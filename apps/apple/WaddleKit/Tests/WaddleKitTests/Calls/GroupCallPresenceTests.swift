@@ -269,12 +269,11 @@ import WaddleKit
         #expect(presence.media.isEmpty)
     }
 
-    @Test func bareSendersAndNonAvailabilityPresenceCannotChangeMembership() {
+    @Test func bareSendersAndSubscriptionTrafficCannotChangeMembership() {
         let presence = GroupCallPresence()
         presence.apply(active("alice", realJID: own))
         presence.apply(WirePresence(from: JID(bare: room, resource: nil)!, kind: .available,
             groupCall: GroupCallMarker(isPreparing: false, media: CallMedia(audio: true, video: true))))
-        presence.apply(WirePresence(from: room.with(resource: "alice")!, kind: .error(condition: "forbidden")))
         presence.apply(WirePresence(from: room.with(resource: "alice")!, kind: .other("subscribe")))
         #expect(presence.participants == [room: [GroupCallParticipant(nick: "alice", realJID: own,
             media: CallMedia(audio: true, video: false))]])

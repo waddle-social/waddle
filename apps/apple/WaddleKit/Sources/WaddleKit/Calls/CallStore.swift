@@ -59,6 +59,7 @@ import Observation
     /// Reduce arrivals synchronously; only remote-originated effects enter the serial queue.
     public func handle(_ event: CallEvent) {
         if fulfillGroupAccept(event) { return }
+        if endGroupFromRemote(event) { return }
         let before = state
         switch event.kind {
         case .reject where before.sid != event.sid, .retract where before.sid != event.sid:

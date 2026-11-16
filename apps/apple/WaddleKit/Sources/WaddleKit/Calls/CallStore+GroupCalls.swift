@@ -129,11 +129,18 @@ extension CallStore {
     }
 
     func leaveGroupPresence(in room: BareJID, nick: String, identity: JID?, epoch: Int) async {
-        let cleared = await groupControl.serializePresence { [self] in
-            guard generation == epoch, !groupSlotHolds(room) else { return nil }
-            return await port.updateGroupCallPresence(.init(state: .left), in: room, nick: nick)
+        _ = await groupControl.serializePresence { [self] in
+            await leaveGroupPresenceNow(in: room, nick: nick, identity: identity, epoch: epoch)
+            return true
         }
-        guard generation == epoch, let cleared else { return }
+    }
+
+    /// Runs inside the presence queue. Stands down when the slot holds a
+    /// group phase for the room: a newer attempt owns its advertisement.
+    private func leaveGroupPresenceNow(in room: BareJID, nick: String, identity: JID?, epoch: Int) async {
+        guard generation == epoch, !groupSlotHolds(room) else { return }
+        let cleared = await port.updateGroupCallPresence(.init(state: .left), in: room, nick: nick)
+        guard generation == epoch else { return }
         if !cleared { reportError("muji leave presence failed", epoch: epoch) }
         // A successor may have claimed the room while the leave was in flight.
         if !groupSlotHolds(room) { groupPresence.clearParticipant(in: room, nick: nick, realJID: identity) }
@@ -147,28 +154,48 @@ extension CallStore {
         }
     }
 
-    /// The caller has already claimed the slot; leave always precedes terminate.
+    /// The caller has already claimed the slot. The leave and the terminate
+    /// go through the presence queue as one unit, leave first: a rejoin of
+    /// the same room queues behind both, so the old session's terminate can
+    /// never reach the mixer after the new attempt's advertisement.
     func teardownGroup(_ claimed: CallState, identity: JID?, epoch: Int) async {
+        let room: BareJID
+        let nick: String
+        let sid: String
+        let terminates: Bool
+        switch claimed {
+        case .joiningGroup(let call): (room, nick, sid, terminates) = (call.room, call.nick, call.sid, call.isAdvertised)
+        case .inGroup(let call): (room, nick, sid, terminates) = (call.room, call.nick, call.sid, true)
+        case .idle, .incoming, .outgoing, .active, .ended: return
+        }
+        cancelGroupWaits(for: claimed)
+        _ = await groupControl.serializePresence { [self] in
+            await leaveGroupPresenceNow(in: room, nick: nick, identity: identity, epoch: epoch)
+            if terminates { await terminateGroup(in: room, sid: sid, epoch: epoch) }
+            return true
+        }
+    }
+
+    /// A claimed attempt's waits end at once, whoever claimed it.
+    func cancelGroupWaits(for claimed: CallState) {
         switch claimed {
         case .joiningGroup(let call):
             groupPresence.cancelPreparationWaiters(in: call.room, nick: call.nick)
             cancelGroupAccept(call.sid)
-            await leaveGroupPresence(in: call.room, nick: call.nick, identity: identity, epoch: epoch)
-            if call.isAdvertised { await terminateGroup(in: call.room, sid: call.sid, epoch: epoch) }
         case .inGroup(let call):
             cancelGroupAccept(call.sid)
-            await leaveGroupPresence(in: call.room, nick: call.nick, identity: identity, epoch: epoch)
-            await terminateGroup(in: call.room, sid: call.sid, epoch: epoch)
         case .idle, .incoming, .outgoing, .active, .ended: break
         }
     }
 }
 
 extension CallStore {
-    /// Only the account's mixer can end a group sid; peer and sibling ends cannot.
-    func endGroupFromRemote(_ event: CallEvent, epoch: Int) async -> Bool {
-        guard generation == epoch, state.isGroupPhase, state.sid == event.sid,
-            event.from.bare == groupControl.mixer else { return false }
+    /// Only the account's mixer can end a group sid; peer and sibling ends
+    /// cannot. The slot ends as the event is handled, so a join in flight
+    /// stops and media disconnects at once; only the wire cleanup waits its
+    /// turn behind earlier sends.
+    func endGroupFromRemote(_ event: CallEvent) -> Bool {
+        guard state.isGroupPhase, state.sid == event.sid, event.from.bare == groupControl.mixer else { return false }
         let reason: CallEndReason
         switch event.kind {
         case .sessionTerminate(let condition), .finish(let condition, _): reason = .finished(condition)
@@ -177,8 +204,13 @@ extension CallStore {
         case .propose, .ringing, .proceed, .sessionInitiate, .sessionAccept: return false
         }
         let claimed = state
+        let epoch = generation
+        cancelGroupWaits(for: claimed)
         transition(.ended(sid: event.sid, reason: reason))
-        await teardownGroup(claimed, identity: ownJID(), epoch: epoch)
+        enqueue { [weak self] in
+            guard let self else { return }
+            await self.teardownGroup(claimed, identity: self.ownJID(), epoch: epoch)
+        }
         return true
     }
 }

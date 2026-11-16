@@ -34,13 +34,15 @@ struct GroupCallPreparationKey: Hashable {
     /// Preparation waiters fire after preparation changes, before the active view changes.
     public func apply(_ presence: WirePresence) {
         guard let nick = presence.from.resource else { return }
+        // An error from an occupant's address means they are not in the
+        // room; subscription traffic says nothing about a call.
         switch presence.kind {
-        case .available, .unavailable: break
-        case .error, .other: return
+        case .available, .unavailable, .error: break
+        case .other: return
         }
         let room = presence.from.bare
         let identity = GroupCallParticipantKey(nick: nick, realJID: presence.occupant?.realJID)
-        let marker = presence.kind == .unavailable ? nil : presence.groupCall
+        let marker = presence.kind == .available ? presence.groupCall : nil
         if marker?.isPreparing == true {
             preparing[room, default: []].insert(identity)
             let key = GroupCallPreparationKey(room: room, participant: identity)
