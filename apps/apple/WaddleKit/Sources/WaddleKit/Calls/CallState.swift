@@ -76,7 +76,8 @@ extension CallState {
         case .ended(let sid, _): sid
         }
     }
-    var isLive: Bool {
+    /// A call is ringing, being placed or in progress: the slot is taken.
+    public var isLive: Bool {
         switch self {
         case .incoming, .outgoing, .active: true
         case .idle, .ended: false

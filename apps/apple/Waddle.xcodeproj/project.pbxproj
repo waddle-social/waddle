@@ -13,10 +13,12 @@
 		03E15C9728F1BC95ABB9365E /* ComposerControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66975FAE7EAEA74929B2474 /* ComposerControls.swift */; };
 		04D96F8535FD66084A220F01 /* RichTextModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8BDF2333452BD5C877BE946 /* RichTextModel.swift */; };
 		051E95C60BE50B0B6570478D /* FFIInbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A5A81C6475212B6231EEFDC /* FFIInbound+Call.swift */; };
+		0543CEC52C6F8072FE12E15E /* CallDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07BC38BD586BF667F9FB3E85 /* CallDockView.swift */; };
 		054DE9608A108047AD3BDA3E /* FFIInbound+Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3A9EC3530A183074519792C /* FFIInbound+Message.swift */; };
 		054EB87288E33AD493C3840A /* NavigationModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A24803E67A2932C18014F56 /* NavigationModelTests.swift */; };
 		062363215A04331CE0328521 /* SignInCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC2B3686BB5095FCFF4D16F /* SignInCard.swift */; };
 		0623B589E5C019AA1D8DA1E5 /* ConversationHeaderText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0C820EA40536B55023B88C /* ConversationHeaderText.swift */; };
+		069F331022C7D27B64F21AD1 /* CallDockSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3974E28827CDAC990D9C3D /* CallDockSnapshotTests.swift */; };
 		06B61F193DE7097970E764BA /* RichTextSegmenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 106BC605E0ED1F5B177FF414 /* RichTextSegmenter.swift */; };
 		070D4CD87291F62455E0AF03 /* SettingsAccountSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0E6E5628B78C6A1CC7ABFA3 /* SettingsAccountSection.swift */; };
 		076783567F9402F506BE8142 /* ServerSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4C5589906A2053A7CA1626 /* ServerSettings.swift */; };
@@ -35,6 +37,7 @@
 		0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A68A7084A9D1741E90F3447B /* HuddleSnapshot.swift */; };
 		0BDD82A8F0290DEBD9239EBE /* SnapshotTesting in Frameworks */ = {isa = PBXBuildFile; productRef = 9CBDF87FE630CD70063DE484 /* SnapshotTesting */; };
 		0C149AF2A76DF725C4FA5616 /* FFIXmppPort+Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74DC91F2EF32ECBD7BC25238 /* FFIXmppPort+Notify.swift */; };
+		0C36753DC620BCF8966005B4 /* CallDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 931B91F62774BEC1541CC962 /* CallDock.swift */; };
 		0CE42B684F3500A8BFFE4CFE /* MentionHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */; };
 		0EC039A2869E923100121994 /* ProfileAvailabilityOption.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8BD216820ED9BAEB871364 /* ProfileAvailabilityOption.swift */; };
 		0F28ED21BF2B735A13283A07 /* RichTextSegmenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 106BC605E0ED1F5B177FF414 /* RichTextSegmenter.swift */; };
@@ -134,6 +137,7 @@
 		4834B6FC72D3B360B831588D /* MessageSafetyScoresSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BF52D49E9087D0B27F5A109 /* MessageSafetyScoresSheet.swift */; };
 		4A5671201D93D19B3C4DFAA2 /* DirectNavigationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */; };
 		4AE54B140409C6AB056FC89F /* SnapshotTesting in Frameworks */ = {isa = PBXBuildFile; productRef = F6A4760C917A6FCBFFA403FC /* SnapshotTesting */; };
+		4AF4FCA24C77C80C374A8BCC /* CallDockSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3974E28827CDAC990D9C3D /* CallDockSnapshotTests.swift */; };
 		4AF662331E49CBC20B2D9F4E /* DecryptedAttachmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E1F68278CF8DC651B6C201 /* DecryptedAttachmentViews.swift */; };
 		4AFCBA04F03D802BFE8B3601 /* ComposerAttachmentStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E09CE720382EC54E3C6218 /* ComposerAttachmentStrip.swift */; };
 		4B7576880A7AB8C980404C7B /* AttachmentPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F675EC377CC84AAEBF1449BB /* AttachmentPolicy.swift */; };
@@ -222,7 +226,9 @@
 		75D23D1E2FCEFE3EAC005FAA /* AuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B16D87BBE11A6EE95142654E /* AuthModels.swift */; };
 		75F20D6B4298C1771AB1CB3F /* ComposerTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B99FD1B0198C109A209467 /* ComposerTextView.swift */; };
 		7600496F6FBAC6CB368C6220 /* EncryptedFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */; };
+		76E5B1FE49F45E1E387B5851 /* CallMediaControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0544D7793B1FDC868FA24526 /* CallMediaControls.swift */; };
 		77F4EC8C93A38E79370BB95D /* ComposerNoticeLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB6F36130E53C59998BEE582 /* ComposerNoticeLine.swift */; };
+		786084370B7C716874FD6620 /* CallMediaControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0544D7793B1FDC868FA24526 /* CallMediaControls.swift */; };
 		7869CA33877C16E2041AA076 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0F38B78980F7FA0414198A /* Theme.swift */; };
 		78922B2D1F7F4E27662D5E6A /* SignInCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC2B3686BB5095FCFF4D16F /* SignInCard.swift */; };
 		7963CE39E2EB3651F155BBFD /* DesignSystemSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */; };
@@ -356,6 +362,7 @@
 		BC91F3B709D0C72D81BC004C /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F196595EE7E003001AB22B89 /* InboxView.swift */; };
 		BCCD49FD13B4B0372E9FA8D7 /* ComposerAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C114E8607FE4BC5DC460FB /* ComposerAttachment.swift */; };
 		BD17CD49CA658B6C53D3635F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44C43BC9F730169E101C375 /* AppDelegate.swift */; };
+		BD3EDF103D50D6D1697A1218 /* CallDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07BC38BD586BF667F9FB3E85 /* CallDockView.swift */; };
 		BD6A9531804E7A5A344BF0DC /* ConversationTimelineList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */; };
 		BDDE170AD7E6B9B0E66B41F0 /* AnimatedImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77EF83062F6AD53EB3E0377 /* AnimatedImageView.swift */; };
 		BFB4853E10B1D17713725387 /* FFIXmppPort+ReadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D13CF6890362A3E5A3EE80 /* FFIXmppPort+ReadState.swift */; };
@@ -392,6 +399,7 @@
 		CEE7D811A19B454D75C2682F /* ProfileMoodCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A857EFDE807DD88C1AEA1EF1 /* ProfileMoodCatalog.swift */; };
 		CEEC3D09EF4B485C76B73465 /* WaddleXmppClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */; };
 		CF156B7714706ECEE251A5B3 /* PhoneShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69278ECB6FF1C13DB8049AB /* PhoneShell.swift */; };
+		CF31EC6ECBD11B78A393FEBA /* CallDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 931B91F62774BEC1541CC962 /* CallDock.swift */; };
 		CFB9C73CB8E6482259A077CA /* ProfileHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A859364D0F895078570C5D3 /* ProfileHeader.swift */; };
 		CFF1458E61632C5EDD53572A /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 079CAAA4C12136A21EC6B831 /* Preferences.swift */; };
 		D00B87703BB2BEF0305A8884 /* ExtensionCommandCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDB24A68F639E15A8EF908C6 /* ExtensionCommandCopy.swift */; };
@@ -491,11 +499,13 @@
 
 /* Begin PBXFileReference section */
 		04AD95367192E794D6F0B2C6 /* SignInProviderPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInProviderPanel.swift; sourceTree = "<group>"; };
+		0544D7793B1FDC868FA24526 /* CallMediaControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallMediaControls.swift; sourceTree = "<group>"; };
 		054BA3B46E4F6A85AE3F4DE1 /* ExtensionCommandActionBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandActionBar.swift; sourceTree = "<group>"; };
 		05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystemSnapshotTests.swift; sourceTree = "<group>"; };
 		05CDE3002C84AACE6E61513C /* ConversationInspectorPlacement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationInspectorPlacement.swift; sourceTree = "<group>"; };
 		066F30A056D21DE5AE470B9F /* MessageEmojiPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageEmojiPicker.swift; sourceTree = "<group>"; };
 		079CAAA4C12136A21EC6B831 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
+		07BC38BD586BF667F9FB3E85 /* CallDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDockView.swift; sourceTree = "<group>"; };
 		07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = WaddleXmppClientFFI.xcframework; path = "$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework"; sourceTree = "<group>"; };
 		08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomDetailsForm.swift; sourceTree = "<group>"; };
 		097A7976BC4F84384A7159AB /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
@@ -614,6 +624,7 @@
 		9183947CADB3940CB51F685C /* MessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRow.swift; sourceTree = "<group>"; };
 		92341C99BBB49D538EC5376C /* MemberPermissions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberPermissions.swift; sourceTree = "<group>"; };
 		9295908F61E540E4185F41C3 /* FFIInbound.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIInbound.swift; sourceTree = "<group>"; };
+		931B91F62774BEC1541CC962 /* CallDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDock.swift; sourceTree = "<group>"; };
 		93EB94A6DDD9F6A80D3D74C7 /* NotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationController.swift; sourceTree = "<group>"; };
 		9472731557D616B2F74FF441 /* MessageReplySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageReplySummary.swift; sourceTree = "<group>"; };
 		96F23CCB3265FE12326F400F /* SignInServerLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInServerLabel.swift; sourceTree = "<group>"; };
@@ -656,6 +667,7 @@
 		BB8C551551F6E346F2CF6447 /* WaddleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleApp.swift; sourceTree = "<group>"; };
 		BC04CCBB25DF7EFFCEE73622 /* ExtensionCommandStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandStage.swift; sourceTree = "<group>"; };
 		BC9800CE6EF75EE311AFD2F1 /* SignInAuthorizingPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInAuthorizingPanel.swift; sourceTree = "<group>"; };
+		BD3974E28827CDAC990D9C3D /* CallDockSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDockSnapshotTests.swift; sourceTree = "<group>"; };
 		BDB24A68F639E15A8EF908C6 /* ExtensionCommandCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandCopy.swift; sourceTree = "<group>"; };
 		C05E9EECFC4491F0A579C1CC /* GifSearchClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifSearchClient.swift; sourceTree = "<group>"; };
 		C14B65E512A4E0390FEC7C4E /* AttachmentImageInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImageInfo.swift; sourceTree = "<group>"; };
@@ -667,6 +679,7 @@
 		C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAttachmentKind.swift; sourceTree = "<group>"; };
 		C47CB426A26582C047EB9477 /* ConversationComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposer.swift; sourceTree = "<group>"; };
 		C6A084A6FE3A66B392B132BE /* FFIXmppPort+Upload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Upload.swift"; sourceTree = "<group>"; };
+		C89279F6B76B61FE072ACE59 /* Waddle-iOS-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Waddle-iOS-Info.plist"; sourceTree = "<group>"; };
 		C8BDF2333452BD5C877BE946 /* RichTextModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTextModel.swift; sourceTree = "<group>"; };
 		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C9767D04DC6F058B0ECC1485 /* ComposerFormattingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerFormattingBar.swift; sourceTree = "<group>"; };
@@ -791,6 +804,15 @@
 			path = Typing;
 			sourceTree = "<group>";
 		};
+		2E3B92A0E5362BD811889858 /* Calls */ = {
+			isa = PBXGroup;
+			children = (
+				931B91F62774BEC1541CC962 /* CallDock.swift */,
+				07BC38BD586BF667F9FB3E85 /* CallDockView.swift */,
+			);
+			path = Calls;
+			sourceTree = "<group>";
+		};
 		3083F5B559EE32A0CF7632E1 /* Reactions */ = {
 			isa = PBXGroup;
 			children = (
@@ -904,6 +926,7 @@
 		4866D020EF3746489583E1C1 /* Calls */ = {
 			isa = PBXGroup;
 			children = (
+				0544D7793B1FDC868FA24526 /* CallMediaControls.swift */,
 				75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */,
 			);
 			path = Calls;
@@ -960,6 +983,7 @@
 		51C5F65E4C0CB96418D0AB10 /* WaddleTests */ = {
 			isa = PBXGroup;
 			children = (
+				BD3974E28827CDAC990D9C3D /* CallDockSnapshotTests.swift */,
 				FB6BECE38DDA80483C9BBADC /* DesignFoundationTests.swift */,
 				05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */,
 				0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */,
@@ -1340,6 +1364,7 @@
 			children = (
 				E44C43BC9F730169E101C375 /* AppDelegate.swift */,
 				93EB94A6DDD9F6A80D3D74C7 /* NotificationController.swift */,
+				C89279F6B76B61FE072ACE59 /* Waddle-iOS-Info.plist */,
 				B0BADFB9DF0EC716C5BF2841 /* Waddle-iOS.entitlements */,
 				9C41898B8E69395919E06204 /* Waddle-macOS.entitlements */,
 			);
@@ -1398,6 +1423,7 @@
 			isa = PBXGroup;
 			children = (
 				37EB7AFF6424D671C54039F8 /* Account */,
+				2E3B92A0E5362BD811889858 /* Calls */,
 				45C3DCBE6A13873931B419F9 /* Conversation */,
 				99B34D5404AF25E6E577AD23 /* Details */,
 				6871B4FF58A8A5F57C64E0A8 /* Navigation */,
@@ -1684,6 +1710,9 @@
 				E6F035620B04948CE18CF1D0 /* AuthClient.swift in Sources */,
 				985578F2C1EDA16F80D1107A /* AuthModels.swift in Sources */,
 				9D90003806BC9B327D9027EB /* BridgeLog.swift in Sources */,
+				CF31EC6ECBD11B78A393FEBA /* CallDock.swift in Sources */,
+				0543CEC52C6F8072FE12E15E /* CallDockView.swift in Sources */,
+				76E5B1FE49F45E1E387B5851 /* CallMediaControls.swift in Sources */,
 				8C9500416C6FB08A34147C29 /* ChannelListSection.swift in Sources */,
 				08C2C76EAE49D394F1159D6F /* ChannelNavigationRow.swift in Sources */,
 				91C49D272ABEDDC691CE86C1 /* Components.swift in Sources */,
@@ -1885,6 +1914,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4AF4FCA24C77C80C374A8BCC /* CallDockSnapshotTests.swift in Sources */,
 				4755D038595AD44BE0A529FE /* DesignFoundationTests.swift in Sources */,
 				7963CE39E2EB3651F155BBFD /* DesignSystemSnapshotTests.swift in Sources */,
 				4E4CCC511B25572B50FB71D3 /* FakePort+Calls.swift in Sources */,
@@ -1916,6 +1946,9 @@
 				EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */,
 				75D23D1E2FCEFE3EAC005FAA /* AuthModels.swift in Sources */,
 				CA5B7C430658157869D10090 /* BridgeLog.swift in Sources */,
+				0C36753DC620BCF8966005B4 /* CallDock.swift in Sources */,
+				BD3EDF103D50D6D1697A1218 /* CallDockView.swift in Sources */,
+				786084370B7C716874FD6620 /* CallMediaControls.swift in Sources */,
 				EA4D755EA947404147B1AABA /* ChannelListSection.swift in Sources */,
 				AF7B332D1BA246B047307930 /* ChannelNavigationRow.swift in Sources */,
 				CB7DD7B71113C29CA61E8671 /* Components.swift in Sources */,
@@ -2117,6 +2150,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				069F331022C7D27B64F21AD1 /* CallDockSnapshotTests.swift in Sources */,
 				5CFF1C9186158342BACB4AEF /* DesignFoundationTests.swift in Sources */,
 				35C0B0CA74318539AE2C3664 /* DesignSystemSnapshotTests.swift in Sources */,
 				3EB84E23C0D3EBEB0C46C583 /* FakePort+Calls.swift in Sources */,
@@ -2259,6 +2293,7 @@
 					"\"$(SRCROOT)/Generated\"",
 				);
 				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient";
+				INFOPLIST_FILE = "Waddle/Platform/Waddle-iOS-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Waddle uses the camera so people on a video call can see you.";
@@ -2342,6 +2377,7 @@
 					"\"$(SRCROOT)/Generated\"",
 				);
 				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient";
+				INFOPLIST_FILE = "Waddle/Platform/Waddle-iOS-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Waddle uses the camera so people on a video call can see you.";

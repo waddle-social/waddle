@@ -7,9 +7,14 @@ extension CallStore {
     }
 
     /// The media plane can end only the active sid it was connected to.
+    ///
+    /// Nobody chose this ending, so the slot keeps it on show as an ended
+    /// call instead of going idle.
     public func hangUpActive(ifSid sid: String, reason: JingleReason) async {
         guard case .active(let current) = state, current.sid == sid else { return }
-        await hangUp(reason: reason)
+        cancelTimers()
+        transition(.ended(sid: sid, reason: .finished(reason)))
+        await terminate(current, reason: reason, epoch: generation)
     }
 
     /// Claim idle before awaiting the wire, so a local hang-up wins queued effects.
@@ -33,16 +38,19 @@ extension CallStore {
             let sent = await port.sendCallFinish(to: responder, sid: call.sid, reason: nil)
             if !sent { reportError("call finish failed", epoch: epoch) }
         }
-        if case .active(let call) = claimed {
-            let outcome = await port.sendCallSessionTerminate(to: call.peer, sid: call.sid, reason: reason)
-            guard generation == epoch else { return }
-            if outcome == .error {
-                reportError("call session terminate failed", epoch: epoch)
-                return
-            }
-            let sent = await port.sendCallFinish(to: call.peer, sid: call.sid, reason: nil)
-            if !sent { reportError("call finish failed", epoch: epoch) }
+        if case .active(let call) = claimed { await terminate(call, reason: reason, epoch: epoch) }
+    }
+
+    /// Ends the Jingle session, then sends the XEP-0353 finish.
+    private func terminate(_ call: ActiveCall, reason: JingleReason, epoch: Int) async {
+        let outcome = await port.sendCallSessionTerminate(to: call.peer, sid: call.sid, reason: reason)
+        guard generation == epoch else { return }
+        if outcome == .error {
+            reportError("call session terminate failed", epoch: epoch)
+            return
         }
+        let sent = await port.sendCallFinish(to: call.peer, sid: call.sid, reason: nil)
+        if !sent { reportError("call finish failed", epoch: epoch) }
     }
 
     /// Once our `<proceed/>` is out, the abandon verb is `<finish/>` with

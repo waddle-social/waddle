@@ -46,7 +46,7 @@ import Testing
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
         store.handle(CallEvent(from: callPeer, sid: "c-invalid", kind: .sessionAccept(join: invalid, media: callAudio)))
         await eventually { port.callSends.count == 3 }
-        #expect(store.state == .idle)
+        #expect(store.state == .ended(sid: "c-invalid", reason: .finished(.gone)))
         #expect(media.calls == [.disconnect])
         #expect(port.externalServicesFetchCount == 0)
         #expect(port.callSends == [
@@ -196,7 +196,7 @@ import Testing
         await eventually { media.calls.count == 1 }
         media.onFailure?()
         await eventually { port.callSends.count == 3 && media.calls.count == 2 }
-        #expect(store.state == .idle)
+        #expect(store.state == .ended(sid: "c-media", reason: .finished(.connectivityError)))
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
         #expect(
             port.callSends == [
@@ -216,7 +216,7 @@ import Testing
         #expect(await store.startCall(to: callPeer.bare, media: callAudio))
         store.handle(CallEvent(from: callPeer, sid: "c-media", kind: .sessionAccept(join: callJoin, media: callAudio)))
         await eventually { port.callSends.count == 3 }
-        #expect(store.state == .idle)
+        #expect(store.state == .ended(sid: "c-media", reason: .finished(.gone)))
         #expect(media.calls == [.connect(callJoin, callAudio), .disconnect])
         #expect(
             port.callSends == [

@@ -343,6 +343,8 @@ final class ActiveSession {
     let auth: AuthSession
     let coordinator: SessionCoordinator
     let navigation = NavigationModel()
+    /// The media of this session's call; the call dock reads and drives it.
+    let callMedia: LiveKitCallMediaController
 
     init?(auth: AuthSession, server: URL, preferences: Preferences) {
         guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
@@ -366,10 +368,12 @@ final class ActiveSession {
         } else {
             outbox = InMemoryOutboxStore()
         }
+        let callMedia = LiveKitCallMediaController()
         self.auth = auth
+        self.callMedia = callMedia
         self.coordinator = SessionCoordinator(
             account: account, port: FFIXmppPort(config: config), outboxStore: outbox,
-            callMedia: LiveKitCallMediaController()
+            handlesCalls: true, callMedia: callMedia
         )
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
     }

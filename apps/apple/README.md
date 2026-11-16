@@ -114,6 +114,12 @@ credentials in the Jingle transport and publishes the microphone and camera.
 WaddleKit checks the token's grant and maps the server's XEP-0215 services to
 ICE servers before it connects; it never imports the SDK.
 
+`Features/Calls/CallDock.swift` is the one call surface on every platform: a
+card above the signed-in shell, from the first ring to the reason the call
+ended. It derives what to show from the call slot and the media phase
+(`CallStage` in WaddleKit); `CallDockView` draws each stage without a session,
+so the snapshot tests cover them all.
+
 The SDK version is pinned in `project.yml`. To check a new SDK or SFU version,
 run the connect tests against that SFU version locally (they skip without the
 URL):

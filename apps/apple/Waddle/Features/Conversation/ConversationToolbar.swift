@@ -1,10 +1,14 @@
 import SwiftUI
 import WaddleKit
 
-/// Conversation toolbar: the title (iPhone and iPad), search, pins for
-/// rooms, and details.
+/// Conversation toolbar: the title (iPhone and iPad), calls for a 1:1,
+/// search, pins for rooms, and details.
 struct ConversationToolbar: ToolbarContent {
     let conversation: ConversationID
+    /// No other call is in the slot and the session is online.
+    let canCall: Bool
+    /// Starts a call; `true` for video.
+    let onCall: (Bool) -> Void
     let onSearch: () -> Void
     let onPins: () -> Void
     let onDetails: () -> Void
@@ -16,6 +20,18 @@ struct ConversationToolbar: ToolbarContent {
         }
         #endif
         ToolbarItemGroup(placement: .primaryAction) {
+            if !conversation.isRoom {
+                Button { onCall(false) } label: {
+                    Label("Voice call", systemImage: "phone")
+                }
+                .help("Start a voice call")
+                .disabled(!canCall)
+                Button { onCall(true) } label: {
+                    Label("Video call", systemImage: "video")
+                }
+                .help("Start a video call")
+                .disabled(!canCall)
+            }
             Button(action: onSearch) {
                 Label("Search", systemImage: "magnifyingglass")
             }

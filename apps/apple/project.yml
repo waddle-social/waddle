@@ -49,6 +49,17 @@ targets:
         script: |
           set -euo pipefail
           env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
+    # Merged into the generated Info.plist, for keys it has no
+    # INFOPLIST_KEY_ setting for.
+    info:
+      path: Waddle/Platform/Waddle-iOS-Info.plist
+      properties:
+        # A call keeps its audio when the app goes to the background.
+        # CallKit, which also rings a closed app, is tracked separately.
+        UIBackgroundModes: [audio]
+        # XcodeGen would write 1.0 and 1; Xcode Cloud sets the build number.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
     entitlements:
       path: Waddle/Platform/Waddle-iOS.entitlements
       properties:
@@ -81,6 +92,7 @@ targets:
         excludes:
           - "**/*.md"
           - LaunchScreen.storyboard
+          - Platform/Waddle-iOS-Info.plist
     dependencies:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
@@ -105,6 +117,9 @@ targets:
         # Call media: publishing the microphone and camera.
         com.apple.security.device.audio-input: true
         com.apple.security.device.camera: true
+        # WebRTC media binds UDP sockets and receives on them; not yet
+        # confirmed necessary with a signed build (#2480).
+        com.apple.security.network.server: true
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS

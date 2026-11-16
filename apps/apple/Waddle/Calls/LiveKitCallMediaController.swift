@@ -1,5 +1,6 @@
 import AVFoundation
 import LiveKit
+import SwiftUI
 import WaddleKit
 
 /// `CallMediaController` over the LiveKit Swift SDK: one `Room` per call,
@@ -8,22 +9,35 @@ import WaddleKit
 /// The SDK is pinned in `project.yml`; bump it under the LiveKit
 /// version-currency policy (#1533).
 @MainActor
-final class LiveKitCallMediaController: CallMediaController {
-    var onFailure: (@MainActor () -> Void)?
+@Observable
+final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
+    @ObservationIgnored var onFailure: (@MainActor () -> Void)?
+
+    private(set) var phase: CallMediaPhase = .idle
+    private(set) var connectedSince: Date?
+    private(set) var isMicrophoneOn = false
+    private(set) var isCameraOn = false
+    private var remoteTrack: VideoTrack?
+    private var localTrack: VideoTrack?
+
+    /// Fitted, not filled: a portrait phone camera keeps the whole face.
+    var remoteVideo: AnyView? { remoteTrack.map { AnyView(SwiftUIVideoView($0, layoutMode: .fit)) } }
+    var localVideo: AnyView? { localTrack.map { AnyView(SwiftUIVideoView($0)) } }
 
     /// The room of the call in progress, from the moment its connect starts.
-    private var room: Room?
+    @ObservationIgnored private var room: Room?
     /// The room holds its delegates weakly.
-    private var observer: RoomObserver?
+    @ObservationIgnored private var observer: RoomObserver?
 
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
         guard room == nil else { throw CallMediaError.alreadyConnected }
-        let observer = RoomObserver { [weak self] room in self?.roomDropped(room) }
+        let observer = RoomObserver { [weak self] room, change in self?.handle(change, in: room) }
         let room = Room(delegate: observer)
         // Owned before connecting, so a drop the SFU reports while the
         // connect is still returning is not lost.
         self.room = room
         self.observer = observer
+        phase = .connecting
         // XEP-0215: an advertised list is the ICE set to use. An empty list
         // means no advertisement, and the SDK keeps the servers the SFU
         // hands out during signalling.
@@ -40,6 +54,9 @@ final class LiveKitCallMediaController: CallMediaController {
             await room.disconnect()
             throw error
         }
+        if phase == .connecting { phase = .connected }
+        connectedSince = .now
+        refreshTracks()
         // Publishing is best effort and separate from joining: a missing
         // device or a denied permission leaves the user in the call,
         // receive-only, as on web and Android. It runs on its own so a
@@ -53,19 +70,38 @@ final class LiveKitCallMediaController: CallMediaController {
         await room.disconnect()
     }
 
+    func setMicrophone(_ on: Bool) async {
+        guard let room else { return }
+        await setSource(.audio, enabled: on, in: room)
+    }
+
+    func setCamera(_ on: Bool) async {
+        guard let room else { return }
+        await setSource(.video, enabled: on, in: room)
+    }
+
     private func publish(_ media: CallMedia, in room: Room) async {
-        if media.audio, await mayCapture(.audio, in: room) {
-            _ = try? await room.localParticipant.setMicrophone(enabled: true)
-        }
-        if media.video, await mayCapture(.video, in: room) {
-            _ = try? await room.localParticipant.setCamera(enabled: true)
+        if media.audio { await setSource(.audio, enabled: true, in: room) }
+        if media.video { await setSource(.video, enabled: true, in: room) }
+    }
+
+    /// Turning a device on goes through `mayCapture`; turning one off
+    /// needs no permission.
+    private func setSource(_ kind: AVMediaType, enabled: Bool, in room: Room) async {
+        if enabled, !(await mayCapture(kind, in: room)) { return }
+        if kind == .audio {
+            _ = try? await room.localParticipant.setMicrophone(enabled: enabled)
+        } else {
+            _ = try? await room.localParticipant.setCamera(enabled: enabled)
         }
         // The call ended while a track was starting: `disconnect()` ran
         // before the track was published, so release it here.
-        if self.room !== room {
+        guard self.room === room else {
             await room.localParticipant.unpublishAll()
             await room.disconnect()
+            return
         }
+        refreshTracks()
     }
 
     /// Asks for the permission, but only for a call that still owns `room`,
@@ -79,13 +115,39 @@ final class LiveKitCallMediaController: CallMediaController {
     private func forgetRoom() {
         room = nil
         observer = nil
+        phase = .idle
+        connectedSince = nil
+        refreshTracks()
     }
 
-    /// `disconnect()` forgets the room first, so only a drop the SDK reports
-    /// on the room still in use ends the call.
-    private func roomDropped(_ dropped: Room) {
-        guard dropped === room else { return }
-        onFailure?()
+    /// Only the room still in use changes the call. `disconnect()` forgets
+    /// the room first, so only a drop the SDK reports on the room still in
+    /// use ends the call.
+    private func handle(_ change: RoomChange, in changed: Room) {
+        guard changed === room else { return }
+        switch change {
+        case .dropped: onFailure?()
+        case .reconnecting: phase = .reconnecting
+        case .reconnected: phase = .connected
+        case .tracks: refreshTracks()
+        }
+    }
+
+    /// Reads the room's tracks as they are now, so the order in which the
+    /// SDK reports changes cannot leave a stale picture.
+    private func refreshTracks() {
+        let local = room?.localParticipant
+        let microphone = local?.isMicrophoneEnabled() ?? false
+        let camera = local?.isCameraEnabled() ?? false
+        // A camera that is off shows no picture rather than its last frame.
+        let preview = camera ? local?.firstCameraVideoTrack : nil
+        let remote = room?.remoteParticipants.values.lazy
+            .filter { $0.isCameraEnabled() }
+            .compactMap(\.firstCameraVideoTrack).first
+        if isMicrophoneOn != microphone { isMicrophoneOn = microphone }
+        if isCameraOn != camera { isCameraOn = camera }
+        if localTrack !== preview { localTrack = preview }
+        if remoteTrack !== remote { remoteTrack = remote }
     }
 }
 
@@ -93,16 +155,63 @@ enum CallMediaError: Error {
     case alreadyConnected
 }
 
-/// Forwards the one room event the call slot needs: the media session died
-/// after it was established.
-private final class RoomObserver: NSObject, RoomDelegate, Sendable {
-    private let onDrop: @MainActor (Room) -> Void
+/// What the call needs to hear from a room.
+private enum RoomChange {
+    /// The media session died after it was established.
+    case dropped
+    case reconnecting
+    case reconnected
+    /// A track was published, subscribed, muted or removed, on either side.
+    case tracks
+}
 
-    init(onDrop: @escaping @MainActor (Room) -> Void) {
-        self.onDrop = onDrop
+/// Forwards room events to the main actor. The reconnect-mode callbacks
+/// are used because, unlike `roomIsReconnecting`, they also fire for a
+/// quick reconnect.
+private final class RoomObserver: NSObject, RoomDelegate, Sendable {
+    private let onChange: @MainActor (Room, RoomChange) -> Void
+
+    init(onChange: @escaping @MainActor (Room, RoomChange) -> Void) {
+        self.onChange = onChange
+    }
+
+    private func forward(_ change: RoomChange, from room: Room) {
+        Task { @MainActor in onChange(room, change) }
     }
 
     func room(_ room: Room, didDisconnectWithError _: LiveKitError?) {
-        Task { @MainActor in onDrop(room) }
+        forward(.dropped, from: room)
+    }
+
+    func room(_ room: Room, didStartReconnectWithMode _: ReconnectMode) {
+        forward(.reconnecting, from: room)
+    }
+
+    func room(_ room: Room, didCompleteReconnectWithMode _: ReconnectMode) {
+        forward(.reconnected, from: room)
+    }
+
+    func room(_ room: Room, participant _: LocalParticipant, didPublishTrack _: LocalTrackPublication) {
+        forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participant _: LocalParticipant, didUnpublishTrack _: LocalTrackPublication) {
+        forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participant _: RemoteParticipant, didSubscribeTrack _: RemoteTrackPublication) {
+        forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participant _: RemoteParticipant, didUnsubscribeTrack _: RemoteTrackPublication) {
+        forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participant _: Participant, trackPublication _: TrackPublication, didUpdateIsMuted _: Bool) {
+        forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participantDidDisconnect _: RemoteParticipant) {
+        forward(.tracks, from: room)
     }
 }

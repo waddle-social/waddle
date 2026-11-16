@@ -86,6 +86,8 @@ private struct ConversationContent: View {
             .toolbar {
                 ConversationToolbar(
                     conversation: conversation,
+                    canCall: !session.calls.state.isLive && session.connection == .online,
+                    onCall: startCall,
                     onSearch: { navigation.sheet = .search(conversation) },
                     onPins: showPins,
                     onDetails: { navigation.showDetails(of: conversation, usesInspector: placement.usesInspector) }
@@ -195,5 +197,12 @@ private struct ConversationContent: View {
         } else {
             showsPinsSheet = true
         }
+    }
+
+    /// The call shows in the dock above the shell, not in this screen.
+    private func startCall(video: Bool) {
+        let calls = session.calls
+        let peer = conversation.jid
+        Task { _ = await calls.startCall(to: peer, media: CallMedia(audio: true, video: video)) }
     }
 }
