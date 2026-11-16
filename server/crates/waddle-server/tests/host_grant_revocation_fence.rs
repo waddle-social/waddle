@@ -11,6 +11,10 @@
 //! replica under a new registration, and the queue in front of the scope's
 //! guard that keeps overlapping acceptances from holding a revoke back.
 //!
+//! The operator subcommands (`waddle-server host-grant`) run as the server
+//! binary against the same database: an account's grants are listed and
+//! revoked in every room, and the command reports the fence's answer.
+//!
 //! They need PostgreSQL only, and no SpiceDB runs beside them: the
 //! acknowledgement never consults the projection. A lane that sets
 //! `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them without PostgreSQL.
@@ -440,5 +444,172 @@ async fn an_acceptance_that_arrives_behind_a_waiting_revoke_does_not_overtake_it
         .expect("committed refusal");
     assert_eq!(refused.class, IngressDecisionClass::AuthorizationDenied);
     observer.close().await;
+    fixture.close().await;
+}
+
+/// Run `waddle-server host-grant` with `args` against the fixture's
+/// database as its owner login, and answer the exit code, the JSON lines it
+/// printed and its diagnostics.
+async fn host_grant_cli(
+    fixture: &GrantFixture,
+    args: &[&str],
+) -> (i32, Vec<serde_json::Value>, String) {
+    let url = fixture.ingress.db.database_url().to_owned();
+    // The fixture's login owns the schema: it is the login the act runs as
+    // and the role it acts as.
+    let login = url::Url::parse(&url)
+        .expect("database URL")
+        .username()
+        .to_owned();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    for (key, _) in std::env::vars_os() {
+        let key = key.to_string_lossy().into_owned();
+        if key.starts_with("WADDLE_") || key.starts_with("OTEL_") || key.starts_with("PG") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .args([
+            "host-grant",
+            "--schema",
+            "public",
+            "--migrator-login",
+            &login,
+            "--schema-owner",
+            &login,
+        ])
+        .args(args)
+        .env("WADDLE_DATABASE_URL", &url)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(120), command.output())
+        .await
+        .expect("the subcommand exits")
+        .expect("the subcommand runs");
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a JSON line"))
+        .collect();
+    (
+        output.status.code().expect("exit code"),
+        lines,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn the_operator_subcommands_revoke_an_accounts_grants_through_the_fence() {
+    let Some(fixture) = GrantFixture::active("hg_fence_cli").await else {
+        return;
+    };
+    // The account holds a grant in two scopes.
+    let other = fixture.enroll_another().await;
+    fixture.activate_current(&other).await;
+    let replica = Replica::attach(&fixture, "fence-cli").await;
+    let peer = bare(PEER);
+    for room in [&fixture.scope.room, &other.room] {
+        assert!(replica
+            .decide(room)
+            .await
+            .allows(&peer, HostGrantAction::Read));
+    }
+
+    let (code, grants, stderr) = host_grant_cli(&fixture, &["grants", "--subject", PEER]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(grants.len(), 2, "{grants:?}");
+    assert!(grants.iter().all(|grant| grant["affiliation"] == "member"));
+
+    // One act revokes the account everywhere, and reports each revoke as
+    // acknowledged by the one replica that holds a lease.
+    let act = uuid::Uuid::new_v4().to_string();
+    let revoke_account = ["revoke-account", "--subject", PEER, "--operation-id", &act];
+    let domain = ["--account-domain", "example.com"];
+    let (code, revoked, stderr) =
+        host_grant_cli(&fixture, &[&revoke_account[..], &domain[..]].concat()).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(revoked.len(), 2, "{revoked:?}");
+    for line in &revoked {
+        assert_eq!(line["recorded"], true, "{line}");
+        assert_eq!(line["previous_affiliation"], "member", "{line}");
+        assert_eq!(line["fence"]["acknowledged"], true, "{line}");
+        assert_eq!(line["fence"]["replicas"], 1, "{line}");
+    }
+    assert_eq!(
+        fixture.affiliations(PEER).await,
+        Some((RoomAffiliation::None, RoomAffiliation::None))
+    );
+    for room in [&fixture.scope.room, &other.room] {
+        assert!(!replica
+            .decide(room)
+            .await
+            .allows(&peer, HostGrantAction::Read));
+    }
+    // Repeating the act finds nothing left to revoke.
+    let (code, repeated, _) =
+        host_grant_cli(&fixture, &[&revoke_account[..], &domain[..]].concat()).await;
+    assert_eq!(code, 0);
+    assert!(repeated.is_empty(), "{repeated:?}");
+
+    // A room's last owner is refused there; the command says so and exits
+    // as refused.
+    let act = uuid::Uuid::new_v4().to_string();
+    let (code, refused, _) = host_grant_cli(
+        &fixture,
+        &[
+            &["revoke-account", "--subject", OWNER, "--operation-id", &act][..],
+            &domain[..],
+        ]
+        .concat(),
+    )
+    .await;
+    assert_eq!(code, 4);
+    assert_eq!(refused.len(), 2);
+    for line in &refused {
+        assert_eq!(line["recorded"], false, "{line}");
+        assert_eq!(line["refusal"], "last_owner", "{line}");
+    }
+
+    // A single revoke that a live replica has not installed is reported as
+    // recorded and not acknowledged; the same command acknowledges it once
+    // the replica has.
+    replica.suspend(true);
+    let operation = uuid::Uuid::new_v4().to_string();
+    let lifecycle = fixture.scope.lifecycle.to_storage();
+    let room = fixture.scope.room.to_string();
+    let revoke = [
+        "revoke",
+        "--scope",
+        &lifecycle,
+        "--room",
+        &room,
+        "--subject",
+        SENDER,
+        "--operation-id",
+        &operation,
+    ];
+    let (code, pending, _) = host_grant_cli(
+        &fixture,
+        &[&revoke[..], &domain[..], &["--fence-wait", "1"][..]].concat(),
+    )
+    .await;
+    assert_eq!(code, 1);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["fence"]["acknowledged"], false, "{pending:?}");
+    assert_eq!(pending[0]["fence"]["lagging"], 1, "{pending:?}");
+    // The revoke is effective all the same.
+    assert_eq!(
+        fixture.affiliations(SENDER).await,
+        Some((RoomAffiliation::None, RoomAffiliation::None))
+    );
+    replica.suspend(false);
+    let (code, acknowledged, stderr) =
+        host_grant_cli(&fixture, &[&revoke[..], &domain[..]].concat()).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(acknowledged[0]["operation_id"], pending[0]["operation_id"]);
+    assert_eq!(acknowledged[0]["generation"], pending[0]["generation"]);
+    assert_eq!(acknowledged[0]["fence"]["acknowledged"], true);
+    let (code, fence, _) = host_grant_cli(&fixture, &["fence", "--scope", &lifecycle]).await;
+    assert_eq!(code, 0);
+    assert_eq!(fence[0]["fence"]["acknowledged"], true, "{fence:?}");
+    drop(replica);
     fixture.close().await;
 }

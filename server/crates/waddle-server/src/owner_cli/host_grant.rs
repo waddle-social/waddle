@@ -1,21 +1,29 @@
-//! `host-grant`: an operator's act on the host-grant authority after a
-//! restore (`permissions::host_grant::restore`).
+//! `host-grant`: an operator's act on the host-grant authority: after a
+//! restore (`permissions::host_grant::restore`), and when an account's
+//! grants are to be revoked through the revocation fence
+//! (`permissions::host_grant::fence`), as after a reported reassignment of
+//! its JID.
 //!
-//! Each act is recorded in PostgreSQL. When the environment names the
+//! Each act is recorded in PostgreSQL. A revoke then waits for the fence's
+//! acknowledgement, which the command reports. When the environment names the
 //! servers' SpiceDB, the act's witnesses are written at once (the scopes'
 //! journal witnesses, the position witness); otherwise the next fence pass
 //! of a server writes them. A witness that could not be written is reported
 //! and does not fail the command: the act is committed either way.
 
+use std::time::Duration;
+
 use kameo::actor::{ActorRef, Spawn};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::SpiceDbConfig;
 use crate::permissions::host_grant::{
     position_witness_resource, read_position_witness, sync_journal_witness, sync_journal_witnesses,
-    sync_position_witness, GrantOperationId, HostGrantStore, OperatorRevoke, PositionStanding,
-    PositionWriter, ReopenSelection, ServedAccountDomains, WitnessSync,
+    sync_position_witness, FenceAcknowledgement, GrantOperationId, HostGrantError, HostGrantStore,
+    OperatorRevoke, PositionStanding, PositionWriter, ReopenSelection, RoomAffiliation,
+    ScopeLifecycleId, ServedAccountDomains, WitnessSync,
 };
 use crate::permissions::{EnsureAuthzCodecIncarnation, PermissionActor};
 
@@ -169,6 +177,7 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
             ban,
             operation_id,
             account_domain,
+            fence_wait,
         } => {
             let command = OperatorRevoke {
                 operation: GrantOperationId::from_uuid(operation_id),
@@ -182,13 +191,6 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                 .await
                 .map_err(OwnerCliError::HostGrant)?;
             let record = receipt.record();
-            println!(
-                "{}",
-                json!({
-                    "operation_id": record.operation.as_uuid().to_string(),
-                    "generation": record.generation.value(),
-                })
-            );
             eprintln!("recorded the revoke; it is effective from its commit");
             if let Some(permissions) = &permissions {
                 let journal = sync_journal_witness(&store, permissions, scope).await;
@@ -199,9 +201,203 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                     report_position(sync, standing);
                 }
             }
+            let fence = store
+                .await_revocation_fence(scope, record.generation, Duration::from_secs(fence_wait))
+                .await
+                .map_err(OwnerCliError::HostGrant)?;
+            println!(
+                "{}",
+                json!({
+                    "operation_id": record.operation.as_uuid().to_string(),
+                    "generation": record.generation.value(),
+                    "fence": fence_json(fence),
+                })
+            );
+            report_fence(fence)?;
+        }
+        HostGrantActionArgs::Grants { subject } => {
+            let grants = store
+                .subject_grants(&subject)
+                .await
+                .map_err(OwnerCliError::HostGrant)?;
+            for (lifecycle, grant) in &grants {
+                println!(
+                    "{}",
+                    json!({
+                        "scope": lifecycle.to_storage(),
+                        "room": grant.room.to_string(),
+                        "affiliation": grant.affiliation.as_storage(),
+                        "effective_affiliation": grant.effective_affiliation.as_storage(),
+                        "generation": grant.changed_generation.value(),
+                    })
+                );
+            }
+            eprintln!("{} grant row(s)", grants.len());
+        }
+        HostGrantActionArgs::RevokeAccount {
+            subject,
+            ban,
+            operation_id,
+            account_domain,
+            fence_wait,
+        } => {
+            let target = if ban {
+                RoomAffiliation::Outcast
+            } else {
+                RoomAffiliation::None
+            };
+            let served = ServedAccountDomains::new([account_domain]);
+            let grants = store
+                .subject_grants(&subject)
+                .await
+                .map_err(OwnerCliError::HostGrant)?;
+            let (mut refused, mut unacknowledged, mut witnessed) = (0_usize, false, Vec::new());
+            for (lifecycle, grant) in grants {
+                // A revoke leaves a ban in place, and nothing is recorded
+                // where the account already holds what is asked for.
+                if grant.affiliation == target
+                    || (!ban && grant.affiliation == RoomAffiliation::Outcast)
+                {
+                    continue;
+                }
+                let command = OperatorRevoke {
+                    operation: room_operation(operation_id, lifecycle, &grant.room),
+                    lifecycle,
+                    room: grant.room.clone(),
+                    subject: subject.clone(),
+                    ban,
+                };
+                let outcome = match store.operator_revoke(&command, &served).await {
+                    Ok(receipt) => {
+                        let generation = receipt.record().generation;
+                        witnessed.push(lifecycle);
+                        let fence = store
+                            .await_revocation_fence(
+                                lifecycle,
+                                generation,
+                                Duration::from_secs(fence_wait),
+                            )
+                            .await
+                            .map_err(OwnerCliError::HostGrant)?;
+                        unacknowledged |= !fence.acknowledged();
+                        json!({
+                            "recorded": true,
+                            "operation_id": command.operation.as_uuid().to_string(),
+                            "generation": generation.value(),
+                            "fence": fence_json(fence),
+                        })
+                    }
+                    // What an operator has to resolve in that room; the
+                    // other rooms are still revoked.
+                    Err(
+                        error @ (HostGrantError::LastOwner
+                        | HostGrantError::ScopeRetired
+                        | HostGrantError::ScopeExhausted),
+                    ) => {
+                        refused += usize::from(matches!(error, HostGrantError::LastOwner));
+                        json!({ "recorded": false, "refusal": error.kind() })
+                    }
+                    Err(error) => return Err(OwnerCliError::HostGrant(error)),
+                };
+                let mut line = json!({
+                    "scope": lifecycle.to_storage(),
+                    "room": grant.room.to_string(),
+                    "previous_affiliation": grant.affiliation.as_storage(),
+                });
+                if let (Some(line), Some(outcome)) = (line.as_object_mut(), outcome.as_object()) {
+                    line.extend(outcome.clone());
+                }
+                println!("{line}");
+            }
+            if let Some(permissions) = &permissions {
+                let mut failed = false;
+                witnessed.dedup();
+                for lifecycle in witnessed {
+                    failed |= sync_journal_witness(&store, permissions, lifecycle)
+                        .await
+                        .is_err();
+                }
+                failed |= sync_position_witness(&store, permissions, PositionWriter::Commit, None)
+                    .await
+                    .is_err();
+                report_witnesses(failed);
+            }
+            if refused > 0 {
+                return Err(OwnerCliError::RevokesRefused { refused });
+            }
+            if unacknowledged {
+                return Err(OwnerCliError::FenceUnacknowledged);
+            }
+            eprintln!("every recorded revoke is acknowledged by the revocation fence");
+        }
+        HostGrantActionArgs::Fence { scope } => {
+            let state = store
+                .scope(scope)
+                .await
+                .map_err(OwnerCliError::HostGrant)?
+                .ok_or(OwnerCliError::HostGrant(HostGrantError::UnknownScope))?;
+            let fence = store
+                .revocation_fence(scope, state.generation)
+                .await
+                .map_err(OwnerCliError::HostGrant)?;
+            println!(
+                "{}",
+                json!({
+                    "generation": state.generation.value(),
+                    "fence": fence_json(fence),
+                })
+            );
         }
     }
     Ok(())
+}
+
+/// The operation identity of one room's revoke within a `revoke-account`
+/// act: derived from the act's own identity, the scope and the room, so that
+/// repeating the act replays each room's revoke instead of recording it
+/// again.
+fn room_operation(act: Uuid, lifecycle: ScopeLifecycleId, room: &jid::BareJid) -> GrantOperationId {
+    let mut hash = Sha256::new();
+    hash.update(b"waddle:host-grant:revoke-account:v1\0");
+    hash.update(act.as_bytes());
+    hash.update(lifecycle.to_storage().as_bytes());
+    hash.update(room.as_str().as_bytes());
+    let digest = hash.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    GrantOperationId::from_uuid(Uuid::from_bytes(bytes))
+}
+
+fn fence_json(fence: FenceAcknowledgement) -> serde_json::Value {
+    match fence {
+        FenceAcknowledgement::Acknowledged { replicas } => {
+            json!({ "acknowledged": true, "replicas": replicas, "lagging": 0 })
+        }
+        FenceAcknowledgement::Pending { replicas, lagging } => {
+            json!({ "acknowledged": false, "replicas": replicas, "lagging": lagging })
+        }
+    }
+}
+
+/// Say what the fence answered, and fail the command while a server that
+/// may still decide has not installed the revoke.
+fn report_fence(fence: FenceAcknowledgement) -> Result<(), OwnerCliError> {
+    match fence {
+        FenceAcknowledgement::Acknowledged { replicas } => {
+            eprintln!(
+                "acknowledged by the revocation fence: {replicas} server(s) hold a lease and \
+                 every one has installed the revoke"
+            );
+            Ok(())
+        }
+        FenceAcknowledgement::Pending { lagging, .. } => {
+            eprintln!(
+                "{lagging} server(s) hold a lease and have not installed the revoke yet; a \
+                 server that stopped is waited for until its lease has run out"
+            );
+            Err(OwnerCliError::FenceUnacknowledged)
+        }
+    }
 }
 
 /// A permission actor on the servers' SpiceDB, or `None` (reported) when it

@@ -112,8 +112,33 @@ Environment (no flag; secret values are never printed):
 
 Each action is one or more short transactions on the host-grant store and can
 run while the servers run. The actions print what they recorded as JSON;
-repeat `revoke` with the same --operation-id after an unknown outcome. See
-docs/operations/authz-host-grant-restore.md.";
+repeat `revoke` or `revoke-account` with the same --operation-id after an
+unknown outcome or an acknowledgement that did not arrive.
+
+A revoke is effective at its commit. `revoke` and `revoke-account` then wait,
+for --fence-wait seconds, until the revocation fence has acknowledged it:
+every server that may still decide for the scope has installed the revoke, so
+none acts on a decision it read before. A server that stopped is waited for
+until its lease has run out. Exit code 1 with `acknowledged: false` means the
+revoke is recorded and not yet acknowledged; run the command again. See
+docs/operations/authz-host-grant-restore.md and
+docs/operations/authz-host-grant-reassignment.md.";
+
+const ACCOUNT_ENVIRONMENT: &str = "\
+Environment (no flag; secret values are never printed):
+  WADDLE_DATABASE_URL  PostgreSQL URL of the migrator login, as for
+                       owner-phase. Not read with --sqlite-database.
+
+`retire` records the account's JID in the ledger of retired JIDs and removes
+the account's native credentials, its account row, its identity-provider
+links and its sessions, in one transaction. No provisioning path issues a
+retired JID again: native registration refuses it, and an identity-provider
+login is given another name. A JID that holds no account is recorded as well.
+The act cannot be undone.
+
+It does not end the account's open streams and does not change its grants in
+any room: revoke those first (`host-grant revoke-account`). See
+docs/operations/account-retirement.md.";
 
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -161,10 +186,13 @@ pub(super) enum Command {
     /// Compose or verify the handoff document the restricted server starts with
     #[command(after_help = EMIT_HANDOFF_ENVIRONMENT)]
     EmitHandoff(EmitHandoffArgs),
-    /// Reopen restored host-grant scopes, acknowledge the PostgreSQL position
-    /// or revoke a grant the restored database lost
+    /// Reopen restored host-grant scopes, acknowledge the PostgreSQL position,
+    /// or list and revoke an account's grants through the revocation fence
     #[command(after_help = HOST_GRANT_ENVIRONMENT)]
     HostGrant(HostGrantArgs),
+    /// Retire an account so that its JID is never issued again
+    #[command(after_help = ACCOUNT_ENVIRONMENT)]
+    Account(AccountArgs),
 }
 
 /// The owner connection: the migrator login acting as the schema owner.
@@ -381,6 +409,98 @@ pub(super) enum HostGrantActionArgs {
             value_parser = parse_account_domain
         )]
         account_domain: CanonicalDomain,
+        /// Seconds to wait for the revocation fence to acknowledge the revoke
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_FENCE_WAIT_SECONDS)]
+        fence_wait: u64,
+    },
+    /// List every grant an account holds, in every room of every scope
+    Grants {
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+    },
+    /// Revoke or ban one account in every managed room it holds a grant in,
+    /// and wait for the revocation fence: the act after a reported
+    /// reassignment of the account's JID
+    RevokeAccount {
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+        /// Record a ban (outcast) instead of a revoke (none)
+        #[arg(long)]
+        ban: bool,
+        /// Operation ID of this act; generate one UUID and keep it. Each
+        /// room's revoke is recorded under an identity derived from it
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// The account domain the servers serve, as their WADDLE_XMPP_DOMAIN
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+        /// Seconds to wait for the revocation fence to acknowledge each revoke
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_FENCE_WAIT_SECONDS)]
+        fence_wait: u64,
+    },
+    /// Report whether the revocation fence has acknowledged a scope's
+    /// current generation
+    Fence {
+        /// Lifecycle of the scope (32 lowercase hex characters)
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+    },
+}
+
+/// How long `revoke` and `revoke-account` wait for the revocation fence by
+/// default: longer than a stopped server's lease takes to run out.
+const DEFAULT_FENCE_WAIT_SECONDS: u64 = 15;
+
+#[derive(Debug, Args)]
+pub(super) struct AccountArgs {
+    #[command(subcommand)]
+    pub(super) action: AccountActionArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum AccountActionArgs {
+    /// Retire an account: its JID is recorded as retired and never issued
+    /// again, and its account rows are removed
+    Retire {
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_bare_jid)]
+        jid: BareJid,
+        /// The server's SQLite database file, for a deployment that runs on
+        /// SQLite. Without it the act runs on PostgreSQL as the migrator
+        /// login acting as the schema owner
+        #[arg(long, value_name = "FILE")]
+        sqlite_database: Option<PathBuf>,
+        /// Application schema that holds the server's relations (PostgreSQL)
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_MAM_CLAIM_SCHEMA",
+            hide_env_values = true,
+            value_parser = parse_schema
+        )]
+        schema: Option<PgSchemaName>,
+        /// Login that runs the owner phase (PostgreSQL)
+        #[arg(
+            long,
+            env = "WADDLE_DB_MIGRATOR_LOGIN",
+            hide_env_values = true,
+            value_parser = parse_role
+        )]
+        migrator_login: Option<PgRoleName>,
+        /// NOLOGIN role that owns the application schema (PostgreSQL)
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_MAM_SCHEMA_OWNER",
+            hide_env_values = true,
+            value_parser = parse_role
+        )]
+        schema_owner: Option<PgRoleName>,
     },
 }
 

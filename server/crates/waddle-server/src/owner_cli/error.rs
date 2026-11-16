@@ -82,6 +82,18 @@ pub enum OwnerCliError {
     Preflight(#[source] RuntimeStartupError),
     #[error("the host-grant action did not complete")]
     HostGrant(#[source] crate::permissions::host_grant::HostGrantError),
+    /// The revokes are recorded and effective; the revocation fence did not
+    /// acknowledge every one of them within the wait.
+    #[error(
+        "recorded, and not yet acknowledged by the revocation fence: run the command again \
+         with the same --operation-id"
+    )]
+    FenceUnacknowledged,
+    /// A room's last owner of a served account cannot be revoked.
+    #[error("{refused} revoke(s) were refused; the rest are recorded")]
+    RevokesRefused { refused: usize },
+    #[error("the account was not retired")]
+    Retirement(#[source] crate::auth::retirement::RetireAccountError),
 }
 
 impl OwnerCliError {
@@ -90,7 +102,14 @@ impl OwnerCliError {
             Self::Configuration(_) | Self::Read { .. } | Self::OutputIsSymlink { .. } => {
                 ExitStatus::Usage
             }
-            Self::Write { .. } | Self::Connect(_) => ExitStatus::Failed,
+            Self::Write { .. } | Self::Connect(_) | Self::FenceUnacknowledged => ExitStatus::Failed,
+            Self::RevokesRefused { .. } => ExitStatus::Refused,
+            Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {
+                ExitStatus::Usage
+            }
+            Self::Retirement(crate::auth::retirement::RetireAccountError::Database(_)) => {
+                ExitStatus::Failed
+            }
             Self::KeypoolActivationPending { .. } => ExitStatus::Pending,
             // The throwaway preflight pool did not close in time: the
             // preflight itself reached no verdict.

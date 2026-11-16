@@ -891,6 +891,53 @@ impl HostGrantStore {
         Ok(grants)
     }
 
+    /// Every grant row an account holds, in every room of every scope, in
+    /// lifecycle and room order: what an operator revokes after a reported
+    /// reassignment of the account's JID (ADR-0020 D8). A revoked subject's
+    /// row is listed with the affiliation `none`.
+    pub async fn subject_grants(
+        &self,
+        subject: &GrantSubject,
+    ) -> Result<Vec<(ScopeLifecycleId, GrantRow)>, HostGrantError> {
+        let mut tx = self.begin_read().await?;
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT lifecycle_id, {GRANT_COLUMNS} FROM host_grants \
+                     WHERE subject_jid = ? ORDER BY lifecycle_id, room_jid"
+                ),
+                crate::db_params![subject.as_str()],
+            )
+            .await?;
+        let mut grants = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+                .ok_or(corrupt("lifecycle_id"))?;
+            grants.push((
+                lifecycle,
+                GrantRow {
+                    room: row
+                        .get::<String>(1)?
+                        .parse()
+                        .map_err(|_| corrupt("room_jid"))?,
+                    subject: GrantSubject::from_storage(&row.get::<String>(2)?)
+                        .ok_or(corrupt("subject_jid"))?,
+                    affiliation: affiliation_column(&row, 3, "affiliation")?,
+                    effective_affiliation: affiliation_column(&row, 4, "effective_affiliation")?,
+                    changed_generation: GrantGeneration::new(row.get::<i64>(5)?)
+                        .ok_or(corrupt("changed_generation"))?,
+                    operation: GrantOperationId::from_storage(&row.get::<String>(6)?)
+                        .ok_or(corrupt("operation_id"))?,
+                    issuance_basis: IssuanceBasis::from_storage(&row.get::<String>(7)?)
+                        .ok_or(corrupt("issuance_basis"))?,
+                },
+            ));
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(grants)
+    }
+
     /// One page of the scopes that hold an operation whose projection is
     /// not yet verified and activated, in lifecycle order, starting after
     /// `after`. A caller that follows the pages to an empty one has seen
