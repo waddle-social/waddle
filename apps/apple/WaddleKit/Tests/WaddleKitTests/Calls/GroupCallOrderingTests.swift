@@ -130,6 +130,37 @@ import Testing
         f.store.clear()
     }
 
+    @Test func aLateSendFromTheLastCallCannotSetThisCallsHandFallback() async {
+        var number = 0
+        let f = GroupFixture(sid: {
+            number += 1
+            return "g\(number)"
+        })
+        await f.activate()
+        f.port.callSends = []
+        // The last call's raised hand is still on its way when the next call starts.
+        f.port.heldCallVerbs = ["groupPresence"]
+        let raisingInFirst = Task { await f.store.setHandRaised(true) }
+        await eventually { f.port.callSends.count == 1 }
+        let leaving = Task { await f.store.hangUp() }
+        let joining = Task { await f.store.joinGroupCall(in: groupRoom, media: callAudio, nick: "alice") }
+        await eventually { f.store.state.sid == "g2" }
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        await eventually { f.port.callSends.contains(.groupPresence(groupRoom, "alice", .init(state: .preparing))) }
+        f.echo()
+        await eventually { f.port.callSends.contains(.groupInitiate(groupRoom, callOwn, "g2", false)) }
+        f.accept(sid: "g2")
+        #expect(await joining.value)
+        _ = await raisingInFirst.value
+        await leaving.value
+        // This call never told the room about a raised hand.
+        f.port.callResults["groupPresence"] = false
+        #expect(await !f.store.setHandRaised(true))
+        #expect(!f.store.isHandRaised)
+        f.store.clear()
+    }
+
     @Test func losingTheStreamWhileJoiningAbandonsTheJoin() async {
         let f = GroupFixture()
         let joining = await f.begin()

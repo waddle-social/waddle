@@ -43,11 +43,11 @@ extension CallStore {
             let sent = await port.updateGroupCallPresence(
                 .init(state: .active(video: current.media.video), isHandRaised: hand, isMuted: isSelfMuteAdvertised),
                 in: current.room, nick: current.nick)
-            guard generation == epoch else { return sent }
-            if sent { groupControl.advertisedHand = hand }
-            if !sent, case .inGroup(let now) = state, now.sid == target.sid, now.room == target.room {
-                onFailure()
-            }
+            // Bookkeeping belongs to the call that sent: a send that returns
+            // after the slot moved on must not touch the next call's.
+            guard generation == epoch, case .inGroup(let now) = state,
+                now.sid == target.sid, now.room == target.room else { return sent }
+            if sent { groupControl.advertisedHand = hand } else { onFailure() }
             return sent
         }
     }
