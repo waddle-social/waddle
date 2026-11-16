@@ -169,6 +169,15 @@ async fn same_full_jid_bound_concurrently_on_two_nodes_leaves_one_binding() {
         .send(&chat(&full_jid, "matrix-a", &bodies[0]))
         .await
         .expect("send from node A");
+    // One message at a time. Two messages admitted together can be archived
+    // in the opposite order, and the later one then waits for ingress
+    // recovery (over a minute), which is not what this row covers.
+    let first = Instant::now() + Duration::from_secs(15);
+    while seen_a.copies_of(&bodies[0]) + seen_b.copies_of(&bodies[0]) == 0 && Instant::now() < first
+    {
+        observe(&mut on_a, &mut seen_a, Duration::from_millis(250)).await;
+        observe(&mut on_b, &mut seen_b, Duration::from_millis(250)).await;
+    }
     sender_b
         .send(&chat(&full_jid, "matrix-b", &bodies[1]))
         .await
