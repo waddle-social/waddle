@@ -44,6 +44,7 @@ the integration branch itself.
 | `integration-run2-s2s.log` | nextest on integration at `6e4cceebb`: `waddle-xmpp` 133 of 133 passed across 4 binaries, `waddle-server` 361 of 361 passed across 11 binaries; no skips reported. |
 | `integration-run5-s2s.log` | nextest on integration at `b887a2941` (the W6b merge, the inventory refresh and the PostgreSQL account-bound cases), with `WADDLE_TEST_REQUIRE_POSTGRES=1` and PostgreSQL 17.11: `waddle-xmpp` 133 of 133 passed across 4 binaries; `waddle-server` 426 of 427 passed across 15 binaries. The failure, `s2s_connection_manager` `limits::a_full_backoff_table_neither_refuses_a_healthy_destination_nor_flushes_a_wait`, was an outbound attempt that told its dialler of its failure before releasing its dial slot, so an immediate retry was refused as in progress; fixed in `9313de477`. |
 | `integration-run5-s2s-rerun.log` | the same selection at `9313de477`: `waddle-xmpp` 133 of 133 and `waddle-server` 427 of 427 passed, the two PostgreSQL cases of `xep0045_s2s_outbound_muc` included; no skips reported. |
+| `integration-run5-s2s-final.log` | the same selection at `e4ef00870`, which records a dial failure before freeing the dial slot: `waddle-xmpp` 133 of 133 and `waddle-server` 427 of 427 passed, the two PostgreSQL cases included; no skips reported. |
 | `integration-run5-s2s-stress.log` | `s2s_connection_manager`, `s2s_stream_end`, `xep0045_s2s_outbound_muc` and `xep0410_s2s_self_ping` at `9313de477`, five consecutive nextest runs, PostgreSQL required: 5 of 5 runs passed. |
 | `integration-run2-hostgrant-b.log` | nextest of the first host-grant slice's set: 110 of 110 passed across 8 binaries, including the `#[ignore]` SpiceDB cases. |
 | `integration-run2-hostgrant-c.log` | nextest of the writer fence's set: 64 of 64 passed across 6 binaries. |
@@ -69,10 +70,10 @@ tests of `waddle-server`, `bun test` for `chat`, or the `clustering` feature.
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `s2s_codec` (54 cases) | W4a, W4c, W5a | none | Run 54/54, s2s and run5 rerun logs |
-| `s2s_pre_authentication` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s and run5 rerun logs |
-| `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s and run5 rerun logs |
-| `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, s2s and run5 rerun logs |
+| `s2s_codec` (54 cases) | W4a, W4c, W5a | none | Run 54/54, s2s and run5 final logs |
+| `s2s_pre_authentication` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s and run5 final logs |
+| `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, s2s and run5 final logs |
+| `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, s2s and run5 final logs |
 | `identity_profile` (19) | W5i | none (loopback address checks only) | Not run |
 | `xep0313_mam` (edited, 11) | W5c | none; two cases need PostgreSQL and skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0402_pep_native_bookmarks` (edited, 15) | W5i | none | Not run |
@@ -82,21 +83,21 @@ tests of `waddle-server`, `bun test` for `chat`, or the `clustering` feature.
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, run5 rerun log |
-| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b | loopback | Run 54/54, run5 rerun log |
-| `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, run5 rerun log |
-| `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run5 rerun log |
-| `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 rerun log |
-| `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run5 rerun log |
-| `s2s_reachability` (6) | W5a, W6b | none | Run 6/6, run5 rerun log |
-| `s2s_d7_refusal` (4) | W5a | none | Run 4/4, run5 rerun log |
-| `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run5 rerun log |
-| `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 rerun log |
-| `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run5 rerun log |
-| `xep0045_s2s_outbound_muc` (41) | W6b, integration | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 41/41, run5 rerun and stress logs |
-| `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 rerun and stress logs |
-| `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 rerun and stress logs |
-| `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 rerun log |
+| `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, run5 final log |
+| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b | loopback | Run 54/54, run5 final log |
+| `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, run5 final log |
+| `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run5 final log |
+| `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run5 final log |
+| `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run5 final log |
+| `s2s_reachability` (6) | W5a, W6b | none | Run 6/6, run5 final log |
+| `s2s_d7_refusal` (4) | W5a | none | Run 4/4, run5 final log |
+| `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run5 final log |
+| `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run5 final log |
+| `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run5 final log |
+| `xep0045_s2s_outbound_muc` (41) | W6b, integration | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 41/41, run5 final and stress logs |
+| `xep0410_s2s_self_ping` (4) | W6b | loopback | Run 4/4, run5 final and stress logs |
+| `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run5 final and stress logs |
+| `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run5 final log |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -201,7 +202,7 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | Run, with a cited log | 32 targets, 724 cases, all passed in their latest cited run (`host_grant_projection` is counted once) |
 | Not run | 41 targets (16 of them library modules) |
 
-By log: the run5 S2S rerun log covers 19 targets (133 `waddle-xmpp` cases in 4, 427 `waddle-server` cases in 15);
+By log: the run5 S2S final log covers 19 targets (133 `waddle-xmpp` cases in 4, 427 `waddle-server` cases in 15);
 the host-grant logs cover 13 targets, with `host_grant_projection` in both.
 
 A target is counted as run only when the whole binary's cases appear in a
