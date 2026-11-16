@@ -1596,7 +1596,11 @@ impl Inner {
             | SeatEnd::Refused => self.tell_removed(&seat, Status::ServiceErrorKick),
             SeatEnd::HolderStopped | SeatEnd::StreamLost | SeatEnd::OccupantError => {}
         }
-        self.seat_ends.push(EndWork::Seat(seat, end));
+        self.seat_ends.push(EndWork::Seat {
+            seat,
+            end,
+            removed: false,
+        });
     }
 
     /// Run one end handed to the seat-end workers: remove the row and have
@@ -1610,7 +1614,7 @@ impl Inner {
         };
         let budget = self.limits.room_request_timeout;
         match work {
-            EndWork::Seat(seat, end) => {
+            EndWork::Seat { seat, end, removed } => {
                 if !matches!(
                     tokio::time::timeout(budget, hosting.store.remove(seat)).await,
                     Ok(Ok(_))
@@ -1620,8 +1624,10 @@ impl Inner {
                 match tokio::time::timeout(budget, hosting.host.unseat(seat, *end)).await {
                     // The occupant of a seat taken over from a replica that
                     // stopped is told once the room removed the occupancy
-                    // recorded for it, unless it has entered again since.
-                    Ok(true) if *end == SeatEnd::HolderStopped => {
+                    // recorded for it, here or by the removal of the same
+                    // occupancy as one without a seat that ran just
+                    // before, unless it has entered again since.
+                    Ok(now) if *end == SeatEnd::HolderStopped && (now || *removed) => {
                         if !self.seats.holds(&seat.room, &seat.occupant) {
                             self.tell_removed(seat, Status::ServiceErrorKick);
                         }
@@ -2388,7 +2394,14 @@ impl Inner {
 /// workers that end seats.
 #[derive(Debug, Clone)]
 pub(super) enum EndWork {
-    Seat(Seat, SeatEnd),
+    /// The seat ended: its row is removed and the room removes the
+    /// occupancy. `removed` says that a removal of the same occupancy as
+    /// one without a seat ran just before it ([`SeatEnds::push`]).
+    Seat {
+        seat: Seat,
+        end: SeatEnd,
+        removed: bool,
+    },
     /// The room seats an occupant of another server under `session`, for
     /// which this replica holds no seat: nothing reaches it.
     Ghost {
@@ -2403,13 +2416,17 @@ type EndKey = (BareJid, FullJid, OccupancySessionGeneration);
 impl EndWork {
     fn key(&self) -> EndKey {
         match self {
-            Self::Seat(seat, _) => (seat.room.clone(), seat.occupant.clone(), seat.session),
+            Self::Seat { seat, .. } => (seat.room.clone(), seat.occupant.clone(), seat.session),
             Self::Ghost {
                 room,
                 occupant,
                 session,
             } => (room.clone(), occupant.clone(), *session),
         }
+    }
+
+    fn is_ghost(&self) -> bool {
+        matches!(self, Self::Ghost { .. })
     }
 }
 
@@ -2418,13 +2435,22 @@ struct EndQueue {
     items: VecDeque<EndWork>,
     /// The occupancies whose end is queued or running.
     keys: HashSet<EndKey>,
+    /// Of those, the occupancies whose removal as one without a seat is
+    /// running.
+    ghosts_running: HashSet<EndKey>,
+    /// Seat ends that arrived while a removal of the same occupancy as one
+    /// without a seat was running: queued once it is done.
+    after: HashMap<EndKey, EndWork>,
 }
 
 /// The ends waiting for the workers that end seats, in the order they were
 /// handed over. Each occupancy is ended once: an end of one whose end is
-/// queued or running is not queued again. There is at most one end for each
-/// seat and for each occupant a room seats, so what waits here is bounded
-/// by what this replica seats.
+/// queued or running is not queued again, except that a seat's end, which
+/// removes the seat's row and may tell its occupant, is preferred to the
+/// removal of the same occupancy as one without a seat. It takes the
+/// removal's place while that is queued, and follows it once it has run.
+/// There are at most two ends for each seat and for each occupant a room
+/// seats, so what waits here is bounded by what this replica seats.
 #[derive(Debug, Default)]
 pub(super) struct SeatEnds {
     queue: Mutex<EndQueue>,
@@ -2433,13 +2459,28 @@ pub(super) struct SeatEnds {
 
 impl SeatEnds {
     /// Hand `work` to the workers, unless an end of the same occupancy is
-    /// queued or running.
+    /// queued or running. A seat's end replaces a queued removal of the
+    /// same occupancy as one without a seat, and follows a running one.
     pub(super) fn push(&self, work: EndWork) {
+        let key = work.key();
         let mut queue = lock(&self.queue);
-        if queue.keys.insert(work.key()) {
+        if queue.keys.insert(key.clone()) {
             queue.items.push_back(work);
             drop(queue);
             self.work.notify_one();
+            return;
+        }
+        if work.is_ghost() {
+            return;
+        }
+        if let Some(queued) = queue
+            .items
+            .iter_mut()
+            .find(|queued| queued.is_ghost() && queued.key() == key)
+        {
+            *queued = work;
+        } else if queue.ghosts_running.contains(&key) {
+            queue.after.entry(key).or_insert(work);
         }
     }
 
@@ -2449,16 +2490,40 @@ impl SeatEnds {
             let work = self.work.notified();
             tokio::pin!(work);
             work.as_mut().enable();
-            if let Some(next) = lock(&self.queue).items.pop_front() {
-                return next;
+            {
+                let mut queue = lock(&self.queue);
+                if let Some(next) = queue.items.pop_front() {
+                    if next.is_ghost() {
+                        queue.ghosts_running.insert(next.key());
+                    }
+                    return next;
+                }
             }
             work.await;
         }
     }
 
-    /// `work` is done: an end of the same occupancy may be queued again.
+    /// `work` is done: an end of the same occupancy may be queued again,
+    /// and a seat's end that waited for it is queued, as one whose
+    /// occupancy that removal removed.
     pub(super) fn done(&self, work: &EndWork) {
-        lock(&self.queue).keys.remove(&work.key());
+        let key = work.key();
+        let mut queue = lock(&self.queue);
+        queue.ghosts_running.remove(&key);
+        match queue.after.remove(&key) {
+            Some(EndWork::Seat { seat, end, .. }) if work.is_ghost() => {
+                queue.items.push_back(EndWork::Seat {
+                    seat,
+                    end,
+                    removed: true,
+                });
+                drop(queue);
+                self.work.notify_one();
+            }
+            _ => {
+                queue.keys.remove(&key);
+            }
+        }
     }
 
     /// Whether an end of the occupancy of `occupant` under `session` in
