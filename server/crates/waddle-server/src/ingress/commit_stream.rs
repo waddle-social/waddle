@@ -35,7 +35,8 @@ pub(super) async fn lock_stream(
         IngressStreamIdentity::Ephemeral { .. }
         | IngressStreamIdentity::Relayed { .. }
         | IngressStreamIdentity::Extension { .. }
-        | IngressStreamIdentity::RoomResult { .. } => return Ok(None),
+        | IngressStreamIdentity::RoomResult { .. }
+        | IngressStreamIdentity::Remote { .. } => return Ok(None),
     };
     #[cfg(feature = "clustering")]
     let fence = if matches!(tx.fencing(), IngressFencing::Clustered(_)) {

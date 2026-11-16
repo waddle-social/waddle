@@ -24,7 +24,9 @@
 //! Whose grants are honoured is decided by the replica's
 //! [`PrincipalPolicy`] at this decision (ADR-0020 D1 and D8, gate G17): the
 //! sender with the evidence of how its request arrived, and every named
-//! recipient without stream evidence. A remote principal's grants
+//! recipient on the evidence of the stream each seat it holds in the room
+//! was admitted under, or without stream evidence when it holds none. A
+//! remote principal's grants
 //! contribute nothing unless its domain is admitted under the S2S snapshot
 //! the replica runs, and an owner or admin grant of a remote principal only
 //! for a trusted home on a `pkix` stream. The witness names what the
@@ -40,7 +42,9 @@ use super::model::{
     ScopeLifecycleId, HOST_GRANT_POLICY_VERSION,
 };
 use super::policy::{grant_allows, HostGrantAction};
-use super::principal::{PrincipalEvidence, PrincipalPolicy, PrincipalWitness};
+use super::principal::{
+    named_evidence, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, SeatEvidence,
+};
 use super::restore::AuthorityBinding;
 use super::store::{binding_query, decode_binding};
 use crate::db::{DatabaseError, Transaction};
@@ -66,6 +70,10 @@ pub struct RoomAcceptance<'a> {
     /// The bare JID of every principal the acceptance names as a recipient:
     /// whoever it would deliver to, project an inbox row for or notify.
     pub audience: &'a [BareJid],
+    /// The stream evidence of the remote occupants the replica seats in the
+    /// room: a named recipient that holds a seat is decided on the evidence
+    /// of each of its seats.
+    pub seats: &'a dyn SeatEvidence,
     /// The served account domains and the S2S snapshot the replica runs.
     pub principals: &'a PrincipalPolicy,
     /// The authority the replica's attachment verified: its incarnation,
@@ -263,10 +271,12 @@ pub(crate) async fn admit_room_acceptance(
         .audience
         .iter()
         .filter(|recipient| {
-            let witness = acceptance
-                .principals
-                .witness(recipient, &PrincipalEvidence::NoStream);
-            allows(recipient, &witness, HostGrantAction::Read)
+            named_evidence(acceptance.seats, acceptance.room, recipient)
+                .iter()
+                .all(|evidence| {
+                    let witness = acceptance.principals.witness(recipient, evidence);
+                    allows(recipient, &witness, HostGrantAction::Read)
+                })
         })
         .cloned()
         .collect();

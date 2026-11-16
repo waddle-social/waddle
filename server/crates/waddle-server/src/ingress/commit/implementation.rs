@@ -1099,8 +1099,12 @@ pub(in crate::ingress::commit) async fn commit_attempt(
                         super::super::principal::IngressPrincipal::Authenticated(principal) => {
                             principal.clone()
                         }
+                        // Only a session of this deployment hands a
+                        // stanza to another replica's room; a remote
+                        // occupant is decided where its stream landed.
                         super::super::principal::IngressPrincipal::Extension(_)
-                        | super::super::principal::IngressPrincipal::RoomResult(_) => {
+                        | super::super::principal::IngressPrincipal::RoomResult(_)
+                        | super::super::principal::IngressPrincipal::Remote(_) => {
                             return Err(IngressUowError::ExtensionRemoteRoomUnsupported)
                         }
                     },

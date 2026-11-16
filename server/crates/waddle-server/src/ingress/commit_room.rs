@@ -110,8 +110,7 @@ pub(super) async fn admit_host_grants(
     use super::host_grant_plan::{named_principals, reduce_to_audience};
     use crate::ingress_uow::HostGrantAdmissionRepository;
     use crate::permissions::host_grant::{
-        AdmissionDenial, HostGrantAction, PrincipalEvidence, RoomAcceptance, RoomAdmission,
-        RoomManagement,
+        AdmissionDenial, HostGrantAction, RoomAcceptance, RoomAdmission, RoomManagement,
     };
     use crate::server::routes::interpret::effects::RoomExecutionPath;
     let RoomExecutionPath::Local {
@@ -148,18 +147,17 @@ pub(super) async fn admit_host_grants(
     // A plan that cannot be classified is refused only after the sender was
     // decided, so a sender who is not admitted learns nothing but that.
     let named = named_principals(&submission.plan, room, sender);
+    let gate = tx.host_grant_gate();
     let admission = HostGrantAdmissionRepository::admit_room_acceptance(
         tx,
         &scope,
         &RoomAcceptance {
             room,
             sender,
-            // Every producer of an ingress submission (a local session, an
-            // extension, a room's own result) submits without an S2S
-            // stream; the sender is decided on that evidence.
-            sender_evidence: PrincipalEvidence::NoStream,
+            sender_evidence: submission.principal.evidence(),
             action: HostGrantAction::SendMessage,
             audience: named.as_deref().unwrap_or_default(),
+            seats: gate.seat_evidence(),
             principals: attachment.principals(),
             binding: attachment.binding(),
         },
