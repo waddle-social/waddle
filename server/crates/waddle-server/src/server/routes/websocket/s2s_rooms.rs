@@ -294,7 +294,7 @@ impl waddle_xmpp::registry::ForeignDelivery for SeatDelivery {
 
 /// One request, as its handlers read it.
 struct Asked<'a> {
-    state: &'a WebSocketState,
+    state: &'a Arc<WebSocketState>,
     archive_writes: &'a ArchiveAllowances,
     request: &'a RoomRequest,
     /// The address the stanza was sent to.
@@ -635,13 +635,27 @@ impl Asked<'_> {
     /// anything else about the room, the sender's grants and standing
     /// included, so no later answer tells such a room from one that does
     /// not exist. An occupant the room still seats is removed: its seat
-    /// was opened while the room was open.
+    /// was opened while the room was open. While the setting cannot be
+    /// read the request is answered with a retryable error and a seat is
+    /// left as it is.
     async fn closed_room(&self, room: &BareJid) -> Option<RoomReplies> {
-        let refused = match self.open_to_other_servers(room).await {
+        match self.open_to_other_servers(room).await {
             Some(true) => return None,
-            Some(false) => no_such_room(),
-            None => internal(),
-        };
+            Some(false) => {}
+            None => {
+                return Some(RoomReplies {
+                    stanzas: refuse(&self.request.stanza, internal()),
+                    // A seat opened for this request has no room to hold
+                    // it; one the occupant already held stays.
+                    seat: if self.request.joining {
+                        SeatChange::Refused
+                    } else {
+                        SeatChange::Unchanged
+                    },
+                });
+            }
+        }
+        let refused = no_such_room();
         if let (Some(seat), false) = (&self.request.seat, self.request.joining) {
             sweep_abandoned_room_occupancy(
                 self.state,
@@ -1036,7 +1050,9 @@ impl Asked<'_> {
     /// beside its frames once its writer has taken them; here the answer is
     /// handed to the router's queue for the sender's domain, which is all
     /// the custody a reply to a remote sender has, so they are settled as
-    /// the answer is returned.
+    /// the answer is returned. A room effect's completion can wait for
+    /// other occupants' connections to take their copies, so it is settled
+    /// off the room's request order.
     async fn answered(&self, batch: ResponseBatch) -> RoomReplies {
         let ResponseBatch {
             frames,
@@ -1058,14 +1074,17 @@ impl Asked<'_> {
             }
         }
         for completion in completions {
-            // An effect whose completion is not recorded stays leased and
-            // is delivered again by the room's outbox.
-            let recorded =
-                crate::room_effect_outbox::drain::complete_after_write(self.state, &completion)
-                    .await;
-            if recorded.is_err() {
-                tracing::warn!("recording a remote principal's delivered room effect failed");
-            }
+            let state = Arc::clone(self.state);
+            tokio::spawn(async move {
+                // An effect whose completion is not recorded stays leased
+                // and is delivered again by the room's outbox.
+                let recorded =
+                    crate::room_effect_outbox::drain::complete_after_write(&state, &completion)
+                        .await;
+                if recorded.is_err() {
+                    tracing::warn!("recording a remote principal's delivered room effect failed");
+                }
+            });
         }
         match stanzas {
             Some(stanzas) => RoomReplies::of(stanzas),

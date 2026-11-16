@@ -1019,7 +1019,7 @@ otherwise from the channel catalog (`channels.federated`, migration 2008),
 which the room's configuration and the channel commands keep in step. A
 room with neither is not found: no room is created for a remote principal.
 While the setting cannot be read the answer is `internal-server-error`
-(type `wait`).
+(type `wait`), and a seat the sender holds is left as it is.
 
 Turning the setting off removes the room's remote occupants once the change
 is committed: each seat ends, the occupant is sent its own unavailable
@@ -1141,7 +1141,10 @@ only:
   `groupchat` messages. The connection registry offers a stanza for a full
   JID that holds no connection to the router (`ForeignDelivery`), which
   takes it only when the JID holds a seat in the room the stanza comes
-  from. Private messages, invitations and IQs between occupants are not
+  from. The room's effect outbox, which delivers what a durable mutation
+  caused (a kick, a ban, an affiliation or configuration change, the
+  room's destruction), offers a recipient without a connection the same
+  way; a copy the router takes needs no write acknowledgement. Private messages, invitations and IQs between occupants are not
   taken, since their answers would be account traffic (D7); they find no
   recipient, as before.
 

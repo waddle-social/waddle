@@ -342,9 +342,10 @@ async fn a_remote_occupant_changes_the_subject_only_where_the_room_lets_occupant
 async fn a_remote_accounts_archived_messages_are_bounded() {
     let (hosted, _alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
-    // The account may have 30 messages archived at once; a burst beyond
-    // that is refused with `resource-constraint` and archives nothing.
-    for index in 0..40 {
+    // The account may have 30 messages archived at once and five more
+    // each second; a burst well beyond that is refused with
+    // `resource-constraint` and archives nothing.
+    for index in 0..120 {
         let id = format!("burst-{index}");
         hosted
             .from_peer(remote_groupchat(BOB, ROOM, &id, "again"))
@@ -365,7 +366,7 @@ async fn a_remote_accounts_archived_messages_are_bounded() {
             && stanza.attr("from") == Some(BOB_OCCUPANT)
             && body(stanza).as_deref() == Some("again")
     });
-    assert!((30..40).contains(&reflected), "{reflected}");
+    assert!((30..120).contains(&reflected), "{reflected}");
     // A chat state is not archived and is not counted.
     hosted
         .from_peer(remote_payload(

@@ -20,14 +20,23 @@ mod s2s_inbound_muc_support;
 
 use s2s_inbound_muc_support::{
     body, error_condition, local_groupchat, local_receives, local_receives_payload, naming,
-    presence_between, remote_groupchat, remote_join, remote_leave, remote_payload,
-    room_with_remote_occupant, stanza_id, statuses, ARRIVES, BOB, BOB_OCCUPANT, ROOM,
+    presence_between, remote_groupchat, remote_join, remote_leave, room_with_remote_occupant,
+    stanza_id, statuses, ARRIVES, BOB, BOB_OCCUPANT, ROOM,
 };
 use waddle_server::s2s::route::RouterLimits;
+use xmpp_parsers::message::Message;
 
 const NS_RETRACT: &str = "urn:xmpp:message-retract:1";
 
 fn no_change(_: &mut s2s_inbound_muc_support::Spec) {}
+
+/// A retraction of the message the room identified as `target` (§4), with
+/// the body a client that does not know the extension shows instead.
+fn retraction(from: &str, id: &str, target: &str) -> Message {
+    let mut message = remote_groupchat(from, ROOM, id, "/me retracted a previous message");
+    message.payloads.push(naming("retract", NS_RETRACT, target));
+    message
+}
 
 #[tokio::test]
 async fn a_remote_occupant_retracts_its_own_message_and_no_other() {
@@ -50,26 +59,12 @@ async fn a_remote_occupant_retracts_its_own_message_and_no_other() {
         .expect("the remote occupant's copy");
     let theirs = stanza_id(&copy, ROOM).expect("the room's stanza-id");
 
-    hosted
-        .from_peer(remote_payload(
-            BOB,
-            ROOM,
-            "meddle-1",
-            naming("retract", NS_RETRACT, &theirs),
-        ))
-        .await;
+    hosted.from_peer(retraction(BOB, "meddle-1", &theirs)).await;
     let refused = hosted.answered("meddle-1").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
 
-    hosted
-        .from_peer(remote_payload(
-            BOB,
-            ROOM,
-            "own-2",
-            naming("retract", NS_RETRACT, &own),
-        ))
-        .await;
+    hosted.from_peer(retraction(BOB, "own-2", &own)).await;
     let retracted = local_receives_payload(&mut alice, BOB_OCCUPANT, "retract", NS_RETRACT).await;
     assert!(retracted.is_some(), "the retraction for the local occupant");
     assert!(hosted
@@ -111,14 +106,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_retracts_none_of_i
         })
         .await
         .expect("the room's own presence for the second occupant");
-    hosted
-        .from_peer(remote_payload(
-            mallory,
-            ROOM,
-            "take-1",
-            naming("retract", NS_RETRACT, &kept),
-        ))
-        .await;
+    hosted.from_peer(retraction(mallory, "take-1", &kept)).await;
     let refused = hosted.answered("take-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
     assert!(

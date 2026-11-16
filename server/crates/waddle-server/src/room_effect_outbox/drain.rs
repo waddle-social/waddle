@@ -728,6 +728,20 @@ async fn deliver_recipients_concurrently(
                     return RecipientDeliveryOutcome::LocalRetryable;
                 }
                 LocalQueueResult::NotConnected => {
+                    // An occupant the room seats from another server holds
+                    // no connection on any replica. Its copy is handed to
+                    // server-to-server routing, which takes only what a
+                    // room sends a seat it holds; that is custody for
+                    // transport, with no write to wait for.
+                    if state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .offer_foreign(&recipient, stanza.clone())
+                        .is_ok()
+                    {
+                        continue;
+                    }
                     match registered_remote_resource_write_accepted_delivery(
                         state, &recipient, &stanza,
                     )
