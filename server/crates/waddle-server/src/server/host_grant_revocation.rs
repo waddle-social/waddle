@@ -32,8 +32,8 @@
 //! are emptied with status 321.
 //!
 //! A room's administration request applies its own change to the actor,
-//! with the administrator and the reason it names; the sweep waits for a
-//! request that is under way on this process before it looks at the room.
+//! with the administrator and the reason it names; the sweep does not look
+//! at a room while such a request is under way on this process.
 //!
 //! The acknowledgement of a revoke does not wait for the sweep (see `fence`).
 //! Until the sweep has removed it, a revoked occupant that is still seated
@@ -70,6 +70,8 @@ use crate::server::routes::websocket::WebSocketState;
 const SWEEP_RETRY: Duration = Duration::from_secs(1);
 /// Longest one ask of a room actor or the room registry waits.
 const SWEEP_ASK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest one pass waits for a request that administers a room.
+const SWEEP_ADMINISTRATION_WAIT: Duration = Duration::from_secs(1);
 
 /// Start this replica's sweep and have the revocation fence drive it. A
 /// state whose gate has no fence (SQLite, a schema without the host-grant
@@ -207,8 +209,17 @@ impl Sweep {
         // A request that administers the room holds this lock from before it
         // records a change until the room actor applied it. Waiting for it
         // leaves the removal to that request, which names who acted and why;
-        // the sweep then finds the room in line.
-        let _administration = crate::admin::channels::acquire_room_config_lock(room).await;
+        // the sweep then finds the room in line. A room that stays under
+        // administration is left for the next pass, so that it does not hold
+        // up the other rooms.
+        let Ok(_administration) = tokio::time::timeout(
+            SWEEP_ADMINISTRATION_WAIT,
+            crate::admin::channels::acquire_room_config_lock(room),
+        )
+        .await
+        else {
+            return false;
+        };
         // Only a read that shows the grants is acted on.
         let grants = match self.grants.room_as_stored(RoomBinding::Room(room)).await {
             RoomGate::Managed(grants) => grants,
