@@ -1125,12 +1125,28 @@ async fn one_accounts_leaves_do_not_delay_another_account_of_its_domain() {
 
 #[tokio::test]
 async fn a_seats_first_leave_is_taken_beyond_its_accounts_allowance() {
+    first_leave_taken_beyond_the_allowance("inbound-router-held-leave", false).await;
+}
+
+#[tokio::test]
+async fn a_seats_first_leave_is_taken_beyond_its_allowance_where_requests_are_placed() {
+    // A host that places requests, as every clustered deployment's does:
+    // the replica that holds the room, and the seat, takes the leave.
+    first_leave_taken_beyond_the_allowance("inbound-router-held-leave-placed", true).await;
+}
+
+async fn first_leave_taken_beyond_the_allowance(name: &str, carrying: bool) {
     let limits = RouterLimits {
         room_request_burst_per_account: 1,
         room_request_rate_per_account: 1,
         ..RouterLimits::default()
     };
-    let hosted = Scripted::start("inbound-router-held-leave", limits).await;
+    let hosted = Scripted::start_with(name, limits, |host| {
+        if carrying {
+            host.carry();
+        }
+    })
+    .await;
     with_bob(&hosted).await;
     // A leave for a room without a seat spends the account's allowance.
     hosted
@@ -1301,4 +1317,61 @@ async fn a_leave_for_a_room_whose_holder_is_silent_is_placed_once_it_answers() {
         .with_id("leave-silent")
         .iter()
         .all(|stanza| stanza.attr("type") != Some("error")));
+}
+
+#[tokio::test]
+async fn a_kept_leave_does_not_end_the_occupancy_of_a_later_join() {
+    // Kept leaves are placed again at each sweep, here every 12 s; the
+    // first sweep runs as the router starts.
+    let started = tokio::time::Instant::now();
+    let limits = RouterLimits {
+        room_placement_backoff: Duration::from_secs(1),
+        sweep_interval: Duration::from_secs(12),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start_with("inbound-router-kept-leave-rejoin", limits, |host| {
+        host.carry();
+    })
+    .await;
+    let before = with_bob(&hosted).await;
+    hosted.host.silence(ROOM);
+    hosted
+        .home_b
+        .send(remote_leave(BOB, ROOM, "bob", "leave-kept"))
+        .await;
+    wait_for(ARRIVES, || (hosted.host.placed() >= 2).then_some(()))
+        .await
+        .expect("the holder is asked to place the leave");
+    // The holder answers again, and the occupant enters again before the
+    // next sweep would place the kept leave.
+    tokio::time::sleep(HOLDER_ASK_LIMIT + Duration::from_secs(1)).await;
+    hosted.host.unsilence(ROOM);
+    hosted
+        .home_b
+        .send(remote_join(BOB, ROOM, "bob", "join-again"))
+        .await;
+    wait_for(ARRIVES, || {
+        (!hosted.host.handled_with("join-again").is_empty()).then_some(())
+    })
+    .await
+    .expect("the join reaches the room");
+    let seat = wait_for(ARRIVES, || {
+        hosted
+            .seat(ROOM, BOB)
+            .filter(|seat| seat.session != before.session)
+    })
+    .await
+    .expect("the join opens a seat of its own");
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "the join came after the next sweep"
+    );
+    // Past the next sweep, the leave kept from before the join has not
+    // ended the occupancy the join opened.
+    tokio::time::sleep_until(started + Duration::from_secs(14)).await;
+    assert!(hosted.host.handled_with("leave-kept").is_empty());
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
 }

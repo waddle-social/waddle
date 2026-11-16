@@ -104,6 +104,11 @@ const RECONCILE_ROOMS: usize = 256;
 /// placed again.
 const PENDING_LEAVE_TTL: Duration = Duration::from_secs(120);
 
+/// Occupancies removed as ones without a seat that are remembered, so that
+/// a seat's end for one of them that arrives afterwards is told as one
+/// whose occupancy was removed.
+const RECENT_GHOSTS: usize = 4096;
+
 /// Until shutdown: hand the work of one shard of local rooms to the room
 /// host, one item at a time, so a room decides its requests in the order
 /// they arrived.
@@ -573,13 +578,21 @@ impl Inner {
                 return SinkVerdict::Accepted;
             }
             Spend::ExemptSpent => {
-                if !self.takes_leave(&request, &room, hosting) {
+                if !self.takes_leave(&request, &room) {
                     telemetry::room_request_exempt_dropped();
                     return SinkVerdict::Accepted;
                 }
                 None
             }
         };
+        // A sender that enters the room again, or changes its presence
+        // there, is past any leave of it still kept to be placed: placed
+        // later, that leave would end its new occupancy.
+        if staged && kind.counts_against_presence() {
+            if let Some(from) = stanza_from(&request.stanza) {
+                lock(&self.pending_leaves).forget(&room, from);
+            }
+        }
         if pause.is_none() {
             match self.admit(&room, request, &peer, staged, kind) {
                 Ok(()) => return SinkVerdict::Accepted,
@@ -612,11 +625,7 @@ impl Inner {
                         return Waited::Taken;
                     }
                     Spend::ExemptSpent => {
-                        let taken = router
-                            .hosting
-                            .get()
-                            .is_some_and(|hosting| router.takes_leave(&request, &room, hosting));
-                        if !taken {
+                        if !router.takes_leave(&request, &room) {
                             telemetry::room_request_exempt_dropped();
                             return Waited::Taken;
                         }
@@ -1205,14 +1214,14 @@ impl Inner {
     /// (XEP-0045 §7.14). A seat's occupant is thereby never kept in a room
     /// it asked to leave, and each seat costs at most one such leave; a
     /// later join, which opens another seat, counts against the account's
-    /// share of presence. A replica that places requests on the replica
-    /// holding their room cannot tell whether a seat is held there, and
-    /// takes no stanza beyond the allowance.
-    fn takes_leave(&self, request: &LocalRoomRequest, room: &BareJid, hosting: &Hosting) -> bool {
+    /// share of presence. Seats are held only on the replica that holds
+    /// their room, so a replica that carries the room's requests elsewhere
+    /// holds none for it and takes no such leave beyond the allowance.
+    fn takes_leave(&self, request: &LocalRoomRequest, room: &BareJid) -> bool {
         let Stanza::Presence(presence) = &request.stanza else {
             return false;
         };
-        if presence.type_ != PresenceType::Unavailable || hosting.host.carries() {
+        if presence.type_ != PresenceType::Unavailable {
             return false;
         }
         request
@@ -2555,6 +2564,18 @@ impl PendingLeaves {
         true
     }
 
+    /// Forget what is kept for `room` and `sender`.
+    fn forget(&mut self, room: &BareJid, sender: &Jid) {
+        if let Some(kept) = self.kept.remove(&(room.clone(), sender.clone())) {
+            if let Some(count) = self.per_peer.get_mut(&kept.peer) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.per_peer.remove(&kept.peer);
+                }
+            }
+        }
+    }
+
     /// Take out what is kept for the rooms `ready` accepts, and what has
     /// expired by `now`.
     fn take(
@@ -2635,6 +2656,9 @@ struct EndQueue {
     /// Seat ends that arrived while a removal of the same occupancy as one
     /// without a seat was running: queued once it is done.
     after: HashMap<EndKey, EndWork>,
+    /// The occupancies most recently removed as ones without a seat,
+    /// oldest first, at most [`RECENT_GHOSTS`].
+    recent_ghosts: VecDeque<EndKey>,
 }
 
 /// The ends waiting for the workers that end seats, in the order they were
@@ -2655,10 +2679,16 @@ impl SeatEnds {
     /// Hand `work` to the workers, unless an end of the same occupancy is
     /// queued or running. A seat's end replaces a queued removal of the
     /// same occupancy as one without a seat, and follows a running one.
-    pub(super) fn push(&self, work: EndWork) {
+    pub(super) fn push(&self, mut work: EndWork) {
         let key = work.key();
         let mut queue = lock(&self.queue);
         if queue.keys.insert(key.clone()) {
+            // A seat's end that arrives after the removal of its occupancy
+            // as one without a seat has run is told as one whose
+            // occupancy that removal removed.
+            if let EndWork::Seat { removed, .. } = &mut work {
+                *removed |= queue.recent_ghosts.contains(&key);
+            }
             queue.items.push_back(work);
             drop(queue);
             self.work.notify_one();
@@ -2704,6 +2734,12 @@ impl SeatEnds {
         let key = work.key();
         let mut queue = lock(&self.queue);
         queue.ghosts_running.remove(&key);
+        if work.is_ghost() {
+            if queue.recent_ghosts.len() >= RECENT_GHOSTS {
+                queue.recent_ghosts.pop_front();
+            }
+            queue.recent_ghosts.push_back(key.clone());
+        }
         match queue.after.remove(&key) {
             Some(EndWork::Seat { seat, end, .. }) if work.is_ghost() => {
                 queue.items.push_back(EndWork::Seat {

@@ -1227,7 +1227,7 @@ sender of the request it answers.
 | The host refuses a request of a seated occupant in a way that ends its occupancy (its domain is no longer admitted, its room is not open to it any more, its leave could not be answered) | The seat ends, the room is told to remove the occupant, with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 after the refusal. Where the request was presence that entered the room again and the room refused that join, the refusal itself tells the occupant that it is not in the room, and it is not told again |
 | The host does not decide a join within the per-item budget (5 s) | The join is answered with `internal-server-error` (type `wait`); the seat opened for it, and one the occupant gave up to enter again, end without a further notice, and the room removes the occupant if it seated it |
 | The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Every 60 s a pass asks each room with seats, once, for the occupants it seats and their generations, and releases the seats the room does not name; the occupant is sent its own unavailable presence with statuses 110 and 333. A pass runs on a task of its own, takes at most 256 rooms and 60 s, and the next goes on where it stopped |
-| The room seats an occupant of another server for which this replica holds no seat, pending seats included (its seat ended and the room's removal timed out, or the room was restored with it) | The same pass removes it from the room, with status 333 for those who stay: nothing could reach it. Rooms whose removal of an occupant could not be confirmed are asked at the next pass first, whether or not a seat is still held there. A seat of the same occupancy that ends while the removal waits or runs (a seat taken over from a replica that stopped, held a moment after the room was restored) is not dropped as a second end: it takes the removal's place, or follows it, so its row is removed and its occupant told as for that seat |
+| The room seats an occupant of another server for which this replica holds no seat, pending seats included (its seat ended and the room's removal timed out, or the room was restored with it) | The same pass removes it from the room, with status 333 for those who stay: nothing could reach it. Rooms whose removal of an occupant could not be confirmed are asked at the next pass first, whether or not a seat is still held there. A seat of the same occupancy that ends while the removal waits or runs, or after it ran (a seat taken over from a replica that stopped, held a moment after the room was restored), is not dropped as a second end: it takes the removal's place, or follows it, so its row is removed and its occupant told as for that seat; the last 4,096 occupancies removed this way are remembered for that |
 | The seat's row could not be removed when the seat ended | The same pass reads this replica's rows, a page of 256 in the order of the table's key, and removes those older than 30 s for which it holds no seat |
 | The replica stops | It tells each occupant it seats, with the occupant's own unavailable presence and statuses 110 and 332 (XEP-0045 §11.2), gives the seats up and waits up to 2 s until the pairs' workers have handed those notices to their streams or given them up, and the streams drain only after that; nothing is promised for a notice no stream takes. A seat whose join is still being answered is given up without a notice. Whether that join is answered as entered is decided against the farewell under the seat index's lock: one decided after the farewell gave its seat up is answered with `resource-constraint` (type `wait`), and its occupant is never told that it entered; one decided before is answered as entered and then, after that answer on the same queue, told with statuses 110 and 332, and the farewell waits for that notice as for the others. No seat is held, adopted or opened once the farewell has given the seats up. Its rows are removed at shutdown, within the shutdown budget. Rows a replica left without shutting down are removed by another replica once the owner has not recorded that it is alive for ten minutes; a join for the same room and occupant that reaches a live replica replaces such a row after 30 s, whatever the seat bounds say, since the row is the join's own |
 | The replica that held the room stopped without shutting down, and the room's claim moved | The replica that takes the room over takes over the seats of its recorded remote occupants whose row names the recorded occupancy generation, so that the room can seat them as recorded, and ends each of them once the room has: what the stopped replica had queued for an occupant is lost and cannot be told from what it received. The room removes the occupant with status 333 for those who stay, and once that removal has removed the recorded generation the occupant is sent its own unavailable presence with statuses 110 and 333 (unless it has entered again meanwhile) and enters again. A recorded occupant whose seat stands for another generation is not seated again, and the row taken over for it is removed; so is a recorded occupant for whom a join opened a seat while its row was taken over, whose join's seat is kept. A room whose actor is restored on the replica that already seats its occupants keeps those seats: an occupant is seated again on the seat it holds under the recorded generation, and nothing ends |
@@ -1376,8 +1376,10 @@ ends a seat, that cannot be placed is not dropped and not answered: it is
 kept, one for each room and sender (a leave replaces an error), within
 the bounds of what waits to be placed, and placed again at each sweep
 once its room's holder is no longer taken for silent, for up to 120 s.
-One that finds no place to be kept, or whose time passes, is dropped and
-counted. What
+Available presence from the same sender for the same room that is taken
+meanwhile, such as a join, forgets it, so a leave from before a later join
+never ends that join's occupancy. One that finds no place to be kept, or
+whose time passes, is dropped and counted. What
 waits to be placed is bounded like the queues behind the stage (1,024 on a
 replica, 32 for one room, 64 from one remote domain), and as there a
 stanza beyond the replica's or its domain's bound holds its stream until
@@ -1981,13 +1983,17 @@ runbook (G24):
   to be kept (1,024 on a replica, 64 for one remote domain) or is not
   placed in that time is dropped, and the occupant stays seated until
   its stream is lost or its seat ends otherwise. Keeping one for each
-  room and sender means only the latest of several is placed.
+  room and sender means only the latest of several is placed. A join that
+  reaches another replica of the same deployment meanwhile does not
+  forget the leave kept here, which can then end that join's occupancy
+  once placed; the occupant enters again.
 - **Leaves beyond the allowance on a replica that carries requests.** The
   first leave for a seat is taken beyond its account's allowance only on
-  the replica that holds the seat. A replica that carries requests to the
-  room's holder cannot tell that a seat is held there, so a leave beyond
-  the allowance it reads is dropped; the occupant stays seated until a
-  later leave is taken, its stream is lost or its seat ends otherwise.
+  the replica that holds the seat, which is the replica that holds its
+  room. A stream that lands on another replica, which carries the room's
+  requests to the holder, holds no seat there, so a leave beyond the
+  allowance it reads is dropped; the occupant stays seated until a later
+  leave is taken, its stream is lost or its seat ends otherwise.
 - **A stale seat row refuses an affiliation.** The admin command that sets
   a room affiliation reads the account's seats from the shared table. A row
   whose seat ended but whose removal failed refuses an owner or admin
