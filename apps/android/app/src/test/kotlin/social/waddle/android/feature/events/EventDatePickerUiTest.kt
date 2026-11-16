@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DatePickerDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +53,7 @@ import java.util.TimeZone
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [35], qualifiers = "en-rGB-w411dp-h891dp-xxhdpi", application = Application::class)
+@OptIn(ExperimentalMaterial3Api::class)
 class EventDatePickerUiTest {
     @get:Rule val compose = createComposeRule()
 
@@ -83,7 +86,12 @@ class EventDatePickerUiTest {
         }
         compose.onNodeWithContentDescription("Start date").performClick()
         compose.onNodeWithText("Done").assertIsNotEnabled()
-        compose.onNodeWithText("13").performClick()
+        val dayDescription = checkNotNull(
+            DatePickerDefaults.dateFormatter().formatDate(
+                calendarPickerMillis(LocalDate.of(2027, 2, 13)), Locale.UK, forContentDescription = true,
+            ),
+        )
+        compose.onNodeWithContentDescription(dayDescription, substring = true).performClick()
         preview(compose.onNode(isDialog()), "calendar-night")
         compose.onNodeWithText("Done").performClick()
         compose.onNode(isDialog()).assertIsDisplayed()
@@ -127,15 +135,26 @@ class EventDatePickerUiTest {
                 }, true)
             }
         }
+        // Drive dialog/focus animations explicitly while typing. Layout and
+        // semantics still have to settle; the default idle timeout is unchanged.
+        compose.mainClock.autoAdvance = false
+        compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithContentDescription("Time zone").performClick()
+        compose.mainClock.advanceTimeBy(500)
         val search = compose.onNodeWithText("Search cities or time zones")
+        search.performClick()
+        compose.mainClock.advanceTimeByFrame()
         search.performTextInput("not a valid zone")
+        compose.mainClock.advanceTimeBy(500)
         compose.onNodeWithText("No matching time zones.").assertIsDisplayed()
         compose.runOnIdle { assertEquals("UTC", result) }
         search.performTextClearance()
+        compose.mainClock.advanceTimeByFrame()
         search.performTextInput("London")
+        compose.mainClock.advanceTimeBy(500)
         preview(compose.onNode(isDialog()), "zone-search-night")
-        compose.onNodeWithText("London").performClick()
+        compose.onNodeWithText("Europe/London").performClick()
+        compose.mainClock.advanceTimeByFrame()
         compose.runOnIdle { assertEquals("Europe/London", result) }
     }
 
