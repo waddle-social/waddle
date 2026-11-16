@@ -44,7 +44,7 @@ BATCHED_CHECKS = [
 ALIASES = {
     "mainClippy": "clippy",
     "mainTest": "test",
-    "mainDoctest": "doctest",
+    "mainDoctest": "nixDoctest",
     "mainBuildImageStream": "nixBuildImageStream",
     "mainBuildExtensionModules": "nixBuildExtensionModules",
 }

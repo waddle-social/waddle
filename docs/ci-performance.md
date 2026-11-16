@@ -541,7 +541,8 @@ The `default` pipeline now has eight gates instead of thirteen:
 | `fmt` | 32-core builder | nothing | `cargo fmt --check` |
 | `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
 | `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
-| `mainClippy`, `mainTest`, `mainDoctest` | profile | `fmt` | the namespace clippy, test and doctest tasks |
+| `mainClippy`, `mainTest` | profile | `fmt` | the namespace clippy and test tasks |
+| `mainDoctest` | profile | `fmt` | the Nix doctest check that pull requests build (`nixDoctest`) |
 | `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
 | `publishContainerImage` | profile | every job above | publication |
 
@@ -568,6 +569,20 @@ Pull requests no longer start these lanes:
 | `roomChildContract`, `spaceFanoutContract` | Namespace profile | `main`, dispatch | none; they gate nothing |
 | `parentMoveNativePullRequest` | GitHub | `main`, dispatch (`parentMoveNative`) | its build closure repeats `nixClippy`, `nixFmt` and `nixBuildImageStream` |
 | Android `deviceTests` | Namespace profile | `main`, dispatch | Android `pullRequest` |
+
+`mainDoctest` builds the `waddle-server-doctest` Nix check instead of running
+`cargo test --doc` from an empty target directory. The plain task compiled 729
+crates for about 8 minutes to run 18 doctests; the Nix check takes its
+dependencies from the shared artifact and is a cache hit when a pull request
+already checked the same tree.
+
+The short pull-request checks share one job, as `mainChecks` does on `main`:
+`pullRequestChecks` runs `checkCiDrift`, `checkSwitchableAlternativeProgram`,
+`checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` and
+`nixFmt`, and `rootSyncChecks` runs `checkAllCiDrift` and `checkRootSyncDrift`.
+Each separate job spent about 75 seconds on Nix, cache and cuenv setup before
+its command started, and a server pull request held eight of the 20 concurrent
+GitHub job slots for these checks.
 
 `namespaceRustChecks` keeps `test` on pull requests: it is the only pull-request
 lane that builds the default features, and it is a publish gate on `main`.
