@@ -68,7 +68,8 @@ use super::routes::webhook_delivery;
 #[derive(Clone, Debug)]
 pub struct RestrictedRuntimeOwnerPlan {
     /// Deployment identity, and the enrollment or adoption action when the
-    /// database has no lineage row for it yet.
+    /// database has no lineage row for it yet. Without an action, a target
+    /// schema that holds no relation besides the lineage table is enrolled.
     pub lineage: LineageConfig,
     /// Login that opened the owner handle. It must be the session user and
     /// the sole login able to assume `schema_owner`.
@@ -168,6 +169,8 @@ pub enum RestrictedRuntimeOwnerError {
     Global(#[source] OwnerBootstrapError),
     #[error("could not attest the owner database lineage")]
     Lineage(#[source] DatabaseError),
+    #[error("could not inspect the owner schema for relations besides the lineage table")]
+    FreshSchemaInventory(#[source] DatabaseError),
     #[error("could not apply the runtime grant for {object}")]
     Grant {
         object: String,
@@ -644,7 +647,8 @@ pub async fn prepare_restricted_runtime_owner(
         require_exclusive_database(owner, owner_application_name).await?;
     }
 
-    bootstrap_global_owner(owner, &plan.lineage, false)
+    let lineage = owner_lineage_config(owner, &plan.lineage).await?;
+    bootstrap_global_owner(owner, &lineage, false)
         .await
         .map_err(RestrictedRuntimeOwnerError::Global)?;
     let expected = lineage::verify(
@@ -1264,6 +1268,60 @@ async fn verify_runtime_role(
 /// attachment refuses them. The `public` schema carries them until they are
 /// revoked, so it is refused in its default state; refuse before any DDL
 /// runs.
+/// The lineage configuration the owner phase bootstraps with.
+///
+/// The restricted runtime never enrolls or adopts: it attaches only to a
+/// schema whose lineage row this phase attested. An explicit
+/// `WADDLE_DB_LINEAGE_ACTION` is used as given. Without one, a target schema
+/// that holds no relation besides the lineage table is a fresh install with
+/// no data to protect, so it is enrolled for this deployment. Enrollment
+/// writes a row only while the lineage table is empty and otherwise verifies
+/// the row it finds, so a schema that already names another lineage or
+/// deployment is refused, never re-enrolled. A schema that holds any other
+/// relation but no lineage row (a restore, a mis-pointed URL, or a database
+/// an earlier server built without lineage) still needs the explicit action,
+/// because binding existing data to this deployment is an operator decision.
+async fn owner_lineage_config(
+    owner: &Database,
+    configured: &LineageConfig,
+) -> Result<LineageConfig, RestrictedRuntimeOwnerError> {
+    if configured.action.is_some() {
+        return Ok(configured.clone());
+    }
+    let inspect = async {
+        let connection = owner.guard().await?;
+        let mut rows = connection
+            .query(
+                "SELECT pg_catalog.current_schema() IS NOT NULL AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_catalog.pg_class c \
+                   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                   WHERE n.nspname = pg_catalog.current_schema() \
+                     AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') \
+                     AND c.relname <> '_lineage')",
+                (),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok::<_, DatabaseError>(row.get::<bool>(0)?),
+            None => Ok(false),
+        }
+    };
+    let fresh = inspect
+        .await
+        .map_err(RestrictedRuntimeOwnerError::FreshSchemaInventory)?;
+    if !fresh {
+        return Ok(configured.clone());
+    }
+    tracing::info!(
+        store = "global",
+        "owner schema holds no relation besides the lineage table; enrolling it for this deployment"
+    );
+    Ok(LineageConfig {
+        deployment_uuid: configured.deployment_uuid,
+        action: Some(lineage::LineageAction::Enroll),
+    })
+}
+
 async fn refuse_public_schema_privileges(
     owner: &Database,
 ) -> Result<(), RestrictedRuntimeOwnerError> {

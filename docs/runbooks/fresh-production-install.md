@@ -47,8 +47,8 @@ How the empty database becomes the server's:
    the schema to `waddle_owner`, grants CONNECT to the three logins only,
    creates `waddle_attestation` and restricts `pg_control_system()`. It
    accepts the logins CloudNativePG created.
-3. The owner Job: `owner-phase` (as `waddle_migrator`) enrolls the lineage,
-   builds the schema from the baseline (migration 2000; the default
+3. The owner Job: `owner-phase` (as `waddle_migrator`) enrolls the lineage
+   (see "Lineage enrollment" below), builds the schema from the baseline (migration 2000; the default
    `WADDLE_DB_BASELINE_ACTION`, `stamp`, builds an empty database from the
    baseline and stamps only a database that holds the retired history),
    grants the runtime its privileges, enrolls the keypair pool and the peer
@@ -61,6 +61,23 @@ How the empty database becomes the server's:
 A fresh database has no stream-management rows to drain, no retired ledger
 to stamp and no keypair-slot table of an older server, so the owner phase
 runs without `--legacy-keypair-slots`.
+
+### Lineage enrollment
+
+The owner Job sets no `WADDLE_DB_LINEAGE_ACTION`, and the chart refuses
+`deployment.lineageAction` while `restrictedRuntime.enabled` is set. The
+owner phase enrolls the lineage itself when the target schema (`public`)
+holds no relation besides the `_lineage` table: the database is fresh, so
+there is nothing to bind by mistake. Enrollment writes a row only while
+`_lineage` is empty and otherwise verifies the row it finds, so a schema
+that names another deployment is refused, never re-enrolled. A schema that
+already holds tables but no lineage row is refused with `could not attest
+the owner database lineage` / `database lineage row is missing`; see
+section 7 for that case.
+
+Images built before this behaviour refuse a fresh database the same way,
+after building the schema. The production install of 2026-11-14 hit that
+and was completed with the one-Job override in section 7.
 
 ## Before you start
 
@@ -214,10 +231,14 @@ manager are the ones it applies with.
    psql_primary -Atc "SELECT oid FROM pg_roles WHERE rolname = 'waddle'"
    ```
 
-   Put it into `role_oid` in
+   Put it into `old_runtime.role_oid` in
    `infrastructure/waddle.cloud/gitops/waddle-server/restricted-runtime/prepare/helmrelease-owner-job.yaml`
-   (it is 0 until then, which `emit-handoff` refuses), commit and push to
-   the pull request.
+   (0 is refused by `emit-handoff`), commit and push to the pull request
+   before it merges: the published chart values carry it. On the
+   2026-11-14 install it was `16384`, the first OID PostgreSQL assigns to a
+   role created after `initdb`; read it from the running cluster every
+   time: a Cluster created again may assign another one, and a stale value
+   makes `emit-handoff` refuse with exit 4.
 
 4. Provision roles and ownership. The procedure checks everything before
    its first change and reports `nothing was changed` when it refuses; a
@@ -254,11 +275,16 @@ manager are the ones it applies with.
 
 2. Wait for the run on the merge commit. `publishContainerImage` must
    succeed: it pushes `ghcr.io/waddle-social/waddle:sha-<short>`, chart
-   0.4.13 and the GitOps artifact.
+   0.4.14 and the GitOps artifact. It runs only when every test job of the
+   run passed, so `main` must be green at the merge commit. The PostgreSQL
+   cluster tests in `nixTestLocal` are occasionally flaky; when one of them
+   is the only failure, rerun the failed jobs of that run (not a new
+   commit) and wait again.
 
    ```sh
    gh run list --workflow waddle-server-default.yml --branch main --limit 3
    gh run watch <run-id> --exit-status
+   gh run rerun <run-id> --failed             # only for a flaky nixTestLocal failure
    flux reconcile source oci waddle-server -n flux-system
    flux get sources oci waddle-server -n flux-system        # revision ends in the merge commit's short SHA
    ```
@@ -273,7 +299,7 @@ manager are the ones it applies with.
    flux resume kustomization infra-waddle-server -n flux-system
    flux get kustomizations infra-waddle-server -n flux-system
    flux get helmreleases waddle-server -n waddle
-   kubectl -n waddle get helmrelease waddle-server -o jsonpath='{.status.history[0].chartVersion}'; echo   # 0.4.13 or later
+   kubectl -n waddle get helmrelease waddle-server -o jsonpath='{.status.history[0].chartVersion}'; echo   # 0.4.14 or later
    kubectl -n waddle get deployment waddle-server       # READY 0/0
    kubectl -n waddle get cronjob waddle-server-owner    # SUSPEND True
    kubectl -n waddle get spicedbcluster spicedb
@@ -281,6 +307,13 @@ manager are the ones it applies with.
 
    If the HelmRelease reports an older chart, run
    `flux reconcile helmrelease waddle-server -n waddle --with-source`.
+
+   From chart 0.4.14 the server pod and all four owner Job containers set
+   `seccompProfile: RuntimeDefault` at pod and container level and meet the
+   PodSecurity `restricted` profile. Older charts produced `would violate
+   PodSecurity "restricted:latest"` warnings for the CronJob and the Job
+   created from it (`seccompProfile` unset); the warnings did not block the
+   install. No such warning is expected now.
 
 2. Confirm no session uses the database. The owner phase refuses
    (`DatabaseNotExclusive`, exit 4) while any other client session is
@@ -310,9 +343,30 @@ kubectl -n waddle wait --for=condition=complete job/"$JOB" --timeout=15m
 | 2 | Invalid configuration | The Job fails at once; fix the values, publish, create a new Job |
 | 4 | A verifier refused the database, the plan or the cutover record (for example `role_oid` still 0); the log names the cause | The Job fails at once; fix the cause (a values change needs a merge and a publish), create a new Job |
 
+The `owner-phase` log reports `owner schema holds no relation besides the
+lineage table; enrolling it for this deployment` on the first run. A
+later run finds the row and only verifies it.
+
+If `owner-phase` refuses with `could not attest the owner database
+lineage` / `database lineage row is missing`, an earlier run (an image
+without automatic enrollment) built the schema without a lineage row. The
+database is the fresh one from section 4 and holds no data, so enroll it
+with a one-off Job that adds the action to `owner-phase` only:
+
+```sh
+JOB=owner-enroll-$(date +%Y%m%d%H%M%S)
+kubectl -n waddle create job "$JOB" --from=cronjob/waddle-server-owner --dry-run=client -o yaml \
+  | yq '(.spec.template.spec.initContainers[] | select(.name == "owner-phase") | .env) += [{"name": "WADDLE_DB_LINEAGE_ACTION", "value": "enroll"}]' \
+  | kubectl apply -f -
+```
+
+Never do this against a database that holds data: enrolling binds whatever
+the schema holds to this deployment.
+
 Then check the result:
 
 ```sh
+psql_primary -Atc "SELECT deployment_uuid FROM public._lineage"                        # the chart's deployment.uuid
 psql_primary -Atc "SELECT version, description FROM _migrations"                       # 2000|schema baseline
 psql_primary -Atc "SELECT epoch, activated_at IS NOT NULL FROM public.ingress_protocol_epoch WHERE id = 1"  # 2|t
 psql_primary -Atc "SELECT state FROM public.clustering_keypool WHERE singleton"          # active
