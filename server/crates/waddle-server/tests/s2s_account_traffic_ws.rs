@@ -258,6 +258,61 @@ async fn private_payloads_of_a_remote_message_are_removed_before_delivery() {
     }));
 }
 
+#[tokio::test]
+async fn room_traffic_from_a_room_never_joined_is_dropped_but_a_mediated_invitation_arrives() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let mut phone = federated.online("alice", "phone", 5).await;
+    let room = "room@home-b.test";
+
+    let mut stale = presence(
+        "room@home-b.test/host",
+        ALICE_PHONE,
+        PresenceType::None,
+        "stale-room",
+    );
+    stale
+        .payloads
+        .push(xmpp_parsers::muc::user::MucUser::new().into());
+    federated.from_peer(stale).await;
+
+    let mut invitation = message(room, ALICE, MessageType::Normal, "invite", "join us");
+    invitation.payloads.push(
+        Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .append(
+                Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .attr(minidom::rxml::xml_ncname!("from").to_owned(), BOB)
+                    .build(),
+            )
+            .build(),
+    );
+    federated.from_peer(invitation).await;
+
+    receive(&mut phone, "message", "invite").await;
+    assert!(!support::arrives_quietly(&mut phone, "presence", "stale-room").await);
+}
+
+#[tokio::test]
+async fn a_chat_message_reaches_a_connected_resource_that_has_not_sent_presence() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let mut quiet = federated.loopback.client("alice", "quiet").await;
+
+    federated
+        .from_peer(message(
+            BOB_PHONE,
+            ALICE,
+            MessageType::Chat,
+            "c1",
+            "anyone there",
+        ))
+        .await;
+
+    receive(&mut quiet, "message", "c1").await;
+}
+
 // --- no enumeration ------------------------------------------------------------
 
 /// The account states a non-contact must not tell apart.

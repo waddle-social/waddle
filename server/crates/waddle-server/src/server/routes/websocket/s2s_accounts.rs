@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
 use tracing::warn;
 use waddle_xmpp::identity::CanonicalDomain;
+use waddle_xmpp::muc::presence::NS_MUC_USER;
 use waddle_xmpp::pubsub::{NS_PUBSUB, NS_PUBSUB_EVENT};
 use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
 use waddle_xmpp::xep::{NS_INBOX, NS_WADDLE_INBOX};
@@ -78,6 +79,14 @@ impl LocalAccounts for WebSocketLocalAccounts {
             telemetry::not_admitted();
             return Vec::new();
         }
+        // Room traffic reaches an occupant through the router's occupancy
+        // table, before this side. What still carries a room's
+        // `muc#user` element here is from a room the resource never joined
+        // or has left, and is dropped; a mediated invitation or its decline
+        // is addressed to a non-occupant and is account traffic.
+        if is_stray_room_traffic(&stanza) {
+            return Vec::new();
+        }
         match stanza {
             Stanza::Message(message) => receive_message(&state, principal, to, message).await,
             Stanza::Presence(presence) => {
@@ -112,6 +121,22 @@ impl LocalAccounts for WebSocketLocalAccounts {
         room_occupant
             || shares_presence_with(&state, &account, principal.account().as_bare_jid()).await
     }
+}
+
+/// Whether `stanza` carries a room's `muc#user` element (XEP-0045) other
+/// than a mediated invitation or its decline.
+fn is_stray_room_traffic(stanza: &Stanza) -> bool {
+    let payloads = match stanza {
+        Stanza::Message(message) => &message.payloads,
+        Stanza::Presence(presence) => &presence.payloads,
+        Stanza::Iq(_) => return false,
+    };
+    payloads.iter().any(|payload| {
+        payload.is("x", NS_MUC_USER)
+            && !(matches!(stanza, Stanza::Message(_))
+                && (payload.has_child("invite", NS_MUC_USER)
+                    || payload.has_child("decline", NS_MUC_USER)))
+    })
 }
 
 /// Whether S2S is enabled on this replica: it runs an S2S snapshot.
@@ -427,8 +452,8 @@ async fn receive_message(
 
 /// Deliver a `chat` or `normal` message: to the full JID it names if that
 /// resource is bound, otherwise (a `chat` message only, §8.5.3.2.1) to the
-/// one most available resource, or a detached one. `false` when nothing
-/// took it.
+/// one most available resource, a connected one when none is available,
+/// or a detached one. `false` when nothing took it.
 async fn deliver_direct(
     state: &WebSocketState,
     account: &BareJid,
@@ -448,6 +473,19 @@ async fn deliver_direct(
         match deliver(state, resource, &stanza).await {
             Delivery::Taken | Delivery::Dropped => return true,
             Delivery::NotBound => {}
+        }
+    }
+    // A connected resource that has not sent presence yet, as local
+    // delivery to the bare JID does (RFC 6121 §8.5.2.1: an available or
+    // connected resource).
+    if live.is_empty() {
+        let mut connected = super::handlers::account_reads::resources(state, account).await;
+        connected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        for resource in connected.iter().take(DELIVERY_ATTEMPTS) {
+            match deliver(state, resource, &stanza).await {
+                Delivery::Taken | Delivery::Dropped => return true,
+                Delivery::NotBound => {}
+            }
         }
     }
     for resource in detached_resources(state, account)
