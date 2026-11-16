@@ -4,6 +4,7 @@
 import importlib.util
 import io
 import json
+import os
 from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
@@ -46,6 +47,7 @@ class MachineUsage(unittest.TestCase):
     def test_report_and_summary_use_phase_windows_from_the_timestamped_log(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            os.environ['RUNNER_TEMP'] = directory
             (root / 'samples.jsonl').write_text(''.join(json.dumps(item) + '\n' for item in samples(
                 [(0, 0, 0, 33554432), (10, 1000, 1000, 16777216), (20, 3000, 1000, 25165824),
                  (30, 3200, 2800, 33554432), (40, 3400, 4600, 33554432)])))
@@ -81,6 +83,14 @@ class MachineUsage(unittest.TestCase):
             self.assertIn('| 16x32 | 16x32 | success | 10.0 | 0.3 | 0.3 | 160 | 4 | 1.5 / 2.0 | 0.2 / 0.2 | 16.0 |', table)
             self.assertIn('| 8x32 | 8x32 | failure | — | — | — | — | 4 | — | — | — |', table)
             self.assertLess(table.index('| 16x32 |'), table.index('| 8x32 |'))
+
+    def test_file_arguments_outside_the_workspace_and_runner_temp_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ['RUNNER_TEMP'] = directory
+            self.assertEqual(usage.confined(Path(directory) / 'a.json'), (Path(directory) / 'a.json').resolve())
+            self.assertEqual(usage.confined('scripts/x'), Path('scripts/x').resolve())
+            with self.assertRaises(SystemExit):
+                usage.confined(Path(directory) / '../escape.json')
 
 
 if __name__ == '__main__':

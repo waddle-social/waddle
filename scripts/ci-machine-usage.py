@@ -15,6 +15,7 @@ figures leave out.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -26,11 +27,23 @@ LIMIT_MEMORY_GIB = 128
 METRIC = re.compile(r'WADDLE_CI_METRIC (.*)')
 
 
+def confined(path):
+    """Resolve a file argument, refusing anything outside the working
+    directory and the runner's temporary directory."""
+    resolved = Path(path).resolve()
+    roots = [Path.cwd().resolve()]
+    if os.environ.get('RUNNER_TEMP'):
+        roots.append(Path(os.environ['RUNNER_TEMP']).resolve())
+    if not any(resolved == root or root in resolved.parents for root in roots):
+        raise SystemExit(f'{path}: outside the working directory and RUNNER_TEMP')
+    return resolved
+
+
 def read_sample(stat_text, meminfo_text, now):
     fields = stat_text.splitlines()[0].split()[1:]
     values = [int(value) for value in fields[:8]]
     idle = values[3] + values[4]  # idle + iowait
-    memory = dict(line.split(':', 1) for line in meminfo_text.splitlines() if ':' in line)
+    memory = {key: value for key, _, value in (line.partition(':') for line in meminfo_text.splitlines()) if value}
     total = int(memory['MemTotal'].split()[0])
     available = int(memory['MemAvailable'].split()[0])
     cpus = sum(1 for line in stat_text.splitlines() if re.match(r'cpu\d+ ', line))
@@ -39,7 +52,7 @@ def read_sample(stat_text, meminfo_text, now):
 
 
 def sample(output, interval):
-    with open(output, 'a', encoding='utf-8') as samples:
+    with confined(output).open('a', encoding='utf-8') as samples:
         while True:
             record = read_sample(Path('/proc/stat').read_text(), Path('/proc/meminfo').read_text(), time.time())
             samples.write(json.dumps(record) + '\n')
@@ -48,7 +61,7 @@ def sample(output, interval):
 
 
 def tee(log):
-    with open(log, 'a', encoding='utf-8') as copy:
+    with confined(log).open('a', encoding='utf-8') as copy:
         for line in sys.stdin:
             sys.stdout.write(line)
             sys.stdout.flush()
@@ -57,7 +70,7 @@ def tee(log):
 
 
 def load_samples(path):
-    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in confined(path).read_text().splitlines() if line.strip()]
 
 
 def usage(samples, start=None, end=None):
@@ -86,7 +99,7 @@ def usage(samples, start=None, end=None):
 def parse_log(path):
     """Timestamped WADDLE_CI_METRIC lines as (time, {key: value}) pairs."""
     metrics = []
-    for line in Path(path).read_text(errors='replace').splitlines():
+    for line in confined(path).read_text(errors='replace').splitlines():
         stamp, _, rest = line.partition(' ')
         match = METRIC.search(rest)
         if not match:
@@ -95,7 +108,8 @@ def parse_log(path):
             when = float(stamp)
         except ValueError:
             continue
-        metrics.append((when, dict(pair.split('=', 1) for pair in match.group(1).split() if '=' in pair)))
+        metrics.append((when, {key: value for key, _, value in
+                               (pair.partition('=') for pair in match.group(1).split()) if value}))
     return metrics
 
 
@@ -124,7 +138,7 @@ def report(args):
         'cpus_seen': samples[-1]['cpus'] if samples else None,
         'memory_total_gib': round(samples[-1]['mem_total_kib'] / 1024 / 1024, 1) if samples else None,
     }
-    Path(args.output).write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+    confined(args.output).write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
     print(json.dumps(record, indent=2, sort_keys=True))
 
 
@@ -137,7 +151,7 @@ def minutes(seconds):
 
 
 def summarize(directory):
-    records = [json.loads(path.read_text()) for path in sorted(Path(directory).rglob('*.json'))]
+    records = [json.loads(path.read_text()) for path in sorted(confined(directory).rglob('*.json'))]
     records = [record for record in records if isinstance(record, dict) and 'variant' in record]
     records.sort(key=lambda record: (-record['vcpu'], record['variant']))
     lines = [
