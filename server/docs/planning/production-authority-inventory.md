@@ -1044,6 +1044,42 @@ producer of stream evidence was added.
 - The raw scan holds 1633 records, as before. 74 unchanged records moved
   because the files above gained lines.
 
+The selected evidence was refreshed a twenty-first time, through
+`1f8434050c9bc4bc84568cd0994b0fb6afcfd24b`, after reviewing the delta of the reviewed
+files since the twentieth refresh. This refresh covers fixes to inbound
+S2S rooms: the allowances that bound what one remote account may send,
+the answer to a join decided while the replica stops, the end of a seat
+taken over from a stopped replica, and the deadline on placing a carried
+request. No grant writer, storage plane or producer of stream evidence
+was added, and no decision of standing moved.
+
+- The join handler (`join`, moved) undoes a seat it gave on a standing
+  that is not honoured as before. The notice to the occupants that
+  entered while it was seated now reads the room once, within 2 s, on a
+  task of its own, and leaves out an occupant that now holds the joiner's
+  nickname; nothing is written.
+- The room host (`s2s-room-host`, `s2s-room-message`, `s2s-room-admin`,
+  `s2s-room-owner`, `s2s-room-placement` and `s2s-unseated-removal`
+  moved) answers no headline, and no message that carries only a chat
+  state or a marker, with an error, and passes the join handler the state
+  it may run that notice with.
+- The router (`s2s-seat-egress`, `s2s-carried-request`,
+  `s2s-seat-adoption` and `s2s-adopted-seats` moved) decides every
+  allowance of a remote account before its domain's rate and drops or
+  answers what is beyond one instead of holding the stream; decides under
+  the seat index's lock whether a join may be answered as entered once
+  the replica stops; holds a seat taken over from a stopped replica only
+  where no seat is held; keeps a taken-over seat's end over a removal of
+  the same occupancy as one without a seat; keeps a leave that cannot be
+  placed to place it again; and ends a seat on a `groupchat` bounce with
+  `service-unavailable`. Each narrows what reaches a room or a remote JID,
+  or what a room keeps seated.
+- The cluster's carrier (`s2s-room-catalogued` and `s2s-relayed-request`
+  moved) bounds its lookups and asks for one request by one deadline, and
+  reports an owner as silent only where an ask ran out of time.
+- The raw scan holds 1633 records, as before. 31 unchanged records moved
+  because the files above gained lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
