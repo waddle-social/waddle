@@ -166,9 +166,12 @@ pub struct RouterLimits {
     /// Stanzas remote principals addressed to the MUC service waiting to
     /// be decided by the room host, on this replica, shared equally by the
     /// workers. A stream whose stanza finds no place beyond this, or beyond
-    /// one of the shares below, stops reading until it fits.
+    /// its remote domain's share below, stops reading until it fits.
     pub room_requests: usize,
-    /// Of those, the stanzas for one room.
+    /// Of those, the stanzas for one room. A stanza beyond it is answered
+    /// as its kind is answered when refused, or dropped, and holds no
+    /// stream: one room cannot stop a stream that carries the stanzas of
+    /// other rooms. A leave and a delivery error do not count against it.
     pub room_requests_per_room: usize,
     /// Of one worker's share, the stanzas from one remote domain.
     pub room_requests_per_peer: usize,
