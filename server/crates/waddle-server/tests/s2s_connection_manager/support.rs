@@ -663,6 +663,14 @@ impl RawPeer {
         self.encoder.element(element).expect("an encodable element")
     }
 
+    /// A stream error with `condition` followed by the closing stream tag,
+    /// as the peer ends the established stream with it.
+    pub fn stream_error(&mut self, condition: StreamErrorCondition) -> Vec<u8> {
+        self.encoder
+            .stream_error(condition)
+            .expect("an encodable stream error")
+    }
+
     /// Write `bytes` on the established stream.
     pub async fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.tls.write_all(bytes).await?;

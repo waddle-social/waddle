@@ -694,18 +694,24 @@ timeout. A leave's grace ends silently.
 **When the stream fails.** The connection manager tells its stanza sink
 when an established stream ends, and how:
 
-- *Lost*: a transport or TLS error (`io`, `tls`), end of file before
-  either side sent its closing stream tag, a write that did not complete
-  within the write deadline, a first-level element the peer left
-  unfinished past the incomplete-element deadline, a stream error this
-  server sent (`protocol`) or the peer sent other than `conflict`
-  (`peer-error`, which includes the peer's `system-shutdown`), a domain
-  peer admission no longer admits (`admission`), or a certificate or
-  dialback failure;
-- *Closed*: either side sent its closing stream tag, the idle timeout on
-  the established stream with nothing unfinished (`timeout`), the
-  connection's maximum age (`expired`), eviction, replacement by a newer
-  stream for the pair (`conflict`), or this server shutting down.
+- *Lost*: a transport or TLS error (`io`, `tls`); end of file, the idle
+  timeout or the maximum age while the peer was in the middle of a
+  first-level element; a write that did not complete within the write
+  deadline; a first-level element the peer left unfinished past the
+  incomplete-element deadline; a stanza the router could not queue within
+  its deadline (see Inbound); a stream error this server sent
+  (`protocol`) or the peer sent other than `conflict` and
+  `connection-timeout` (`peer-error`, which includes the peer's
+  `system-shutdown`); a domain peer admission no longer admits
+  (`admission`); or a certificate or dialback failure;
+- *Closed*: either side sent its closing stream tag; the peer ended the
+  stream with `connection-timeout`; end of file between elements; the
+  idle timeout with nothing unfinished (`timeout`); the connection's
+  maximum age with nothing unfinished (`expired`); eviction; replacement
+  by a newer stream for the pair (`conflict`); or this server shutting
+  down. Peers close idle streams with `connection-timeout` or by dropping
+  the connection, and a stream idle long enough to be closed carries
+  nothing in flight.
 
 When an inbound stream from a remote domain to a local domain is lost,
 every occupancy of a resource of that local domain in a room at that

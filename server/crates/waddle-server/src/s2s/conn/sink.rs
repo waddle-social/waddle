@@ -21,16 +21,22 @@ pub enum SinkVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEnd {
     /// The stream ended in an orderly way: either side sent its closing
-    /// stream tag, it was idle, a newer stream for the same pair replaced
-    /// it, it was evicted or aged out, or this server is shutting down. A
-    /// new stream carries the pair's next stanza and nothing is known to be
-    /// lost.
+    /// stream tag, it was idle (this server's idle timeout, or the peer's
+    /// `connection-timeout`), the connection reached end of file between
+    /// elements, a newer stream for the same pair replaced it, it was
+    /// evicted or aged out, or this server is shutting down. A new stream
+    /// carries the pair's next stanza and nothing is known to be lost.
     Closed,
     /// The stream failed: a transport or TLS error, the connection's end
-    /// of file before either side closed the stream, a write that did not
-    /// complete within its deadline, a first-level element the peer left
-    /// unfinished past its deadline, a stream error either side sent other
-    /// than `conflict`, or a domain peer admission no longer admits.
+    /// of file, idle timeout or maximum age while the peer was in the
+    /// middle of a first-level element, a write that did not complete
+    /// within its deadline, a first-level element the peer left unfinished
+    /// past its deadline, a stanza the sink could not take within its
+    /// deadline, a stream error this server sent other than
+    /// `connection-timeout`, `reset`, `system-shutdown`, `conflict` and
+    /// `resource-constraint`, a stream error the peer sent other than
+    /// `conflict` and `connection-timeout`, or a domain peer admission no
+    /// longer admits.
     /// Stanzas in flight on it may be lost in either direction.
     Lost,
 }

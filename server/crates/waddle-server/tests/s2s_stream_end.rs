@@ -3,10 +3,13 @@
 //! for an orderly end and `StreamEnd::Lost` when stanzas in flight may have
 //! been lost.
 //!
-//! - Inbound, from a hand-written peer: the peer's closing stream tag and
-//!   the idle timeout are orderly; the connection's end of file before
-//!   either side closed the stream, and a first-level element left
-//!   unfinished past the incomplete-element deadline, are lost.
+//! - Inbound, from a hand-written peer: the peer's closing stream tag, its
+//!   `connection-timeout` stream error, the connection's end of file
+//!   between elements and the idle timeout with nothing unfinished are
+//!   orderly, as peers end idle streams this way; the connection's end of
+//!   file or the idle timeout while the peer is in the middle of an
+//!   element, and a first-level element left unfinished past the
+//!   incomplete-element deadline, are lost.
 //! - Outbound, through a TCP relay that stops reading from the dialling
 //!   deployment once the stream is established: a write that does not
 //!   complete within the write deadline is lost.
@@ -165,7 +168,7 @@ fn closing_tag() -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn end_of_file_before_any_close_is_lost() {
+async fn end_of_file_between_elements_is_closed() {
     let pki = Pki::new();
     let (b, sink, mut peer) = inbound(&pki, &[]).await;
     // Read what the deployment sent first, so the socket closes with a FIN
@@ -174,7 +177,68 @@ async fn end_of_file_before_any_close_is_lost() {
     assert!(!closed, "the deployment closed the stream");
     assert_eq!(error, None);
     // The peer's socket closes without a TLS close_notify and without a
-    // closing stream tag.
+    // closing stream tag, as a peer drops an idle connection.
+    drop(peer);
+    assert_eq!(
+        endings(&sink).await,
+        vec![(
+            StreamDirection::Inbound,
+            HOME_A.to_owned(),
+            StreamEnd::Closed
+        )]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn end_of_file_in_the_middle_of_an_element_is_lost() {
+    let pki = Pki::new();
+    let (b, sink, mut peer) = inbound(&pki, &[]).await;
+    let (error, closed, _) = peer.read_until_closed(Duration::from_millis(100)).await;
+    assert!(!closed, "the deployment closed the stream");
+    assert_eq!(error, None);
+    // The first half of a stanza, then the socket closes.
+    let stanza = peer.encode(&into_server_content(message("cut-off".to_owned(), 256)));
+    peer.write(&stanza[..stanza.len() / 2])
+        .await
+        .expect("write part of a stanza");
+    drop(peer);
+    assert_eq!(
+        endings(&sink).await,
+        vec![(StreamDirection::Inbound, HOME_A.to_owned(), StreamEnd::Lost)]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_peers_connection_timeout_is_closed() {
+    let pki = Pki::new();
+    let (b, sink, mut peer) = inbound(&pki, &[]).await;
+    // The peer ends an idle stream as RFC 6120 §4.9.3.4 describes.
+    let error = peer.stream_error(StreamErrorCondition::ConnectionTimeout);
+    peer.write(&error).await.expect("write the stream error");
+    let (_, closed, _) = peer.read_until_closed(WAIT).await;
+    assert!(closed, "the deployment did not close the stream");
+    drop(peer);
+    assert_eq!(
+        endings(&sink).await,
+        vec![(
+            StreamDirection::Inbound,
+            HOME_A.to_owned(),
+            StreamEnd::Closed
+        )]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_stream_error_from_the_peer_is_lost() {
+    let pki = Pki::new();
+    let (b, sink, mut peer) = inbound(&pki, &[]).await;
+    let error = peer.stream_error(StreamErrorCondition::InternalServerError);
+    peer.write(&error).await.expect("write the stream error");
+    let (_, closed, _) = peer.read_until_closed(WAIT).await;
+    assert!(closed, "the deployment did not close the stream");
     drop(peer);
     assert_eq!(
         endings(&sink).await,
@@ -218,6 +282,27 @@ async fn an_element_left_unfinished_past_its_deadline_is_lost() {
         .expect("write part of a stanza");
     let (error, closed, _) = peer.read_until_closed(WAIT).await;
     assert!(closed, "the deployment did not close the stream");
+    assert_eq!(error, Some(StreamErrorCondition::ConnectionTimeout));
+    assert_eq!(
+        endings(&sink).await,
+        vec![(StreamDirection::Inbound, HOME_A.to_owned(), StreamEnd::Lost)]
+    );
+    assert!(eventually(WAIT, || b.handle.streams().is_empty()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_stream_with_an_element_unfinished_is_lost() {
+    let pki = Pki::new();
+    // The idle timeout comes well before the incomplete-element deadline
+    // (five seconds by default).
+    let idle = format!("idle_timeout_ms = {SHORT_IDLE_MS}");
+    let (b, sink, mut peer) = inbound(&pki, &[idle.as_str()]).await;
+    let stanza = peer.encode(&into_server_content(message("idle".to_owned(), 256)));
+    peer.write(&stanza[..stanza.len() / 2])
+        .await
+        .expect("write part of a stanza");
+    let (error, closed, _) = peer.read_until_closed(WAIT).await;
+    assert!(closed, "the deployment did not close the idle stream");
     assert_eq!(error, Some(StreamErrorCondition::ConnectionTimeout));
     assert_eq!(
         endings(&sink).await,
