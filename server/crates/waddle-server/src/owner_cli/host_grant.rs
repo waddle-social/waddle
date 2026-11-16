@@ -329,7 +329,7 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
                 report_witnesses(failed);
             }
             tally.finish()?;
-            eprintln!("every room is revoked and acknowledged by the revocation fence");
+            eprintln!("{}", tally.summary());
         }
         HostGrantActionArgs::Fence { scope } => {
             let state = store
@@ -381,6 +381,10 @@ struct RevokeTally {
     failed: usize,
     /// Rooms whose revoke is recorded and not yet acknowledged.
     unacknowledged: usize,
+    /// Rooms of a retired or exhausted scope: closed for good, so nothing
+    /// is recorded there and nothing there is admitted. They do not change
+    /// the exit code, but they are not reported as revoked.
+    closed: usize,
 }
 
 impl RevokeTally {
@@ -416,7 +420,7 @@ impl RevokeTally {
     fn failure(&mut self, error: HostGrantError) -> serde_json::Value {
         match error {
             HostGrantError::LastOwner => self.refused += 1,
-            HostGrantError::ScopeRetired | HostGrantError::ScopeExhausted => {}
+            HostGrantError::ScopeRetired | HostGrantError::ScopeExhausted => self.closed += 1,
             ref error if super::error::host_grant_error_is_transient(error) => {
                 self.failed += 1;
                 return json!({ "recorded": false, "error": error.kind() });
@@ -443,6 +447,20 @@ impl RevokeTally {
             return Err(OwnerCliError::FenceUnacknowledged);
         }
         Ok(())
+    }
+
+    /// The closing line of an act that [`Self::finish`] let succeed: rooms
+    /// of a closed scope were skipped, not revoked, and are counted apart.
+    fn summary(&self) -> String {
+        if self.closed == 0 {
+            return "every room is revoked and acknowledged by the revocation fence".to_owned();
+        }
+        format!(
+            "every room of an open scope is revoked and acknowledged by the revocation fence; \
+             {} room(s) of a retired or exhausted scope were skipped: nothing is recorded or \
+             admitted there",
+            self.closed
+        )
     }
 }
 

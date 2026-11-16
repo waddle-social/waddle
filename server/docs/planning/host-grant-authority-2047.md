@@ -1523,9 +1523,13 @@ change stays recorded, and it is what every admission reads.
   groupchat; its audience is the room actor's seated occupants reduced to
   those whose grants allow `read`, decided after the actor's snapshot and
   before the route intents are captured, so a recovered delivery replays the
-  reduced audience. When the grants cannot be read nothing is archived or
-  sent, and the caller's own retry applies (a call-thread ending is
-  retried from its persisted fence). A system message planned inside a
+  reduced audience. When the grants cannot be read before the archive write
+  nothing is archived or sent, and the caller's own retry applies (a
+  call-thread ending is retried from its persisted fence). After the archive
+  write the audience is decided again; a read that cannot decide is made once
+  more, and when neither decides the message stays archived and is delivered
+  to no occupant, with a warning that names only the kind of the failure,
+  logged at most once a minute. A system message planned inside a
   room-manifest acceptance is refused by the first slice's plan reduction.
 - **Call tokens.** A call is verified on the replica that receives it, on
   the room's owner when relayed, and again before the token is released;
@@ -2767,7 +2771,7 @@ follows; "decided" means from the grants, with a ticket.
 | Extension delivery | A managed room serves no extension state and seats no extension bot (writer fence); an observer is dropped from each acceptance. Nothing is queued for an extension. |
 | Room administration | An affiliation change is revalidated under the guard. A role change is refused by the actor once its sender's decision is overtaken. An owner's configuration change reads the grants again once it holds the room's configuration lock, which an administration request holds from before it records a change until the actor applied it, and asks that decision again just before the actor applies the change: a demotion acknowledged while the change waited refuses it (`forbidden`). A request waits at most 15 s for the lock (`ROOM_CONFIG_LOCK_WAIT`) and is answered `resource-constraint` after that. The role list is decided again after the actor's occupants were read; the affiliation lists are answered from the decision itself. |
 | Call setup, Muji presence that starts, joins or prepares a call | Decided at each verification; a decision that is not current allows nothing. A live participant is decided from the grants. |
-| Room system messages | The audience of a room's own message is decided before its archive write and again after it, and each occupant is asked again just before its copy is routed; a decision whose ticket is no longer current is read again for the occupants that remain. Grants that cannot be read after the archive write deliver nothing. |
+| Room system messages | The audience of a room's own message is decided before its archive write and again after it, and each occupant is asked again just before its copy is routed; a decision whose ticket is no longer current is read again for the occupants that remain. Grants that cannot be read after the archive write, in two reads, deliver nothing; the message stays archived and a rate-limited warning names only the kind of the failure. |
 | An extension's archive query (`query_mam`), the reserved-nick node (XEP-0045 §7.12) | Decided before the read and again after it, as an archive page is. |
 | Channel-wide mentions, moderation, search and discovery | Decided when sent. Some are decided before an await and acted on after it (see What stays open). |
 | Claim-move re-seating | Decided once per claim epoch (writer fence). The re-seating asks for a sweep of the room once the seats are restored, and also when the ask that seats them failed or timed out, since it may have seated some; the sweep removes a seat the grants no longer admit. |

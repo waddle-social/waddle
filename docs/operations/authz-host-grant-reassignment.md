@@ -99,7 +99,7 @@ restore witnesses at once
 
    | Exit | Meaning | Do |
    | --- | --- | --- |
-   | `0` | Every room's revoke is recorded and acknowledged. | Go on. |
+   | `0` | Every room of an open scope is revoked and acknowledged. The closing line counts apart any room of a retired or exhausted scope, which was skipped. | Go on. |
    | `1` with `"error"` on a line | That room's revoke, or the reading of its acknowledgement, failed; the other rooms are reported on their own lines. | Run the same command again with the same operation ID. |
    | `1` with `"acknowledged": false` on a line | That revoke is recorded and effective; a server that holds a lease has not installed it yet. A server that stopped is waited for until its lease has run out (about 6 s). | Run the same command again with the same operation ID. It records nothing again: the rooms already revoked are reported `"unchanged": true`, and it waits again at each scope's current generation. If a server stays behind, look at that server: `host-grant fence --scope <lifecycle>` shows the scope's standing. |
    | `1` otherwise | The database returned an error before any room was reported. | Run the same command again with the same operation ID. |
@@ -108,7 +108,9 @@ restore witnesses at once
 
    A line with `"refusal": "scope_retired"` or `"scope_exhausted"` names a
    scope that is closed for good: nothing is admitted there, nothing is
-   recorded, and the exit code is not affected.
+   recorded, and the exit code is not affected. Such a room is not reported
+   as revoked: the closing line on standard error says how many were
+   skipped.
 
 4. **Confirm.** `host-grant grants --subject …` now shows `none` (or
    `outcast`) for every room. A scope that was closed for a restore keeps the

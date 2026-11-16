@@ -268,16 +268,13 @@ pub(super) async fn broadcast_room_system_message_with_identity(
     // The audience was decided before the archive write. A revoke
     // acknowledged meanwhile must keep its occupant from receiving the
     // message, so the audience is decided again for the delivery, and each
-    // occupant is asked again before its copy is routed. Grants that cannot
-    // be read now deliver nothing; the message stays archived.
+    // occupant is asked again before its copy is routed.
     crate::permissions::host_grant::reach_checkpoint(
         crate::permissions::host_grant::DecisionCheckpoint::SystemMessageArchived,
         &room,
     )
     .await;
-    let mut audience = system_message_audience(deps, &room, &snapshot.occupants)
-        .await
-        .unwrap_or_default();
+    let mut audience = delivery_audience(deps, &room, &snapshot.occupants).await;
 
     // Fan out to every joined occupant. One `RouteToConnection`
     // per occupant full JID with the message's `to` set to that
@@ -371,6 +368,40 @@ impl SystemMessageAudience<'_> {
             decision.allows(&occupant.full_jid.to_bare(), HostGrantAction::Read)
         })
     }
+}
+
+/// At most one warning a minute that a room's own message, already
+/// archived, was delivered to no occupant because its audience could not be
+/// decided again; only the kind of the failure is logged.
+static UNDELIVERED: crate::permissions::host_grant::RateLimitedWarning =
+    crate::permissions::host_grant::RateLimitedWarning::new();
+
+/// How many times the audience of an archived room message is read before
+/// it is delivered to no one.
+const DELIVERY_AUDIENCE_READS: usize = 2;
+
+/// The audience of a room's own message after its archive write. The message
+/// is already archived, so a read that cannot decide is made once more; when
+/// neither decides, the message is delivered to no occupant and a warning
+/// naming only the kind of the failure is logged at most once a minute.
+async fn delivery_audience<'o>(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    occupants: &'o [RoomChainOccupant],
+) -> SystemMessageAudience<'o> {
+    for _ in 0..DELIVERY_AUDIENCE_READS {
+        if let Some(audience) = system_message_audience(deps, room, occupants).await {
+            return audience;
+        }
+    }
+    if UNDELIVERED.due() {
+        warn!(
+            kind = "audience_undecided",
+            "an archived room system message was delivered to no occupant: \
+             the room's grants could not be read again after the archive write"
+        );
+    }
+    SystemMessageAudience::default()
 }
 
 /// The occupants a room's own message is delivered to: every seated
