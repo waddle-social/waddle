@@ -32,7 +32,8 @@ internal fun PlanningEditor(
     var url by rememberSaveable(key) { mutableStateOf(initial.url.orEmpty()) }
     var category by rememberSaveable(key) { mutableStateOf(initial.category.orEmpty()) }
     var location by rememberSaveable(key) { mutableStateOf(initial.location.orEmpty()) }
-    var timezone by rememberSaveable(key) { mutableStateOf(initial.timezone ?: ZoneId.systemDefault().id) }
+    val initialTimezone = rememberSaveable(key) { initial.timezone ?: ZoneId.systemDefault().id }
+    var timezone by rememberSaveable(key) { mutableStateOf(initialTimezone) }
     var start by rememberSaveable(key) { mutableStateOf(planningLocal(initial.startsAt, timezone)) }
     var end by rememberSaveable(key) { mutableStateOf(planningLocal(initial.endsAt, timezone)) }
     var assignee by rememberSaveable(key) { mutableStateOf(initial.assignee.orEmpty()) }
@@ -46,16 +47,23 @@ internal fun PlanningEditor(
     val timed = initial.kind in listOf(
         WaddlePlanningKind.EVENT, WaddlePlanningKind.ITINERARY, WaddlePlanningKind.TRAVEL, WaddlePlanningKind.TASK,
     )
+    val originalStart = initial.startsAt.takeIf { timezone == initialTimezone }
+    val originalEnd = initial.endsAt.takeIf { timezone == initialTimezone }
+    val dateIssue = if (timed) {
+        eventDateIssue(start, end, timezone, originalStart = originalStart, originalEnd = originalEnd)
+    } else {
+        null
+    }
     val dated = runCatching {
-        val from = planningInstant(start, timezone)
-        val until = planningInstant(end, timezone)
+        val from = selectedPlanningInstant(start, timezone, originalStart)
+        val until = selectedPlanningInstant(end, timezone, originalEnd)
         require(until == null || from != null && until > from)
         from to until
     }
     val amountMinor = planningAmountMinor(amount, currency)
     val valid = title.isNotBlank() && title.length <= 512 && description.length <= 16_384 &&
         category.length <= 128 && location.length <= 2048 && url.length <= 8192 &&
-        (!timed || dated.isSuccess) &&
+        (!timed || dateIssue == null && dated.isSuccess) &&
         (url.isBlank() || safePlanningUrl(url) != null) &&
         (initial.kind != WaddlePlanningKind.LINK || safePlanningUrl(url) != null) &&
         (initial.kind != WaddlePlanningKind.EXPENSE || amountMinor != null) &&
@@ -75,9 +83,11 @@ internal fun PlanningEditor(
     }
     if (timed) {
         PlanField(location, { location = it }, R.string.events_location, busy)
-        PlanField(timezone, { timezone = it }, R.string.events_timezone, busy)
-        PlanField(start, { start = it }, R.string.events_local_start, busy)
-        PlanField(end, { end = it }, R.string.events_local_end, busy)
+        EventTimeZoneField(timezone, { timezone = it }, !busy)
+        Text(stringResource(R.string.events_dates_optional), style = MaterialTheme.typography.bodySmall)
+        EventDateTimeField(start, { start = it }, stringResource(R.string.events_local_start), !busy)
+        EventDateTimeField(end, { end = it }, stringResource(R.string.events_local_end), !busy)
+        dateIssue?.let { Text(stringResource(it.message), color = MaterialTheme.colorScheme.error) }
     }
     if (initial.kind in listOf(WaddlePlanningKind.TASK, WaddlePlanningKind.ITINERARY, WaddlePlanningKind.DECISION)) {
         PlanField(assignee, { assignee = it }, R.string.events_assignee, busy)
@@ -101,7 +111,7 @@ internal fun PlanningEditor(
             }
         }
     }
-    if (!valid && title.isNotEmpty()) {
+    if (!valid && title.isNotEmpty() && dateIssue == null) {
         Text(stringResource(R.string.events_invalid_plan), color = MaterialTheme.colorScheme.error)
     }
     FlowRow {

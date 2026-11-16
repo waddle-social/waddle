@@ -37,6 +37,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.client.EventPlanningFailure
+import social.waddle.android.client.EventPlanningFailureReason
+import social.waddle.android.client.EventPlanningStage
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.WaddleTopBar
 import social.waddle.android.ui.huddle.HuddleCard
@@ -124,7 +127,12 @@ fun EventsScreen(
             verticalArrangement = Arrangement.spacedBy(Waddle.space.md),
         ) {
             if (state.busy) CircularProgressIndicator()
-            if (state.failed) Text(stringResource(R.string.events_error), color = MaterialTheme.colorScheme.error)
+            if (state.failed) {
+                Text(
+                state.failure?.let { planningFailureMessage(it) } ?: stringResource(R.string.events_error),
+                color = MaterialTheme.colorScheme.error,
+            )
+            }
             when {
                 creating || editing != null || addingKind != null -> PlanningEditor(
                     initial = editing ?: newPlanningItem(
@@ -136,7 +144,10 @@ fun EventsScreen(
                 )
                 state.room == null -> {
                     Text(stringResource(R.string.events_private_notice))
-                    Button(onClick = { creating = true }, enabled = !state.busy) {
+                    Button(onClick = {
+                        model.startEditor()
+                    creating = true
+                    }, enabled = !state.busy) {
                         Text(stringResource(R.string.events_create))
                     }
                     OutlinedTextField(
@@ -161,7 +172,10 @@ fun EventsScreen(
                 else -> {
                     val room = state.room!!
                     if (metadata == null) {
-                        Button(onClick = { addingKind = WaddlePlanningKind.EVENT.name }, enabled = !state.busy) {
+                        Button(onClick = {
+                            model.startEditor()
+                        addingKind = WaddlePlanningKind.EVENT.name
+                        }, enabled = !state.busy) {
                             Text(stringResource(R.string.events_create))
                         }
                     }
@@ -217,7 +231,10 @@ fun EventsScreen(
                     }) { Text(stringResource(R.string.events_export)) }
                     FlowRow {
                         planningKinds.forEach { (kind, label) ->
-                            TextButton(onClick = { addingKind = kind.name }, enabled = !state.busy) {
+                            TextButton(onClick = {
+                                model.startEditor()
+                            addingKind = kind.name
+                            }, enabled = !state.busy) {
                                 Text("+ ${stringResource(label)}")
                             }
                         }
@@ -238,7 +255,10 @@ fun EventsScreen(
                                 ) || item.author == self ||
                                     item.kind == WaddlePlanningKind.TASK && item.assignee == self,
                                 mayDelete = mayManage || item.author == self,
-                                onEdit = { editingId = item.id }, onSave = { model.save(it) },
+                                onEdit = {
+                                    model.startEditor()
+                                editingId = item.id
+                                }, onSave = { model.save(it) },
                                 onDelete = { model.delete(item) },
                                 onDiscuss = { onOpenConversation(room, metadata?.title ?: room) },
                             )
@@ -261,3 +281,39 @@ internal val planningKinds = listOf(
     WaddlePlanningKind.EXPENSE to R.string.events_expenses,
     WaddlePlanningKind.POLL to R.string.events_polls,
 )
+
+@Composable
+private fun planningFailureMessage(failure: EventPlanningFailure): String {
+    val creating = failure.stage == EventPlanningStage.CREATE_ROOM
+    val reason = when (failure.reason) {
+        EventPlanningFailureReason.PERMISSION_DENIED -> if (creating) {
+            R.string.event_error_create_permission
+        } else {
+            R.string.event_error_save_permission
+        }
+        EventPlanningFailureReason.UNSUPPORTED -> if (creating) {
+            R.string.event_error_create_unsupported
+        } else {
+            R.string.event_error_save_unsupported
+        }
+        EventPlanningFailureReason.UNAVAILABLE -> R.string.event_error_unavailable
+        EventPlanningFailureReason.NOT_CONNECTED, EventPlanningFailureReason.TRANSPORT ->
+            R.string.event_error_connection
+        EventPlanningFailureReason.SESSION_CHANGED -> R.string.event_error_session_changed
+        EventPlanningFailureReason.INVALID_INPUT -> R.string.event_error_invalid_input
+        EventPlanningFailureReason.NOT_FOUND -> R.string.event_error_not_found
+        EventPlanningFailureReason.CONFLICT -> R.string.event_error_conflict
+        EventPlanningFailureReason.SERVER_BUSY -> R.string.event_error_busy
+        EventPlanningFailureReason.TIMEOUT -> R.string.event_error_timeout
+        EventPlanningFailureReason.MALFORMED_REPLY -> if (creating) {
+            R.string.event_error_create_verification
+        } else {
+            R.string.event_error_save_verification
+        }
+        EventPlanningFailureReason.UNEXPECTED -> R.string.event_error_unexpected
+    }
+    return stringResource(
+        if (creating) R.string.event_error_create_action else R.string.event_error_save_action,
+        stringResource(reason),
+    )
+}

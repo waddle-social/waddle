@@ -1622,6 +1622,18 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
         }
 
+        if super::muc_owner_config::event_config_changes_privacy(&room_jid, iq) {
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                forbidden_iq_error(
+                    "Event workspaces must remain private, members-only and persistent.",
+                ),
+            )]
+            .into();
+        }
+
         let mut batch = match apply_muc_owner_config(
             state,
             &room_jid,

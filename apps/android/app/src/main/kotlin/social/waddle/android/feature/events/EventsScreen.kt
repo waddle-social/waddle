@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -20,6 +21,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -30,6 +32,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
@@ -37,8 +40,10 @@ import social.waddle.android.R
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.WaddleTopBar
 import social.waddle.android.ui.huddle.HuddleCard
+import social.waddle.client.ffi.WaddleCalendarDate
 import social.waddle.client.ffi.WaddleEvent
 import social.waddle.client.ffi.WaddleEventParticipation
+import java.time.ZoneId
 
 /** Calendar and event workspace, reachable from Home's calendar action. */
 @Composable
@@ -170,7 +175,7 @@ fun CommunityCalendarScreen(onBack: () -> Unit, onOpenWorkspace: (String) -> Uni
 }
 
 @Composable
-private fun EventEditor(
+internal fun EventEditor(
     event: WaddleEvent?,
     busy: Boolean,
     selfJid: String,
@@ -180,15 +185,44 @@ private fun EventEditor(
     var name by rememberSaveable(event?.id) { mutableStateOf(event?.summary.orEmpty()) }
     var description by rememberSaveable(event?.id) { mutableStateOf(event?.description.orEmpty()) }
     var location by rememberSaveable(event?.id) { mutableStateOf(event?.location.orEmpty()) }
-    var start by rememberSaveable(event?.id) { mutableStateOf(eventDateText(event?.start)) }
-    var end by rememberSaveable(event?.id) { mutableStateOf(eventDateText(event?.end)) }
-    val valid = name.isNotBlank() && eventDatesValid(start, end)
+    val initialTimezone = rememberSaveable(event?.id) { ZoneId.systemDefault().id }
+    var timezone by rememberSaveable(event?.id) { mutableStateOf(initialTimezone) }
+    var allDay by rememberSaveable(event?.id) {
+        mutableStateOf(event?.start is WaddleCalendarDate.Date || event?.end is WaddleCalendarDate.Date)
+    }
+    var start by rememberSaveable(event?.id) { mutableStateOf(communityPickerText(event?.start, timezone, false)) }
+    var end by rememberSaveable(event?.id) { mutableStateOf(communityPickerText(event?.end, timezone, true)) }
+    val originalStart = (event?.start as? WaddleCalendarDate.DateTime)?.timestampMs
+        .takeIf { timezone == initialTimezone }
+    val originalEnd = (event?.end as? WaddleCalendarDate.DateTime)?.timestampMs
+        .takeIf { timezone == initialTimezone }
+    val dateIssue = eventDateIssue(start, end, timezone, allDay, originalStart, originalEnd)
+    val valid = name.isNotBlank() && dateIssue == null
     EventField(name, { name = it }, R.string.events_name, !busy)
     EventField(description, { description = it }, R.string.events_description, !busy)
     EventField(location, { location = it }, R.string.events_location, !busy)
-    EventField(start, { start = it }, R.string.events_start, !busy)
-    EventField(end, { end = it }, R.string.events_end, !busy)
-    if (!valid && name.isNotEmpty()) {
+    Text(stringResource(R.string.events_dates_optional), style = MaterialTheme.typography.bodySmall)
+    Row(
+        modifier = Modifier.fillMaxWidth().toggleable(
+            value = allDay, enabled = !busy, role = Role.Switch,
+            onValueChange = { selected ->
+                start = changeAllDay(start, selected, false)
+                end = changeAllDay(end, selected, true)
+                allDay = selected
+            },
+        ),
+    ) {
+        Text(stringResource(R.string.events_all_day), modifier = Modifier.weight(1f))
+        Switch(checked = allDay, onCheckedChange = null, enabled = !busy)
+    }
+    if (!allDay) EventTimeZoneField(timezone, { timezone = it }, !busy)
+    EventDateTimeField(start, { start = it }, stringResource(R.string.events_start), !busy, dateOnly = allDay)
+    EventDateTimeField(
+        end, { end = it }, stringResource(if (allDay) R.string.events_last_day else R.string.events_end),
+        !busy, dateOnly = allDay,
+    )
+    dateIssue?.let { Text(stringResource(it.message), color = MaterialTheme.colorScheme.error) }
+    if (!valid && name.isNotEmpty() && dateIssue == null) {
         Text(stringResource(R.string.events_invalid), color = MaterialTheme.colorScheme.error)
     }
     Row {
@@ -199,8 +233,8 @@ private fun EventEditor(
                 description = description.trim().takeIf { it.isNotEmpty() },
                 location = location.trim().takeIf { it.isNotEmpty() },
                 organizer = event?.organizer ?: "xmpp:${selfJid.substringBefore('/')}",
-                start = parseEventDate(start),
-                end = parseEventDate(end),
+                start = communityPickerValue(start, timezone, allDay, false, originalStart),
+                end = communityPickerValue(end, timezone, allDay, true, originalEnd),
                 attendees = event?.attendees.orEmpty(),
                 workspaceRoom = event?.workspaceRoom,
             )

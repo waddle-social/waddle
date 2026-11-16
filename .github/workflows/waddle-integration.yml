@@ -96,6 +96,14 @@ jobs:
           GITHUB_REF_NAME: "${{ github.ref_name }}"
           WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
           WADDLE_CI_HEAD_SHA: "${{ github.sha }}"
+      - name: Upload Android event picker previews
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          if-no-files-found: ignore
+          name: waddle_android_pullrequest-android-event-picker-previews
+          path: apps/android/app/build/outputs/roborazzi/event-picker-previews/*.png
+          retention-days: 3
       - name: Upload Android test failure reports
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

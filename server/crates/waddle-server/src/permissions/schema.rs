@@ -159,6 +159,7 @@ definition server {
 
   permission create_space = owner
   permission create_muc = owner
+  permission create_event_room = owner + admin + member
 }
 
 definition space {
@@ -248,6 +249,14 @@ fn server_schema() -> ObjectTypeSchema {
         )
         .with_permission("create_space", ComputedPermission::direct("owner"))
         .with_permission("create_muc", ComputedPermission::direct("owner"))
+        .with_permission(
+            "create_event_room",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
+            ]),
+        )
 }
 
 /// Schema for Space objects

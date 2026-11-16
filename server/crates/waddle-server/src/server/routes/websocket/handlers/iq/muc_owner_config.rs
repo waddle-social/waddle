@@ -25,6 +25,22 @@ fn data_form_bool(form: &Element, var: &str) -> Option<bool> {
     })
 }
 
+/// Event workspaces cannot be converted into ordinary open/public rooms.
+pub(super) fn event_config_changes_privacy(room: &BareJid, iq: &xmpp_parsers::iq::Iq) -> bool {
+    if !waddle_xmpp_core::event_planning::is_event_room(room) {
+        return false;
+    }
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return false;
+    };
+    let Some(form) = payload.get_child("x", DATA_FORMS_NS) else {
+        return false;
+    };
+    data_form_bool(form, "muc#roomconfig_membersonly") == Some(false)
+        || data_form_bool(form, "muc#roomconfig_publicroom") == Some(true)
+        || data_form_bool(form, "muc#roomconfig_persistentroom") == Some(false)
+}
+
 fn channel_type_from_config(config: &waddle_xmpp::muc::RoomConfig) -> waddle_xmpp::ChannelType {
     if config.group_dm {
         waddle_xmpp::ChannelType::GroupDm

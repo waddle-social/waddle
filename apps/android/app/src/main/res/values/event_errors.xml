@@ -1,0 +1,19 @@
+<resources>
+    <string name="event_error_create_action">Could not create the event space. %1$s</string>
+    <string name="event_error_save_action">Could not save the event details. %1$s</string>
+    <string name="event_error_create_permission">This server does not allow your account to create events. Ask a community administrator for access.</string>
+    <string name="event_error_save_permission">You do not have permission to save these changes. Your draft has been kept.</string>
+    <string name="event_error_create_unsupported">This server does not support private events yet. Ask an administrator to update it.</string>
+    <string name="event_error_save_unsupported">This server does not support event planning yet. Your event space and draft have been kept for retry.</string>
+    <string name="event_error_connection">Reconnect and try again. Your draft has been kept.</string>
+    <string name="event_error_session_changed">Your sign-in session changed. Close the editor and refresh this screen before trying again.</string>
+    <string name="event_error_invalid_input">Check the event fields and try again. Your draft has been kept.</string>
+    <string name="event_error_not_found">The event space or planning item is no longer available.</string>
+    <string name="event_error_conflict">The event changed elsewhere. Refresh it before trying again.</string>
+    <string name="event_error_busy">The server is busy. Try again shortly. Your draft has been kept.</string>
+    <string name="event_error_timeout">The server did not respond in time. Your draft has been kept for retry.</string>
+    <string name="event_error_create_verification">The server returned an unexpected reply while creating the private event. Your draft has been kept.</string>
+    <string name="event_error_save_verification">The server returned an unexpected reply. Refresh the event before retrying.</string>
+    <string name="event_error_unexpected">Your draft has been kept. Try again or contact a community administrator.</string>
+    <string name="event_error_unavailable">Event planning is unavailable on this server. Try again or contact an administrator. Your draft has been kept.</string>
+</resources>

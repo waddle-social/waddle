@@ -149,6 +149,9 @@ impl WaddleClient {
     pub fn event_room_create(&self, name: String, private_room: bool) -> js_sys::Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
+            if !private_room {
+                return Err(js_error("event workspaces must be private"));
+            }
             let name = name.trim();
             if name.is_empty() || name.len() > 200 {
                 return Err(js_error("event title must contain 1–200 characters"));
