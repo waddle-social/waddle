@@ -502,6 +502,27 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
             }
+            // ADR-0020 D8 at issuance: on the Spaces service an Owner
+            // administers the Space and a publisher places rooms in it, so
+            // either is written only for an account of this deployment or
+            // of a trusted home of the S2S snapshot the replica runs. The
+            // whole request is refused before any of it is applied; a
+            // standing written for another home would not be honoured at
+            // the effect either.
+            let is_spaces_service = matches!(
+                spaces_service_bare_jid(spaces_domain),
+                Ok(spaces_jid) if target_jid == &spaces_jid
+            );
+            if is_spaces_service
+                && changes.iter().any(|(entity, affiliation)| {
+                    space_affiliation_is_privileged(*affiliation)
+                        && !super::muc_admin_host_grant::privileged_standing_may_be_issued(
+                            state, entity,
+                        )
+                })
+            {
+                return vec![iq_to_xml(privileged_affiliation_refused(iq))];
+            }
             for (entity, aff) in &changes {
                 if let Err(e) = state
                     .deps
@@ -701,6 +722,40 @@ pub(super) async fn handle_pubsub_admin_request(
         | PubSubRequest::Items { .. }
         | PubSubRequest::Retract { .. } => Vec::new(),
         _ => Vec::new(),
+    }
+}
+
+/// Whether a PubSub affiliation on a Space node is a privileged grant
+/// (ADR-0020 D8): the owner administers the Space, and a publisher places
+/// rooms in it. Membership and a ban are not.
+pub(crate) fn space_affiliation_is_privileged(
+    affiliation: waddle_xmpp::pubsub::Affiliation,
+) -> bool {
+    use waddle_xmpp::pubsub::Affiliation;
+    match affiliation {
+        Affiliation::Owner | Affiliation::Publisher | Affiliation::PublishOnly => true,
+        Affiliation::Member | Affiliation::Outcast | Affiliation::None => false,
+    }
+}
+
+/// The answer to an affiliation change that would write a privileged
+/// affiliation for an account whose home is neither served nor trusted
+/// (XEP-0060 §8.9.2.4 leaves the condition to the service; `not-allowed`
+/// is what room administration answers for the same refusal).
+fn privileged_affiliation_refused(iq: &xmpp_parsers::iq::Iq) -> xmpp_parsers::iq::Iq {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    xmpp_parsers::iq::Iq::Error {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_owned(),
+        payload: None,
+        error: StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::NotAllowed,
+            "en",
+            "Owner and publisher affiliations are granted to accounts of this deployment and of \
+             its trusted servers only.",
+        ),
     }
 }
 

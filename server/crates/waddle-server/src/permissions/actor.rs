@@ -8,9 +8,9 @@ use crate::db::Database;
 use std::sync::Arc;
 
 use super::host_grant::{
-    EnrolledScopes, Enrollment, HostGrantStore, ListedWitness, ProjectionIntent, ProjectionMarker,
-    ProjectionObservation, ProjectionWrite, RestoredPlan, ScopeLifecycleId, WitnessChange,
-    HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
+    EnrolledScopes, Enrollment, HostGrantStore, IssuancePolicy, ListedWitness, ProjectionIntent,
+    ProjectionMarker, ProjectionObservation, ProjectionWrite, RestoredPlan, ScopeLifecycleId,
+    WitnessChange, HOST_GRANT_PROJECTION_OBSERVATION_TIMEOUT, HOST_GRANT_RESTORE_SCAN_TIMEOUT,
 };
 use super::schema::SPICEDB_SCHEMA;
 use super::spicedb::SpiceDbPermissionBackend;
@@ -106,6 +106,29 @@ pub struct PermissionActor {
     /// an object it holds (only the host-grant authority decides there),
     /// without any PostgreSQL read in this actor's mailbox.
     enrolled: EnrolledScopes,
+    /// Whose accounts may be written a privileged relation that no writer
+    /// of its own decides ([`privileged_without_writer`]): the accounts of
+    /// the served domains and of the trusted homes (ADR-0020 D8). A replica
+    /// that serves attaches it ([`Self::with_privileged_issuance`]); an
+    /// actor without one, as the suites build, asks nothing.
+    privileged_issuance: Option<IssuancePolicy>,
+}
+
+/// Whether `relation` on `object` is a privileged or room-moderation
+/// relation that no handler, command or repair path writes by name: the
+/// channel `manager` and `moderator`, the Space `moderator` and the role
+/// `manager` (ADR-0020, "Privileged grant" and "Room moderation"). The
+/// owner, admin and affiliation relations each have a writer that decides
+/// issuance itself, on what it knows of the request; these four reach the
+/// store only through this actor's write messages, so issuance is decided
+/// here.
+fn privileged_without_writer(object: &Object, relation: &Relation) -> bool {
+    matches!(
+        (object.object_type, relation.name.as_str()),
+        (ObjectType::Channel, "manager" | "moderator")
+            | (ObjectType::Space, "moderator")
+            | (ObjectType::Role, "manager")
+    )
 }
 
 /// At most one warning a minute that a legacy read was refused because the
@@ -123,6 +146,7 @@ impl PermissionActor {
             backend: PermissionActorBackend::SpiceDb(Box::new(backend)),
             host_grants: None,
             enrolled: EnrolledScopes::default(),
+            privileged_issuance: None,
         }
     }
 
@@ -181,6 +205,50 @@ impl PermissionActor {
             },
             host_grants: None,
             enrolled: EnrolledScopes::default(),
+            privileged_issuance: None,
+        }
+    }
+
+    /// Decide issuance of the privileged relations no writer names
+    /// ([`privileged_without_writer`]) under `policy`: such a relation is
+    /// written for an account only when its home is a domain this
+    /// deployment serves or a trusted home (ADR-0020 D8). Whether a stored
+    /// relation is honoured is decided where it is used, from the
+    /// principal's witness; this is the refusal at the write.
+    pub fn with_privileged_issuance(mut self, policy: IssuancePolicy) -> Self {
+        self.privileged_issuance = Some(policy);
+        self
+    }
+
+    /// Refuse to write `relation` on `object` for `subject` when it is one
+    /// of the privileged relations no writer names and `subject` is not an
+    /// account that may hold it: an account of a served domain or of a
+    /// trusted home. A subject that is no account (a Space or channel
+    /// userset) is not a grant to a principal and is not asked about. A
+    /// subject that names no account address is refused.
+    fn refuse_untrusted_privilege(
+        &self,
+        object: &Object,
+        relation: Option<&Relation>,
+        subject: &Subject,
+    ) -> Result<(), PermissionError> {
+        let (Some(policy), Some(relation)) = (&self.privileged_issuance, relation) else {
+            return Ok(());
+        };
+        if !privileged_without_writer(object, relation)
+            || subject.subject_type != SubjectType::User
+            || subject.relation.is_some()
+        {
+            return Ok(());
+        }
+        let admitted = subject
+            .id
+            .parse::<jid::BareJid>()
+            .is_ok_and(|account| policy.admits_privileged_subject(&account));
+        if admitted {
+            Ok(())
+        } else {
+            Err(PermissionError::UntrustedPrivilegedSubject)
         }
     }
 
@@ -552,6 +620,11 @@ impl kameo::message::Message<WriteTuple> for PermissionActor {
     ) -> Self::Reply {
         self.refuse_enrolled_scope(&msg.tuple.object, &msg.tuple.subject)
             .await?;
+        self.refuse_untrusted_privilege(
+            &msg.tuple.object,
+            Some(&msg.tuple.relation),
+            &msg.tuple.subject,
+        )?;
         self.write_tuple(msg.tuple).await?;
         self.clear_cache().await;
         Ok(())
@@ -598,6 +671,7 @@ impl kameo::message::Message<ReplaceExclusiveRelation> for PermissionActor {
     ) -> Self::Reply {
         self.refuse_enrolled_scope(&msg.object, &msg.subject)
             .await?;
+        self.refuse_untrusted_privilege(&msg.object, msg.replacement.as_ref(), &msg.subject)?;
         self.replace_exclusive_relation(msg).await?;
         self.clear_cache().await;
         Ok(())
@@ -637,6 +711,7 @@ impl kameo::message::Message<SwapExclusiveRelation> for PermissionActor {
     ) -> Self::Reply {
         self.refuse_enrolled_scope(&msg.object, &msg.subject)
             .await?;
+        self.refuse_untrusted_privilege(&msg.object, msg.replacement.as_ref(), &msg.subject)?;
         let outcome = self.swap_exclusive_relation(msg).await?;
         self.clear_cache().await;
         Ok(outcome)

@@ -437,7 +437,12 @@ async fn handle_set_role(ctx: CommandContext, state: Arc<AppState>) -> CommandRe
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_set_role(&state, &args).await {
+    // Admin commands reach the server only from authenticated accounts of
+    // this deployment, so the caller's domain is its account domain: the
+    // one an owner or admin role may name beside the trusted homes
+    // (ADR-0020 D8).
+    let account_domain = ctx.from.domain().as_str().to_owned();
+    match run_set_role(&state, &args, &account_domain).await {
         Ok(result) => CommandResult::Completed {
             session_id: None,
             form: Some(build_set_role_form(&result)),
@@ -1491,10 +1496,31 @@ async fn run_members(
 async fn run_set_role(
     state: &AppState,
     args: &SpacesSetRoleArgs,
+    account_domain: &str,
 ) -> Result<SpacesSetRoleResult, AdminErr> {
     let (node, _) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
     super::refuse_host_grant_space(state, &node).await?;
+    // ADR-0020 D8 at issuance: the owner and admin roles are the node's
+    // Owner and Publisher affiliations, which administer the Space and
+    // place rooms in it. They are written only for an account of this
+    // deployment or of a trusted home of the S2S snapshot the replica
+    // runs; a standing written for any other home would not be honoured at
+    // the effect either. The member role and a removal are written for any
+    // account.
+    if matches!(args.role, SpaceRole::Owner | SpaceRole::Admin) {
+        let admitted = crate::spaces_pubsub_seed::replica_seed_issuance(state, account_domain)
+            .is_some_and(|issuance| issuance.admits_privileged_subject(&args.member_jid));
+        if !admitted {
+            return Err(Box::new(CommandResult::Error(XmppError::not_allowed(
+                Some(
+                    "owner and admin roles are granted to accounts of this deployment and of its \
+                 trusted servers only"
+                        .to_string(),
+                ),
+            ))));
+        }
+    }
     let exists = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node)
