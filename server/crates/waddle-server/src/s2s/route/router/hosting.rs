@@ -1230,8 +1230,11 @@ impl Inner {
                                 self.queue_room_reply(&pair, reply, self.reply_deadline(deadline))
                                     .await;
                             }
+                            // The refusal of its join tells the occupant
+                            // that it is not in the room; the seat it gave
+                            // up for the join ends without telling it again.
                             if let Some(left) = given_up {
-                                self.end_seat(left, SeatEnd::Refused);
+                                self.end_seat_untold(left, SeatEnd::Refused);
                             }
                             return;
                         }
@@ -1248,12 +1251,18 @@ impl Inner {
             let Ok(answer) = tokio::time::timeout_at(deadline, handled).await else {
                 telemetry::room_request_timed_out();
                 // The room may have seated the occupant before the host was
-                // abandoned.
+                // abandoned. A join is answered with an error, which tells
+                // its occupant that it is not in the room, and its seats
+                // end without telling it so again: it was never told that
+                // it entered.
                 if let Some(opened) = seat.filter(|_| joining) {
-                    self.end_seat(opened, SeatEnd::Undeliverable);
+                    if let Some(reply) = replies::error_reply(&stanza, self.join_failed()) {
+                        self.offer_room_reply(&pair, reply);
+                    }
+                    self.end_seat_untold(opened, SeatEnd::Undeliverable);
                 }
                 if let Some(left) = given_up {
-                    self.end_seat(left, SeatEnd::Refused);
+                    self.end_seat_untold(left, SeatEnd::Refused);
                 }
                 return;
             };
@@ -1319,11 +1328,11 @@ impl Inner {
             (SeatChange::Refused, false) => refused = seat.take(),
             (SeatChange::Unchanged | SeatChange::Rejoin, false) => {}
         }
-        if answer.seat != SeatChange::Seated {
-            // The room did not seat the occupant again: it must not keep
-            // the occupancy whose seat was given up for the join.
-            refused = refused.or(given_up);
-        }
+        // The room did not seat the occupant again: it must not keep the
+        // occupancy whose seat was given up for the join. The join's refusal
+        // tells the occupant that it is not in the room, so that seat ends
+        // without telling it again.
+        let untold = given_up.filter(|_| answer.seat != SeatChange::Seated);
         let mut answered = true;
         let replied_by = self.reply_deadline(deadline);
         for mut reply in answer.stanzas {
@@ -1365,6 +1374,9 @@ impl Inner {
         }
         if let Some(left) = refused {
             self.end_seat(left, SeatEnd::Refused);
+        }
+        if let Some(left) = untold {
+            self.end_seat_untold(left, SeatEnd::Refused);
         }
         if !answered {
             if let Some(held) = seat.take() {
@@ -1579,22 +1591,37 @@ impl Inner {
     /// workers that end seats, so no shard waits for them. Those who stay
     /// are told by the room (XEP-0045 §11.1).
     pub(super) fn end_seat(self: &Arc<Self>, seat: Seat, end: SeatEnd) {
+        self.end_seat_telling(seat, end, true);
+    }
+
+    /// [`Self::end_seat`] for a seat whose occupant was just answered with
+    /// the refusal of its join, which tells it that it is not in the room:
+    /// it is not told again.
+    fn end_seat_untold(self: &Arc<Self>, seat: Seat, end: SeatEnd) {
+        self.end_seat_telling(seat, end, false);
+    }
+
+    fn end_seat_telling(self: &Arc<Self>, seat: Seat, end: SeatEnd, tell: bool) {
         if self.hosting.get().is_none() {
             return;
         }
         self.seats.release(&seat.room, &seat.occupant, seat.session);
         // Where the occupant's server may still be reached and was not told
-        // by a failed stream or by its own error, the occupant is told that
-        // the service removed it (XEP-0045 §11.1), ahead of anything a
-        // later join is answered with. It is not waited for: nothing
-        // depends on its arrival. A seat taken over from a replica that
-        // stopped is told only once the room has removed that occupancy.
-        match end {
+        // by a failed stream, by its own error or by the refusal of its
+        // join, the occupant is told that the service removed it (XEP-0045
+        // §11.1), ahead of anything a later join is answered with. It is
+        // not waited for: nothing depends on its arrival. A seat taken
+        // over from a replica that stopped is told only once the room has
+        // removed that occupancy.
+        let told = match end {
             SeatEnd::Undeliverable
             | SeatEnd::EvidenceChanged
             | SeatEnd::RoomClosed
-            | SeatEnd::Refused => self.tell_removed(&seat, Status::ServiceErrorKick),
-            SeatEnd::HolderStopped | SeatEnd::StreamLost | SeatEnd::OccupantError => {}
+            | SeatEnd::Refused => tell,
+            SeatEnd::HolderStopped | SeatEnd::StreamLost | SeatEnd::OccupantError => false,
+        };
+        if told {
+            self.tell_removed(&seat, Status::ServiceErrorKick);
         }
         self.seat_ends.push(EndWork::Seat {
             seat,

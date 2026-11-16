@@ -990,6 +990,9 @@ impl Asked<'_> {
                 // without one, is never taken for a remote principal.
                 ordered_relay_origin: None,
                 evidence: self.evidence,
+                // A join the router stops waiting for after its per-item
+                // budget still finishes the notices it started.
+                owned_state: Some(self.state),
             },
         )
         .await;

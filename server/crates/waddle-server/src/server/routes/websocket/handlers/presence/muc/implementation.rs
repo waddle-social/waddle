@@ -61,6 +61,7 @@ pub async fn handle_muc_join(
             registry_owner: connection.registry_owner,
             ordered_relay_origin: None,
             evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            owned_state: None,
         },
     )
     .await
@@ -109,6 +110,10 @@ pub struct MucJoinRequest<'a> {
     /// principal's join. Every decision the join takes for the joiner
     /// names it.
     pub evidence: crate::permissions::host_grant::PrincipalEvidence,
+    /// The state, owned, where the caller holds it so: work the join
+    /// starts that must not be cut short with the join's own handling runs
+    /// on a task of its own with it. `None` runs that work inline.
+    pub owned_state: Option<&'a std::sync::Arc<WebSocketState>>,
 }
 
 pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoinWork<'a> {
@@ -128,6 +133,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoin
         Option<OrderedRelayRouteOrigin>,
     pub(in crate::server::routes::websocket::handlers::presence::muc) evidence:
         crate::permissions::host_grant::PrincipalEvidence,
+    pub(in crate::server::routes::websocket::handlers::presence::muc) owned_state:
+        Option<&'a std::sync::Arc<WebSocketState>>,
 }
 
 pub async fn handle_muc_join_with_ordered_relay(
@@ -155,6 +162,7 @@ pub async fn handle_muc_join_with_ordered_relay(
             authenticated_session: request.authenticated_session,
             ordered_relay_origin: request.ordered_relay_origin,
             evidence: request.evidence,
+            owned_state: request.owned_state,
         },
     )
     .await
@@ -395,9 +403,13 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn run_r
     }
 }
 
-/// After a remote joiner's seat was undone without being announced: tell
-/// the occupants that entered the room after it seated the joiner that the
-/// joiner left.
+/// How long the room is read for its occupants after a remote joiner's
+/// seat was undone.
+const UNDONE_JOIN_READ: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A remote joiner's seat undone without being announced, and what the
+/// room had answered the joiner with: what telling the occupants that
+/// entered since needs, owned so that it can run on a task of its own.
 ///
 /// Nobody present when the room seated the joiner was told of it, which is
 /// why the removal is announced to nobody. An occupant that entered between
@@ -407,52 +419,111 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn run_r
 /// sent the joiner's unavailable presence with status 333 (XEP-0045 §11.1).
 /// An occupant that entered after the removal is among them and is told of
 /// an occupant it never saw, which a client ignores. An occupant that left
-/// and entered again under the same full JID meanwhile is not told.
-async fn tell_later_entrants_of_undone_join(
-    state: &WebSocketState,
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    room_jid: &BareJid,
-    joiner: &FullJid,
-    nick: &str,
-    outcome: &waddle_xmpp::muc::room_actor::JoinOutcome,
-) {
-    let seated = room_actor
-        .ask(waddle_xmpp::muc::room_actor::GetSeatedSessionGenerations)
-        .reply_timeout(std::time::Duration::from_secs(5))
-        .await;
-    let Ok(seated) = seated else {
-        warn!(room = %room_jid, "the occupants of a room whose join was undone could not be read");
-        return;
-    };
-    let Ok(from) = room_jid.with_resource_str(nick) else {
-        return;
-    };
-    let present: HashSet<&FullJid> = outcome
-        .existing_occupants
-        .iter()
-        .map(|existing| &existing.jid)
-        .collect();
-    let joiner_bare = joiner.to_bare();
-    for (occupant, _) in seated {
-        if occupant == *joiner || present.contains(&occupant) {
-            continue;
+/// and entered again under the same full JID meanwhile is not told, and
+/// neither is one that now holds the joiner's nickname, whose own occupant
+/// JID the presence would name. The room is read once, for its occupants
+/// and who holds that nickname together.
+struct UndoneJoin {
+    room_actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: BareJid,
+    joiner: FullJid,
+    nick: String,
+    affiliation: Affiliation,
+    present: HashSet<FullJid>,
+}
+
+impl UndoneJoin {
+    fn new(
+        room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        room_jid: &BareJid,
+        joiner: &FullJid,
+        nick: &str,
+        outcome: &waddle_xmpp::muc::room_actor::JoinOutcome,
+    ) -> Self {
+        Self {
+            room_actor: room_actor.clone(),
+            room_jid: room_jid.clone(),
+            joiner: joiner.clone(),
+            nick: nick.to_owned(),
+            affiliation: outcome.new_occupant_affiliation,
+            present: outcome
+                .existing_occupants
+                .iter()
+                .map(|existing| existing.jid.clone())
+                .collect(),
         }
-        let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-            bare_jid: &joiner_bare,
-            real_jid: Some(joiner),
-            secret: &state.deps.occupant_id_secret,
-            hats: &state.deps.app_state.server_hats,
-        };
-        let presence = waddle_xmpp::muc::build_leave_presence(
-            &from,
-            &occupant,
-            outcome.new_occupant_affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(false, false)
-                .removed_by(waddle_xmpp::muc::MucRemovalCause::TechnicalProblem),
-            &identity,
-        );
-        route_room_presence_to_occupant(state, room_jid, &occupant, Stanza::Presence(presence))
+    }
+
+    /// Tell the occupants that entered after the joiner was seated, on a
+    /// task of its own where `owned` is given, so that a bound on the
+    /// join's own handling does not cut the notices short; inline
+    /// otherwise.
+    async fn tell(self, state: &WebSocketState, owned: Option<&std::sync::Arc<WebSocketState>>) {
+        match owned {
+            Some(owned) => {
+                tokio::spawn(self.told_by(std::sync::Arc::clone(owned)));
+            }
+            None => self.tell_later_entrants(state).await,
+        }
+    }
+
+    /// [`Self::tell_later_entrants`] as a task of its own. The join that
+    /// starts it is itself reached from the delivery it awaits, so its
+    /// type is named here rather than inferred.
+    fn told_by(
+        self,
+        state: std::sync::Arc<WebSocketState>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(async move { self.tell_later_entrants(&state).await })
+    }
+
+    async fn tell_later_entrants(self, state: &WebSocketState) {
+        let snapshot = self
+            .room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(UNDONE_JOIN_READ)
             .await;
+        let Ok(snapshot) = snapshot else {
+            warn!(
+                room = %self.room_jid,
+                "the occupants of a room whose join was undone could not be read"
+            );
+            return;
+        };
+        let Ok(from) = self.room_jid.with_resource_str(&self.nick) else {
+            return;
+        };
+        let holders = snapshot.room.occupant_sessions(&self.nick);
+        let joiner_bare = self.joiner.to_bare();
+        for (occupant, _) in snapshot.room.seated_session_generations() {
+            if occupant == self.joiner
+                || self.present.contains(&occupant)
+                || holders.contains(&occupant)
+            {
+                continue;
+            }
+            let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                bare_jid: &joiner_bare,
+                real_jid: Some(&self.joiner),
+                secret: &state.deps.occupant_id_secret,
+                hats: &state.deps.app_state.server_hats,
+            };
+            let presence = waddle_xmpp::muc::build_leave_presence(
+                &from,
+                &occupant,
+                self.affiliation,
+                waddle_xmpp::muc::MucPresenceStatus::new(false, false)
+                    .removed_by(waddle_xmpp::muc::MucRemovalCause::TechnicalProblem),
+                &identity,
+            );
+            route_room_presence_to_occupant(
+                state,
+                &self.room_jid,
+                &occupant,
+                Stanza::Presence(presence),
+            )
+            .await;
+        }
     }
 }
 
@@ -958,6 +1029,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         registry_owner,
         ordered_relay_origin,
         evidence,
+        owned_state,
     } = request;
     #[cfg(not(feature = "clustering"))]
     let _ = &ordered_relay_origin;
@@ -1980,15 +2052,9 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     waddle_xmpp::muc::MucRemovalCause::Unannounced,
                 )
                 .await;
-                tell_later_entrants_of_undone_join(
-                    state,
-                    &room_actor,
-                    room_jid,
-                    sender_jid,
-                    &nick,
-                    &join_outcome,
-                )
-                .await;
+                UndoneJoin::new(&room_actor, room_jid, sender_jid, &nick, &join_outcome)
+                    .tell(state, owned_state)
+                    .await;
                 return deny_join_admission(
                     room_jid,
                     sender_jid,

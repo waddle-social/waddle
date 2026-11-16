@@ -1005,9 +1005,10 @@ producer of stream evidence was added.
   `admin-context-honoured` moved).
 - The join handler (`join`, moved) still undoes a seat it gave on a
   standing that is not honoured without announcing a departure, and now
-  reads the generations the room seats afterwards to send the joiner's
-  unavailable presence to the occupants that entered between the seat and
-  its undoing. The decision that undoes the seat is unchanged; nothing is
+  reads the room once afterwards, on a task of its own, to send the
+  joiner's unavailable presence to the occupants that entered between the
+  seat and its undoing, other than one that now holds the joiner's
+  nickname. The decision that undoes the seat is unchanged; nothing is
   written.
 - Claim-move re-seating (`hg-claim-move`, moved) seats a recorded occupant
   at another server only on a seat of the recorded generation: one this

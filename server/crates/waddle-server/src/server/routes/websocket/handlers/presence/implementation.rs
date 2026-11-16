@@ -353,6 +353,7 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
                 registry_owner: context.registry_owner,
                 ordered_relay_origin: context.ordered_relay_origin,
                 evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                owned_state: None,
             },
         )
         .await;

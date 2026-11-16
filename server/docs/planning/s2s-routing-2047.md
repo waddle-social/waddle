@@ -1224,8 +1224,8 @@ sender of the request it answers.
 | The occupant's server answers the room with a delivery error | The room removes the occupant with status 333 (§17.1.2, "ghost users") |
 | A stanza of the occupant arrives on a stream that proved something else | As for a stanza that cannot be queued |
 | The room's `federated` setting is turned off | Every seat of the room ends once the change is committed: the room removes the occupant with status 333 and the occupant is sent its own unavailable presence with statuses 110 and 333 |
-| The host refuses a request of a seated occupant in a way that ends its occupancy (its domain is no longer admitted, its room is not open to it any more, its leave could not be answered) | The seat ends, the room is told to remove the occupant, with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 after the refusal |
-| The host does not decide a join within the per-item budget (5 s) | The seat opened for it ends and the room removes the occupant if it seated it |
+| The host refuses a request of a seated occupant in a way that ends its occupancy (its domain is no longer admitted, its room is not open to it any more, its leave could not be answered) | The seat ends, the room is told to remove the occupant, with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 after the refusal. Where the request was presence that entered the room again and the room refused that join, the refusal itself tells the occupant that it is not in the room, and it is not told again |
+| The host does not decide a join within the per-item budget (5 s) | The join is answered with `internal-server-error` (type `wait`); the seat opened for it, and one the occupant gave up to enter again, end without a further notice, and the room removes the occupant if it seated it |
 | The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Every 60 s a pass asks each room with seats, once, for the occupants it seats and their generations, and releases the seats the room does not name; the occupant is sent its own unavailable presence with statuses 110 and 333. A pass runs on a task of its own, takes at most 256 rooms and 60 s, and the next goes on where it stopped |
 | The room seats an occupant of another server for which this replica holds no seat, pending seats included (its seat ended and the room's removal timed out, or the room was restored with it) | The same pass removes it from the room, with status 333 for those who stay: nothing could reach it. Rooms whose removal of an occupant could not be confirmed are asked at the next pass first, whether or not a seat is still held there. A seat of the same occupancy that ends while the removal waits or runs (a seat taken over from a replica that stopped, held a moment after the room was restored) is not dropped as a second end: it takes the removal's place, or follows it, so its row is removed and its occupant told as for that seat |
 | The seat's row could not be removed when the seat ended | The same pass reads this replica's rows, a page of 256 in the order of the table's key, and removes those older than 30 s for which it holds no seat |
@@ -1508,7 +1508,11 @@ following is applied to a remote principal on top of them:
   joiner's unavailable presence with status 333. One that entered after
   the undoing is told of an occupant it never saw, which clients ignore;
   one that left and entered again under the same full JID in between is
-  not told;
+  not told, nor is one that now holds the joiner's nickname, whose own
+  occupant JID that presence would name. The room is read once, within
+  2 s, for its occupants and the holders of the nickname together, and
+  the notices go out on a task of their own, so the router's bound on
+  deciding the join does not cut them short;
 - D8 at the request, for administration: the standing the room holds for a
   remote requester counts only as honoured for the stream that carried the
   request (above);
@@ -1930,9 +1934,9 @@ runbook (G24):
   occupant's child alone, is verification's; neither has been run.
 - **A slow room loses its joins.** Deciding one request, changing its
   seat and queueing its answer share 5 s. A join the room has not decided
-  by then ends the seat opened for it, and the occupant is told with
-  statuses 110 and 333 rather than answered with error presence; any other
-  request is left unanswered. A room whose actor is slower than that under
+  by then ends the seat opened for it and is answered with error presence
+  (`internal-server-error`, type `wait`); any other request is left
+  unanswered. A room whose actor is slower than that under
   load turns its remote occupants' joins away until it recovers.
 - **Joins where a replica carries requests.** A replica that carries
   requests to the room's holder cannot tell whether the sender of presence
