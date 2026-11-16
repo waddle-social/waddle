@@ -297,6 +297,48 @@ async fn a_nickname_change_keeps_the_occupancy_under_the_new_nickname() {
 }
 
 #[tokio::test]
+async fn joining_again_keeps_a_joined_occupancy_and_its_traffic() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+    // A client resynchronising joins again; the room's answer is slow.
+    muc.silence_joins();
+    let offered = offer(
+        &a,
+        Stanza::Presence(join_presence(ALICE_PHONE, ROOM_ALICE, "rejoin")),
+    )
+    .await;
+    assert!(matches!(offered, StanzaOffer::Accepted), "{offered:?}");
+    assert!(
+        wait_for(ARRIVES, || muc
+            .received_with_id("presence", "rejoin")
+            .into_iter()
+            .next())
+        .await
+        .is_some(),
+        "the join reaches the room"
+    );
+    // Room traffic sent meanwhile still reaches the occupant.
+    muc.send(message(
+        ROOM_HOST,
+        ALICE_PHONE,
+        MessageType::Groupchat,
+        "meanwhile",
+        "still here",
+    ));
+    assert!(
+        wait_for(ARRIVES, || delivered_messages(&a, ALICE_PHONE, "meanwhile")
+            .into_iter()
+            .next())
+        .await
+        .is_some(),
+        "the room's traffic is still admitted"
+    );
+    assert!(muc.received_with_id("message", "meanwhile").is_empty());
+    assert_eq!(a.router.remote_rooms(), 1);
+}
+
+#[tokio::test]
 async fn a_join_the_room_refuses_is_delivered_and_forgotten() {
     let pki = support::Pki::new();
     let (a, _b, _muc) = outbound_muc(&pki, RouterLimits::default()).await;

@@ -114,6 +114,7 @@ pub struct FakeMuc {
     occupants: Mutex<HashMap<BareJid, HashMap<FullJid, String>>>,
     reflected: Mutex<HashMap<String, Reflected>>,
     reflect_pings: AtomicBool,
+    silent_joins: AtomicBool,
 }
 
 impl FakeMuc {
@@ -127,6 +128,7 @@ impl FakeMuc {
             occupants: Mutex::new(HashMap::new()),
             reflected: Mutex::new(HashMap::new()),
             reflect_pings: AtomicBool::new(false),
+            silent_joins: AtomicBool::new(false),
         })
     }
 
@@ -161,6 +163,12 @@ impl FakeMuc {
     /// Reflect self-pings to the occupant instead of answering them.
     pub fn reflect_pings(&self) {
         self.reflect_pings.store(true, Ordering::SeqCst);
+    }
+
+    /// Leave further joins unanswered, as a room does whose answer is
+    /// still on its way.
+    pub fn silence_joins(&self) {
+        self.silent_joins.store(true, Ordering::SeqCst);
     }
 
     /// Everything the room service received.
@@ -240,6 +248,7 @@ impl FakeMuc {
             .iter()
             .any(|payload| payload.is("x", NS_MUC));
         match presence.type_ {
+            PresenceType::None if joining && self.silent_joins.load(Ordering::SeqCst) => {}
             PresenceType::None if joining => {
                 if room.to_string() == BUSY {
                     let mut refusal = Presence::new(PresenceType::Error);
