@@ -8,8 +8,9 @@ S2S routing and the host-grant restore incarnation through
 `0ac974978f2ba9a664b1964788f37e8fb2a6de18`, outbound S2S rooms through
 `9766d9c8175f09d56fff6f4e6f8c65b93b0984eb`, the host-grant revocation fence
 through `9b2e2d57ebd13329ddc045b2d1343f03b9619089`, and the effect boundary for
-remote principals through `c9111c714cfb821e571cc7f3b63d4a9ef37d11ba` (see the
-last refresh below); the original baseline and its limits remain unchanged.
+remote principals through `c9111c714cfb821e571cc7f3b63d4a9ef37d11ba`, merged
+with them in `763988ff0b1c466d659033ca398623cf9999fc11` (see the last refresh
+below); the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
 runtime behavior, authorization gate, schema, migration, CI job or activation.
@@ -59,8 +60,8 @@ revision. The [local test backend](../../crates/waddle-server/src/permissions/ac
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1548) invokes account reconciliation behind its
-lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L142) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L182) write
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1550) invokes account reconciliation behind its
+lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L143) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L183) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
 all-or-nothing graph/SQL transaction. [Topology seeding](../../crates/waddle-server/src/server/topology.rs#L109) also writes
@@ -88,7 +89,7 @@ capability cannot be reached again without a source change. The lexical token
 
 **W5 — MUC and channel administration (concrete).** The active MUC admin handler
 [persists managed-channel affiliation](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L106) through ReplaceExclusiveRelation
-before applying the room-actor batch. [Rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L207) uses expected
+before applying the room-actor batch. [Rollback](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L204) uses expected
 family state via SwapExclusiveRelation to avoid overwriting a later writer;
 a failed/lost reply can still require reconciliation with actor/durable state.
 Administrative channel commands are additional callers. Graph persistence,
@@ -251,7 +252,7 @@ backend, common snapshots, race ordering or production closure.
 | --- | --- | --- |
 | E1 | [write_and_delete_tuple_with_typed_payloads](../../crates/waddle-server/src/permissions/actor/tests.rs#L52) | Typed actor behavior; its helper uses an in-memory database/local backend, not SpiceDB. |
 | E2 | `owner_reseed_keeps_bans_skips_enrolled_spaces_and_refuses_remote_accounts` in `crates/waddle-server/tests/xep0045_host_grant_fence.rs` (outside the scan roots, so not anchored) | The seed keeps an Outcast on the in-memory and SQL stores, skips an enrolled Space node and refuses remote privileged seeds; executed in the writer fence's focused set (host-grant design, evidence of the writer fence). |
-| E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3597) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
+| E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3599) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
 | E4 | [database_deliverable_subscribers_excludes_outcast](../../crates/waddle-server/src/pubsub/tests.rs#L997) | Storage filtering; no post-capture fanout guarantee. |
 | E5 | [items authorization before backfill](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L3348), [repair only projected parent](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L4882) | Selected repair gates/selection; not all mutation interleavings or authority choice. |
 | E6 | [members-only join requires explicit affiliation](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L1145), [MAM denies non-member](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L5533) | Current action-specific entry semantics; test state uses local fixtures, not an inherited graph fence. |
@@ -647,6 +648,34 @@ the seventh to twelfth refreshes:
   documentation reference to `set_affiliation` beside it takes its place in
   the count. The rest moved lines. No production grant writer, grant store
   or acceptance authority was added.
+
+The selected evidence was refreshed a fourteenth time, through
+`763988ff0b1c466d659033ca398623cf9999fc11`, the merge of the effect boundary for remote
+principals with the revocation fence, after reviewing the merged tree against
+both of its parents:
+
+- The writer fence's gate (`hg-gate`, `hg-room-read`, `hg-admission` moved)
+  holds, in each managed room's decision, the replica's principal policy and
+  the revocation fence's ticket together. The ticket is asked in
+  `ManagedRoomGrants::allows_as` and `standing_as`, which the stream-less
+  `allows` and `standing` call, so a decision with stream evidence answers
+  nothing once its ticket is no longer current either. `still_allows` takes
+  the initiator's evidence and asks the same check; the room administration's
+  role list passes a local session's (none).
+- The revocation sweep (`hg-revocation-sweep`) reads each account's standing
+  and read access from the grants as stored under the principal policy,
+  without stream evidence; the ticket-free standing read is
+  `ManagedRoomGrants::standing_unfenced`. It writes what it wrote before.
+- The raw scan holds 1596 records. Against the revocation fence's parent, the
+  one record that changed is the effect boundary's own, described in the
+  thirteenth refresh (`HostGrantAuthority` records through
+  `set_affiliation_as`); against the effect boundary's parent, the records
+  that differ are those of the eighth to twelfth refreshes. The rest moved
+  lines; `startup`, `startup-schema`, `startup-call`, `bootstrap`,
+  `reconcile`, `topology`, `seed`, `admin-rollback`, `space-admin`,
+  `space-delete`, `claim`, `e-rollback`, `hg-bootstrap-d8`, `hg-topology` and
+  `hg-recovery` moved with them. No production grant writer, grant store or
+  acceptance authority was added.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
