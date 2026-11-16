@@ -710,6 +710,9 @@ struct Held {
     /// stanzas for the occupant that arrived meanwhile, kept until the
     /// join's own answer is queued so that they follow it (XEP-0045 §7.1).
     pending: Option<Vec<Stanza>>,
+    /// Whether a leave of the occupant was taken for this seat beyond its
+    /// account's allowance ([`SeatIndex::take_leave`]).
+    leave_taken: bool,
 }
 
 impl Held {
@@ -782,6 +785,7 @@ impl HeldSeats {
                 recent: VecDeque::new(),
                 copies: 0,
                 pending,
+                leave_taken: false,
             },
         );
         // A seat that replaces one of the same room and occupant is of the
@@ -936,6 +940,18 @@ impl SeatIndex {
             self.occupied.remove(room);
         }
         released
+    }
+
+    /// Take a leave of `occupant` for the seat it holds in `room` beyond
+    /// its account's allowance of such stanzas: `true` once for each seat
+    /// held here, and `false` when no seat is held or one was taken for it
+    /// already. A seat opened again by a later join is another seat.
+    pub fn take_leave(&self, room: &BareJid, occupant: &FullJid) -> bool {
+        let mut held = self.held();
+        let Some(held) = held.get_mut(room, occupant) else {
+            return false;
+        };
+        !std::mem::replace(&mut held.leave_taken, true)
     }
 
     /// Record the nickname the room now seats `occupant` under.

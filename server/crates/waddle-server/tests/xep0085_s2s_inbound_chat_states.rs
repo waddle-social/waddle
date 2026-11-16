@@ -11,7 +11,8 @@
 //! sender, and a copy beyond the bound is dropped rather than queued; a
 //! remote occupant's chat states count against its account's share of its
 //! domain's request rate, and one beyond the share is neither relayed nor
-//! answered.
+//! answered. A message that carries only a chat state, of any type, and a
+//! headline are never answered with an error.
 //!
 //! The deployments are those of `s2s_inbound_muc_support`: `example.com`
 //! runs the production room host, S2S router and connection manager over a
@@ -26,12 +27,16 @@ mod s2s_inbound_muc_support;
 
 use minidom::Element;
 use s2s_inbound_muc_support::{
-    body, error_condition, local_groupchat, local_payload, local_receives_payload,
-    remote_groupchat, remote_payload, room_with_remote_occupant, BOB, BOB_OCCUPANT, QUIET, ROOM,
+    body, error_condition, local_groupchat, local_payload, local_receives, local_receives_payload,
+    remote_groupchat, remote_payload, room_with_remote_occupant, ARRIVES, BOB, BOB_OCCUPANT, QUIET,
+    ROOM,
 };
 use waddle_server::s2s::route::RouterLimits;
+use xmpp_parsers::message::{Id, Message, MessageType};
 
 const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
+/// Alice's occupant JID in [`ROOM`].
+const ALICE_OCCUPANT: &str = "lounge@muc.example.com/alice";
 
 fn no_change(_: &mut s2s_inbound_muc_support::Spec) {}
 
@@ -158,4 +163,47 @@ async fn a_remote_occupants_chat_states_count_against_its_accounts_share_and_are
     }
     assert!(reflected < ids.len(), "every chat state was taken");
     assert!(hosted.seat(ROOM, BOB).is_some());
+}
+
+#[tokio::test]
+async fn a_lone_chat_state_or_a_headline_is_never_answered_with_an_error() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // A chat state alone in a private message to an occupant, which the
+    // service does not relay (XEP-0045 §7.5 private messages are not
+    // offered to remote occupants), and a headline to the room: neither is
+    // taken, and neither is answered.
+    let mut private = Message::new_with_type(
+        MessageType::Chat,
+        Some(s2s_inbound_muc_support::jid(ALICE_OCCUPANT)),
+    );
+    private.from = Some(s2s_inbound_muc_support::jid(BOB));
+    private.id = Some(Id("state-private".to_owned()));
+    private
+        .payloads
+        .push(Element::builder("composing", NS_CHATSTATES).build());
+    hosted.from_peer(private).await;
+    let mut headline = remote_groupchat(BOB, ROOM, "headline-1", "news");
+    headline.type_ = MessageType::Headline;
+    hosted.from_peer(headline).await;
+    // A message of the same room that follows is decided after both.
+    hosted
+        .from_peer(remote_groupchat(BOB, ROOM, "after-1", "after"))
+        .await;
+    let after = local_receives(&mut alice, ARRIVES, |stanza| {
+        body(stanza).as_deref() == Some("after")
+    })
+    .await;
+    assert!(after.is_some(), "the message that follows reaches the room");
+    tokio::time::sleep(QUIET).await;
+    for id in ["state-private", "headline-1"] {
+        assert!(
+            hosted
+                .captured
+                .with_id(id)
+                .iter()
+                .all(|stanza| stanza.attr("type") != Some("error")),
+            "{id}"
+        );
+    }
 }

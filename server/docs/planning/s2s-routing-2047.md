@@ -1043,7 +1043,7 @@ then is refused as above and removes it.
 | Presence without a type | An occupant JID | A join when the sender holds no seat in the room, otherwise a change of availability or nickname |
 | Unavailable presence | An occupant JID | A leave, for a sender that holds a seat |
 | `groupchat` message | A room's bare JID | From a sender that holds a seat, what it carries of the standard extensions is accepted (below); `not-acceptable` from any other sender (XEP-0045 §7.4). A subject change is put to the room only where the room lets every occupant change it or the sender's moderator standing is honoured for the stream, and is `forbidden` otherwise (§8.1), or `internal-server-error` (type `wait`) while the room's configuration cannot be read. `resource-constraint` (type `wait`) once the account has spent its allowance of archived messages. A message that carries nothing a room relays is neither relayed nor answered |
-| Any other message | A room or an occupant | `feature-not-implemented`: private messages, invitations, voice requests and declines |
+| Any other message | A room or an occupant | `feature-not-implemented`: private messages, invitations, voice requests and declines. A headline, and a message of any type that carries only a chat state or a marker, is neither taken nor answered |
 | `muc#admin` request | A room's bare JID | The affiliation and role lists and changes to them (kick, ban, role, affiliation), decided for the requester on its stream's evidence (below). `forbidden` without a standing the effect boundary honours, `not-allowed` for a change D8 does not issue, `item-not-found` for a room that is not federated |
 | `muc#owner` request | A room's bare JID | The configuration form, a configuration change and the room's destruction, for an owner whose standing is honoured; `forbidden` otherwise. A managed room is configured by its grants' `manage` and never destroyed by a request |
 | XEP-0425 `moderate` request | A room's bare JID | A moderator's retraction of another occupant's message, for a requester whose room moderation is honoured; `forbidden` otherwise, `bad-request` for an element that asks to retract nothing |
@@ -1530,7 +1530,9 @@ reached.
 | Stanzas one remote domain may address to the MUC service, on average and at once | 50 a second, 200 |
 | Of those, the stanzas of one remote account other than joins, on average and at once | 10 a second, 40 |
 | Of those, the available presence of one remote account to occupant JIDs (joins, changes of availability or nickname, entering again), on average and at once | 1 a second, 64 |
-| Refusals of an account's stanzas beyond its share that are answered, for one remote domain | 5 a second, 20 |
+| Of those, the leaves, errors and ignored presence of one remote account, on average and at once (beyond it they are dropped, except the first leave for each seat held here) | 10 a second, 40 |
+| Refusals of an account's stanzas beyond its share, and of requests for a full room, that are answered, for one remote domain | 5 a second, 20 |
+| Refusals of one remote account's joins beyond its share of presence that are answered (beyond it they are dropped) | 0.1 a second, 6 |
 | Rooms being placed at once on one replica, and for the requests of one remote domain | 64, 8 |
 | How long a request may wait for a place among the rooms being placed, how long asking the holder may take, and how long a room whose holder did not answer is answered without asking | 5 s, 5 s (4.5 s for the relay's own ask), 5 s |
 | Requests waiting for the room host on one replica (four workers of 256) | 1,024 |
@@ -1593,15 +1595,22 @@ on with the other rooms of the domain. A leave and a delivery error are
 not counted against their room's share, so they are never refused for
 it.
 
-A stanza beyond a share of its account is not taken at all: the domain's
-rate is not spent on it and its stream is not held, so one account cannot
-spend what the other accounts of its domain may send. An account has two
-shares. Requests, messages, chat states, markers and changes of
-availability or nickname count against the first; a leave and a delivery
-error are always taken. Available presence to an occupant JID counts
-against the second, its share of presence: joins, which count against
-nothing else, so that an account's other stanzas never cost it a join, and
-changes of availability or nickname. A join is presence that carries the
+A stanza beyond an allowance of its account is not taken at all: the
+domain's rate is not spent on it and its stream is not held, so one
+account cannot spend what the other accounts of its domain may send, nor
+hold the stream they share. Every allowance of the account is decided
+before the domain's rate, and a stanza beyond one is answered or dropped
+at once; only the domain's rate, which all its accounts spend together,
+makes a stream wait. An account has three allowances. Requests,
+messages, chat states, markers and changes of availability or nickname
+count against its share. Available presence to an occupant JID counts
+against its share of presence: joins, which count against nothing else,
+so that an account's other stanzas never cost it a join, and changes of
+availability or nickname. Leaves, errors (delivery errors among them) and
+presence the host ignores count against neither share but against an
+allowance of their own, at the rate and burst of the first share: beyond
+it they are dropped, except the first leave its sender sends for a seat
+this replica holds, which is always taken, once for each seat. A join is presence that carries the
 bare `muc` element (XEP-0045 §7.2.1), or, on a replica that decides every
 room itself, presence from a sender that holds no seat in the room; a
 replica that carries requests to other replicas cannot tell whether the
@@ -1610,15 +1619,20 @@ element is taken for a change.
 
 A refused request or message with content is answered with
 `resource-constraint` (type `wait`) within an allowance of such answers
-for the domain; a chat state, a marker and a change of presence are
-dropped unanswered, as is a request beyond that allowance. A join is
-never dropped (XEP-0045 §7.2): beyond its share it is answered with error
-presence (`resource-constraint`, type `wait`) within the same allowance,
-and once that is spent it waits, holding its stream, until the share
-allows it (at most a second by default), as a stanza beyond the domain's
-rate does. An answer still needs a place on the queue of its pair: one
-that finds none is lost with the pair's other traffic. Requests for one
-room are decided one at a time, in the order they arrived.
+for the domain, and so is a request for a room whose share of the queues
+is full; a chat state, a marker and a change of presence are dropped
+unanswered, as is a request beyond that allowance. A headline, and a
+message of any type that carries only a chat state or a marker, is never
+answered with an error, by the router or the host: what is not taken of
+it is dropped (RFC 6121 §8.5.2.2.1 for headlines). A join beyond its
+account's share of presence is answered with error presence
+(`resource-constraint`, type `wait`, XEP-0045 §7.2) within an allowance
+of such answers for the account (one for ten joins of the share's rate:
+six at once and one every ten seconds by default), and dropped once that
+is spent too; the client sees no answer to that join and retries it
+later. An answer still needs a place on the queue of its pair: one that
+finds none is lost with the pair's other traffic. Requests for one room
+are decided one at a time, in the order they arrived.
 
 One item of the workers that hand requests to the room host takes at
 most 5 s: deciding a request, opening or changing its seat, asking the
@@ -1928,6 +1942,25 @@ runbook (G24):
   enters every room it may at once fits, a client that changes its
   availability often across many rooms loses some of those changes, and
   its occupants then show an earlier availability.
+- **A join can go unanswered.** A join beyond its account's share of
+  presence is answered only while the account's own allowance of answers
+  lasts (six at once, one every ten seconds); after that it is dropped,
+  so that one account's joins never hold the stream its domain's other
+  accounts use. A client that sends joins faster than that waits for its
+  own join timeout and retries.
+- **An account's allowances are bounded by its domain's one at a time.**
+  Each of an account's allowances is at most its domain's, but their sum
+  is not bounded by it: with the defaults one account can spend
+  at most 21 of its domain's 50 stanzas a second and 144 of its 200 at
+  once. A configuration whose per-account rates add up to more than the
+  domain's lets one account spend its domain's rate, and the domain's
+  stream then waits for it as it waits for all its accounts together.
+- **Leaves beyond the allowance on a replica that carries requests.** The
+  first leave for a seat is taken beyond its account's allowance only on
+  the replica that holds the seat. A replica that carries requests to the
+  room's holder cannot tell that a seat is held there, so a leave beyond
+  the allowance it reads is dropped; the occupant stays seated until a
+  later leave is taken, its stream is lost or its seat ends otherwise.
 - **A stale seat row refuses an affiliation.** The admin command that sets
   a room affiliation reads the account's seats from the shared table. A row
   whose seat ended but whose removal failed refuses an owner or admin

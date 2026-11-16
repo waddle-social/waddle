@@ -1141,8 +1141,13 @@ impl Asked<'_> {
         if message.type_ == MessageType::Error {
             return RoomReplies::none();
         }
+        // A headline, or a message that carries only a chat state or a
+        // marker, is never answered with an error: what is not taken of
+        // it is dropped.
+        let unanswered = crate::s2s::route::is_unanswered_message(message);
         let room = match (message.type_.clone(), self.room(), self.to.resource()) {
             (MessageType::Groupchat, Some(room), None) => room,
+            _ if unanswered => return RoomReplies::none(),
             // Private messages, invitations, voice requests and declines.
             _ => {
                 return self.refuse(error(
@@ -1158,6 +1163,9 @@ impl Asked<'_> {
             .full()
             .filter(|_| self.request.seat.is_some())
         else {
+            if unanswered {
+                return RoomReplies::none();
+            }
             // XEP-0045 §7.4: only an occupant sends to the room.
             return self.refuse(error(
                 ErrorType::Modify,

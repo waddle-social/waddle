@@ -205,10 +205,15 @@ pub struct RouterLimits {
     /// count against the account's share of presence alone. A stanza
     /// beyond it is not taken, and the domain's rate is not spent on it, so
     /// one account cannot spend what the other accounts of its domain may
-    /// send. Never above the domain's rate.
+    /// send. The same rate, apart, bounds what no share counts: an
+    /// account's leaves, errors and presence the host ignores. One of
+    /// those beyond it is dropped, except the first leave for a seat this
+    /// replica holds, which is always taken. Never above the domain's
+    /// rate.
     pub room_request_rate_per_account: u32,
     /// How many such stanzas one remote account may send at once before
-    /// its rate applies. Never above the domain's burst.
+    /// its rate applies, for either allowance. Never above the domain's
+    /// burst.
     pub room_request_burst_per_account: u32,
     /// Of its domain's rate, the available presence one remote account may
     /// address to occupant JIDs a second, on average: joins, changes of
@@ -217,9 +222,10 @@ pub struct RouterLimits {
     /// against this and the account's other share; a join against this
     /// alone, so that an account's other stanzas never cost it a join. A
     /// change beyond it is dropped. A join beyond it is answered with
-    /// `resource-constraint` while its domain's allowance of answered
-    /// refusals lasts, and otherwise waits for it, holding its stream: a
-    /// join is never dropped. Never above the domain's rate.
+    /// `resource-constraint` while the account's own allowance of
+    /// answered refusals lasts (one for ten joins of this rate), and
+    /// dropped once that is spent too: one account's joins never hold its
+    /// domain's stream. Never above the domain's rate.
     pub room_presence_rate_per_account: u32,
     /// How many such presence stanzas one remote account may send at once
     /// before its rate applies: by default as many as the seats it may
@@ -448,7 +454,8 @@ struct Allowance {
     tokens: f64,
     refilled: Instant,
     /// For a remote domain: the refusals of its accounts' stanzas that may
-    /// still be answered.
+    /// still be answered. For an account's share of presence: the
+    /// refusals of its joins that may still be answered.
     refusals: f64,
 }
 
@@ -631,8 +638,13 @@ struct Inner {
     /// before `presence_allowances` when both are held.
     account_allowances: Mutex<HashMap<BareJid, Allowance>>,
     /// Each remote account's share of its domain's allowance for the
-    /// presence it addresses to occupant JIDs.
+    /// presence it addresses to occupant JIDs, with the refusals of its
+    /// joins that may still be answered. Taken before
+    /// `exempt_allowances` when both are held.
     presence_allowances: Mutex<HashMap<BareJid, Allowance>>,
+    /// Each remote account's allowance of the stanzas no share above
+    /// counts: leaves, errors and presence the host ignores.
+    exempt_allowances: Mutex<HashMap<BareJid, Allowance>>,
     /// Requests for local rooms waiting to be placed, where the room host
     /// keeps rooms on other replicas.
     placements: Placements,
@@ -744,6 +756,7 @@ impl S2sRouter {
             allowances: Mutex::new(HashMap::new()),
             account_allowances: Mutex::new(HashMap::new()),
             presence_allowances: Mutex::new(HashMap::new()),
+            exempt_allowances: Mutex::new(HashMap::new()),
             placements: Placements::new(PlacementBounds {
                 waiting: options.limits.room_requests,
                 waiting_per_room: room_requests_per_room,
@@ -3300,3 +3313,5 @@ impl PairWorker {
 }
 
 mod hosting;
+
+pub use hosting::is_unanswered_message;

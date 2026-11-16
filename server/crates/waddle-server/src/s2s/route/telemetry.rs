@@ -182,6 +182,29 @@ pub(super) fn room_request_account_limited() {
     );
 }
 
+/// A join for the MUC service was beyond its account's share of presence
+/// after the account's allowance of answered refusals was spent, and was
+/// dropped unanswered.
+pub(super) fn room_join_dropped() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.joins_dropped",
+        "{stanza}",
+        "Joins from S2S streams to the MUC service dropped unanswered because their account had spent its share of presence and its allowance of answered refusals.",
+        1,
+    );
+}
+
+/// A leave, an error or presence the host ignores was beyond its
+/// account's allowance of such stanzas, and was dropped.
+pub(super) fn room_request_exempt_dropped() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.exempt_dropped",
+        "{stanza}",
+        "Leaves, errors and ignored presence from S2S streams to the MUC service dropped because their account had spent its allowance of such stanzas.",
+        1,
+    );
+}
+
 /// The replica that holds a room did not answer within the placement
 /// timeout, and the request's sender was answered with an error.
 pub(super) fn room_placement_timed_out() {

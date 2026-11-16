@@ -15,8 +15,10 @@
 //! it once (§7.4); one account cannot spend its domain's request rate; and
 //! chat states are dropped before a seat ends. A room whose actor is slow
 //! holds no stream and ends no seat: what its share of the queues does not
-//! hold is answered at once. A join is never dropped for its account's
-//! share. A room restored on the replica that seats its occupants keeps
+//! hold is answered at once. A join beyond its account's share of presence
+//! is answered while the account's allowance of answers lasts, and neither
+//! one account's joins nor its leaves delay another account of the same
+//! domain. A room restored on the replica that seats its occupants keeps
 //! their seats, a seat whose join is still answered gets no notice when the
 //! replica stops, and an occupant of another server the room seats without
 //! a seat is removed.
@@ -41,7 +43,7 @@ use minidom::Element;
 use s2s_inbound_muc_support::routing::wait_for_async;
 use s2s_inbound_muc_support::{
     body, error_condition, jid, presence_between, remote_get, remote_groupchat, remote_join,
-    statuses, wait_for, ARRIVES, BOB, BOB_OCCUPANT, DOMAIN, HOME_B, MUC, QUIET, ROOM,
+    remote_leave, statuses, wait_for, ARRIVES, BOB, BOB_OCCUPANT, DOMAIN, HOME_B, MUC, QUIET, ROOM,
 };
 use scripted::{bare, full, own_unavailable, Scripted, ScriptedRooms, CAROL, GREETING};
 use waddle_server::destination::{RemoteRoute, SeatAdoption};
@@ -65,6 +67,8 @@ const SILENT_ROOM: &str = "attic@muc.example.com";
 const DAVE: &str = "dave@home-b.test/tablet";
 /// A second room.
 const STUDY: &str = "study@muc.example.com";
+/// A third room.
+const ATTIC: &str = "attic-room@muc.example.com";
 
 /// A replica name no router records as alive.
 const STOPPED: &str = "a-replica-that-stopped";
@@ -953,7 +957,7 @@ async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
 }
 
 #[tokio::test]
-async fn a_join_is_answered_and_not_dropped_beyond_its_accounts_shares() {
+async fn a_join_beyond_its_accounts_share_is_answered_while_its_answers_last() {
     let limits = RouterLimits {
         // One stanza at once of the account's share, and one join or
         // change of presence at once of its share of presence.
@@ -990,6 +994,158 @@ async fn a_join_is_answered_and_not_dropped_beyond_its_accounts_shares() {
     );
     assert!(hosted.host.handled_with("join-2").is_empty());
     assert!(hosted.seat(STUDY, BOB).is_none());
+    // The account's allowance of answered refusals (one at once) is spent:
+    // a third join at once is dropped, and its stream goes on.
+    hosted
+        .home_b
+        .send(remote_join(BOB, ATTIC, "bob", "join-3"))
+        .await;
+    hosted
+        .home_b
+        .send(remote_get(DAVE, MUC, "ping-dave", ping()))
+        .await;
+    let answered = hosted.home_b.answered("ping-dave").await;
+    assert_eq!(answered.attr("type"), Some("result"), "{answered:?}");
+    tokio::time::sleep(QUIET).await;
+    assert!(hosted.home_b.captured.with_id("join-3").is_empty());
+    assert!(hosted.host.handled_with("join-3").is_empty());
+}
+
+/// How long another account's request may take to be answered behind one
+/// account's flood: far less than the flood would hold a stream that
+/// waited for the flooding account's allowances.
+const PROMPTLY: Duration = Duration::from_secs(2);
+
+#[tokio::test]
+async fn one_accounts_joins_do_not_delay_another_account_of_its_domain() {
+    let limits = RouterLimits {
+        // A domain with one answered refusal at once, and an account with
+        // one join and one answered refusal at once, then one join a
+        // second.
+        room_request_burst: 10,
+        room_presence_rate_per_account: 1,
+        room_presence_burst_per_account: 1,
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-join-flood", limits).await;
+    hosted
+        .home_b
+        .send(remote_join(BOB, ROOM, "bob", "flood-0"))
+        .await;
+    hosted.seated(ROOM, BOB).await;
+    // Twelve joins at once beyond the account's share of presence: had
+    // they waited for it they would hold the stream a second each.
+    let flood: Vec<String> = (1..=12).map(|index| format!("flood-{index}")).collect();
+    for (index, id) in flood.iter().enumerate() {
+        let room = format!("room-{index}@{MUC}");
+        hosted.home_b.send(remote_join(BOB, &room, "bob", id)).await;
+    }
+    let sent = tokio::time::Instant::now();
+    hosted
+        .home_b
+        .send(remote_get(DAVE, MUC, "ping-dave", ping()))
+        .await;
+    let answered = tokio::time::timeout(PROMPTLY, hosted.home_b.answered("ping-dave"))
+        .await
+        .expect("another account of the domain is answered promptly");
+    assert_eq!(answered.attr("type"), Some("result"), "{answered:?}");
+    assert!(sent.elapsed() < PROMPTLY);
+    tokio::time::sleep(QUIET).await;
+    // One refusal is answered and the others are dropped; at most the
+    // joins the share allowed again while the flood arrived, one a second,
+    // reached a room.
+    let refused = flood
+        .iter()
+        .filter(|id| !hosted.home_b.captured.with_id(id).is_empty())
+        .count();
+    assert_eq!(refused, 1);
+    let taken = flood
+        .iter()
+        .filter(|id| !hosted.host.handled_with(id).is_empty())
+        .count();
+    assert!(taken <= 2, "{taken}");
+}
+
+#[tokio::test]
+async fn one_accounts_leaves_do_not_delay_another_account_of_its_domain() {
+    let limits = RouterLimits {
+        // A domain whose rate allows ten stanzas at once and one a second,
+        // and an account whose leaves and errors are allowed two at once.
+        room_request_rate: 1,
+        room_request_burst: 10,
+        room_request_rate_per_account: 1,
+        room_request_burst_per_account: 2,
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-leave-flood", limits).await;
+    // Leaves for rooms the account holds no seat in: had each spent the
+    // domain's rate, the stream would wait a second for each beyond ten.
+    for index in 0..30 {
+        let id = format!("leave-{index}");
+        hosted
+            .home_b
+            .send(remote_leave(
+                BOB,
+                &format!("room-{index}@{MUC}"),
+                "bob",
+                &id,
+            ))
+            .await;
+    }
+    let sent = tokio::time::Instant::now();
+    hosted
+        .home_b
+        .send(remote_get(DAVE, MUC, "ping-dave", ping()))
+        .await;
+    let answered = tokio::time::timeout(PROMPTLY, hosted.home_b.answered("ping-dave"))
+        .await
+        .expect("another account of the domain is answered promptly");
+    assert_eq!(answered.attr("type"), Some("result"), "{answered:?}");
+    assert!(sent.elapsed() < PROMPTLY);
+    tokio::time::sleep(QUIET).await;
+    // Two were taken at once, and at most one more for the second the
+    // flood may have taken to arrive; the others were dropped before the
+    // room host.
+    let taken = hosted
+        .host
+        .handled()
+        .iter()
+        .filter(|handled| {
+            handled
+                .id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("leave-"))
+        })
+        .count();
+    assert!((2..=3).contains(&taken), "{taken}");
+}
+
+#[tokio::test]
+async fn a_seats_first_leave_is_taken_beyond_its_accounts_allowance() {
+    let limits = RouterLimits {
+        room_request_burst_per_account: 1,
+        room_request_rate_per_account: 1,
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-held-leave", limits).await;
+    with_bob(&hosted).await;
+    // A leave for a room without a seat spends the account's allowance.
+    hosted
+        .home_b
+        .send(remote_leave(BOB, STUDY, "bob", "leave-study"))
+        .await;
+    // The leave for the seat it holds is taken all the same, once.
+    hosted
+        .home_b
+        .send(remote_leave(BOB, ROOM, "bob", "leave-1"))
+        .await;
+    assert!(hosted.unseated(ROOM, BOB).await);
+    assert!(!hosted.host.handled_with("leave-1").is_empty());
+    hosted
+        .home_b
+        .received(is_own_departure)
+        .await
+        .expect("the room's answer to the leave");
 }
 
 #[tokio::test]
