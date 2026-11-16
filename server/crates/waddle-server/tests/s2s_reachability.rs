@@ -5,8 +5,9 @@
 //! `service-unavailable`, presence is ignored and no error is answered.
 //! The MUC service, which D10 enables, is reached only on a replica that
 //! hosts rooms for remote occupants, and only for the operations reviewed
-//! for a remote principal; the Spaces PubSub service refuses until its
-//! handlers are reviewed. The identity profile
+//! for a remote principal; the Spaces PubSub service likewise only on a
+//! replica that serves its Spaces to remote principals, and only for the
+//! IQ requests reviewed for one. The identity profile
 //! applies to every address a stanza carries (gate G10): a refused spelling
 //! is answered with `jid-malformed`, with the stanza's own id, except in
 //! presence, which is dropped unanswered, and the stream stays open.
@@ -31,7 +32,7 @@ use support::{
 use waddle_server::destination::ServedService;
 use waddle_server::s2s::route::{
     reach as reach_with, InboundReach, LocalRooms, LocalTarget, Reachable, Refusal, RoomOperation,
-    RoomReplies, RoomRequest, RouterLimits, Seat, SeatEnd, SqlSeatStore,
+    RoomReplies, RoomRequest, RouterLimits, Seat, SeatEnd, SpaceOperation, SqlSeatStore,
 };
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::xep::xep0199::NS_PING;
@@ -220,7 +221,10 @@ const NS_MODERATE: &str = "urn:xmpp:message-moderate:1";
 
 #[test]
 fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_operations() {
-    let hosting = Reachable { rooms: true };
+    let hosting = Reachable {
+        rooms: true,
+        spaces: false,
+    };
     let muc = LocalTarget::Service(ServedService::Muc);
     let request = |payload: Element| {
         Stanza::Iq(Box::new(Iq::Get {
@@ -303,6 +307,118 @@ fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_
     assert_eq!(
         reach_with(LocalTarget::AccountBare, &request(ping_payload()), hosting),
         InboundReach::Refused(Refusal::AccountTraffic)
+    );
+}
+
+const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+
+/// ADR-0020 D10: the Spaces PubSub service is reached only on a replica
+/// that serves its Spaces to remote principals, and only for the IQ
+/// requests reviewed for one (XEP-0503 over XEP-0060, XEP-0030, XEP-0199).
+#[test]
+fn the_spaces_service_is_reached_only_where_spaces_are_hosted_and_only_for_reviewed_requests() {
+    let hosting = Reachable {
+        rooms: false,
+        spaces: true,
+    };
+    let spaces = LocalTarget::Service(ServedService::Spaces);
+    let request = |payload: Element| {
+        Stanza::Iq(Box::new(Iq::Get {
+            from: Some(jid(BOB)),
+            to: None,
+            id: "r".into(),
+            payload,
+        }))
+    };
+    let set = |payload: Element| {
+        Stanza::Iq(Box::new(Iq::Set {
+            from: Some(jid(BOB)),
+            to: None,
+            id: "r".into(),
+            payload,
+        }))
+    };
+    let pubsub = |namespace: &str| Element::builder("pubsub", namespace).build();
+    for (stanza, operation) in [
+        (request(query(DISCO_INFO_NS)), SpaceOperation::DiscoInfo),
+        (request(query(DISCO_ITEMS_NS)), SpaceOperation::DiscoItems),
+        (request(ping_payload()), SpaceOperation::Ping),
+        // Item retrieval, and subscribing, unsubscribing, publishing and
+        // retracting. Reaching the host admits nothing: it decides each for
+        // the principal on its stream's evidence.
+        (request(pubsub(NS_PUBSUB)), SpaceOperation::PubSub),
+        (set(pubsub(NS_PUBSUB)), SpaceOperation::PubSub),
+        (request(pubsub(NS_PUBSUB_OWNER)), SpaceOperation::Owner),
+        (set(pubsub(NS_PUBSUB_OWNER)), SpaceOperation::Owner),
+    ] {
+        assert_eq!(
+            reach_with(spaces, &stanza, hosting),
+            InboundReach::Space(operation)
+        );
+        // Without a Spaces host the whole service refuses.
+        assert_eq!(
+            reach(spaces, &stanza),
+            InboundReach::Refused(Refusal::AwaitingReview(ServedService::Spaces))
+        );
+    }
+    // Every other request, every IQ response, and every message and
+    // presence: the service takes requests only, and sends none.
+    let response = Stanza::Iq(Box::new(Iq::Result {
+        from: Some(jid(BOB)),
+        to: None,
+        id: "r".into(),
+        payload: None,
+    }));
+    let failed = Stanza::Iq(Box::new(Iq::Error {
+        from: Some(jid(BOB)),
+        to: None,
+        id: "r".into(),
+        payload: None,
+        error: StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::ItemNotFound,
+            "en",
+            "No.",
+        ),
+    }));
+    for stanza in [
+        set(query(DISCO_INFO_NS)),
+        set(ping_payload()),
+        request(query("jabber:iq:register")),
+        request(query("vcard-temp")),
+        set(query("http://jabber.org/protocol/commands")),
+        request(Element::builder("event", "http://jabber.org/protocol/pubsub#event").build()),
+        response,
+        failed,
+        Stanza::Message(chat(SPACES, "r")),
+        Stanza::Presence(available(SPACES, "r")),
+    ] {
+        assert_eq!(
+            reach_with(spaces, &stanza, hosting),
+            InboundReach::Refused(Refusal::SpaceRequest)
+        );
+    }
+    // Hosting Spaces opens nothing else.
+    assert_eq!(
+        reach_with(
+            LocalTarget::Service(ServedService::Muc),
+            &request(query(DISCO_INFO_NS)),
+            hosting
+        ),
+        InboundReach::Refused(Refusal::AwaitingReview(ServedService::Muc))
+    );
+    assert_eq!(
+        reach_with(LocalTarget::AccountBare, &request(ping_payload()), hosting),
+        InboundReach::Refused(Refusal::AccountTraffic)
+    );
+    assert_eq!(
+        reach_with(
+            LocalTarget::Service(ServedService::Upload),
+            &request(pubsub(NS_PUBSUB)),
+            hosting
+        ),
+        InboundReach::Refused(Refusal::NotEnabled(ServedService::Upload))
     );
 }
 
@@ -474,7 +590,7 @@ async fn services_not_enabled_for_remote_senders_refuse_them() {
 }
 
 #[tokio::test]
-async fn muc_without_a_room_host_and_spaces_refuse_remote_senders() {
+async fn muc_without_a_room_host_and_spaces_without_a_spaces_host_refuse_remote_senders() {
     let (_a, b, captured, _pki) = deployments(&[MUC, SPACES]).await;
     let (muc, spaces) = (MUC, SPACES);
     send(&b, HOME_B, muc, get(muc, "m1", query(DISCO_INFO_NS))).await;

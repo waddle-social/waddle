@@ -296,6 +296,13 @@ impl Hosted {
         send(peer, HOME_B, MUC, stanza).await;
     }
 
+    /// Send `stanza` from `home-b.test` to `service`, another S2S domain
+    /// of `example.com` that the case added to its specification.
+    pub async fn peer_sends_to(&self, service: &str, stanza: impl Into<Element>) {
+        let peer = self.peer.as_ref().expect("the peer is running");
+        send(peer, HOME_B, service, stanza).await;
+    }
+
     /// Shut `home-b.test` down: its streams end with a stream error.
     pub async fn stop_peer(&mut self) {
         if let Some(peer) = self.peer.take() {
