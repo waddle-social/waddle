@@ -383,6 +383,15 @@ def load_snapshot_gate(source):
     return module
 
 
+def benchmark_lane():
+    # ci/runner-benchmark selects one of flake.nix's benchmarkShardLanes. The
+    # unset default is the production lane, the only one that is evidence.
+    lane = os.environ.get('WADDLE_NEXTEST_BENCHMARK_LANE', '')
+    if lane and not re.fullmatch(r'[0-9a-z]+(-[0-9a-z]+)*', lane):
+        raise InputError(f'invalid WADDLE_NEXTEST_BENCHMARK_LANE: {lane!r}')
+    return lane
+
+
 def build_record(candidate, run_id, source, identities, required_path, diagnostics, gate):
     reports = [Path(item['output_path']) / f'junit-{selection}.xml'
                for item in identities for selection in ('whole', 'shared')]
@@ -443,6 +452,7 @@ def atomic_write(path, record):
 
 def run(root, diagnostics):
     sidecar = diagnostics / 'qualification-evidence.json'
+    lane = benchmark_lane()
     candidate = check_candidate(root)
     run_id = secrets.token_hex(32)
     if not re.fullmatch(r'[0-9a-f]{64}', run_id):
@@ -479,12 +489,14 @@ def run(root, diagnostics):
     # relative to the working directory, so 'path:/nix/store/...#attr' under
     # /nix/store/<source>/server names the source store path itself.
     archive = store_path(command(['bash', str(source / 'server/scripts/build-nextest-archive.sh'),
-                                  f'{flake}#waddle-server-test-archive'], cwd=root / 'server').strip())
+                                  f'{flake}#waddle-server-test-archive' + (f'-bench-{lane}' if lane else '')],
+                                 cwd=root / 'server').strip())
     for name in ('ci-performance/cargo-timing.html', 'partition-coverage.json', 'plan.json'):
         atomic_copy(STORE_DIR, archive, Path(name), diagnostics / Path(name).name)
     wrapper = source / 'server/scripts/qualification-shards.nix'
     drvs = command(['nix-instantiate', '--store', 'daemon', str(wrapper), '--argstr', 'sourcePath', str(source),
-                    '--argstr', 'candidateSha', candidate, '--argstr', 'runId', run_id]).splitlines()
+                    '--argstr', 'candidateSha', candidate, '--argstr', 'runId', run_id,
+                    *(['--argstr', 'lane', lane] if lane else [])]).splitlines()
     identities, input_outputs = derivation_identities(drvs, source, candidate, run_id)
     reject_existing_outputs(identities)
     # Realise the shards' dependencies first, from binary caches where
@@ -509,7 +521,11 @@ def run(root, diagnostics):
     record = build_record(candidate, run_id, source, identities,
                           source / 'server/.config/required-cluster-tests.txt', diagnostics, gate)
     check_candidate(root, candidate)
-    atomic_write(sidecar, record)
+    if lane:
+        # Same tests and gate, but another machine shape: never evidence.
+        print(f'Benchmark lane {lane}: qualification evidence not written')
+    else:
+        atomic_write(sidecar, record)
     print(f"All {record['required_test_gate']['required_count']} required tests executed and passed")
 
 

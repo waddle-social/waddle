@@ -45,6 +45,7 @@ def input_drv(name): return 'g' * 32 + '-' + name + '.drv'
 if os.path.basename(sys.argv[0]) == 'nix-instantiate':
     d = {'source': value('sourcePath'), 'candidate': value('candidateSha'), 'run': value('runId')}
     (diag / 'nix-state.json').write_text(json.dumps(d))
+    (diag / 'instantiate-args.json').write_text(json.dumps(args))
     for i in range(1, 5): print(drv(i))
     sys.exit(0)
 if args[:2] == ['store', 'info']:
@@ -213,6 +214,26 @@ raise SystemExit(r.main())
         except subprocess.TimeoutExpired:
             process.kill()
             return process.communicate()
+
+    def test_benchmark_lane_selects_its_shards_and_writes_no_evidence(self):
+        self.env['WADDLE_NEXTEST_BENCHMARK_LANE'] = '16x32-j8'
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.diag / 'instantiate-args.json').read_text())
+        self.assertEqual(args[args.index('lane') + 1], '16x32-j8')
+        self.assertIn('Benchmark lane 16x32-j8: qualification evidence not written', result.stdout)
+        self.assertFalse((self.diag / 'qualification-evidence.json').exists())
+
+    def test_production_lane_passes_no_lane_argument(self):
+        self.assertEqual(self.run_shards().returncode, 0)
+        self.assertNotIn('lane', json.loads((self.diag / 'instantiate-args.json').read_text()))
+
+    def test_invalid_benchmark_lane_is_rejected_before_building(self):
+        self.env['WADDLE_NEXTEST_BENCHMARK_LANE'] = '16x32"; evil'
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('invalid WADDLE_NEXTEST_BENCHMARK_LANE', result.stderr)
+        self.assertFalse((self.diag / 'build-args.json').exists())
 
     def test_all_four_isolated_shards_are_required_and_evidence_is_retained(self):
         result = self.run_shards()

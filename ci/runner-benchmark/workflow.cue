@@ -1,0 +1,166 @@
+package runnerbenchmark
+
+import (
+	"list"
+	wc "github.com/waddle-social/waddle/ci/contributors"
+)
+
+// Runs the PR Rust shard lane (ci/rust-tests) on several Namespace machine
+// shapes and reports what each used of the machine it asked for. Variants
+// run one at a time, without `job.priority`, so the benchmark never holds
+// more than one machine and ordinary CI is scheduled ahead of it.
+//
+// A pull request runs it when the `ci-benchmark` label is added; add the
+// label again to measure a newer commit.
+let _checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+let _download = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+let _usage = "python3 scripts/ci-machine-usage.py"
+
+// `lane` names a flake.nix benchmarkShardLanes entry; empty is production.
+let _variants = [
+	{variant: "32x64", lane: "", vcpu: 32, memory: 64},
+	{variant: "32x64-j16", lane: "32x64-j16", vcpu: 32, memory: 64},
+	{variant: "16x32", lane: "16x32", vcpu: 16, memory: 32},
+	{variant: "16x32-j8", lane: "16x32-j8", vcpu: 16, memory: 32},
+	{variant: "8x32", lane: "8x32", vcpu: 8, memory: 32},
+]
+
+// The same setup as the lane being measured.
+let _setupSteps = [
+	{
+		name: "Checkout"
+		uses: _checkout
+		with: "fetch-depth": 0
+	},
+	{
+		name:  "Start machine usage sampler"
+		shell: "bash"
+		run:   "nohup \(_usage) sample --output \"$RUNNER_TEMP/samples.jsonl\" >/dev/null 2>&1 &"
+	},
+	for contributor in [wc.#Nix, wc.#FlakeHubCache, wc.#Hestia]
+	for task in contributor.tasks {
+		name: task.label
+		uses: task.provider.github.uses
+		with: task.provider.github.with
+	},
+]
+
+workflow: {
+	name: "waddle-ci-runner-benchmark"
+	on: {
+		pull_request: types: ["labeled"]
+		workflow_dispatch: {}
+	}
+	concurrency: {
+		// Keyed by label too: another label added to the pull request must
+		// not cancel a running benchmark.
+		group:                "${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ github.event.label.name || 'dispatch' }}"
+		"cancel-in-progress": true
+	}
+	permissions: {}
+	jobs: {
+		contracts: {
+			name:              "runner-benchmark/contracts"
+			if:                "${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'ci-benchmark' }}"
+			"runs-on":         "ubuntu-24.04"
+			"timeout-minutes": 5
+			permissions: contents: "read"
+			steps: [
+				{name: "Checkout", uses: _checkout},
+				{name: "Validate measurement contracts", run: "python3 scripts/test-ci-machine-usage.py"},
+			]
+		}
+		lane: {
+			name: "runner-benchmark/${{ matrix.variant }}"
+			needs: ["contracts"]
+			"runs-on": [
+				"nscloud-ubuntu-24.04-amd64-${{ matrix.vcpu }}x${{ matrix.memory }}-with-features",
+				"namespace-features:container.privileged=true",
+			]
+			"timeout-minutes": 75
+			permissions: {contents: "read", "id-token": "write"}
+			strategy: {
+				"fail-fast":    false
+				"max-parallel": 1
+				matrix: include: _variants
+			}
+			steps: list.Concat([_setupSteps, [
+				{
+					name:                "Compile and run four isolated test shards"
+					id:                  "lane"
+					shell:               "bash"
+					"working-directory": "server"
+					env: WADDLE_NEXTEST_BENCHMARK_LANE: "${{ matrix.lane }}"
+					run: #"""
+						set -euo pipefail
+						started=$(date +%s)
+						status=0
+						timeout --kill-after=2m 55m bash scripts/run-nextest-shards.sh 2>&1 |
+						  python3 ../scripts/ci-machine-usage.py tee --log "$RUNNER_TEMP/lane.log" || status=$?
+						echo "$(($(date +%s) - started))" > "$RUNNER_TEMP/lane-seconds"
+						exit "$status"
+						"""#
+				},
+				{
+					name:  "Report machine usage"
+					if:    "${{ !cancelled() }}"
+					shell: "bash"
+					env: {
+						VARIANT: "${{ matrix.variant }}"
+						VCPU:    "${{ matrix.vcpu }}"
+						MEMORY:  "${{ matrix.memory }}"
+						OUTCOME: "${{ steps.lane.outcome }}"
+					}
+					run: #"""
+						set -euo pipefail
+						mkdir -p "$RUNNER_TEMP/report"
+						touch "$RUNNER_TEMP/samples.jsonl" "$RUNNER_TEMP/lane.log"
+						\#(_usage) report --samples "$RUNNER_TEMP/samples.jsonl" --log "$RUNNER_TEMP/lane.log" \
+						  --variant "$VARIANT" --vcpu "$VCPU" --memory-gib "$MEMORY" --outcome "${OUTCOME:-skipped}" \
+						  --lane-seconds "$(cat "$RUNNER_TEMP/lane-seconds" 2>/dev/null || echo 0)" \
+						  --output "$RUNNER_TEMP/report/$VARIANT.json"
+						grep -h 'WADDLE_CI_METRIC' "$RUNNER_TEMP/lane.log" | grep -v 'phase=linker_verified' \
+						  > "$RUNNER_TEMP/report/$VARIANT.metrics.txt" || true
+						cp "$RUNNER_TEMP/samples.jsonl" "$RUNNER_TEMP/report/$VARIANT.samples.jsonl"
+						\#(_usage) summarize "$RUNNER_TEMP/report" >> "$GITHUB_STEP_SUMMARY"
+						"""#
+				},
+				{
+					name: "Upload measurements"
+					if:   "${{ !cancelled() }}"
+					uses: _upload
+					with: {
+						name:                "runner-benchmark-${{ matrix.variant }}"
+						path:                "${{ runner.temp }}/report"
+						"if-no-files-found": "error"
+					}
+				},
+			]])
+		}
+		summary: {
+			name: "runner-benchmark/summary"
+			needs: ["lane"]
+			if:                "${{ !cancelled() && needs.lane.result != 'skipped' }}"
+			"runs-on":         "ubuntu-24.04"
+			"timeout-minutes": 5
+			permissions: contents: "read"
+			steps: [
+				{name: "Checkout", uses: _checkout},
+				{
+					name: "Download measurements"
+					uses: _download
+					with: {
+						pattern:          "runner-benchmark-*"
+						path:             "measurements"
+						"merge-multiple": true
+					}
+				},
+				{
+					name: "Compare runner shapes"
+					run:  "\(_usage) summarize measurements | tee -a \"$GITHUB_STEP_SUMMARY\""
+				},
+			]
+		}
+	}
+}
