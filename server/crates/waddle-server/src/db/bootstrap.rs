@@ -64,6 +64,39 @@ pub enum SharedOwnerBootstrapError {
     NotificationOutbox(#[source] NotificationOutboxError),
 }
 
+/// How long owner startup keeps retrying outbox preparation that timed out.
+const OUTBOX_PREPARATION_BUDGET: Duration = Duration::from_secs(30);
+
+/// Prepare the legacy notification outbox, retrying a bounded wait.
+///
+/// Each preparation transaction has the ingress writer's 100 ms budget, which
+/// a busy database or host can exceed while nothing is wrong. Preparation is
+/// what every startup runs, so running it again is what a restarted process
+/// would do; exiting on the first timeout only moves that retry to the
+/// supervisor. Any other error, and a timeout that outlasts the budget, still
+/// fails startup.
+async fn prepare_legacy_outbox_within_startup_budget(
+    database: &Database,
+) -> Result<crate::notification_outbox::PreparedLegacyOwnerOutbox, NotificationOutboxError> {
+    let deadline = tokio::time::Instant::now() + OUTBOX_PREPARATION_BUDGET;
+    let mut delay = Duration::from_millis(100);
+    loop {
+        match NotificationOutboxStore::prepare_legacy_owner_shared(database).await {
+            Err(NotificationOutboxError::Ancestry(
+                crate::ingress_uow::IngressUowError::Timeout,
+            )) if tokio::time::Instant::now() + delay < deadline => {
+                tracing::warn!(
+                    retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "legacy notification outbox owner preparation timed out; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Bootstrap the ordinary owner path, then seal its one physical PostgreSQL
 /// pool into main and ingress admission classes before any handle escapes.
 /// MAM uses the current legacy initializer, on an owned connection detached
@@ -113,7 +146,7 @@ pub async fn bootstrap_shared_owner_postgres(
         .await
         .map_err(SharedOwnerBootstrapError::Push)?;
     drop(push);
-    let prepared_outbox = NotificationOutboxStore::prepare_legacy_owner_shared(&database)
+    let prepared_outbox = prepare_legacy_outbox_within_startup_budget(&database)
         .await
         .map_err(SharedOwnerBootstrapError::NotificationOutbox)?;
 
