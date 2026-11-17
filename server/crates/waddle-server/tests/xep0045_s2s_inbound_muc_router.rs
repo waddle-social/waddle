@@ -981,8 +981,8 @@ async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
 /// `internal-server-error` (type `wait`), and one beyond the lists a
 /// replica builds at once with `resource-constraint`. A request the host
 /// does not decide in time is answered as its kind is: an IQ with
-/// `internal-server-error`, a seated occupant's change of presence not at
-/// all, and its seat stands.
+/// `internal-server-error`, a self-ping with `remote-server-timeout`, a
+/// seated occupant's change of presence not at all, and its seat stands.
 #[tokio::test]
 async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answered() {
     let limits = RouterLimits {
@@ -1052,6 +1052,23 @@ async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answer
             Some("wait".to_owned()),
         ),
         "{ping_answer:?}"
+    );
+
+    // A seated occupant's self-ping (XEP-0410) the host did not decide in
+    // time is answered with the one error §4 has a client take no decision
+    // from, so it neither leaves nor enters again on it.
+    hosted
+        .home_b
+        .send(remote_get(BOB, BOB_OCCUPANT, "held-self-ping", ping()))
+        .await;
+    let self_ping = hosted.home_b.answered("held-self-ping").await;
+    assert_eq!(
+        condition_and_type(&self_ping),
+        (
+            Some("remote-server-timeout".to_owned()),
+            Some("wait".to_owned()),
+        ),
+        "{self_ping:?}"
     );
 
     // A seated occupant's change of presence is not answered, though the
