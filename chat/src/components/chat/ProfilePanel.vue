@@ -5,7 +5,7 @@ import { Popover } from "@ark-ui/vue/popover";
 import type { PopoverOpenChangeDetails, PopoverRootProps } from "@ark-ui/vue/popover";
 import { Bell, BellOff, LogOut, Settings, SlidersHorizontal, Volume2, VolumeX } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
-import { badge, iconbtn } from "styled-system/recipes";
+import { iconbtn } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import PresencePicker from "@/components/chat/PresencePicker.vue";
@@ -24,8 +24,6 @@ const props = defineProps<{
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
   messageSoundsEnabled?: boolean;
-  totalUnreadCount?: number;
-  totalMentionCount?: number;
   compact?: boolean;
   /** Where the account popover opens relative to its trigger. Defaults
    * to below the avatar in compact (header) mode, above the account row
@@ -50,17 +48,9 @@ const bellTitle = computed(() => {
   return "Enable notifications";
 });
 
-const bellAriaLabel = computed(() => {
-  const base = bellTitle.value;
-  if ((props.totalMentionCount ?? 0) > 0) return `${base}, ${props.totalMentionCount} unread mention${props.totalMentionCount === 1 ? "" : "s"} in channels`;
-  if ((props.totalUnreadCount ?? 0) > 0) return `${base}, ${props.totalUnreadCount} unread message${props.totalUnreadCount === 1 ? "" : "s"} in channels`;
-  return base;
-});
-
 const bellOff = computed(() =>
   props.notificationPermission === "denied" || (props.notificationPermission === "granted" && !props.notificationsEnabled),
 );
-const bellCount = computed(() => (props.totalMentionCount ?? 0) || (props.totalUnreadCount ?? 0));
 
 const accountMenuLabel = computed(() => `${props.session.username} — Account menu`);
 
@@ -133,8 +123,6 @@ const caption = css({ textStyle: "caption", color: "fg.muted", overflow: "hidden
 const separator = css({ height: "1px", bg: "border.soft", mx: "1", my: "1" });
 const row = cx(menuClasses.item, css({ _hover: { bg: "state.hover" } }));
 const dangerRow = cx(row, css({ "&, & svg": { color: "danger.text" } }));
-const grow = css({ flex: 1 });
-const countBadge = badge();
 const version = css({ px: "3", pt: "1" });
 // Footer trigger (Sidebar board): avatar + bold name + status caption.
 const footer = css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0, flex: 1 });
@@ -158,8 +146,7 @@ const footerButton = css({
 const footerText = css({ minWidth: 0, display: "flex", flexDirection: "column", "& b": { fontSize: "sm", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
 const compactRow = css({ position: "relative", display: "flex", alignItems: "center", gap: "1" });
 const iconButton = iconbtn();
-const bellButton = cx(iconButton, css({ position: "relative", _disabled: { opacity: 0.4, cursor: "not-allowed" } }));
-const bellBadge = cx(badge(), css({ position: "absolute", top: "-2px", right: "-2px" }));
+const bellButton = cx(iconButton, css({ _disabled: { opacity: 0.4, cursor: "not-allowed" } }));
 </script>
 
 <template>
@@ -168,13 +155,12 @@ const bellBadge = cx(badge(), css({ position: "absolute", top: "-2px", right: "-
       <button
         :class="bellButton"
         type="button"
-        :aria-label="bellAriaLabel"
+        :aria-label="bellTitle"
         :disabled="notificationPermission === 'denied'"
         @click="handleBellClick"
       >
         <BellOff v-if="bellOff" aria-hidden="true" />
         <Bell v-else aria-hidden="true" />
-        <span v-if="bellCount > 0" :class="bellBadge" aria-hidden="true">{{ bellCount }}</span>
       </button>
     </AppTooltip>
     <Popover.Root
@@ -216,14 +202,12 @@ const bellBadge = cx(badge(), css({ position: "absolute", top: "-2px", right: "-
             <button
               :class="row"
               type="button"
-              :aria-label="bellAriaLabel"
               :disabled="notificationPermission === 'denied'"
               @click="handleBellClick"
             >
               <BellOff v-if="bellOff" aria-hidden="true" />
               <Bell v-else aria-hidden="true" />
-              <span :class="grow">{{ bellTitle }}</span>
-              <span v-if="bellCount > 0" :class="countBadge" aria-hidden="true">{{ bellCount }}</span>
+              <span>{{ bellTitle }}</span>
             </button>
             <button
               :class="row"

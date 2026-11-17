@@ -23,6 +23,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openNav: [];
+  markRead: [roomJid: string, threadId?: string];
 }>();
 
 const { groups, isLoading, error, refresh } = useUnreadOverview({
@@ -33,8 +34,7 @@ const { groups, isLoading, error, refresh } = useUnreadOverview({
 });
 
 const countClass = badge();
-const refreshButtonClass = btn({ size: "sm" });
-const openButtonClass = btn({ size: "sm" });
+const smallButtonClass = btn({ size: "sm" });
 const loaderClass = waddle();
 const spinClass = css({ _motionSafe: { animation: "spin 1s linear infinite" } });
 
@@ -50,6 +50,7 @@ const cardHeadClass = css({
 });
 const cardTitleClass = css({ margin: 0, flex: 1, minWidth: 0, font: "700 15px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const messagesClass = css({ display: "flex", flexDirection: "column" });
+const previewStatusClass = css({ margin: 0, px: "4", py: "2", color: "fg.muted", fontSize: "sm" });
 const threadClass = css({ borderTop: "1px solid {colors.border.soft}" });
 const threadButtonClass = css({
   display: "flex",
@@ -76,6 +77,11 @@ const hasGroups = computed(() => groups.value.length > 0);
 const isRefreshingInbox = ref(false);
 const isRefreshBusy = computed(() => isLoading.value || isRefreshingInbox.value);
 
+function markRoomRead(group: (typeof groups.value)[number]) {
+  if (group.channelUnreadCount > 0) emit("markRead", group.roomJid);
+  for (const thread of group.threads) emit("markRead", group.roomJid, thread.threadId);
+}
+
 async function refreshUnread() {
   if (isRefreshBusy.value) return;
   isRefreshingInbox.value = true;
@@ -99,7 +105,7 @@ async function refreshUnread() {
         </div>
         <button
           type="button"
-          :class="refreshButtonClass"
+          :class="smallButtonClass"
           :disabled="isRefreshBusy"
           aria-label="Refresh unread"
           @click="refreshUnread()"
@@ -141,10 +147,17 @@ async function refreshUnread() {
             >{{ group.channelUnreadCount }}</span>
             <button
               type="button"
-              :class="openButtonClass"
+              :class="smallButtonClass"
               :aria-label="`Open ${group.channelName}`"
               @click="props.onSelectChannel(group.channelId)"
             >Open</button>
+            <button
+              type="button"
+              :class="smallButtonClass"
+              :aria-label="`Mark ${group.channelName} as read`"
+              :disabled="isRefreshBusy"
+              @click="markRoomRead(group)"
+            >Mark as read</button>
           </header>
 
           <div v-if="group.channelMessages.length > 0" :class="messagesClass">
@@ -154,6 +167,7 @@ async function refreshUnread() {
               :message="message"
             />
           </div>
+          <p v-else-if="group.channelUnreadCount > 0" :class="previewStatusClass">Message previews unavailable.</p>
 
           <div
             v-for="thread in group.threads"
@@ -172,13 +186,14 @@ async function refreshUnread() {
                 :aria-label="`${thread.unreadCount} unread`"
               >{{ thread.unreadCount }}</span>
             </button>
-            <div :class="messagesClass">
+            <div v-if="thread.messages.length > 0" :class="messagesClass">
               <UnreadMessageRow
                 v-for="message in thread.messages"
                 :key="message.id"
                 :message="message"
               />
             </div>
+            <p v-else :class="previewStatusClass">Message previews unavailable.</p>
           </div>
         </section>
       </template>

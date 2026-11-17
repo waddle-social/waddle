@@ -627,6 +627,15 @@ function onAdminNavigate(match: AdminMatch) {
 function onAdminBack() {
   openHome();
 }
+function markInboxRead(roomJid: string, threadId?: string) {
+  if (threadId) {
+    channelUnread.markThreadRead(roomJid, threadId);
+  } else {
+    channelUnread.markRead(roomJid);
+    messaging.clearChannelActivity(roomJid);
+  }
+}
+
 /** A page header's sidebar button. On phones the sidebar is the home
  * screen (Mobile-Home board), so it goes back there; wider screens keep
  * the drawer, though their sidebar is always visible. */
@@ -915,6 +924,7 @@ async function recoverSupersededFromShell() {
         :on-select-channel="(id: string) => selectChannel(id)"
         :on-select-thread="onSelectThread"
         :on-refresh-inbox="channelUnread.hydrateFromInbox"
+        @mark-read="markInboxRead"
         @open-nav="openNav"
       />
       <RoomsPage

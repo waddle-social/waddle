@@ -19,6 +19,7 @@ import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import { isForumChannel } from "@/lib/channel-types";
+import { selectUnreadRoomCandidates } from "@/lib/unread-overview-state";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 import { buildHref, type RouteMatch } from "@/router";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -83,11 +84,11 @@ const activeView = computed<ViewId | null>(() => {
   }
 });
 
-function viewCount(id: ViewId): number {
-  // Inbox holds Unread and Discussions, so its count covers thread replies too.
-  if (id === "inbox") return channelUnread.totalMentionCount.value || channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value;
-  return 0;
-}
+const inboxCount = computed(() =>
+  selectUnreadRoomCandidates(channelUnread.inboxState.value, waddles.sortedChannels.value)
+    .reduce((total, room) =>
+      total + room.channelUnread + room.threads.reduce((sum, thread) => sum + thread.unread, 0), 0),
+);
 
 const communityName = computed(() =>
   waddles.currentSpace.value?.name ?? waddles.sortedSpaces.value[0]?.name ?? "Waddle",
@@ -256,7 +257,7 @@ const dockClass = css({ flex: "none", padding: "{spacing.1.5} {spacing.2.5} 0", 
       >
         <component :is="view.icon" aria-hidden="true" />
         <span class="wd-room__name">{{ view.label }}</span>
-        <span v-if="viewCount(view.id) > 0" :class="badge()" :aria-label="`${viewCount(view.id)} unread`">{{ viewCount(view.id) }}</span>
+        <span v-if="view.id === 'inbox' && inboxCount > 0" :class="badge()" :aria-label="`${inboxCount} unread`">{{ inboxCount }}</span>
       </a>
 
       <slot name="live" />
@@ -332,8 +333,6 @@ const dockClass = css({ flex: "none", padding: "{spacing.1.5} {spacing.2.5} 0", 
         :notification-permission="notifications.permissionState.value"
         :notifications-enabled="notifications.notificationsEnabled.value"
         :message-sounds-enabled="notifications.messageSoundsEnabled.value"
-        :total-unread-count="channelUnread.totalUnreadCount.value"
-        :total-mention-count="channelUnread.totalMentionCount.value"
         :web-commit-sha="version.webCommitSha.value"
         :server-version="version.serverVersion.value"
         placement="top-start"
