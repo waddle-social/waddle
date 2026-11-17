@@ -719,23 +719,23 @@ fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) 
 /// room's own host reads it for every request
 /// ([`super::s2s_rooms::room_open_to_other_servers`]): from the room's
 /// actor where this replica holds one, and otherwise from the channel
-/// catalog. A room that cannot be told now is not told.
-async fn room_open(state: &WebSocketState, room: &BareJid) -> bool {
-    super::s2s_rooms::room_open_to_other_servers(state, room).await == Some(true)
+/// catalog. `None` when that cannot be told now; such a room is not told.
+async fn room_open(state: &WebSocketState, room: &BareJid) -> Option<bool> {
+    super::s2s_rooms::room_open_to_other_servers(state, room).await
 }
 
 /// Whether the grants of `room` let the remote principal `account`,
 /// deciding on `evidence`, be told of it: always for a room no enrolled
 /// host-grant scope manages, which describes itself to any admitted asker,
 /// and for a managed room only where its canonical grants admit the
-/// principal to view it on that evidence. A room that cannot be decided now
-/// is not told.
+/// principal to view it on that evidence. `None` when that cannot be
+/// decided now; such a room is not told.
 async fn room_admits(
     state: &WebSocketState,
     room: &BareJid,
     account: &BareJid,
     evidence: &PrincipalEvidence,
-) -> bool {
+) -> Option<bool> {
     match state
         .deps
         .app_state
@@ -748,22 +748,26 @@ async fn room_admits(
         )
         .await
     {
-        RoomGate::Unmanaged => true,
-        RoomGate::Managed(allowed) => allowed,
-        RoomGate::Unavailable => false,
+        RoomGate::Unmanaged => Some(true),
+        RoomGate::Managed(allowed) => Some(allowed),
+        RoomGate::Unavailable => None,
     }
 }
 
 /// Whether a remote principal `account`, deciding on `evidence`, may be
 /// told of `room` as a child of a Space: what the room's own host would
-/// tell it ([`room_open`] and [`room_admits`]).
+/// tell it ([`room_open`] and [`room_admits`]). `None` when either cannot
+/// be told now.
 async fn room_visible(
     state: &WebSocketState,
     room: &BareJid,
     account: &BareJid,
     evidence: &PrincipalEvidence,
-) -> bool {
-    room_open(state, room).await && room_admits(state, room, account, evidence).await
+) -> Option<bool> {
+    match room_open(state, room).await {
+        Some(true) => room_admits(state, room, account, evidence).await,
+        closed_or_unknown => closed_or_unknown,
+    }
 }
 
 impl Asked<'_> {
@@ -874,11 +878,13 @@ impl Asked<'_> {
 
     /// Whether this asker may be told of the Space item `item`: a bookmark
     /// of a room it may be told of. Nothing else a Space holds is served to
-    /// a remote principal.
-    async fn child_visible(&self, id: &str, payload: Option<&Element>) -> bool {
+    /// a remote principal. `None` when whether the room is open to other
+    /// servers, or its grants, cannot be read now: the item is not told,
+    /// and a listing that left it out tells no count.
+    async fn child_visible(&self, id: &str, payload: Option<&Element>) -> Option<bool> {
         match bookmarked_room(self.state, id, payload) {
             Some(room) => room_visible(self.state, &room, &self.account, &self.evidence).await,
-            None => false,
+            None => Some(false),
         }
     }
 
@@ -1019,7 +1025,9 @@ impl Asked<'_> {
     /// read, as a read of its items reads them; a room among older items of
     /// a Space that holds more is not listed to accounts at other servers,
     /// and such a listing tells no count, since what it left out is not
-    /// known. The rooms are sorted by item ID and paged with XEP-0059.
+    /// known. Nor does a listing that left out a room whose openness to
+    /// other servers or grants could not be read now. The rooms are sorted
+    /// by item ID and paged with XEP-0059.
     async fn children(&self, node: String, rsm: Option<&SetQuery>) -> Vec<Stanza> {
         let space = match self.open(&node).await {
             Ok(space) => space,
@@ -1043,7 +1051,7 @@ impl Asked<'_> {
             return self.refuse(internal());
         };
         let most = usize::try_from(MAX_RETURNED_ITEMS).unwrap_or(usize::MAX);
-        let complete = stored.len() <= most;
+        let mut complete = stored.len() <= most;
         if !complete {
             stored.drain(..stored.len() - most);
         }
@@ -1056,12 +1064,14 @@ impl Asked<'_> {
             if item.payload.is_none() {
                 continue;
             }
-            if self.child_visible(&id, item.payload.as_ref()).await {
-                items.push(xmpp_parsers::disco::Item {
+            match self.child_visible(&id, item.payload.as_ref()).await {
+                Some(true) => items.push(xmpp_parsers::disco::Item {
                     jid: Jid::from(self.service.clone()),
                     node: None,
                     name: Some(id),
-                });
+                }),
+                Some(false) => {}
+                None => complete = false,
             }
         }
         items.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1168,7 +1178,7 @@ impl Asked<'_> {
         for item in &stored {
             let item = item.to_pubsub_item();
             let told = match item.id.as_deref() {
-                Some(id) => self.child_visible(id, item.payload.as_ref()).await,
+                Some(id) => self.child_visible(id, item.payload.as_ref()).await == Some(true),
                 None => false,
             };
             if told {
@@ -1640,7 +1650,7 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
     };
     // Whether the room is open to other servers is the same for every
     // subscriber: a room that is not is told to none of them.
-    if !room_open(state, &room).await {
+    if room_open(state, &room).await != Some(true) {
         return;
     }
     // The service's own record, read for this publication just before the
@@ -1667,7 +1677,7 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
         let sent = !state.serves(account)
             && deliverable.contains(account)
             && subscriber_reads(state, service, &node, account, &evidence).await
-            && room_admits(state, &room, account, &evidence).await
+            && room_admits(state, &room, account, &evidence).await == Some(true)
             && state.deps.remote_route.space_event(
                 service,
                 &subscriber,

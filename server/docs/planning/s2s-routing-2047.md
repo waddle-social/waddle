@@ -2421,7 +2421,9 @@ left out.
   Space's 256 most recently published items are read, as a read of its
   items reads them: a room among older items of a Space that holds more is
   not listed to accounts at other servers, and such a listing carries its
-  `<set/>` with no count, since what the read left out is not known. The
+  `<set/>` with no count, since what the read left out is not known. A
+  room whose openness to other servers or whose grants cannot be read now
+  is left out, and that listing tells no count either. The
   Spaces service's own listing tells no count either when more than 256
   Spaces are open to other servers, or when a Space could not be decided
   now and was left out.
@@ -2480,8 +2482,9 @@ the same pinned commit. A `<set/>` that is not well formed is
   of a slow room answered (scripted host);
 - `crates/waddle-server/tests/xep0503_s2s_inbound_spaces.rs`: a Space's
   node lists the rooms a remote asker may be told of, in pages, refuses
-  a banned account, and tells no count once the Space holds more than the
-  256 items read;
+  a banned account, tells no count once the Space holds more than the
+  256 items read, and tells no count while a room's openness to other
+  servers cannot be read;
 - `crates/waddle-server/tests/xep0503_s2s_inbound_spaces_host_grant.rs`: a
   managed room in a Space's node listing only for the member (PostgreSQL);
 - `crates/waddle-server/tests/xep0503_spaces_ws.rs`: a Space's node lists
@@ -3128,8 +3131,6 @@ runbook (G24):
   service's listing, page through a listing that does not fit in one
   answer, and take one that tells no count as incomplete
   (`chat/src/lib/xmpp/discovery.ts` reads only the items).
-- MUC fallback, a remote Space node listing: tell no count when a room's
-  openness or grants could not be read, as the MUC service's listing does.
 - Spaces, a federated setting for single peers: the setting opens a Space
   to every admitted domain.
 - Spaces, the web client: offer the `federated` field in a Space's
