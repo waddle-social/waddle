@@ -2124,8 +2124,9 @@ A room leaves a Space in other ways than a retract of its bookmark, and
 each notifies the Space's subscribers, here and at other servers, once the
 bookmark's retraction stands, as the retract does: a publish that places
 the room in another Space (the Spaces it moved out of), and the admin
-commands that delete a channel, update one so that it moves to another
-Space, and delete a Space (its rooms, before its node is deleted). Admin
+commands that delete a channel, update one (which takes its bookmark out
+of every Space other than the one it is linked to), and delete a Space
+(its rooms, before its node is deleted). Admin
 commands reach the fan-out through the WebSocket state that startup binds
 to the application state (`AppState::notify_space_retracted`). The
 retraction of a group conversation's bookmark from a member's XEP-0402
