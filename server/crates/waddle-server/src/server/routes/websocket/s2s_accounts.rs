@@ -41,7 +41,6 @@ use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
-use waddle_xmpp::carbons::CARBONS_NS;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::muc::presence::NS_MUC_USER;
@@ -51,10 +50,7 @@ use waddle_xmpp::protocol::dm_routing::{classify_dm_intake, OnlineResources, Pen
 use waddle_xmpp::protocol::Blocklist;
 use waddle_xmpp::pubsub::{NS_PUBSUB, NS_PUBSUB_EVENT};
 use waddle_xmpp::roster::Subscription;
-use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
-use waddle_xmpp::xep::{NS_INBOX, NS_WADDLE_INBOX};
 use waddle_xmpp::Stanza;
-use waddle_xmpp_core::mam::MAM_NS;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -70,6 +66,7 @@ use crate::db::s2s_accounts::{
 use crate::db::Database;
 use crate::destination::{ServedDomains, UnservedDestination};
 use crate::permissions::host_grant::PrincipalEvidence;
+use crate::s2s::remote_content::{sanitize_message, RemoteSource};
 use crate::s2s::route::{AccountWork, LocalAccounts, RemotePrincipal};
 use crate::server::routes::interpret::{
     deliver_peer_to_full_with_registered_remote, FullJidDeliveryOutcome,
@@ -597,63 +594,6 @@ fn refuse_message(state: &WebSocketState, message: &Message) -> Vec<Stanza> {
     vec![Stanza::Message(reply)]
 }
 
-/// Remove from a remote message the payloads only this server originates
-/// for its own accounts: the inbox elements, the DM pin marker, the
-/// XEP-0280 `<received/>` and `<sent/>` wrappers of carbon copies and the
-/// XEP-0313 `<result/>` wrapper of archive results, the stanza ids it
-/// could have assigned ([`strip_local_stanza_ids`]), and the XEP-0511 link
-/// metadata and link-preview requests a local sender's message has
-/// stripped before this server stamps its own card. A carbon or an archive
-/// result names the account's own traffic; one from a remote sender is a
-/// forgery a client could take for its own (XEP-0280 §11). A client trusts
-/// a link card as this server's (it promotes an inline video to a player
-/// only for a URL a card names), so a remote sender's card is removed as a
-/// local client's is, and no card is stamped in its place: this server
-/// resolves no preview for a remote sender.
-fn strip_private_payloads(message: &mut Message, served: Option<&ServedDomains>) {
-    strip_local_stanza_ids(message, served);
-    waddle_xmpp::xep::strip_link_preview_requests(message);
-    waddle_xmpp::xep::strip_link_metadata(message);
-    message.payloads.retain(|payload| {
-        let namespace = payload.ns();
-        namespace != NS_INBOX
-            && namespace != NS_WADDLE_INBOX
-            && namespace != NS_WADDLE_PIN_V0
-            && !payload.is("received", CARBONS_NS)
-            && !payload.is("sent", CARBONS_NS)
-            && !payload.is("result", MAM_NS)
-    });
-}
-
-/// Remove from a remote message every XEP-0359 `<stanza-id/>` this
-/// deployment could have assigned: one whose `by` names an address at a
-/// domain it serves (the recipient account's archive among them), or that
-/// cannot be read as an address. A client takes an id in its own
-/// account's name for the one its archive gave the message, so a remote
-/// sender must not supply it; an entity that assigns stanza ids deletes
-/// one whose `by` it would set (XEP-0359 §3); the recipient pass replaces
-/// only an id in the name it stamps itself, and a stored message has not
-/// met it yet. An id a remote entity assigned in its own name is left, as
-/// a routing entity leaves it (§3). Without the served domains every
-/// `<stanza-id/>` is removed.
-fn strip_local_stanza_ids(message: &mut Message, served: Option<&ServedDomains>) {
-    message.payloads.retain(|payload| {
-        if !payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID) {
-            return true;
-        }
-        let Some(served) = served else {
-            return false;
-        };
-        let Some(by) = payload.attr("by").and_then(|by| by.parse::<Jid>().ok()) else {
-            return false;
-        };
-        matches!(
-            served.classify(Some(&by)).unserved(),
-            Some(UnservedDestination::Remote(_))
-        )
-    });
-}
-
 /// The nodes the XEP-0060 event notifications in `message` name, if it
 /// carries any: one entry for each child of each `<event/>`, `None` for a
 /// child that names no node (§7.1.2: `items`, `purge`, `delete`,
@@ -708,7 +648,7 @@ async fn receive_message(
         {
             return Vec::new();
         }
-        strip_private_payloads(&mut message, served.as_ref());
+        sanitize_message(&mut message, served.as_ref(), RemoteSource::Account);
         deliver_headline(
             state,
             &account,
@@ -721,7 +661,7 @@ async fn receive_message(
         .await;
         return Vec::new();
     }
-    strip_private_payloads(&mut message, served.as_ref());
+    sanitize_message(&mut message, served.as_ref(), RemoteSource::Account);
     match message.type_ {
         MessageType::Error => {
             if let Some(full) = full.as_ref() {
