@@ -66,6 +66,20 @@ impl From<String> for NotificationOutboxJobId {
     }
 }
 
+/// Selection and limit for one notification outbox drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainBatch {
+    pub scope: DrainScope,
+    pub batch_size: usize,
+}
+
+/// Classes selected by a notification outbox sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainScope {
+    All,
+    CallsOnly,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationClass {
     DirectMessage,

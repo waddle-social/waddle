@@ -1103,3 +1103,32 @@ pub fn direct_notification_candidate_from_envelope_for_test(
         archive_stanza_id,
     )
 }
+
+/// Run the production notification loops with an explicit timer for wake tests.
+/// The returned tasks can be aborted by the fixture when its assertions finish.
+#[cfg(feature = "test-support")]
+pub fn spawn_notification_loops(
+    state: &Arc<WebSocketState>,
+    interval: std::time::Duration,
+) -> [tokio::task::JoinHandle<()>; 2] {
+    [
+        tokio::spawn(
+            crate::server::session_janitors::run_notification_outbox_loop(
+                Arc::downgrade(state),
+                interval,
+                state.deps.protocol.ingress.notification_outbox_wake(),
+                128,
+                7,
+                128,
+            ),
+        ),
+        tokio::spawn(
+            crate::server::session_janitors::run_push_service_publish_job_loop(
+                Arc::downgrade(state),
+                interval,
+                state.deps.protocol.push_service.publish_job_wake(),
+                128,
+            ),
+        ),
+    ]
+}

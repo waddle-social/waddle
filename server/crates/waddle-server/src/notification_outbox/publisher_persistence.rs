@@ -8,9 +8,10 @@ use super::publish::{
     PublishFailure, PublishFailureClass, MAX_OUTBOX_ATTEMPTS,
 };
 use super::{
-    decode_outbox_job, BareJid, Element, InboxStorage, NotificationOutboxError,
-    NotificationOutboxJob, NotificationOutboxStatus, NotificationOutboxStore, PubSubItem, Row,
-    STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED,
+    decode_outbox_job, BareJid, DrainScope, Element, InboxStorage, NotificationClass,
+    NotificationOutboxError, NotificationOutboxJob, NotificationOutboxStatus,
+    NotificationOutboxStore, PubSubItem, Row, STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED,
+    STATUS_QUEUED,
 };
 use crate::db::DatabaseDriver;
 use crate::ingress_substrate::DefinerApiCandidateContext;
@@ -244,6 +245,7 @@ impl NotificationOutboxStore {
 
     pub(super) async fn persist_due_outbox_selection(
         &self,
+        scope: DrainScope,
         batch_size: usize,
         now_ms: i64,
         stale_claimed_before_ms: i64,
@@ -272,14 +274,15 @@ impl NotificationOutboxStore {
                        approved_publish_options_xml,
                        queue_acceptance_may_exist
                 FROM notification_outbox
-                WHERE (
+                WHERE ((
                     status = ?
                     AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
                 ) OR (
                     status = ?
                     AND claimed_at_ms IS NOT NULL
                     AND claimed_at_ms <= ?
-                )
+                ))
+                  AND (? = 1 OR class = ?)
                 ORDER BY created_at_ms ASC, job_id ASC
                 LIMIT ?
                 "#,
@@ -288,6 +291,8 @@ impl NotificationOutboxStore {
                     now_ms,
                     STATUS_IN_PROGRESS,
                     stale_claimed_before_ms,
+                    scope == DrainScope::All,
+                    NotificationClass::Call.as_db_value(),
                     batch_size,
                 ],
             )

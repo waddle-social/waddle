@@ -68,10 +68,10 @@ pub(crate) use publisher_persistence::retire_registration_outbox_tx;
 pub use runtime_attach::NotificationOutboxRuntimeAttachError;
 pub(crate) use types::SuppressedReason;
 pub use types::{
-    NotificationCandidateInsertOutcome, NotificationClass, NotificationOutboxError,
-    NotificationOutboxJob, NotificationOutboxJobId, NotificationOutboxPruneOutcome,
-    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxTarget,
-    NotificationReason, NotificationThreadId, PushServiceNodeName,
+    DrainBatch, DrainScope, NotificationCandidateInsertOutcome, NotificationClass,
+    NotificationOutboxError, NotificationOutboxJob, NotificationOutboxJobId,
+    NotificationOutboxPruneOutcome, NotificationOutboxPublishOutcome, NotificationOutboxStatus,
+    NotificationOutboxTarget, NotificationReason, NotificationThreadId, PushServiceNodeName,
 };
 
 // Internal wiring: children import shared sibling items through this facade.

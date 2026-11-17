@@ -28,7 +28,7 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0353::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_ringing,
-    jmi_media, jmi_propose, CallOffer, JingleMI, NS_JINGLE_MESSAGE,
+    is_bodyless_jmi_signal, jmi_media, jmi_propose, CallOffer, JingleMI, NS_JINGLE_MESSAGE,
 };
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -60,6 +60,35 @@ fn jmi_envelope(to: &jid::Jid, body: Element) -> Element {
 fn xep_0353_namespace_matches_spec() {
     assert_eq!(NS_JINGLE_MESSAGE, "urn:xmpp:jingle-message:0");
     assert_eq!(NS_JINGLE_MESSAGE, xmpp_parsers::ns::JINGLE_MESSAGE);
+}
+
+#[test]
+fn xep_0353_bodyless_signal_recognition_is_namespace_and_envelope_scoped() {
+    let mut message = Message::new(None::<jid::Jid>);
+    message
+        .payloads
+        .push(Element::builder("retract", NS_JINGLE).build());
+    assert!(!is_bodyless_jmi_signal(&message));
+    message
+        .payloads
+        .push(Element::builder("future-signal", NS_JINGLE_MESSAGE).build());
+    assert!(!is_bodyless_jmi_signal(&message));
+    message
+        .payloads
+        .push(build_retract(SessionId("call".into())).into());
+    assert!(is_bodyless_jmi_signal(&message));
+    message.bodies.insert("en".into(), "call update".into());
+    assert!(!is_bodyless_jmi_signal(&message));
+    message.bodies.clear();
+    message
+        .payloads
+        .push(Element::builder("propose", NS_JINGLE).build());
+    assert!(is_bodyless_jmi_signal(&message));
+    message.payloads.push(build_propose(
+        SessionId("call".into()),
+        CallOffer::audio_only(),
+    ));
+    assert!(!is_bodyless_jmi_signal(&message));
 }
 
 // ── §3 propose — one <description/> per offered media kind ───────────

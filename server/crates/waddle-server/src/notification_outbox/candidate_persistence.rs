@@ -7,8 +7,8 @@ use super::{
     decode_candidate, decode_sender_jids, encode_sender_jids, lock_outbox_ancestry_tx,
     policy_retry_delay_ms, require_full_sender_jid, require_full_sender_jid_set,
     require_sender_matches_conversation, require_sender_set_contains_scalar,
-    require_sender_set_matches_conversation, settle_outbox_if_unowned_tx, Element,
-    NotificationCandidate, NotificationOutboxError, NotificationOutboxJobId,
+    require_sender_set_matches_conversation, settle_outbox_if_unowned_tx, DrainScope, Element,
+    NotificationCandidate, NotificationClass, NotificationOutboxError, NotificationOutboxJobId,
     NotificationOutboxStore, NotificationOutboxTarget, RichSummary, Row, SuppressedReason,
     STATUS_FAILED, STATUS_QUEUED,
 };
@@ -148,7 +148,7 @@ impl NotificationOutboxStore {
         batch_size: usize,
     ) -> Result<Vec<NotificationCandidate>, NotificationOutboxError> {
         Ok(self
-            .pending_candidate_rows(batch_size)
+            .pending_candidate_rows(DrainScope::All, batch_size)
             .await?
             .into_iter()
             .map(|(candidate, _)| candidate)
@@ -157,6 +157,7 @@ impl NotificationOutboxStore {
 
     pub(super) async fn pending_candidate_rows(
         &self,
+        scope: DrainScope,
         batch_size: usize,
     ) -> Result<Vec<(NotificationCandidate, i64)>, NotificationOutboxError> {
         let batch_size = batch_size.clamp(1, 1_000);
@@ -185,6 +186,7 @@ impl NotificationOutboxStore {
                 WHERE outboxed_at_ms IS NULL
                   AND quarantined_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
+                  AND (? = 1 OR class = ?)
                 ORDER BY created_at_ms ASC,
                          recipient_bare_jid ASC,
                          conversation_jid ASC,
@@ -195,7 +197,12 @@ impl NotificationOutboxStore {
                          class ASC
                 LIMIT ?
                 "#,
-                crate::db_params![crate::time::now_ms(), batch_size as i64],
+                crate::db_params![
+                    crate::time::now_ms(),
+                    scope == DrainScope::All,
+                    NotificationClass::Call.as_db_value(),
+                    batch_size as i64,
+                ],
             )
             .await?;
         let mut candidates = Vec::new();

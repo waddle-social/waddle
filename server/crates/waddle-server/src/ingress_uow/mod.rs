@@ -126,6 +126,7 @@ pub(super) const DEFINER_API_PAGE_SIZE: i64 = 256;
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 use crate::config::LineageConfig;
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
@@ -153,6 +154,8 @@ pub enum IngressFencing {
 /// Dialect-aware factory for ingress transactions bound to one lineage policy.
 #[derive(Clone)]
 pub struct IngressUnitOfWork {
+    /// Local scheduling hint shared by every transaction from this authority.
+    notification_outbox_wake: Arc<Notify>,
     observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
     db: Arc<Database>,
     standalone_receipt_writer: StandaloneReceiptWriter,
@@ -188,6 +191,10 @@ enum EpochPreparation<'g> {
 }
 
 impl IngressUnitOfWork {
+    pub(crate) fn notification_outbox_wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.notification_outbox_wake)
+    }
+
     pub(crate) fn database(&self) -> &Database {
         &self.db
     }
@@ -215,6 +222,7 @@ impl IngressUnitOfWork {
         let db = Arc::new(db);
         let standalone_receipt_writer = StandaloneReceiptWriter::from_shared(Arc::clone(&db));
         Ok(Self {
+            notification_outbox_wake: Arc::new(Notify::new()),
             observations: Default::default(),
             db,
             standalone_receipt_writer,
@@ -527,6 +535,7 @@ impl IngressUnitOfWork {
         };
 
         Ok(IngressUowTransaction {
+            notification_outbox_wake: self.notification_outbox_wake(),
             observations: self.observations.load(std::sync::atomic::Ordering::Acquire),
             entry,
             lineage,
@@ -554,6 +563,7 @@ pub enum IngressLineage {
 /// There is intentionally no rollback method: dropping this value without
 /// [`Self::commit`] rolls back the underlying database transaction.
 pub struct IngressUowTransaction<'a> {
+    notification_outbox_wake: Arc<Notify>,
     observations: bool,
     /// Emit candidate hand-offs only after the owning transaction commits.
     recorded_notification_candidates: Vec<(StanzaId, NotificationClass)>,
@@ -731,6 +741,9 @@ impl<'a> IngressUowTransaction<'a> {
     pub async fn commit(self) -> Result<(), IngressUowError> {
         self.entry.commit().await?;
         for (stanza_id, notification_class) in self.recorded_notification_candidates {
+            if notification_class == NotificationClass::Call {
+                self.notification_outbox_wake.notify_one();
+            }
             tracing::info!(
                 stanza_id = stanza_id.id.as_str(),
                 notification_class = notification_class.as_db_value(),

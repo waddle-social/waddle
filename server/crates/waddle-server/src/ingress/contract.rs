@@ -97,6 +97,10 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    pub(crate) fn notification_outbox_wake(&self) -> Arc<tokio::sync::Notify> {
+        self.uow.notification_outbox_wake()
+    }
+
     pub(crate) fn bind_receipt_fatal_fence(
         &self,
         fatal_fence: CancellationToken,

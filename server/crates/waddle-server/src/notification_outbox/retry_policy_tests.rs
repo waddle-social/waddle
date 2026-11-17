@@ -1,7 +1,7 @@
 use super::{
-    retire_registration_outbox_tx, uncertain_retry_delay_ms, NotificationOutboxJob,
-    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
-    PublishFailureClass, STATUS_FAILED, STATUS_QUEUED,
+    retire_registration_outbox_tx, uncertain_retry_delay_ms, DrainBatch, DrainScope,
+    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStatus,
+    NotificationOutboxStore, PublishFailureClass, STATUS_FAILED, STATUS_QUEUED,
 };
 use crate::ingress_substrate::EnteredTransaction;
 use crate::notification_outbox::test_support::{
@@ -60,7 +60,10 @@ async fn terminal_proof_lookup_failure_is_pre_send_storage_without_queue_accepta
             &inbox,
             &waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new(),
             &bare("push.example.com"),
-            1,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
         )
         .await
         .expect("storage failure schedules retry");
@@ -102,7 +105,7 @@ async fn expired_claims_persist_backoff_and_consume_budget_before_reclaim() {
         let store = store().await;
         enqueue_jobs_for_test(&store, &candidate("expired-backoff"), &[target()]).await;
         let mut job = store
-            .claim_due_outbox_jobs(1)
+            .claim_due_outbox_jobs(DrainScope::All, 1)
             .await
             .expect("first claim")
             .remove(0);
@@ -118,7 +121,7 @@ async fn expired_claims_persist_backoff_and_consume_budget_before_reclaim() {
                 .expect("expired claim");
             let before = crate::time::now_ms();
             assert!(store
-                .claim_due_outbox_jobs(1)
+                .claim_due_outbox_jobs(DrainScope::All, 1)
                 .await
                 .expect("expire without replay")
                 .is_empty());
@@ -153,7 +156,7 @@ async fn expired_claims_persist_backoff_and_consume_budget_before_reclaim() {
                 None
             );
             assert!(store
-                .claim_due_outbox_jobs(1)
+                .claim_due_outbox_jobs(DrainScope::All, 1)
                 .await
                 .expect("no early reclaim")
                 .is_empty());
@@ -166,7 +169,7 @@ async fn expired_claims_persist_backoff_and_consume_budget_before_reclaim() {
                     .await
                     .expect("advance retry deadline");
                 let fresh = store
-                    .claim_due_outbox_jobs(1)
+                    .claim_due_outbox_jobs(DrainScope::All, 1)
                     .await
                     .expect("due retry")
                     .remove(0);
@@ -224,7 +227,7 @@ async fn expired_claim_without_token_still_schedules_a_fenced_retry() {
     let store = store().await;
     enqueue_jobs_for_test(&store, &candidate("expired-null-token"), &[target()]).await;
     let job = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -241,7 +244,7 @@ async fn expired_claim_without_token_still_schedules_a_fenced_retry() {
         .expect("legacy claim snapshot")
         .remove(0);
     assert!(store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("expire legacy claim")
         .is_empty());
@@ -265,7 +268,7 @@ async fn expired_claim_without_token_still_schedules_a_fenced_retry() {
         .await
         .expect("advance retry deadline");
     let fresh = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim successor")
         .remove(0);
@@ -312,7 +315,7 @@ async fn durable_acceptance_marker_selects_the_hour_scale_retry_window() {
         enqueue_jobs_for_test(&store, &candidate("backoff-window"), &[target()]).await;
         for (lower, upper) in bounds {
             let job = store
-                .claim_due_outbox_jobs(1)
+                .claim_due_outbox_jobs(DrainScope::All, 1)
                 .await
                 .expect("claim")
                 .remove(0);
@@ -352,7 +355,7 @@ async fn uncertain_policy_deferral_uses_the_combined_failure_count() {
         let store = store().await;
         enqueue_jobs_for_test(&store, &candidate("policy-backoff-window"), &[target()]).await;
         let mut job = store
-            .claim_due_outbox_jobs(1)
+            .claim_due_outbox_jobs(DrainScope::All, 1)
             .await
             .expect("claim")
             .remove(0);
@@ -387,7 +390,7 @@ async fn claim_loss_uses_durable_uncertainty_without_reclassifying_later_refusal
     let store = store().await;
     enqueue_jobs_for_test(&store, &candidate("sticky-attempt-classes"), &[target()]).await;
     let fresh = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -409,7 +412,7 @@ async fn claim_loss_uses_durable_uncertainty_without_reclassifying_later_refusal
         .await
         .expect("advance");
     let refused = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -423,7 +426,7 @@ async fn claim_loss_uses_durable_uncertainty_without_reclassifying_later_refusal
         .await
         .expect("advance");
     let policy = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -439,7 +442,7 @@ async fn claim_loss_uses_durable_uncertainty_without_reclassifying_later_refusal
     )
     .await;
     let known = known_store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("known claim")
         .remove(0);
@@ -498,7 +501,7 @@ async fn explicit_retirement_preserves_settled_history_but_closes_unresolved_lin
     )
     .await;
     let history_job = store
-        .claim_due_outbox_jobs(3)
+        .claim_due_outbox_jobs(DrainScope::All, 3)
         .await
         .expect("claim fixture jobs")
         .into_iter()

@@ -16,6 +16,8 @@ use super::{
     TestStateOverrides, FIXTURE_BOT_PLUGIN,
 };
 
+use crate::notification_outbox::{DrainBatch, DrainScope};
+
 #[path = "messages_offline.rs"]
 mod messages_offline;
 
@@ -575,7 +577,10 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
                 .as_ref(),
             deps,
             &push_service_jid,
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain notification candidates")
@@ -791,7 +796,10 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
             state.deps.protocol.inbox_storage.as_ref(),
             state.deps.protocol.blocking_storage.as_ref(),
             &push_service_jid,
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain notification outbox");

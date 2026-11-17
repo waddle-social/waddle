@@ -5,9 +5,9 @@ use std::ops::Deref;
 use jid::{BareJid, Jid};
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
-    DndReader, NoopDndReader, NotificationCandidate, NotificationClass, NotificationDrainDeps,
-    NotificationOutboxError, NotificationOutboxStore, NotificationOutboxTarget,
-    NotificationThreadId, PushServiceNodeName, RoomPolicyStore,
+    DndReader, DrainBatch, DrainScope, NoopDndReader, NotificationCandidate, NotificationClass,
+    NotificationDrainDeps, NotificationOutboxError, NotificationOutboxStore,
+    NotificationOutboxTarget, NotificationThreadId, PushServiceNodeName, RoomPolicyStore,
 };
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::push::PushSubscriptionStore;
@@ -314,7 +314,10 @@ pub async fn enqueue_jobs_for_test(
             &projection,
             deps,
             service_jids[0],
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidate into outbox");

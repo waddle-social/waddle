@@ -9011,3 +9011,6 @@ use implementation::ORPHAN_WORK_ATTEMPT_TIMEOUT;
 #[cfg(feature = "clustering")]
 #[cfg(test)]
 use implementation::ORPHAN_WORK_QUEUE_CAPACITY;
+
+#[cfg(feature = "test-support")]
+pub(crate) use implementation::{run_notification_outbox_loop, run_push_service_publish_job_loop};
