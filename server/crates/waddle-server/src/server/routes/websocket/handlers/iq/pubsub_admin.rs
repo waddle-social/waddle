@@ -602,7 +602,21 @@ pub(super) async fn handle_pubsub_admin_request(
                     !joined_spaces_affiliation_allowed(target_jid, entity, *affiliation)
                 })
             {
-                return vec![joined_spaces_affiliation_refused(iq)];
+                // XEP-0060 §8.9.2.4: entities left out of the error count as
+                // modified, and none of this request is applied, so every
+                // entity it names is returned with its stored affiliation.
+                let mut existing = Vec::with_capacity(changes.len());
+                for (entity, _) in &changes {
+                    let stored = state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .affiliation(target_jid, &node, entity)
+                        .await
+                        .unwrap_or(waddle_xmpp::pubsub::Affiliation::None);
+                    existing.push((entity.clone(), stored));
+                }
+                return vec![joined_spaces_affiliation_refused(iq, &node, &existing)];
             }
             // ADR-0020 D8 at issuance: on the Spaces service an Owner
             // administers the Space and a publisher places rooms in it, so
@@ -929,14 +943,24 @@ fn joined_spaces_affiliation_allowed(
 /// stricter than its state chart; the whole request is refused before any
 /// of it is applied, with `not-allowed`: no requester may make the change,
 /// which `forbidden` (§8.9.2.3, a requester that is not an owner) would not
-/// say.
-fn joined_spaces_affiliation_refused(iq: &xmpp_parsers::iq::Iq) -> xmpp_parsers::iq::Iq {
+/// say. §8.9.2.4 also requires the error to carry the entities that were
+/// not modified, each with its existing affiliation, since any entity left
+/// out counts as modified; `existing` holds every entity of the request.
+fn joined_spaces_affiliation_refused(
+    iq: &xmpp_parsers::iq::Iq,
+    node: &str,
+    existing: &[(BareJid, waddle_xmpp::pubsub::Affiliation)],
+) -> xmpp_parsers::iq::Iq {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    let payload = match build_pubsub_affiliations_result(iq, node, existing) {
+        xmpp_parsers::iq::Iq::Result { payload, .. } => payload,
+        _ => None,
+    };
     xmpp_parsers::iq::Iq::Error {
         from: iq.to().cloned(),
         to: iq.from().cloned(),
         id: iq.id().to_owned(),
-        payload: None,
+        payload,
         error: StanzaError::new(
             ErrorType::Cancel,
             DefinedCondition::NotAllowed,

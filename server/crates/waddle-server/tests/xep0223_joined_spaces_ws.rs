@@ -577,6 +577,23 @@ async fn roster_contact_with_notify_caps_receives_no_event() {
     let _ = bob.close().await;
 }
 
+/// Whether an affiliations error returns `entity` with `affiliation`
+/// inside an owner `<affiliations/>` element, whichever quotes the
+/// serializer used.
+fn returns_unmodified_affiliation(response: &str, entity: &str, affiliation: &str) -> bool {
+    let Some(start) = response.find("<affiliations") else {
+        return false;
+    };
+    let affiliations = &response[start..];
+    affiliations.split("<affiliation ").skip(1).any(|element| {
+        let element = element.split('>').next().unwrap_or_default();
+        (element.contains(&format!("jid='{entity}'"))
+            || element.contains(&format!("jid=\"{entity}\"")))
+            && (element.contains(&format!("affiliation='{affiliation}'"))
+                || element.contains(&format!("affiliation=\"{affiliation}\"")))
+    })
+}
+
 #[tokio::test]
 async fn owner_cannot_share_the_node_through_affiliations() {
     let _guard = TEST_SERIAL.lock().await;
@@ -612,6 +629,15 @@ async fn owner_cannot_share_the_node_through_affiliations() {
         mixed.contains(r#"type='error'"#) && mixed.contains("not-allowed"),
         "a request granting member must be refused whole: {mixed}"
     );
+    // XEP-0060 §8.9.2.4: an entity left out of the error counts as
+    // modified, so the refusal returns both, each with its affiliation as
+    // stored (none: neither has a row).
+    for entity in [&admin_bare, &bob_bare] {
+        assert!(
+            returns_unmodified_affiliation(&mixed, entity, "none"),
+            "the refusal must return {entity} with its existing affiliation: {mixed}"
+        );
+    }
 
     // The account cannot make itself an outcast of its own node.
     let self_outcast =
