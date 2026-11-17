@@ -1255,6 +1255,30 @@ moved.
 - The raw scan holds 1636 records, unchanged in content; records in the
   changed files moved because those files gained lines.
 
+The selected evidence was refreshed a twenty-seventh time, through
+`b3fa4f78f91ae66bf46fcffcb19ec1b64aaa5338`, after reviewing the delta of the reviewed files since the
+twenty-sixth refresh. `auth/retirement.rs`,
+`websocket/handlers/message/muc_invite.rs` and
+`websocket/handlers/message/group_dm_invite.rs` changed. No grant writer or
+storage plane of the host-grant authority was added, no producer of stream
+evidence changed, and no decision of standing moved.
+
+- Retirement (`account-retire`, its anchor unchanged) takes the advisory
+  lock every insert into the offline store takes for the account's
+  canonical JID before it deletes the account's offline store; from its
+  commit on the store refuses every row for the account
+  (`pending_delivery/database/retired.rs`, outside the reviewed files). It
+  writes no grant and decides no standing.
+- A mediated or group DM invitation to a retired account, which the
+  offline store refuses, fails as one beyond the store's quota does
+  (`MucUserDeliveryError::RecipientRetired`): the group DM invitation
+  rolls its member grant back through the same path
+  (`hg-group-dm-rollback` moved) and answers the inviter
+  `service-unavailable`; a mediated invitation rolls back as for any
+  delivery failure.
+- The raw scan holds 1636 records, unchanged in content; records in the
+  changed files moved because those files gained lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
