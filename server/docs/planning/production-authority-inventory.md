@@ -19,7 +19,7 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`6ee605e3d45ef31f686c92a1b458f1f412b8248c` (see the last refresh below); the original
+`3039aff56f7eec2eec95eccd698290946b3999b8` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1654,6 +1654,30 @@ thirty-ninth refresh:
   builds the state with the listings' shared reads; no anchor there moved.
 - The raw scan still holds 1640 records, each token's count unchanged;
   its digest changed because matched lines moved.
+
+The selected evidence was refreshed a forty-first time, through
+`3039aff56f7eec2eec95eccd698290946b3999b8`, the merge of the MUC fallback slice into the integration
+branch, after reviewing what the merge changed in the reviewed files beyond
+either side. The manifest is the union of both sides': the MUC fallback's
+reviewed file (`handlers/iq/disco_items.rs`) and its four anchors
+(`hg-muc-listing`, `hg-space-children-listing`, `s2s-room-listing` and
+`s2s-space-children`) join the integration branch's set, and no anchor
+differs in path or text between the two sides. Two reviewed files changed on
+both sides and were merged: `server/http.rs` (the state holds the
+replica's set of retired accounts and the listings' shared reads) and
+`server/routes/websocket/s2s_rooms.rs` (the room arm's
+`RemoteIngressTarget::Room` and the mark the host sets just before a
+message's ingress commit). The merge changed nothing else in them; the
+anchors of both sides moved with the lines (`s2s-room-host`,
+`s2s-room-placement` and `s2s-unseated-removal` one line below the MUC
+fallback's places). No grant writer or storage plane of the host-grant
+authority was added by the merge, no producer of stream evidence changed,
+and no decision of standing moved.
+
+- The raw scan holds 1643 records: the 1642 of the thirty-fifth refresh
+  and the `space_enrolled` call the thirty-sixth added in a Space node's
+  listing (`disco_items.rs`), each unchanged in content; records in the
+  merged files moved with the lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
