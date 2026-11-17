@@ -265,8 +265,8 @@ const REVOKING_DEPARTURE_CODES: ReadonlySet<number> = new Set([301, 321, 322]);
 const ROOM_CREATED_STATUS = 201;
 
 /**
- * Delay before discovery is tried again when it could not place rooms, and
- * its cap: the delay doubles from the first to the second with each try.
+ * Delay before discovery is tried again when it could not place rooms; it
+ * doubles with each further try, up to the cap.
  */
 const PLACEMENT_RETRY_INITIAL_MS = 2_000;
 const PLACEMENT_RETRY_MAX_MS = 60_000;
@@ -2042,7 +2042,8 @@ export class BrowserXmppClient {
     this.placementRetryDelayMs = Math.min(delay * 2, PLACEMENT_RETRY_MAX_MS);
     this.placementRetryTimer = setTimeout(() => {
       this.placementRetryTimer = null;
-      if (this.destroying || this.xmpp !== xmpp) return;
+      // Only on the stream it was armed for: a retry never starts a connect.
+      if (this.destroying || this.xmpp !== xmpp || !this.connected) return;
       void this.discoverTopology().then(
         (topology) => {
           if (topology.services?.mucDiscovered && topology.mucCatalogRead === true) {
