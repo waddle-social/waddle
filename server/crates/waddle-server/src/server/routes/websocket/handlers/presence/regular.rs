@@ -397,6 +397,7 @@ fn spawn_session_recovery_delivery(
                     &app_state,
                     served.as_ref(),
                     &storage,
+                    &mam_storage,
                     &recipient,
                 )
                 .await;

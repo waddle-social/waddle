@@ -78,6 +78,8 @@ pub(crate) use send_attempts::{start_fresh_postgres, start_fresh_sqlite};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
 mod projections;
 pub(crate) use projections::ProjectionRepository;
+mod remote_recipients;
+pub(crate) use remote_recipients::{RecipientAssertion, RemoteRecipientRepository};
 mod relation_guard;
 pub use relation_guard::{RelationGuardCapability, RelationGuardCapabilityError};
 mod settlement;

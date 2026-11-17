@@ -86,7 +86,7 @@ pub use effects::{
     PlannedEffect, RoomExecutionPath,
 };
 pub use execute::{ExecutionReport, ExternalOutcome, FrameObligation};
-pub use identity::{IngressCanonicalRef, IngressStreamIdentity};
+pub use identity::{IngressCanonicalRef, IngressStreamIdentity, RemoteIngressTarget};
 pub use submission::IngressSubmission;
 
 use crate::config::{IngressConfig, IngressConfigError, LineageConfig};

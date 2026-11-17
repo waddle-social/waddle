@@ -2213,6 +2213,7 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
                 .served_domains(state.deps.auth_state.xmpp_domain.as_str())
                 .as_ref(),
             &state.deps.protocol.pending_delivery_storage,
+            &state.deps.protocol.mam_storage,
             recipient,
         )
         .await;

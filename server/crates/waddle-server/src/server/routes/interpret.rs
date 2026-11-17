@@ -285,6 +285,10 @@ pub(crate) use notification_activity_ingest::{
 mod relay_plan;
 #[cfg(feature = "clustering")]
 pub(crate) use relay_plan::plan_muc_for_relay;
+mod remote_direct_plan;
+pub(crate) use remote_direct_plan::{
+    classify_remote_direct_plan, plan_remote_direct_message, RemoteDirectPlan,
+};
 mod remote_occupant_plan;
 pub(crate) use remote_occupant_plan::plan_remote_occupant_groupchat;
 

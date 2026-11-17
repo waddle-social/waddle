@@ -45,11 +45,30 @@ pub enum IngressStreamIdentity {
         #[cfg(feature = "clustering")]
         room_fence: RoomClaimFenceContext,
     },
-    /// A stanza an inbound S2S stream carried from an occupant at a domain
-    /// this deployment does not serve. Like an ephemeral stream it has no
-    /// stream-management session and no wire position to bind.
+    /// A stanza an inbound S2S stream carried from an account at a domain
+    /// this deployment does not serve, to a local room or to a local
+    /// account. Like an ephemeral stream it has no stream-management session
+    /// and no wire position to bind.
     Remote {
         account: BareJid,
+        target: RemoteIngressTarget,
+    },
+}
+
+/// What a remote principal's stanza is addressed to, which decides the
+/// acceptance arm that admits it (`principal::assert_admission`).
+#[derive(Clone, Debug)]
+pub enum RemoteIngressTarget {
+    /// A room of this deployment: the room is the authority that stamps
+    /// the message, and its acceptance decides the rest.
+    Room,
+    /// An account of this deployment, addressed by its bare or a full JID:
+    /// the account's archive is the authority that stamps the message.
+    /// `admission` is the S2S admission policy of the replica that built
+    /// the submission (ADR-0020 D1), from which the acceptance transaction
+    /// decides the sender's domain again.
+    Account {
+        admission: Box<crate::permissions::host_grant::PrincipalPolicy>,
     },
 }
 

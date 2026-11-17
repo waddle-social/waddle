@@ -14,8 +14,9 @@ pub struct ExtensionPrincipal {
     pub sender: BareJid,
 }
 
-/// An occupant at a domain this deployment does not serve, whose stanza an
-/// inbound S2S stream carried to a local room (ADR-0020 D10).
+/// An account at a domain this deployment does not serve, whose stanza an
+/// inbound S2S stream carried to a local room, as an occupant (ADR-0020
+/// D10), or to a local account, as the sender of a direct message (D7).
 ///
 /// It names the account and what its stream proved, and nothing else: no
 /// session, credential or grant. Whether its domain is admitted, and what
@@ -63,10 +64,11 @@ pub(super) async fn assert_admission(
     tx: &mut IngressUowTransaction<'_>,
     submission: &super::submission::IngressSubmission,
 ) -> Result<(), IngressUowError> {
-    use super::identity::IngressStreamIdentity;
+    use super::identity::{IngressStreamIdentity, RemoteIngressTarget};
     use crate::ingress_uow::{
         ExtensionGrantRepository, IngressUowError, PrincipalAssertion, PrincipalRepository,
     };
+    use crate::server::routes::interpret::effects::RoomExecutionPath;
     use waddle_xmpp::auth::ExtensionGrantScope;
     use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
     match (
@@ -138,7 +140,10 @@ pub(super) async fn assert_admission(
         }
         (
             IngressPrincipal::Remote(principal),
-            IngressStreamIdentity::Remote { account },
+            IngressStreamIdentity::Remote {
+                account,
+                target: RemoteIngressTarget::Room,
+            },
             TransportGeneration::Host,
         ) if account == &principal.account
             && submission.sender.to_bare() == principal.account
@@ -159,7 +164,64 @@ pub(super) async fn assert_admission(
                 }
             }
         }
+        (
+            IngressPrincipal::Remote(principal),
+            IngressStreamIdentity::Remote {
+                account,
+                target: RemoteIngressTarget::Account { admission },
+            },
+            TransportGeneration::Host,
+        ) if account == &principal.account
+            && submission.sender.to_bare() == principal.account
+            && matches!(submission.plan.room_execution, RoomExecutionPath::None) =>
+        {
+            assert_remote_direct_admission(tx, submission, principal, admission).await?;
+        }
         _ => return Err(IngressUowError::PrincipalAssertionFailed),
     }
     Ok(())
+}
+
+/// The acceptance of a remote sender's direct message to a local account
+/// (ADR-0020 D7; gate G18), decided in the acceptance transaction:
+///
+/// - D1 at the effect: the sender's domain is admitted under `admission`,
+///   the S2S policy of the replica that built the submission. A domain no
+///   longer admitted commits nothing, whatever admitted its stream earlier.
+/// - The recipient named by the target, bare or full, is an account of this
+///   deployment and its JID is not retired (`RemoteRecipientRepository`).
+///
+/// Every refusal is the same failed assertion, so the caller, which answers
+/// a remote sender nothing whatever the outcome, cannot tell them apart
+/// either.
+async fn assert_remote_direct_admission(
+    tx: &mut IngressUowTransaction<'_>,
+    submission: &super::submission::IngressSubmission,
+    principal: &RemoteOccupantPrincipal,
+    admission: &crate::permissions::host_grant::PrincipalPolicy,
+) -> Result<(), IngressUowError> {
+    use crate::ingress_uow::{RecipientAssertion, RemoteRecipientRepository};
+    use waddle_xmpp::ingress::NormalizedTarget;
+    let witness = admission.witness(
+        &principal.account,
+        &PrincipalEvidence::Stream(principal.evidence),
+    );
+    if !witness
+        .remote()
+        .is_some_and(|remote| remote.admission().is_ok())
+    {
+        return Err(IngressUowError::PrincipalAssertionFailed);
+    }
+    let recipient = match &submission.target {
+        NormalizedTarget::Bare(recipient) => recipient.clone(),
+        NormalizedTarget::Full(recipient) => recipient.to_bare(),
+        NormalizedTarget::Absent => return Err(IngressUowError::PrincipalAssertionFailed),
+    };
+    if recipient.node().is_none() || recipient == principal.account {
+        return Err(IngressUowError::PrincipalAssertionFailed);
+    }
+    match RemoteRecipientRepository::assert_recipient(tx, &recipient).await? {
+        RecipientAssertion::Asserted => Ok(()),
+        RecipientAssertion::Unknown => Err(IngressUowError::PrincipalAssertionFailed),
+    }
 }
