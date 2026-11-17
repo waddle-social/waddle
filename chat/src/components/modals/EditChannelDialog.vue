@@ -61,6 +61,8 @@ function onMoveClick() {
 }
 const titleClass = css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const moveRow = css({ display: "flex", alignItems: "center", gap: "2", "& select": { flex: 1, minWidth: 0 } });
+const checkRow = css({ display: "flex", alignItems: "flex-start", gap: "2.5", font: "400 14px/1.4 {fonts.body}", color: "fg", cursor: "pointer" });
+const checkBox = css({ flex: "none", width: "18px", height: "18px", mt: "0.5", accentColor: "{colors.action}" });
 const strong = css({ color: "fg", fontWeight: 700 });
 </script>
 
@@ -109,27 +111,27 @@ const strong = css({ color: "fg", fontWeight: 700 });
 
       <!-- Whether accounts on other servers can reach this room. Shown
            only when the room's owner form offers the setting. -->
-      <div v-if="typeof form.federated === 'boolean'" class="chat-field-stack">
-        <span class="type-section-label text-muted-foreground">Other servers</span>
-        <label for="edit-channel-federated" class="flex items-start gap-2.5">
+      <div v-if="typeof form.federated === 'boolean'" :class="f.field">
+        <span :class="f.label">Other servers</span>
+        <label for="edit-channel-federated" :class="checkRow">
           <input
             id="edit-channel-federated"
             type="checkbox"
-            class="mt-1"
+            :class="checkBox"
             :checked="form.federated"
             aria-describedby="edit-channel-federated-help"
             @change="$emit('update:form', { ...form, federated: ($event.target as HTMLInputElement).checked })"
           />
-          <span class="type-field">Open this room to accounts on other servers</span>
+          <span>Open this room to accounts on other servers</span>
         </label>
-        <p id="edit-channel-federated-help" class="type-meta text-muted-foreground">
+        <p id="edit-channel-federated-help" :class="f.caption">
           Off by default. When on, accounts on every server this one connects to can find the room and
           join it as its other settings allow; a members-only room still needs them added as members.
           People there see each sender's address in the room's history. Turning it off removes everyone
           from another server who is in the room.
         </p>
       </div>
-      <p v-else-if="form.federated === undefined && channel?.jid" class="type-meta text-muted-foreground">
+      <p v-else-if="form.federated === undefined && channel?.jid" :class="f.caption">
         Checking whether this room is open to other servers…
       </p>
 
