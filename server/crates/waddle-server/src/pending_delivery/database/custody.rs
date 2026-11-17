@@ -1,9 +1,11 @@
 //! Transfer independent ingress custody into pending delivery in one transaction.
 
+use super::implementation::insert_with_ledger;
+use super::retired::RetiredLedger;
 use super::{
-    assert_insert_fence, claim_error_to_pending_storage_error, insert_in_transaction,
-    DatabasePendingDeliveryStorage, Entity, EntityType, InsertOutcome, PendingInsertFence,
-    PendingRow, PendingStorageError, QuotaPolicy, SmClaimFence,
+    assert_insert_fence, claim_error_to_pending_storage_error, DatabasePendingDeliveryStorage,
+    Entity, EntityType, InsertOutcome, PendingInsertFence, PendingRow, PendingStorageError,
+    QuotaPolicy, SmClaimFence,
 };
 use crate::db::DatabaseError;
 use crate::db::Transaction;
@@ -28,7 +30,14 @@ pub(super) async fn insert(
     }
     let Some(fencing) = &storage.fencing else {
         let mut tx = storage.db.begin_immediate().await.map_err(storage_error)?;
-        let outcome = transfer(&mut tx, &row, append, storage.quota).await?;
+        let outcome = transfer(
+            &mut tx,
+            &row,
+            append,
+            storage.quota,
+            &storage.retired_ledger,
+        )
+        .await?;
         tx.commit().await.map_err(storage_error)?;
         return Ok(outcome);
     };
@@ -63,7 +72,14 @@ pub(super) async fn insert(
         ),
     )
     .await?;
-    let outcome = transfer(&mut tx, &row, append, storage.quota).await?;
+    let outcome = transfer(
+        &mut tx,
+        &row,
+        append,
+        storage.quota,
+        &storage.retired_ledger,
+    )
+    .await?;
     tx.commit().await.map_err(storage_error)?;
     drop(identity_guard);
     Ok(outcome)
@@ -74,6 +90,7 @@ async fn transfer(
     row: &PendingRow,
     append: &PersistedIngressAppend,
     quota: QuotaPolicy,
+    ledger: &RetiredLedger,
 ) -> Result<CustodyInsertOutcome, PendingStorageError> {
     // The no-op UPDATE takes an exclusive row lock on both SQL backends.
     // A concurrent tombstone must either win before this lock (no insert),
@@ -103,7 +120,7 @@ async fn transfer(
             ))
         }
     }
-    let (disposition, outcome) = match insert_in_transaction(tx, row, quota, None).await? {
+    let (disposition, outcome) = match insert_with_ledger(tx, row, quota, None, ledger).await? {
         InsertOutcome::QuotaExceeded => return Ok(CustodyInsertOutcome::QuotaExceeded),
         // Promoted: the payload is in the recipient's offline store.
         InsertOutcome::Inserted => (2_i64, CustodyInsertOutcome::Inserted),

@@ -10,15 +10,18 @@
 //!
 //! On PostgreSQL an insert and the retirement serialise on a
 //! transaction-scoped advisory lock keyed by the account's canonical JID,
-//! the form the retirement removes rows by: an insert that took it first
-//! commits before the retirement's delete reads the store, and one that
-//! waits for it reads the ledger the retirement committed. SQLite runs one
-//! writing transaction at a time.
+//! which an insert takes whatever spelling of the JID its row names: an
+//! insert that took it first commits before the retirement's delete reads
+//! the store, which removes the account's rows under every spelling, and
+//! one that waits for it reads the ledger the retirement committed. SQLite
+//! runs one writing transaction at a time.
 //!
 //! The ledger lives in the global database, which the offline store shares
 //! in every deployment (startup refuses a split store). A store opened on a
 //! database without the ledger (a disposable test store) refuses no
 //! recipient.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use jid::BareJid;
 
@@ -34,6 +37,33 @@ fn storage_error(error: crate::db::DatabaseError) -> PendingStorageError {
 /// the account's canonical JID.
 pub(super) fn retirement_lock_key(recipient: &BareJid) -> Option<String> {
     retirement_key_of(recipient).filter(|key| *key != recipient.to_string())
+}
+
+/// Whether a store's database holds the ledger of retired account JIDs,
+/// once the store has seen it there.
+///
+/// A migration creates the ledger and nothing drops it, so a store that has
+/// seen it reads the catalog for it no more. A store whose database lacks
+/// it keeps reading the catalog, and refuses rows from when the ledger
+/// appears: only a positive answer is kept, since a kept absence would
+/// switch the refusal off for the life of the store. A caller that holds no
+/// store passes a fresh one, which reads the catalog every time.
+#[derive(Debug, Default)]
+pub(crate) struct RetiredLedger {
+    seen: AtomicBool,
+}
+
+impl RetiredLedger {
+    async fn present(&self, tx: &mut Transaction<'_>) -> Result<bool, PendingStorageError> {
+        if self.seen.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        let present = ledger_present(tx).await?;
+        if present {
+            self.seen.store(true, Ordering::Release);
+        }
+        Ok(present)
+    }
 }
 
 /// Whether the transaction's database holds the ledger of retired account
@@ -56,12 +86,13 @@ async fn ledger_present(tx: &mut Transaction<'_>) -> Result<bool, PendingStorage
 /// committed before this read or waits for the caller's commit.
 pub(super) async fn recipient_retired_in(
     tx: &mut Transaction<'_>,
+    ledger: &RetiredLedger,
     recipient: &BareJid,
 ) -> Result<bool, PendingStorageError> {
     let Some(key) = retirement_key_of(recipient) else {
         return Ok(false);
     };
-    if !ledger_present(tx).await? {
+    if !ledger.present(tx).await? {
         return Ok(false);
     }
     let mut rows = tx
