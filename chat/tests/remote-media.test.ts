@@ -1,0 +1,55 @@
+import { describe, expect, test } from "bun:test";
+import type { TimelineMessage } from "../src/lib/chat-ui";
+import { remoteMediaSource } from "../src/lib/remote-media";
+
+const HOME = { accountDomain: "home.test", mucService: "muc.home.test", spacesService: "spaces.home.test" };
+
+function message(partial: Partial<TimelineMessage>): TimelineMessage {
+  return {
+    id: "m1",
+    author: "bob",
+    body: "https://images.example/cat.png",
+    createdAt: "2026-11-17T10:00:00Z",
+    createdAtSource: "archive",
+    isSelf: false,
+    ...partial,
+  } as TimelineMessage;
+}
+
+describe("media from other servers", () => {
+  test("anything posted in a room on another server waits, whoever sent it", () => {
+    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob" }), HOME)).toBe("chat.remote.test");
+    expect(remoteMediaSource(message({
+      authorOccupantJid: "dev@chat.remote.test/carol",
+      authorRealJid: "carol@home.test",
+    }), HOME)).toBe("chat.remote.test");
+    expect(remoteMediaSource(message({ stanzaIdBy: "dev@chat.remote.test" }), HOME)).toBe("chat.remote.test");
+  });
+
+  test("a sender whose real address is on another domain waits, in a home room too", () => {
+    expect(remoteMediaSource(message({
+      authorOccupantJid: "general@muc.home.test/bob",
+      authorRealJid: "bob@remote.test",
+    }), HOME)).toBe("remote.test");
+    // A direct message from an account elsewhere.
+    expect(remoteMediaSource(message({ authorJid: "bob@remote.test", stanzaIdBy: "alice@home.test" }), HOME)).toBe("remote.test");
+  });
+
+  test("home senders, the user's own messages and undisclosed occupants of home rooms load as before", () => {
+    expect(remoteMediaSource(message({
+      authorOccupantJid: "general@muc.home.test/bob",
+      authorRealJid: "bob@home.test",
+    }), HOME)).toBeNull();
+    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/alice", isSelf: true }), HOME)).toBeNull();
+    expect(remoteMediaSource(message({
+      authorOccupantJid: "general@muc.home.test/someone",
+      authorJid: "general@muc.home.test/someone",
+    }), HOME)).toBeNull();
+  });
+
+  test("before the home MUC service is known, room addresses decide nothing", () => {
+    const undiscovered = { ...HOME, mucService: null };
+    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob" }), undiscovered)).toBeNull();
+    expect(remoteMediaSource(message({ authorJid: "bob@remote.test" }), undiscovered)).toBe("remote.test");
+  });
+});
