@@ -9,8 +9,9 @@
 //! messages. An actor that decides issuance writes every one of them for an
 //! account of a served domain or of a trusted home and refuses them for any
 //! other account, in each of the three messages that write a relation, so
-//! that a writer that omits its own check still issues nothing; every other
-//! relation, and a subject that is no account, is written as before.
+//! that a writer that omits its own check still issues nothing. Every other
+//! relation is written whatever its subject, and a userset subject, which
+//! names no account, is not asked about.
 //! Startup builds a replica's actor deciding issuance, through the function
 //! the test-support seam calls.
 //!
@@ -291,8 +292,8 @@ async fn an_exclusive_swap_is_refused_for_an_untrusted_home() {
     );
 }
 
-/// An actor that was given no policy asks nothing, as before: the suites
-/// that write these relations over the local backend build such actors.
+/// An actor that was given no policy asks nothing: the suites that write
+/// these relations over the local backend build such actors.
 #[tokio::test]
 async fn an_actor_without_a_policy_refuses_nothing() {
     let actor = PermissionActor::spawn(PermissionActor::new_for_tests(

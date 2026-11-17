@@ -12,6 +12,10 @@
 //!   every operation a remote principal may ask of a node, with the error a
 //!   node that does not exist gets.
 //!
+//! - On PostgreSQL, a sweep of the subscription store at the deployment's
+//!   bound passes over rows other transactions hold, and a Space's
+//!   deletion lock holds off another deletion of that Space only.
+//!
 //! The deployment is the revocation fixture's on PostgreSQL, with one
 //! replica that runs an S2S snapshot admitting `home-b.test` and serves its
 //! Spaces to it. The cases need PostgreSQL only. Without it they return
@@ -39,7 +43,12 @@ use jid::BareJid;
 use managed::{Managed, GUEST_PHONE, STRANGER_PHONE};
 use minidom::Element;
 use s2s_inbound_muc_support::{error_condition, jid};
-use waddle_server::db::s2s_spaces::FederatedSpaces;
+use waddle_server::db::s2s_spaces::{
+    lock_space_deletion, FederatedSpaces, SpaceSubscriptions, SubscriptionRecord,
+    SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
+};
+use waddle_server::permissions::host_grant::StreamEvidence;
+use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::test_support::host_spaces_for_remote_principals;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
@@ -359,5 +368,162 @@ async fn the_space_of_an_enrolled_scope_is_served_to_nobody() {
     .await;
     assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
     assert!(item_ids(&listed).is_empty(), "{listed:?}");
+    managed.deployment.close().await;
+}
+
+// --- The Spaces stores on PostgreSQL -----------------------------------------
+//
+// The fixture's deployment runs on PostgreSQL, where the subscription store
+// and a Space's deletion take advisory locks and a sweep of the whole store
+// passes over rows other transactions hold. SQLite runs one writer at a
+// time and the other Spaces suites cover it.
+
+/// Fill the store with as many current remote subscriptions as the
+/// deployment's bound and two lapsed ones, over 512 Spaces: the rows
+/// `guest-0` and `guest-1` of `d0000.test` have lapsed, seventeen rows go
+/// to each domain `dNNNN.test` (3,855 of them) and the last sixteen to
+/// `zz-gone.test`, so that one sweep reads every domain. The number of
+/// rows, the last sixteen of which are `zz-gone.test`'s.
+async fn fill_the_store(managed: &Managed, now: i64) -> i64 {
+    let rows = i64::try_from(MAX_REMOTE_SUBSCRIPTIONS).expect("the bound fits") + 2;
+    managed
+        .hosted
+        .state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("a connection")
+        .execute(
+            "INSERT INTO s2s_space_subscriptions \
+             (service_jid, node_name, subscriber_jid, account_jid, subscriber_domain, \
+              node_created_at_ms, strength, trust_profile, snapshot_generation, \
+              subscribed_at_ms) \
+             SELECT 'spaces.example.com', 'seed-' || (i % 512), \
+             'guest-' || i || '@' || domain, 'guest-' || i || '@' || domain, domain, \
+             0, 'pkix', NULL, '00000000-0000-0000-0000-000000000000', \
+             CASE WHEN i < 2 THEN 0 ELSE ? END \
+             FROM (SELECT i, CASE WHEN i >= ? - 16 THEN 'zz-gone.test' \
+             ELSE 'd' || lpad((i / 17)::text, 4, '0') || '.test' END AS domain \
+             FROM generate_series(0, ? - 1) AS i) AS seeded",
+            vec![now.into(), rows.into(), rows.into()],
+        )
+        .await
+        .expect("the store is filled");
+    rows
+}
+
+/// At the deployment's bound a subscription sweeps the whole store on
+/// PostgreSQL: the lapsed rows first, then the rows of a domain that is no
+/// longer admitted, passing over a row another transaction holds rather
+/// than waiting for it, and lists what it removed.
+#[tokio::test]
+async fn a_sweep_of_the_whole_store_passes_over_rows_another_transaction_holds() {
+    let Some(managed) = serving_spaces("s2s_spaces_sweep").await else {
+        return;
+    };
+    federated_space(&managed, LOBBY).await;
+    let db = managed.hosted.state.deps.app_state.db_pool.global();
+    let created_at = managed
+        .hosted
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces(), LOBBY)
+        .await
+        .expect("the node is read")
+        .expect("the Space exists")
+        .created_at
+        .timestamp_millis();
+    let now = chrono::Utc::now().timestamp_millis();
+    let filled = fill_the_store(&managed, now).await;
+
+    // Another transaction holds one of `zz-gone.test`'s rows.
+    let mut holder = db.begin().await.expect("a transaction");
+    holder
+        .query(
+            "SELECT 1 FROM s2s_space_subscriptions WHERE subscriber_jid = ? FOR UPDATE",
+            vec![format!("guest-{}@zz-gone.test", filled - 1).into()],
+        )
+        .await
+        .expect("the row is held");
+
+    let carol = jid("carol@new.test").to_bare();
+    let recording = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        SpaceSubscriptions::new(db.clone()).record(
+            &spaces(),
+            LOBBY,
+            created_at,
+            SubscriptionRequest {
+                account: &carol,
+                evidence: StreamEvidence::for_test(AuthenticationStrength::Pkix, None),
+                snapshot: uuid::Uuid::new_v4(),
+                now_ms: now,
+            },
+            &|domain| domain != "zz-gone.test",
+            std::future::ready(Ok(false)),
+        ),
+    )
+    .await
+    .expect("the sweep waits for no row")
+    .expect("the store answers");
+    holder.rollback().await.expect("the row is released");
+
+    assert_eq!(recording.outcome, SubscriptionRecord::Recorded);
+    let mut removed: Vec<String> = recording
+        .removed
+        .iter()
+        .map(|gone| gone.account.to_string())
+        .collect();
+    removed.sort();
+    let mut expected: Vec<String> = ["guest-0@d0000.test", "guest-1@d0000.test"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain((filled - 16..filled - 1).map(|i| format!("guest-{i}@zz-gone.test")))
+        .collect();
+    expected.sort();
+    assert_eq!(removed, expected);
+    managed.deployment.close().await;
+}
+
+/// On PostgreSQL a Space's deletion lock holds off another deletion of the
+/// Space, on any replica, until it is released, and no deletion of another
+/// Space.
+#[tokio::test]
+async fn a_spaces_deletion_lock_holds_off_another_deletion_of_it_only() {
+    let Some(managed) = serving_spaces("s2s_spaces_deletion_lock").await else {
+        return;
+    };
+    let db = managed.hosted.state.deps.app_state.db_pool.global();
+    let first = lock_space_deletion(db, &spaces(), LOBBY)
+        .await
+        .expect("the lock is taken");
+    let other = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        lock_space_deletion(db, &spaces(), "other"),
+    )
+    .await
+    .expect("another Space's deletion is not held off")
+    .expect("the lock is taken");
+    other.release().await;
+
+    let service = spaces();
+    let mut second = Box::pin(lock_space_deletion(db, &service, LOBBY));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut second)
+            .await
+            .is_err(),
+        "a second deletion of the Space waits"
+    );
+    first.release().await;
+    let second = tokio::time::timeout(std::time::Duration::from_secs(10), second)
+        .await
+        .expect("the second deletion runs once the first is released")
+        .expect("the lock is taken");
+    second.release().await;
     managed.deployment.close().await;
 }

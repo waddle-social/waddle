@@ -24,9 +24,9 @@
 //!   Owner and publisher affiliations are written only for accounts of
 //!   this deployment and of trusted homes, and an owner's standing is not
 //!   honoured on evidence of `dialback` strength. A Space deleted through
-//!   PubSub, by a remote owner as by a session, is deleted with the
-//!   cascade of `spaces:delete`; purging its items takes its rooms out of
-//!   it.
+//!   PubSub, by a remote owner as by a session, takes its rooms out of it
+//!   and leaves them standing (only the admin command `spaces:delete`
+//!   destroys rooms); purging its items takes its rooms out of it too.
 //!
 //! `example.com` and `home-b.test` are the Spaces fixture's deployments
 //! (`s2s_spaces_support`): loopback TLS in one process, in-memory SQLite.
@@ -46,10 +46,11 @@ use s2s_spaces_support::{
     retract, room, rows, space, spaces, subscription, Adjust, Federated, Pki, BOB, BOB_PHONE,
     FIELD_FEDERATED, MALLORY, NS_DISCO_ITEMS, NS_PUBSUB_OWNER, PEER, SPACES,
 };
+use waddle_server::db::actor::DbExecute;
 use waddle_server::db::s2s_spaces::{
     FederatedSpaces, SpaceSubscriptions, SubscriptionRecord, SubscriptionRequest,
     MAX_REMOTE_SUBSCRIBERS_PER_DOMAIN_AND_SPACE, MAX_REMOTE_SUBSCRIBERS_PER_SPACE,
-    MAX_SUBSCRIPTIONS_PER_REMOTE_ACCOUNT, SUBSCRIPTION_LIFETIME_MS,
+    MAX_REMOTE_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS_PER_REMOTE_ACCOUNT, SUBSCRIPTION_LIFETIME_MS,
 };
 use waddle_server::permissions::host_grant::StreamEvidence;
 use waddle_server::permissions::{
@@ -188,9 +189,11 @@ async fn offer(
                 now_ms: at,
             },
             admitted,
+            std::future::ready(Ok(false)),
         )
         .await
         .expect("the store answers")
+        .outcome
 }
 
 /// Record a subscription of `account` to `node` through the store, as one
@@ -1143,14 +1146,15 @@ async fn parents(federated: &Federated, id: &str) -> Vec<Subject> {
 }
 
 /// A trusted home's owner holds every power a Space's owner holds, over a
-/// certificate stream, deletion included; a Space deleted through PubSub
-/// is deleted with the cascade `spaces:delete` runs. Nothing that named it
-/// is left: the rooms it held, their parent grants and links, the Space's
-/// own relations and metadata, its `federated` setting and the remote
-/// subscriptions to it. A Space created again under the name inherits none
-/// of it.
+/// certificate stream, deletion included. A Space deleted through PubSub
+/// goes with everything that named it, and its rooms stay: each is taken
+/// out of the Space (its parent grant on it, its link to it and its
+/// bookmark in it go) and stands alone. The Space's own relations and
+/// metadata, its `federated` setting and the remote subscriptions to it go
+/// too, so a Space created again under the name inherits none of it. Only
+/// the admin command `spaces:delete` destroys rooms.
 #[tokio::test]
-async fn a_remote_owners_deletion_leaves_nothing_of_the_space() {
+async fn a_remote_owners_deletion_unlinks_the_rooms_and_leaves_nothing_of_the_space() {
     let pki = Pki::new();
     let federated = hosting_with(&pki, trusting_the_peer()).await;
     let mut victor = space_with_owner(&federated).await;
@@ -1207,7 +1211,10 @@ async fn a_remote_owners_deletion_leaves_nothing_of_the_space() {
         .is_none());
     assert_eq!(rows(&federated, "s2s_federated_spaces").await, 0);
     assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
-    assert_eq!(rows(&federated, "channels").await, channels - 1);
+    // The room stands alone: its catalog row stays, and nothing places it
+    // in a Space any more.
+    assert_eq!(rows(&federated, "channels").await, channels);
+    assert_eq!(rows(&federated, "channels WHERE id = 'lounge'").await, 1);
     assert!(links
         .get(&room("lounge"))
         .await
@@ -1224,9 +1231,16 @@ async fn a_remote_owners_deletion_leaves_nothing_of_the_space() {
         .expect("the metadata is read")
         .is_none());
 
-    // A Space created again under the name starts with nothing.
+    // A Space created again under the name starts with nothing, and does
+    // not hold the room.
     space(&federated, DEV, NodeConfig::spaces_public()).await;
     assert!(space_relations(&federated, DEV).await.is_empty());
+    assert!(storage
+        .get_items(&spaces(), DEV, None, &[])
+        .await
+        .expect("the items are read")
+        .is_empty());
+    assert!(parents(&federated, "lounge").await.is_empty());
     assert_eq!(
         federated_spaces(&federated)
             .enabled_for(&spaces(), DEV)
@@ -1359,4 +1373,252 @@ async fn an_owner_ends_remote_subscriptions_by_removing_banning_or_closing() {
             .all(|row| row.subscriber.to_bare().domain().as_str() == "example.com"),
         "{remaining:?}"
     );
+}
+
+/// Two deletions of one Space asked at once, by a local owner's session and
+/// by a remote owner, run one after the other under the Space's deletion
+/// lock: one deletes the Space, the other finds no such node, and the room
+/// the Space held stands alone.
+#[tokio::test]
+async fn two_deletions_of_one_space_at_once_delete_it_once() {
+    let pki = Pki::new();
+    let federated = hosting_with(&pki, trusting_the_peer()).await;
+    let mut victor = space_with_owner(&federated).await;
+    let placed = round_trip(&mut victor, set("twice-1", SPACES, publish(DEV, "lounge"))).await;
+    assert!(is_result(&placed), "{placed:?}");
+    affiliate(&federated, DEV, BOB, Affiliation::Owner).await;
+    let channels = rows(&federated, "channels").await;
+    let delete = || pubsub(NS_PUBSUB_OWNER, of_node("delete", NS_PUBSUB_OWNER, DEV));
+
+    let (local, remote) = tokio::join!(
+        round_trip(&mut victor, set("twice-2", SPACES, delete())),
+        ask(&federated, request(BOB_PHONE, "twice-3", true, delete())),
+    );
+    let local_deleted = is_result(&local);
+    let remote_deleted = remote.attr("type") == Some("result");
+    assert!(local_deleted != remote_deleted, "{local:?} {remote:?}");
+    if local_deleted {
+        assert_eq!(
+            error_condition(&remote).as_deref(),
+            Some("item-not-found"),
+            "{remote:?}"
+        );
+    } else {
+        assert!(
+            is_error(&local, DefinedCondition::ItemNotFound),
+            "{local:?}"
+        );
+    }
+    assert!(federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces(), DEV)
+        .await
+        .expect("the node is read")
+        .is_none());
+    assert_eq!(rows(&federated, "channels").await, channels);
+    assert!(parents(&federated, "lounge").await.is_empty());
+    assert!(federated
+        .loopback
+        .state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(&room("lounge"))
+        .await
+        .expect("the link is read")
+        .is_none());
+}
+
+/// A ban is read again under the Space's lock as a subscription is
+/// recorded: an account banned after its request read the Space is not
+/// recorded, and nothing of the request is kept.
+#[tokio::test]
+async fn a_ban_read_under_the_spaces_lock_refuses_the_subscription() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    let created_at = node_created_at(&federated, DEV).await;
+    let account = jid("mallory@home-b.test").to_bare();
+
+    let recording = subscriptions(&federated)
+        .record(
+            &spaces(),
+            DEV,
+            created_at,
+            SubscriptionRequest {
+                account: &account,
+                evidence: recorded(AuthenticationStrength::Pkix),
+                snapshot: uuid::Uuid::new_v4(),
+                now_ms: now_ms(),
+            },
+            &|_| true,
+            std::future::ready(Ok(true)),
+        )
+        .await
+        .expect("the store answers");
+    assert_eq!(recording.outcome, SubscriptionRecord::Banned);
+    assert!(recording.removed.is_empty());
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
+
+    // Over the wire, the ban is the stored affiliation the request reads.
+    affiliate(&federated, DEV, "mallory@home-b.test", Affiliation::Outcast).await;
+    let refused = subscribe(&federated, "banned-1", MALLORY, "mallory@home-b.test").await;
+    assert_eq!(
+        error_condition(&refused).as_deref(),
+        Some("forbidden"),
+        "{refused:?}"
+    );
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
+}
+
+/// Make the remote subscription of `account` lapsed, as if it was last
+/// made at the epoch.
+async fn lapse(federated: &Federated, account: &str) {
+    federated
+        .loopback
+        .state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(DbExecute {
+            sql: "UPDATE s2s_space_subscriptions SET subscribed_at_ms = 0 \
+                  WHERE subscriber_jid = ?"
+                .to_owned(),
+            params: vec![account.into()],
+        })
+        .await
+        .expect("the subscription lapses");
+}
+
+/// The bare JIDs of the PubSub service's subscription records of `node`.
+async fn service_subscribers(federated: &Federated, node: &str) -> Vec<String> {
+    federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .list_node_subscriptions(&spaces(), node)
+        .await
+        .expect("the subscriptions are read")
+        .into_iter()
+        .map(|subscription| subscription.subscriber.to_bare().to_string())
+        .collect()
+}
+
+/// A lapsed subscription that is removed as another is recorded takes the
+/// PubSub service's own record of it along; an account that subscribes
+/// again renews its own lapsed subscription and stays subscribed.
+#[tokio::test]
+async fn a_lapsed_subscription_removed_takes_the_services_record_along() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    let made = subscribe(&federated, "lapse-1", MALLORY, "mallory@home-b.test").await;
+    assert_eq!(made.attr("type"), Some("result"), "{made:?}");
+    lapse(&federated, "mallory@home-b.test").await;
+
+    let other = subscribe(&federated, "lapse-2", BOB_PHONE, BOB).await;
+    assert_eq!(other.attr("type"), Some("result"), "{other:?}");
+    let subscribers = service_subscribers(&federated, DEV).await;
+    assert!(
+        !subscribers.iter().any(|jid| jid == "mallory@home-b.test"),
+        "{subscribers:?}"
+    );
+    assert!(subscribers.iter().any(|jid| jid == BOB), "{subscribers:?}");
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
+
+    lapse(&federated, BOB).await;
+    let renewed = subscribe(&federated, "lapse-3", BOB_PHONE, BOB).await;
+    assert_eq!(renewed.attr("type"), Some("result"), "{renewed:?}");
+    let subscribers = service_subscribers(&federated, DEV).await;
+    assert!(subscribers.iter().any(|jid| jid == BOB), "{subscribers:?}");
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
+}
+
+/// When the bound on the deployment's remote subscriptions is reached, a
+/// sweep of the whole store reads at most 4,096 remote domains, starting
+/// after the last domain the sweep before it read and wrapping round: a
+/// domain no longer admitted whose name sorts after the first 4,096 is
+/// reached by the next sweep, and its rows give way, listed for the caller
+/// to remove the PubSub service's records of them. The cursor is the
+/// process's own; each case runs in a process of its own.
+#[tokio::test]
+async fn sweeps_of_the_whole_store_read_every_remote_domain_in_turn() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    let created_at = node_created_at(&federated, DEV).await;
+    let now = now_ms();
+    // The deployment's bound in rows, eight to a domain over 512 Spaces:
+    // 8,191 domains `dNNNNN.test`, then `zz-gone.test`, which is no longer
+    // admitted and sorts after all of them.
+    let bound = i64::try_from(MAX_REMOTE_SUBSCRIPTIONS).expect("the bound fits");
+    federated
+        .loopback
+        .state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(DbExecute {
+            sql: "WITH RECURSIVE seq(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < ?) \
+                  INSERT INTO s2s_space_subscriptions \
+                  (service_jid, node_name, subscriber_jid, account_jid, subscriber_domain, \
+                   node_created_at_ms, strength, trust_profile, snapshot_generation, \
+                   subscribed_at_ms) \
+                  SELECT 'spaces.example.com', 'seed-' || (i % 512), \
+                  'guest-' || i || '@' || domain, 'guest-' || i || '@' || domain, domain, \
+                  0, 'pkix', NULL, '00000000-0000-0000-0000-000000000000', ? \
+                  FROM (SELECT i, CASE WHEN i >= ? - 8 THEN 'zz-gone.test' \
+                  ELSE 'd' || printf('%05d', i / 8) || '.test' END AS domain FROM seq)"
+                .to_owned(),
+            params: vec![(bound - 1).into(), now.into(), bound.into()],
+        })
+        .await
+        .expect("the store is filled");
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, bound);
+    let admitted = |domain: &str| domain != "zz-gone.test";
+    let carol = jid("carol@new.test").to_bare();
+    let store = subscriptions(&federated);
+    let service = spaces();
+    let carol_subscribes = || {
+        store.record(
+            &service,
+            DEV,
+            created_at,
+            SubscriptionRequest {
+                account: &carol,
+                evidence: recorded(AuthenticationStrength::Pkix),
+                snapshot: uuid::Uuid::new_v4(),
+                now_ms: now,
+            },
+            &admitted,
+            std::future::ready(Ok(false)),
+        )
+    };
+
+    // The first sweep reads the first 4,096 domains, every one admitted.
+    let first = carol_subscribes().await.expect("the store answers");
+    assert_eq!(first.outcome, SubscriptionRecord::Bounds);
+    assert!(first.removed.is_empty());
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, bound);
+
+    // The next starts after them and reaches `zz-gone.test`.
+    let second = carol_subscribes().await.expect("the store answers");
+    assert_eq!(second.outcome, SubscriptionRecord::Recorded);
+    let mut removed: Vec<String> = second
+        .removed
+        .iter()
+        .map(|gone| gone.account.domain().as_str().to_owned())
+        .collect();
+    removed.dedup();
+    assert_eq!(removed, ["zz-gone.test"]);
+    assert_eq!(second.removed.len(), 8);
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, bound - 7);
 }
