@@ -2040,10 +2040,10 @@ steps; nothing a remote owner can do reaches them.
 
 **Event notifications to remote subscribers.** A publish or a retract on a
 Space fans out to its local subscribers; a subscriber at another server is
-skipped there. A retract is notified once it stands, because a Space
-node's `pubsub#notify_retract` is on (XEP-0503 node configuration) and
-XEP-0060 §7.2.2.1 then requires it, as it does for a request that asks
-with `notify`. Once the publication is stored, the fan-out only
+skipped there. A retract is notified once it stands: a Space node's
+`pubsub#notify_retract`, which XEP-0503's node configuration requires to be
+on, is the setting to notify subscribers when items are removed (XEP-0060
+§17.4.4), and a request that asks with `notify` must be notified (§7.2.2.1). Once the publication is stored, the fan-out only
 queues it for the Spaces host (`queue_remote_notification`, then
 `RemoteRoute::space_published`): a bounded queue of 1,024 publications for
 each replica. A publication takes one of its Space's allowance of notified
@@ -2098,10 +2098,14 @@ service's record of that subscriber too.
 A ban and a subscription being recorded at the same time cannot leave a
 row behind: the ban is written before the row is removed, and the removal
 takes the Space's lock; the subscription reads the account's affiliation
-again under that lock, after the `federated` setting, and is refused for a
-ban it finds, `forbidden` in a public Space and `item-not-found` in a
-private one, as for a banned account's request. Either the removal finds
-the row, or the subscription finds the ban.
+again once its row is committed, removes the row for a ban it finds and is
+refused, `forbidden` in a public Space and `item-not-found` in a private
+one, as for a banned account's request. Either the removal finds the row,
+or the subscription finds the ban. The affiliation is read after the
+commit, not under the Space's lock, because the PubSub store may share the
+database pool: a transaction that waited for a second connection while
+holding its own and the lock could stall every subscription when the pool
+is taken by waiters.
 
 Turning the `federated` setting off removes the setting's row and every
 remote subscription row of the Space in one transaction, under the
