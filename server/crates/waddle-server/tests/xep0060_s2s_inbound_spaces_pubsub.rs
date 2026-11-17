@@ -189,7 +189,6 @@ async fn offer(
                 now_ms: at,
             },
             admitted,
-            std::future::ready(Ok(false)),
         )
         .await
         .expect("the store answers")
@@ -1438,44 +1437,48 @@ async fn two_deletions_of_one_space_at_once_delete_it_once() {
         .is_none());
 }
 
-/// A ban is read again under the Space's lock as a subscription is
-/// recorded: an account banned after its request read the Space is not
-/// recorded, and nothing of the request is kept.
+/// A banned account's subscription is refused and leaves no row: in a
+/// public Space with `forbidden`, and in a private one as a node that does
+/// not exist. A ban written while a subscription is being recorded is read
+/// once the row is committed, and the row is then removed; that order is
+/// not reproduced here.
 #[tokio::test]
-async fn a_ban_read_under_the_spaces_lock_refuses_the_subscription() {
+async fn a_banned_accounts_subscription_is_refused_and_leaves_no_row() {
     let pki = Pki::new();
     let federated = hosting(&pki).await;
     federated_space(&federated, DEV).await;
-    let created_at = node_created_at(&federated, DEV).await;
-    let account = jid("mallory@home-b.test").to_bare();
-
-    let recording = subscriptions(&federated)
-        .record(
-            &spaces(),
-            DEV,
-            created_at,
-            SubscriptionRequest {
-                account: &account,
-                evidence: recorded(AuthenticationStrength::Pkix),
-                snapshot: uuid::Uuid::new_v4(),
-                now_ms: now_ms(),
-            },
-            &|_| true,
-            std::future::ready(Ok(true)),
-        )
-        .await
-        .expect("the store answers");
-    assert_eq!(recording.outcome, SubscriptionRecord::Banned);
-    assert!(recording.removed.is_empty());
-    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
-
-    // Over the wire, the ban is the stored affiliation the request reads.
     affiliate(&federated, DEV, "mallory@home-b.test", Affiliation::Outcast).await;
     let refused = subscribe(&federated, "banned-1", MALLORY, "mallory@home-b.test").await;
     assert_eq!(
         error_condition(&refused).as_deref(),
         Some("forbidden"),
         "{refused:?}"
+    );
+    assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
+
+    space(&federated, "inner", NodeConfig::spaces_private()).await;
+    federate(&federated, "inner").await;
+    affiliate(
+        &federated,
+        "inner",
+        "mallory@home-b.test",
+        Affiliation::Outcast,
+    )
+    .await;
+    let hidden = ask(
+        &federated,
+        request(
+            MALLORY,
+            "banned-2",
+            true,
+            subscription("subscribe", "inner", "mallory@home-b.test"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        error_condition(&hidden).as_deref(),
+        Some("item-not-found"),
+        "{hidden:?}"
     );
     assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 0);
 }
@@ -1604,7 +1607,6 @@ async fn sweeps_of_the_whole_store_read_every_remote_domain_in_turn() {
                 now_ms: now,
             },
             &admitted,
-            std::future::ready(Ok(false)),
         )
     };
 

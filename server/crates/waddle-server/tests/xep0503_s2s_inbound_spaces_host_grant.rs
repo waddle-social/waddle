@@ -465,7 +465,6 @@ async fn a_sweep_of_the_whole_store_passes_over_rows_another_transaction_holds()
                 now_ms: now,
             },
             &|domain| domain != "zz-gone.test",
-            std::future::ready(Ok(false)),
         ),
     )
     .await
