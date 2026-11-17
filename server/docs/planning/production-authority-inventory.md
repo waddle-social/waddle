@@ -1793,7 +1793,7 @@ changed on both sides. The five the slice changed (`pubsub/node.rs`,
 `pubsub_fanout/implementation.rs`) are as on its branch, and the
 integration branch's (among them `s2s_rooms.rs`, `s2s_spaces.rs` and
 `disco_items.rs`) as on it. `pubsub-admin` and `d8-space-affiliations`
-moved as in the forty-fourth to forty-seventh refreshes, fifty lines in
+moved as in the forty-fifth to forty-seventh refreshes, fifty lines in
 all; the integration branch's anchors are where it put them. No grant
 writer or storage plane of the host-grant authority was added by the
 merge, no producer of stream evidence changed, and no decision of standing

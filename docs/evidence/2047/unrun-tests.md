@@ -127,8 +127,9 @@ stops at each stage) and `xep0045_host_grant_revocation` (a replica that
 stops running its fence), and the cases of `host_grant_revocation_fence` and
 `account_jid_retirement` that run the `waddle-server` binary's operator
 subcommands, ran in run6; no run covers Prosody, ejabberd,
-the Rust library unit tests of `waddle-server`, or the
-`clustering` feature; `bun test` for `chat` ran in the run11 chat log.
+or the Rust library unit tests of `waddle-server`; the `clustering`
+feature ran from the run7 logs on, and `bun test` for `chat` in the run11
+chat log.
 
 ## Integration test targets
 
