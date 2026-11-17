@@ -65,10 +65,6 @@ pub const S2S_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2012;
 /// acknowledgements.
 pub const ACCOUNT_SESSION_ENDINGS_VERSION: i64 = 2013;
 
-/// Version of the migration that indexes the offline store's recipients by
-/// their lower-case spelling, which the retirement of an account reads.
-pub const PENDING_DELIVERY_RECIPIENT_SPELLINGS_VERSION: i64 = 2014;
-
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -194,16 +190,6 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2013_account_session_endings.postgres.sql"
             ),
         },
-        Migration {
-            version: PENDING_DELIVERY_RECIPIENT_SPELLINGS_VERSION,
-            description: "pending delivery recipient spellings".to_string(),
-            sql_sqlite: include_str!(
-                "../../../sql/migrations/2014_pending_delivery_recipient_spellings.sqlite.sql"
-            ),
-            sql_postgres: include_str!(
-                "../../../sql/migrations/2014_pending_delivery_recipient_spellings.postgres.sql"
-            ),
-        },
     ]
 }
 
@@ -213,11 +199,10 @@ mod tests {
     use super::{
         all, ACCOUNT_SESSION_ENDINGS_VERSION, CHANNEL_FEDERATED_VERSION,
         HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
-        HOST_GRANT_REVOCATION_FENCE_VERSION, PENDING_DELIVERY_RECIPIENT_SPELLINGS_VERSION,
-        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
-        S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
-        S2S_SPACE_SUBSCRIPTIONS_VERSION,
+        HOST_GRANT_REVOCATION_FENCE_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
+        S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION, S2S_IQ_CORRELATIONS_VERSION,
+        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
+        S2S_REMOTE_ROOMS_VERSION, S2S_SPACE_SUBSCRIPTIONS_VERSION,
     };
 
     #[test]
@@ -246,8 +231,7 @@ mod tests {
                 S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
                 S2S_FEDERATED_SPACES_VERSION,
                 S2S_SPACE_SUBSCRIPTIONS_VERSION,
-                ACCOUNT_SESSION_ENDINGS_VERSION,
-                PENDING_DELIVERY_RECIPIENT_SPELLINGS_VERSION
+                ACCOUNT_SESSION_ENDINGS_VERSION
             ]
         );
     }

@@ -309,11 +309,8 @@ async fn retire_in(
 /// which keeps a domain's U-labels, and a row written before recipients
 /// were prepared may differ in letter case as well. Every such spelling has
 /// the canonical localpart, so the candidates are the recipients that start
-/// with it and `@`, compared without letter case, and the key decides. The
-/// candidates are read as a range of the lower-case recipients, bytewise
-/// from `localpart@` up to `localpartA` (`A` follows `@`), which the
-/// recipient-spelling index of migration 2014 serves: the read touches the
-/// account's own spellings, not every recipient of the store.
+/// with it, compared without letter case, and the key decides. The read
+/// scans the store's recipients under the retirement's statement bound.
 async fn delete_offline_spellings(
     tx: &mut Transaction<'_>,
     canonical: &BareJid,
@@ -330,27 +327,13 @@ async fn delete_offline_spellings(
         pattern.push(character);
     }
     pattern.push_str("@%");
-    let from = [localpart.as_str(), "@"].concat();
-    let below = [localpart.as_str(), "A"].concat();
-    // PostgreSQL compares `>=` and `<` under the column's collation, which
-    // need not order bytes; the pattern operators always do, and they are
-    // the ones the index's `text_pattern_ops` serves. SQLite compares text
-    // bytewise. The pattern then only confirms what the range read.
-    let sql = match tx.driver() {
-        DatabaseDriver::Postgres => {
-            "SELECT DISTINCT recipient_jid FROM pending_delivery \
-             WHERE lower(recipient_jid) ~>=~ ? AND lower(recipient_jid) ~<~ ? \
-             AND lower(recipient_jid) LIKE ? ESCAPE '\\'"
-        }
-        DatabaseDriver::Sqlite => {
-            "SELECT DISTINCT recipient_jid FROM pending_delivery \
-             WHERE lower(recipient_jid) >= ? AND lower(recipient_jid) < ? \
-             AND lower(recipient_jid) LIKE ? ESCAPE '\\'"
-        }
-    };
     let mut spellings = Vec::new();
     let mut rows = tx
-        .query(sql, crate::db_params![from, below, pattern])
+        .query(
+            "SELECT DISTINCT recipient_jid FROM pending_delivery \
+             WHERE lower(recipient_jid) LIKE ? ESCAPE '\\'",
+            crate::db_params![pattern],
+        )
         .await?;
     while let Some(row) = rows.next().await? {
         let stored: String = row.get(0)?;
