@@ -15,7 +15,7 @@ pub(super) fn route_receipts(
         match effect {
             ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::PushInboxUpdate { receipt: Some(recorded), .. } | crate::server::routes::interpret::effects::direct::ExternalDirectEffect::DmCallThreadState { receipt: Some(recorded), .. }) if recorded.as_ref() == intent => Some(index),
             ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { row, prepared_notification, .. }) if offline_intents(row, prepared_notification).contains(intent) => Some(index),
-            effect if groupchat_notification_receipt(effect, intent) => Some(index),
+            effect if direct_notification_receipt(effect, intent) || groupchat_notification_receipt(effect, intent) => Some(index),
             _ => None,
         }
     }).collect::<Vec<_>>();
@@ -122,6 +122,23 @@ fn subject_rejection_reply<'a>(
         }
         _ => None,
     }
+}
+
+pub(in crate::ingress) fn direct_notification_receipt(
+    effect: &ExternalEffect,
+    intent: &IngressEffectIntent,
+) -> bool {
+    use waddle_xmpp::ingress::{NotificationActivityMutation, NotificationCandidateOutcome};
+    matches!((effect, intent), (
+        ExternalEffect::Delivery(ExternalDeliveryEffect::NotificationCandidate { candidate }),
+        IngressEffectIntent::NotificationActivityPreview {
+            owner,
+            mutation: NotificationActivityMutation::NotificationCandidate {
+                conversation, archive_stanza_id, outcome: NotificationCandidateOutcome::Inserted,
+            },
+        }
+    ) if owner == conversation && owner == candidate.recipient_bare_jid()
+        && archive_stanza_id == candidate.archive_stanza_id())
 }
 
 fn groupchat_notification_receipt(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool {

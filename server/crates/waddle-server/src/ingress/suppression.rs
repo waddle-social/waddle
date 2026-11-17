@@ -167,7 +167,10 @@ fn unreceipted_repair(
     effect: &ExternalEffect,
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> bool {
-    super::restore_offline::pending_obligation(effect, unreceipted)
+    unreceipted
+        .iter()
+        .any(|intent| super::receipts::routing::direct_notification_receipt(effect, intent))
+        || super::restore_offline::pending_obligation(effect, unreceipted)
         || super::recorded::recorded_route_obligation(unreceipted, effect)
 }
 

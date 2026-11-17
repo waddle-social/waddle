@@ -72,7 +72,7 @@ pub(crate) fn direct_candidate_from_envelope(
 
 /// Message-intrinsic classification is independent from archive provenance.
 /// Legacy alias adoption may reuse it without relaxing new-candidate authority checks.
-pub(super) fn direct_message_intrinsics(
+pub(crate) fn direct_message_intrinsics(
     message: &Message,
     recipient: &BareJid,
 ) -> (

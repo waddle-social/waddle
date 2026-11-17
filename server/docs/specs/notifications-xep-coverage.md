@@ -18,8 +18,8 @@ The pipeline shape (kept here for reference):
 inbound stanza
     │
     ▼
-T0 emit — insert_offline_delivery_notification_candidate  (DM)
-         insert_groupchat_notification_candidate           (MUC)
+T0 emit — prepare_notification_candidate_for_message  (headless DM; live/detached calls)
+         insert_groupchat_notification_candidate      (MUC)
     │
     │ (typed evaluator `evaluate_push_gate_at_dispatch` runs here:
     │  blocking, XEP-0492, XEP-0334, XEP-0513 noping, XEP-0513
@@ -67,6 +67,8 @@ push_publish_jobs  (durable row, Push Service queue; provider
 |---|---|---|
 | Offline DM produces a durable XEP-0357 push | XEP-0160 (offline storage), XEP-0313 (MAM), XEP-0359 (stable stanza id), XEP-0357 (`<publish>` payload + `urn:xmpp:push:summary` form + `message-count`) | `xep0357_offline_dm_emits_durable_summary_pubsub_publish_job` (`tests/xep0357_push_service_ws.rs`) — full WS-level pipeline; `xep0357_payload_uses_summary_form_and_waddle_context_only` (`notification_outbox.rs`) — payload shape |
 | Offline call invitation becomes class `call`, reason `offline_call` | XEP-0353 raw top-level `<propose>` with nonempty session id, an audio or video RTP description and no body; XEP-0334 store hint; XEP-0357 routing context | `direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call` (`tests/notification_outbox/calls.rs`); raw-recognizer tests in `crates/waddle-xmpp/tests/xep0353_jingle_message.rs` cover audio and audio+video descriptions |
+| Connected and detached recipients get exactly one call candidate, without pending delivery | Like headless delivery, the live path requires an archived XEP-0353 audio/video proposal (XEP-0334 store hint) in the recipient archive with this stanza id; a recipient archive stamp alone is insufficient; XEP-0198 detached bare/full-JID routing; XEP-0191 blocking; XEP-0492 never; XEP-0359 origin-id replay | `tests/xep0353_live_push_ws.rs` covers connected, detached-only, mixed connected/detached, two connected resources, detached full JID, blocked/self/muted, headless, no-store, no-media/retract and origin-id retry. Negative cases wait for a positive control, and positive cases also count candidate effects before deduplication. Persisted reason remains `offline_call` for every session state. |
+| Lost live call candidate obligations expire cleanly | Canonical ingress custody and fixed 45-second call expiry; 60-second maintenance grace | `sqlite_expired_live_call_candidate_settles_without_late_push_or_unrecoverable_metric` (`ingress/maintenance_tests.rs`); executor replay and restamp tests in `ingress/execute_notification_tests.rs` and `ingress/restamp/tests.rs` |
 | Recognized bodyless call signals stay deliverable without generic alerts | XEP-0353 top-level `retract`, `proceed`, `reject`, `finish`, `ringing` or legacy `accept` with no top-level JMI `propose`; XEP-0160 pending delivery and MAM retained | `offline_call_signals_preserve_pending_delivery_without_generic_alerts` (`tests/notification_outbox/calls.rs`); predicate unit tests and `tests/xep0353_jingle_message.rs` |
 | Calls honor mute, DND and blocking while passing on-mention | XEP-0492 (`never`, `on-mention`), XEP-0191, Waddle DND | `calls_respect_never_dnd_blocking_and_pass_on_mention` (`tests/notification_outbox/calls.rs`) |
 | Latest call replaces queued call context; DM stays separate | XEP-0353 session identity; XEP-0357 coalescing and fixed receipt-based deadline | `latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_expiry` (`tests/notification_outbox/calls.rs`) |
@@ -94,6 +96,12 @@ push_publish_jobs  (durable row, Push Service queue; provider
 | Durable rows survive process restart | Pipeline-wide durability invariant (no specific XEP — Waddle's own contract) | `push_pipeline_durable_rows_survive_server_restart` (`tests/notifications_restart_durability_ws.rs`) |
 | Push payload privacy default — no body, no sender in payload | XEP-0357 §"Privacy Considerations" | `xep0357_payload_uses_summary_form_and_waddle_context_only` (`notification_outbox.rs`) explicitly asserts `last-message-body` / `last-message-sender` fields are ABSENT |
 | Sender self-notification always suppressed | Pipeline-wide invariant (rejected at `NotificationCandidate::direct_message` constructor) | `self_directed_dm_candidate_is_rejected_at_constructor`; `self_directed_dm_inserts_no_candidate_row` (`notification_outbox.rs`) |
+
+During a rolling update, an older binary cannot settle a live DM candidate
+intent without a pending row; a newer binary's maintenance settles the expired
+obligation. After a full rollback to a binary without this change, ingress rows
+with recorded but unexecuted live candidate obligations stay non-terminal and
+raise the non-terminal backlog alert.
 
 ## Pipeline observability (counter ↔ pipeline boundary)
 

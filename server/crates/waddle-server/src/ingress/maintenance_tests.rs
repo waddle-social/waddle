@@ -927,6 +927,148 @@ impl super::RecoveryEnvironment for EmptyRecoveryEnvironment {
     }
 }
 
+#[tokio::test]
+async fn sqlite_expired_live_call_candidate_settles_without_late_push_or_unrecoverable_metric() {
+    use waddle_xmpp::ingress::{
+        DigestContext, DigestInput, NotificationActivityMutation, NotificationCandidateOutcome,
+    };
+    use waddle_xmpp::xep::xep0353::{build_propose, CallOffer};
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::jingle::SessionId;
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = IngressFixture::sqlite().await;
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
+        .await
+        .expect("notification schema");
+    let mut submission = fixture.submission(Some("maintenance-live-call"), "");
+    submission.plan.sanitized_message.bodies.clear();
+    submission
+        .plan
+        .sanitized_message
+        .payloads
+        .push(build_propose(
+            SessionId("maintenance-live-call".into()),
+            CallOffer::audio_only(),
+        ));
+    submission.digest_input = DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![fixture.principal.bare_jid().clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("call digest");
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    let identity = EffectMessageIdentity::capture_ordinal(0);
+    let recipient = resource.to_bare();
+    let stamp = StanzaId::new("live-call-archive", recipient.clone().into());
+    let candidate = crate::notification_outbox::direct_candidate_from_envelope(
+        &submission.plan.sanitized_message,
+        &recipient,
+        submission
+            .plan
+            .sanitized_message
+            .from
+            .as_ref()
+            .expect("sender"),
+        &stamp,
+    )
+    .expect("call candidate");
+    let candidate_intent = IngressEffectIntent::NotificationActivityPreview {
+        owner: recipient.clone(),
+        mutation: NotificationActivityMutation::NotificationCandidate {
+            conversation: recipient.clone(),
+            archive_stanza_id: stamp,
+            outcome: NotificationCandidateOutcome::Inserted,
+        },
+    };
+    submission.plan.intents = vec![
+        IngressEffectIntent::RouteDirect {
+            prepared: None,
+            recipient,
+            fanout: vec![resource.clone()],
+            route_identity: identity.clone(),
+        },
+        candidate_intent,
+    ];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+            route_identity: Some(identity),
+            jid: resource.clone(),
+            stanza: Box::new(Stanza::Message(submission.plan.sanitized_message.clone())),
+            kind: PeerDeliveryKind::RegistryFrame,
+            call_setup: None,
+        }),
+    ))];
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::NotificationCandidate {
+                candidate: Box::new(candidate),
+            }),
+        )));
+    let mut decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("Phase B");
+    // Lose the in-memory candidate effect after Phase B, while the live route
+    // still executes and receipts. Maintenance sees only recorded authority.
+    assert_eq!(decision.external.len(), 2);
+    decision.external.truncate(1);
+    decision.external_dependencies.truncate(1);
+    decision.external_receipts.truncate(1);
+    let key = decision.message_key.expect("key");
+    let registry = ConnectionRegistry::new();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    registry.register(resource, sender);
+    let deps = Deps::new(&registry, "example.com");
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(terminal_count(&fixture).await, 0);
+    backdate_created(&fixture, key, 120).await;
+    let labels = [
+        ("kind", "notification_activity_preview"),
+        ("reason", "unsupported"),
+    ];
+    let before = metrics
+        .counter_sum("ingress.maintenance.unrecoverable_obligations", &labels)
+        .unwrap_or(0);
+    assert_eq!(
+        run_maintenance_pass(
+            &fixture.db,
+            &fixture.uow,
+            MaintenanceBudget::DEFAULT,
+            Some(Arc::new(
+                EmptyRecoveryEnvironment(ConnectionRegistry::new())
+            )),
+        )
+        .await,
+        MaintenanceOutcome::Complete
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(terminal_count(&fixture).await, 1);
+    assert_eq!(fixture.count("notification_candidates").await, 0);
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.maintenance.unrecoverable_obligations", &labels)
+            .unwrap_or(0),
+        before,
+    );
+    fixture.close().await;
+}
+
 async fn stalled_route(fixture: &IngressFixture) -> MessageKey {
     let mut submission = fixture.submission(Some("maintenance-stall"), "pending delivery");
     let resources = ["juliet@example.com/phone", "juliet@example.com/laptop"]

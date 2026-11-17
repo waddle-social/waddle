@@ -342,6 +342,10 @@ pub(in crate::server::routes::interpret::route_to_connection) async fn route_pla
                 } else {
                     None
                 };
+                super::super::offline_delivery::prepare_live_call_notification(
+                    deps, &bare, message,
+                )
+                .await;
                 for target in &selection.originals {
                     if inventory
                         .live

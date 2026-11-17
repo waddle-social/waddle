@@ -641,3 +641,69 @@ fn restamp_deferred_policy_preserves_frozen_fields_and_changes_receipt_identity(
         crate::ingress::receipt_key(&expected).expect("committed key")
     );
 }
+
+#[test]
+fn restamp_updates_live_call_candidate_and_its_receipt_together() {
+    use crate::notification_outbox::{NotificationCall, NotificationCandidate};
+    use waddle_xmpp::ingress::{NotificationActivityMutation, NotificationCandidateOutcome};
+    use xmpp_parsers::jingle::SessionId;
+    let (mut plan, owner, minted, recorded) = fixture();
+    let candidate = NotificationCandidate::call_with_hints(
+        owner.clone(),
+        "caller@example.test/phone".parse().expect("caller"),
+        minted.clone(),
+        NotificationCall {
+            session_id: SessionId("call".into()),
+            video: false,
+        },
+        crate::notification_outbox::NotificationMessageHints::none(),
+    )
+    .expect("call candidate");
+    plan.intents
+        .push(IngressEffectIntent::NotificationActivityPreview {
+            owner: owner.clone(),
+            mutation: NotificationActivityMutation::NotificationCandidate {
+                conversation: owner.clone(),
+                archive_stanza_id: minted.clone(),
+                outcome: NotificationCandidateOutcome::Inserted,
+            },
+        });
+    plan.plan.push(
+        PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+            ExternalDeliveryEffect::NotificationCandidate {
+                candidate: Box::new(candidate),
+            },
+        )))
+        .with_dependency(PlanEffectDependency::AfterArchive {
+            archive: owner.clone(),
+            minted,
+        }),
+    );
+    let result = restamp_plan(
+        &plan,
+        &[(owner.clone(), ArchiveRole::Sender, recorded.clone())],
+    )
+    .expect("restamp candidate");
+    let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::NotificationCandidate {
+        candidate,
+    })) = &result.plan[0].effect
+    else {
+        panic!("call effect")
+    };
+    assert_eq!(candidate.archive_stanza_id(), &recorded);
+    assert_eq!(
+        result.plan[0].dependencies,
+        vec![PlanEffectDependency::AfterArchive {
+            archive: owner,
+            minted: recorded
+        }]
+    );
+    assert!(
+        crate::ingress::receipts::routing::direct_notification_receipt(
+            &ExternalEffect::Delivery(ExternalDeliveryEffect::NotificationCandidate {
+                candidate: candidate.clone(),
+            }),
+            result.intents.last().expect("notification intent"),
+        )
+    );
+}

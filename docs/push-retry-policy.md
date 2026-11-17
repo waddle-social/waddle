@@ -54,6 +54,33 @@ settled notification ancestry. This is an explicit authoritative expiry
 disposition, including when an earlier attempt left `uncertain_send = 1`; the
 transport policy TTL does not extend the deadline.
 
+An archived bodyless XEP-0353 audio/video `<propose/>` (requiring the existing
+XEP-0334 `<store/>` hint) creates one `call` candidate per recipient account,
+including accounts with connected or hibernated
+(XEP-0198 detached) sessions and proposals addressed to a detached full JID.
+The selected recipient pass prepares this candidate once before resource
+fanout. Live/detached delivery creates no XEP-0160 pending row; headless
+delivery retains its existing pending-row path. Like the headless path, the
+live path requires a recipient archive write with the candidate's stanza id;
+a recipient `<stanza-id/>` alone does not prove archival. Both paths persist
+the reason `offline_call`; that name does not imply the account has no sessions.
+Blocking, self-notification rejection and the existing T0/T1 push gates apply.
+
+The live candidate and its ingress receipt commit together with canonical
+ancestry. Replays use the recorded archive stanza id and original receipt time.
+If that effect was lost before execution, maintenance settles its recorded
+candidate obligation without inserting a late push: its 60-second grace exceeds
+the call's 45-second lifetime. A T0 preparation failure logs a warning and
+increments `xmpp.push.live_call_preparation_failed`; no pending row exists to
+anchor a retry.
+
+During a rolling update, an older binary cannot settle a DM candidate intent
+without a pending row and may report it as an unrecoverable obligation. A newer
+binary's maintenance settles that expired obligation. No persisted encoding or
+schema changes are required. After a full rollback to a binary without this
+change, ingress rows with recorded but unexecuted live candidate obligations
+stay non-terminal and raise the non-terminal backlog alert.
+
 A newly inserted `call` candidate wakes this process's notification outbox loop
 only after its durable ingress transaction commits. A wake drains only call
 candidates and due call outbox jobs. Other classes, candidate recovery and

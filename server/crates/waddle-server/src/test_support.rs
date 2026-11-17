@@ -4,6 +4,8 @@
 //! creating fixed local fixtures; they are never enabled in release images.
 
 #[cfg(feature = "test-support")]
+pub(crate) mod call_candidate_effects;
+#[cfg(feature = "test-support")]
 pub mod iq_forward;
 #[cfg(feature = "test-support")]
 pub mod observer_quarantine;

@@ -21,7 +21,7 @@ use crate::notification_activity::{
 mod candidate;
 mod candidate_persistence;
 mod direct_envelope;
-pub(crate) use direct_envelope::direct_candidate_from_envelope;
+pub(crate) use direct_envelope::{direct_candidate_from_envelope, direct_message_intrinsics};
 mod envelope;
 pub(crate) mod groupchat_class;
 pub use envelope::{candidate_from_envelope, GroupchatCandidateIdentity};

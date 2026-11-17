@@ -69,6 +69,10 @@ pub enum ExternalDeliveryEffect {
         message: Box<Message>,
         kind: CarbonKind,
     },
+    /// A frozen DM call notification, independent of XEP-0160 pending custody.
+    NotificationCandidate {
+        candidate: Box<NotificationCandidate>,
+    },
     QueueOfflineDelivery {
         prepared_notification: PreparedOfflineNotification,
         row: PendingRow,
@@ -88,6 +92,15 @@ pub enum PreparedOfflineNotification {
 /// rows whose archive reference is not carried in the original sender stanza.
 pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffect) {
     use super::{Effect, ExternalEffect, PlanEffectDependency, PlannedEffect};
+    #[cfg(feature = "test-support")]
+    match &effect {
+        ExternalDeliveryEffect::NotificationCandidate { candidate }
+        | ExternalDeliveryEffect::QueueOfflineDelivery {
+            prepared_notification: PreparedOfflineNotification::Prepared(candidate),
+            ..
+        } => crate::test_support::call_candidate_effects::record(candidate),
+        _ => {}
+    }
     let mut dependencies = Vec::new();
     let message = match &effect {
         ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
@@ -100,6 +113,13 @@ pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffe
         },
         ExternalDeliveryEffect::Carbons { message, .. }
         | ExternalDeliveryEffect::RelayCarbons { message, .. } => Some(message.as_ref()),
+        ExternalDeliveryEffect::NotificationCandidate { candidate } => {
+            dependencies.push(PlanEffectDependency::AfterArchive {
+                archive: candidate.recipient_bare_jid().clone(),
+                minted: candidate.archive_stanza_id().clone(),
+            });
+            None
+        }
         ExternalDeliveryEffect::QueueOfflineDelivery { row, .. } => {
             if let waddle_xmpp::pending_delivery::PendingPayload::Archived(minted) = &row.payload {
                 dependencies.push(PlanEffectDependency::AfterArchive {
@@ -125,6 +145,7 @@ pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffe
     let suppression = match &effect {
         ExternalDeliveryEffect::HostOwnedCopy { .. }
         | ExternalDeliveryEffect::QueueOfflineDelivery { .. }
+        | ExternalDeliveryEffect::NotificationCandidate { .. }
         | ExternalDeliveryEffect::QueueDetached { .. } => super::PlanSuppressionPolicy::SenderOnly,
         _ => super::PlanSuppressionPolicy::Always,
     };
