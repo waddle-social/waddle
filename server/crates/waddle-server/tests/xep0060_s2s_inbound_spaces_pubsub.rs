@@ -61,7 +61,9 @@ use waddle_server::s2s::route::RouterLimits;
 use waddle_server::s2s::verify::TrustProfileKind;
 use waddle_server::space_identity::SpaceNode;
 use waddle_server::spaces_metadata::SpaceMetadata;
-use waddle_server::test_support::spaces_publications_settled;
+use waddle_server::test_support::{
+    hold_space_subscription_after_record, spaces_publications_settled,
+};
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::stanza::{is_error, is_result, set};
 use waddle_ws_test_support::WsXmppClient;
@@ -1439,9 +1441,9 @@ async fn two_deletions_of_one_space_at_once_delete_it_once() {
 
 /// A banned account's subscription is refused and leaves no row: in a
 /// public Space with `forbidden`, and in a private one as a node that does
-/// not exist. A ban written while a subscription is being recorded is read
-/// once the row is committed, and the row is then removed; that order is
-/// not reproduced here.
+/// not exist. A ban written while a subscription is being recorded is
+/// covered by
+/// [`a_ban_written_while_a_subscription_is_recorded_removes_its_row`].
 #[tokio::test]
 async fn a_banned_accounts_subscription_is_refused_and_leaves_no_row() {
     let pki = Pki::new();
@@ -1628,4 +1630,52 @@ async fn sweeps_of_the_whole_store_read_every_remote_domain_in_turn() {
     assert_eq!(removed, ["zz-gone.test"]);
     assert_eq!(second.removed.len(), 8);
     assert_eq!(rows(&federated, "s2s_space_subscriptions").await, bound - 7);
+}
+
+/// A ban written while a remote account's subscription is being recorded,
+/// after the Space was read for the request and before the row committed,
+/// is read again once the row is committed: the subscription is refused as
+/// it is when the ban was there first, and the row and the service's own
+/// subscription are gone, in a public Space and in a private one.
+#[tokio::test]
+async fn a_ban_written_while_a_subscription_is_recorded_removes_its_row() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    space(&federated, "inner", NodeConfig::spaces_private()).await;
+    federate(&federated, "inner").await;
+    affiliate(&federated, "inner", BOB, Affiliation::Member).await;
+    let bob = jid(BOB).to_bare();
+
+    for (node, condition) in [(DEV, "forbidden"), ("inner", "item-not-found")] {
+        let gate = hold_space_subscription_after_record(node, bob.clone());
+        let id = format!("ban-race-{node}");
+        let (answer, ()) = tokio::join!(
+            ask(
+                &federated,
+                request(BOB_PHONE, &id, true, subscription("subscribe", node, BOB)),
+            ),
+            async {
+                gate.wait_until_reached().await;
+                // The row committed before the ban was written.
+                assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
+                affiliate(&federated, node, BOB, Affiliation::Outcast).await;
+                gate.release();
+            }
+        );
+        assert_eq!(
+            error_condition(&answer).as_deref(),
+            Some(condition),
+            "{node}: {answer:?}"
+        );
+        assert_eq!(
+            rows(&federated, "s2s_space_subscriptions").await,
+            0,
+            "{node}"
+        );
+        assert!(
+            service_subscribers(&federated, node).await.is_empty(),
+            "{node}"
+        );
+    }
 }

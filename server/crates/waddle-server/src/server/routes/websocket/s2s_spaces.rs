@@ -1250,6 +1250,8 @@ impl Asked<'_> {
         if let Ok(recording) = &recorded {
             self.forget_removed(&recording.removed).await;
         }
+        #[cfg(feature = "test-support")]
+        subscription_gates::recorded(node, &self.account).await;
         // A ban written since the Space was read above is read again now
         // that the row is committed. A ban is written before its removal of
         // the banned account's row, so either this finds the ban or that
@@ -1262,9 +1264,19 @@ impl Asked<'_> {
             .await
             .map(|affiliation| affiliation.is_outcast());
         if !matches!(banned, Ok(false)) {
-            let _ = subscriptions
+            // The service holds no subscription for the account yet, so a
+            // row left behind is never notified; it is removed when the
+            // account unsubscribes or the Space closes, and lapses with
+            // its lifetime otherwise.
+            if let Err(error) = subscriptions
                 .remove(&self.service, node, &self.account)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    "the remote subscription record of a banned account was not removed"
+                );
+            }
             return match (banned, space.node.config.access_model) {
                 (Ok(_), AccessModel::Open) => {
                     self.refuse(forbidden("You may not subscribe to this Space."))
@@ -1715,4 +1727,63 @@ async fn subscriber_reads(
         return false;
     };
     reads(node.config.access_model, honoured(&witness, stored))
+}
+
+/// A point of a remote account's subscription that a suite holds, to write
+/// what a concurrent request would write there: just after the account's
+/// subscription record committed, before the ban is read again.
+#[cfg(feature = "test-support")]
+pub(crate) mod subscription_gates {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    use jid::BareJid;
+    use tokio::sync::Notify;
+
+    type Key = (String, BareJid);
+
+    static GATES: LazyLock<Mutex<HashMap<Key, Arc<SubscriptionGate>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// A held point: the next subscription of the account to the node that
+    /// reaches it waits there until the suite releases it.
+    #[derive(Default)]
+    pub struct SubscriptionGate {
+        reached: Notify,
+        released: Notify,
+    }
+
+    impl SubscriptionGate {
+        /// Wait until a subscription has reached the point.
+        pub async fn wait_until_reached(&self) {
+            self.reached.notified().await;
+        }
+
+        /// Let the subscription that reached the point go on.
+        pub fn release(&self) {
+            self.released.notify_one();
+        }
+    }
+
+    /// Hold the next subscription of `account` to the Space `node` once its
+    /// record has committed.
+    pub fn hold_after_record(node: &str, account: BareJid) -> Arc<SubscriptionGate> {
+        let gate = Arc::new(SubscriptionGate::default());
+        GATES
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .insert((node.to_owned(), account), Arc::clone(&gate));
+        gate
+    }
+
+    pub(super) async fn recorded(node: &str, account: &BareJid) {
+        let gate = GATES
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .remove(&(node.to_owned(), account.clone()));
+        if let Some(gate) = gate {
+            gate.reached.notify_one();
+            gate.released.notified().await;
+        }
+    }
 }

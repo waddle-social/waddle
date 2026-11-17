@@ -362,6 +362,22 @@ pub async fn spaces_publications_settled(router: &crate::s2s::route::S2sRouter) 
     router.spaces_publications_settled().await;
 }
 
+/// Hold the next subscription of the remote `account` to the Space `node`
+/// just after its record committed and before its ban is read again, so a
+/// suite can write a ban there as a concurrent request would.
+#[cfg(feature = "test-support")]
+pub fn hold_space_subscription_after_record(
+    node: &str,
+    account: jid::BareJid,
+) -> Arc<SpaceSubscriptionGate> {
+    crate::server::routes::websocket::s2s_spaces::subscription_gates::hold_after_record(
+        node, account,
+    )
+}
+
+#[cfg(feature = "test-support")]
+pub use crate::server::routes::websocket::s2s_spaces::subscription_gates::SubscriptionGate as SpaceSubscriptionGate;
+
 /// Have `router` serve the Spaces of `state` to remote principals, as
 /// startup does for a replica with S2S enabled: the router hands what
 /// remote principals ask of the Spaces PubSub service to the state's
