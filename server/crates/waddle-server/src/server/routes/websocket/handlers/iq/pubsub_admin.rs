@@ -194,11 +194,12 @@ pub(super) async fn handle_pubsub_admin_request(
                 return vec![error];
             }
 
-            // A Space is deleted with the cascade `spaces:delete` runs,
-            // whoever asks: its rooms, their parent grants and links, the
-            // Space's own relations and metadata, and what S2S recorded for
-            // it go with the node, so nothing is left for a Space created
-            // again under the name to inherit.
+            // A Space deleted through PubSub, whoever asks, takes its rooms
+            // out of it and leaves them standing: their parent grants on
+            // it, their links to it and their bookmarks in it go, with the
+            // Space's own relations and metadata and what S2S recorded for
+            // it, so nothing is left for a Space created again under the
+            // name to inherit. Only `spaces:delete` destroys rooms.
             if matches!(
                 spaces_service_bare_jid(spaces_domain),
                 Ok(spaces_jid) if target_jid == &spaces_jid
@@ -853,6 +854,7 @@ fn spaces_service<'a>(
         storage: &state.deps.protocol.pubsub_storage,
         spaces_jid,
         muc_domain: &state.deps.service_domains.muc,
+        account_domain: state.deps.auth_state.xmpp_domain.as_str(),
     }
 }
 

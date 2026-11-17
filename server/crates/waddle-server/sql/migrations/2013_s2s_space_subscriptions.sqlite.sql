@@ -17,7 +17,9 @@
 -- `node_created_at_ms` binds the row to the PubSub node it was made for, as
 -- in `s2s_federated_spaces`: a row left by a deleted Space counts for
 -- nothing. `account_jid` and `subscriber_domain` serve the bounds per
--- account and per remote domain. The addresses are bounded in bytes so that
+-- account and per remote domain; `subscribed_at_ms` serves the bound on
+-- the deployment's subscriptions, which counts the rows that have not
+-- lapsed and removes lapsed ones oldest first. The addresses are bounded in bytes so that
 -- the primary key's index entry stays below PostgreSQL's B-tree limit.
 -- See server/docs/planning/s2s-routing-2047.md.
 CREATE TABLE s2s_space_subscriptions (
@@ -41,3 +43,4 @@ CREATE TABLE s2s_space_subscriptions (
 
 CREATE INDEX s2s_space_subscriptions_account ON s2s_space_subscriptions (account_jid);
 CREATE INDEX s2s_space_subscriptions_domain ON s2s_space_subscriptions (subscriber_domain);
+CREATE INDEX s2s_space_subscriptions_subscribed_at ON s2s_space_subscriptions (subscribed_at_ms);

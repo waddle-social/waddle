@@ -83,7 +83,7 @@ async fn cascade_removes_dormant_catalog_channel_without_a_bookmark_or_actor() {
     let space = space(&state, "Delete").await;
     let jid = catalog_channel(&state).await;
     link(&state, &jid, &space).await;
-    run_delete(&state, &delete_args(&space))
+    run_delete(&state, &delete_args(&space), "localhost")
         .await
         .unwrap_or_else(|_| panic!("cascade deletion"));
     assert!(
@@ -108,7 +108,9 @@ async fn failed_cascade_restores_catalog_link_bookmark_and_parent_tuple() {
     link(&state, &jid, &space).await;
     state.room_registry.kill();
     state.room_registry.wait_for_shutdown().await;
-    assert!(run_delete(&state, &delete_args(&space)).await.is_err());
+    assert!(run_delete(&state, &delete_args(&space), "localhost")
+        .await
+        .is_err());
     let record = get_xmpp_channel(state.db_pool.global_actor().clone(), "dormant")
         .await
         .expect("catalog")
@@ -157,7 +159,7 @@ async fn external_bookmark_destruction_preserves_same_named_local_catalog_channe
     catalog_channel(&state).await;
     destroy_space_channel(
         &state,
-        super::SpaceService::of(&state),
+        super::SpaceService::of(&state, "localhost"),
         &"dormant@remote.example".parse().expect("remote room"),
     )
     .await
@@ -191,7 +193,7 @@ async fn old_space_bookmark_does_not_destroy_channel_linked_to_another_space() {
         .publish_item(&state.spaces_jid, &old_space.space_node, &item, None, false)
         .await
         .expect("old bookmark");
-    run_delete(&state, &delete_args(&old_space))
+    run_delete(&state, &delete_args(&old_space), "localhost")
         .await
         .unwrap_or_else(|_| panic!("old space deletion"));
     assert!(

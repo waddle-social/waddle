@@ -401,7 +401,11 @@ async fn handle_delete(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_delete(&state, &args).await {
+    // As for `spaces:set-role`: the caller's domain is the deployment's
+    // account domain, which tells the subscription records of accounts at
+    // other servers that the deletion removes.
+    let account_domain = ctx.from.domain().as_str().to_owned();
+    match run_delete(&state, &args, &account_domain).await {
         Ok(()) => CommandResult::Completed {
             session_id: None,
             form: None,
@@ -1127,40 +1131,101 @@ async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRe
     })
 }
 
-async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), AdminErr> {
+/// `spaces:delete`: the Space is deleted and the rooms it holds are
+/// destroyed ([`SpaceRooms::Destroy`]). It is the one deletion that
+/// destroys rooms; one asked through PubSub only takes them out of the
+/// Space ([`delete_space`]).
+async fn run_delete(
+    state: &AppState,
+    args: &SpacesDeleteArgs,
+    account_domain: &str,
+) -> Result<(), AdminErr> {
     let (node_name, space_jid) =
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
     super::refuse_host_grant_space(state, &node_name).await?;
-    cascade_delete(state, SpaceService::of(state), &node_name, Some(&space_jid)).await
+    let service = SpaceService::of(state, account_domain);
+    let lock = lock_deletion(state, service, &node_name).await?;
+    let deleted = cascade_delete(
+        state,
+        service,
+        &node_name,
+        Some(&space_jid),
+        SpaceRooms::Destroy,
+    )
+    .await;
+    lock.release().await;
+    deleted
+}
+
+/// Wait until no other deletion of the Space `node` runs, and hold that
+/// until the answer is released ([`crate::db::s2s_spaces::lock_space_deletion`]):
+/// two deletions of one Space never interleave, so one that fails never
+/// puts back what it removed beside one that completed.
+async fn lock_deletion<'a>(
+    state: &'a AppState,
+    service: SpaceService<'_>,
+    node: &str,
+) -> Result<crate::db::s2s_spaces::SpaceDeletionLock<'a>, AdminErr> {
+    crate::db::s2s_spaces::lock_space_deletion(state.db_pool.global(), service.spaces_jid, node)
+        .await
+        .map_err(|e| internal_err(format!("the Space's deletion lock was not taken: {e}")))
 }
 
 /// The Spaces PubSub service a Space's deletion works on: its store, its
-/// address and the MUC service whose rooms its items name. `spaces:delete`
-/// uses the admin state's; a PubSub request uses those of the WebSocket
-/// state it reached, which a deployment builds from the same values.
+/// address, the MUC service whose rooms its items name, and the
+/// deployment's account domain. `spaces:delete` uses the admin state's; a
+/// PubSub request uses those of the WebSocket state it reached, which a
+/// deployment builds from the same values.
 #[derive(Clone, Copy)]
 pub(crate) struct SpaceService<'a> {
     pub(crate) storage: &'a Arc<dyn waddle_xmpp::pubsub::PubSubStorage>,
     pub(crate) spaces_jid: &'a BareJid,
     pub(crate) muc_domain: &'a str,
+    pub(crate) account_domain: &'a str,
 }
 
 impl<'a> SpaceService<'a> {
-    /// The service the admin state `state` names.
-    pub(crate) fn of(state: &'a AppState) -> Self {
+    /// The service the admin state `state` names, for a deployment whose
+    /// accounts are of `account_domain`.
+    pub(crate) fn of(state: &'a AppState, account_domain: &'a str) -> Self {
         Self {
             storage: &state.pubsub_storage,
             spaces_jid: &state.spaces_jid,
             muc_domain: state.muc_domain.as_str(),
+            account_domain,
         }
     }
+
+    /// Whether `address` is of this deployment: an account of its account
+    /// domain, or one of its MUC and Spaces services. Any other address a
+    /// Space's subscriptions name is an account at another server.
+    fn serves(&self, address: &BareJid) -> bool {
+        let domain = address.domain().as_str();
+        domain == self.account_domain
+            || domain == self.muc_domain
+            || domain == self.spaces_jid.domain().as_str()
+    }
+}
+
+/// What a Space's deletion does with the rooms it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpaceRooms {
+    /// They leave the Space and stand alone: each loses its parent grant
+    /// on the Space, its link to it and its bookmark in it. A deletion
+    /// asked through PubSub, by a session or by a remote owner.
+    Unlink,
+    /// They are destroyed, each with its catalog row: `spaces:delete`. A
+    /// room is destroyed only where this Space was its parent, its parent
+    /// grant on the Space found and removed by the deletion; any other
+    /// room the Space names is unlinked.
+    Destroy,
 }
 
 /// What became of a Space's deletion asked through PubSub (XEP-0060 §8.4),
 /// by a session or by a remote owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpaceDeletion {
-    /// The Space and everything that named it are gone.
+    /// The Space is gone, and the rooms it held stand alone.
     Deleted,
     /// No such node.
     NotFound,
@@ -1181,12 +1246,14 @@ fn deletion_of(error: &CommandResult) -> SpaceDeletion {
     }
 }
 
-/// Delete the Space `node` with the cascade `spaces:delete` runs, for a
-/// deletion asked through PubSub: whoever may delete the node removes, with
-/// it, the rooms it holds, their parent grants and their links to it, the
-/// relations of the Space itself, its metadata, and what S2S recorded for
-/// it. A PubSub deletion leaves nothing behind that a Space created again
-/// under the same name would inherit.
+/// Delete the Space `node` as asked through PubSub, by whoever may delete
+/// the node: a session's owner or a remote owner. The Space goes with what
+/// named it, and its rooms stay, each taken out of it
+/// ([`SpaceRooms::Unlink`]): their parent grants on it, their links to it
+/// and their bookmarks in it go; the relations of the Space itself, its
+/// metadata, and what S2S recorded for it go. Nothing is left behind that a
+/// Space created again under the same name would inherit. Only
+/// `spaces:delete` destroys rooms.
 pub(crate) async fn delete_space(
     state: &AppState,
     service: SpaceService<'_>,
@@ -1202,13 +1269,38 @@ pub(crate) async fn delete_space(
     }
     let node_name = SpaceNode::from(node);
     let space_jid = space_jid_for_node(service.spaces_jid, &node_name);
-    match cascade_delete(state, service, &node_name, space_jid.as_ref()).await {
-        Ok(()) => SpaceDeletion::Deleted,
-        Err(error) => {
-            tracing::warn!(space_node = %node_name, "PubSub deletion of a Space did not complete");
-            deletion_of(&error)
+    let lock = match lock_deletion(state, service, &node_name).await {
+        Ok(lock) => lock,
+        Err(_) => return SpaceDeletion::Failed,
+    };
+    // Read again under the lock: a deletion that held it may have deleted
+    // the node meanwhile.
+    let deletion = match service.storage.get_node(service.spaces_jid, node).await {
+        Ok(Some(_)) => {
+            match cascade_delete(
+                state,
+                service,
+                &node_name,
+                space_jid.as_ref(),
+                SpaceRooms::Unlink,
+            )
+            .await
+            {
+                Ok(()) => SpaceDeletion::Deleted,
+                Err(error) => {
+                    tracing::warn!(
+                        space_node = %node_name,
+                        "PubSub deletion of a Space did not complete"
+                    );
+                    deletion_of(&error)
+                }
+            }
         }
-    }
+        Ok(None) => SpaceDeletion::NotFound,
+        Err(_) => SpaceDeletion::Failed,
+    };
+    lock.release().await;
+    deletion
 }
 
 /// What became of taking the rooms out of a Space before its items are
@@ -1312,32 +1404,38 @@ async fn delete_space_relations(state: &AppState, node: &str) -> Result<(), Admi
 }
 
 /// The cascade of a Space's deletion, for `spaces:delete` and for a PubSub
-/// deletion alike; the caller has refused the Space of an enrolled scope.
-/// `space_jid` is the Space's address, where its node name has one.
+/// deletion alike, run under the Space's deletion lock; the caller has
+/// refused the Space of an enrolled scope. `space_jid` is the Space's
+/// address, where its node name has one; `rooms` says what becomes of the
+/// rooms it holds.
 async fn cascade_delete(
     state: &AppState,
     service: SpaceService<'_>,
     node_name: &SpaceNode,
     space_jid: Option<&BareJid>,
+    rooms: SpaceRooms,
 ) -> Result<(), AdminErr> {
-    // Cascade destroy. There are two sources of "channels in this
-    // space" we need to honor:
+    // There are two sources of "channels in this space" we need to honor:
     //   1. The persistent channel↔space link projection
     //      (`channel_space_link_store`) — populated by admin V2's
     //      `channels:create`. This is the authoritative source for
     //      admin-managed channels.
     //   2. Legacy/bookmark items stored on the space's pubsub node
     //      (each item's `id` is a managed-room JID).
-    // Both are unioned so the cascade is total, with one exception. An
-    // item whose id is not the room's canonical text
-    // (`Room@muc.example.com`, stored as written by earlier releases) folds
-    // onto a room that need not belong to this space: publishing it gave
-    // that room a parent tuple on this node and moved its link here. Such
-    // a room loses that tuple and link, but is destroyed only when an item
-    // under its canonical id is on this node too.
+    // Both are unioned so that every room the Space names is taken out of
+    // it. With `SpaceRooms::Destroy`, a room is destroyed only where the
+    // Space was its parent: its parent tuple on this node is found and
+    // removed here, and neither of the following holds. Its link names
+    // another Space. Or only an item whose id is not the room's canonical
+    // text (`Room@muc.example.com`, stored as written by earlier releases)
+    // names it: such an item folds onto a room that need not belong to this
+    // space, though publishing it gave that room a parent tuple on this
+    // node and moved its link here. Such a room loses that tuple and link,
+    // but is destroyed only when an item under its canonical id is on this
+    // node too.
     let node_name = node_name.clone();
 
-    // Collect channels-to-destroy from both sources.
+    // Collect the rooms the Space names from both sources.
     let mut targets: BTreeSet<BareJid> = BTreeSet::new();
 
     let linked = state
@@ -1367,8 +1465,10 @@ async fn cascade_delete(
     }
     // A Space being deleted is closed to other servers first: its
     // `federated` setting and the subscriptions remote accounts made to it
-    // go in one transaction, and nothing is subscribed to it after. A
-    // deletion that fails later leaves it closed, which is the safe side.
+    // go in one transaction, and nothing is subscribed to it after; then
+    // the service's own subscription records of accounts at other servers
+    // go, as when its owner closes it. A deletion that fails later leaves
+    // it closed, which is the safe side, and with none of those records.
     crate::server::routes::websocket::s2s_spaces::close_space(
         state.db_pool.global(),
         service.spaces_jid,
@@ -1376,6 +1476,18 @@ async fn cascade_delete(
     )
     .await
     .map_err(|e| internal_err(format!("closing the Space to other servers failed: {e}")))?;
+    if !crate::server::routes::websocket::s2s_spaces::remove_remote_subscription_records(
+        service.storage,
+        service.spaces_jid,
+        &node_name,
+        &|address| service.serves(address),
+    )
+    .await
+    {
+        return Err(internal_err(
+            "removing the subscription records of accounts at other servers failed".to_string(),
+        ));
+    }
     let bookmarked_rooms: BTreeSet<BareJid> = items
         .iter()
         .filter_map(|stored| stored.id.parse::<BareJid>().ok())
@@ -1518,7 +1630,12 @@ async fn cascade_delete(
             cleanups.push(cleanup);
             continue;
         }
-        destroy_targets.insert(room_jid.clone());
+        // A room is destroyed only by `spaces:delete`, and only where the
+        // Space was its parent: an item or a link alone does not show
+        // that, and a room of another MUC service has no parent here.
+        if rooms == SpaceRooms::Destroy && cleanup.parent_tuple_deleted {
+            destroy_targets.insert(room_jid.clone());
+        }
         cleanups.push(cleanup);
     }
 

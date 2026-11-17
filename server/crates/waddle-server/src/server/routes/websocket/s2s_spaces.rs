@@ -39,11 +39,12 @@
 //! is a join of the room, decided by the room.
 //!
 //! A Space's publications are handed to [`WebSocketLocalSpaces`] once they
-//! are stored, on a bounded queue, and a task of its own sends their event
-//! notifications to the subscribers at other servers
-//! ([`notify_remote_subscribers`]), each only for a subscription the remote
-//! account made itself and decided on the evidence that subscription
-//! recorded. The publisher's request waits for none of it.
+//! are stored, within the Space's allowance of notified publications, on a
+//! bounded queue, and a task of its own sends their event notifications to
+//! the subscribers at other servers ([`notify_remote_subscribers`]), each
+//! only for a subscription the remote account made itself and decided on
+//! the evidence that subscription recorded. The publisher's request waits
+//! for none of it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -72,7 +73,8 @@ use super::handlers::iq::spaces_change_for_remote;
 use super::handlers::presence::principal_witness;
 use super::WebSocketState;
 use crate::db::s2s_spaces::{
-    FederatedSpaces, SpaceSubscriptions, SubscriptionRecord, SubscriptionRequest,
+    FederatedSpaces, RemovedSubscription, SpaceSubscriptions, SubscriptionRecord,
+    SubscriptionRequest,
 };
 use crate::db::Database;
 use crate::permissions::host_grant::{
@@ -93,12 +95,12 @@ const MAX_LISTED_SPACES: usize = 256;
 /// The most items one answer returns to a remote asker.
 const MAX_RETURNED_ITEMS: u32 = 256;
 
-/// Publications of one Space, on average each second, whose notifications
-/// leave for subscribers at other servers.
+/// Publications of one Space, on average each second, queued to be decided
+/// for subscribers at other servers.
 const EVENT_RATE: f64 = 4.0;
 
-/// Publications of one Space at once whose notifications leave for
-/// subscribers at other servers.
+/// Publications of one Space at once queued to be decided for subscribers
+/// at other servers.
 const EVENT_BURST: f64 = 16.0;
 
 /// Spaces whose allowance of notified publications is kept. A Space that
@@ -107,9 +109,11 @@ const EVENT_BURST: f64 = 16.0;
 const EVENT_ALLOWANCES: usize = 4096;
 
 /// Publications stored in local Spaces and not yet decided for their
-/// subscribers at other servers. One that finds the queue full is not
-/// notified to them, so a burst of publications never holds a publisher
-/// and never grows the replica's memory.
+/// subscribers at other servers. A publication is queued only within its
+/// Space's allowance, so one Space holds at most [`EVENT_BURST`] places
+/// at once; one that finds the queue full is not notified to them, so a
+/// burst of publications never holds a publisher and never grows the
+/// replica's memory.
 const PUBLICATION_QUEUE: usize = 1024;
 
 /// What one Space may still have notified to other servers.
@@ -119,7 +123,7 @@ struct EventAllowance {
 }
 
 /// The allowances of notified publications of the Spaces of one host,
-/// kept by its notification task.
+/// taken as each publication is handed over, before it is queued.
 #[derive(Default)]
 struct EventBudget {
     allowances: HashMap<String, EventAllowance>,
@@ -204,14 +208,26 @@ mod telemetry {
         );
     }
 
-    /// A publication of a local Space was not notified to its subscribers
-    /// at other servers: the Space had spent its allowance of notified
+    /// Publications of local Spaces queued for their subscribers at other
+    /// servers and never decided: the replica's state, or its Spaces host,
+    /// was going away.
+    pub(super) fn publications_discarded(count: u64) {
+        counter_add!(
+            "waddle.s2s.spaces.publications.discarded",
+            "{event}",
+            "Publications of local Spaces queued for their subscribers at other servers that were never decided because the replica's state or its Spaces host was shutting down.",
+            count,
+        );
+    }
+
+    /// A publication of a local Space was not queued for its subscribers at
+    /// other servers: the Space had spent its allowance of notified
     /// publications.
     pub(super) fn publication_limited() {
         counter_add!(
             "waddle.s2s.spaces.events.limited",
             "{event}",
-            "Publications of local Spaces whose event notifications were not sent to subscribers at other servers because the Space had spent its allowance of notified publications.",
+            "Publications of local Spaces not queued for subscribers at other servers because the Space had spent its allowance of notified publications, counted whether or not the Space has such subscribers.",
             1,
         );
     }
@@ -237,6 +253,10 @@ mod telemetry {
 pub struct WebSocketLocalSpaces {
     state: Weak<WebSocketState>,
     publications: tokio::sync::mpsc::Sender<Queued>,
+    /// The Spaces' allowances of queued publications. A publisher takes
+    /// from it as it hands a publication over, so the queue holds no more
+    /// of one Space's than its allowance.
+    budget: std::sync::Mutex<EventBudget>,
 }
 
 impl WebSocketLocalSpaces {
@@ -248,31 +268,57 @@ impl WebSocketLocalSpaces {
         Self {
             state: Arc::downgrade(state),
             publications,
+            budget: std::sync::Mutex::new(EventBudget::default()),
         }
+    }
+
+    /// Take one publication of the Space's allowance; `false` when it is
+    /// spent, or the allowances cannot be read.
+    fn within_allowance(&self, publication: &SpacePublication) -> bool {
+        let Ok(mut budget) = self.budget.lock() else {
+            return false;
+        };
+        budget.take(&publication.service, &publication.node)
     }
 }
 
 /// The notification task of one host: each publication taken, in the order
-/// taken, decided for the Space's subscribers at other servers within the
-/// Space's allowance of notified publications, which this task keeps.
+/// taken, decided for the Space's subscribers at other servers. Once the
+/// state is gone, what is still queued is discarded and counted.
 async fn notify_publications(
     state: Weak<WebSocketState>,
     mut queued: tokio::sync::mpsc::Receiver<Queued>,
 ) {
-    let mut budget = EventBudget::default();
     while let Some(next) = queued.recv().await {
         match next {
             Queued::Publication(publication) => {
                 let Some(state) = state.upgrade() else {
+                    discard_queued(&mut queued);
                     return;
                 };
-                notify_remote_subscribers(&state, &publication, &mut budget).await;
+                notify_remote_subscribers(&state, &publication).await;
             }
             Queued::Settled(settled) => {
                 let _ = settled.send(());
             }
         }
     }
+}
+
+/// Close `queued` and count the publication in hand and every one still in
+/// it as discarded; whoever waits for the queue to settle is answered.
+fn discard_queued(queued: &mut tokio::sync::mpsc::Receiver<Queued>) {
+    queued.close();
+    let mut discarded: u64 = 1;
+    while let Ok(next) = queued.try_recv() {
+        match next {
+            Queued::Publication(_) => discarded += 1,
+            Queued::Settled(settled) => {
+                let _ = settled.send(());
+            }
+        }
+    }
+    telemetry::publications_discarded(discarded);
 }
 
 /// Have `router` serve the Spaces of `state` to remote principals: the
@@ -516,13 +562,30 @@ async fn remove_remote_pubsub_subscriptions(
     service: &BareJid,
     node: &str,
 ) -> bool {
-    let storage = &state.deps.protocol.pubsub_storage;
+    remove_remote_subscription_records(
+        &state.deps.protocol.pubsub_storage,
+        service,
+        node,
+        &|address| state.serves(address),
+    )
+    .await
+}
+
+/// Remove the subscription records `storage` holds for `node` of `service`
+/// for addresses `serves` does not answer for: those of accounts at other
+/// servers. `false` when one could not be read or removed.
+pub(crate) async fn remove_remote_subscription_records(
+    storage: &Arc<dyn waddle_xmpp::pubsub::PubSubStorage>,
+    service: &BareJid,
+    node: &str,
+    serves: &(dyn Fn(&BareJid) -> bool + Send + Sync),
+) -> bool {
     let Ok(subscriptions) = storage.list_node_subscriptions(service, node).await else {
         return false;
     };
     let mut removed = true;
     for subscription in subscriptions {
-        if state.serves(&subscription.subscriber.to_bare()) {
+        if serves(&subscription.subscriber.to_bare()) {
             continue;
         }
         removed &= storage
@@ -1068,6 +1131,15 @@ impl Asked<'_> {
         };
         let subscriber = Jid::from(self.account.clone());
         let admitted = admitted_now(self.state);
+        // A ban written after the Space was read above is read again under
+        // the Space's lock, where the ban's removal of a subscription waits.
+        let banned = async {
+            self.storage()
+                .affiliation(&self.service, node, &self.account)
+                .await
+                .map(|affiliation| affiliation.is_outcast())
+                .map_err(|error| crate::db::s2s_spaces::SpaceStoreError::Storage(error.to_string()))
+        };
         let recorded = subscriptions
             .record(
                 &self.service,
@@ -1080,9 +1152,10 @@ impl Asked<'_> {
                     now_ms: chrono::Utc::now().timestamp_millis(),
                 },
                 &admitted,
+                banned,
             )
             .await;
-        match recorded {
+        match recorded.as_ref().map(|recording| recording.outcome) {
             Ok(SubscriptionRecord::Recorded) => {}
             Ok(SubscriptionRecord::Bounds) => {
                 telemetry::subscription_limited();
@@ -1090,7 +1163,21 @@ impl Asked<'_> {
             }
             // The Space was closed to other servers since it was read.
             Ok(SubscriptionRecord::NotFederated) => return self.refuse(no_such_node()),
+            // The account was banned since the Space was read: answered as
+            // a banned account's request is, refused in a public Space and
+            // told nothing of a private one.
+            Ok(SubscriptionRecord::Banned) => {
+                return match space.node.config.access_model {
+                    AccessModel::Open => {
+                        self.refuse(forbidden("You may not subscribe to this Space."))
+                    }
+                    _ => self.refuse(no_such_node()),
+                };
+            }
             Err(_) => return self.refuse(internal()),
+        }
+        if let Ok(recording) = &recorded {
+            self.forget_removed(&recording.removed).await;
         }
         let subscribed = match self
             .storage()
@@ -1132,6 +1219,29 @@ impl Asked<'_> {
             &subscriber,
             &subscribed.subid,
         ))
+    }
+
+    /// Remove the PubSub service's records of the subscriptions the store
+    /// removed while it recorded this request's: lapsed ones, and those of
+    /// domains no longer admitted. A record that cannot be removed now is
+    /// left; without its row nothing is sent for it.
+    async fn forget_removed(&self, removed: &[RemovedSubscription]) {
+        for gone in removed {
+            if self.state.serves(&gone.account) {
+                continue;
+            }
+            let subscriber = Jid::from(gone.account.clone());
+            if let Err(error) = self
+                .storage()
+                .unsubscribe(&gone.service, &gone.node, &subscriber, None)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    "the PubSub record of a removed remote subscription was not removed"
+                );
+            }
+        }
     }
 
     /// XEP-0060 §6.2: the account's own subscription ends. Leaving only
@@ -1270,13 +1380,23 @@ impl LocalSpaces for WebSocketLocalSpaces {
     }
 
     fn published(&self, publication: SpacePublication) -> bool {
+        // The allowance is taken before anything is queued or read, so one
+        // Space's burst spends its own allowance and not the queue's places.
+        if !self.within_allowance(&publication) {
+            telemetry::publication_limited();
+            return false;
+        }
         match self
             .publications
             .try_send(Queued::Publication(Box::new(publication)))
         {
             Ok(()) => true,
-            Err(_) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 telemetry::publication_dropped();
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                telemetry::publications_discarded(1);
                 false
             }
         }
@@ -1376,15 +1496,12 @@ pub(crate) fn queue_remote_notification(
 ///   still lets it read the Space;
 /// - the room the event names is one the subscriber may be told of.
 ///
-/// One publication sends at most one stanza to each of at most 256 remote
-/// accounts, within the Space's allowance of notified publications;
-/// what does not fit a domain pair's queue is dropped, as a headline may
-/// be. Nothing is sent to an address at a domain this deployment serves.
-async fn notify_remote_subscribers(
-    state: &WebSocketState,
-    publication: &SpacePublication,
-    budget: &mut EventBudget,
-) {
+/// One publication, queued within the Space's allowance of notified
+/// publications, sends at most one stanza to each of at most 256 remote
+/// accounts; what does not fit a domain pair's queue is dropped, as a
+/// headline may be. Nothing is sent to an address at a domain this
+/// deployment serves.
+async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePublication) {
     // Without an S2S snapshot nothing leaves for another server, and
     // nothing is read to find that out.
     if state.deps.app_state.s2s_federation.is_none() {
@@ -1440,10 +1557,6 @@ async fn notify_remote_subscribers(
     // Whether the room is open to other servers is the same for every
     // subscriber: a room that is not is told to none of them.
     if !room_open(state, &room).await {
-        return;
-    }
-    if !budget.take(service, node_name) {
-        telemetry::publication_limited();
         return;
     }
     // The service's own record, read for this publication just before the

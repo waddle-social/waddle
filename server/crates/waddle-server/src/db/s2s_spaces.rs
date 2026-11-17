@@ -19,14 +19,27 @@
 //! two transaction-scoped advisory locks, one keyed on the subscriber's
 //! domain and then one keyed on the Space, so that the subscriptions of one
 //! remote domain, and those to one Space, are counted one at a time on
-//! every replica. Turning a Space's `federated` setting off takes the
-//! Space's lock too, and a subscription re-reads the setting under it, so
-//! no subscription is recorded for a Space after its setting went off.
+//! every replica. Turning a Space's `federated` setting off and removing
+//! one subscription take the Space's lock too, and a subscription re-reads
+//! the setting and the account's ban under it, so no subscription is
+//! recorded for a Space after its setting went off, nor for an account
+//! after it was banned.
 //!
 //! A subscription lapses [`SUBSCRIPTION_LIFETIME_MS`] after it was last
 //! made: a lapsed row counts against no bound and names no subscriber, and
-//! subscribing again renews it. The decisions are recorded in
+//! subscribing again renews it. Recording a subscription removes lapsed
+//! rows, and rows of domains no longer admitted, and tells its caller which
+//! ([`Recording::removed`]), so that the PubSub service's own records of
+//! them go too.
+//!
+//! A Space's deletion runs under a lock of its own
+//! ([`lock_space_deletion`]), so two deletions of one Space never
+//! interleave. The decisions are recorded in
 //! `server/docs/planning/s2s-routing-2047.md`.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use jid::BareJid;
 use thiserror::Error;
@@ -63,7 +76,33 @@ pub const SUBSCRIPTION_LIFETIME_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// The most remote domains whose rows one sweep of the whole store reads,
 /// when the bound on the deployment's remote subscriptions is reached.
+/// Each sweep starts after the last domain the one before it read
+/// ([`SWEEP_CURSOR`]), so successive sweeps read every domain in turn.
 const MAX_SWEPT_DOMAINS: usize = 4096;
+
+/// The most rows one sweep of the whole store removes, lapsed rows and rows
+/// of domains no longer admitted together: what one subscription request
+/// removes, and whose PubSub records its caller then removes, stays
+/// bounded.
+const MAX_SWEPT_ROWS: usize = 1024;
+
+/// The remote domain after which the next sweep of the whole store starts
+/// reading domains, wrapping round to the first once it reaches the last.
+/// Each process keeps its own; empty before its first sweep.
+static SWEEP_CURSOR: Mutex<String> = Mutex::new(String::new());
+
+fn sweep_cursor() -> String {
+    SWEEP_CURSOR
+        .lock()
+        .map(|cursor| cursor.clone())
+        .unwrap_or_default()
+}
+
+fn set_sweep_cursor(domain: &str) {
+    if let Ok(mut cursor) = SWEEP_CURSOR.lock() {
+        domain.clone_into(&mut cursor);
+    }
+}
 
 /// The longest node name either store records, in bytes.
 pub const MAX_NODE_BYTES: usize = 1023;
@@ -270,6 +309,38 @@ pub enum SubscriptionRecord {
     /// Not recorded: the Space's `federated` setting is not on for the node
     /// created at the time the request named, read under the Space's lock.
     NotFederated,
+    /// Not recorded: the account is banned from the Space, read under the
+    /// Space's lock.
+    Banned,
+}
+
+/// A subscription the store removed while it recorded another: it had
+/// lapsed, or its domain is no longer admitted. The PubSub service's own
+/// record of it is the caller's to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedSubscription {
+    pub service: BareJid,
+    pub node: String,
+    pub account: BareJid,
+}
+
+/// What became of a subscription offered to the store, and which others it
+/// removed meanwhile. Only a subscription that was recorded removes any:
+/// otherwise nothing the request did is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recording {
+    pub outcome: SubscriptionRecord,
+    /// The subscriptions removed, the account's own renewed one aside.
+    pub removed: Vec<RemovedSubscription>,
+}
+
+impl Recording {
+    fn only(outcome: SubscriptionRecord) -> Self {
+        Self {
+            outcome,
+            removed: Vec::new(),
+        }
+    }
 }
 
 /// The subscriptions of remote accounts to local Spaces
@@ -277,6 +348,16 @@ pub enum SubscriptionRecord {
 #[derive(Clone)]
 pub struct SpaceSubscriptions {
     db: Database,
+}
+
+/// One subscription being counted against the bounds: of `account` to the
+/// Space `node` of `service`, made at `now_ms`.
+#[derive(Clone, Copy)]
+struct Offer<'a> {
+    service: &'a BareJid,
+    node: &'a str,
+    account: &'a BareJid,
+    now_ms: i64,
 }
 
 /// Take the transaction-scoped advisory lock keyed on `key` on
@@ -360,30 +441,185 @@ async fn domains_in(
     Ok(domains)
 }
 
-/// Remove, inside `tx`, the rows matching `filter` whose remote domain
-/// `admitted` no longer admits, reading at most `most` domains. A domain
-/// that is not admitted receives nothing (the notification path decides
-/// admission again for each subscriber), so its rows only hold places.
+/// The subscriptions named by the rows a `RETURNING service_jid,
+/// node_name, subscriber_jid` statement gave back. A row whose addresses do
+/// not parse names no subscription the PubSub service could hold.
+async fn removed_from(
+    mut rows: super::Rows,
+    removed: &mut Vec<RemovedSubscription>,
+) -> Result<usize, SpaceStoreError> {
+    let mut count = 0;
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        count += 1;
+        let service: String = row.get(0).map_err(storage)?;
+        let node: String = row.get(1).map_err(storage)?;
+        let account: String = row.get(2).map_err(storage)?;
+        if let (Ok(service), Ok(account)) = (service.parse(), account.parse()) {
+            removed.push(RemovedSubscription {
+                service,
+                node,
+                account,
+            });
+        }
+    }
+    Ok(count)
+}
+
+/// Delete, inside `tx`, the rows of `s2s_space_subscriptions` matching
+/// `filter`, adding the subscriptions they recorded to `removed`. Every row
+/// it reaches belongs to the Space whose lock `tx` holds, which no other
+/// transaction but a sweep of the whole store ([`sweep_rows`]) changes, so
+/// waiting for a row another transaction holds closes no cycle of waits.
+async fn delete_rows(
+    tx: &mut Transaction<'_>,
+    filter: &str,
+    params: Vec<super::Value>,
+    removed: &mut Vec<RemovedSubscription>,
+) -> Result<(), SpaceStoreError> {
+    let sql = [
+        "DELETE FROM s2s_space_subscriptions ",
+        filter,
+        " RETURNING service_jid, node_name, subscriber_jid",
+    ]
+    .concat();
+    let rows = tx.query(&sql, params).await.map_err(storage)?;
+    removed_from(rows, removed).await?;
+    Ok(())
+}
+
+/// Delete, inside `tx`, at most `most` rows of `s2s_space_subscriptions`
+/// matching `filter`, taken in `order`, adding the subscriptions they
+/// recorded to `removed`; the number of rows deleted.
+///
+/// These rows may belong to any Space, whose lock `tx` does not hold. On
+/// PostgreSQL a row another transaction holds is passed over, never waited
+/// for (`FOR UPDATE SKIP LOCKED`), so a sweep never waits for a row and can
+/// close no cycle of waits with the transactions that hold rows it reaches;
+/// the row is left to that transaction, or to a later sweep. SQLite's
+/// immediate transactions run one at a time.
+async fn sweep_rows(
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    filter: &str,
+    mut params: Vec<super::Value>,
+    order: &str,
+    most: usize,
+    removed: &mut Vec<RemovedSubscription>,
+) -> Result<usize, SpaceStoreError> {
+    let skip_locked = if driver == DatabaseDriver::Postgres {
+        " FOR UPDATE SKIP LOCKED"
+    } else {
+        ""
+    };
+    let sql = [
+        "DELETE FROM s2s_space_subscriptions \
+         WHERE (service_jid, node_name, subscriber_jid) IN \
+         (SELECT service_jid, node_name, subscriber_jid FROM s2s_space_subscriptions ",
+        filter,
+        order,
+        " LIMIT ?",
+        skip_locked,
+        ") RETURNING service_jid, node_name, subscriber_jid",
+    ]
+    .concat();
+    params.push(limit(most).into());
+    let rows = tx.query(&sql, params).await.map_err(storage)?;
+    removed_from(rows, removed).await
+}
+
+/// Remove, inside `tx`, the rows of the Space that `filter` names whose
+/// remote domain `admitted` no longer admits, reading at most `most`
+/// domains. A domain that is not admitted receives nothing (the
+/// notification path decides admission again for each subscriber), so its
+/// rows only hold places.
 async fn sweep_unadmitted(
     tx: &mut Transaction<'_>,
     filter: &str,
     params: Vec<super::Value>,
     most: usize,
     admitted: &(dyn Fn(&str) -> bool + Send + Sync),
+    removed: &mut Vec<RemovedSubscription>,
 ) -> Result<(), SpaceStoreError> {
     let domains = domains_in(tx, filter, params.clone(), most).await?;
     for domain in domains.iter().filter(|domain| !admitted(domain)) {
-        let joiner = if filter.is_empty() { "WHERE " } else { " AND " };
-        let sql = [
-            "DELETE FROM s2s_space_subscriptions ",
-            filter,
-            joiner,
-            "subscriber_domain = ?",
-        ]
-        .concat();
+        let filter = [filter, " AND subscriber_domain = ?"].concat();
         let mut params = params.clone();
         params.push(domain.as_str().into());
-        tx.execute(&sql, params).await.map_err(storage)?;
+        delete_rows(tx, &filter, params, removed).await?;
+    }
+    Ok(())
+}
+
+/// Sweep the whole store inside `tx`, once the bound on the deployment's
+/// remote subscriptions is reached: lapsed rows, oldest first, and then the
+/// rows of domains `admitted` no longer admits, read from the domain after
+/// [`SWEEP_CURSOR`] on and wrapping round, at most [`MAX_SWEPT_DOMAINS`]
+/// domains and [`MAX_SWEPT_ROWS`] rows in all. The cursor is left at the
+/// last domain whose rows were all read.
+async fn sweep_store(
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    lapsed_before: i64,
+    admitted: &(dyn Fn(&str) -> bool + Send + Sync),
+    removed: &mut Vec<RemovedSubscription>,
+) -> Result<(), SpaceStoreError> {
+    let mut budget = MAX_SWEPT_ROWS;
+    budget -= sweep_rows(
+        tx,
+        driver,
+        "WHERE subscribed_at_ms < ?",
+        crate::db_params![lapsed_before],
+        " ORDER BY subscribed_at_ms",
+        budget,
+        removed,
+    )
+    .await?
+    .min(budget);
+    if budget == 0 {
+        return Ok(());
+    }
+    let start = sweep_cursor();
+    let mut domains = domains_in(
+        tx,
+        "WHERE subscriber_domain > ?",
+        crate::db_params![start.as_str()],
+        MAX_SWEPT_DOMAINS,
+    )
+    .await?;
+    if domains.len() < MAX_SWEPT_DOMAINS && !start.is_empty() {
+        let wrapped = domains_in(
+            tx,
+            "WHERE subscriber_domain <= ?",
+            crate::db_params![start.as_str()],
+            MAX_SWEPT_DOMAINS - domains.len(),
+        )
+        .await?;
+        domains.extend(wrapped);
+    }
+    let mut read_through = None;
+    for domain in &domains {
+        if !admitted(domain) {
+            let swept = sweep_rows(
+                tx,
+                driver,
+                "WHERE subscriber_domain = ?",
+                crate::db_params![domain.as_str()],
+                "",
+                budget,
+                removed,
+            )
+            .await?;
+            if swept >= budget {
+                // The domain may hold more rows: the next sweep starts
+                // with it.
+                break;
+            }
+            budget -= swept;
+        }
+        read_through = Some(domain);
+    }
+    if let Some(domain) = read_through {
+        set_sweep_cursor(domain);
     }
     Ok(())
 }
@@ -444,17 +680,25 @@ impl SpaceSubscriptions {
 
     /// Record that `request.account` subscribed to the node `node` of
     /// `service` created at `node_created_at_ms`, within the bounds, while
-    /// the Space's `federated` setting is on for that node. A subscription
-    /// the account already holds to that node is recorded again with this
-    /// request's evidence, which renews it, and counts against no bound;
-    /// rows left for an earlier node of the name, and lapsed rows of the
-    /// Space, are removed first.
+    /// the Space's `federated` setting is on for that node and `banned`
+    /// does not find the account banned from it. A subscription the account
+    /// already holds to that node is recorded again with this request's
+    /// evidence, which renews it, and counts against no bound; rows left
+    /// for an earlier node of the name, and lapsed rows of the Space, are
+    /// removed first.
+    ///
+    /// `banned` is awaited under the Space's lock, after the setting is read
+    /// again: a ban is written before the banned account's subscription is
+    /// removed under that lock ([`Self::remove`]), so either this reads the
+    /// ban or that removal finds the row this writes.
     ///
     /// Only the rows of domains `admitted` admits now hold a place against
     /// the bound on the Space's remote subscribers and against the
     /// deployment's: when either is reached, the rows of the other domains
-    /// are removed (for the deployment's, of at most [`MAX_SWEPT_DOMAINS`]
-    /// domains, and lapsed rows with them) and the bound is counted again.
+    /// are removed (for the deployment's, by a sweep of the whole store
+    /// that removes lapsed rows too, within [`MAX_SWEPT_ROWS`]) and the
+    /// bound is counted again. The rows removed are listed in the answer
+    /// once the subscription is recorded.
     pub async fn record(
         &self,
         service: &BareJid,
@@ -462,7 +706,8 @@ impl SpaceSubscriptions {
         node_created_at_ms: i64,
         request: SubscriptionRequest<'_>,
         admitted: &(dyn Fn(&str) -> bool + Send + Sync),
-    ) -> Result<SubscriptionRecord, SpaceStoreError> {
+        banned: impl Future<Output = Result<bool, SpaceStoreError>> + Send,
+    ) -> Result<Recording, SpaceStoreError> {
         let SubscriptionRequest {
             account,
             evidence,
@@ -474,7 +719,7 @@ impl SpaceSubscriptions {
             || service.as_str().len() > MAX_SERVICE_BYTES
             || account.as_str().len() > MAX_ADDRESS_BYTES
         {
-            return Ok(SubscriptionRecord::Bounds);
+            return Ok(Recording::only(SubscriptionRecord::Bounds));
         }
         let domain = account.domain().as_str();
         let lapsed_before = now_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS);
@@ -498,16 +743,36 @@ impl SpaceSubscriptions {
         };
         if !federated {
             tx.rollback().await.map_err(storage)?;
-            return Ok(SubscriptionRecord::NotFederated);
+            return Ok(Recording::only(SubscriptionRecord::NotFederated));
         }
+        match banned.await {
+            Ok(false) => {}
+            Ok(true) => {
+                tx.rollback().await.map_err(storage)?;
+                return Ok(Recording::only(SubscriptionRecord::Banned));
+            }
+            Err(error) => {
+                tx.rollback().await.map_err(storage)?;
+                return Err(error);
+            }
+        }
+        // Rows of an earlier node of the name named a Space that was
+        // deleted, whose PubSub records went with it.
         tx.execute(
             "DELETE FROM s2s_space_subscriptions \
-             WHERE service_jid = ? AND node_name = ? \
-             AND (node_created_at_ms <> ? OR subscribed_at_ms < ?)",
-            crate::db_params![service.as_str(), node, node_created_at_ms, lapsed_before],
+             WHERE service_jid = ? AND node_name = ? AND node_created_at_ms <> ?",
+            crate::db_params![service.as_str(), node, node_created_at_ms],
         )
         .await
         .map_err(storage)?;
+        let mut removed = Vec::new();
+        delete_rows(
+            &mut tx,
+            "WHERE service_jid = ? AND node_name = ? AND subscribed_at_ms < ?",
+            crate::db_params![service.as_str(), node, lapsed_before],
+            &mut removed,
+        )
+        .await?;
         let held = count_in(
             &mut tx,
             "WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ?",
@@ -518,11 +783,21 @@ impl SpaceSubscriptions {
             > 0;
         if !held
             && !self
-                .within_bounds(&mut tx, service, node, account, now_ms, admitted)
+                .within_bounds(
+                    &mut tx,
+                    Offer {
+                        service,
+                        node,
+                        account,
+                        now_ms,
+                    },
+                    admitted,
+                    &mut removed,
+                )
                 .await?
         {
             tx.rollback().await.map_err(storage)?;
-            return Ok(SubscriptionRecord::Bounds);
+            return Ok(Recording::only(SubscriptionRecord::Bounds));
         }
         tx.execute(
             "INSERT INTO s2s_space_subscriptions \
@@ -549,21 +824,33 @@ impl SpaceSubscriptions {
         .await
         .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
-        Ok(SubscriptionRecord::Recorded)
+        // The account's own lapsed row was renewed, not removed.
+        removed.retain(|gone| {
+            !(gone.account == *account && gone.service == *service && gone.node == node)
+        });
+        Ok(Recording {
+            outcome: SubscriptionRecord::Recorded,
+            removed,
+        })
     }
 
-    /// Whether one more subscription of `account` to the Space `node` of
-    /// `service` fits every bound, counted inside `tx`, which holds the
-    /// locks of [`begin_for_subscription`]. Lapsed rows count against none.
+    /// Whether one more subscription, `offer`, fits every bound, counted
+    /// inside `tx`, which holds the locks of [`begin_for_subscription`].
+    /// Lapsed rows count against none. The rows a sweep removes are added
+    /// to `removed`.
     async fn within_bounds(
         &self,
         tx: &mut Transaction<'_>,
-        service: &BareJid,
-        node: &str,
-        account: &BareJid,
-        now_ms: i64,
+        offer: Offer<'_>,
         admitted: &(dyn Fn(&str) -> bool + Send + Sync),
+        removed: &mut Vec<RemovedSubscription>,
     ) -> Result<bool, SpaceStoreError> {
+        let Offer {
+            service,
+            node,
+            account,
+            now_ms,
+        } = offer;
         let domain = account.domain().as_str();
         let lapsed_before = now_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS);
         // The Space's own rows hold no lapsed one any more (see
@@ -580,6 +867,7 @@ impl SpaceSubscriptions {
                 space_params(),
                 MAX_REMOTE_SUBSCRIBERS_PER_SPACE,
                 admitted,
+                removed,
             )
             .await?;
             if count_in(tx, space, space_params(), MAX_REMOTE_SUBSCRIBERS_PER_SPACE).await?
@@ -624,13 +912,7 @@ impl SpaceSubscriptions {
         .await?
             >= MAX_REMOTE_SUBSCRIPTIONS
         {
-            tx.execute(
-                "DELETE FROM s2s_space_subscriptions WHERE subscribed_at_ms < ?",
-                crate::db_params![lapsed_before],
-            )
-            .await
-            .map_err(storage)?;
-            sweep_unadmitted(tx, "", Vec::new(), MAX_SWEPT_DOMAINS, admitted).await?;
+            sweep_store(tx, self.db.driver(), lapsed_before, admitted, removed).await?;
             if count_in(
                 tx,
                 live,
@@ -646,22 +928,27 @@ impl SpaceSubscriptions {
         Ok(true)
     }
 
-    /// Forget the subscription of `account` to `node` of `service`.
+    /// Forget the subscription of `account` to `node` of `service`, under
+    /// the Space's lock: a subscription being recorded for the account at
+    /// the same time is committed first and removed here, or recorded
+    /// after and decided on what was written before this ran (a ban among
+    /// it, see [`Self::record`]).
     pub async fn remove(
         &self,
         service: &BareJid,
         node: &str,
         account: &BareJid,
     ) -> Result<(), SpaceStoreError> {
-        let guard = self.db.guard().await.map_err(storage)?;
-        guard
-            .execute(
-                "DELETE FROM s2s_space_subscriptions \
-                 WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ?",
-                crate::db_params![service.as_str(), node, account.as_str()],
-            )
-            .await
-            .map_err(storage)?;
+        let mut tx = self.db.begin_immediate().await.map_err(storage)?;
+        lock_space(&self.db, &mut tx, service, node).await?;
+        tx.execute(
+            "DELETE FROM s2s_space_subscriptions \
+             WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ?",
+            crate::db_params![service.as_str(), node, account.as_str()],
+        )
+        .await
+        .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
         Ok(())
     }
 
@@ -701,4 +988,73 @@ impl SpaceSubscriptions {
         }
         Ok(subscriptions)
     }
+}
+
+/// Held while one Space is deleted ([`lock_space_deletion`]); released by
+/// [`SpaceDeletionLock::release`].
+pub struct SpaceDeletionLock<'a>(DeletionHold<'a>);
+
+enum DeletionHold<'a> {
+    /// On PostgreSQL: a transaction holding the deletion's advisory lock,
+    /// whose connection is discarded rather than reused if it is dropped
+    /// before it ends, so the lock never outlives its holder.
+    Postgres(Transaction<'a>),
+    /// On SQLite, which one process serves: the process's lock of the
+    /// Space's deletion, released when dropped.
+    Process {
+        _held: tokio::sync::OwnedMutexGuard<()>,
+    },
+}
+
+impl SpaceDeletionLock<'_> {
+    /// Let the next deletion of the Space run.
+    pub async fn release(self) {
+        if let DeletionHold::Postgres(tx) = self.0 {
+            if let Err(error) = tx.rollback().await {
+                tracing::warn!(%error, "releasing a Space deletion lock failed");
+            }
+        }
+    }
+}
+
+/// The process's lock of the deletion of the Space `key` names, shared by
+/// every deletion of that Space running in this process while one is.
+fn process_lock(key: String) -> Result<Arc<tokio::sync::Mutex<()>>, SpaceStoreError> {
+    type Locks = Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Locks::default)
+        .lock()
+        .map_err(|_| storage("the Space deletion locks are unusable"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+/// Wait until no other deletion of the Space `node` of `service` runs, on
+/// any replica, and hold that until the answer is released: a deletion
+/// that fails and puts back what it removed never does so beside another
+/// that completed. On PostgreSQL this is a transaction-scoped advisory lock
+/// of its own, not the Space's lock under which subscriptions are counted,
+/// which the deletion takes in turn when it closes the Space to other
+/// servers; on SQLite, a lock in this process.
+pub async fn lock_space_deletion<'a>(
+    db: &'a Database,
+    service: &BareJid,
+    node: &str,
+) -> Result<SpaceDeletionLock<'a>, SpaceStoreError> {
+    let key = ["waddle.spaces.deletion:", service.as_str(), "/", node].concat();
+    if db.driver() == DatabaseDriver::Postgres {
+        let mut tx = db.begin_discard_postgres_on_drop().await.map_err(storage)?;
+        advisory_lock(db, &mut tx, key).await?;
+        return Ok(SpaceDeletionLock(DeletionHold::Postgres(tx)));
+    }
+    let lock = process_lock(key)?;
+    Ok(SpaceDeletionLock(DeletionHold::Process {
+        _held: lock.lock_owned().await,
+    }))
 }
