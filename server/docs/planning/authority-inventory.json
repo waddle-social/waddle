@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "478f0f4292e53afb47e5d738f6acadcce1c48a7a",
+  "baseline_commit": "fe3d6dd7f3b1ba51fc18b5c186eb08440f7235c4",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "sha256": "f6dfa6e1b67e30168fd6aa408c0517a96ae1b3dad201f1d4c569334002ab1d00"
+      "sha256": "03072bf7a3df04d338c2293ce8b0fe7604b450022e1436e36d00c2f57f975ed6"
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
@@ -45,7 +45,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/ingress_uow/mod.rs",
-      "sha256": "68d347660a259f85237032ca5e3e3bd3db71518ed517c96ac2d10bfb50b81f66"
+      "sha256": "db01d8f7aa67766506dcdff5514ade4ef4693939c16405c6b6411189ee989218"
     },
     {
       "path": "server/crates/waddle-server/src/ingress_uow/tests.rs",
@@ -97,7 +97,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/pubsub/implementation.rs",
-      "sha256": "d20b50d7b792148f757da6224df6526c06cc3d21b335f752f2fb98b33b82073b"
+      "sha256": "6068a54face13e34c2b6af9490f8e6d5d0566c1767435083d9353855654f627f"
     },
     {
       "path": "server/crates/waddle-server/src/pubsub/node.rs",
@@ -145,7 +145,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "b358d0d32880dc23398b69f09564747e5fc5e30a920973c5988a648d23efbaec"
+      "sha256": "c2fc64e2be9907bfeee06962a32b00958c54ec3c13705f56043a03d284b299b5"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -197,7 +197,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs",
-      "sha256": "130bbd89dfd1f869801eadd127c08e00f5be5e3f4d33243d4f4336898e2714e9"
+      "sha256": "e8ea190b6af40c99d868323c8cd8dac4eac4bc7e44b903dffcad06a5eb493b6a"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pin_query.rs",
@@ -209,7 +209,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_dispatch.rs",
-      "sha256": "6134e20563a5de41772edb33d71d44ec02087f90e871e4921b5be338e1da0427"
+      "sha256": "b825a81ca35db11c37d685d508b413163cbf7a5141fcbb6280cbae1a7f788e06"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/search.rs",
@@ -325,7 +325,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/room_effect_outbox/drain.rs",
-      "sha256": "dfc891e0dfc704e363c3b619c7e3d38ecc5505b90a1b2e40e6013298a635491a"
+      "sha256": "7bbe313063dbd0660b40eea50cbc0c5ddb3c773bf2fa497faac13e106b8aa3a2"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/interpret/effects/immediate.rs",
@@ -341,7 +341,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/db/s2s_spaces.rs",
-      "sha256": "f8ced1ddcda8848587f55186a7c205eff3977b5c5745d5b98479752e590949bb"
+      "sha256": "435713699c3be970b941bbc0230d1b12b2d26d20ab2f3b63094a68d8cdaa8782"
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/spaces.rs",
@@ -490,12 +490,12 @@
     },
     "pubsub-write": {
       "path": "server/crates/waddle-server/src/pubsub/implementation.rs",
-      "line": 409,
+      "line": 433,
       "text": "async fn set_affiliation("
     },
     "pubsub-capture": {
       "path": "server/crates/waddle-server/src/pubsub/implementation.rs",
-      "line": 376,
+      "line": 400,
       "text": "async fn list_deliverable_subscribers("
     },
     "pubsub-node": {
@@ -755,7 +755,7 @@
     },
     "hg-owner-iq": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs",
-      "line": 1357,
+      "line": 1386,
       "text": "let authorized = {"
     },
     "hg-owner-config": {
@@ -780,7 +780,7 @@
     },
     "hg-space-pubsub": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_dispatch.rs",
-      "line": 608,
+      "line": 626,
       "text": "fn enrolled_scope_guarded_node("
     },
     "hg-fanout": {
@@ -805,7 +805,7 @@
     },
     "hg-unless-outcast": {
       "path": "server/crates/waddle-server/src/pubsub/implementation.rs",
-      "line": 445,
+      "line": 469,
       "text": "async fn set_affiliation_unless_outcast("
     },
     "hg-bootstrap-d8": {
@@ -840,7 +840,7 @@
     },
     "hg-moderation": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs",
-      "line": 1814,
+      "line": 1843,
       "text": "HostGrantAction::Moderate,"
     },
     "hg-call-token": {
@@ -940,7 +940,7 @@
     },
     "account-retire": {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "line": 129,
+      "line": 161,
       "text": "pub async fn retire_account("
     },
     "account-retired-native": {
@@ -1045,7 +1045,7 @@
     },
     "outbox-seat-delivery": {
       "path": "server/crates/waddle-server/src/room_effect_outbox/drain.rs",
-      "line": 740,
+      "line": 743,
       "text": ".offer_foreign(&recipient, stanza.clone())"
     },
     "hg-seats-honour": {
@@ -1231,7 +1231,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "4f930ff35e5bfc8439f81ab17b1af8e9dc0a13664014a82fb376aa9621b40528",
+    "sha256": "8336abe7d71638369e8ad1ecee2d409d354fd62511dc4498d041b4f1b25d8a4c",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,
@@ -1247,15 +1247,15 @@
       "pubsub_affiliations": 24,
       "set_affiliation": 85,
       "set_room_affiliation": 0,
-      "publish_item": 83,
-      "retract_item": 29,
-      "delete_node": 21,
+      "publish_item": 85,
+      "retract_item": 30,
+      "delete_node": 22,
       "list_deliverable_subscribers": 21,
-      "JoinWithAffiliation": 223,
-      "JoinAffiliationGrant": 220,
+      "JoinWithAffiliation": 227,
+      "JoinAffiliationGrant": 224,
       "ApplyAdminItems": 68,
       "ApplyAffiliationChange": 23,
-      "ChangeAffiliation": 175,
+      "ChangeAffiliation": 185,
       "UpdateConfig": 99,
       "HydrateDurableRecipients": 14,
       "SyncResolverAffiliation": 34,

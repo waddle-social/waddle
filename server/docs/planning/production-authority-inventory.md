@@ -20,9 +20,10 @@ with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings through
 `fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, the joined-spaces node's gates through
-`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, and the fixes before verification through
-`478f0f4292e53afb47e5d738f6acadcce1c48a7a` (see the last refresh below); the original
-baseline and its limits remain unchanged.
+`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, the fixes before verification through
+`478f0f4292e53afb47e5d738f6acadcce1c48a7a`, and the merge of `main` with the first
+verification step's fixes through `fe3d6dd7f3b1ba51fc18b5c186eb08440f7235c4` (see the
+last refresh below); the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
 runtime behavior, authorization gate, schema, migration, CI job or activation.
@@ -1853,6 +1854,55 @@ added, and no producer of stream evidence changed.
 - The raw scan holds 1643 records, the same number for every token as in
   the forty-eighth refresh; its digest changed with the records that moved
   in the changed files.
+
+The selected evidence was refreshed a fiftieth time, through
+`fe3d6dd7f3b1ba51fc18b5c186eb08440f7235c4`: the merge of `main` at `e90e2464f`
+(`1de394873`), the fixes of the first verification step and the sweep of a
+retired account's other offline spellings. Eight reviewed files changed;
+what changed in each, for the authority this inventory maps:
+
+- `handlers/iq/pubsub_dispatch.rs` (from `main`): a PubSub request a session
+  addresses to a room JID is answered by the private event workspace
+  handler (`event_planning::handle_room_pubsub`), before the generic node
+  checks and before the refusal of an enrolled scope's Space node. It
+  decides membership and organizer rights from the room actor's
+  affiliation snapshot (`event_planning_access`, carried to the room's
+  owner node as `waddle.clustering.relay.event_planning_access.v1`), not
+  from the host-grant authority. In a room an enrolled scope manages that is
+  a decision of standing outside the authority, open before any scope is
+  enrolled. It writes no grant, affiliation or relationship.
+- `handlers/iq/muc_owner_moderation.rs` (from `main`): completing a room's
+  destroy removes the destroyed lifecycle's event workspace node before it
+  acknowledges. No standing is read or written.
+- `pubsub/implementation.rs` (from `main`): a retraction conditioned on its
+  publisher (`retract_item_if_publisher`), for event workspace nodes only;
+  every other node refuses it. It writes no affiliation or subscription.
+- `ingress_uow/mod.rs` (from `main`): a unit of work records notification
+  candidates and wakes the notification outbox after its commit. No
+  decision.
+- `room_effect_outbox/drain.rs`, `server/http.rs` (from `main`): a drained
+  effect's delivery carries its producer's trace context; the APNs VoIP
+  topic is checked at startup. No decision.
+- `auth/retirement.rs`: the retirement's transaction removes the offline
+  store under the canonical JID only; the rows under other spellings are
+  removed after its commit by `sweep_offline_spellings`, outside the lock on
+  the account tables, which refuses a JID the ledger does not hold. The
+  ledger, the removal of the account rows and the exclusion of provisioning
+  are unchanged.
+- `db/s2s_spaces.rs`: the migration numbers in its module documentation.
+
+Eight anchors moved with the lines added above them; no anchor's text
+changed. No grant writer or storage plane of the host-grant authority was
+added, and no producer of stream evidence changed.
+
+- The raw scan holds 1665 records: the 1643 of the forty-ninth refresh, and
+  22 that `main`'s event workspaces added. Two are production calls: the
+  workspace handler's `retract_item` (`handlers/iq/event_planning.rs`) and
+  the destroy completion's `delete_node`. The other twenty are in tests:
+  `JoinWithAffiliation`, `JoinAffiliationGrant` and `ChangeAffiliation` in
+  the workspace handlers' tests and the private event discovery test, and
+  `publish_item` in the destroy completion's test and the PubSub storage
+  tests.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
