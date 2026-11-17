@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "62c322f48601d00994d2fa6bc9ee85f7e3655782",
+  "baseline_commit": "46373a1d91f97b475660dde07f4483fb1a52bdf9",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -349,7 +349,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "sha256": "02e211f0f6aab6391bf49c6e0e02551bf1f73607047eea7dbf543117c0662bb3"
+      "sha256": "30b3823020733d63d5e1f7914db361efa10f464a7b4113aef7384502a391ef22"
     }
   ],
   "anchors": {

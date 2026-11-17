@@ -19,7 +19,7 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`62c322f48601d00994d2fa6bc9ee85f7e3655782` (see the last refresh below); the original
+`46373a1d91f97b475660dde07f4483fb1a52bdf9` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1431,6 +1431,12 @@ changed.
 - The raw scan holds 1640 records: one more `space_enrolled`, the Space
   node listing's refusal of an enrolled node in `disco_items.rs`; every
   other token's count is unchanged.
+
+The selected evidence was refreshed a thirty-first time, through
+`46373a1d91f97b475660dde07f4483fb1a52bdf9`. One reviewed file changed (`disco_items.rs`), in a
+comment of the instant-room scan that now says a managed room is listed
+only from its channel row, under its grants; no code changed, no anchor
+moved and the raw scan still holds 1640 records.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
