@@ -34,6 +34,53 @@ import Testing
         f.store.clear()
     }
 
+    @Test func aSecondAnswerWaitsForTheFirstToGoOut() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.port.heldCallVerbs = ["proceed"]
+        f.port.callResults["proceed"] = false
+        let first = Task { await f.store.acceptIncoming() }
+        await eventually { f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)) }
+        // Asked while the first answer is still on its way: not answered yet.
+        let second = Task { await f.store.answer(sid: "c1") }
+        try? await Task.sleep(for: .milliseconds(30))
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        #expect(await !first.value)
+        #expect(await !second.value)
+        f.store.clear()
+    }
+
+    @Test func aSecondAnswerSucceedsWithTheFirst() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.port.heldCallVerbs = ["proceed"]
+        let first = Task { await f.store.acceptIncoming() }
+        await eventually { !f.port.callSends.isEmpty && f.store.state.sid == "c1" && f.store.state != .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)) }
+        let second = Task { await f.store.answer(sid: "c1") }
+        try? await Task.sleep(for: .milliseconds(30))
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        #expect(await first.value)
+        #expect(await second.value)
+        f.store.clear()
+    }
+
+    @Test func aWaitingAnswerIsReleasedWhenTheSessionEnds() async {
+        let f = CallFixture()
+        f.store.handle(f.event(.propose(callAudio)))
+        f.port.heldCallVerbs = ["proceed"]
+        let first = Task { await f.store.acceptIncoming() }
+        await eventually { f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)) }
+        let second = Task { await f.store.answer(sid: "c1") }
+        try? await Task.sleep(for: .milliseconds(30))
+        f.store.clear()
+        #expect(await !second.value)
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        _ = await first.value
+    }
+
     @Test func endingARingingCallDeclinesIt() async {
         let f = CallFixture()
         f.store.handle(f.event(.propose(callAudio)))

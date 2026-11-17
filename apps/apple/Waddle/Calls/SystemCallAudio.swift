@@ -25,6 +25,9 @@ final class SystemCallAudio {
 
     func setOwner(_ next: SystemCallAudioOwner) {
         guard owner != next else { return }
+        // An activation belongs to the call it was for; the next call the
+        // system manages waits for its own.
+        if owner == .system { isActivated = false }
         owner = next
         apply()
     }
@@ -33,13 +36,21 @@ final class SystemCallAudio {
     func activated(_ session: AVAudioSession) {
         isActivated = true
         guard owner == .system else { return }
-        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.mixWithOthers])
+        // What the media engine sets for a call when it configures the
+        // session itself: loudspeaker by default, Bluetooth and AirPlay
+        // routes allowed.
+        let call = AudioSessionConfiguration.playAndRecordSpeaker
+        try? session.setCategory(call.category, mode: call.mode, options: call.categoryOptions)
         apply()
     }
 
     /// CallKit took the session back.
     func deactivated() {
         isActivated = false
+        // A late deactivation for the last call lands on the one session
+        // there is. If the app has a call running on it by now, the engine
+        // is restarted so that it takes the session again.
+        if owner == .app { stopEngine() }
         apply()
     }
 

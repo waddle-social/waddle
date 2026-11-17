@@ -84,16 +84,20 @@ extension CallStore {
 /// notification) name the call they were shown for.
 extension CallStore {
     /// Answers the ringing call `sid`. True when its answer has gone out,
-    /// now or already; false when that call is not ringing here or the
-    /// answer could not be sent.
+    /// by this or by an earlier answer; false when that call is not
+    /// ringing here or the answer could not be sent.
     public func answer(sid: String) async -> Bool {
         switch state {
         case .incoming(let call) where call.sid == sid:
-            call.isAccepting ? true : await acceptIncoming()
+            guard call.isAccepting else { return await acceptIncoming() }
+            // Someone already answered it here. If that answer is still
+            // on its way, it is not answered until it has gone out.
+            guard let pending = acceptInFlight, pending.sid == sid else { return true }
+            return await pending.outcome.wait(timeout: .seconds(60)) ?? false
         case .active(let call) where call.sid == sid:
-            true
+            return true
         case .idle, .incoming, .outgoing, .active, .joiningGroup, .inGroup, .ended:
-            false
+            return false
         }
     }
 

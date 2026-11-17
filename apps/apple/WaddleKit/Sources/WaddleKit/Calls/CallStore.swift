@@ -27,6 +27,8 @@ import Observation
     @ObservationIgnored private let ringTimeout: Duration
     @ObservationIgnored private let sessionTimeout: Duration
     @ObservationIgnored private let unansweredTimeout: Duration
+    /// The answer on its way to the caller, and how it will turn out.
+    @ObservationIgnored var acceptInFlight: (sid: String, outcome: GroupCallWaiter<Bool>)?
     @ObservationIgnored private var ringTimer: Task<Void, Never>?
     @ObservationIgnored private var sessionTimer: Task<Void, Never>?
     /// Abort history is bounded because reductions can outpace the effects queue.
@@ -123,7 +125,12 @@ import Observation
         target.isAccepting = true
         state = .incoming(target)
         let epoch = generation
+        // Whoever else asks to answer this call meanwhile shares the outcome.
+        let outcome = GroupCallWaiter<Bool>()
+        acceptInFlight = (target.sid, outcome)
         let sent = await port.sendCallProceed(to: target.from, sid: target.sid)
+        if acceptInFlight?.outcome === outcome { acceptInFlight = nil }
+        outcome.resolve(sent && generation == epoch)
         guard generation == epoch else { return false }
         if !sent {
             if case .incoming(var current) = state, current.sid == target.sid {
@@ -154,6 +161,8 @@ import Observation
         sessionTimer?.cancel()
         sessionTimer = nil
         recentlyAbortedSids.removeAll()
+        acceptInFlight?.outcome.cancel()
+        acceptInFlight = nil
         generation += 1
         groupControl.clear()
         groupPresence.clear()
