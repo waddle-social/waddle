@@ -17,14 +17,19 @@ let callJoin = CallJoin(
     let sid: () -> String
     let ringTimeout: Duration
     let sessionTimeout: Duration
-    init(sid: @escaping () -> String = { "c1" }, ringTimeout: Duration = .seconds(45), sessionTimeout: Duration = .seconds(45)) {
+    let unansweredTimeout: Duration
+    init(
+        sid: @escaping () -> String = { "c1" }, ringTimeout: Duration = .seconds(45), sessionTimeout: Duration = .seconds(45),
+        unansweredTimeout: Duration = .seconds(60)
+    ) {
         self.sid = sid
         self.ringTimeout = ringTimeout
         self.sessionTimeout = sessionTimeout
+        self.unansweredTimeout = unansweredTimeout
     }
     lazy var store = CallStore(
         port: port, ownJID: { [weak self] in self?.own }, ownBareJID: callOwn.bare, ringTimeout: ringTimeout,
-        sessionTimeout: sessionTimeout, newSid: sid)
+        sessionTimeout: sessionTimeout, unansweredTimeout: unansweredTimeout, newSid: sid)
     func event(_ kind: CallEvent.Kind, sid: String = "c1", from: JID = callPeer) -> CallEvent {
         CallEvent(from: from, sid: sid, kind: kind)
     }

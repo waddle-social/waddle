@@ -64,9 +64,10 @@ final class NotificationController: NSObject {
         ])
     }
 
-    /// Posts the ring for a call. `playsSound` is for a device whose app
-    /// cannot ring by itself in the background.
-    func postIncomingCall(sid: String, callerName: String, isVideo: Bool, for account: BareJID, playsSound: Bool) {
+    /// Posts the ring for a call. On an iPhone or iPad the notification
+    /// rings too, since the app cannot from the background; a Mac app
+    /// plays its own ring.
+    func postIncomingCall(sid: String, callerName: String, isVideo: Bool, for account: BareJID) {
         let content = UNMutableNotificationContent()
         content.title = callerName
         content.body = isVideo ? "Incoming video call" : "Incoming voice call"
@@ -74,9 +75,7 @@ final class NotificationController: NSObject {
         content.userInfo = [Identifier.accountKey: account.description, Identifier.callKey: sid]
         content.interruptionLevel = .timeSensitive
         #if os(iOS)
-        if playsSound { content.sound = .defaultRingtone }
-        #else
-        if playsSound { content.sound = .default }
+        content.sound = .defaultRingtone
         #endif
         center.add(UNNotificationRequest(identifier: Self.callIdentifier(sid), content: content, trigger: nil))
     }
@@ -88,6 +87,16 @@ final class NotificationController: NSObject {
     }
 
     private static func callIdentifier(_ sid: String) -> String { "call#\(sid)" }
+
+    /// A tap on the ring itself only brings Waddle forward, where the dock
+    /// shows the call.
+    private func answerCall(_ action: String, sid: String, for account: BareJID) async {
+        switch action {
+        case Identifier.acceptCall: await onAnswerCall?(account, sid)
+        case Identifier.declineCall: await onDeclineCall?(account, sid)
+        default: break
+        }
+    }
 
     func requestAuthorizationIfNeeded() {
         guard !hasRequestedAuthorization else { return }
@@ -221,16 +230,9 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         let userInfo = response.notification.request.content.userInfo
         if let sid = userInfo[Identifier.callKey] as? String {
             guard let account = Self.account(from: userInfo) else { return }
-            // A tap on the ring itself only brings Waddle forward, where
-            // the dock shows the call.
-            let action = response.actionIdentifier
-            await MainActor.run {
-                switch action {
-                case Identifier.acceptCall: Task { await self.onAnswerCall?(account, sid) }
-                case Identifier.declineCall: Task { await self.onDeclineCall?(account, sid) }
-                default: break
-                }
-            }
+            // Awaited, so the system keeps the app running until a Decline
+            // from the background has been sent.
+            await answerCall(response.actionIdentifier, sid: sid, for: account)
             return
         }
         guard let target = Self.target(from: userInfo) else { return }

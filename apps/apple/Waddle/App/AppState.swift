@@ -126,14 +126,11 @@ final class AppState {
             }
         }
         guard session === active else { return }
-        switch alert {
-        case .ring(let ring):
-            ringer.ring(.init(
-                alert: ring, account: coordinator.account.jid,
-                callerName: coordinator.directory.title(for: .direct(ring.from))))
-        case .ringback: ringer.ringback()
-        case nil: ringer.stop()
-        }
+        ringer.show(alert.map { alert in
+            var callerName = ""
+            if case .ring(let ring) = alert { callerName = coordinator.directory.title(for: .direct(ring.from)) }
+            return .init(alert: alert, account: coordinator.account.jid, callerName: callerName)
+        })
     }
 
     // MARK: - Lifecycle
@@ -173,7 +170,9 @@ final class AppState {
 
     func sceneActivityChanged(isActive: Bool) {
         notifications.isAppActive = isActive
+        #if os(iOS)
         ringer.isAppActive = isActive
+        #endif
         if isActive { notifications.refreshAuthorizationStatus() }
         guard let coordinator = session?.coordinator else { return }
         if isActive {
@@ -366,7 +365,7 @@ final class AppState {
         guard let active = session else { return }
         await finishPendingPushRegistration?(active.coordinator)
         session = nil
-        ringer.stop()
+        ringer.show(nil)
         pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()
         if signingOut {

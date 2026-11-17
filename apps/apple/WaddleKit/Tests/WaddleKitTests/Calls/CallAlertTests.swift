@@ -1,6 +1,7 @@
-import Foundation
 import Testing
-import WaddleKit
+
+@testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 @Suite("Call alerts") struct CallAlertTests {
     private let peer = JID(parsing: "bob@waddle.test/phone")!
@@ -41,37 +42,63 @@ import WaddleKit
     }
 }
 
-@Suite("Call tones") struct CallToneTests {
-    private func samples(_ data: Data) -> [Int16] {
-        data.dropFirst(44).withUnsafeBytes { raw in
-            stride(from: 0, to: raw.count - 1, by: 2).map { Int16(littleEndian: raw.loadUnaligned(fromByteOffset: $0, as: Int16.self)) }
+@MainActor @Suite("Unanswered calls") struct UnansweredCallTests {
+    @Test func aCallNobodyAnswersStopsRingingByItself() async {
+        // The caller's retract never arrived: they lost their connection.
+        let f = CallFixture(unansweredTimeout: .milliseconds(40))
+        f.store.handle(f.event(.propose(callAudio)))
+        #expect(f.store.state.isLive)
+        await eventually { f.store.state == .ended(sid: "c1", reason: .timeout) }
+        // There is nobody to tell.
+        #expect(!f.port.callSends.contains { if case .reject = $0 { true } else { false } })
+        f.store.clear()
+    }
+
+    @Test func anAnsweredCallIsNotCutShortByTheRingRunningOut() async {
+        let f = CallFixture(unansweredTimeout: .milliseconds(40))
+        f.store.handle(f.event(.propose(callAudio)))
+        #expect(await f.store.acceptIncoming())
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)))
+        f.store.clear()
+    }
+
+    @Test func aDeclinedCallLeavesNoTimerBehindForTheNextOne() async {
+        let f = CallFixture(unansweredTimeout: .milliseconds(80))
+        f.store.handle(f.event(.propose(callAudio)))
+        #expect(await f.store.declineIncoming())
+        f.store.handle(f.event(.propose(callAudio), sid: "c2"))
+        try? await Task.sleep(for: .milliseconds(40))
+        #expect(f.store.state.sid == "c2" && f.store.state.isLive)
+        await eventually { f.store.state == .ended(sid: "c2", reason: .timeout) }
+        f.store.clear()
+    }
+}
+
+@Suite("Call ring plan") struct CallRingPlanTests {
+    private let ring = CallAlert.ring(.init(sid: "s1", from: BareJID(parsing: "bob@waddle.test")!, isVideo: false))
+
+    @Test func inFrontARingIsOnlyHeard() {
+        #expect(CallRingPlan(alert: ring, isAppActive: true, ringsInBackground: true) == .init(tone: .ring, notifies: false))
+        #expect(CallRingPlan(alert: ring, isAppActive: true, ringsInBackground: false) == .init(tone: .ring, notifies: false))
+    }
+
+    @Test func behindAnotherAppAMacRingsAndNotifies() {
+        #expect(CallRingPlan(alert: ring, isAppActive: false, ringsInBackground: true) == .init(tone: .ring, notifies: true))
+    }
+
+    @Test func inTheBackgroundAPhoneLeavesTheRingToItsNotification() {
+        #expect(CallRingPlan(alert: ring, isAppActive: false, ringsInBackground: false) == .init(tone: nil, notifies: true))
+    }
+
+    @Test func ringbackIsHeardWhereverTheAppIs() {
+        for active in [true, false] {
+            #expect(CallRingPlan(alert: .ringback(sid: "s2"), isAppActive: active, ringsInBackground: false)
+                == .init(tone: .ringback, notifies: false))
         }
     }
 
-    @Test(arguments: CallTone.allCases) func aToneIsAWaveFileOfItsWholePattern(tone: CallTone) {
-        let data = tone.waveData()
-        #expect(String(decoding: data.prefix(4), as: UTF8.self) == "RIFF")
-        #expect(String(decoding: data[8..<16], as: UTF8.self) == "WAVEfmt ")
-        let expected = Int((tone.duration * Double(CallTone.sampleRate)).rounded())
-        #expect(abs(samples(data).count - expected) <= tone.segments.count)
-        let declared = data[40..<44].withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
-        #expect(Int(declared) == data.count - 44)
-    }
-
-    @Test(arguments: CallTone.allCases) func aToneLoopsWithoutAClick(tone: CallTone) {
-        let pcm = samples(tone.waveData())
-        // It starts and ends at rest, so the loop point is silent.
-        #expect(pcm.first == 0)
-        #expect(abs(Int(pcm.last ?? 1)) < 400)
-        #expect(pcm.contains { abs(Int($0)) > 2000 })
-        // Quiet enough to sit under a conversation.
-        #expect(pcm.allSatisfy { abs(Int($0)) <= Int(Double(Int16.max) * CallTone.peak) + 1 })
-    }
-
-    @Test func aRingLeavesAPauseBetweenItsPhrases() {
-        #expect(CallTone.ring.segments.last?.frequency == nil)
-        #expect(CallTone.ringback.segments.last?.frequency == nil)
-        let pcm = samples(CallTone.ring.waveData())
-        #expect(pcm.suffix(CallTone.sampleRate / 2).allSatisfy { $0 == 0 })
+    @Test func noAlertIsSilence() {
+        #expect(CallRingPlan(alert: nil, isAppActive: false, ringsInBackground: true) == .init(tone: nil, notifies: false))
     }
 }

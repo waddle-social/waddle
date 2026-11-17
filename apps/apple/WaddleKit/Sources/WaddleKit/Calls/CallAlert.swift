@@ -32,3 +32,31 @@ public enum CallAlert: Hashable, Sendable {
         }
     }
 }
+
+/// How an alert reaches the person, given where the app is.
+public struct CallRingPlan: Hashable, Sendable {
+    /// The tone to loop, if any.
+    public let tone: CallTone?
+    /// Post the ring as a notification with Accept and Decline.
+    public let notifies: Bool
+
+    public init(tone: CallTone?, notifies: Bool) {
+        self.tone = tone
+        self.notifies = notifies
+    }
+
+    /// A ring is heard in front, and seen as a notification when the app
+    /// is not. A Mac app rings from the background too; an iPhone or iPad
+    /// app may not start audio there, so its notification's sound rings.
+    /// Ringback is only ever heard.
+    public init(alert: CallAlert?, isAppActive: Bool, ringsInBackground: Bool) {
+        switch alert {
+        case .ring:
+            self.init(tone: isAppActive || ringsInBackground ? .ring : nil, notifies: !isAppActive)
+        case .ringback:
+            self.init(tone: .ringback, notifies: false)
+        case nil:
+            self.init(tone: nil, notifies: false)
+        }
+    }
+}
