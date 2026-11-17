@@ -2936,9 +2936,11 @@ A home never issues the JID of a retired account to a new holder
   the ledger insert, the deletes of the account's rows (the delete of its
   `users` row cascades to its identity-provider links and its sessions; one
   delete for each row of the account, usually one native row and one
-  account row) and two reads of the account rows that carry no lookup key:
-  five statements for a usual account, so a login can be held up for 2 s of
-  waiting plus up to 25 s, and is in practice for milliseconds. An account
+  account row), two reads of the account rows that carry no lookup key,
+  the delete of the account's offline store (`pending_delivery`) and the
+  three deletes of what remote senders left for it: nine statements for a
+  usual account, so a login can be held up for 2 s of waiting plus up to
+  45 s, and is in practice for milliseconds. An account
   whose delete does not finish within the statement bound is not retired;
   nothing splits that delete.
 - **Ending the account's open sessions** (`auth/session_endings.rs`,
@@ -2947,36 +2949,56 @@ A home never issues the JID of a retired account to a new holder
   engines). `retire_account` leaves them; the operator command takes the
   second step once the retirement committed. It records a request naming
   the canonical JID. Every serving replica holds a lease row it registers
-  when it starts serving and renews every 500 ms for 5 s, on a task of its
-  own. Each tick a replica reads the requests of the last day whose JID the
-  ledger holds and that it has not completed, holds the account in its
-  in-memory set of retired accounts first, records that it observed the
-  request, then ends what it holds of the account and records the request
-  as completed with what it ended:
-  - every live stream it hosts is force-detached as a fresh-bind
-    replacement, the terminal close a replacing bind uses (the session is
-    closed, not detached), with `<not-authorized/>` instead of
-    `<conflict/>`. The connection's teardown broadcasts the unavailable
-    presence to local contacts, leaves local rooms (which fan the departure
-    out to remote occupants) and remote rooms, and retires the binding. A
-    stream counts as closed once the registry no longer holds its binding;
+  when it starts serving and renews every 5 s for 15 s, on a task of its
+  own. Every second a replica reads, in a read-only transaction, the
+  requests of the last day whose JID the ledger holds and that it has not
+  completed; it holds every requested account in its in-memory set of
+  retired accounts first, then for each request records that it observed
+  it, ends what it holds of the account and records the request as
+  completed with what it ended. While nobody is retired that is one
+  single-row update every 5 s and one select a second per serving process;
+  the lease's expiry carries no index, so on PostgreSQL the update is
+  heap-only:
+  - every live stream it hosts is force-detached for the account's
+    retirement (`ForceDetachOrigin::AccountRetirement`): the connection
+    ends its binding as terminally as a replacing bind does (the session
+    is closed, not detached), with `<not-authorized/>` instead of
+    `<conflict/>`. No binding takes the full JID over, so the end is no
+    transfer: a connection whose pumps are not seen to stop within the
+    transfer join deadline does not take the node's terminal failure
+    path, as a transfer's does. The origin is local to the replica that
+    hosts the stream and is never relayed. The connection's teardown
+    broadcasts the unavailable presence to local contacts, leaves local
+    rooms (which fan the departure out to remote occupants) and remote
+    rooms, and retires the binding. A stream counts as closed once the
+    registry no longer holds its binding;
   - every stream-management session of the account that waits for a
     resume is ended: those held in memory through the invalidation a
     replacing bind uses, those of the durable authority under their claim.
     Both run the terminal path of an invalidated detached session (room
-    leaves, unavailable presence). A session whose claim another replica
-    holds is left to it, and the request stays incomplete until none is
-    left;
+    leaves, unavailable presence). What an in-memory session held for the
+    client is discarded, not promoted to the offline store: its durable
+    rows are deleted and its claim released as after a promotion. A
+    session whose claim another replica holds is left to it, and the
+    request stays incomplete until none is left;
+  - once no stream and no detached session is left, the account's offline
+    store is emptied through the store (the end of a live stream moves
+    what it had not delivered there), and again on each pass for a minute
+    after the replica took the request up;
   - from the moment the account is in the set, a binding or resume of it is
     refused before it is published (`<not-authorized/>`). For a minute after
     taking a request up the replica also closes any stream of the account
     it finds again, which covers a binding that checked the set just before
     the account was added.
 
-  The command waits (default 30 s) until every replica whose lease counts
-  has completed or has stopped renewing its lease, judged by whether it saw
-  the lease renewed, on its own clock; it reports each replica as
-  `completed`, `lapsed` or `pending` and exits 3 when one is `pending`. A
+  The command waits (default 30 s, at most 600 s) until every replica
+  whose lease counts has completed or has stopped renewing its lease,
+  judged by whether it saw the lease renewed within the lease's lifetime
+  and a 2 s grace (17 s), on its own clock; the default wait is checked
+  at compile time to exceed that. It reports each replica as
+  `completed`, `lapsed` or `pending` and exits 3 when one is `pending`;
+  a lapsed replica no longer serves the account's sessions and does not
+  keep the command from exiting 0. A
   replica that starts within the day takes the request up too: it ends the
   detached sessions an earlier process left and refuses the account's
   bindings. The runtime role inserts and updates the lease and

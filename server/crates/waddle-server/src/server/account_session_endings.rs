@@ -1,26 +1,28 @@
 //! A replica's part in ending retired accounts' sessions (ADR-0020 D8;
 //! `crate::auth::session_endings`).
 //!
-//! Two tasks run on every serving replica, each on the
-//! [`SESSION_ENDING_TICK`]:
+//! Two tasks run on every serving replica:
 //!
 //! - [`ReplicaLease`] registers the replica's lease when it starts serving
-//!   and renews it. It runs apart from the work, so a pass that waits for a
-//!   stream to close does not let the lease run out; it releases the lease
-//!   when the process stops.
-//! - [`RequestedEndings`] reads the requests of the window this replica has
-//!   not completed. For each one it holds the account in the replica's
-//!   [`RetiredAccounts`] first, so that a binding of it is refused from
-//!   then on, records that it observed the request, ends the account's
-//!   live streams and detached sessions on this replica, and records the
-//!   request as completed once none is left. A pass that leaves something
-//!   behind, or a statement that fails, leaves the request to the next
-//!   tick, which adds what it ends to what the earlier passes ended.
+//!   and renews it every [`SESSION_ENDING_RENEWAL`]. It runs apart from the
+//!   work, so a pass that waits for a stream to close does not let the
+//!   lease run out; it releases the lease when the process stops.
+//! - [`RequestedEndings`] reads, every [`SESSION_ENDING_POLL`], the requests
+//!   of the window this replica has not completed; the read writes
+//!   nothing. It holds every requested account in the replica's
+//!   [`RetiredAccounts`] first, so that a binding of any of them is refused
+//!   from then on; then, for each request, it records that it observed the
+//!   request, ends the account's live streams and detached sessions on this
+//!   replica, empties the account's offline store, and records the request
+//!   as completed once none is left. A pass that leaves something behind,
+//!   or a statement that fails, leaves the request to the next poll, which
+//!   adds what it ends to what the earlier passes ended.
 //!
 //! For a short while after it took a request up the replica also closes
-//! any stream of the account it finds again: a binding that checked the set
-//! just before the account was added can be published after the pass read
-//! the registry.
+//! any stream of the account it finds again, and empties its offline store
+//! again: a binding that checked the set just before the account was added
+//! can be published after the pass read the registry, and its teardown
+//! stores what it had not delivered.
 //!
 //! [`RetiredAccounts`]: crate::server::routes::websocket::RetiredAccounts
 //!
@@ -36,12 +38,14 @@ use uuid::Uuid;
 
 use crate::auth::session_endings::{
     record_completed, record_observed, register_replica, release_replica, renew_replica,
-    requests_to_complete, EndedSessions, SessionEndingError, SESSION_ENDING_TICK,
-    SESSION_ENDING_WINDOW,
+    requests_to_complete, EndedSessions, SessionEndingError, SESSION_ENDING_POLL,
+    SESSION_ENDING_RENEWAL, SESSION_ENDING_WINDOW,
 };
 use crate::db::Database;
 use crate::permissions::host_grant::RateLimitedWarning;
-use crate::server::routes::websocket::{close_live_streams, end_account_sessions, WebSocketState};
+use crate::server::routes::websocket::{
+    close_live_streams, discard_offline_messages, end_account_sessions, WebSocketState,
+};
 
 /// How long after taking a request up the replica keeps closing the
 /// account's streams it finds again.
@@ -167,12 +171,16 @@ impl RequestedEndings {
         let requests = requests_to_complete(db, self.replica).await?;
         self.progress
             .retain(|id, _| requests.iter().any(|request| request.id == *id));
+        // Every requested account is held before any session is ended: a
+        // binding of any of them that registers after this point is
+        // refused, and one that registered before is in the registry the
+        // pass reads, also while the pass waits for another account's
+        // stream to close.
+        for request in &requests {
+            retired.insert(request.account.clone(), request.requested_at_ms);
+        }
         let mut completed = 0;
         for request in requests {
-            // Held before anything else: a binding that registers after
-            // this point is refused, and one that registered before is in
-            // the registry the pass reads.
-            retired.insert(request.account.clone(), request.requested_at_ms);
             if !self.progress.contains_key(&request.id) {
                 if let Err(error) = record_observed(db, request.id, self.replica).await {
                     debug!(%error, "a session-ending request's observation was not recorded");
@@ -185,7 +193,7 @@ impl RequestedEndings {
                 *total
             };
             if !pass.complete {
-                debug!("a retired account still has sessions here; the next tick tries again");
+                debug!("a retired account still has sessions here; the next poll tries again");
                 continue;
             }
             record_completed(db, request.id, self.replica, total).await?;
@@ -199,12 +207,15 @@ impl RequestedEndings {
             );
         }
         for account in retired.taken_up_within(RESWEEP_AFTER_TAKE_UP) {
-            let (closed, _) = close_live_streams(state, &account).await;
+            let (closed, none_left) = close_live_streams(state, &account).await;
             if closed > 0 {
                 debug!(
                     closed,
                     "closed streams a retired account bound while its request was taken up"
                 );
+            }
+            if none_left {
+                discard_offline_messages(state, &account).await;
             }
         }
         Ok(completed)
@@ -221,7 +232,7 @@ pub(crate) fn spawn_account_session_endings(websocket_state: &Arc<WebSocketState
     let weak = Arc::downgrade(websocket_state);
     let lease_stop = stop.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(SESSION_ENDING_TICK);
+        let mut ticker = tokio::time::interval(SESSION_ENDING_RENEWAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -247,7 +258,7 @@ pub(crate) fn spawn_account_session_endings(websocket_state: &Arc<WebSocketState
 
     let weak = Arc::downgrade(websocket_state);
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(SESSION_ENDING_TICK);
+        let mut ticker = tokio::time::interval(SESSION_ENDING_POLL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {

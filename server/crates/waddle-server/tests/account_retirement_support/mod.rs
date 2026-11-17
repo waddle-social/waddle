@@ -2,7 +2,7 @@
 //! (`account_retirement_sessions.rs`, `xep0198_account_retirement_ws.rs`):
 //! the production `/ws` router over a loopback socket against the in-memory
 //! test state, with accounts, rooms and a replica's lease and work driven
-//! one tick at a time.
+//! one poll at a time.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,6 +142,19 @@ impl Server {
             .detached_resources_for_user(account)
             .await
             .expect("the session registry is readable")
+    }
+
+    /// How many messages `account`'s offline store holds.
+    pub async fn offline_messages(&self, account: &BareJid) -> usize {
+        use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+        self.state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(account)
+            .await
+            .expect("the offline store is readable")
+            .len()
     }
 }
 

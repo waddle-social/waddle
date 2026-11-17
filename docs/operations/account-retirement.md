@@ -19,17 +19,22 @@ One transaction:
   `retired_account_jids`;
 - removes the account's native credentials (`native_users`);
 - removes its account row (`users`) and, with it, its identity-provider
-  links and its sessions.
+  links and its sessions;
+- removes the messages its offline store holds for its next session
+  (`pending_delivery`): the account has no next session.
 
 Then, in the same command, every serving server ends the account's open
-sessions. The command records a request; each server takes it up on its
-next tick, usually within half a second, and from then on:
+sessions. The command records a request; each server reads it within about
+a second, and from then on:
 
 - closes every live stream of the account it hosts. The client is sent the
   stream error `<not-authorized/>` (RFC 6120 §4.9.3.12) and the stream is
   closed; the session is not kept for resumption;
 - ends every stream-management session of the account that waits for the
-  client to resume (XEP-0198), wherever the session's state is held;
+  client to resume (XEP-0198), wherever the session's state is held. What
+  such a session held for the client is discarded, not stored;
+- once it holds neither, removes what the end of a live stream stored in
+  the account's offline store, and does so again for a minute;
 - refuses a stream of the account that authenticated before the
   retirement and binds a resource or resumes afterwards, with the same
   `<not-authorized/>`.
@@ -119,10 +124,13 @@ It does not:
    - `pending`: the server renews its lease and has not completed within
      the wait.
 
-   The command waits at most `--session-wait` seconds (default 30) and
-   reports when no server is `pending`; the shortest run takes about a
-   second. A server whose lease is not renewed is reported `lapsed` about
-   7 s after the command first reads it. With no server running (a stopped
+   The command waits at most `--session-wait` seconds (default 30, at most
+   600) and reports when no server is `pending`; the shortest run takes
+   about a second. A server whose lease is not renewed is reported
+   `lapsed` about 17 s after the command first reads it: the lease's 15 s
+   lifetime and a 2 s grace. A lapsed server holds none of the account's
+   sessions any more: its streams went with its process or will be ended
+   when it serves again. With no server running (a stopped
    SQLite deployment, for example) `replicas` is empty: the request stays,
    and a server that starts within a day ends the account's remaining
    detached sessions and refuses its bindings.
@@ -133,7 +141,8 @@ It does not:
 
    Exit codes:
 
-   - 0: retired, and no serving server is `pending`;
+   - 0: retired, and no serving server is `pending` (`lapsed` servers are
+     listed);
    - 1: the database returned an error. If the JSON was printed, the account
      is retired and its sessions' end was not requested or not read: run
      the command again;
@@ -150,7 +159,7 @@ It does not:
    for the lock; if a long-running transaction holds the tables it exits
    with code 1 without having changed anything, and logins that queued
    behind it proceed. Run it again. Once it holds the lock, the transaction
-   is a handful of statements (five for a usual account) and usually takes
+   is a handful of statements (nine for a usual account) and usually takes
    milliseconds; it has no deadline of its own, and each statement runs at
    most 5 s. The delete of the account row removes the account's
    identity-provider links and sessions with it, and an account with so
@@ -198,8 +207,8 @@ and no ledger row, and the retirement has to be repeated.
 Three tables, on both engines (migration 2015), carry the second step:
 
 - `account_session_ending_replicas`: one lease per serving server process,
-  registered when it starts serving, renewed every half second for 5 s, and
-  ended when it stops;
+  registered when it starts serving, renewed every 5 s for 15 s, and ended
+  when it stops;
 - `account_session_ending_requests`: one row per run of the command, naming
   the retired JID;
 - `account_session_ending_acks`: each server's progress on a request: when
@@ -208,6 +217,14 @@ Three tables, on both engines (migration 2015), carry the second step:
 A server acts on a request of the last day whose JID the ledger holds.
 Under the restricted runtime role a server registers and renews its lease
 and records its acknowledgements; it reads requests and deletes nothing.
+
+What this costs every deployment, whether or not an account is ever
+retired: each serving server process updates its one lease row every 5 s
+and reads the requests once a second in a read-only transaction that
+writes nothing (on PostgreSQL four statements: two statement bounds, the
+select and the rollback). The lease's expiry is not indexed, so on
+PostgreSQL the update is a heap-only one.
+
 The command removes leases that ended more than a day ago and requests
 older than two days, with their acknowledgements, each time it runs.
 
@@ -215,5 +232,5 @@ The command decides that a server serves by seeing its lease renewed while
 it waits, on its own clock; which leases it looks at depends on the clocks
 of the hosts, and it looks at every lease whose recorded end is no earlier
 than 10 s before the request. Keep the hosts' clocks in sync (NTP): the
-command does not wait for a server whose clock runs more than about 14 s
+command does not wait for a server whose clock runs more than about 20 s
 behind its own.

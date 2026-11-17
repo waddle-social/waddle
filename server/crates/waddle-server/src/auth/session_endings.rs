@@ -9,13 +9,14 @@
 //! - It records a *request* that names the account
 //!   ([`request_session_ending`]).
 //! - Every serving replica holds a *lease*: a row it registers when it
-//!   starts and renews every [`SESSION_ENDING_TICK`] for
-//!   [`SESSION_ENDING_LEASE_TTL`]. Each tick it reads the requests of the
-//!   last [`SESSION_ENDING_WINDOW`] that it has not completed and whose
-//!   account the ledger of retired JIDs holds ([`requests_to_complete`]),
-//!   refuses the account's bindings from then on, ends the account's
-//!   streams and detached sessions it holds, and records the request as
-//!   completed with what it ended (`crate::server::account_session_endings`).
+//!   starts and renews every [`SESSION_ENDING_RENEWAL`] for
+//!   [`SESSION_ENDING_LEASE_TTL`]. Every [`SESSION_ENDING_POLL`] it reads,
+//!   writing nothing, the requests of the last [`SESSION_ENDING_WINDOW`]
+//!   that it has not completed and whose account the ledger of retired
+//!   JIDs holds ([`requests_to_complete`]); for each one it refuses the
+//!   account's bindings from then on, ends the account's streams and
+//!   detached sessions it holds, and records the request as completed with
+//!   what it ended (`crate::server::account_session_endings`).
 //! - The command waits ([`await_session_endings`]) until every replica whose
 //!   lease counts has completed the request or has stopped renewing its
 //!   lease, and reports each replica.
@@ -31,6 +32,15 @@
 //! A replica that starts later reads the requests of the window too and
 //! completes them: it refuses the account's bindings and ends the detached
 //! sessions an earlier process left.
+//!
+//! What a serving replica costs while nobody is retired: one single-row
+//! `UPDATE` of its lease every [`SESSION_ENDING_RENEWAL`], and one
+//! read-only transaction every [`SESSION_ENDING_POLL`] whose select finds
+//! no request (on PostgreSQL four statements: the two statement bounds,
+//! the select and the rollback). The lease's expiry is not indexed, so on
+//! PostgreSQL a renewal changes no indexed column and is a heap-only
+//! update; only the command and the owner's prune read the lease table by
+//! expiry, and it holds one row per serving process of the last day.
 //!
 //! Times are milliseconds since the Unix epoch on the clock of the process
 //! that writes them, on both engines. The runtime role registers and renews
@@ -48,10 +58,14 @@ use super::retirement::retirement_key_of;
 use crate::db::{Database, DatabaseError, Transaction};
 use crate::ingress_substrate::set_local_transaction_timeouts;
 
-/// How long a lease lasts after the registration or renewal that set it.
-pub const SESSION_ENDING_LEASE_TTL: Duration = Duration::from_secs(5);
-/// How often a replica renews its lease and reads the requests.
-pub const SESSION_ENDING_TICK: Duration = Duration::from_millis(500);
+/// How long a lease lasts after the registration or renewal that set it:
+/// three renewals, so that a renewal that fails or is late does not let it
+/// run out.
+pub const SESSION_ENDING_LEASE_TTL: Duration = Duration::from_secs(15);
+/// How often a replica renews its lease.
+pub const SESSION_ENDING_RENEWAL: Duration = Duration::from_secs(5);
+/// How often a replica reads the requests it has not completed.
+pub const SESSION_ENDING_POLL: Duration = Duration::from_secs(1);
 /// How long beyond [`SESSION_ENDING_LEASE_TTL`] the command waits for a
 /// lease to be renewed before it decides that its replica stopped.
 pub const SESSION_ENDING_LAPSE_GRACE: Duration = Duration::from_secs(2);
@@ -69,13 +83,13 @@ const LEASE_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// so that no replica still reads a request the owner removes.
 const REQUEST_RETENTION: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 /// The shortest the command observes the leases before it reports that no
-/// replica is left to complete the request: a replica registers its lease
-/// within its first tick.
-const MINIMUM_OBSERVATION: Duration = Duration::from_secs(1);
+/// replica is left to complete the request: a replica's poll reads a new
+/// request within [`SESSION_ENDING_POLL`].
+const MINIMUM_OBSERVATION: Duration = SESSION_ENDING_POLL;
 /// How often the command reads the acknowledgements again.
 const AWAIT_POLL: Duration = Duration::from_millis(100);
-/// How many requests a replica reads in one tick.
-const REQUESTS_PER_TICK: i64 = 64;
+/// How many requests a replica reads in one poll.
+const REQUESTS_PER_POLL: i64 = 64;
 /// Longest a statement here waits for a lock, and longest it runs.
 const LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -367,14 +381,15 @@ fn report_of(
 /// Wait, for at most `limit`, until every replica whose lease counts has
 /// completed `request` or has stopped renewing its lease. The last reading
 /// is returned either way; a reading that fails is returned at once, and
-/// the request stays recorded.
+/// the request stays recorded. A `limit` beyond what the monotonic clock
+/// can represent waits until the replicas confirm.
 pub async fn await_session_endings(
     db: &Database,
     request: &SessionEndingRequest,
     limit: Duration,
 ) -> Result<SessionEndingReport, SessionEndingError> {
     let started = Instant::now();
-    let deadline = started + limit;
+    let deadline = started.checked_add(limit);
     let mut observed = BTreeMap::new();
     loop {
         let readings = read_replicas(db, request).await?;
@@ -382,10 +397,14 @@ pub async fn await_session_endings(
         observe(&mut observed, readings, now);
         let report = report_of(request, &observed);
         let observed_long_enough = now.saturating_duration_since(started) >= MINIMUM_OBSERVATION;
-        if (report.confirmed() && observed_long_enough) || now >= deadline {
+        let expired = deadline.is_some_and(|deadline| now >= deadline);
+        if (report.confirmed() && observed_long_enough) || expired {
             return Ok(report);
         }
-        tokio::time::sleep(AWAIT_POLL.min(deadline.saturating_duration_since(now))).await;
+        let left = deadline.map_or(AWAIT_POLL, |deadline| {
+            deadline.saturating_duration_since(now)
+        });
+        tokio::time::sleep(AWAIT_POLL.min(left)).await;
     }
 }
 
@@ -508,7 +527,7 @@ pub async fn requests_to_complete(
              WHERE a.request_id = q.request_id AND a.replica_id = ? \
              AND a.completed_at_ms IS NOT NULL) \
              ORDER BY q.requested_at_ms, q.request_id LIMIT ?",
-            crate::db_params![since, replica.simple().to_string(), REQUESTS_PER_TICK],
+            crate::db_params![since, replica.simple().to_string(), REQUESTS_PER_POLL],
         )
         .await?;
     let mut requests = Vec::new();

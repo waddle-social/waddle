@@ -8,16 +8,25 @@
 //!   (`registration`), as is a resume: the stream ends with
 //!   `<not-authorized/>` (RFC 6120 §4.9.3.12);
 //! - every live stream of the account this replica hosts is force-detached
-//!   as a fresh-bind replacement, the terminal close that a replacing bind
-//!   uses, and its peer is sent `<not-authorized/>` instead of
-//!   `<conflict/>`. The connection's own teardown then broadcasts its
-//!   unavailable presence, leaves its rooms (a local room fans the departure
-//!   out to its remote occupants) and its remote rooms, retires its binding
-//!   and closes its stream-management session without detaching it;
+//!   for the account's retirement: the connection ends its binding as
+//!   terminally as a replacing bind does, and its peer is sent
+//!   `<not-authorized/>` instead of `<conflict/>`. No binding takes the
+//!   full JID over, so the end is no transfer: a connection whose pumps are
+//!   not seen to stop in time does not fail the node, as a transfer's
+//!   would. The connection's own teardown broadcasts its unavailable
+//!   presence, leaves its rooms (a local room fans the departure out to its
+//!   remote occupants) and its remote rooms, retires its binding and closes
+//!   its stream-management session without detaching it;
 //! - every stream-management session of the account that waits for a
 //!   resume is ended, in memory and on the durable authority, through the
 //!   terminal path an invalidated detached session takes, which also
-//!   broadcasts its unavailable presence and leaves its rooms.
+//!   broadcasts its unavailable presence and leaves its rooms. What such a
+//!   session held for the client is discarded, not moved to the offline
+//!   store: no session of the account will ever flush that store;
+//! - once neither is left, the account's offline store is emptied: the
+//!   retirement removed what it held then, and what the teardown of a live
+//!   stream moved there since is removed here. For a while after taking
+//!   the request up the replica empties it again on each pass.
 //!
 //! What this replica holds is the evidence: a stream counts as closed once
 //! the registry no longer holds its binding, and the detached sessions as
@@ -42,7 +51,6 @@ use waddle_xmpp::registry::{
 use super::WebSocketState;
 use crate::auth::directory::canonical_account_jid;
 use crate::auth::session_endings::EndedSessions;
-use crate::sm_promotion::DisplacedPromotionDeps;
 
 /// Longest the replica waits for one live stream of a retired account to
 /// close after it asked the connection to: the longest wait a replacing
@@ -129,19 +137,58 @@ pub(crate) struct EndingPass {
 }
 
 /// End every live stream and every detached session of the retired
-/// account `account` (canonical) that this replica holds. The caller holds
-/// the account in [`RetiredAccounts`] first, so no binding of it is
-/// published after this pass reads the registry.
+/// account `account` (canonical) that this replica holds, then, once none
+/// is left, empty the account's offline store. The caller holds the
+/// account in [`RetiredAccounts`] first, so no binding of it is published
+/// after this pass reads the registry.
 pub(crate) async fn end_account_sessions(state: &WebSocketState, account: &BareJid) -> EndingPass {
     let (streams_closed, streams_complete) = close_live_streams(state, account).await;
     let (detached_sessions_ended, detached_complete) = end_detached_sessions(state, account).await;
+    // Only once the sessions are gone: the teardown of a live stream moves
+    // what it had not delivered to the store, and that is removed here too.
+    let complete =
+        streams_complete && detached_complete && discard_offline_messages(state, account).await;
     EndingPass {
         ended: EndedSessions {
             streams_closed,
             detached_sessions_ended,
         },
-        complete: streams_complete && detached_complete,
+        complete,
     }
+}
+
+/// Remove every message of the retired account `account`'s offline store,
+/// claimed or not: no session of the account will flush it. Returns whether
+/// the store could be read and every row removed.
+pub(crate) async fn discard_offline_messages(state: &WebSocketState, account: &BareJid) -> bool {
+    let storage = &state.deps.protocol.pending_delivery_storage;
+    let rows = match storage.list(account).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, "a retired account's offline store could not be read");
+            return false;
+        }
+    };
+    let mut discarded: u64 = 0;
+    let mut complete = true;
+    for row in rows {
+        match storage.delete_row(&row.id).await {
+            Ok(removed) => discarded = discarded.saturating_add(removed),
+            Err(error) => {
+                warn!(%error, "a message of a retired account's offline store was not removed");
+                complete = false;
+            }
+        }
+    }
+    if discarded > 0 {
+        waddle_xmpp::counter_add!(
+            "waddle.account_retirement.offline_messages_discarded",
+            "{message}",
+            "Messages of retired accounts' offline stores this replica removed after ending their sessions",
+            discarded,
+        );
+    }
+    complete
 }
 
 /// The live streams of `account` this replica hosts, with the binding each
@@ -188,8 +235,8 @@ pub(crate) async fn close_live_streams(state: &WebSocketState, account: &BareJid
     (closed_count, closed == outcomes.len())
 }
 
-/// Ask the connection hosting `jid` to end its binding as a terminal
-/// replacement, and wait until the registry no longer holds that binding.
+/// Ask the connection hosting `jid` to end its binding for the account's
+/// retirement, and wait until the registry no longer holds that binding.
 async fn close_live_stream(state: &WebSocketState, jid: &FullJid, entry: &ConnectionEntry) -> bool {
     let Some(binding) = entry.binding_ref().cloned() else {
         return true;
@@ -197,7 +244,7 @@ async fn close_live_stream(state: &WebSocketState, jid: &FullJid, entry: &Connec
     let deadline = tokio::time::Instant::now() + STREAM_CLOSE_WAIT;
     let (ack, ack_rx) = tokio::sync::oneshot::channel();
     let offer = entry.try_force_detach_and_interrupt(ForceDetachRequest {
-        origin: ForceDetachOrigin::FreshBindReplacement,
+        origin: ForceDetachOrigin::AccountRetirement,
         target_binding: Some(binding.clone()),
         requester_bare_jid: jid.to_bare(),
         ack,
@@ -218,7 +265,7 @@ async fn close_live_stream(state: &WebSocketState, jid: &FullJid, entry: &Connec
             return true;
         }
         if tokio::time::Instant::now() + STREAM_CLOSE_POLL > deadline {
-            warn!("a retired account's stream did not close in time; trying again next tick");
+            warn!("a retired account's stream did not close in time; trying again at the next poll");
             return false;
         }
         tokio::time::sleep(STREAM_CLOSE_POLL).await;
@@ -254,21 +301,17 @@ async fn end_detached_sessions(state: &WebSocketState, account: &BareJid) -> (u6
     for resource in &resources {
         match registry.invalidate_sessions_for_jid(resource).await {
             Ok(removed) if !removed.is_empty() => {
-                // As a replacing bind does: what the sessions retained moves
-                // to offline delivery, then each one leaves its rooms and
-                // its presence ends.
-                crate::sm_promotion::promote_displaced_sessions(
-                    removed.clone(),
-                    DisplacedPromotionDeps {
-                        sm_registry: registry,
-                        connection_registry: &state.deps.protocol.connection_registry,
-                        user_registry: &state.deps.protocol.user_registry,
-                        pending_storage: &state.deps.protocol.pending_delivery_storage,
-                        blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
-                        server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-                    },
-                )
-                .await;
+                // Unlike a replacing bind, which moves what a session
+                // retained to the offline store, the retirement discards
+                // it: no session of the account will flush that store. The
+                // durable rows the invalidation kept for a promotion are
+                // deleted and the claim released; then each session leaves
+                // its rooms and its presence ends.
+                for detached in &removed {
+                    if !registry.confirm_drained(&detached.stream_id).await {
+                        debug!("a retired account's detached session kept its durable rows");
+                    }
+                }
                 for detached in removed {
                     super::cleanup::cleanup_invalidated_detached_session(state, detached, None)
                         .await;

@@ -86,14 +86,16 @@ pub(super) async fn settle_owned_session(
     let Some(mut owner) = conn.durable_sm.take_owner() else {
         return OwnedSessionTeardown::Continue;
     };
-    let replaced_by_fresh_bind =
-        force_detach_origin == Some(waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement);
+    // A replacing bind or the account's retirement ends the session for
+    // good: it is not detached for a resume.
+    let ended_for_good =
+        force_detach_origin.is_some_and(waddle_xmpp::registry::ForceDetachOrigin::is_terminal);
     let detachable = conn.sm_state.enabled
         && conn.sm_state.is_resumable()
         && !matches!(conn.phase, ConnectionPhase::Closing { .. })
         && !conn.sm_recovery_required
         && !superseded
-        && !replaced_by_fresh_bind;
+        && !ended_for_good;
     let route = conn.phase.cleanup_jid().cloned().and_then(|jid| {
         let owner_token = conn.registry_owner?;
         let entry = state

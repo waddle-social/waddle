@@ -94,6 +94,7 @@ pub(super) async fn run(args: AccountArgs) -> Result<(), OwnerCliError> {
                     "newly_retired": retirement.newly_retired,
                     "native_accounts_removed": retirement.native_accounts,
                     "accounts_removed": retirement.accounts,
+                    "offline_messages_removed": retirement.offline_messages,
                     "sessions": sessions_json(sessions.as_ref().ok()),
                 })
             );

@@ -3,11 +3,13 @@
 //! request to end the retired account's sessions up, a resumable live
 //! stream is closed with `<not-authorized/>` (RFC 6120 §4.9.3.12) and its
 //! session ended rather than detached for a resumption (§5), a session that
-//! waits for a resumption is ended and leaves its rooms, and a resumption
-//! of the account's session is refused: no `<resumed/>` is sent and no
-//! resource is bound. Through the production `/ws` router over a loopback
-//! socket against the in-memory test state; the replica's work runs one
-//! tick at a time. No PostgreSQL, SpiceDB or second process is involved.
+//! waits for a resumption is ended and leaves its rooms, what either held
+//! is discarded rather than stored for the account's next session, and a
+//! resumption of the account's session is refused: no `<resumed/>` is sent
+//! and no resource is bound. Through the production `/ws` router over a
+//! loopback socket against the in-memory test state; the replica's work
+//! runs one poll at a time. No PostgreSQL, SpiceDB or second process is
+//! involved.
 #![cfg(feature = "test-support")]
 
 // The fixture serves two suites; each uses a part of it.
@@ -40,6 +42,9 @@ async fn a_resumable_live_stream_of_a_retired_account_is_closed_and_not_kept_for
     // ended, not detached for a resumption.
     ended_not_authorized(&frames_until_closed(&mut alices).await);
     assert!(server.detached(&alice).await.is_empty());
+    // What the session had not delivered is not kept for a later session:
+    // the account has none.
+    assert_eq!(server.offline_messages(&alice).await, 0);
     receive(&mut bobs, |frame| {
         occupant_presence(frame, &room, "alice", Some("unavailable"))
     })
@@ -76,7 +81,11 @@ async fn a_detached_session_of_a_retired_account_is_ended_and_leaves_its_room() 
     let (_lease, mut endings) = server.replica().await;
     assert_eq!(endings.run(&server.state).await.expect("a pass"), 1);
 
+    // The session is discarded, not moved to the offline store (§5 moves a
+    // session that cannot resume there for the account's next session; a
+    // retired account has none).
     assert!(server.detached(&alice).await.is_empty());
+    assert_eq!(server.offline_messages(&alice).await, 0);
     receive(&mut bobs, |frame| {
         occupant_presence(frame, &room, "alice", Some("unavailable"))
     })

@@ -513,16 +513,33 @@ pub(super) enum AccountActionArgs {
         )]
         schema_owner: Option<PgRoleName>,
         /// Seconds to wait for the serving servers to confirm ending the
-        /// account's open sessions
-        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_SESSION_WAIT_SECONDS)]
+        /// account's open sessions (at most 600)
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = DEFAULT_SESSION_WAIT_SECONDS,
+            value_parser = clap::value_parser!(u64).range(..=MAX_SESSION_WAIT_SECONDS)
+        )]
         session_wait: u64,
     },
 }
 
 /// How long `account retire` waits for the serving servers by default:
-/// longer than a server takes to close a stream that does not answer, and
-/// than a stopped server's lease takes to run out.
+/// longer than a server takes to close a stream that does not answer (10
+/// s), and than the command takes to decide that a stopped server's lease
+/// lapsed (its lifetime and the grace beyond it, 17 s).
 const DEFAULT_SESSION_WAIT_SECONDS: u64 = 30;
+
+const _: () = assert!(
+    DEFAULT_SESSION_WAIT_SECONDS
+        > crate::auth::session_endings::SESSION_ENDING_LEASE_TTL.as_secs()
+            + crate::auth::session_endings::SESSION_ENDING_LAPSE_GRACE.as_secs()
+);
+
+/// The longest `account retire` may be told to wait. A server that has not
+/// confirmed by then is reported `pending`, and running the command again
+/// asks again.
+const MAX_SESSION_WAIT_SECONDS: u64 = 600;
 
 #[derive(Debug, Args)]
 pub(super) struct InstallAttestorArgs {

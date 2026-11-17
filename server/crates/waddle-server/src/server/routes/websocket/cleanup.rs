@@ -888,7 +888,9 @@ pub(super) async fn cleanup_force_detach_connection_shutdown(
     superseded: bool,
     origin: waddle_xmpp::registry::ForceDetachOrigin,
 ) -> ConnectionShutdownOutcome {
-    if origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement {
+    // A replacing bind and the account's retirement both end the binding
+    // for good: nothing of it is left to resume.
+    if origin.is_terminal() {
         if conn.sm_state.enabled {
             conn.begin_terminal_sm_recovery();
         } else if let Some(jid) = conn.phase.cleanup_jid().cloned() {
@@ -2712,11 +2714,7 @@ async fn promote_terminal_recovery_prefix(
 fn force_detach_requires_actor_unregister(
     origin: waddle_xmpp::registry::ForceDetachOrigin,
 ) -> bool {
-    matches!(
-        origin,
-        waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
-            | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
-    )
+    origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume || origin.is_terminal()
 }
 
 #[cfg(test)]
@@ -2733,6 +2731,11 @@ mod force_detach_tests {
         ));
         assert!(force_detach_requires_actor_unregister(
             waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+        ));
+        // A retirement's cleanup removes the actor entry itself, as a
+        // replacing bind's does.
+        assert!(force_detach_requires_actor_unregister(
+            waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
         ));
     }
 }

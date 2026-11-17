@@ -221,6 +221,30 @@ pub enum ForceDetachOrigin {
     /// An external lifecycle owner will remove its own registry mirrors after
     /// the connection task acknowledges the detach.
     OwnerManagedRetirement,
+    /// The bound account was retired. The connection ends its binding as
+    /// terminally as a replacing bind does, but no binding takes the full JID
+    /// over, so its end is no transfer and has no waiter to hand over to.
+    ///
+    /// Only the replica that hosts the stream sends it, so it never crosses
+    /// the relay; it is not part of the relayed encoding, and appending it
+    /// leaves the indices of the other variants as they were.
+    #[serde(skip)]
+    AccountRetirement,
+}
+
+impl ForceDetachOrigin {
+    /// Whether the detach ends the binding for good, leaving no session to
+    /// resume: a replacing bind, or the account's retirement.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::FreshBindReplacement | Self::AccountRetirement)
+    }
+
+    /// Whether another binding takes the full JID over once the connection
+    /// acknowledges the detach. Every origin but the account's retirement
+    /// hands the binding to its requester.
+    pub fn is_transfer(self) -> bool {
+        !matches!(self, Self::AccountRetirement)
+    }
 }
 
 /// A request to force-detach a live connection from its own connection task.

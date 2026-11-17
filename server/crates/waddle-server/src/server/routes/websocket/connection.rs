@@ -1305,6 +1305,7 @@ impl LiveSocketState {
                             // The old serving generation may no longer emit
                             // the optional `<conflict/>`. Still acknowledge
                             // only after normal detach persistence in `settle`.
+                            let cause = force_detach_cause(request.origin);
                             pending_force_detach.push(request);
                             if let Some(bound_bare) = bound_bare.as_ref() {
                                 pending_force_detach.extend(drain_ready_force_detach_requests(
@@ -1313,12 +1314,9 @@ impl LiveSocketState {
                                     conn.binding_ref.as_ref(),
                                 ));
                             }
-                            return ControlFlow::Break(Retire::settled(
-                                RetirementCause::ForceDetach,
-                            ));
+                            return ControlFlow::Break(Retire::settled(cause));
                         } else {
-                            let close = force_detach_close(state, conn);
-                            info!(?close, "force-detaching this session");
+                            let cause = force_detach_cause(request.origin);
                             // Deferred: acked only after this connection's own
                             // detach-for-resume cleanup in `settle` actually runs.
                             pending_force_detach.push(request);
@@ -1329,10 +1327,9 @@ impl LiveSocketState {
                                     conn.binding_ref.as_ref(),
                                 ));
                             }
-                            return ControlFlow::Break(Retire::owing(
-                                RetirementCause::ForceDetach,
-                                close,
-                            ));
+                            let close = force_detach_close(state, conn, pending_force_detach);
+                            info!(?close, "force-detaching this session");
+                            return ControlFlow::Break(Retire::owing(cause, close));
                         }
                     }
                     None => {
@@ -1964,7 +1961,8 @@ pub(super) async fn finish_connection<S, R, E>(
             conn.binding_ref.as_ref(),
         ));
         if !was_detaching && !pending_force_detach.is_empty() {
-            let stream_error = force_detach_stream_error(force_detach_close(state, conn));
+            let stream_error =
+                force_detach_stream_error(force_detach_close(state, conn, pending_force_detach));
             let (sender, _) = socket_io.halves_mut();
             close_live_session_for_force_detach(
                 sender.uninterrupted(),
@@ -2090,8 +2088,11 @@ pub(super) async fn finish_connection<S, R, E>(
         // node, and the acknowledgements below release a resumer. Neither may
         // happen for a transfer while the old pumps could still write.
         let pumps = observe_pump_termination(pump_witness.as_ref(), pump_deadline).await;
+        // A retirement's detach hands the full JID to nobody: missing its
+        // pumps' join leaves nothing a successor could write over, so it
+        // does not take the node's terminal failure path.
         let transfer = cause.is_transfer()
-            || primary_origin.is_some()
+            || primary_origin.is_some_and(waddle_xmpp::registry::ForceDetachOrigin::is_transfer)
             || superseded
             || late_transfer.load(std::sync::atomic::Ordering::Acquire);
         let fenced = pumps == PumpTermination::Missed && transfer;
@@ -2118,7 +2119,10 @@ pub(super) async fn finish_connection<S, R, E>(
         };
     // A waiter retained after the lifecycle check above still makes this a
     // transfer, and still must not be answered for an unobserved pump.
-    if pumps == PumpTermination::Missed && !fenced && !late_requests.is_empty() {
+    if pumps == PumpTermination::Missed
+        && !fenced
+        && late_requests.iter().any(|request| request.origin.is_transfer())
+    {
         fail_unjoined_transfer(state, conn);
         fenced = true;
     }
@@ -2211,12 +2215,29 @@ fn fail_unjoined_transfer(state: &WebSocketState, conn: &WsConnState) {
     );
 }
 
-/// The close a force-detach owes its live stream: `<not-authorized/>` for a
-/// binding of an account this replica holds as retired, whose retirement
-/// ended the session, and `<conflict/>` for one a resume or a replacing
-/// bind displaced.
-fn force_detach_close(state: &WebSocketState, conn: &WsConnState) -> OwedClose {
-    let retired = conn
+/// The retirement cause of a force-detach the request with `origin` began:
+/// a displacement hands the full JID to its requester, and the account's
+/// retirement hands it to nobody.
+fn force_detach_cause(origin: waddle_xmpp::registry::ForceDetachOrigin) -> RetirementCause {
+    if origin.is_transfer() {
+        RetirementCause::ForceDetach
+    } else {
+        RetirementCause::AccountRetired
+    }
+}
+
+/// The close a force-detach owes its live stream: `<not-authorized/>` when
+/// the account's retirement asked for it or this replica holds the bound
+/// account as retired, and `<conflict/>` for a binding a resume or a
+/// replacing bind displaced.
+fn force_detach_close(
+    state: &WebSocketState,
+    conn: &WsConnState,
+    requests: &[waddle_xmpp::registry::ForceDetachRequest],
+) -> OwedClose {
+    let retired = requests.iter().any(|request| {
+        request.origin == waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
+    }) || conn
         .phase
         .bound_jid()
         .is_some_and(|jid| state.deps.protocol.retired_accounts.holds(&jid.to_bare()));
@@ -2353,6 +2374,7 @@ pub(super) fn release_stale_force_detach_waiters_before_cross_node_cleanup(
         Some(
             waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
                 | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+                | waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
         )
     ) {
         return;
@@ -2436,7 +2458,9 @@ where
                     primary_origin,
                     &mut pending,
                 );
-                if !pending.is_empty() {
+                // A retained waiter makes the end a transfer, unless it is
+                // a retirement's, which hands the full JID to nobody.
+                if pending.iter().any(|request| request.origin.is_transfer()) {
                     retained.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
@@ -2508,6 +2532,7 @@ fn handle_late_force_detach_waiter_during_cross_node_cleanup(
         primary_origin,
         waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
             | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+            | waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
     ) && request.origin == waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
     {
         // While the cross-node cleanup is synchronously re-entering the

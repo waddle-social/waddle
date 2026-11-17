@@ -10,7 +10,7 @@
 //!
 //! The replica cases drive the production `/ws` router over a loopback
 //! socket against the in-memory test state, and run the replica's lease and
-//! its work one tick at a time instead of on their timers. The command's
+//! its work one poll at a time instead of on their timers. The command's
 //! wait and report run against an SQLite database of their own, and the
 //! operator subcommand runs as the server binary against an SQLite file. No
 //! PostgreSQL, SpiceDB or second server process is involved.
@@ -33,12 +33,16 @@ use waddle_server::auth::retirement::retire_account;
 use waddle_server::auth::session_endings::{
     await_session_endings, prune_session_endings, record_completed, register_replica,
     release_replica, renew_replica, request_session_ending, requests_to_complete, EndedSessions,
-    ReplicaEnding, SessionEndingRequest,
+    ReplicaEnding, SessionEndingRequest, SESSION_ENDING_LAPSE_GRACE, SESSION_ENDING_LEASE_TTL,
 };
 use waddle_server::db::actor::{DbActor, DbExecute, DbQueryOne};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner, Value};
+use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 use xmpp_parsers::bind::BindQuery;
 use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::{Lang, Message};
 
 #[tokio::test]
 async fn a_live_stream_of_a_retired_account_is_closed_and_leaves_its_room() {
@@ -110,6 +114,65 @@ async fn a_binding_after_the_request_is_refused_with_not_authorized() {
         .protocol
         .connection_registry
         .is_connected(&bound));
+}
+
+/// A message from Bob to `account` as the offline store keeps it whole.
+fn offline_message(account: &jid::BareJid) -> PendingRow {
+    let mut message = Message::new(Some(jid::Jid::from(account.clone())));
+    message.from = Some("bob@example.com/phone".parse().expect("Bob's JID"));
+    message
+        .bodies
+        .insert(Lang::new(), "for the next session".to_owned());
+    PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: account.clone(),
+        original_receipt_at: chrono::Utc::now(),
+        payload: PendingPayload::Transient(Box::new(message)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    }
+}
+
+#[tokio::test]
+async fn a_retired_accounts_offline_store_is_emptied() {
+    let server = Server::start().await;
+    let alice = server.account("alice").await;
+
+    // The retirement removes what the store holds in the deployment's
+    // database in its transaction.
+    let stored = DatabasePendingDeliveryStorage::attach_existing(
+        server.db().clone(),
+        QuotaPolicy::default_policy(),
+    )
+    .await
+    .expect("the offline store attaches");
+    stored
+        .insert(offline_message(&alice))
+        .await
+        .expect("a stored message");
+    let retirement = retire_account(server.db(), &alice)
+        .await
+        .expect("the account is retired");
+    assert_eq!(retirement.offline_messages, 1);
+    assert!(stored
+        .list(&alice)
+        .await
+        .expect("the offline store is readable")
+        .is_empty());
+
+    // What the teardown of a session stores afterwards is removed by the
+    // replica that ended the account's sessions, before it completes.
+    let replica_store = &server.state.deps.protocol.pending_delivery_storage;
+    replica_store
+        .insert(offline_message(&alice))
+        .await
+        .expect("a stored message");
+    request_session_ending(server.db(), &alice)
+        .await
+        .expect("the request is recorded");
+    let (_lease, mut endings) = server.replica().await;
+    assert_eq!(endings.run(&server.state).await.expect("a pass"), 1);
+    assert_eq!(server.offline_messages(&alice).await, 0);
 }
 
 #[tokio::test]
@@ -208,10 +271,16 @@ async fn a_replica_that_stops_renewing_its_lease_is_reported_lapsed() {
     // The stopped replica's lease is not renewed: after the lease and the
     // grace the command stops waiting for it, and says so.
     let started = Instant::now();
-    let report = await_session_endings(&db, &request, Duration::from_secs(30))
+    let report = await_session_endings(&db, &request, Duration::from_secs(60))
         .await
         .expect("the acknowledgements are readable");
-    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(
+        started.elapsed() >= SESSION_ENDING_LEASE_TTL,
+        "a lease is not taken for lapsed before it could have run out"
+    );
+    assert!(
+        started.elapsed() < SESSION_ENDING_LEASE_TTL + SESSION_ENDING_LAPSE_GRACE + Duration::from_secs(10)
+    );
     assert!(report.confirmed(), "{report:?}");
     let ending_of = |replica: Uuid| {
         report
@@ -494,5 +563,19 @@ async fn the_operator_subcommand_reports_each_serving_replica() {
     assert_eq!(printed["sessions"]["confirmed"], false);
     assert_eq!(printed["sessions"]["replicas"][0]["state"], "pending");
     replica.abort();
+
+    // The wait is bounded: a longer one is refused before anything is
+    // retired.
+    let (code, printed, _) = account_retire(&[
+        "--jid",
+        "kim@example.com",
+        "--sqlite-database",
+        &file,
+        "--session-wait",
+        "601",
+    ])
+    .await;
+    assert_eq!(code, 2);
+    assert_eq!(printed, serde_json::Value::Null);
     drop(db);
 }

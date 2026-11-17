@@ -15,9 +15,12 @@
 -- and deletes nothing. The owner removes old rows when the command runs.
 
 -- One row per registration of a serving replica: a process registers once
--- when it starts and renews the lease while it runs. `node` names the
--- replica in the command's report: its clustering node identity, or its
--- host and process.
+-- when it starts and renews the lease every 5 s while it runs. `node` names
+-- the replica in the command's report: its clustering node identity, or its
+-- host and process. The lease's expiry carries no index: only the command
+-- and the owner's prune read the table by it, and it holds one row per
+-- serving process of the last day, so a renewal changes no indexed column
+-- (on PostgreSQL a heap-only update).
 CREATE TABLE account_session_ending_replicas (
     replica_id TEXT PRIMARY KEY,
     node TEXT NOT NULL,
@@ -26,8 +29,6 @@ CREATE TABLE account_session_ending_replicas (
     CONSTRAINT account_session_ending_replicas_id CHECK (length(replica_id) = 32 AND replica_id NOT GLOB '*[^0-9a-f]*'),
     CONSTRAINT account_session_ending_replicas_node CHECK (length(CAST(node AS BLOB)) BETWEEN 1 AND 255)
 );
-
-CREATE INDEX account_session_ending_replicas_lease ON account_session_ending_replicas (lease_expires_at_ms);
 
 -- One row per run of the command: end the open sessions of the retired
 -- account `account_jid`, its bare JID in canonical form (the key of
