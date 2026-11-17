@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "b68747c0924a8b77815b7f957ba46749bba17271",
+  "baseline_commit": "cc7079cbad9d75b8f702bc9611714240690616d2",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -113,7 +113,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "sha256": "89597c45eab4724e08e61da81324b5ed3fba179a09a426957de93ee5c13ba35a"
+      "sha256": "612e2db785fa4bafbf9e1f4bc779ded8f22c51dd9706ee5349b54c7e4d3fc07f"
     },
     {
       "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
@@ -965,7 +965,7 @@
     },
     "s2s-seat-egress": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2026,
+      "line": 2043,
       "text": "pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {"
     },
     "foreign-delivery": {
@@ -1065,7 +1065,7 @@
     },
     "s2s-adopted-seats": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2653,
+      "line": 2670,
       "text": "pub(super) fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {"
     },
     "hg-seats-honour-anywhere": {
@@ -1075,7 +1075,7 @@
     },
     "s2s-seat-adoption": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2586,
+      "line": 2603,
       "text": "pub(super) async fn adopt_seat("
     },
     "s2s-unseated-removal": {

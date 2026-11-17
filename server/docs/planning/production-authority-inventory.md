@@ -19,7 +19,7 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`b68747c0924a8b77815b7f957ba46749bba17271` (see the last refresh below); the original
+`cc7079cbad9d75b8f702bc9611714240690616d2` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1471,6 +1471,15 @@ without a change to their text.
   count beyond its bounded read) changed only around their listings.
 - The raw scan still holds 1640 records, each token's count unchanged;
   its digest changed because matched lines moved.
+
+The selected evidence was refreshed a thirty-third time, through
+`cc7079cbad9d75b8f702bc9611714240690616d2`. One reviewed file changed (the router's room host
+`router/hosting.rs`): a self-ping the host did not decide in time is
+answered with `remote-server-timeout` rather than
+`internal-server-error`. It decides nothing for a room; three anchors
+(`s2s-seat-egress`, `s2s-adopted-seats` and `s2s-seat-adoption`) moved
+with the lines added above them, no anchor's text changed, and the raw
+scan still holds 1640 records.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
