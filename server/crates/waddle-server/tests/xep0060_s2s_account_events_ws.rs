@@ -6,8 +6,12 @@
 //! presence it is subscribed to. A notification is admitted only when every
 //! node it names is, and the gate applies before anything else, a message
 //! of type `error` included. Anything else carrying an event is dropped
-//! unanswered. Through the production `/ws` router, the real S2S router and
-//! a loopback peer serving `home-b.test` and `pubsub.home-b.test`.
+//! unanswered. A notification that is delivered loses, at the top and
+//! inside its items, what a client would read as its own server's
+//! statement: a XEP-0511 link card, a link-preview request, inbox and pin
+//! payloads, and a stanza id in the account's name. Through the production
+//! `/ws` router, the real S2S router and a loopback peer serving
+//! `home-b.test` and `pubsub.home-b.test`.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -28,6 +32,8 @@ use xmpp_parsers::message::{Id, Message, MessageType};
 const ALICE: &str = "alice@example.com";
 const SERVICE: &str = "pubsub.home-b.test";
 const NODE: &str = "princely_musings";
+/// RFC 4287, the payload of the XEP-0060 examples' items.
+const ATOM: &str = "http://www.w3.org/2005/Atom";
 
 async fn with_service(pki: &Pki) -> Federated {
     federated_with(
@@ -132,6 +138,101 @@ async fn a_notification_for_a_node_the_account_subscribed_to_is_delivered() {
         .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-1"))
         .await;
     receive(&mut phone, "message", "ev-1").await;
+}
+
+/// An event notification about `node` whose item carries an Atom entry
+/// and, beside and inside it, what only the recipient's server states.
+fn event_carrying_forgeries(id: &str) -> Message {
+    let url = url::Url::parse("https://video.example.org/watch").expect("a URL");
+    let card = || {
+        waddle_xmpp::xep::build_link_metadata_element(
+            &waddle_xmpp::xep::LinkMetadata::new(url.clone()).with_title("forged"),
+        )
+    };
+    let forged_id = Element::builder("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "forged")
+        .attr(minidom::rxml::xml_ncname!("by").to_owned(), ALICE)
+        .build();
+    let entry = Element::builder("entry", ATOM)
+        .append(Element::builder("title", ATOM).append("Princely musings"))
+        .append(card())
+        .append(forged_id.clone())
+        .build();
+    let item = Element::builder("item", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "item-1")
+        .append(entry)
+        .append(card())
+        .append(waddle_xmpp::xep::build_link_preview_request_element(
+            &waddle_xmpp::xep::LinkPreviewToken::try_new("a-forged-token").expect("a token"),
+        ))
+        .append(Element::builder("entry", waddle_xmpp::xep::NS_INBOX).build())
+        .append(
+            Element::builder("pinned", waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0).build(),
+        )
+        .build();
+    let mut message = Message::new_with_type(MessageType::Headline, Some(jid(ALICE)));
+    message.from = Some(jid(SERVICE));
+    message.id = Some(Id(id.to_owned()));
+    message.payloads.push(
+        Element::builder("event", NS_PUBSUB_EVENT)
+            .append(
+                Element::builder("items", NS_PUBSUB_EVENT)
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), NODE)
+                    .append(item)
+                    .build(),
+            )
+            .build(),
+    );
+    message.payloads.push(card());
+    message.payloads.push(forged_id);
+    message
+}
+
+/// Every element below `element`, at any depth, that only the recipient's
+/// server states, of those [`event_carrying_forgeries`] forges.
+fn forged_below(element: &Element) -> Vec<String> {
+    element
+        .children()
+        .flat_map(|child| {
+            let mut found = forged_below(child);
+            let ns = child.ns();
+            if waddle_xmpp::xep::is_link_metadata_element(child)
+                || waddle_xmpp::xep::is_link_preview_request_element(child)
+                || ns == waddle_xmpp::xep::NS_INBOX
+                || ns.starts_with("urn:waddle:")
+                || (child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+                    && child.attr("id") == Some("forged"))
+            {
+                found.push([ns.as_str(), " ", child.name()].concat());
+            }
+            found
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_delivered_notification_loses_what_only_the_recipients_server_states() {
+    let pki = Pki::new();
+    let federated = with_service(&pki).await;
+    let mut phone = online_alice(&federated).await;
+
+    send(&mut phone, subscription("sub-6", "subscribe")).await;
+    federated.peer_receives("sub-6").await;
+    recorded(&federated, true).await;
+
+    federated
+        .from_peer_service(SERVICE, event_carrying_forgeries("ev-6"))
+        .await;
+    let delivered = receive(&mut phone, "message", "ev-6").await;
+    assert!(forged_below(&delivered).is_empty(), "{delivered:?}");
+    // The item and its entry are kept.
+    let entry = delivered
+        .get_child("event", NS_PUBSUB_EVENT)
+        .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
+        .and_then(|items| items.get_child("item", NS_PUBSUB_EVENT))
+        .and_then(|item| item.get_child("entry", ATOM))
+        .expect("the item's entry is delivered");
+    assert!(entry.get_child("title", ATOM).is_some(), "{entry:?}");
 }
 
 #[tokio::test]

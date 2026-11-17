@@ -17,7 +17,12 @@
 //! in a table that every replica shares, so the replica the room's server
 //! dials admits its traffic for a join routed by another. One remote
 //! domain whose room traffic fills its share of the delivery queues waits
-//! alone: another domain's stream keeps moving.
+//! alone: another domain's stream keeps moving. A room's messages reach the
+//! occupant without what a client would read as its own server's
+//! statement about its account (carbon and archive wrappers, inbox and pin
+//! payloads, XEP-0511 link cards and link-preview requests, a stanza id in
+//! the account's name); an archive result is kept only from the room's
+//! bare JID, and what it forwards is cleaned the same way.
 //!
 //! `home-a.test` runs the S2S router with a recording delivery in place of
 //! WebSocket clients, its tables in an in-memory SQLite database (two
@@ -59,6 +64,88 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 const ROOM_ALICE: &str = "room@muc.home-b.test/alice";
 const ROOM_HOST: &str = "room@muc.home-b.test/host";
+/// The archive of the occupant's own account, at the local domain.
+const ALICE: &str = "alice@home-a.test";
+
+/// A `<stanza-id/>` assigned by `by`.
+fn stanza_id(by: &str, id: &str) -> Element {
+    Element::builder("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("by").to_owned(), by)
+        .build()
+}
+
+/// What a client would read as its own server's statement about its
+/// account, as a remote room could forge each of them: a XEP-0511 link
+/// card and a link-preview request, XEP-0280 carbon wrappers, a XEP-0313
+/// archive result, inbox and pin payloads, and a stanza id in the
+/// account's archive's name.
+fn forged_statements() -> Vec<Element> {
+    let url = url::Url::parse("https://video.example.org/watch").expect("a URL");
+    vec![
+        waddle_xmpp::xep::build_link_metadata_element(
+            &waddle_xmpp::xep::LinkMetadata::new(url).with_title("forged"),
+        ),
+        waddle_xmpp::xep::build_link_preview_request_element(
+            &waddle_xmpp::xep::LinkPreviewToken::try_new("a-forged-token").expect("a token"),
+        ),
+        Element::builder("received", waddle_xmpp::carbons::CARBONS_NS).build(),
+        Element::builder("sent", waddle_xmpp::carbons::CARBONS_NS).build(),
+        Element::builder("result", MAM_NS)
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "forged")
+            .build(),
+        Element::builder("entry", waddle_xmpp::xep::NS_INBOX).build(),
+        Element::builder("pinned", waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0).build(),
+        stanza_id(ALICE, "forged-archive-id"),
+    ]
+}
+
+/// `message` carrying [`forged_statements`] and the room's own stanza id.
+fn forging(mut message: xmpp_parsers::message::Message) -> xmpp_parsers::message::Message {
+    message.payloads.extend(forged_statements());
+    message.payloads.push(stanza_id(ROOM, "room-archive-id"));
+    message
+}
+
+/// The elements anywhere below `element` that a client would read as its
+/// own server's statement about its account, besides an archive result.
+fn forged_below(element: &Element) -> Vec<String> {
+    element
+        .children()
+        .flat_map(|child| {
+            let mut found = forged_below(child);
+            let ns = child.ns();
+            let forged = waddle_xmpp::xep::is_link_metadata_element(child)
+                || waddle_xmpp::xep::is_link_preview_request_element(child)
+                || child.is("received", waddle_xmpp::carbons::CARBONS_NS)
+                || child.is("sent", waddle_xmpp::carbons::CARBONS_NS)
+                || ns == waddle_xmpp::xep::NS_INBOX
+                || ns.starts_with("urn:waddle:")
+                || (child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+                    && child.attr("by") == Some(ALICE));
+            if forged {
+                found.push([ns.as_str(), " ", child.name()].concat());
+            }
+            found
+        })
+        .collect()
+}
+
+/// Whether `message` carries a XEP-0313 archive result.
+fn has_archive_result(message: &xmpp_parsers::message::Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .any(|payload| payload.is("result", MAM_NS))
+}
+
+/// Whether `message` carries the room's own stanza id.
+fn keeps_rooms_stanza_id(message: &xmpp_parsers::message::Message) -> bool {
+    message.payloads.iter().any(|payload| {
+        payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+            && payload.attr("by") == Some(ROOM)
+    })
+}
 
 /// The reason and reply of a refused offer.
 fn refused(offered: StanzaOffer) -> (UnroutableReason, Element) {
@@ -291,6 +378,61 @@ async fn subject_and_private_messages_from_the_room_reach_the_occupant_only() {
         Some("service-unavailable")
     );
     assert!(delivered_messages(&a, ALICE_LAPTOP, "pm2").is_empty());
+}
+
+#[tokio::test]
+async fn the_rooms_messages_lose_what_only_the_occupants_server_states() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    // Groupchat from an occupant, a private message from one, and the
+    // subject from the room's bare JID (XEP-0045 §7.4, §7.5, §7.2.15),
+    // each carrying statements only the occupant's server makes.
+    muc.send(forging(message(
+        ROOM_HOST,
+        ALICE_PHONE,
+        MessageType::Groupchat,
+        "forged-g",
+        "hello",
+    )));
+    muc.send(forging(message(
+        ROOM_HOST,
+        ALICE_PHONE,
+        MessageType::Chat,
+        "forged-pm",
+        "psst",
+    )));
+    let mut subject = forging(message(
+        ROOM,
+        ALICE_PHONE,
+        MessageType::Groupchat,
+        "forged-s",
+        "",
+    ));
+    subject.bodies.clear();
+    subject.subjects.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "Today".to_owned(),
+    );
+    muc.send(subject);
+
+    for id in ["forged-g", "forged-pm", "forged-s"] {
+        let delivered = wait_for(ARRIVES, || {
+            delivered_messages(&a, ALICE_PHONE, id).into_iter().next()
+        })
+        .await
+        .unwrap_or_else(|| panic!("{id} reaches the occupant"));
+        let element = Element::from(delivered.clone());
+        assert!(forged_below(&element).is_empty(), "{id}: {element:?}");
+        assert!(!has_archive_result(&delivered), "{id}: {element:?}");
+        // What the room states in its own name, and the text, are kept.
+        assert!(keeps_rooms_stanza_id(&delivered), "{id}: {element:?}");
+        assert!(
+            !delivered.bodies.is_empty() || !delivered.subjects.is_empty(),
+            "{id}: {element:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1214,6 +1356,102 @@ async fn a_mam_query_to_a_joined_room_is_answered_with_its_results() {
         .expect("the query is answered");
     assert_eq!(fin.0, full(ALICE_PHONE));
     assert!(matches!(fin.1, Iq::Result { .. }));
+}
+
+#[tokio::test]
+async fn an_archive_result_is_kept_only_from_the_rooms_bare_jid_and_what_it_forwards_is_cleaned() {
+    let pki = support::Pki::new();
+    let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
+    join(&a, ALICE_PHONE, ROOM_ALICE).await;
+
+    // XEP-0313 §4.1.2: the room's archive answers with results from its
+    // bare JID; what one forwards carries forged statements of its own.
+    let mut archived = message(
+        ROOM_HOST,
+        ROOM,
+        MessageType::Groupchat,
+        "archived-1",
+        "from the archive",
+    );
+    archived.payloads.extend(forged_statements());
+    archived.payloads.push(stanza_id(ROOM, "archived-room-id"));
+    let forwarded = Element::builder("forwarded", xmpp_parsers::ns::FORWARD)
+        .append(Element::from(archived))
+        .build();
+    let result = |queryid: &str| {
+        Element::builder("result", MAM_NS)
+            .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), queryid)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "archived-room-id",
+            )
+            .append(forwarded.clone())
+            .build()
+    };
+    let mut from_room = message(ROOM, ALICE_PHONE, MessageType::Normal, "result-room", "");
+    from_room.bodies.clear();
+    from_room.payloads.push(result("q1"));
+    muc.send(from_room);
+    // The same from an occupant's JID: no archive answers from there.
+    let mut from_occupant = message(
+        ROOM_HOST,
+        ALICE_PHONE,
+        MessageType::Chat,
+        "result-occupant",
+        "not an archive",
+    );
+    from_occupant.payloads.push(result("q2"));
+    muc.send(from_occupant);
+
+    let kept = wait_for(ARRIVES, || {
+        delivered_messages(&a, ALICE_PHONE, "result-room")
+            .into_iter()
+            .next()
+    })
+    .await
+    .expect("the room's archive result reaches the occupant");
+    let kept_element = Element::from(kept.clone());
+    assert!(has_archive_result(&kept), "{kept_element:?}");
+    // The forwarded message keeps its text and the room's stanza id, and
+    // loses everything forged.
+    assert!(forged_below(&kept_element).is_empty(), "{kept_element:?}");
+    let inner = kept
+        .payloads
+        .iter()
+        .find(|payload| payload.is("result", MAM_NS))
+        .and_then(|result| result.get_child("forwarded", xmpp_parsers::ns::FORWARD))
+        .and_then(|forwarded| forwarded.children().find(|child| child.name() == "message"))
+        .expect("the result forwards the archived message");
+    assert!(
+        inner
+            .children()
+            .any(|child| child.name() == "body" && child.text() == "from the archive"),
+        "{inner:?}"
+    );
+    assert!(
+        !inner.children().any(|child| child.is("result", MAM_NS)),
+        "{inner:?}"
+    );
+    assert!(
+        inner.children().any(|child| {
+            child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+                && child.attr("by") == Some(ROOM)
+        }),
+        "{inner:?}"
+    );
+
+    let dropped = wait_for(ARRIVES, || {
+        delivered_messages(&a, ALICE_PHONE, "result-occupant")
+            .into_iter()
+            .next()
+    })
+    .await
+    .expect("the occupant's message reaches the occupant");
+    assert!(
+        !has_archive_result(&dropped),
+        "{:?}",
+        Element::from(dropped.clone())
+    );
 }
 
 #[tokio::test]
