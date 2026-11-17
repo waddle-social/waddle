@@ -1,17 +1,27 @@
-//! Issuance of the privileged relations no writer names (ADR-0020 D8).
+//! Issuance of the privileged relations at the permission actor (ADR-0020
+//! D8).
 //!
-//! The channel `manager` and `moderator`, the Space `moderator` and the
-//! role `manager` relations confer management permissions or room
-//! moderation, and no handler, command or repair path writes them by name:
-//! they reach the store only through the permission actor's write messages.
-//! An actor that decides issuance writes them for an account of a served
-//! domain or of a trusted home and refuses them for any other account, in
-//! each of the three messages that write a relation; every other relation,
-//! and a subject that is no account, is written as before.
+//! The channel and Space `owner` and `admin`, the channel `manager` and
+//! `moderator`, the Space `moderator` and the role `manager` relations
+//! confer administration, management permissions or room moderation. The
+//! owner and admin relations have writers that decide issuance themselves;
+//! the others reach the store only through the permission actor's write
+//! messages. An actor that decides issuance writes every one of them for an
+//! account of a served domain or of a trusted home and refuses them for any
+//! other account, in each of the three messages that write a relation, so
+//! that a writer that omits its own check still issues nothing; every other
+//! relation, and a subject that is no account, is written as before.
+//! Startup builds a replica's actor deciding issuance, through the function
+//! the test-support seam calls.
 //!
 //! The suites' actors over the local backend establish the refusal at the
 //! write, not SpiceDB behaviour.
 #![cfg(feature = "test-support")]
+
+// The S2S configuration fixture: a snapshot loaded by the production loader.
+#[allow(dead_code, unused_imports)]
+#[path = "s2s_connection_manager/support.rs"]
+mod s2s_transport;
 
 use std::sync::Arc;
 
@@ -24,6 +34,8 @@ use waddle_server::permissions::{
     Relation, ReplaceExclusiveRelation, Subject, SubjectType, SwapExclusiveRelation, Tuple,
     WriteTuple,
 };
+use waddle_server::server::XmppConfig;
+use waddle_server::test_support::permission_actor_as_startup_builds;
 use waddle_xmpp::identity::CanonicalDomain;
 
 const LOCAL: &str = "alice@example.com";
@@ -61,11 +73,15 @@ async fn deciding(name: &str) -> ActorRef<PermissionActor> {
     )
 }
 
-/// The four relations and the object each is a relation of.
-fn privileged() -> [(ObjectType, &'static str); 4] {
+/// The privileged relations and the object each is a relation of.
+fn privileged() -> [(ObjectType, &'static str); 8] {
     [
+        (ObjectType::Channel, "owner"),
+        (ObjectType::Channel, "admin"),
         (ObjectType::Channel, "manager"),
         (ObjectType::Channel, "moderator"),
+        (ObjectType::Space, "owner"),
+        (ObjectType::Space, "admin"),
         (ObjectType::Space, "moderator"),
         (ObjectType::Role, "manager"),
     ]
@@ -159,8 +175,7 @@ async fn a_subject_that_is_no_account_of_an_admitted_home_is_refused() {
         .is_empty());
 }
 
-/// Member-level relations, and the relations whose writers decide issuance
-/// themselves, are not this boundary's to refuse.
+/// Member-level relations and a ban are not this boundary's to refuse.
 #[tokio::test]
 async fn other_relations_are_written_for_any_account() {
     let actor = deciding("spaces-issuance-other-relations").await;
@@ -300,6 +315,68 @@ async fn a_policy_that_serves_nothing_refuses_every_account() {
     );
     for account in [LOCAL, TRUSTED, UNTRUSTED] {
         let refused = write(&actor, tuple(ObjectType::Space, "moderator", account)).await;
+        assert!(
+            matches!(refused, Err(PermissionError::UntrustedPrivilegedSubject)),
+            "{account}: {refused:?}"
+        );
+    }
+}
+
+/// The XMPP configuration of a replica serving `example.com` with its
+/// default MUC and Spaces services.
+fn served() -> XmppConfig {
+    XmppConfig {
+        domain: "example.com".to_owned(),
+        muc_domain: jid::DomainPart::new("muc.example.com")
+            .expect("a MUC domain")
+            .into_owned(),
+        spaces_jid: jid::BareJid::new("spaces.example.com").expect("a Spaces JID"),
+        ..XmppConfig::default()
+    }
+}
+
+/// Startup builds a replica's permission actor deciding issuance for its
+/// served domain and the trusted homes of the S2S snapshot it runs: the
+/// owner and admin of a channel and of a Space are written for an account
+/// of either and refused for any other, as the other privileged relations
+/// are. With S2S off, only the served domain's accounts hold them.
+#[tokio::test]
+async fn startup_builds_an_actor_that_decides_issuance() {
+    let pki = s2s_transport::Pki::new();
+    let mut spec = s2s_transport::Spec::new("example.com", "home-b.test");
+    spec.allow = vec!["home-a.test", "home-b.test"];
+    spec.private = vec!["home-a.test", "home-b.test"];
+    spec.trusted_homes = vec!["home-a.test"];
+    let s2s = spec.load(&pki).await.expect("the S2S snapshot loads");
+
+    let actor = PermissionActor::spawn(permission_actor_as_startup_builds(
+        PermissionActor::new_for_tests(database("spaces-issuance-startup").await),
+        &served(),
+        Some(&s2s),
+    ));
+    for (object, relation) in privileged() {
+        for account in [LOCAL, TRUSTED] {
+            write(&actor, tuple(object, relation, account))
+                .await
+                .unwrap_or_else(|error| panic!("{relation} for {account}: {error}"));
+        }
+        let refused = write(&actor, tuple(object, relation, UNTRUSTED)).await;
+        assert!(
+            matches!(refused, Err(PermissionError::UntrustedPrivilegedSubject)),
+            "{relation}: {refused:?}"
+        );
+    }
+
+    let local_only = PermissionActor::spawn(permission_actor_as_startup_builds(
+        PermissionActor::new_for_tests(database("spaces-issuance-startup-local").await),
+        &served(),
+        None,
+    ));
+    write(&local_only, tuple(ObjectType::Space, "owner", LOCAL))
+        .await
+        .expect("an owner of the served domain");
+    for account in [TRUSTED, UNTRUSTED] {
+        let refused = write(&local_only, tuple(ObjectType::Space, "owner", account)).await;
         assert!(
             matches!(refused, Err(PermissionError::UntrustedPrivilegedSubject)),
             "{account}: {refused:?}"

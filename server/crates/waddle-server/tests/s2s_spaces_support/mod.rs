@@ -358,6 +358,12 @@ pub fn affiliation(node: &str, account: &str, affiliation: &str) -> Element {
 
 /// A `pubsub#owner` change that subscribes `account` to `node`.
 pub fn owner_subscription(node: &str, account: &str) -> Element {
+    owner_subscription_as(node, account, "subscribed")
+}
+
+/// A `pubsub#owner` change that sets `account`'s subscription to `node` to
+/// `state` (XEP-0060 §8.8.2): `subscribed`, or `none` to remove it.
+pub fn owner_subscription_as(node: &str, account: &str, state: &str) -> Element {
     pubsub(
         NS_PUBSUB_OWNER,
         Element::builder("subscriptions", NS_PUBSUB_OWNER)
@@ -365,10 +371,7 @@ pub fn owner_subscription(node: &str, account: &str) -> Element {
             .append(
                 Element::builder("subscription", NS_PUBSUB_OWNER)
                     .attr(minidom::rxml::xml_ncname!("jid").to_owned(), account)
-                    .attr(
-                        minidom::rxml::xml_ncname!("subscription").to_owned(),
-                        "subscribed",
-                    )
+                    .attr(minidom::rxml::xml_ncname!("subscription").to_owned(), state)
                     .build(),
             )
             .build(),

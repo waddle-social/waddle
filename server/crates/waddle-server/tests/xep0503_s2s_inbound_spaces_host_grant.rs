@@ -8,13 +8,18 @@
 //!   evidence of the stream that carried the request. A stranger is not
 //!   told of it, in the Space's items as in the room's own discovery.
 //! - The Space node of an enrolled scope is served to nobody: whatever its
-//!   `federated` setting says, it answers as a node that does not exist.
+//!   `federated` setting says, it answers as a node that does not exist, in
+//!   every operation a remote principal may ask of a node, with the error a
+//!   node that does not exist gets.
 //!
 //! The deployment is the revocation fixture's on PostgreSQL, with one
 //! replica that runs an S2S snapshot admitting `home-b.test` and serves its
-//! Spaces to it. The cases need PostgreSQL only and return early without
-//! it; a lane that sets `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them
-//! instead. No SpiceDB or second process is involved.
+//! Spaces to it. The cases need PostgreSQL only. Without it they return
+//! early, as every PostgreSQL case of the workspace does; a lane that sets
+//! `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them instead, since the fixture
+//! reads the test database through
+//! `waddle_ws_test_support::require_test_postgres_url`, which panics there.
+//! No SpiceDB or second process is involved.
 #![cfg(feature = "test-support")]
 
 // The shared fixtures serve several suites; this one uses a subset.
@@ -45,6 +50,9 @@ const SPACES: &str = "spaces.example.com";
 /// A Space no scope enrolls.
 const LOBBY: &str = "lobby";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
+const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
 
 fn spaces() -> BareJid {
     SPACES.parse().expect("the Spaces service")
@@ -161,6 +169,148 @@ async fn a_managed_rooms_bookmark_is_told_only_to_a_principal_its_grants_admit()
     managed.deployment.close().await;
 }
 
+/// An element `name` in `namespace` naming `node`.
+fn naming(name: &str, namespace: &str, node: &str) -> minidom::element::ElementBuilder {
+    Element::builder(name, namespace).attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+}
+
+/// A `pubsub` element of `namespace` holding `child`.
+fn pubsub(namespace: &str, child: Element) -> Element {
+    Element::builder("pubsub", namespace).append(child).build()
+}
+
+/// Every operation a remote principal may ask of the node `node`, each
+/// with whether it is a `set`: discovery, reading, subscribing and leaving,
+/// placing and removing a room, and each request of the owner namespace.
+fn operations(node: &str, account: &str) -> Vec<(&'static str, bool, Element)> {
+    let room = "lounge@muc.example.com";
+    vec![
+        (
+            "disco-info",
+            false,
+            naming("query", NS_DISCO_INFO, node).build(),
+        ),
+        (
+            "disco-items",
+            false,
+            naming("query", NS_DISCO_ITEMS, node).build(),
+        ),
+        (
+            "items",
+            false,
+            pubsub(NS_PUBSUB, naming("items", NS_PUBSUB, node).build()),
+        ),
+        (
+            "subscribe",
+            true,
+            pubsub(
+                NS_PUBSUB,
+                naming("subscribe", NS_PUBSUB, node)
+                    .attr(minidom::rxml::xml_ncname!("jid").to_owned(), account)
+                    .build(),
+            ),
+        ),
+        (
+            "unsubscribe",
+            true,
+            pubsub(
+                NS_PUBSUB,
+                naming("unsubscribe", NS_PUBSUB, node)
+                    .attr(minidom::rxml::xml_ncname!("jid").to_owned(), account)
+                    .build(),
+            ),
+        ),
+        (
+            "publish",
+            true,
+            pubsub(
+                NS_PUBSUB,
+                naming("publish", NS_PUBSUB, node)
+                    .append(
+                        Element::builder("item", NS_PUBSUB)
+                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), room)
+                            .build(),
+                    )
+                    .build(),
+            ),
+        ),
+        (
+            "retract",
+            true,
+            pubsub(
+                NS_PUBSUB,
+                naming("retract", NS_PUBSUB, node)
+                    .append(
+                        Element::builder("item", NS_PUBSUB)
+                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), room)
+                            .build(),
+                    )
+                    .build(),
+            ),
+        ),
+        (
+            "configure",
+            false,
+            pubsub(
+                NS_PUBSUB_OWNER,
+                naming("configure", NS_PUBSUB_OWNER, node).build(),
+            ),
+        ),
+        (
+            "delete",
+            true,
+            pubsub(
+                NS_PUBSUB_OWNER,
+                naming("delete", NS_PUBSUB_OWNER, node).build(),
+            ),
+        ),
+        (
+            "purge",
+            true,
+            pubsub(
+                NS_PUBSUB_OWNER,
+                naming("purge", NS_PUBSUB_OWNER, node).build(),
+            ),
+        ),
+        (
+            "affiliations",
+            false,
+            pubsub(
+                NS_PUBSUB_OWNER,
+                naming("affiliations", NS_PUBSUB_OWNER, node).build(),
+            ),
+        ),
+        (
+            "subscriptions",
+            false,
+            pubsub(
+                NS_PUBSUB_OWNER,
+                naming("subscriptions", NS_PUBSUB_OWNER, node).build(),
+            ),
+        ),
+    ]
+}
+
+/// `payload` from `from` to the Spaces service, as a `get` or a `set`.
+fn request(from: &str, id: String, set: bool, payload: Element) -> Iq {
+    let (from, to) = (Some(jid(from)), Some(jid(SPACES)));
+    if set {
+        Iq::Set {
+            from,
+            to,
+            id,
+            payload,
+        }
+    } else {
+        Iq::Get {
+            from,
+            to,
+            id,
+            payload,
+        }
+    }
+}
+
 #[tokio::test]
 async fn the_space_of_an_enrolled_scope_is_served_to_nobody() {
     let Some(managed) = serving_spaces("s2s_spaces_enrolled").await else {
@@ -169,24 +319,41 @@ async fn the_space_of_an_enrolled_scope_is_served_to_nobody() {
     let node = managed.deployment.grants.scope.space_node.clone();
     // Even with a PubSub node of that name whose setting is on.
     federated_space(&managed, &node).await;
+    let account = jid(GUEST_PHONE).to_bare().to_string();
 
-    let enrolled = ask(&managed, items(GUEST_PHONE, "enrolled-1", &node)).await;
-    let missing = ask(&managed, items(GUEST_PHONE, "enrolled-2", "nowhere")).await;
-    assert_eq!(
-        error_condition(&enrolled).as_deref(),
-        Some("item-not-found")
-    );
-    assert_eq!(
-        enrolled.children().find(|child| child.name() == "error"),
-        missing.children().find(|child| child.name() == "error")
-    );
+    // Every operation is answered as for a node that does not exist, with
+    // the very error such a node gets.
+    let enrolled = operations(&node, &account);
+    let missing = operations("nowhere", &account);
+    for ((name, set, asked), (_, _, control)) in enrolled.into_iter().zip(missing) {
+        let answer = ask(
+            &managed,
+            request(GUEST_PHONE, format!("enrolled-{name}"), set, asked),
+        )
+        .await;
+        let expected = ask(
+            &managed,
+            request(GUEST_PHONE, format!("missing-{name}"), set, control),
+        )
+        .await;
+        assert_eq!(
+            error_condition(&answer).as_deref(),
+            Some("item-not-found"),
+            "{name}: {answer:?}"
+        );
+        assert_eq!(
+            answer.children().find(|child| child.name() == "error"),
+            expected.children().find(|child| child.name() == "error"),
+            "{name}"
+        );
+    }
     let listed = ask(
         &managed,
         Iq::Get {
             from: Some(jid(GUEST_PHONE)),
             to: Some(jid(SPACES)),
-            id: "enrolled-3".to_owned(),
-            payload: Element::builder("query", "http://jabber.org/protocol/disco#items").build(),
+            id: "enrolled-listing".to_owned(),
+            payload: Element::builder("query", NS_DISCO_ITEMS).build(),
         },
     )
     .await;
