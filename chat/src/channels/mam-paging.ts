@@ -1,4 +1,4 @@
-import { nextTick, ref, type Ref } from "vue";
+import { ref, type Ref } from "vue";
 import type { ChannelSummary } from "@/lib/chat-types";
 import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -9,10 +9,8 @@ import type {
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { TimelineLoadResult } from "@/lib/timeline-load-result";
 import { findMessageById } from "@/lib/message-ids";
-import {
-  isTopPinnedScrollDirection,
-  type ScrollDirectionMode,
-} from "@/lib/scroll-direction";
+import { preserveScrollOnPrepend } from "@/lib/pinned-edge-scroll";
+import type { ScrollDirectionMode } from "@/lib/scroll-direction";
 import {
   buildChannelTimelineFromMamResults,
   type TimelineBuildOptions,
@@ -365,9 +363,6 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       (activeSpaceId.value ?? "") === spaceId &&
       activeChannelId.value === channelId;
 
-    const el = timelineEl.value;
-    const previousHeight = el?.scrollHeight ?? 0;
-    const previousTop = el?.scrollTop ?? 0;
     isLoadingOlderMessages.value = true;
     try {
       const page = await client.queryMamPage(spaceId, channelId, PAGE_SIZE, { type: "before", before });
@@ -381,11 +376,11 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       const withoutQueued = stripQueuedSelfMessages(messages.value);
       const roomJid = roomJidForChannel(channelId);
       if (!roomJid) return;
-      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomJid);
-      await nextTick();
-      if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
-        el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
-      }
+      await preserveScrollOnPrepend(timelineEl, scrollDirection, isCurrentRequest, () => {
+        messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomJid);
+        // Include removal of the loading row in the final page's height.
+        if (!hasOlderMessages.value) isLoadingOlderMessages.value = false;
+      });
     } catch (e) {
       const classified = classifyMamError(e);
       if (isMamCursorNotFound(classified)) {
