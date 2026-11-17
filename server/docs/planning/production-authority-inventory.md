@@ -18,7 +18,7 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `42cbdd9b127e9256dada6ea3a1ad19fe87226510` (see the last refresh below); the original
+through `3302678966ce3557b815755291b08632d382be1a` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1322,6 +1322,45 @@ text, and one anchor's text changed (`s2s-space-notify`, which is no longer
 - The raw scan holds 1639 records, four more than before, all in
   `admin/spaces.rs` and described above. The other records are unchanged in
   content; those in the changed files moved with the lines.
+
+The selected evidence was refreshed a twenty-seventh time, through
+`3302678966ce3557b815755291b08632d382be1a`, after reviewing the delta of the reviewed files since the
+twenty-sixth refresh. Four reviewed files changed (`admin/spaces.rs`,
+`pubsub_admin.rs`, the Spaces host `s2s_spaces.rs` and the store
+`db/s2s_spaces.rs`), no file was added to the reviewed set, fourteen anchors
+moved without a change to their text, and no anchor's text changed.
+
+- A Space deleted through PubSub (`pubsub-admin` moved), by a session or by
+  a trusted home's owner through `s2s-space-remote-change`, no longer
+  destroys rooms: the cascade (`space-delete` moved) takes a mode, and the
+  PubSub entry `delete_space` only takes the Space's rooms out of it (parent
+  tuple, link and bookmark). `run_delete`, the admin command, still
+  destroys rooms, and now only a room whose parent tuple on the Space the
+  cascade found and deleted, so an item or a link alone no longer reaches a
+  room's destruction. Both run under a Space deletion lock of their own (a
+  transaction-scoped advisory lock on PostgreSQL, a process lock on SQLite),
+  and the PubSub entry reads the node again under it. After closing the
+  Space to other servers the cascade removes the PubSub service's
+  subscription records of accounts at other servers. No parent, owner or
+  placement decision was added; the change only narrows what the PubSub
+  path removes.
+- `s2s_space_subscriptions` (`s2s-space-subscription-record` moved) reads
+  the subscriber's ban again under the Space's advisory lock, and the
+  removal of one subscription (by its account, its owner or a ban,
+  `d8-space-affiliations` moved) takes that lock. The sweep of the whole
+  store at the deployment's bound is bounded, reads domains from a rotating
+  in-process cursor, passes over rows other transactions hold on
+  PostgreSQL, and returns the rows it removed, whose PubSub records the
+  Spaces host then removes. None of these is a grant store; each only
+  reduces what is sent.
+- The Spaces host (`s2s-space-host`, `s2s-space-open`, `s2s-space-honoured`,
+  `s2s-space-room-visible`, `s2s-space-change`, `s2s-space-notify` and
+  `s2s-space-federated-setting` moved) takes a Space's allowance of
+  notified publications before a publication is queued, and counts what is
+  discarded at shutdown; `space-admin`, `d8-space-set-role` and
+  `hg-admin-space-listing` moved with the lines added above them.
+- The raw scan still holds 1639 records, each token's count unchanged; the
+  records in the changed files moved with the lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
