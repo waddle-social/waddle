@@ -86,7 +86,7 @@ mod destination_route;
 mod disco_info;
 pub(crate) use disco_info::muc_disco_info_for_remote;
 mod disco_items;
-pub(crate) use disco_items::{muc_rooms_for_remote, page_listing, RemoteRoomCandidates};
+pub(crate) use disco_items::{muc_rooms_for_remote, page_listing, RoomListings};
 pub(crate) mod errors;
 mod extension_forms;
 mod extension_route_items;

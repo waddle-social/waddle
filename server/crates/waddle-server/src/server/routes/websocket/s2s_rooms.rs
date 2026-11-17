@@ -72,7 +72,7 @@ use super::cleanup::{get_room_actor_result, is_muc_room_jid, sweep_abandoned_roo
 use super::frame::{ResponseBatch, ResponseFrame};
 use super::handlers::iq::{
     muc_admin_for_remote, muc_disco_info_for_remote, muc_owner_or_moderation_for_remote,
-    muc_rooms_for_remote, page_listing, RemoteRoomCandidates,
+    muc_rooms_for_remote, page_listing,
 };
 use super::handlers::presence::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
@@ -207,9 +207,6 @@ pub trait RoomCarrier: Send + Sync {
 pub struct WebSocketLocalRooms {
     state: Weak<WebSocketState>,
     archive_writes: ArchiveAllowances,
-    /// The rooms the MUC service may list to accounts at other servers, as
-    /// this replica last read them.
-    listed: Arc<RemoteRoomCandidates>,
     carrier: Option<Arc<dyn RoomCarrier>>,
 }
 
@@ -220,7 +217,6 @@ impl WebSocketLocalRooms {
         Self {
             state: Arc::downgrade(state),
             archive_writes: ArchiveAllowances::default(),
-            listed: Arc::default(),
             carrier,
         }
     }
@@ -311,7 +307,6 @@ impl waddle_xmpp::registry::ForeignDelivery for SeatDelivery {
 struct Asked<'a> {
     state: &'a Arc<WebSocketState>,
     archive_writes: &'a ArchiveAllowances,
-    listed: &'a Arc<RemoteRoomCandidates>,
     request: &'a RoomRequest,
     /// The address the stanza was sent to.
     to: &'a Jid,
@@ -727,7 +722,9 @@ impl Asked<'_> {
     /// [`MAX_LISTED_ROOMS`] are listed in one answer, paged with XEP-0059.
     /// The listing is answered within [`SERVICE_LISTING_LIMIT`], leaving
     /// out a room that could not be decided in time, and with
-    /// `internal-server-error` (type `wait`) when it cannot be built.
+    /// `internal-server-error` (type `wait`) when it cannot be built. A
+    /// listing that left any room out, for time, for a bound or for grants
+    /// that could not be read, tells no count.
     ///
     /// A room's occupants are not listed (§6.5): its answer is an empty
     /// list, the same for every room address, so it tells nothing of the
@@ -750,25 +747,23 @@ impl Asked<'_> {
             }
         } else {
             let deadline = tokio::time::Instant::now() + SERVICE_LISTING_LIMIT;
-            let listed = muc_rooms_for_remote(
-                self.state,
-                self.listed,
-                &self.account,
-                &self.evidence,
-                deadline,
-            )
-            .await;
-            let rooms = match listed {
-                Ok(rooms) => rooms,
+            let listed =
+                muc_rooms_for_remote(self.state, &self.account, &self.evidence, deadline).await;
+            let (rooms, omission) = match listed {
+                Ok(listed) => listed,
                 Err(error) => {
                     tracing::debug!(error = %error, "The MUC service's rooms were not listed");
                     return self.refuse(internal());
                 }
             };
-            let (items, rsm) =
-                page_listing(rooms, query.rsm.as_ref(), MAX_LISTED_ROOMS, true, |item| {
-                    item.jid.as_str()
-                });
+            // A listing that left rooms out tells no count (XEP-0059 §1).
+            let (items, rsm) = page_listing(
+                rooms,
+                query.rsm.as_ref(),
+                MAX_LISTED_ROOMS,
+                omission.complete(),
+                |item| item.jid.as_str(),
+            );
             DiscoItemsResult {
                 node: None,
                 items,
@@ -1358,7 +1353,6 @@ impl LocalRooms for WebSocketLocalRooms {
         let asked = Asked {
             state: &state,
             archive_writes: &self.archive_writes,
-            listed: &self.listed,
             request: &request,
             to: &to,
             account: request.principal.account().as_bare_jid().clone(),

@@ -363,6 +363,7 @@ where
     let state = Arc::new(WebSocketState {
             #[cfg(feature = "test-support")]
             sasl2_test_capability,
+            room_listings: Default::default(),
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,

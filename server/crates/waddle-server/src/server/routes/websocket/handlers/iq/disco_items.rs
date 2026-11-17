@@ -1,18 +1,20 @@
 use super::{
     bad_request_iq_error, build_command_items, build_disco_items_response,
     build_iq_error_xml_typed, command_refs_by_boundary, debug, extension_route_disco_node,
-    get_managed_channel_for_room, get_room_actor, internal_server_error_iq_error, iq_to_xml,
-    item_not_found_iq_error, list_xmpp_channels, muc_occupant_disco, parse_disco_items_query,
-    resolve_muc_room_archive_access, space_details_from_node, spaces_service_bare_jid, warn,
-    Affiliation, BareJid, CheckPermission, CommandBoundary, ConnectionPhase, DbQuery, DbQueryOne,
-    DiscoItem, FullJid, GetSnapshot, IqHandlerContext, Jid, Object, ObjectType, Permission,
-    Relation, RoomArchiveAccess, RsmRequest, RsmResponse, Subject, SubjectType, WebSocketState,
-    NODE_COMMANDS, PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
+    get_managed_channel_for_room, get_room_actor, get_room_actor_result,
+    internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error, list_xmpp_channels,
+    muc_occupant_disco, parse_disco_items_query, resolve_muc_room_archive_access,
+    space_details_from_node, spaces_service_bare_jid, warn, Affiliation, BareJid, CheckPermission,
+    CommandBoundary, ConnectionPhase, DbQuery, DbQueryOne, DiscoItem, FullJid, GetSnapshot,
+    IqHandlerContext, Jid, Object, ObjectType, Permission, Relation, RoomArchiveAccess, RsmRequest,
+    RsmResponse, Subject, SubjectType, WebSocketState, NODE_COMMANDS, PEP_NODE_AVATAR_DATA,
+    PEP_NODE_AVATAR_METADATA,
 };
 use crate::permissions::host_grant::{
     HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomBinding, RoomGate,
 };
 use crate::permissions::ListSubjects;
+use crate::server::xmpp_channels::list_listed_federated_xmpp_channels;
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -316,8 +318,8 @@ pub(super) async fn handle_disco_items_iq(
                 }
             };
             let requester = phase.bound_jid().map(|jid| jid.to_bare());
-            let items = match muc_rooms_for_session(state, muc_domain, requester.as_ref()).await {
-                Ok(items) => items,
+            let (items, omission) = match muc_rooms_for_session(state, requester.as_ref()).await {
+                Ok(listed) => listed,
                 Err(error) => {
                     warn!(error = %error, "Failed to list MUC rooms");
                     return vec![build_iq_error_xml_typed(
@@ -328,10 +330,26 @@ pub(super) async fn handle_disco_items_iq(
                     )];
                 }
             };
-            let (page, rsm_response) =
-                page_disco_items(&items, rsm_request.as_ref(), usize::MAX, |item| {
-                    item.jid.as_str()
-                });
+            // A client takes the listing as the whole of the service's
+            // rooms: one that lacks a room not read or decided in time is
+            // not answered.
+            if omission == Omission::Late {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    internal_server_error_iq_error(
+                        "The rooms could not all be read in time; try again later.",
+                    ),
+                )];
+            }
+            let (page, rsm_response) = page_disco_items(
+                &items,
+                rsm_request.as_ref(),
+                usize::MAX,
+                omission.complete(),
+                |item| item.jid.as_str(),
+            );
             return vec![paged_disco_items_response(
                 request_iq,
                 page,
@@ -495,7 +513,7 @@ pub(super) async fn handle_disco_items_iq(
         if target_to == Some(spaces_domain) {
             if let Some(node) = query.node.as_deref() {
                 let requester = phase.bound_jid().map(|jid| jid.to_bare());
-                let items = match space_children_for_session(
+                let (items, omission) = match space_children_for_session(
                     state,
                     spaces_domain,
                     node,
@@ -503,7 +521,7 @@ pub(super) async fn handle_disco_items_iq(
                 )
                 .await
                 {
-                    Ok(items) => items,
+                    Ok(listed) => listed,
                     Err(refusal) => {
                         return vec![build_iq_error_xml_typed(
                             id,
@@ -528,6 +546,7 @@ pub(super) async fn handle_disco_items_iq(
                     &items,
                     rsm_request.as_ref(),
                     MAX_LISTED_SPACE_ROOMS,
+                    omission.complete(),
                     |item| item.name.as_deref().unwrap_or_default(),
                 );
                 return vec![paged_disco_items_response(
@@ -726,30 +745,36 @@ pub(super) async fn handle_disco_items_iq(
     Vec::new()
 }
 
-/// Practical fetch bound for the MUC room list. RSM paging (#1265
-/// item 11) means clients are no longer silently truncated at the old
-/// hard 500 cap; this bound only protects the server from an unbounded
-/// DB read.
+/// Catalog rows a session's listing of the MUC service reads at most. RSM
+/// paging (#1265 item 11) means clients are not silently truncated at a
+/// fixed number of rooms; this bound protects the server from an unbounded
+/// DB read, and a listing whose read filled it tells no count.
 const MUC_DISCO_ITEMS_FETCH_BOUND: usize = 10_000;
 
+/// Catalog rows a listing for accounts at other servers reads at most. The
+/// read names only the rooms such a listing may hold (public, open to other
+/// servers and no group conversation), so no other row takes its places; a
+/// listing whose read filled it tells no count.
+const REMOTE_LISTING_FETCH_BOUND: usize = 4_096;
+
 /// Longest a session's listing of the MUC service, or of a Space's rooms,
-/// takes, the rooms read and the session's grants decided: a room not
-/// decided by then is left out, and the listing is answered with the rest.
+/// takes, the rooms read and the session's grants decided. A room not
+/// decided by then is left out, and the session is answered with
+/// `internal-server-error` (type `wait`) rather than with the rest.
 const LISTING_LIMIT: Duration = Duration::from_millis(2_500);
 
 /// Longest the rooms a listing may name are read for, before any asker's
-/// grants: the channel catalog, the live rooms and their actors. A room
-/// whose actor has not answered by then is left out.
+/// grants: the channel catalog, the live rooms and their actors.
 const CANDIDATES_LIMIT: Duration = Duration::from_millis(1_500);
 
-/// Longest one build of the rooms the MUC service may list to accounts at
-/// other servers takes ([`RemoteRoomCandidates`]). It is below
-/// [`CANDIDATES_LIMIT`], so the asker whose request started the build is
-/// answered from it.
-const REMOTE_CANDIDATES_BUILD_LIMIT: Duration = Duration::from_millis(1_200);
+/// Longest one build of the rooms the MUC service may list
+/// ([`RoomCandidates`]) takes. It is below [`CANDIDATES_LIMIT`], so the
+/// asker whose request started the build is answered from it.
+const CANDIDATES_BUILD_LIMIT: Duration = Duration::from_millis(1_200);
 
-/// How long a replica answers accounts at other servers from one build of
-/// the rooms its MUC service may list.
+/// How long after a build started accounts at other servers are answered
+/// from it: what the catalog and the rooms' actors said of a room when the
+/// build started is what they are told for at most this long.
 const REMOTE_CANDIDATES_TTL: Duration = Duration::from_secs(2);
 
 /// Managed rooms whose grants one listing reads at once.
@@ -782,6 +807,38 @@ pub(crate) enum RoomListingError {
     /// The rooms were not read within the listing's time.
     #[error("the rooms were not read in time")]
     Deadline,
+}
+
+/// What a listing left out of the rooms it would list, from least to most.
+/// A listing tells its count (XEP-0059) only when it left nothing out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Omission {
+    /// Nothing.
+    #[default]
+    None,
+    /// Rooms beyond a bound, or whose grants could not be read: a catalog
+    /// read that filled its bound, live rooms beyond the scan's bound, or a
+    /// managed room whose grants are unavailable.
+    Bounded,
+    /// Rooms that were not read or decided in time, or whose reading failed
+    /// for now: the live rooms, a room's actor, the catalog check of a live
+    /// room, a managed room's grants or their confirmation. A session is
+    /// answered with `internal-server-error` (type `wait`) rather than with
+    /// a listing that lacks them; an account at another server gets the
+    /// rest without a count.
+    Late,
+}
+
+impl Omission {
+    /// What two parts of one listing left out together.
+    fn and(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    /// Whether the listing left nothing out, so that its count may be told.
+    pub(crate) fn complete(self) -> bool {
+        self == Self::None
+    }
 }
 
 /// Extract an optional XEP-0059 `<set/>` from a disco#items query.
@@ -837,12 +894,14 @@ fn page_window<T>(
 /// ordering per XEP-0059 §2.2): the room JID for the MUC service, the item
 /// ID for a Space's rooms. A page holds at most `most` items whatever the
 /// request asks; the `<set/>` that places it is answered when the request
-/// asked for paging, or when the list did not fit in one answer (XEP-0059
-/// §1), and `None` otherwise.
+/// asked for paging, or when the list did not fit in one answer or left
+/// rooms out (XEP-0059 §1), and `None` otherwise. Its count is told only
+/// for a `complete` list.
 fn page_disco_items<'a>(
     items: &'a [DiscoItem],
     request: Option<&RsmRequest>,
     most: usize,
+    complete: bool,
     key: fn(&DiscoItem) -> &str,
 ) -> (&'a [DiscoItem], Option<RsmResponse>) {
     let total = items.len();
@@ -860,10 +919,13 @@ fn page_disco_items<'a>(
             .map(|index| index as usize),
     );
     let page = &items[start..end];
-    if request.is_none() && page.len() == total {
+    if request.is_none() && page.len() == total && complete {
         return (page, None);
     }
-    let mut response = RsmResponse::new().with_count(u32::try_from(total).unwrap_or(u32::MAX));
+    let mut response = RsmResponse::new();
+    if complete {
+        response = response.with_count(u32::try_from(total).unwrap_or(u32::MAX));
+    }
     if let (Some(first), Some(last)) = (page.first(), page.last()) {
         response = response
             .with_first(key(first).to_owned(), u32::try_from(start).ok())
@@ -1011,6 +1073,8 @@ struct ViewDecisions<T> {
     allowed: Vec<(T, ManagedRoomGrants)>,
     /// Whom `allowed` was decided for, on what evidence.
     subject: Option<(BareJid, PrincipalEvidence)>,
+    /// What the decisions left out.
+    omission: Omission,
 }
 
 impl<T> ViewDecisions<T> {
@@ -1019,22 +1083,25 @@ impl<T> ViewDecisions<T> {
             unmanaged,
             allowed: Vec::new(),
             subject: None,
+            omission: Omission::None,
         }
     }
 
-    /// The rooms listed, asked just before the answer is built: every
-    /// unmanaged room, and each managed room whose grants still allow
-    /// `view` ([`HostGrantGate::still_allows`]), the decision itself while
-    /// its fence ticket is current and a decision read now otherwise. A
-    /// managed room that is not confirmed by `deadline` is left out.
-    async fn still_viewable(self, gate: &HostGrantGate, deadline: Instant) -> Vec<T> {
+    /// The rooms listed, asked just before the answer is built, and what
+    /// the listing left out: every unmanaged room, and each managed room
+    /// whose grants still allow `view` ([`HostGrantGate::still_allows`]),
+    /// the decision itself while its fence ticket is current and a decision
+    /// read now otherwise. A managed room that is not confirmed by
+    /// `deadline` is left out, as one not decided in time.
+    async fn still_viewable(self, gate: &HostGrantGate, deadline: Instant) -> (Vec<T>, Omission) {
         let Self {
             mut unmanaged,
             allowed,
             subject,
+            mut omission,
         } = self;
         let Some((subject, evidence)) = subject else {
-            return unmanaged;
+            return (unmanaged, omission);
         };
         let (subject, evidence) = (&subject, &evidence);
         let mut confirmed = futures::stream::iter(allowed)
@@ -1045,14 +1112,18 @@ impl<T> ViewDecisions<T> {
                 (room, still)
             })
             .buffer_unordered(GRANT_READS_AT_ONCE);
-        while let Ok(Some((room, still))) =
-            tokio::time::timeout_at(deadline, confirmed.next()).await
-        {
-            if still {
-                unmanaged.push(room);
+        loop {
+            match tokio::time::timeout_at(deadline, confirmed.next()).await {
+                Ok(Some((room, true))) => unmanaged.push(room),
+                Ok(Some((_, false))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    omission = omission.and(Omission::Late);
+                    break;
+                }
             }
         }
-        unmanaged
+        (unmanaged, omission)
     }
 }
 
@@ -1060,8 +1131,9 @@ impl<T> ViewDecisions<T> {
 /// with `evidence`: a room no enrolled scope manages (any longer) is kept
 /// as unmanaged, and a managed one only where its canonical grants allow
 /// `view`, with those grants. At most [`GRANT_READS_AT_ONCE`] rooms' grants
-/// are read at once, all by `deadline`; a room not decided by then, or
-/// whose grants cannot be read, is left out.
+/// are read at once, all by `deadline`; a room not decided by then
+/// ([`Omission::Late`]), or whose grants cannot be read
+/// ([`Omission::Bounded`]), is left out.
 async fn decide_views<T>(
     gate: &HostGrantGate,
     rooms: Vec<(T, GrantKey)>,
@@ -1073,6 +1145,7 @@ async fn decide_views<T>(
         unmanaged: Vec::new(),
         allowed: Vec::new(),
         subject: Some((subject.clone(), evidence)),
+        omission: Omission::None,
     };
     let mut decisions = futures::stream::iter(rooms)
         .map(|(room, key)| async move {
@@ -1080,7 +1153,15 @@ async fn decide_views<T>(
             (room, grants)
         })
         .buffer_unordered(GRANT_READS_AT_ONCE);
-    while let Ok(Some((room, grants))) = tokio::time::timeout_at(deadline, decisions.next()).await {
+    loop {
+        let (room, grants) = match tokio::time::timeout_at(deadline, decisions.next()).await {
+            Ok(Some(decision)) => decision,
+            Ok(None) => break,
+            Err(_) => {
+                decided.omission = decided.omission.and(Omission::Late);
+                break;
+            }
+        };
         match grants {
             RoomGate::Unmanaged => decided.unmanaged.push(room),
             RoomGate::Managed(grants)
@@ -1088,33 +1169,72 @@ async fn decide_views<T>(
             {
                 decided.allowed.push((room, grants));
             }
-            RoomGate::Managed(_) | RoomGate::Unavailable => {}
+            // Grants read under a fence ticket that is no longer current
+            // allow nothing: the room could not be decided now.
+            RoomGate::Managed(grants) if !grants.fence.is_current() => {
+                decided.omission = decided.omission.and(Omission::Bounded);
+            }
+            RoomGate::Managed(_) => {}
+            RoomGate::Unavailable => decided.omission = decided.omission.and(Omission::Bounded),
         }
     }
     decided
 }
 
-/// The rooms the MUC service may list (XEP-0045 §6.3) before any asker's
-/// grants are read, sorted by room JID: the public catalog rows that are
-/// no group conversation, and the live instant rooms whose actors describe
-/// them so by `deadline`.
+/// Whom one build of the rooms the MUC service may list is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateAudience {
+    /// Accounts at other servers: only rooms open to other servers.
+    Remote,
+    /// Sessions of this deployment.
+    Session,
+}
+
+/// The rooms one build read, sorted by room JID, and what it left out.
+#[derive(Clone)]
+struct Candidates {
+    rooms: Arc<[ListedRoom]>,
+    omission: Omission,
+}
+
+/// One build of the rooms [`RoomCandidates`] holds.
+type CandidatesBuild = Result<Candidates, RoomListingError>;
+
+/// The rooms the MUC service may list (XEP-0045 §6.3) to `audience` before
+/// any asker's grants are read, sorted by room JID: the public catalog
+/// rows that are no group conversation, and the live instant rooms whose
+/// actors describe them so by `deadline`; for accounts at other servers,
+/// only the rooms open to other servers.
 ///
-/// Every catalog row is read, public or not, within
+/// A session's build reads every catalog row, public or not, within
 /// [`MUC_DISCO_ITEMS_FETCH_BOUND`], so the instant-room scan sets
-/// catalog-backed rooms aside in memory; only when the read filled the
-/// bound are the scan's candidates checked against the catalog.
+/// catalog-backed rooms aside in memory. A build for accounts at other
+/// servers reads only the rows it may list, within
+/// [`REMOTE_LISTING_FETCH_BOUND`], so no hidden, closed or group
+/// conversation's row takes the bound's places; its scan then checks every
+/// live room whose address names a channel against the catalog, so that a
+/// room with a catalog row is never listed from its actor's configuration.
 async fn room_candidates(
     state: &WebSocketState,
-    muc_domain: &str,
+    audience: CandidateAudience,
     deadline: Instant,
-) -> Result<Vec<ListedRoom>, RoomListingError> {
+) -> CandidatesBuild {
+    let muc_domain = state.deps.service_domains.muc.as_str();
     let db = state.deps.app_state.db_pool.global_actor().clone();
-    let read = tokio::time::timeout_at(
-        deadline,
-        list_xmpp_channels(db, MUC_DISCO_ITEMS_FETCH_BOUND, 0),
-    )
-    .await;
-    let channels = match read {
+    let bound = match audience {
+        CandidateAudience::Remote => REMOTE_LISTING_FETCH_BOUND,
+        CandidateAudience::Session => MUC_DISCO_ITEMS_FETCH_BOUND,
+    };
+    // One row more than the bound is read to tell whether any was left out.
+    let read = async {
+        match audience {
+            CandidateAudience::Remote => {
+                list_listed_federated_xmpp_channels(db, bound.saturating_add(1)).await
+            }
+            CandidateAudience::Session => list_xmpp_channels(db, bound.saturating_add(1), 0).await,
+        }
+    };
+    let mut channels = match tokio::time::timeout_at(deadline, read).await {
         Ok(Ok(channels)) => channels,
         Ok(Err(error)) => {
             warn!(error = %error, "Failed to list canonical channels for MUC discovery");
@@ -1122,19 +1242,27 @@ async fn room_candidates(
         }
         Err(_) => return Err(RoomListingError::Deadline),
     };
+    let mut omission = Omission::None;
+    if channels.len() > bound {
+        channels.truncate(bound);
+        omission = Omission::Bounded;
+    }
     let channel_backed = ChannelBackedRooms {
         jids: channels
             .iter()
             .filter_map(|channel| waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok())
             .collect(),
-        // When the fetch filled the bound, rows beyond it exist and the set
-        // is incomplete: membership misses fall back to a catalog check.
-        truncated: channels.len() >= MUC_DISCO_ITEMS_FETCH_BOUND,
+        every_row: audience == CandidateAudience::Session && omission.complete(),
     };
+    let remote = audience == CandidateAudience::Remote;
+    // The query for accounts at other servers reads only these rows; each
+    // is checked again here, so the listing never rests on the query alone.
     let mut rooms: Vec<ListedRoom> = channels
         .into_iter()
         .filter(|channel| {
-            channel.public_room && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+            channel.public_room
+                && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+                && (!remote || channel.federated)
         })
         .filter_map(|channel| {
             let jid = waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok()?;
@@ -1150,10 +1278,15 @@ async fn room_candidates(
     // XEP-0045 §6.3 (#1265 item 11): public live instant rooms are part of
     // the service's item list too, not only channel-backed persistent
     // rooms.
-    rooms.extend(instant_room_candidates(state, muc_domain, &channel_backed, deadline).await);
+    let (instant, scanned) =
+        instant_room_candidates(state, muc_domain, &channel_backed, deadline).await;
+    rooms.extend(instant.into_iter().filter(|room| !remote || room.federated));
     rooms.sort_by(|a, b| a.jid.as_str().cmp(b.jid.as_str()));
     rooms.dedup_by(|a, b| a.jid == b.jid);
-    Ok(rooms)
+    Ok(Candidates {
+        rooms: rooms.into(),
+        omission: omission.and(scanned),
+    })
 }
 
 /// Of `candidates`, the rooms the MUC service lists to `audience`, before
@@ -1212,158 +1345,289 @@ async fn rooms_listed_to(
     Ok(decided)
 }
 
-/// XEP-0045 §6.3 for a session: the rooms of the MUC service listed to
-/// it, sorted by room JID, read and decided within [`LISTING_LIMIT`].
+/// XEP-0045 §6.3 for a session: the rooms of the MUC service listed to it,
+/// sorted by room JID, read and decided within [`LISTING_LIMIT`], with what
+/// the listing left out. The rooms are read from a build that started once
+/// the request arrived ([`RoomCandidates`]), so a change the session made
+/// before it asked is in its answer.
 async fn muc_rooms_for_session(
     state: &WebSocketState,
-    muc_domain: &str,
     requester: Option<&BareJid>,
-) -> Result<Vec<DiscoItem>, RoomListingError> {
-    let started = Instant::now();
-    let deadline = started + LISTING_LIMIT;
-    let candidates = room_candidates(state, muc_domain, started + CANDIDATES_LIMIT).await?;
+) -> Result<(Vec<DiscoItem>, Omission), RoomListingError> {
+    let arrived = Instant::now();
+    let deadline = arrived + LISTING_LIMIT;
+    let candidates = state
+        .room_listings
+        .session
+        .rooms(state, Fresh::Since(arrived), arrived + CANDIDATES_LIMIT)
+        .await?;
     let decided = rooms_listed_to(
         state,
-        &candidates,
+        &candidates.rooms,
         RoomListingFor::Session(requester),
         deadline,
     )
     .await?;
-    let mut rooms = decided
+    let (mut rooms, omission) = decided
         .still_viewable(&state.deps.app_state.host_grants, deadline)
         .await;
     rooms.sort_by(|a, b| a.jid.as_str().cmp(b.jid.as_str()));
-    Ok(rooms
+    let items = rooms
         .into_iter()
         .map(|room| DiscoItem::muc_room(room.jid.as_str(), &room.name))
-        .collect())
+        .collect();
+    Ok((items, omission.and(candidates.omission)))
 }
 
 /// XEP-0045 §6.3 for an account at another server: the rooms of the MUC
-/// service listed to it ([`rooms_listed_to`]), sorted by room JID, from the
-/// replica's recent build of the rooms it may list (`candidates`) and the
+/// service listed to it ([`rooms_listed_to`]), sorted by room JID, with what
+/// the listing left out, from the replica's recent build of the rooms it
+/// may list to accounts at other servers ([`RoomCandidates`]) and the
 /// account's grants decided now, all by `deadline`. `Err` when the listing
 /// cannot be built now.
 pub(crate) async fn muc_rooms_for_remote(
-    state: &Arc<WebSocketState>,
-    candidates: &Arc<RemoteRoomCandidates>,
+    state: &WebSocketState,
     account: &BareJid,
     evidence: &PrincipalEvidence,
     deadline: Instant,
-) -> Result<Vec<Item>, RoomListingError> {
+) -> Result<(Vec<Item>, Omission), RoomListingError> {
     let read_by = deadline.min(Instant::now() + CANDIDATES_LIMIT);
-    let rooms = candidates.rooms(state, read_by).await?;
+    let candidates = state
+        .room_listings
+        .remote
+        .rooms(state, Fresh::Within(REMOTE_CANDIDATES_TTL), read_by)
+        .await?;
     let decided = rooms_listed_to(
         state,
-        &rooms,
+        &candidates.rooms,
         RoomListingFor::Remote { account, evidence },
         deadline,
     )
     .await?;
-    let mut rooms = decided
+    let (mut rooms, omission) = decided
         .still_viewable(&state.deps.app_state.host_grants, deadline)
         .await;
     rooms.sort_by(|a, b| a.jid.as_str().cmp(b.jid.as_str()));
-    Ok(rooms
+    let items = rooms
         .into_iter()
         .map(|room| Item {
             jid: Jid::from(room.jid),
             node: None,
             name: Some(room.name),
         })
-        .collect())
+        .collect();
+    Ok((items, omission.and(candidates.omission)))
 }
 
-/// One build of the rooms [`RemoteRoomCandidates`] holds.
-type CandidatesBuild = Result<Arc<[ListedRoom]>, RoomListingError>;
+/// The rooms a replica's MUC service may list, one [`RoomCandidates`] for
+/// each audience: what the catalog and the rooms' actors say of them, and
+/// nothing that depends on an asker. Whether a room is managed, and the
+/// asker's grants in it, are read for every request.
+pub(crate) struct RoomListings {
+    /// For accounts at other servers, reused for
+    /// [`REMOTE_CANDIDATES_TTL`] after a build started.
+    remote: RoomCandidates,
+    /// For sessions, from a build that started once the session's request
+    /// arrived.
+    session: RoomCandidates,
+}
 
-/// The rooms a replica's MUC service may list to accounts at other servers
-/// ([`room_candidates`]), built at most once at a time and reused for
-/// [`REMOTE_CANDIDATES_TTL`]: what the catalog and the rooms' actors say of
-/// them, and nothing that depends on the asker. Whether a room is managed,
-/// and the asker's grants in it, are read for every request.
+impl Default for RoomListings {
+    fn default() -> Self {
+        Self {
+            remote: RoomCandidates::new(CandidateAudience::Remote),
+            session: RoomCandidates::new(CandidateAudience::Session),
+        }
+    }
+}
+
+/// Which build of [`RoomCandidates`] an asker may be answered from.
+#[derive(Clone, Copy)]
+enum Fresh {
+    /// One that started at most this long ago.
+    Within(Duration),
+    /// One that started no earlier than this.
+    Since(Instant),
+}
+
+impl Fresh {
+    fn takes(self, started: Instant) -> bool {
+        match self {
+            Self::Within(age) => started.elapsed() < age,
+            Self::Since(arrived) => started >= arrived,
+        }
+    }
+}
+
+/// The rooms the MUC service may list to one audience
+/// ([`room_candidates`]), built at most once at a time on a replica.
 ///
-/// A build runs on a task of its own, within
-/// [`REMOTE_CANDIDATES_BUILD_LIMIT`]: an asker whose time runs out stops
-/// waiting for it, and the build goes on for the askers after it. A room
-/// whose catalog row or configuration changed is listed as it was for at
-/// most the reuse time.
-#[derive(Default)]
-pub(crate) struct RemoteRoomCandidates {
+/// An asker is answered from the last build that succeeded when it may be
+/// ([`Fresh`]), or waits for the build running now when that one started
+/// late enough for it, or else starts one. Every asker that waits for a
+/// build is answered from it, so many askers cost one read of the catalog
+/// and the rooms' actors. A build runs within [`CANDIDATES_BUILD_LIMIT`] in
+/// the task of the asker that started it, which a stopping router or a
+/// closing session ends with it: then the askers that waited for it ask
+/// again, and one of them starts the next build. No build outlives every
+/// asker, and none holds the state.
+pub(crate) struct RoomCandidates {
+    audience: CandidateAudience,
     held: tokio::sync::Mutex<HeldCandidates>,
 }
 
 #[derive(Default)]
 struct HeldCandidates {
-    /// The last build that succeeded, and when it finished.
-    built: Option<(Instant, Arc<[ListedRoom]>)>,
-    /// The build running now, which every asker waits for.
-    building: Option<watch::Receiver<Option<CandidatesBuild>>>,
+    /// The last build that succeeded, and when it started.
+    built: Option<(Instant, Candidates)>,
+    /// The build running now, which askers may wait for.
+    building: Option<Building>,
+    /// Builds started so far, which number them.
+    builds: u64,
 }
 
-impl RemoteRoomCandidates {
-    /// The rooms of a build that finished within [`REMOTE_CANDIDATES_TTL`],
-    /// or of the build running now, or else of one started now, waited for
-    /// until `deadline`.
-    async fn rooms(
-        self: &Arc<Self>,
-        state: &Arc<WebSocketState>,
-        deadline: Instant,
-    ) -> CandidatesBuild {
-        let mut building = {
-            let Ok(mut held) = tokio::time::timeout_at(deadline, self.held.lock()).await else {
-                return Err(RoomListingError::Deadline);
-            };
-            if let Some((built_at, rooms)) = &held.built {
-                if built_at.elapsed() < REMOTE_CANDIDATES_TTL {
-                    return Ok(Arc::clone(rooms));
-                }
-            }
-            match held
-                .building
-                .as_ref()
-                .filter(|building| building.has_changed().is_ok())
-            {
-                Some(building) => building.clone(),
-                None => {
-                    let building = self.build(state);
-                    held.building = Some(building.clone());
-                    building
-                }
-            }
-        };
-        let built =
-            match tokio::time::timeout_at(deadline, building.wait_for(Option::is_some)).await {
-                Ok(Ok(built)) => (*built).clone(),
-                Ok(Err(_)) | Err(_) => None,
-            };
-        built.unwrap_or(Err(RoomListingError::Deadline))
+/// A build running now.
+struct Building {
+    started: Instant,
+    number: u64,
+    told: watch::Receiver<Option<CandidatesBuild>>,
+}
+
+/// What an asker does next.
+enum NextStep {
+    /// Wait for the build running now; `takes` says whether the asker may
+    /// be answered from it, or only waits for it to end before it asks
+    /// again.
+    Wait {
+        told: watch::Receiver<Option<CandidatesBuild>>,
+        takes: bool,
+    },
+    /// Run a build, and tell its result to the askers that wait for it.
+    Build {
+        started: Instant,
+        number: u64,
+        tell: watch::Sender<Option<CandidatesBuild>>,
+    },
+}
+
+impl RoomCandidates {
+    fn new(audience: CandidateAudience) -> Self {
+        Self {
+            audience,
+            held: tokio::sync::Mutex::new(HeldCandidates::default()),
+        }
     }
 
-    /// Start a build on a task of its own; the receiver is told its result.
-    fn build(
-        self: &Arc<Self>,
-        state: &Arc<WebSocketState>,
-    ) -> watch::Receiver<Option<CandidatesBuild>> {
-        let (told, building) = watch::channel(None);
-        let candidates = Arc::clone(self);
-        let state = Arc::clone(state);
-        tokio::spawn(async move {
-            let muc_domain = state.deps.service_domains.muc.clone();
-            let deadline = Instant::now() + REMOTE_CANDIDATES_BUILD_LIMIT;
-            let built: CandidatesBuild = room_candidates(&state, &muc_domain, deadline)
-                .await
-                .map(Arc::from);
-            {
-                let mut held = candidates.held.lock().await;
-                held.building = None;
-                if let Ok(rooms) = &built {
-                    held.built = Some((Instant::now(), Arc::clone(rooms)));
+    /// The rooms of a build `fresh` takes, waited for until `deadline`.
+    async fn rooms(
+        &self,
+        state: &WebSocketState,
+        fresh: Fresh,
+        deadline: Instant,
+    ) -> CandidatesBuild {
+        loop {
+            let next = {
+                let Ok(mut held) = tokio::time::timeout_at(deadline, self.held.lock()).await else {
+                    return Err(RoomListingError::Deadline);
+                };
+                if let Some((started, built)) = &held.built {
+                    if fresh.takes(*started) {
+                        return Ok(built.clone());
+                    }
+                }
+                match held
+                    .building
+                    .as_ref()
+                    .filter(|building| building.told.has_changed().is_ok())
+                {
+                    Some(building) => NextStep::Wait {
+                        told: building.told.clone(),
+                        takes: fresh.takes(building.started),
+                    },
+                    None => {
+                        let (tell, told) = watch::channel(None);
+                        held.builds = held.builds.wrapping_add(1);
+                        let started = Instant::now();
+                        let number = held.builds;
+                        held.building = Some(Building {
+                            started,
+                            number,
+                            told,
+                        });
+                        NextStep::Build {
+                            started,
+                            number,
+                            tell,
+                        }
+                    }
+                }
+            };
+            match next {
+                NextStep::Wait { mut told, takes } => {
+                    let ended =
+                        tokio::time::timeout_at(deadline, told.wait_for(Option::is_some)).await;
+                    match ended {
+                        Ok(Ok(built)) if takes => {
+                            if let Some(built) = built.clone() {
+                                return built;
+                            }
+                        }
+                        // The build ended without this asker taking it, or
+                        // the asker that ran it stopped: ask again.
+                        Ok(_) => {}
+                        Err(_) => return Err(RoomListingError::Deadline),
+                    }
+                }
+                NextStep::Build {
+                    started,
+                    number,
+                    tell,
+                } => {
+                    self.count_build();
+                    let built = room_candidates(
+                        state,
+                        self.audience,
+                        deadline.min(started + CANDIDATES_BUILD_LIMIT),
+                    )
+                    .await;
+                    {
+                        let mut held = self.held.lock().await;
+                        if held
+                            .building
+                            .as_ref()
+                            .is_some_and(|building| building.number == number)
+                        {
+                            held.building = None;
+                        }
+                        if let Ok(candidates) = &built {
+                            if held.built.as_ref().is_none_or(|(at, _)| *at <= started) {
+                                held.built = Some((started, candidates.clone()));
+                            }
+                        }
+                    }
+                    // Nobody may be waiting any more; that is no failure.
+                    let _ = tell.send(Some(built.clone()));
+                    return built;
                 }
             }
-            let _ = told.send(Some(built));
-        });
-        building
+        }
+    }
+
+    fn count_build(&self) {
+        match self.audience {
+            CandidateAudience::Remote => waddle_xmpp::counter_add!(
+                "waddle.muc.room_listings.remote_builds",
+                "{build}",
+                "Reads of the channel catalog and the live rooms that the MUC service's room listings for accounts at other servers were built from.",
+                1,
+            ),
+            CandidateAudience::Session => waddle_xmpp::counter_add!(
+                "waddle.muc.room_listings.session_builds",
+                "{build}",
+                "Reads of the channel catalog and the live rooms that the MUC service's room listings for sessions were built from.",
+                1,
+            ),
+        }
     }
 }
 
@@ -1398,15 +1662,17 @@ impl SpaceListingRefusal {
 /// deployment that an enrolled host-grant scope manages is listed only
 /// where its canonical grants allow the session `view`, read at most
 /// [`GRANT_READS_AT_ONCE`] at a time within [`LISTING_LIMIT`] and confirmed
-/// just before the answer is built; one not decided in that time is left
-/// out. Every other bookmark is listed as the Space's items show it. Unlike
-/// a read of the items, the listing writes nothing.
+/// just before the answer is built; when one is not decided in that time
+/// the session is refused as for a Space whose reading cannot be told now,
+/// rather than answered with a listing that lacks it. Every other bookmark
+/// is listed as the Space's items show it. Unlike a read of the items, the
+/// listing writes nothing.
 async fn space_children_for_session(
     state: &WebSocketState,
     spaces_domain: &str,
     node: &str,
     requester: Option<&BareJid>,
-) -> Result<Vec<DiscoItem>, SpaceListingRefusal> {
+) -> Result<(Vec<DiscoItem>, Omission), SpaceListingRefusal> {
     let Some(requester) = requester else {
         return Err(SpaceListingRefusal::NotFound);
     };
@@ -1467,33 +1733,38 @@ async fn space_children_for_session(
     let mut decided =
         decide_views(gate, here, requester, PrincipalEvidence::NoStream, deadline).await;
     decided.unmanaged.extend(elsewhere);
-    let mut ids = decided.still_viewable(gate, deadline).await;
+    let (mut ids, omission) = decided.still_viewable(gate, deadline).await;
+    if omission == Omission::Late {
+        return Err(SpaceListingRefusal::Unavailable);
+    }
     ids.sort();
     ids.dedup();
-    Ok(ids
+    let items = ids
         .iter()
         .map(|id| DiscoItem::new(spaces_domain, Some(id), None))
-        .collect())
+        .collect();
+    Ok((items, omission))
 }
 
 /// Live rooms created ad hoc through the MUC protocol (no catalog row)
 /// that are public and not group DMs, as their actors describe them by
-/// `deadline`. Catalog-backed rooms are listed from the catalog, never from
-/// their actors: a candidate the catalog check cannot clear is left out.
+/// `deadline`, with what the scan left out. Catalog-backed rooms are listed
+/// from the catalog, never from their actors: a candidate the catalog
+/// check cannot clear is left out.
 async fn instant_room_candidates(
     state: &WebSocketState,
     muc_domain: &str,
     channel_backed: &ChannelBackedRooms,
     deadline: Instant,
-) -> Vec<ListedRoom> {
+) -> (Vec<ListedRoom>, Omission) {
     let registry = waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
     let room_jids = match tokio::time::timeout_at(deadline, registry.list_rooms()).await {
         Ok(Ok(room_jids)) => room_jids,
         Ok(Err(error)) => {
             warn!(error = %error, "Failed to list live MUC rooms for disco#items");
-            return Vec::new();
+            return (Vec::new(), Omission::Late);
         }
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), Omission::Late),
     };
     // Order of operations: (1) the free in-memory filter, and the catalog
     // check when the catalog read was bounded, set every catalog-backed
@@ -1507,35 +1778,72 @@ async fn instant_room_candidates(
         })
         .collect();
     candidates.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
-    channel_backed
+    let mut omission = Omission::None;
+    if !channel_backed
         .drop_unlisted_channel_rooms(state, &mut candidates, deadline)
-        .await;
-    candidates.truncate(MAX_INSTANT_ROOM_SCAN);
+        .await
+    {
+        omission = Omission::Late;
+    }
+    if candidates.len() > MAX_INSTANT_ROOM_SCAN {
+        candidates.truncate(MAX_INSTANT_ROOM_SCAN);
+        omission = omission.and(Omission::Bounded);
+    }
     // The actors are asked a few at a time, all by `deadline`: a wedged
     // actor costs its own room's place in the listing and no more.
     let mut asks = futures::stream::iter(candidates)
         .map(|room_jid| instant_room(state, room_jid))
         .buffer_unordered(SNAPSHOT_ASKS_AT_ONCE);
     let mut rooms = Vec::new();
-    while let Ok(Some(room)) = tokio::time::timeout_at(deadline, asks.next()).await {
-        rooms.extend(room);
+    loop {
+        match tokio::time::timeout_at(deadline, asks.next()).await {
+            Ok(Some(InstantRoom::Listed(room))) => rooms.push(room),
+            Ok(Some(InstantRoom::NotListed)) => {}
+            Ok(Some(InstantRoom::Unknown)) => omission = omission.and(Omission::Late),
+            Ok(None) => break,
+            Err(_) => {
+                omission = omission.and(Omission::Late);
+                break;
+            }
+        }
     }
-    rooms
+    (rooms, omission)
 }
 
-/// The live instant room `room_jid` as its actor describes it, when it is
-/// public and no group conversation; `None` otherwise and when its actor
-/// does not answer.
-async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> Option<ListedRoom> {
-    let room_actor = get_room_actor(state, &room_jid).await?;
-    let snapshot = room_actor
+/// What a live instant room's actor said of it.
+enum InstantRoom {
+    /// It is public and no group conversation.
+    Listed(ListedRoom),
+    /// It is hidden or a group conversation, or it is gone.
+    NotListed,
+    /// Its actor could not be asked or did not answer.
+    Unknown,
+}
+
+/// The live instant room `room_jid` as its actor describes it.
+async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> InstantRoom {
+    let room_actor = match get_room_actor_result(state, &room_jid).await {
+        Ok(Some(room_actor)) => room_actor,
+        Ok(None) => return InstantRoom::NotListed,
+        Err(_) => return InstantRoom::Unknown,
+    };
+    let snapshot = match room_actor
         .ask(GetSnapshot)
         .reply_timeout(DISCO_ITEMS_SNAPSHOT_TIMEOUT)
         .await
-        .ok()?;
+    {
+        Ok(snapshot) => snapshot,
+        // A room whose actor stopped since the rooms were listed is gone.
+        Err(
+            kameo::error::SendError::ActorNotRunning(_) | kameo::error::SendError::ActorStopped,
+        ) => {
+            return InstantRoom::NotListed;
+        }
+        Err(_) => return InstantRoom::Unknown,
+    };
     let config = &snapshot.room.config;
     if !config.public_room || config.group_dm {
-        return None;
+        return InstantRoom::NotListed;
     }
     let name = if config.name.trim().is_empty() {
         room_jid
@@ -1545,7 +1853,7 @@ async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> Option<Liste
     } else {
         config.name.clone()
     };
-    Some(ListedRoom {
+    InstantRoom::Listed(ListedRoom {
         channel: waddle_xmpp::parse_managed_room_jid(&room_jid),
         jid: room_jid,
         name,
@@ -1554,30 +1862,31 @@ async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> Option<Liste
     })
 }
 
-/// The catalog-backed room JIDs known to this request, plus whether the
-/// fetch hit its bound (in which case the set may be incomplete).
+/// The catalog-backed room JIDs known to this request, plus whether they
+/// are every row of the catalog: they are not when the read filled its
+/// bound or read only the rows a listing may hold.
 struct ChannelBackedRooms {
     jids: HashSet<BareJid>,
-    truncated: bool,
+    every_row: bool,
 }
 
 impl ChannelBackedRooms {
-    /// Drop catalog-backed rooms that the bounded fetch missed. No-op
-    /// for the common (untruncated) case — the in-memory set filtering
-    /// already happened; a truncated catalog fetch checks every candidate
-    /// whose address names a channel, [`CATALOG_CHECK_CHUNK`] to a query,
-    /// by `deadline`. A candidate the check cannot clear (a query failed or
-    /// ran out of time) is dropped when its address names a channel: such
-    /// a room is listed only from its catalog row, never from its actor's
-    /// configuration.
+    /// Drop catalog-backed rooms that the read did not name. No-op when it
+    /// named every row (the in-memory set filtering already happened);
+    /// otherwise every candidate whose address names a channel is checked,
+    /// [`CATALOG_CHECK_CHUNK`] to a query, by `deadline`. A candidate the
+    /// check cannot clear (a query failed or ran out of time) is dropped
+    /// when its address names a channel: such a room is listed only from
+    /// its catalog row, never from its actor's configuration. `false` when
+    /// a candidate was dropped that way.
     async fn drop_unlisted_channel_rooms(
         &self,
         state: &WebSocketState,
         candidates: &mut Vec<BareJid>,
         deadline: Instant,
-    ) {
-        if !self.truncated || candidates.is_empty() {
-            return;
+    ) -> bool {
+        if self.every_row || candidates.is_empty() {
+            return true;
         }
         let channel_ids: Vec<(BareJid, String)> = candidates
             .iter()
@@ -1587,7 +1896,7 @@ impl ChannelBackedRooms {
             })
             .collect();
         if channel_ids.is_empty() {
-            return;
+            return true;
         }
         let mut backed: HashSet<BareJid> = HashSet::new();
         for chunk in channel_ids.chunks(CATALOG_CHECK_CHUNK) {
@@ -1611,12 +1920,12 @@ impl ChannelBackedRooms {
                     warn!(error = %error, "Failed batched channel membership check for disco#items");
                     candidates
                         .retain(|room_jid| waddle_xmpp::parse_managed_room_jid(room_jid).is_none());
-                    return;
+                    return false;
                 }
                 Err(_) => {
                     candidates
                         .retain(|room_jid| waddle_xmpp::parse_managed_room_jid(room_jid).is_none());
-                    return;
+                    return false;
                 }
             };
             backed.extend(
@@ -1627,5 +1936,6 @@ impl ChannelBackedRooms {
             );
         }
         candidates.retain(|room_jid| !backed.contains(room_jid));
+        true
     }
 }
