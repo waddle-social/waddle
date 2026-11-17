@@ -596,28 +596,49 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
-            if is_pep
+            // XEP-0060 §8.9.2.4 (Multiple Simultaneous Modifications): the
+            // joined-spaces node enforces affiliation rules stricter than the
+            // state chart. A change it does not support is not applied and
+            // comes back in a `not-acceptable` error with the entity's
+            // existing affiliation. Any change left out
+            // of that error counts as a successful modification, so every
+            // permitted change of the same request is applied as usual.
+            let (changes, refused) = if is_pep
                 && node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
-                && changes.iter().any(|(entity, affiliation)| {
-                    !joined_spaces_affiliation_allowed(target_jid, entity, *affiliation)
-                })
             {
-                // XEP-0060 §8.9.2.4: entities left out of the error count as
-                // modified, and none of this request is applied, so every
-                // entity it names is returned with its stored affiliation.
-                let mut existing = Vec::with_capacity(changes.len());
-                for (entity, _) in &changes {
-                    let stored = state
-                        .deps
-                        .protocol
-                        .pubsub_storage
-                        .affiliation(target_jid, &node, entity)
-                        .await
-                        .unwrap_or(waddle_xmpp::pubsub::Affiliation::None);
-                    existing.push((entity.clone(), stored));
+                let (permitted, unsupported): (Vec<_>, Vec<_>) =
+                    changes.into_iter().partition(|(entity, affiliation)| {
+                        joined_spaces_affiliation_allowed(target_jid, entity, *affiliation)
+                    });
+                let mut refused = Vec::with_capacity(unsupported.len());
+                for (entity, _) in unsupported {
+                    // The account's own ownership of its PEP node is derived
+                    // (XEP-0163 §1), not stored, so the existing affiliation
+                    // is the effective one.
+                    match crate::pubsub_authz::effective_affiliation(
+                        &state.deps.protocol.pubsub_storage,
+                        target_jid,
+                        &node,
+                        &entity,
+                        is_pep,
+                    )
+                    .await
+                    {
+                        Ok(stored) => refused.push((entity, stored)),
+                        Err(error) => {
+                            warn!(
+                                node = %node,
+                                error = %error,
+                                "Failed to read a refused joined-spaces affiliation"
+                            );
+                            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
+                        }
+                    }
                 }
-                return vec![joined_spaces_affiliation_refused(iq, &node, &existing)];
-            }
+                (permitted, refused)
+            } else {
+                (changes, Vec::new())
+            };
             // ADR-0020 D8 at issuance: on the Spaces service an Owner
             // administers the Space and a publisher places rooms in it, so
             // either is written only for an account of this deployment or
@@ -661,6 +682,9 @@ pub(super) async fn handle_pubsub_admin_request(
                 {
                     return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
+            }
+            if !refused.is_empty() {
+                return vec![joined_spaces_affiliation_refused(iq, &node, &refused)];
             }
             vec![build_pubsub_success(iq)]
         }
@@ -938,21 +962,22 @@ fn joined_spaces_affiliation_allowed(
     }
 }
 
-/// The answer to an affiliation change the joined-spaces node does not
-/// support. XEP-0060 §8.9.2.4 lets a service enforce affiliation rules
-/// stricter than its state chart; the whole request is refused before any
-/// of it is applied, with `not-allowed`: no requester may make the change,
-/// which `forbidden` (§8.9.2.3, a requester that is not an owner) would not
-/// say. §8.9.2.4 also requires the error to carry the entities that were
-/// not modified, each with its existing affiliation, since any entity left
-/// out counts as modified; `existing` holds every entity of the request.
+/// The answer to an owner affiliations set on the joined-spaces node that
+/// holds changes the node does not support (XEP-0060 §8.9.2.4, Multiple
+/// Simultaneous Modifications).
+///
+/// The section lets a service enforce rules stricter than its state chart
+/// and says the error SHOULD be `not-acceptable` (type `modify`). It carries
+/// only the `<affiliation/>` elements that caused it, each with the entity's
+/// existing affiliation: `refused` holds the unsupported changes alone,
+/// since the requester treats every entity left out as modified.
 fn joined_spaces_affiliation_refused(
     iq: &xmpp_parsers::iq::Iq,
     node: &str,
-    existing: &[(BareJid, waddle_xmpp::pubsub::Affiliation)],
+    refused: &[(BareJid, waddle_xmpp::pubsub::Affiliation)],
 ) -> xmpp_parsers::iq::Iq {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
-    let payload = match build_pubsub_affiliations_result(iq, node, existing) {
+    let payload = match build_pubsub_affiliations_result(iq, node, refused) {
         xmpp_parsers::iq::Iq::Result { payload, .. } => payload,
         _ => None,
     };
@@ -962,8 +987,8 @@ fn joined_spaces_affiliation_refused(
         id: iq.id().to_owned(),
         payload,
         error: StanzaError::new(
-            ErrorType::Cancel,
-            DefinedCondition::NotAllowed,
+            ErrorType::Modify,
+            DefinedCondition::NotAcceptable,
             "en",
             "The joined-spaces node is private to its account: only none and outcast \
              affiliations are written for another entity.",
