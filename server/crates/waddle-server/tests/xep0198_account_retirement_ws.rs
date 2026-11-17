@@ -221,11 +221,16 @@ async fn a_retired_accounts_ingress_custody_is_discarded_and_never_reaches_its_o
     let (_lease, mut endings) = server.replica().await;
     assert_eq!(endings.run(&server.state).await.expect("a pass"), 1);
     assert!(server.detached(&alice).await.is_empty());
+    // The session's end ended its custody itself, before any recovery ran.
+    assert_eq!(pending_custody(&server, &resource).await, 0);
+    assert_eq!(server.offline_messages(&alice).await, 0);
 
-    // The recovery of custody whose session is gone finds nothing of the
-    // account's to hand on: the session's end ended its custody, and the
-    // account's offline store holds nothing.
-    run_ingress_custody_sweep(&server.state).await;
+    // The recovery of custody whose session is gone settles every candidate
+    // and finds nothing of the account's to hand on.
+    assert!(
+        run_ingress_custody_sweep(&server.state).await,
+        "the recovery settles every candidate"
+    );
     assert_eq!(pending_custody(&server, &resource).await, 0);
     assert_eq!(server.offline_messages(&alice).await, 0);
 
