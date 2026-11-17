@@ -2941,9 +2941,55 @@ A home never issues the JID of a retired account to a new holder
   waiting plus up to 25 s, and is in practice for milliseconds. An account
   whose delete does not finish within the statement bound is not retired;
   nothing splits that delete.
-- **Not done by retirement:** it does not end the account's open streams,
-  and it does not revoke the account's grants in any room, here or on
-  another deployment. The [retirement runbook](../../../docs/operations/account-retirement.md)
+- **Ending the account's open sessions** (`auth/session_endings.rs`,
+  `server/account_session_endings.rs`,
+  `server/routes/websocket/account_retirement.rs`, migration 2015, both
+  engines). `retire_account` leaves them; the operator command takes the
+  second step once the retirement committed. It records a request naming
+  the canonical JID. Every serving replica holds a lease row it registers
+  when it starts serving and renews every 500 ms for 5 s, on a task of its
+  own. Each tick a replica reads the requests of the last day whose JID the
+  ledger holds and that it has not completed, holds the account in its
+  in-memory set of retired accounts first, records that it observed the
+  request, then ends what it holds of the account and records the request
+  as completed with what it ended:
+  - every live stream it hosts is force-detached as a fresh-bind
+    replacement, the terminal close a replacing bind uses (the session is
+    closed, not detached), with `<not-authorized/>` instead of
+    `<conflict/>`. The connection's teardown broadcasts the unavailable
+    presence to local contacts, leaves local rooms (which fan the departure
+    out to remote occupants) and remote rooms, and retires the binding. A
+    stream counts as closed once the registry no longer holds its binding;
+  - every stream-management session of the account that waits for a
+    resume is ended: those held in memory through the invalidation a
+    replacing bind uses, those of the durable authority under their claim.
+    Both run the terminal path of an invalidated detached session (room
+    leaves, unavailable presence). A session whose claim another replica
+    holds is left to it, and the request stays incomplete until none is
+    left;
+  - from the moment the account is in the set, a binding or resume of it is
+    refused before it is published (`<not-authorized/>`). For a minute after
+    taking a request up the replica also closes any stream of the account
+    it finds again, which covers a binding that checked the set just before
+    the account was added.
+
+  The command waits (default 30 s) until every replica whose lease counts
+  has completed or has stopped renewing its lease, judged by whether it saw
+  the lease renewed, on its own clock; it reports each replica as
+  `completed`, `lapsed` or `pending` and exits 3 when one is `pending`. A
+  replica that starts within the day takes the request up too: it ends the
+  detached sessions an earlier process left and refuses the account's
+  bindings. The runtime role inserts and updates the lease and
+  acknowledgement rows and reads requests; the command, as the owner,
+  removes leases ended more than a day ago and requests older than two
+  days. A holder of the runtime credential can write an acknowledgement
+  with its own SQL and so report sessions ended that were not; the ledger
+  and the account rows are unaffected.
+- **Not done by retirement:** it does not revoke the account's grants in
+  any room, here or on another deployment, and the account's contacts on
+  other deployments are sent no final unavailable presence: the S2S router
+  refuses everything a retired account sends. The
+  [retirement runbook](../../../docs/operations/account-retirement.md)
   orders those steps. Other homes cannot be required to keep such a ledger;
   ADR-0020 D8 states what a reassigned JID may inherit there.
 
@@ -3004,7 +3050,8 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
 - A PubSub admission identity for a scope's Space, and with it an
   acknowledged fence for PubSub: unenrolled Spaces have the hand-over read
   only.
-- Ending a retired or revoked account's open streams.
+- Ending a revoked account's open streams. A retired account's are ended by
+  the retirement command ([D8](#non-reuse-of-retired-account-jids-d8)).
 - A replica whose lease lapsed keeps its seats until it registers again.
   Removing them on the lapse would need the grants it cannot read.
 - The relayed record of a remote membership (`RemoteMucMemberships`) is not
