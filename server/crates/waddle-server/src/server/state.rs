@@ -148,6 +148,64 @@ pub struct AppState {
     /// verified an authority that changed under the running replica.
     pub(crate) host_grant_gate:
         OnceLock<Arc<crate::permissions::host_grant::HostGrantAttachmentGate>>,
+    /// The WebSocket state built over this state, bound once it exists. A
+    /// write made outside a session's request (an admin command that takes
+    /// a room out of a Space, or a group conversation's bookmark out of a
+    /// member's list) notifies the node's subscribers through it, as the
+    /// session's own request would. While unbound such a write notifies
+    /// nobody.
+    notifications: OnceLock<std::sync::Weak<crate::server::routes::websocket::WebSocketState>>,
+}
+
+impl AppState {
+    /// Bind the WebSocket state that notifies the subscribers of writes
+    /// made outside a session's request ([`Self::notify_space_retracted`],
+    /// [`Self::notify_bookmark_retracted`]). The first binding stays.
+    pub(crate) fn bind_notifications(
+        &self,
+        websocket_state: &Arc<crate::server::routes::websocket::WebSocketState>,
+    ) {
+        let _ = self.notifications.set(Arc::downgrade(websocket_state));
+    }
+
+    /// Tell the subscribers of the Space `node` that its item `item_id`
+    /// was retracted, as a session's retract of it does (XEP-0060
+    /// §7.2.2.1; a Space node's `pubsub#notify_retract` is on): those at
+    /// other servers through the Spaces host's notification task. Call it
+    /// once the retraction stands. Nothing is sent while no WebSocket state
+    /// is bound.
+    pub(crate) async fn notify_space_retracted(&self, node: &str, item_id: &str) {
+        use crate::server::routes::websocket::handlers::pubsub_fanout;
+        let Some(websocket_state) = self.notifications.get().and_then(std::sync::Weak::upgrade)
+        else {
+            return;
+        };
+        let request = pubsub_fanout::FanOutRetractRequest {
+            owner: &self.spaces_jid,
+            node,
+            item_id,
+        };
+        pubsub_fanout::fan_out_service_retract(&websocket_state, request, false).await;
+    }
+
+    /// Tell the resources of `account` that the bookmark `item_id` of its
+    /// XEP-0402 bookmarks node was retracted, as the account's own retract
+    /// with `notify` does: XEP-0402 asks a client to leave a room whose
+    /// bookmark was retracted. Call it once the retraction stands. Nothing
+    /// is sent while no WebSocket state is bound.
+    pub(crate) async fn notify_bookmark_retracted(&self, account: &BareJid, item_id: &str) {
+        use crate::server::routes::websocket::handlers::pubsub_fanout;
+        let Some(websocket_state) = self.notifications.get().and_then(std::sync::Weak::upgrade)
+        else {
+            return;
+        };
+        let request = pubsub_fanout::FanOutRetractRequest {
+            owner: account,
+            node: waddle_xmpp::xep::xep0402::PEP_NODE,
+            item_id,
+        };
+        pubsub_fanout::fan_out_pep_retract(&websocket_state, request, None, true).await;
+    }
 }
 
 impl AppState {
@@ -259,6 +317,7 @@ impl AppState {
             lineage_startup: OnceLock::new(),
             lineage_latched: OnceLock::new(),
             host_grant_gate: OnceLock::new(),
+            notifications: OnceLock::new(),
             lineage_adopt_matched: Mutex::new(HashSet::new()),
             runtime_progress: Arc::new(RuntimeProgress::new()),
             durable_sm: OnceLock::new(),

@@ -362,6 +362,15 @@ pub async fn spaces_publications_settled(router: &crate::s2s::route::S2sRouter) 
     router.spaces_publications_settled().await;
 }
 
+/// Have admin commands run against the application state of `state`
+/// notify the subscribers of what they take out of a node, as startup
+/// binds it once the WebSocket state exists. The state is held weakly, so
+/// call it once nothing needs the state unshared any more.
+#[cfg(feature = "test-support")]
+pub fn bind_admin_notifications(state: &Arc<WebSocketState>) {
+    state.deps.app_state.bind_notifications(state);
+}
+
 /// Hold the next subscription of the remote `account` to the Space `node`
 /// just after its record committed and before its ban is read again, so a
 /// suite can write a ban there as a concurrent request would.
@@ -604,6 +613,11 @@ pub async fn websocket_state_with_federation_and_database_pubsub(
         config,
     ));
     app_state.pubsub_storage = pubsub.clone();
+    // The Spaces service the state's service domains name, which admin
+    // commands address as startup has them address it.
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("the Spaces service JID");
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides {

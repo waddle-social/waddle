@@ -1696,6 +1696,15 @@ async fn cascade_delete(
         forget_extension_bot_room(state, room_jid).await;
     }
 
+    // Nothing below restores the retracted items: the Space's subscribers
+    // are told each room left it, as a retract of its bookmark would tell
+    // them, while the node still exists to name them.
+    for (item_id, _) in &retracted_items {
+        state
+            .notify_space_retracted(node_name.as_str(), item_id)
+            .await;
+    }
+
     // The Space's own relations go while its node still exists, so that a
     // failure here is completed by deleting the Space again.
     delete_space_relations(state, &node_name).await?;

@@ -1830,12 +1830,15 @@ struct RemovedChannelBookmark {
     parent_tuple_deleted: bool,
 }
 
+/// Retract the bookmark of `channel_jid` from every Space other than
+/// `keep_node`, restoring what was retracted on a failure. Returns the
+/// Spaces it was retracted from, whose subscribers the caller notifies.
 async fn retract_duplicate_channel_bookmarks(
     state: &AppState,
     keep_node: &str,
     channel_id: &str,
     channel_jid: &BareJid,
-) -> Result<(), AdminErr> {
+) -> Result<Vec<String>, AdminErr> {
     let item_id = channel_jid.to_string();
     let nodes = state
         .pubsub_storage
@@ -1880,7 +1883,7 @@ async fn retract_duplicate_channel_bookmarks(
             }
         }
     }
-    Ok(())
+    Ok(removed.into_iter().map(|removed| removed.node).collect())
 }
 
 fn channel_type_from_config(config: &RoomConfig) -> &'static str {
@@ -2445,6 +2448,12 @@ async fn run_group_dm_leave(
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
     }
+    // The bookmark's retraction stands: the account's other resources are
+    // told, so that a client leaves the room (XEP-0402).
+    let room_item = args.room_jid.to_string();
+    state
+        .notify_bookmark_retracted(&caller_bare, &room_item)
+        .await;
     {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
@@ -4527,33 +4536,48 @@ async fn run_update(
                 return Err(error);
             }
         };
-        if let Err(error) =
-            retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid).await
-        {
-            config_reservation.clear_members_only_enforcement();
-            if rollback_room_config_or_arm(
-                websocket_state,
-                &actor,
-                expected_revision,
-                existing.clone(),
-                config_reservation.reservation().cloned(),
-            )
-            .await
+        let moved_from =
+            match retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid)
+                .await
             {
-                restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
-                    .await;
-                restore_channel_space_bookmark(
-                    state,
-                    &node,
-                    &item_id,
-                    &channel_id,
-                    previous_bookmark.as_ref(),
-                    parent_tuple_created,
-                )
+                Ok(moved_from) => moved_from,
+                Err(error) => {
+                    config_reservation.clear_members_only_enforcement();
+                    if rollback_room_config_or_arm(
+                        websocket_state,
+                        &actor,
+                        expected_revision,
+                        existing.clone(),
+                        config_reservation.reservation().cloned(),
+                    )
+                    .await
+                    {
+                        restore_channel_catalog_snapshot(
+                            state,
+                            &channel_id,
+                            catalog_snapshot.as_ref(),
+                        )
+                        .await;
+                        restore_channel_space_bookmark(
+                            state,
+                            &node,
+                            &item_id,
+                            &channel_id,
+                            previous_bookmark.as_ref(),
+                            parent_tuple_created,
+                        )
+                        .await;
+                    }
+                    config_reservation.clear();
+                    return Err(error);
+                }
+            };
+        // Nothing below restores the bookmarks the move retracted: the
+        // Spaces the room left tell their subscribers.
+        for stale in &moved_from {
+            state
+                .notify_space_retracted(stale, &args.channel_jid.to_string())
                 .await;
-            }
-            config_reservation.clear();
-            return Err(error);
         }
     }
 
@@ -4894,6 +4918,11 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         return Err(error);
     }
     forget_extension_bot_room(state, &args.channel_jid).await;
+    // The deletion stands: each Space the room was taken out of tells its
+    // subscribers, as a retract of the room's bookmark there would.
+    for removed in &removed_bookmarks {
+        state.notify_space_retracted(&removed.node, &item_id).await;
+    }
     Ok(())
 }
 

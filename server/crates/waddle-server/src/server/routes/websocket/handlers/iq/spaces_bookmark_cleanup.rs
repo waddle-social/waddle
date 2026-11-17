@@ -6,8 +6,10 @@ use super::{warn, BareJid, PubSubItem, WebSocketState};
 /// Move a placed channel out of every Space other than `keep_node`: retract
 /// its bookmark `item_id` from each of `stale_nodes`, and remove each other
 /// Space as the channel's parent, including a Space that is its parent
-/// without listing a bookmark of it. On a failure everything removed so far
-/// is restored and the error is returned.
+/// without listing a bookmark of it. Returns the Spaces a bookmark was
+/// retracted from, whose subscribers the caller notifies once the move
+/// stands. On a failure everything removed so far is restored and the
+/// error is returned.
 pub(super) async fn cleanup_stale_space_bookmarks(
     state: &WebSocketState,
     spaces_jid: &BareJid,
@@ -15,7 +17,8 @@ pub(super) async fn cleanup_stale_space_bookmarks(
     keep_node: &str,
     item_id: &str,
     stale_nodes: &[String],
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
+    let mut retracted_from = Vec::new();
     let mut removed_stale: Vec<RemovedStaleSpaceBookmark> = Vec::new();
     for stale in stale_nodes.iter().filter(|name| name.as_str() != keep_node) {
         let item_filter = [item_id.to_string()];
@@ -52,7 +55,10 @@ pub(super) async fn cleanup_stale_space_bookmarks(
             .retract_item(spaces_jid, stale, item_id)
             .await
         {
-            Ok(_) => {
+            Ok(retracted) => {
+                if retracted {
+                    retracted_from.push(stale.clone());
+                }
                 removed_stale.push(RemovedStaleSpaceBookmark {
                     node: stale.clone(),
                     item: previous_item,
@@ -110,7 +116,7 @@ pub(super) async fn cleanup_stale_space_bookmarks(
             }
         }
     }
-    Ok(())
+    Ok(retracted_from)
 }
 
 struct RemovedStaleSpaceBookmark {

@@ -35,6 +35,9 @@ impl Drop for Loopback {
 
 impl Loopback {
     pub async fn serve(state: Arc<WebSocketState>) -> Self {
+        // As startup does once the state is built: admin commands notify
+        // the subscribers of what they take out of a node.
+        waddle_server::test_support::bind_admin_notifications(&state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");
