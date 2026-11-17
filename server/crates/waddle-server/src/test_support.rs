@@ -216,6 +216,7 @@ pub use crate::server::routes::websocket::muc_invites::{
 /// Hold an ingress acceptance transaction that the host-grant authority
 /// admitted, with the scope's guard held, until `proceed` is notified.
 /// `entered` is notified when the transaction reaches the gate.
+#[cfg(feature = "test-support")]
 pub async fn with_host_grant_admission_gate<F: std::future::Future>(
     entered: Arc<tokio::sync::Notify>,
     proceed: Arc<tokio::sync::Notify>,
@@ -233,6 +234,7 @@ pub async fn with_host_grant_admission_gate<F: std::future::Future>(
 ///
 /// # Errors
 /// Returns the store's refusal or failure, as `HostGrantStore::activate`.
+#[cfg(feature = "test-support")]
 pub async fn activate_host_grant_marker(
     store: &crate::permissions::host_grant::HostGrantStore,
     marker: &crate::permissions::host_grant::ProjectionMarker,
