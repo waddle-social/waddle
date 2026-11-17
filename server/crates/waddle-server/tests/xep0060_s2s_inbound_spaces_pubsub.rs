@@ -1840,3 +1840,56 @@ async fn deleting_a_channel_tells_the_spaces_local_subscribers_it_left() {
     let here = federated.client_settle(&mut walter).await;
     assert_eq!(retracted(&here, DEV), [lounge], "{here:?}");
 }
+
+/// The admin command that deletes a Space tells the Space's subscribers
+/// here of each room it takes out, before the Space's node is deleted, as
+/// a retract of each room's bookmark would.
+#[tokio::test]
+async fn deleting_a_space_tells_its_local_subscribers_of_each_room_it_took_out() {
+    const NODE_SPACES_DELETE: &str = "urn:waddle:admin:spaces:delete:0";
+    const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+    const NS_DATA: &str = "jabber:x:data";
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    let state = &federated.loopback.state;
+    waddle_server::admin::spaces::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+    )
+    .await;
+    let mut walter = local_subscriber(&federated, "walter", DEV).await;
+    let published = round_trip(&mut victor, set("sdel-pub", SPACES, publish(DEV, "lounge"))).await;
+    assert!(is_result(&published), "{published:?}");
+    let lounge = room("lounge").to_string();
+    let space_jid =
+        waddle_server::space_identity::space_jid_for_node(&spaces(), &SpaceNode::from(DEV))
+            .expect("the Space's JID");
+
+    let form_field = |var: &str, value: &str| {
+        Element::builder("field", NS_DATA)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+            .append(Element::builder("value", NS_DATA).append(value).build())
+            .build()
+    };
+    let command = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NODE_SPACES_DELETE,
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(
+            Element::builder("x", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(form_field("FORM_TYPE", NODE_SPACES_DELETE))
+                .append(form_field("space_jid", space_jid.as_str()))
+                .append(form_field("confirm", "yes"))
+                .build(),
+        )
+        .build();
+    let deleted = round_trip(&mut victor, set("sdel-run", LOCAL, command)).await;
+    assert!(is_result(&deleted), "{deleted:?}");
+
+    let here = federated.client_settle(&mut walter).await;
+    assert_eq!(retracted(&here, DEV), [lounge], "{here:?}");
+}
