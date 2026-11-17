@@ -1888,17 +1888,20 @@ as the effect boundary honours any standing (`honoured` in the host):
 | `disco#items` of a node | An empty list for an open Space: a Space's content is read as PubSub items |
 | Ping of the service | An empty result |
 | `<items/>` | The XEP-0402 bookmarks of the rooms the asker may be told of (below), at most 256, without the publisher's address. `forbidden` for an account that may not read the Space. The store is read and nothing is written: a session's read also publishes bookmarks a Space lacks and repairs a room's parent, and a remote principal's read does neither |
-| `<subscribe/>` | For the sender's own account, named by its bare JID or one of its full JIDs: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one. The service keeps one subscription for an account, under its bare JID, as it does for sessions; the answer names that bare JID and notifications are addressed to it |
-| `<unsubscribe/>` | For the sender's own account: both records removed; `unexpected-request` when the account holds no subscription. Leaving only reduces what an account receives, so the records are removed even for a node that is no longer a Space open to the account; the answer is then `item-not-found`, as for every other request about such a node |
+| `<subscribe/>` | For the sender's own account, named by its bare JID or one of its full JIDs: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one. The service keeps one subscription for an account, under its bare JID, as it does for sessions; the answer names that bare JID and notifications are addressed to it. A Space closed to other servers while the request was decided answers `item-not-found`, and neither record is left |
+| `<unsubscribe/>` | For the sender's own account: both records removed; `unexpected-request` (type `cancel`) with the PubSub condition `<not-subscribed/>` when the account holds no subscription (XEP-0060 §6.2.3.2). Leaving only reduces what an account receives, so the records are removed even for a node that is no longer a Space open to the account; the answer is then `item-not-found`, as for every other request about such a node |
 | `<publish/>`, `<retract/>` and every `pubsub#owner` request | `forbidden` unless the principal's privilege is honoured (a trusted home on a `pkix` stream); then decided by the checks a session's request meets, for the remote account as their subject (below) |
 | `<create/>` | `forbidden`: no Space is created for a remote principal, since creating one makes its creator the owner |
 | Anything else in the two namespaces | `feature-not-implemented` where the parser names the feature, otherwise `service-unavailable` |
 
 **The rooms a Space lists.** A Space's items are bookmarks of rooms. A
 remote principal is told of a room only where the room's own host would
-describe it to that principal ([Inbound MUC](#inbound-muc-w6a)): the room's
-catalog row says it is open to other servers and is no group conversation;
-and a room an enrolled host-grant scope manages is told only to a principal
+describe it to that principal ([Inbound MUC](#inbound-muc-w6a)): the room is
+open to other servers and is no group conversation, read as the room host
+reads it for every request (`room_open_to_other_servers`: the room's actor
+where this replica holds one, the channel catalog otherwise, and "cannot be
+told now" for an actor that cannot be reached, which tells nothing); and a
+room an enrolled host-grant scope manages is told only to a principal
 its canonical grants admit to view it, decided through the evidence-naming
 form of the gate (`HostGrantGate::allows_as`) on the evidence of the stream
 that carried the request, behind the revocation fence's ticket. A room that
@@ -1917,7 +1920,9 @@ session's request runs through (`spaces_change_for_remote`):
 - The `pubsub#owner` requests (the configuration form and its change,
   purge, deletion, the affiliations and the subscriptions) are decided by
   the node's Owner affiliation. They are made without a session, so they
-  neither read nor change whether the Space is federated.
+  neither read nor change whether the Space is federated. A trusted home's
+  owner holds every other power a session's owner holds through PubSub
+  ([what a remote owner of a Space can do](#what-a-remote-owner-of-a-space-can-do)).
 - A publish or a retract places a room in the Space or takes it out, which
   moves the room's parent. It is decided by the Space's `owner`
   relationship or the deployment's right to create Spaces, and by authority
@@ -1939,30 +1944,97 @@ effect either. Three writers apply it:
   `not-allowed`, before any change of the request is applied;
 - the admin command `spaces:set-role` refuses the owner and admin roles
   (the node's Owner and Publisher affiliations) the same way;
-- the permission actor refuses to write the channel `manager` and
-  `moderator`, the Space `moderator` and the role `manager` relations for
-  any other account (`PermissionError::UntrustedPrivilegedSubject`), in
-  each of its three messages that write a relation. No handler, command or
-  repair path names those four relations, so the actor is the one place
-  that can decide their issuance. A replica attaches the policy at startup
-  (`PermissionActor::with_privileged_issuance`); an actor without one, as
-  the suites build, asks nothing.
+- the permission actor refuses to write the channel and Space `owner` and
+  `admin`, the channel `manager` and `moderator`, the Space `moderator` and
+  the role `manager` relations for any other account
+  (`PermissionError::UntrustedPrivilegedSubject`), in each of its three
+  messages that write a relation. No handler, command or repair path names
+  the last four, so the actor is the one place that decides their
+  issuance; the owner and admin relations have writers that decide it
+  themselves, and the actor refuses them as well, so that a writer that
+  omits or misreads its own check still issues nothing. A replica attaches
+  the policy at startup (`with_replica_privileged_issuance`, which the
+  test-support seam `permission_actor_as_startup_builds` calls); an actor
+  without one, as most suites build, asks nothing. A deployment whose
+  account domain is not canonical attaches a policy that admits no
+  account, so these relations are then written for nobody, a Space's
+  creator included.
 
 Membership, a ban and the removal of a standing are written for any
 account.
 
+#### What a remote owner of a Space can do
+
+An account of a trusted home that holds a Space's Owner affiliation, on a
+`pkix` stream, holds every power a session's owner holds through PubSub
+(ADR-0020 D8): it reads and changes the configuration form (the
+`federated` field aside, which only a session reads or changes), purges
+the Space's items, deletes the Space, and reads and changes its
+affiliations, under D8 issuance, and its subscriptions. It creates no
+Space, and places no room in one: a publish is decided by the Space's
+`owner` relationship, which no writer issues to a remote account.
+
+- **Deletion runs the cascade of `spaces:delete`**, for a remote owner as
+  for a session (`admin::spaces::delete_space`). Before anything changes,
+  a Space, or a room it names, of an enrolled host-grant scope refuses the
+  whole deletion with `forbidden`. Then: the Space is closed to other
+  servers (its `federated` row and its remote subscription rows, in one
+  transaction); every room the Space's links or items name loses its
+  parent grant on the Space and its link to it, and every room an item
+  names under its canonical address is destroyed with its catalog row;
+  the items are retracted; the Space's own relations (`owner`, `admin`,
+  `moderator`, `member`) are removed; the node is purged and deleted; its
+  metadata is removed. A Space created again under the name inherits none
+  of it. A failure part-way rolls back what `spaces:delete` rolls back and
+  answers `internal-server-error`; a failure after the node is gone is
+  completed by `spaces:delete`, since the PubSub request then answers
+  `item-not-found`.
+- **Purging a Space's items** takes the rooms they name out of the Space
+  first (each loses its parent grant on the Space and its link to it, as a
+  retract does); the rooms stay. A purge leaves nothing of S2S behind: the
+  `federated` setting and the remote subscriptions name the node, which
+  remains.
+- A remote owner's deletion destroys rooms of this deployment. Listing a
+  home as trusted is the operator's decision to give its accounts that
+  power over the Spaces they are made owners of.
+
+**Recovering a Space from a remote owner.** These are server-administrator
+steps; nothing a remote owner can do reaches them.
+
+1. Take the standing away: the admin command `spaces:set-role` with the
+   remote account as `member_jid` and the role `none` (or `member`)
+   removes its Owner affiliation, which is the only privileged standing a
+   remote account can hold on a Space. It takes effect at the next request.
+2. Or stop honouring every owner of a home at once: remove the domain from
+   `admission.trusted_homes` in the S2S configuration. The owner and
+   publisher affiliations of its accounts are then honoured as nothing at
+   the next request, on every replica that runs the new snapshot, and are
+   written for nobody of that home.
+3. Undo what the owner changed: `spaces:set-role` with the role `owner`
+   gives a local owner its standing back, a ban included, and a local
+   owner's configuration form restores the access model. Subscriptions the
+   remote owner removed are made again by their accounts.
+4. A deleted Space, and the rooms it destroyed, are not recovered by any
+   command: restoring them is a restore from backup.
+
 **Event notifications to remote subscribers.** A publish or a retract on a
 Space fans out to local subscribers as before; a subscriber at another
-server is skipped there and decided apart (`notify_remote_subscribers`). A
-notification leaves for an address at another server only where all of
-this holds when it is handed over:
+server is skipped there. Once the publication is stored, the fan-out only
+queues it for the Spaces host (`queue_remote_notification`, then
+`RemoteRoute::space_published`): a bounded queue of 1,024 publications for
+each replica, which a publication that finds full is not notified through
+(counted by `waddle.s2s.spaces.publications.dropped`). One task of the host
+takes them in order and decides each for the remote subscribers
+(`notify_remote_subscribers`), so a publisher's request never waits for
+what is read about them. A notification leaves for an address at another
+server only where all of this holds when it is handed over:
 
-- the replica serves its Spaces to remote principals and the Space is
-  federated;
+- the replica serves its Spaces to remote principals, the Space is
+  federated, and its node is still the one the publication was made to;
 - the remote account made the subscription itself over an inbound stream
-  (a row of `s2s_space_subscriptions` bound to this node), and the PubSub
-  service's own record still holds it as deliverable, read for this
-  publication. A subscription an owner recorded for a remote address has no
+  (a row of `s2s_space_subscriptions` bound to this node, made or made
+  again within the last thirty days), and the PubSub service's own record
+  still holds it as deliverable, read for this publication. A subscription an owner recorded for a remote address has no
   such row and sends nothing, so a local owner cannot aim a Space's
   notifications at an address that never asked;
 - the subscriber's domain is admitted now, and its affiliation, honoured
@@ -1981,6 +2053,26 @@ that stream proved (authentication strength, trust profile and the snapshot
 it was admitted under), as a seat does. Peer admission and trusted-home
 status are not stored: they are evaluated at each notification.
 
+**What ends a remote subscription.** Its account's `<unsubscribe/>`; the
+owner removing it (`<subscriptions/>` with `subscription='none'`, which
+removes the row as well as the service's record); a ban of the account
+(`<affiliations/>` with `outcast`), which removes the row, so lifting the
+ban does not bring the subscription back; the Space being closed to other
+servers or deleted; and thirty days without the account subscribing again
+(below). A domain that is no longer admitted receives nothing from the
+moment it is not, and its rows give way when they would keep an admitted
+account out (below).
+
+Turning the `federated` setting off removes the setting's row and every
+remote subscription row of the Space in one transaction, under the
+Space's lock (below), and then the service's subscription records of every
+address this deployment does not serve, an owner's record for one
+included. A subscription being recorded at the same time re-reads the
+setting under that lock and is refused when it is off; one whose service
+record is written after the records were removed reads the setting once
+more and removes its own. Either way no record of a remote subscriber
+outlives the setting.
+
 **Bounds.**
 
 | Bound | Default |
@@ -1990,10 +2082,13 @@ status are not stored: they are evaluated at each notification.
 | Refusals of requests beyond an allowance that are answered, for one remote domain (beyond it they are dropped) | 5 a second, 20 |
 | How long the host may take to decide one request | 5 s |
 | Spaces listed, and items returned, in one answer | 256, 256 |
-| Subscriptions accounts at other servers hold to one Space | 256 |
-| Subscriptions of one remote account | 64 |
-| Subscriptions of one remote domain | 4,096 |
-| Subscriptions accounts at other servers hold in the deployment | 65,536 |
+| Subscriptions accounts at other servers hold to one Space (exact) | 256 |
+| Subscriptions the accounts of one remote domain hold to one Space (exact) | 32 |
+| Subscriptions of one remote account (exact) | 64 |
+| Subscriptions of one remote domain (exact) | 4,096 |
+| Subscriptions accounts at other servers hold in the deployment (approximate on PostgreSQL, below) | 65,536 |
+| How long a remote subscription holds without being made again | 30 days |
+| Publications awaiting the decision for remote subscribers, for each replica | 1,024 |
 | Publications of one Space whose notifications leave for other servers, on average and at once, for each replica | 4 a second, 16 |
 | Event notifications waiting for one directional pair's stream | 256 |
 
@@ -2012,12 +2107,32 @@ recorded although its answer was dropped, and subscribing again is
 answered.
 
 The subscription bounds are counted and the row written in one
-transaction; on PostgreSQL the transaction takes an advisory lock keyed on
-the subscriber's domain, so the subscriptions of one domain are counted one
-at a time on every replica. Each bound is counted by the database, up to
-the bound, so checking one costs one row read whatever its size. A
-subscription the account already holds is recorded again whatever the
-bounds.
+transaction. On SQLite it is an immediate transaction, which holds the
+database's write lock, so every bound is exact. On PostgreSQL the
+transaction takes two advisory locks, one keyed on the subscriber's domain
+and then one keyed on the Space, so the subscriptions of one domain, and
+those to one Space, are counted one at a time on every replica: the bounds
+on a Space, on one domain in a Space, on an account and on a domain are
+exact. The deployment's bound is counted under neither lock of its own, so
+subscriptions of different domains to different Spaces may pass it
+together; it is approximate by at most the number of such subscriptions
+decided at once. Turning a Space's setting off takes the Space's lock
+alone, and every transaction that takes both takes the domain's first, so
+they never wait on each other in a cycle.
+
+Each bound is counted by the database, up to the bound, so checking one
+costs one row read whatever its size. A subscription the account already
+holds is recorded again whatever the bounds, which renews it. Only the
+subscriptions of domains admitted now hold a place against a Space's bound
+and the deployment's: when either is reached, the rows of domains the
+replica's snapshot does not admit are removed (for the deployment's bound,
+of at most 4,096 domains read, together with every lapsed row) and the
+bound is counted again. A row whose subscription was last made more than
+thirty days ago has lapsed: it counts against no bound, names no
+subscriber, and is removed when its Space is next subscribed to or the
+deployment's bound is reached. A replica on an older snapshot may remove
+the rows of a domain another replica still admits; that account then
+receives nothing until it subscribes again, which is the safe side.
 
 **Amplification.** One publication sends at most one stanza to each
 subscribed account at another server, at most 256 for a Space, and only
@@ -2506,22 +2621,28 @@ runbook (G24):
   256 federated Spaces, so one request costs up to about 770 reads, and a
   remote domain's allowance of 50 requests a second can ask for that many
   listings. A notification reads one affiliation for each of up to 256
-  remote subscribers, inline in the publisher's request, so a Space with
-  many remote subscribers answers its publisher later. Neither is cached.
+  remote subscribers, on the Spaces host's notification task rather than in
+  the publisher's request; a replica's publications wait for that task in
+  one queue of 1,024, so a burst of publications to Spaces with many remote
+  subscribers delays their notifications, and beyond the queue drops them.
+  Neither read is cached.
 - **Spaces: a notification dials.** A notification for a subscriber whose
   domain has no established stream makes this server dial it, within the
   connection manager's bounds and backoff. A remote account that subscribes
   and whose server then stops answering costs one attempt for each
-  notified publication until it unsubscribes or its domain is no longer
-  admitted; nothing ends such a subscription today.
+  notified publication until it unsubscribes, its domain is no longer
+  admitted or thirty days pass without it subscribing again.
 - **Spaces: the allowance of notified publications is per replica and in
-  memory.** A deployment of several replicas notifies up to the allowance
-  on each, and a restart refills it.
+  memory.** Each Spaces host's notification task keeps it, so a deployment
+  of several replicas notifies up to the allowance on each, and a restart
+  refills it.
 - **Spaces: what a remote owner can do.** A trusted home's owner of a Space
-  can make it private, purge it and delete it over S2S, as a session's
-  owner can through PubSub. PubSub deletion does not run the admin
-  command's cascade over the Space's rooms, for a remote owner as for a
-  session.
+  holds every power a session's owner holds through PubSub, deleting the
+  Space and the rooms it holds included
+  ([what a remote owner of a Space can do](#what-a-remote-owner-of-a-space-can-do)).
+  Trusting a home is the operator's decision to give its accounts that
+  power over the Spaces they are made owners of; the recovery path is the
+  admin command `spaces:set-role`.
 - **Spaces: a private Space's existence under storage errors.** A read that
   fails after the `federated` setting was read answers
   `internal-server-error`, which a missing node never does. It is reached
@@ -2557,12 +2678,10 @@ runbook (G24):
   Movim's Spaces use
   ([survey](../../../docs/planning/xep0503-survey-2047.md)).
 - Spaces, ending a subscription on a delivery error from the subscriber's
-  server (XEP-0060 §12.3), and expiring one whose domain stays unreachable
-  or unadmitted, or whose account lost its membership of a private Space
-  and never leaves.
-- Spaces, the cost of one request: page or cache the service's listing,
-  and decide a publication's remote subscribers off the publisher's
-  request.
+  server (XEP-0060 §12.3), and removing at once the row of an account that
+  lost its membership of a private Space; until then such a row receives
+  nothing and lapses after thirty days.
+- Spaces, the cost of one request: page or cache the service's listing.
 - Spaces, a federated setting for single peers: the setting opens a Space
   to every admitted domain.
 - Spaces, the web client: offer the `federated` field in a Space's

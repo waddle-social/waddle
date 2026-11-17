@@ -3454,16 +3454,20 @@ like its grants, which needs a migration and an operation of its own.
   `muc#admin` writer of such a room, by the admin command that sets a room
   affiliation (`channels:set-affiliation`), by the writers of a Space's
   PubSub affiliations (`spaces:set-role` and the `<affiliations/>` change
-  on the Spaces service) and, for the relations no writer names
-  (`channel.manager`, `channel.moderator`, `space.moderator` and
-  `role.manager`), by the permission actor's write messages, which refuse
-  them for an account whose home is neither served nor trusted. A standing
+  on the Spaces service) and by the permission actor's write messages,
+  which refuse the channel and Space `owner` and `admin` relations and the
+  relations no writer names (`channel.manager`, `channel.moderator`,
+  `space.moderator` and `role.manager`) for an account whose home is
+  neither served nor trusted. A standing
   stored for a remote account before that, or under an earlier
   trusted-home list, is not honoured at the effect unless its home is
   trusted and its stream is `pkix`.
 - The channel and Space `owner` and `admin` relations are checked by their
-  writers, not by the permission actor. A writer added later that names
-  one of them for an account it does not check is not caught there.
+  writers and again by the permission actor, so a writer added later that
+  names one of them for an account it does not check is refused at the
+  actor. A replica whose account domain is not canonical attaches a
+  policy that admits no account, and then writes those relations for
+  nobody.
 - A remote principal's administration of a managed room has no fence check
   beyond the ones a session's has: a moderation request (XEP-0425) and the
   role list read are decided once, on the grants as read, and an
