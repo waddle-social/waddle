@@ -1473,11 +1473,13 @@ async fn create_websocket_state(
                 apns_topic = apns_config.topic.as_str(),
                 "APNs delivery enabled for the XMPP Push Service"
             );
-            push_service.with_apns_provider(
-                Arc::new(tokens),
-                Arc::new(sender),
-                apns_config.topic.clone(),
-            )
+            push_service
+                .with_apns_provider(
+                    Arc::new(tokens),
+                    Arc::new(sender),
+                    apns_config.topic.clone(),
+                )
+                .map_err(|error| anyhow::anyhow!("invalid APNs VoIP topic: {error}"))?
         }
         None => {
             info!("APNs delivery disabled: WADDLE_APNS_* is not configured");

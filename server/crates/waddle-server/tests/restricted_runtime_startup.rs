@@ -19,6 +19,8 @@ mod authority_guard;
 #[cfg(feature = "clustering")]
 #[path = "restricted_runtime_startup/clustered.rs"]
 mod clustered;
+#[path = "restricted_runtime_support/notification_migration.rs"]
+mod notification_migration_support;
 #[path = "restricted_runtime_startup/owner_entrypoint.rs"]
 mod owner_entrypoint;
 #[path = "restricted_runtime_support/mod.rs"]
@@ -38,7 +40,7 @@ use waddle_server::db::bootstrap::RuntimePoolLimits;
 use waddle_server::db::lineage::PgSchemaName;
 use waddle_server::db::physical_attestation::DarkPinnedEntryError;
 use waddle_server::db::runtime_startup::{RuntimeStartupError, RuntimeStartupIdentity};
-use waddle_server::db::DatabasePool;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool};
 use waddle_server::ingress_substrate::{
     AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
 };
@@ -507,6 +509,53 @@ async fn owner_phase_prepares_the_stores_the_runtime_role_attaches() {
     .await;
     assert_runtime_owns_nothing(&prepared).await;
 
+    drop(pool);
+    prepared.cleanup().await;
+}
+
+/// A baseline-only deployment upgrades before the owner attests its stores;
+/// the runtime then attaches the full schema and writes the new call class.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn baseline_call_migration_attaches_under_the_restricted_runtime_role() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let provisioned = Provisioned::new(&url).await;
+    let config = DatabaseConfig::new(DatabaseDriver::Postgres, provisioned.owner_url.clone());
+    let owner = Database::from_config("baseline-only owner", &config)
+        .await
+        .expect("baseline owner database");
+    notification_migration_support::install_baseline_only(&owner, SCHEMA).await;
+    notification_migration_support::seed_notification_rows(&owner).await;
+    drop(owner);
+    let prepared = Prepared::from_provisioned(provisioned, &url).await;
+    let before = catalog_entries(&prepared.admin).await;
+    let pool = attach_serving_pool(&prepared).await;
+    let inherited = ResolvedXmppDatabaseUrl::InheritedGlobal(prepared.runtime_url.clone());
+    attach_single_node_stores(&prepared, &pool, &inherited).await;
+    DatabaseMamStorage::attach_single_node(
+        pool.global(),
+        role(&prepared.roles.schema_owner),
+        PgSchemaName(SCHEMA.to_owned()),
+    )
+    .await
+    .expect("upgraded MAM attaches");
+    let ingress = waddle_server::test_support::create_ingress_authority_at_startup(
+        &ingress_config(),
+        &pool,
+        &runtime_lineage(&prepared),
+    )
+    .await
+    .expect("upgraded ingress authority attaches");
+    drop(ingress);
+    notification_migration_support::assert_rows_preserved_and_insert_call(pool.global()).await;
+    assert_catalog_unchanged(
+        &prepared.admin,
+        &before,
+        "upgraded runtime changed the catalog",
+    )
+    .await;
+    assert_runtime_owns_nothing(&prepared).await;
     drop(pool);
     prepared.cleanup().await;
 }

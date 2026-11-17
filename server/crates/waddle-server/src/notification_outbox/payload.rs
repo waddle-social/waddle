@@ -8,8 +8,11 @@ use super::{
 pub const WADDLE_PUSH_CONTEXT_NS: &str = "urn:waddle:push:context:0";
 pub const XEP0357_SUMMARY_FORM_TYPE: &str = "urn:xmpp:push:summary";
 
-pub(super) fn build_waddle_context(candidate: &NotificationCandidate) -> Element {
-    Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
+pub(super) fn build_waddle_context(
+    candidate: &NotificationCandidate,
+    created_at_ms: i64,
+) -> Element {
+    let mut builder = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
         .attr(
             minidom::rxml::xml_ncname!("conversation").to_owned(),
             candidate.conversation_jid.to_string(),
@@ -35,8 +38,26 @@ pub(super) fn build_waddle_context(candidate: &NotificationCandidate) -> Element
         .attr(
             minidom::rxml::xml_ncname!("stanza-id").to_owned(),
             candidate.archive_stanza_id.id.as_str(),
-        )
-        .build()
+        );
+    if let Some(call) = &candidate.call {
+        builder = builder.append(
+            Element::builder("call", WADDLE_PUSH_CONTEXT_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("sid").to_owned(),
+                    call.session_id.0.as_str(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("video").to_owned(),
+                    if call.video { "true" } else { "false" },
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("expires").to_owned(),
+                    (created_at_ms / 1_000 + 45).to_string(),
+                )
+                .build(),
+        );
+    }
+    builder.build()
 }
 
 /// Resolved XEP-0357 §5.4 rich summary fields, decided at T1.

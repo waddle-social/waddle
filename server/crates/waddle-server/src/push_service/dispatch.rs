@@ -16,6 +16,7 @@ use std::sync::Arc;
 use jid::BareJid;
 use minidom::Element;
 use url::Url;
+use waddle_xmpp::push::apns::ApnsCall;
 use waddle_xmpp::push::envelope::{push_topic_for, NotificationClass, PushEnvelope};
 use waddle_xmpp::push::types::{SubscriptionKeys, TransientFailure, VapidSub, WebPushOutcome};
 use waddle_xmpp::push::vapid::{aud_for, vapid_k_header, VapidSigner};
@@ -118,6 +119,8 @@ pub(crate) struct ParsedPushPayload {
     /// what the foreground tab posts. `None` when the publisher
     /// omitted it (the envelope falls back to the pubsub item id).
     pub stanza_id: Option<ContextStanzaId>,
+    /// Validated call metadata; required for call notifications only.
+    pub call: Option<ApnsCall>,
 }
 
 /// Non-empty XEP-0359 stanza-id lifted off the typed context at the
@@ -202,6 +205,31 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
         .filter(|t| !t.is_empty())
         .map(str::to_owned);
     let stanza_id = context.attr("stanza-id").and_then(ContextStanzaId::parse);
+    let call = if class == NotificationClass::Call {
+        let call = context
+            .get_child("call", NS_WADDLE_PUSH_CONTEXT)
+            .ok_or_else(|| XmppError::internal("call context missing call metadata"))?;
+        let sid = call
+            .attr("sid")
+            .filter(|sid| !sid.is_empty())
+            .ok_or_else(|| XmppError::internal("call metadata missing session id"))?;
+        let video = match call.attr("video") {
+            Some("true") => true,
+            Some("false") => false,
+            _ => return Err(XmppError::internal("call metadata has invalid video flag")),
+        };
+        let expires = call
+            .attr("expires")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| XmppError::internal("call metadata has invalid expiry"))?;
+        Some(ApnsCall {
+            sid: xmpp_parsers::jingle::SessionId(sid.to_owned()),
+            video,
+            expires,
+        })
+    } else {
+        None
+    };
     let message_count = parse_summary_message_count(&payload);
     Ok(ParsedPushPayload {
         message_count,
@@ -209,6 +237,17 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
         thread,
         class,
         stanza_id,
+        call,
+    })
+}
+
+/// Preserve provider-less minimal fixtures without accepting malformed call metadata.
+pub(super) fn has_call_context(payload_xml: &str) -> bool {
+    payload_xml.parse::<Element>().ok().is_some_and(|payload| {
+        payload.children().any(|child| {
+            child.is("context", NS_WADDLE_PUSH_CONTEXT)
+                && child.attr("class") == Some(NotificationClass::Call.as_db_value())
+        })
     })
 }
 

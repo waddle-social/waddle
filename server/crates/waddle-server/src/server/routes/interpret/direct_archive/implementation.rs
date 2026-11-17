@@ -9,7 +9,7 @@ use super::StoreOutcome;
 use super::WebSocketState;
 use super::{
     apply_retraction_tombstone, build_direct_archived_message, debug, effects, warn,
-    ArchiveIdRewrite, BareJid, Deps, Element, Message,
+    ArchiveIdRewrite, BareJid, Deps, Message,
 };
 use super::{extract_stanza_id_by, StanzaId};
 use super::{IngressEffectIntent, RetractionTombstoneMutation};
@@ -531,11 +531,7 @@ pub(in crate::server::routes::interpret::direct_archive) fn jmi_propose(
     xmpp_parsers::jingle::SessionId,
     waddle_xmpp::xep::CallThreadMedia,
 )> {
-    let propose = message.payloads.iter().find(|payload| {
-        payload.name() == "propose" && payload.ns() == waddle_xmpp::xep::xep0353::NS_JINGLE_MESSAGE
-    })?;
-    let sid = xmpp_parsers::jingle::SessionId(propose.attr("id")?.to_owned());
-    Some((sid, jmi_media(propose)?))
+    waddle_xmpp::xep::xep0353::jmi_propose(message).filter(|(_, media)| media.audio || media.video)
 }
 
 pub(in crate::server::routes::interpret::direct_archive) fn jmi_sid(
@@ -550,24 +546,6 @@ pub(in crate::server::routes::interpret::direct_archive) fn jmi_sid(
         })
         .and_then(|payload| payload.attr("id"))
         .map(|id| xmpp_parsers::jingle::SessionId(id.to_owned()))
-}
-
-pub(in crate::server::routes::interpret::direct_archive) fn jmi_media(
-    element: &Element,
-) -> Option<waddle_xmpp::xep::CallThreadMedia> {
-    let mut audio = false;
-    let mut video = false;
-    for child in element.children() {
-        if child.name() != "description" || child.ns() != waddle_xmpp::xep::xep0167::NS_JINGLE_RTP {
-            continue;
-        }
-        match child.attr("media") {
-            Some("audio") => audio = true,
-            Some("video") => video = true,
-            _ => {}
-        }
-    }
-    (audio || video).then_some(waddle_xmpp::xep::CallThreadMedia { audio, video })
 }
 
 pub(in crate::server::routes::interpret::direct_archive) fn format_call_thread_duration(

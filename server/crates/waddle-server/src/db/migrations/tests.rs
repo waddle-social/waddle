@@ -42,6 +42,17 @@ fn baseline_row(driver: DatabaseDriver) -> LedgerRow {
     (BASELINE_VERSION, baseline.description, Some(checksum))
 }
 
+fn catalog_rows(driver: DatabaseDriver) -> Vec<LedgerRow> {
+    MigrationRunner::single()
+        .migrations
+        .into_iter()
+        .map(|migration| {
+            let checksum = migration_checksum(&migration, driver);
+            (migration.version, migration.description, Some(checksum))
+        })
+        .collect()
+}
+
 async fn ledger(db: &Database) -> Vec<LedgerRow> {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
@@ -105,10 +116,14 @@ async fn sqlite_retired_history_database(name: &str) -> Database {
     tx.commit()
         .await
         .expect("commit the lineage and ledger tables");
-    MigrationRunner::deployment(BaselineAction::Apply)
+    let mut baseline = MigrationRunner::deployment(BaselineAction::Apply);
+    baseline
+        .migrations
+        .retain(|migration| migration.version == BASELINE_VERSION);
+    baseline
         .run(&db)
         .await
-        .expect("build the schema");
+        .expect("build the baseline-only schema");
     replace_ledger(&db, &retired_ledger(DatabaseDriver::Sqlite)).await;
     db
 }
@@ -117,11 +132,8 @@ async fn sqlite_retired_history_database(name: &str) -> Database {
 async fn a_fresh_sqlite_database_is_built_from_the_baseline() {
     let db = Database::in_memory("baseline-fresh").await.expect("sqlite");
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION]);
-    assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Sqlite)]
-    );
+    assert_eq!(applied, vec![BASELINE_VERSION, 2001]);
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
     let conn = db.guard().await.expect("guard");
     for table in [
         "users",
@@ -161,18 +173,19 @@ async fn a_fresh_sqlite_database_is_built_from_the_baseline() {
 }
 
 #[tokio::test]
-async fn a_complete_retired_sqlite_ledger_is_stamped_without_ddl() {
+async fn a_complete_retired_sqlite_ledger_is_stamped_then_upgraded() {
     let db = sqlite_retired_history_database("baseline-stamp").await;
     let objects = sqlite_table_count(&db).await;
     let applied = MigrationRunner::deployment(BaselineAction::Stamp)
         .run(&db)
         .await
         .expect("stamp");
-    assert!(applied.is_empty(), "a stamp applies nothing");
     assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Sqlite)]
+        applied,
+        vec![2001],
+        "a stamp applies the post-baseline migration"
     );
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
     assert_eq!(sqlite_table_count(&db).await, objects);
 
     // A second run finds the baseline and changes nothing.
@@ -181,10 +194,7 @@ async fn a_complete_retired_sqlite_ledger_is_stamped_without_ddl() {
         .await
         .expect("second run")
         .is_empty());
-    assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Sqlite)]
-    );
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
 }
 
 #[tokio::test]
@@ -321,7 +331,7 @@ async fn a_ledger_version_this_binary_does_not_know_is_refused() {
         .expect("guard")
         .execute(
             "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-            crate::db_params![BASELINE_VERSION + 1, "from a newer release", "0".repeat(64)],
+            crate::db_params![BASELINE_VERSION + 2, "from a newer release", "0".repeat(64)],
         )
         .await
         .expect("record a newer migration");
@@ -329,7 +339,7 @@ async fn a_ledger_version_this_binary_does_not_know_is_refused() {
     assert!(matches!(
         error,
         DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version, .. })
-            if version == BASELINE_VERSION + 1
+            if version == BASELINE_VERSION + 2
     ));
 }
 
@@ -388,11 +398,8 @@ async fn postgres_fresh_database_is_built_from_the_baseline_in_any_schema() {
     let schema = unique_postgres_schema_name("baseline_fresh");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION]);
-    assert_eq!(
-        ledger(&db).await,
-        vec![baseline_row(DatabaseDriver::Postgres)]
-    );
+    assert_eq!(applied, vec![BASELINE_VERSION, 2001]);
+    assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Postgres));
     // The template functions name the schema they were rendered for.
     let attach: String = sqlx::query_scalar(&format!(
         "SELECT prosrc FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n \
@@ -420,10 +427,14 @@ async fn postgres_an_older_retired_ledger_is_refused_before_anything_is_written(
     };
     let schema = unique_postgres_schema_name("baseline_older");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
-    MigrationRunner::deployment(BaselineAction::Apply)
+    let mut baseline = MigrationRunner::deployment(BaselineAction::Apply);
+    baseline
+        .migrations
+        .retain(|migration| migration.version == BASELINE_VERSION);
+    baseline
         .run(&db)
         .await
-        .expect("build the schema");
+        .expect("build the baseline-only schema");
     let mut older = retired_ledger(DatabaseDriver::Postgres);
     older.pop();
     replace_ledger(&db, &older).await;

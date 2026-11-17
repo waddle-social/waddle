@@ -11,8 +11,10 @@
 //! The payload is built from serde structs and serialized once by
 //! [`ApnsPayload::encode`], which also enforces Apple's 4096-byte limit.
 
-use serde::Serialize;
+use jid::BareJid;
+use serde::{Serialize, Serializer};
 use thiserror::Error;
+use xmpp_parsers::jingle::SessionId;
 
 use crate::push::envelope::NotificationClass;
 
@@ -40,15 +42,16 @@ pub enum ApnsAlertLocKey {
 }
 
 impl ApnsAlertLocKey {
-    pub fn for_class(class: NotificationClass) -> Self {
-        match class {
+    pub fn for_class(class: NotificationClass) -> Result<Self, ApnsPayloadError> {
+        Ok(match class {
+            NotificationClass::Call => return Err(ApnsPayloadError::InvalidAlertClass),
             NotificationClass::Dm => Self::Dm,
             NotificationClass::DmMention => Self::DmMention,
             NotificationClass::PersonalMention => Self::PersonalMention,
             NotificationClass::ChannelMention => Self::ChannelMention,
             NotificationClass::ActiveChannelMention => Self::ActiveChannelMention,
             NotificationClass::NotifyAll => Self::NotifyAll,
-        }
+        })
     }
 
     pub fn as_str(self) -> &'static str {
@@ -119,11 +122,11 @@ pub struct ApnsPayloadFields<'a> {
 }
 
 impl<'a> ApnsPayload<'a> {
-    pub fn new(fields: ApnsPayloadFields<'a>) -> Self {
-        Self {
+    pub fn new(fields: ApnsPayloadFields<'a>) -> Result<Self, ApnsPayloadError> {
+        Ok(Self {
             aps: Aps {
                 alert: Alert {
-                    loc_key: ApnsAlertLocKey::for_class(fields.class).as_str(),
+                    loc_key: ApnsAlertLocKey::for_class(fields.class)?.as_str(),
                 },
                 badge: fields.badge_count,
                 sound: DEFAULT_SOUND,
@@ -137,7 +140,7 @@ impl<'a> ApnsPayload<'a> {
                 item: fields.item,
                 node: fields.node,
             },
-        }
+        })
     }
 
     /// Serialize to the request body, rejecting anything over
@@ -151,9 +154,71 @@ impl<'a> ApnsPayload<'a> {
     }
 }
 
+/// Immutable call metadata carried from the publisher to PushKit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApnsCall {
+    #[serde(serialize_with = "serialize_session_id")]
+    pub sid: SessionId,
+    pub video: bool,
+    pub expires: u64,
+}
+
+fn serialize_session_id<S: Serializer>(sid: &SessionId, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&sid.0)
+}
+
+/// A PushKit payload has only routing and call metadata, without `aps`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApnsVoipPayload<'a> {
+    waddle: VoipRouting<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VoipRouting<'a> {
+    v: u8,
+    class: &'static str,
+    conversation: &'a BareJid,
+    item: &'a str,
+    node: &'a str,
+    call: &'a ApnsCall,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ApnsVoipPayloadFields<'a> {
+    pub conversation: &'a BareJid,
+    pub item: &'a str,
+    pub node: &'a str,
+    pub call: &'a ApnsCall,
+}
+
+impl<'a> ApnsVoipPayload<'a> {
+    pub fn new(fields: ApnsVoipPayloadFields<'a>) -> Self {
+        Self {
+            waddle: VoipRouting {
+                v: WADDLE_ROUTING_VERSION,
+                class: NotificationClass::Call.as_db_value(),
+                conversation: fields.conversation,
+                item: fields.item,
+                node: fields.node,
+                call: fields.call,
+            },
+        }
+    }
+
+    pub fn encode(&self) -> Result<EncodedApnsPayload, ApnsPayloadError> {
+        let bytes = serde_json::to_vec(self).map_err(ApnsPayloadError::Serialize)?;
+        if bytes.len() > MAX_APNS_PAYLOAD_BYTES {
+            return Err(ApnsPayloadError::TooLarge { size: bytes.len() });
+        }
+        Ok(EncodedApnsPayload(bytes))
+    }
+}
+
 /// Why a payload could not be encoded.
 #[derive(Debug, Error)]
 pub enum ApnsPayloadError {
+    #[error("call notifications require an APNs VoIP payload")]
+    InvalidAlertClass,
     #[error("APNs payload is {size} bytes, over the {MAX_APNS_PAYLOAD_BYTES}-byte limit")]
     TooLarge { size: usize },
     #[error("APNs payload serialization failed: {0}")]
@@ -186,8 +251,41 @@ mod tests {
     }
 
     fn encode_to_string(fields: ApnsPayloadFields<'_>) -> String {
-        let encoded = ApnsPayload::new(fields).encode().expect("encodes");
+        let encoded = ApnsPayload::new(fields)
+            .expect("alert class")
+            .encode()
+            .expect("encodes");
         String::from_utf8(encoded.as_slice().to_vec()).expect("utf-8 JSON")
+    }
+
+    #[test]
+    fn voip_payload_has_exact_routing_shape_and_no_aps() {
+        let conversation = "alice@example.com".parse().expect("bare jid");
+        let call = ApnsCall {
+            sid: xmpp_parsers::jingle::SessionId("call-1".into()),
+            video: false,
+            expires: 1_700_000_000,
+        };
+        let payload = ApnsVoipPayload::new(ApnsVoipPayloadFields {
+            conversation: &conversation,
+            item: "stanza-1",
+            node: "node-1",
+            call: &call,
+        })
+        .encode()
+        .expect("voip payload");
+        assert_eq!(
+            std::str::from_utf8(payload.as_slice()).expect("json"),
+            r#"{"waddle":{"v":1,"class":"call","conversation":"alice@example.com","item":"stanza-1","node":"node-1","call":{"sid":"call-1","video":false,"expires":1700000000}}}"#
+        );
+    }
+
+    #[test]
+    fn call_cannot_render_as_an_alert() {
+        assert!(matches!(
+            ApnsPayload::new(fields(NotificationClass::Call, None)),
+            Err(ApnsPayloadError::InvalidAlertClass)
+        ));
     }
 
     #[test]
@@ -269,6 +367,7 @@ mod tests {
             thread: Some(&huge_thread),
             ..fields(NotificationClass::Dm, None)
         })
+        .expect("alert class")
         .encode()
         .expect_err("over the limit");
         assert!(

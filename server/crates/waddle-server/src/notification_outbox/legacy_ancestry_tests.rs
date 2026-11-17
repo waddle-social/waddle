@@ -191,7 +191,7 @@ async fn pending_provider_and_restart_reconcile(fixture: IngressFixture) {
         &mut tx,
         &candidate,
         &target,
-        &build_waddle_context(&candidate),
+        &build_waddle_context(&candidate, 0),
         &RichSummary::minimal(),
         crate::time::now_ms(),
     )
@@ -252,7 +252,7 @@ async fn pending_provider_and_restart_reconcile(fixture: IngressFixture) {
         &mut tx,
         &unrelated,
         &target_named("later-node"),
-        &build_waddle_context(&unrelated),
+        &build_waddle_context(&unrelated, 0),
         &RichSummary::minimal(),
         crate::time::now_ms(),
     )
@@ -916,7 +916,7 @@ async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed
             &mut tx,
             item,
             &target,
-            &build_waddle_context(item),
+            &build_waddle_context(item, 0),
             &RichSummary::minimal(),
             crate::time::now_ms(),
         )
@@ -926,7 +926,7 @@ async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed
     }
     let jobs = store.pending_outbox_jobs().await.expect("jobs");
     for job in &jobs {
-        let completed = !mixed || job.context() == &build_waddle_context(&wanted);
+        let completed = !mixed || job.context() == &build_waddle_context(&wanted, 0);
         if completed {
             store
                 .execute(
@@ -957,7 +957,7 @@ async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed
     if pruned_early {
         let matched = jobs
             .iter()
-            .find(|job| job.context() == &build_waddle_context(&wanted))
+            .find(|job| job.context() == &build_waddle_context(&wanted, 0))
             .expect("matched job");
         store.execute(&format!("CREATE TRIGGER fail_legacy_child_adoption BEFORE INSERT ON ingress_effect_descendants WHEN NEW.descendant_key = '{}' BEGIN SELECT RAISE(ABORT, 'injected legacy child adoption failure'); END", matched.job_id().as_str()), ()).await.expect("adoption fault injection");
         store

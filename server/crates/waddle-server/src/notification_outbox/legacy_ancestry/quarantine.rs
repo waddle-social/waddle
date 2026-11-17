@@ -10,7 +10,8 @@ use crate::ingress_substrate::EnteredTransaction;
 pub(super) fn is_candidate_data_error(error: &NotificationOutboxError) -> bool {
     matches!(
         error,
-        NotificationOutboxError::InvalidDeliveryIdentity
+        NotificationOutboxError::InvalidCallData
+            | NotificationOutboxError::InvalidDeliveryIdentity
             | NotificationOutboxError::InvalidClass(_)
             | NotificationOutboxError::InvalidReason(_)
             | NotificationOutboxError::InvalidRecipientBareJid(_)

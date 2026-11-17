@@ -45,6 +45,30 @@ notification.
 A later refusal never erases uncertainty from an earlier send. Elapsed time,
 attempt count and message age do not establish provider acceptance or refusal.
 
+### Authoritative call dispositions
+
+Call invitations have a fixed deadline: the original message receipt time in
+Unix seconds plus 45 seconds. Before provider dispatch, a call past that deadline
+on its VoIP node ends `failed` with `uncertain_send = 0`, an error identifying call expiry, and
+settled notification ancestry. This is an explicit authoritative expiry
+disposition, including when an earlier attempt left `uncertain_send = 1`; the
+transport policy TTL does not extend the deadline.
+
+Call jobs apply only to the node whose app ID exactly matches the configured
+APNs bundle ID plus `.voip`; other notification classes apply only to other
+nodes. A class/node mismatch ends `published`, clears `uncertain_send`, and
+settles ancestry without sending. The diagnostic records `not-applicable`,
+which acknowledges upstream custody without claiming provider delivery. Class
+and node app ID are immutable, so an earlier pass cannot have sent such a job.
+On the VoIP node, a non-APNs device records a non-retrying, non-disabling
+not-applicable attempt. Applicability is decided before expiry, and both run
+before empty-device retries.
+The configured topic identity is retained independently of provider readiness.
+When APNs configuration is entirely absent, there is no known VoIP topic:
+call jobs are not applicable, and an app ID ending in `.voip` alone does not
+establish a matching node. Existing non-call provider-not-configured handling
+continues to apply in that case.
+
 ## Scheduling and disposition
 
 The provider queue allows 24 failed scheduling attempts. Its retry delay grows

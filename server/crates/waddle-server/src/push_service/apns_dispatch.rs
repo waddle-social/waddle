@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use waddle_xmpp::push::apns::{
     ApnsCollapseId, ApnsDeviceToken, ApnsEnvironment, ApnsExpiration, ApnsOutcome, ApnsPayload,
     ApnsPayloadError, ApnsPayloadFields, ApnsPriority, ApnsProviderJwt, ApnsProviderTokenSource,
-    ApnsRequest, ApnsSender, ApnsTopic, ApnsTransient,
+    ApnsPushType, ApnsRequest, ApnsSender, ApnsTopic, ApnsTransient, ApnsVoipPayload,
+    ApnsVoipPayloadFields,
 };
 use waddle_xmpp::push::types::TransientFailure;
 use waddle_xmpp::push::Urgency;
@@ -59,6 +60,7 @@ pub(crate) struct ApnsProvider {
     pub(crate) sender: Arc<dyn ApnsSender>,
     /// The configured bundle id (`WADDLE_APNS_BUNDLE_ID`).
     pub(crate) topic: ApnsTopic,
+    pub(crate) voip_topic: ApnsTopic,
 }
 
 /// Per-job values shared by every device of the fan-out.
@@ -174,7 +176,12 @@ pub(super) async fn dispatch_apns_device(
     // The topic is checked before anything is unsealed or signed: a
     // registration for another app must never reach Apple under our
     // provider token.
-    if provider.topic.as_str() != job.app_id {
+    let topic = if parsed.call.is_some() {
+        &provider.voip_topic
+    } else {
+        &provider.topic
+    };
+    if topic.as_str() != job.app_id {
         log_skip(ATTEMPT_STATUS_APNS_TOPIC_MISMATCH);
         return ApnsAttempt::failed(
             ATTEMPT_STATUS_APNS_TOPIC_MISMATCH,
@@ -195,28 +202,53 @@ pub(super) async fn dispatch_apns_device(
     };
     let conversation = parsed.conversation.to_string();
     let item = envelope_item(parsed, job.item_id);
-    let encoded = match ApnsPayload::new(ApnsPayloadFields {
-        class: parsed.class,
-        conversation: &conversation,
-        thread: parsed.thread.as_deref(),
-        item,
-        node: job.node,
-        badge_count,
-    })
-    .encode()
-    {
+    let encoded = match if let Some(call) = parsed.call.as_ref() {
+        ApnsVoipPayload::new(ApnsVoipPayloadFields {
+            conversation: &parsed.conversation,
+            item,
+            node: job.node,
+            call,
+        })
+        .encode()
+    } else {
+        ApnsPayload::new(ApnsPayloadFields {
+            class: parsed.class,
+            conversation: &conversation,
+            thread: parsed.thread.as_deref(),
+            item,
+            node: job.node,
+            badge_count,
+        })
+        .and_then(|payload| payload.encode())
+    } {
         Ok(encoded) => encoded,
         Err(error @ ApnsPayloadError::TooLarge { .. }) => {
             log_skip(ATTEMPT_STATUS_APNS_PAYLOAD_TOO_LARGE);
             return ApnsAttempt::failed(ATTEMPT_STATUS_APNS_PAYLOAD_TOO_LARGE, error.to_string());
         }
-        Err(error @ ApnsPayloadError::Serialize(_)) => {
+        Err(error) => {
             log_skip(ATTEMPT_STATUS_APNS_INTERNAL_ERROR);
             return ApnsAttempt::failed(ATTEMPT_STATUS_APNS_INTERNAL_ERROR, error.to_string());
         }
     };
     let policy = parsed.class.transport_policy();
-    let collapse_id = ApnsCollapseId::try_new(item);
+    let (push_type, priority, expiration, collapse_id) = match parsed.call.as_ref() {
+        Some(call) => (
+            ApnsPushType::Voip,
+            ApnsPriority::Immediate,
+            ApnsExpiration::at(call.expires),
+            None,
+        ),
+        None => (
+            ApnsPushType::Alert,
+            priority_for(policy.urgency()),
+            ApnsExpiration::after(
+                now_unix_seconds(),
+                Duration::from_secs(u64::from(policy.ttl())),
+            ),
+            ApnsCollapseId::try_new(item),
+        ),
+    };
     let send = |jwt: ApnsProviderJwt| {
         let token = &target.token;
         let encoded = &encoded;
@@ -227,14 +259,12 @@ pub(super) async fn dispatch_apns_device(
                 .send(ApnsRequest {
                     environment: target.environment,
                     device_token: token,
-                    topic: &provider.topic,
+                    topic,
                     provider_token: &jwt,
                     payload: encoded,
-                    priority: priority_for(policy.urgency()),
-                    expiration: ApnsExpiration::after(
-                        now_unix_seconds(),
-                        Duration::from_secs(u64::from(policy.ttl())),
-                    ),
+                    push_type,
+                    priority,
+                    expiration,
                     collapse_id,
                 })
                 .await

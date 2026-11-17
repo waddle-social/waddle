@@ -36,6 +36,7 @@ pub(in crate::notification_outbox::legacy_ancestry) enum CandidateBridge {
 
 pub(in crate::notification_outbox::legacy_ancestry) struct LegacyCandidate {
     pub(in crate::notification_outbox::legacy_ancestry) candidate: NotificationCandidate,
+    pub(in crate::notification_outbox::legacy_ancestry) created_at_ms: i64,
     pub(in crate::notification_outbox::legacy_ancestry) outboxed: bool,
     pub(in crate::notification_outbox::legacy_ancestry) suppressed: bool,
 }
@@ -95,11 +96,11 @@ impl NotificationOutboxStore {
         let mut candidates = Vec::new();
         let mut malformed = Vec::new();
         for row in rows {
-            let suppressed: Option<String> = row.get(16)?;
+            let suppressed: Option<String> = row.get(18)?;
             let invalid_audit = suppressed
                 .as_deref()
                 .is_some_and(|reason| SuppressedReason::from_db_value(reason).is_err());
-            let quarantined = row.get::<Option<i64>>(17)?.is_some();
+            let quarantined = row.get::<Option<i64>>(19)?.is_some();
             let candidate = match decode_candidate(&row) {
                 Ok(candidate) if !invalid_audit && !quarantined => candidate,
                 Ok(_) => {
@@ -114,7 +115,8 @@ impl NotificationOutboxStore {
             };
             candidates.push(LegacyCandidate {
                 candidate,
-                outboxed: row.get::<Option<i64>>(15)?.is_some(),
+                created_at_ms: row.get(20)?,
+                outboxed: row.get::<Option<i64>>(17)?.is_some(),
                 suppressed: suppressed.is_some(),
             });
         }
@@ -132,11 +134,16 @@ impl NotificationOutboxStore {
                 .map_err(|error| error.last_error)?;
             match active {
                 CandidateBridge::Pending if candidate.outboxed && !candidate.suppressed => {
-                    self.adopt_jobs(recorded, &candidate.candidate).await?
+                    self.adopt_jobs(recorded, &candidate.candidate, candidate.created_at_ms)
+                        .await?
                 }
                 CandidateBridge::Established => {
-                    self.reconcile_existing_jobs(recorded, &candidate.candidate)
-                        .await?
+                    self.reconcile_existing_jobs(
+                        recorded,
+                        &candidate.candidate,
+                        candidate.created_at_ms,
+                    )
+                    .await?
                 }
                 _ => {}
             }
@@ -180,7 +187,7 @@ impl NotificationOutboxStore {
             }
         };
         let mut rows = tx.query(
-            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,outboxed_at_ms,suppressed_reason,quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND stanza_id = ? ORDER BY class LIMIT 16",
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,call_sid,call_video,outboxed_at_ms,suppressed_reason,quarantined_at_ms,created_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND stanza_id = ? ORDER BY class LIMIT 16",
             crate::db_params![owner.to_string(), conversation.to_string(), archive.id.clone()],
         ).await?;
         let mut result = Vec::new();
@@ -262,6 +269,7 @@ impl NotificationOutboxStore {
         &self,
         recorded: &Recorded,
         candidate: &NotificationCandidate,
+        created_at_ms: i64,
     ) -> Result<(), IngressUowError> {
         let id = candidate
             .delivery_id
@@ -284,9 +292,11 @@ impl NotificationOutboxStore {
                 return Ok(());
             }
             for job in &jobs {
-                run_with_retry(5, || self.adopt_job(recorded, candidate, *job, false))
-                    .await
-                    .map_err(|error| error.last_error)?;
+                run_with_retry(5, || {
+                    self.adopt_job(recorded, candidate, created_at_ms, *job, false)
+                })
+                .await
+                .map_err(|error| error.last_error)?;
             }
             cursor = jobs
                 .last()
@@ -299,6 +309,7 @@ impl NotificationOutboxStore {
         &self,
         recorded: &Recorded,
         candidate: &NotificationCandidate,
+        created_at_ms: i64,
     ) -> Result<(), IngressUowError> {
         let candidate_id = candidate
             .delivery_id
@@ -329,7 +340,7 @@ impl NotificationOutboxStore {
                 let context: String = row.get(1)?;
                 let sender: Option<String> = row.get(2)?;
                 if recorded_lineage
-                    || legacy_context_matches(candidate, &context, sender.as_deref())
+                    || legacy_context_matches(candidate, created_at_ms, &context, sender.as_deref())
                 {
                     match Uuid::parse_str(&raw) {
                         Ok(job) => jobs.push((job, !recorded_lineage)),
@@ -351,7 +362,13 @@ impl NotificationOutboxStore {
             }
             for (job, require_context_match) in jobs {
                 let adopted = run_with_retry(5, || {
-                    self.adopt_job(recorded, candidate, job, require_context_match)
+                    self.adopt_job(
+                        recorded,
+                        candidate,
+                        created_at_ms,
+                        job,
+                        require_context_match,
+                    )
                 })
                 .await
                 .map_err(|error| error.last_error)?;
@@ -406,6 +423,7 @@ impl NotificationOutboxStore {
         &self,
         recorded: &Recorded,
         candidate: &NotificationCandidate,
+        created_at_ms: i64,
         job: Uuid,
         require_context_match: bool,
     ) -> Result<bool, IngressUowError> {
@@ -434,7 +452,7 @@ impl NotificationOutboxStore {
         if require_context_match {
             let context: String = row.get(3)?;
             let sender: Option<String> = row.get(4)?;
-            if !legacy_context_matches(candidate, &context, sender.as_deref()) {
+            if !legacy_context_matches(candidate, created_at_ms, &context, sender.as_deref()) {
                 drop(rows);
                 retain_legacy_fanout_gap(&mut tx, recorded).await?;
                 tx.commit().await?;
@@ -517,6 +535,7 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn retain_legacy_fanou
 /// Established lineage remains authoritative after later coalescing.
 pub(in crate::notification_outbox::legacy_ancestry) fn legacy_context_matches(
     candidate: &NotificationCandidate,
+    created_at_ms: i64,
     context: &str,
     sender: Option<&str>,
 ) -> bool {
@@ -526,7 +545,7 @@ pub(in crate::notification_outbox::legacy_ancestry) fn legacy_context_matches(
     let Ok(context) = context.parse::<Element>() else {
         return false;
     };
-    sender == candidate.sender_jid && context == build_waddle_context(candidate)
+    sender == candidate.sender_jid && context == build_waddle_context(candidate, created_at_ms)
 }
 
 pub(in crate::notification_outbox::legacy_ancestry) fn target(
@@ -577,7 +596,9 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn source_matches(
     }
     if matches!(
         candidate.class,
-        NotificationClass::DirectMessage | NotificationClass::DirectMessageMention
+        NotificationClass::DirectMessage
+            | NotificationClass::DirectMessageMention
+            | NotificationClass::Call
     ) {
         if message.type_ == xmpp_parsers::message::MessageType::Groupchat {
             return Ok(false);
@@ -585,13 +606,15 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn source_matches(
         if candidate.sender_jid.to_bare() == candidate.recipient_bare_jid {
             return Err(IngressUowError::EffectIntentConflict);
         }
-        let (class, _) = super::super::direct_envelope::direct_message_intrinsics(
+        let (class, _, call) = super::super::direct_envelope::direct_message_intrinsics(
             message,
             &candidate.recipient_bare_jid,
         );
         // An alternate stored archive authority is not a new-candidate admission.
         // Preserve its stamp; only frozen sender/class/root-thread metadata matches.
-        return Ok(class == candidate.class && candidate.thread_id == NotificationThreadId::root());
+        return Ok(class == candidate.class
+            && call == candidate.call
+            && candidate.thread_id == NotificationThreadId::root());
     }
     Ok(true)
 }

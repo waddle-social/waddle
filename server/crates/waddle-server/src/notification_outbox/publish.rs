@@ -433,11 +433,12 @@ impl NotificationOutboxStore {
             });
         }
 
-        let unread = if job.queue_acceptance_may_exist {
-            None
-        } else {
-            current_unread_count_for_job(job, inbox_storage).await?
-        };
+        let unread =
+            if job.queue_acceptance_may_exist || job.class == super::NotificationClass::Call {
+                None
+            } else {
+                current_unread_count_for_job(job, inbox_storage).await?
+            };
         // #1126: the recipient reconnected and read the conversation
         // inside the notification window — an OS push now would be
         // for a message they already saw. Drop the job terminally.

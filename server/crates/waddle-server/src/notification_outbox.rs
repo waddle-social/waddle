@@ -48,7 +48,7 @@ pub(crate) const fn outbox_schema_gate() -> (i32, i32) {
 mod test_support;
 mod types;
 
-pub use candidate::{NotificationCandidate, NotificationMessageHints};
+pub use candidate::{NotificationCall, NotificationCandidate, NotificationMessageHints};
 pub use deps::{
     active_mention_ttl_ms_from_env, DndReader, DndState, NoopDndReader, NoopRoomPolicy,
     NotificationDrainDeps, RoomPolicyStore, DEFAULT_ACTIVE_MENTION_TTL_SECONDS,

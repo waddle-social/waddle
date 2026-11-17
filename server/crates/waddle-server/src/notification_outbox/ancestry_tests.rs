@@ -88,7 +88,7 @@ async fn fanout(
             &mut tx,
             candidate,
             target,
-            &build_waddle_context(candidate),
+            &build_waddle_context(candidate, 0),
             &RichSummary::minimal(),
             now,
         )

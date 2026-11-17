@@ -53,8 +53,10 @@ impl NotificationOutboxStore {
                     no_permanent_store,
                     last_message_body,
                     reaction,
-                    delivery_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)
+                    delivery_id,
+                    call_sid,
+                    call_video
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
@@ -74,6 +76,11 @@ impl NotificationOutboxStore {
                     candidate.last_message_body.clone(),
                     i64::from(candidate.reaction),
                     uuid::Uuid::new_v4().to_string(),
+                    candidate
+                        .call
+                        .as_ref()
+                        .map(|call| call.session_id.0.clone()),
+                    candidate.call.as_ref().map(|call| i64::from(call.video)),
                 ],
             )
             .await?;
@@ -156,9 +163,9 @@ impl NotificationOutboxStore {
         expected: &NotificationCandidate,
     ) -> Result<bool, IngressUowError> {
         let query = if tx.driver() == DatabaseDriver::Postgres {
-            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL FOR UPDATE NOWAIT"
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,call_sid,call_video,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL FOR UPDATE NOWAIT"
         } else {
-            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL"
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,call_sid,call_video,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL"
         };
         let mut rows = tx
             .query(
@@ -182,13 +189,13 @@ impl NotificationOutboxStore {
         };
         let mut stored =
             decode_candidate(&row).map_err(|_| IngressUowError::EffectIntentConflict)?;
-        let suppression = row.get::<Option<String>>(15)?;
+        let suppression = row.get::<Option<String>>(17)?;
         if let Some(reason) = &suppression {
             SuppressedReason::from_db_value(reason)
                 .map_err(|_| IngressUowError::EffectIntentConflict)?;
         }
         let delivery = stored.delivery_id;
-        let outboxed = row.get::<Option<i64>>(16)?.is_some();
+        let outboxed = row.get::<Option<i64>>(18)?.is_some();
         // Scheduling counters/identity may evolve; admitted intrinsic approval
         // (including exact archive pointer) must still agree completely.
         stored.delivery_id = expected.delivery_id;

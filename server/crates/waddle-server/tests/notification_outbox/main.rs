@@ -7,6 +7,7 @@ mod activity;
 mod activity_store;
 mod activity_writers;
 mod blocking;
+mod calls;
 #[cfg(feature = "test-support")]
 mod candidate_drain;
 mod candidates;

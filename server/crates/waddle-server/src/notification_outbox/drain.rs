@@ -35,7 +35,7 @@ impl NotificationOutboxStore {
             dnd_reader,
             activity_reader,
         } = deps;
-        let candidates = self.pending_candidates(batch_size).await?;
+        let candidates = self.pending_candidate_rows(batch_size).await?;
         let mut target_cache = BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
         let mut room_policy_cache = BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut dnd_cache = BTreeMap::<BareJid, DndState>::new();
@@ -43,7 +43,7 @@ impl NotificationOutboxStore {
             BTreeMap::<(BareJid, BareJid), Option<NotificationActivity>>::new();
         let active_mention_ttl_ms = active_mention_ttl_ms_from_env();
         let mut processed = 0usize;
-        for candidate in candidates {
+        for (candidate, created_at_ms) in candidates {
             // Self-DM filtering happens at the `NotificationCandidate`
             // constructor (`SelfDirectedNotificationCandidate` typed
             // error). A self-directed candidate is structurally
@@ -221,7 +221,7 @@ impl NotificationOutboxStore {
                 }
                 continue;
             }
-            let context = build_waddle_context(&candidate);
+            let context = build_waddle_context(&candidate, created_at_ms);
             let now_ms = crate::time::now_ms();
             if let Some(job_ids) = self
                 .persist_candidate_targets(&candidate, &targets, &context, &rich, now_ms)

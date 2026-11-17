@@ -521,7 +521,8 @@ async fn sqlite_runner_still_applies_and_rechecks_the_catalog() {
         .expect("open SQLite");
     let runner = MigrationRunner::single();
     let applied = runner.run(&db).await.expect("apply SQLite catalog");
-    assert_eq!(applied, vec![waddle_server::db::BASELINE_VERSION]);
+    assert_eq!(applied.first(), Some(&waddle_server::db::BASELINE_VERSION));
+    assert!(applied.is_sorted());
     assert!(runner.run(&db).await.expect("recheck catalog").is_empty());
     let conn = db.guard().await.expect("SQLite guard");
     let mut rows = conn
