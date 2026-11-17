@@ -868,6 +868,9 @@ pub(super) fn should_compensate_failed_affiliation_grant(
 pub enum MucUserDeliveryError {
     #[error("pending_delivery quota exceeded")]
     QuotaExceeded,
+    /// The invitee's account was retired: its offline store keeps nothing.
+    #[error("the recipient's account was retired")]
+    RecipientRetired,
     #[error("pending_delivery storage failed: {0}")]
     Storage(#[source] waddle_xmpp::pending_delivery::storage::PendingStorageError),
     #[error("delivery effect executor unavailable")]

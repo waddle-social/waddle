@@ -258,11 +258,21 @@ async fn retire_in(
 
     // The account's offline store: no session of the account will ever
     // flush it, and a row left would wait for the JID's next holder, which
-    // the ledger never lets exist. What a replica's teardown of the
-    // account's sessions stores afterwards, it removes itself once those
-    // sessions are gone (`crate::server::account_session_endings`). Rows
-    // are keyed by the account's JID as stanzas name it, which is its
+    // the ledger never lets exist. From this commit on the store refuses
+    // every row for the account (`crate::pending_delivery`'s retired
+    // recipients), whichever producer offers it. An insert serialises with
+    // this delete on the advisory lock keyed by the account's canonical
+    // JID: one that holds it commits first and its row is removed here,
+    // and one that waits for it reads the ledger this transaction wrote.
+    // Rows are keyed by the account's JID as stanzas name it, which is its
     // canonical form.
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(?))",
+            crate::db_params![canonical.as_str()],
+        )
+        .await?;
+    }
     let offline_messages = tx
         .execute(
             "DELETE FROM pending_delivery WHERE recipient_jid = ?",

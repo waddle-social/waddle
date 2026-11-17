@@ -475,9 +475,11 @@ impl DatabasePendingDeliveryStorage {
             return Ok(InsertOutcome::Inserted);
         }
         let outcome = insert_in_transaction(&mut tx, &row, self.quota, None).await?;
-        if outcome == InsertOutcome::QuotaExceeded {
+        if outcome != InsertOutcome::Inserted {
             // Roll back the receipt too: rejected custody is still owed by
-            // the SM source and must remain eligible for a later retry.
+            // the SM source and must remain eligible for a later retry. A
+            // retired recipient's refusal is final, and a retry meets it
+            // again.
             return Ok(outcome);
         }
         tx.commit()
@@ -563,6 +565,11 @@ pub(in crate::pending_delivery::database) async fn persisted_replay_already_tran
 /// SQLite needs no corresponding advisory primitive because its single writer
 /// already serializes the statement. When `fence` is present, its exact SM
 /// claim is asserted before either the advisory lock or the write.
+///
+/// A row for a retired account is never written
+/// ([`InsertOutcome::RecipientRetired`]; [`super::retired`]). The ledger is
+/// read under the same lock, which the retirement also takes, keyed by the
+/// account's canonical JID as well where the row names it otherwise.
 pub(crate) async fn insert_in_transaction(
     tx: &mut Transaction<'_>,
     row: &PendingRow,
@@ -575,12 +582,19 @@ pub(crate) async fn insert_in_transaction(
 
     let recipient = row.recipient.to_string();
     if matches!(tx.driver(), DatabaseDriver::Postgres) {
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(?))",
-            crate::db_params![recipient.clone()],
-        )
-        .await
-        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let keys = std::iter::once(recipient.clone())
+            .chain(super::retired::retirement_lock_key(&row.recipient));
+        for key in keys {
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(?))",
+                crate::db_params![key],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        }
+    }
+    if super::retired::recipient_retired_in(tx, &row.recipient).await? {
+        return Ok(InsertOutcome::RecipientRetired);
     }
 
     let PreparedInsertRow {
@@ -696,6 +710,18 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .await
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         Ok(outcome)
+    }
+
+    async fn recipient_retired(&self, recipient: &BareJid) -> Result<bool, PendingStorageError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let retired = super::retired::recipient_retired_in(&mut tx, recipient).await;
+        // A read-only transaction: its rollback changes nothing.
+        let _ = tx.rollback().await;
+        retired
     }
 
     #[instrument(

@@ -102,6 +102,9 @@ pub(super) async fn insert_pending(
                 Ok(CustodyInsertOutcome::AlreadyCompleted) => {
                     return PromotedOutcome::NotPromotable
                 }
+                // The store ended the custody without delivery in the same
+                // transaction.
+                Ok(CustodyInsertOutcome::RecipientRetired) => return PromotedOutcome::Discarded,
                 // A quota error sent to an in-memory socket is not a durable
                 // replacement for the retained original payload.
                 Ok(CustodyInsertOutcome::QuotaExceeded) => {
@@ -115,6 +118,9 @@ pub(super) async fn insert_pending(
     };
     match result {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
+        // The recipient's account was retired: its store keeps nothing, and
+        // no sender is answered for it.
+        Ok(InsertOutcome::RecipientRetired) => PromotedOutcome::Discarded,
         Ok(InsertOutcome::QuotaExceeded) => {
             if original_message.from.is_none() {
                 // No peer return target exists. Retire this nonbounceable
@@ -251,6 +257,8 @@ async fn return_quota_bounce(
         .await
     {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Bounced,
+        // The sender's own account was retired: nobody is left to answer.
+        Ok(InsertOutcome::RecipientRetired) => PromotedOutcome::Discarded,
         Ok(InsertOutcome::QuotaExceeded) => {
             PromotedOutcome::StorageFailure(if delivery.allow_unfenced_effects {
                 PromotionFailureReason::QuotaBounceUnavailable

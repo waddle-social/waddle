@@ -317,7 +317,10 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Group-DM invite could not be delivered or queued; rolling back member grant"
         );
         let error_kind = match error {
-            super::muc_invite::MucUserDeliveryError::QuotaExceeded => {
+            // RFC 6121 §8.5.1: an account that does not exist, a retired
+            // one included, is answered as unavailable.
+            super::muc_invite::MucUserDeliveryError::QuotaExceeded
+            | super::muc_invite::MucUserDeliveryError::RecipientRetired => {
                 GroupDmInviteError::ServiceUnavailable
             }
             super::muc_invite::MucUserDeliveryError::Storage(_)

@@ -1212,7 +1212,10 @@ async fn store_offline(
         .await
     {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => telemetry::offline_stored(),
-        Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
+        Ok(
+            waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded
+            | waddle_xmpp::pending_delivery::InsertOutcome::RecipientRetired,
+        ) => {
             telemetry::offline_dropped();
         }
         Err(error) => warn!(%error, "storing a remote sender's message offline failed"),

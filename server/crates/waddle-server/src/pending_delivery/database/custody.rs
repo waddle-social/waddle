@@ -103,19 +103,25 @@ async fn transfer(
             ))
         }
     }
-    if insert_in_transaction(tx, row, quota, None).await? == InsertOutcome::QuotaExceeded {
-        return Ok(CustodyInsertOutcome::QuotaExceeded);
-    }
+    let (disposition, outcome) = match insert_in_transaction(tx, row, quota, None).await? {
+        InsertOutcome::QuotaExceeded => return Ok(CustodyInsertOutcome::QuotaExceeded),
+        // Promoted: the payload is in the recipient's offline store.
+        InsertOutcome::Inserted => (2_i64, CustodyInsertOutcome::Inserted),
+        // The recipient's account was retired and its store keeps nothing:
+        // the custody ends without delivery, as a retraction's scrub ends
+        // it (Tombstoned), so that no later recovery hands the payload on.
+        InsertOutcome::RecipientRetired => (3_i64, CustodyInsertOutcome::RecipientRetired),
+    };
     let completed = tx.execute(
-        "UPDATE sm_ingress_appends SET disposition = 2 WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ? AND accepting_stream_id = ? AND sequence = ? AND disposition = 0",
-        crate::db_params![append.key.message_key.to_storage().to_string(), i64::from(append.key.kind.to_storage()), append.key.semantic_identity_hash.to_vec(), append.key.resource.to_string(), append.accepting_stream.as_str().to_string(), i64::from(append.sequence)],
+        "UPDATE sm_ingress_appends SET disposition = ? WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ? AND accepting_stream_id = ? AND sequence = ? AND disposition = 0",
+        crate::db_params![disposition, append.key.message_key.to_storage().to_string(), i64::from(append.key.kind.to_storage()), append.key.semantic_identity_hash.to_vec(), append.key.resource.to_string(), append.accepting_stream.as_str().to_string(), i64::from(append.sequence)],
     ).await.map_err(storage_error)?;
     if completed != 1 {
         return Err(PendingStorageError::Other(
             "locked ingress custody transition failed".to_owned(),
         ));
     }
-    Ok(CustodyInsertOutcome::Inserted)
+    Ok(outcome)
 }
 
 #[cfg(test)]

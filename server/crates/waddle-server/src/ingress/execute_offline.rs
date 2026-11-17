@@ -167,7 +167,7 @@ async fn store(
     if !already_receipted && !PendingReceiptRepository::contains(&mut tx, &row.id).await? {
         match PendingReceiptRepository::insert(&mut tx, row, quota).await? {
             InsertOutcome::Inserted => {}
-            InsertOutcome::QuotaExceeded => {
+            refused @ (InsertOutcome::QuotaExceeded | InsertOutcome::RecipientRetired) => {
                 let mut evidence = Vec::new();
                 for intent in EffectIntentRepository::load(&mut tx, key).await? {
                     if decision.external_receipts[index]
@@ -182,12 +182,20 @@ async fn store(
                 // bounce loses the bounce (at-most-once), the RFC's trade for keyless
                 // sinks. Bouncing first would repeat the refusal on every retry.
                 tx.commit().await?;
-                return Ok(StoreOutcome::QuotaExceeded(SettledOutcome {
+                let settled = SettledOutcome {
                     refusal: None,
                     persisted,
                     completion: SettledCompletion::Complete,
                     detached: None,
-                }));
+                };
+                // A retired recipient's message is discarded unanswered
+                // (RFC 6121 §8.5.1 lets a server ignore a message to an
+                // account that does not exist); only a full store bounces.
+                return Ok(if refused == InsertOutcome::QuotaExceeded {
+                    StoreOutcome::QuotaExceeded(settled)
+                } else {
+                    StoreOutcome::Settled(settled)
+                });
             }
         }
     }

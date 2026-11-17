@@ -72,6 +72,9 @@ pub(crate) async fn execute(route: MucUserRoute, deps: &Deps<'_>) -> super::Effe
             Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
                 Some(muc_invite::MucUserDeliveryError::QuotaExceeded)
             }
+            Ok(waddle_xmpp::pending_delivery::InsertOutcome::RecipientRetired) => {
+                Some(muc_invite::MucUserDeliveryError::RecipientRetired)
+            }
             Err(error) => Some(muc_invite::MucUserDeliveryError::Storage(error)),
         };
         if let Some(error) = error {
