@@ -515,6 +515,46 @@ pub async fn websocket_state_with_federation(
     .await
 }
 
+/// [`websocket_state_with_federation`] whose PubSub service is the
+/// database-backed store a deployment runs (`DatabasePubSubStorage`, on an
+/// in-memory database of its own) rather than the in-memory one the
+/// default test state uses: it keeps one subscription for an account,
+/// under its bare JID, whichever of its addresses subscribes, as the
+/// Spaces host relies on.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_federation_and_database_pubsub(
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::try_new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
+            .await
+            .expect("db pool"),
+    );
+    let pubsub = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("pubsub storage"),
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    app_state.s2s_federation = Some(crate::permissions::host_grant::FederationSnapshot::of(
+        config,
+    ));
+    app_state.pubsub_storage = pubsub.clone();
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            database_pubsub_storage: Some(pubsub),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// The default in-memory WebSocket state whose app state names the Spaces
 /// service the test state's Spaces handlers serve (`spaces.example.com`),
 /// so that the code reading the app state's service (a join's Space parent

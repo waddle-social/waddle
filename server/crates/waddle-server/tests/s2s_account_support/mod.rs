@@ -31,7 +31,8 @@ use waddle_server::s2s::route::{
     SqlIqCorrelations, SqlRemoteRoomStore,
 };
 use waddle_server::test_support::{
-    host_spaces_for_remote_principals, websocket_state_with_federation, WebSocketLocalAccounts,
+    host_spaces_for_remote_principals, websocket_state_with_federation,
+    websocket_state_with_federation_and_database_pubsub, WebSocketLocalAccounts,
     WebSocketLocalDelivery,
 };
 use waddle_ws_test_support::iq::bound_jid;
@@ -90,8 +91,9 @@ pub struct Adjust {
     pub peer_services: &'static [&'static str],
     /// Whether the local deployment serves its Spaces to remote
     /// principals: its Spaces domain ([`SPACES`]) is then one of its S2S
-    /// domains, which the peer admits and reaches, and the production
-    /// Spaces host is attached to the router as startup attaches it.
+    /// domains, which the peer admits and reaches, the production Spaces
+    /// host is attached to the router as startup attaches it, and the
+    /// PubSub service is the database-backed store a deployment runs.
     pub hosts_spaces: bool,
 }
 
@@ -148,7 +150,11 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
         None => Arc::clone(&config),
     };
 
-    let mut state = websocket_state_with_federation(&effect_config).await;
+    let mut state = if adjust.hosts_spaces {
+        websocket_state_with_federation_and_database_pubsub(&effect_config).await
+    } else {
+        websocket_state_with_federation(&effect_config).await
+    };
     let database = routing::correlation_database(&unique("s2s-account")).await;
     let router = S2sRouter::new(RouterOptions {
         config: Arc::clone(&config),
