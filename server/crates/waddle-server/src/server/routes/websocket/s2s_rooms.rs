@@ -283,8 +283,27 @@ pub(crate) fn host_rooms_carrying(
     // without one those decisions would find no seat at all, so it is bound
     // here as well. Binding the gate already bound changes nothing, and the
     // gate's store, not the binding, decides which rooms are managed.
-    let _ = state.deps.app_state.host_grants.bind_attachment(gate);
+    // Offering the bound gate again answers `false` as well; only another
+    // gate than the bound one, which leaves every managed room refused,
+    // is worth a warning.
+    let host_grants = &state.deps.app_state.host_grants;
+    if !host_grants.bind_attachment(gate)
+        && host_grants.attachment_conflicts()
+        && ATTACHMENT_CONFLICT.due()
+    {
+        tracing::error!(
+            kind = "attachment_gate_conflict",
+            "Rooms were hosted for remote occupants with another host-grant attachment gate \
+             than the one bound. Every room an enrolled scope manages is refused on this replica"
+        );
+    }
 }
+
+/// At most one error a minute that the rooms were hosted for remote
+/// occupants with another attachment gate than the one bound; only the
+/// kind is logged.
+static ATTACHMENT_CONFLICT: crate::permissions::host_grant::RateLimitedWarning =
+    crate::permissions::host_grant::RateLimitedWarning::new();
 
 /// Delivery of a room's stanzas to the seats of remote occupants.
 struct SeatDelivery(crate::s2s::route::S2sRouter);
