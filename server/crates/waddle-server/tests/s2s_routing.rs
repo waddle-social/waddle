@@ -28,10 +28,7 @@ use support::{
     full, jid, listener, routed_and_capturing, routed_pair, start_routed, wait_for, Pki, Spec,
     ARRIVES, HOME_A, HOME_B, QUIET,
 };
-use waddle_server::destination::{
-    InvalidDestination, IqOffer, RemoteDestination, RemoteOutbound, RemoteRoute,
-    RemoteRouteOutcome, UnroutableReason,
-};
+use waddle_server::destination::{IqOffer, UnroutableReason};
 use waddle_server::s2s::conn::StreamDirection;
 use waddle_server::s2s::route::{
     PrincipalError, RemotePrincipal, RouterLimits, MAX_CORRELATED_ADDRESS_BYTES,
@@ -345,8 +342,15 @@ async fn a_request_whose_addresses_are_too_long_to_correlate_is_refused() {
     assert!(a.deployment.handle.streams().is_empty(), "nothing dialled");
 }
 
+// Building a destination the classifier would refuse takes the
+// `test-support` constructor.
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn the_router_refuses_a_destination_that_cannot_name_a_peer_by_its_own_classification() {
+    use waddle_server::destination::{
+        InvalidDestination, RemoteDestination, RemoteOutbound, RemoteRoute, RemoteRouteOutcome,
+    };
+
     let pki = Pki::new();
     let (a, _b) = routed_pair(&pki, RouterLimits::default()).await;
     // Destinations the classifier refuses before any route sees them,
