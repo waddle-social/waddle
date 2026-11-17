@@ -345,6 +345,9 @@ fn served() -> XmppConfig {
 async fn startup_builds_an_actor_that_decides_issuance() {
     let pki = s2s_transport::Pki::new();
     let mut spec = s2s_transport::Spec::new("example.com", "home-b.test");
+    // `example.com` is outside `.test`, which the default test peer scope
+    // requires of every domain (ADR-0020 D1).
+    spec.top.push("peer_scope = \"public\"".to_owned());
     spec.allow = vec!["home-a.test", "home-b.test"];
     spec.private = vec!["home-a.test", "home-b.test"];
     spec.trusted_homes = vec!["home-a.test"];
