@@ -1585,7 +1585,7 @@ storage plane or decision of standing changed. `pubsub-admin` and
 unchanged, and the raw scan's records are unchanged in content.
 
 The selected evidence was refreshed a thirty-ninth time, through
-`a7aa1036648efffd0d19635d4ece481229beb3fa`, after reviewing the delta of the reviewed files since the
+`34b1631c5b136ac5f3630b52be30046231d83410`, after reviewing the delta of the reviewed files since the
 thirty-eighth refresh. `pubsub_authz.rs` and `pubsub_admin.rs` changed. No
 grant writer or storage plane of the host-grant authority was added, no
 producer of stream evidence changed, and no decision of standing moved.
@@ -1599,13 +1599,14 @@ producer of stream evidence changed, and no decision of standing moved.
   or `none` for the account) through the same `set_affiliation` loop as
   every other PubSub node, and answers the unsupported ones with
   `not-acceptable` (type `modify`), carrying only those entities with
-  their effective affiliation, as XEP-0060 §8.9.2.4 describes. It writes
-  no affiliation another node could not already receive. `pubsub-admin`
-  and `d8-space-affiliations` moved down by twenty-one lines, their text
-  unchanged.
+  their effective affiliation, as XEP-0060 §8.9.2.4 describes; a request
+  naming an entity twice is refused with `bad-request` before any of it
+  is applied. It writes no affiliation another node could not already
+  receive. `pubsub-admin` and `d8-space-affiliations` moved down by
+  twenty-eight lines, their text unchanged.
 - The raw scan's records are unchanged in content; those in
   `pubsub_authz.rs` (its unit tests) moved down by nineteen lines and the
-  two `set_affiliation` records of `pubsub_admin.rs` by twenty-one.
+  two `set_affiliation` records of `pubsub_admin.rs` by twenty-eight.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
