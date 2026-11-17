@@ -38,6 +38,59 @@ pub(super) async fn queue_offline_delivery(
     apply_offline_delivery_row(deps, row, original_message).await;
 }
 
+/// The selected recipient pass owns one call candidate for all live/detached resources.
+pub(super) async fn prepare_live_call_notification(
+    deps: &Deps<'_>,
+    recipient: &BareJid,
+    message: &Message,
+) {
+    if crate::notification_outbox::direct_message_intrinsics(message, recipient).0
+        != crate::notification_outbox::NotificationClass::Call
+    {
+        return;
+    }
+    let by = Jid::from(recipient.clone());
+    let Some(id) = waddle_xmpp::xep::extract_stanza_id_by(message, &by) else {
+        return;
+    };
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(id, by);
+    // Canonicalization stamps even transient messages. Require the recipient's
+    // captured archive write, not just a stamp that may name no MAM row.
+    let archived = deps.ingress_effect_capture.as_ref().is_some_and(|capture| {
+        capture.snapshot().intents.iter().any(|intent| {
+            matches!(intent, IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, .. }
+                if archive == recipient && stanza_id == &archive_stanza_id)
+        })
+    });
+    if !archived {
+        return;
+    }
+    match prepare_offline_notification(deps, recipient, Some(&archive_stanza_id), message).await {
+        PreparedOfflineNotification::Prepared(candidate) => {
+            deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                owner: recipient.clone(),
+                mutation:
+                    waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                        conversation: recipient.clone(),
+                        archive_stanza_id,
+                        outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                    },
+            });
+            super::effects::delivery::record(
+                deps,
+                super::effects::delivery::ExternalDeliveryEffect::NotificationCandidate {
+                    candidate,
+                },
+            );
+        }
+        PreparedOfflineNotification::Suppressed => {}
+        PreparedOfflineNotification::RetryLater => {
+            warn!(%recipient, "live call notification preparation failed; no pending row anchors a retry");
+            waddle_xmpp::telemetry::reliability::increment_push_live_call_preparation_failed();
+        }
+    }
+}
+
 /// Capture the frozen row and notification obligations for the ingress arm.
 pub(super) async fn apply_offline_delivery_row(
     deps: &Deps<'_>,

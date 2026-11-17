@@ -342,6 +342,10 @@ reliability_counters! {
         "xmpp.user_actor.reaped",
         "{session}",
         "Empty user actors removed by the periodic reaper.";
+    increment increment_push_live_call_preparation_failed,
+        "xmpp.push.live_call_preparation_failed",
+        "{notification}",
+        "Live-recipient call notifications lost at preparation without pending retry custody.";
     increment increment_dnd_projection_read_errored,
         "xmpp.dnd.projection_read_errored",
         "{event}",

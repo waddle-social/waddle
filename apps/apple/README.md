@@ -182,13 +182,19 @@ team's App ID. The server needs `WADDLE_APNS_KEY_PATH`, `WADDLE_APNS_TEAM_ID`,
 APNs off); debug builds register as `sandbox`, release builds as `prod`.
 
 The server also supports PushKit tokens registered as `platform=apns` with
-`app-id=<bundle id>.voip` on a separate node. Offline XEP-0353 invitations use
+`app-id=<bundle id>.voip` on a separate node. XEP-0353 invitations use
 APNs push type `voip`, priority 10, and that `.voip` topic. Their payload has
 only a `waddle` object (no `aps`): `v`, `class=call`, caller bare JID in
 `conversation`, stanza `item`, `node`, and `call` containing `sid`, `video`,
 and Unix-second `expires` (receipt time plus 45 seconds). It carries no display
 name or body. Ordinary notifications stay on the alert node. Client PushKit
 registration and incoming-call UI are separate follow-up work.
+
+Call pushes are also emitted when the account has connected or hibernated
+sessions, so a client may receive both the XMPP proposal and its VoIP push.
+A client already showing the call must ignore a push with the same `call.sid`
+(the XEP-0353 call id), keeping a single incoming-call surface. The server's
+persisted reason remains `offline_call` for these invitations too.
 
 ## Xcode Cloud and TestFlight
 

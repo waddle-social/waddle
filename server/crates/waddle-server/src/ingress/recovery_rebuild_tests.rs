@@ -343,6 +343,81 @@ fn groupchat_notification_recovery_is_delegated_not_executed() {
     assert_eq!(result.delegated.len(), 1);
     assert!(result.unrecoverable.is_empty());
 }
+
+fn live_call_candidate_intent() -> IngressEffectIntent {
+    let recipient = bare("juliet@example.com");
+    IngressEffectIntent::NotificationActivityPreview {
+        owner: recipient.clone(),
+        mutation: NotificationActivityMutation::NotificationCandidate {
+            conversation: recipient.clone(),
+            archive_stanza_id: StanzaId::new("recipient-archive", recipient.into()),
+            outcome: NotificationCandidateOutcome::Inserted,
+        },
+    }
+}
+
+#[test]
+fn expired_live_call_candidate_is_discarded_without_rebuilding_a_candidate() {
+    let candidate = live_call_candidate_intent();
+    let recorded = [
+        route_intent(&["juliet@example.com/phone"]),
+        archive(),
+        candidate.clone(),
+    ];
+    let result = run_at(
+        &envelope(""),
+        &recorded,
+        std::slice::from_ref(&candidate),
+        Utc::now() - chrono::Duration::seconds(120),
+    );
+    assert!(result.decision.external.is_empty());
+    assert!(result.unrecoverable.is_empty());
+    assert!(result.unsupported_receipts.is_empty());
+    assert_eq!(result.discarded_receipts, result.decision.receipts_pending);
+    assert_eq!(result.discarded_receipts.len(), 1);
+}
+
+#[test]
+fn live_call_candidate_discard_requires_expiry_and_a_recorded_live_route() {
+    let candidate = live_call_candidate_intent();
+    let pending = std::slice::from_ref(&candidate);
+    let route = route_intent(&["juliet@example.com/phone"]);
+    let recorded = [route, archive(), candidate.clone()];
+    assert!(run(&envelope(""), &recorded, pending)
+        .discarded_receipts
+        .is_empty());
+    let result = run_at(
+        &envelope(""),
+        pending,
+        pending,
+        Utc::now() - chrono::Duration::seconds(120),
+    );
+    assert!(result.discarded_receipts.is_empty());
+    assert_eq!(
+        result.unrecoverable,
+        vec![IngressEffectKind::NotificationActivityPreview]
+    );
+    let mut recorded = recorded.to_vec();
+    recorded.push(IngressEffectIntent::PendingDelivery {
+        mutation: PendingDeliveryMutation::Archived {
+            recipient: bare("juliet@example.com"),
+            row_id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+            archive_stanza_id: StanzaId::new(
+                "recipient-archive",
+                bare("juliet@example.com").into(),
+            ),
+        },
+    });
+    assert!(run_at(
+        &envelope(""),
+        &recorded,
+        pending,
+        Utc::now() - chrono::Duration::seconds(120),
+    )
+    .discarded_receipts
+    .is_empty());
+}
+
 #[test]
 fn sent_carbons_rebuild_only_unreceipted_frozen_resources() {
     let intents = [IngressEffectIntent::Carbons {

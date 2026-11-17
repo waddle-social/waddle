@@ -465,6 +465,9 @@ impl Replacements {
             ExternalDeliveryEffect::RelayBareJid { stanza, .. } => self.stanza(stanza),
             ExternalDeliveryEffect::RelayCarbons { message, .. }
             | ExternalDeliveryEffect::Carbons { message, .. } => self.message(message),
+            ExternalDeliveryEffect::NotificationCandidate { candidate } => {
+                self.candidate(candidate)
+            }
             ExternalDeliveryEffect::QueueOfflineDelivery {
                 prepared_notification,
                 row,

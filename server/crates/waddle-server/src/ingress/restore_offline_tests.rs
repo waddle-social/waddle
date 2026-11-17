@@ -376,3 +376,103 @@ fn marker_only_repair_does_not_recreate_an_already_receipted_candidate() {
         vec![0]
     );
 }
+
+fn live_call(row: &PendingRow) -> PlannedEffect {
+    let PendingPayload::Archived(stamp) = &row.payload else {
+        panic!("archived call")
+    };
+    let mut message = canonical().message().clone();
+    message.bodies.clear();
+    message
+        .payloads
+        .push(waddle_xmpp::xep::xep0353::build_propose(
+            xmpp_parsers::jingle::SessionId("call".into()),
+            waddle_xmpp::xep::xep0353::CallOffer::audio_only(),
+        ));
+    let candidate = crate::notification_outbox::direct_candidate_from_envelope(
+        &message,
+        &row.recipient,
+        message.from.as_ref().expect("caller"),
+        stamp,
+    )
+    .expect("call candidate");
+    PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+        ExternalDeliveryEffect::NotificationCandidate {
+            candidate: Box::new(candidate),
+        },
+    )))
+    .with_suppression(PlanSuppressionPolicy::SenderOnly)
+}
+
+#[test]
+fn recorded_live_call_keeps_candidate_but_strips_later_offline_conversion() {
+    let row = row(true);
+    let candidate = notification(&row, true);
+    let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
+        recipient: row.recipient.clone(),
+        fanout: vec!["recipient@example.test/phone".parse().expect("phone")],
+        route_identity: waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(1),
+    };
+    let recorded = vec![route.clone(), candidate.clone()];
+    let mut plan = plan();
+    plan.intents = vec![
+        route,
+        candidate.clone(),
+        pending(&row),
+        notification(&row, false),
+    ];
+    plan.plan = vec![live_call(&row), offline(row)];
+    super::retain_recorded_delivery_mode(&mut plan, &recorded);
+    assert_eq!(plan.intents, recorded);
+    assert_eq!(plan.plan.len(), 1);
+    assert_eq!(
+        external_effect_indices(
+            &plan,
+            None,
+            &ReconcileVerdict::Consistent,
+            &[],
+            &[candidate],
+            &[],
+        ),
+        vec![0]
+    );
+    assert!(
+        external_effect_indices(&plan, None, &ReconcileVerdict::Consistent, &[], &[], &[],)
+            .is_empty(),
+        "a receipted call is never emitted again"
+    );
+}
+
+#[test]
+fn recorded_offline_call_owns_candidate_when_retry_selects_live_resources() {
+    let row = row(true);
+    let recorded = vec![
+        pending(&row),
+        notification(&row, true),
+        notification(&row, false),
+    ];
+    let mut plan = plan();
+    plan.intents = vec![notification(&row, true)];
+    plan.plan = vec![live_call(&row)];
+    assert!(restore_recorded_offline_deliveries(
+        &mut plan,
+        &recorded,
+        &recorded,
+        &canonical(),
+        created_at(),
+    ));
+    assert_eq!(plan.plan.len(), 2);
+    assert_eq!(
+        external_effect_indices(
+            &plan,
+            None,
+            &ReconcileVerdict::Consistent,
+            &[],
+            &recorded,
+            &[],
+        ),
+        vec![1],
+        "only the original pending-row path may insert the candidate"
+    );
+}

@@ -278,6 +278,12 @@ pub(super) fn pending_obligation(
 /// Reject fresh delivery shapes that the original offline acceptance did not own.
 pub(super) fn in_recorded_offline_audience(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
     match effect {
+        ExternalEffect::Delivery(ExternalDeliveryEffect::NotificationCandidate { candidate }) => {
+            plan.intents.iter().any(|intent| super::receipts::routing::direct_notification_receipt(effect, intent))
+                && !plan.intents.iter().any(|intent| matches!(intent,
+                    IngressEffectIntent::PendingDelivery { mutation }
+                        if pending_identity(mutation).0 == candidate.recipient_bare_jid()))
+        }
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { row, .. }) => {
             plan.intents.iter().any(|intent| matches!(intent,
                 IngressEffectIntent::PendingDelivery { mutation }

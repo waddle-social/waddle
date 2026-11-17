@@ -58,7 +58,7 @@ pub(in crate::ingress) struct RebuiltRecovery {
     pub unrecoverable: Vec<IngressEffectKind>,
     /// Receipts of unreceipted intents no rebuilt effect or delegation can settle.
     pub unsupported_receipts: Vec<decision::EffectReceiptKey>,
-    /// Direct routes resolved by recipient blocking or expired best-effort inbox refreshes.
+    /// Obligations resolved by blocking or expiry of best-effort live work.
     pub discarded_receipts: Vec<decision::EffectReceiptKey>,
 }
 
@@ -133,6 +133,7 @@ pub(in crate::ingress) fn rebuild(
         }
     }
     discarded_receipts.extend(carbons::restore(&mut plan, &input)?);
+    discarded_receipts.extend(expired_live_notification_receipts(&input)?);
     muc::restore_muc_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
     let mut external = super::super::suppression::filter_external_effects(
@@ -209,6 +210,52 @@ pub(in crate::ingress) fn rebuild(
         unsupported_receipts,
         discarded_receipts,
     })
+}
+
+/// A live call has no pending-delivery row from which to retry notification
+/// preparation. Maintenance's 60-second grace already exceeds the 45-second
+/// call lifetime, so discharge its recorded candidate without ringing late.
+/// Keep the age check here too: other rebuild callers must not discard a fresh
+/// call merely because they lack the frozen in-memory candidate.
+fn expired_live_notification_receipts(
+    input: &RecoveryInput<'_>,
+) -> Result<Vec<decision::EffectReceiptKey>, IngressUowError> {
+    if Utc::now() - input.created_at < chrono::Duration::seconds(60) {
+        return Ok(Vec::new());
+    }
+    input
+        .unreceipted
+        .iter()
+        .filter(|intent| {
+            let IngressEffectIntent::NotificationActivityPreview {
+                owner,
+                mutation:
+                    NotificationActivityMutation::NotificationCandidate {
+                        conversation,
+                        outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                        ..
+                    },
+            } = intent
+            else {
+                return false;
+            };
+            owner == conversation
+                && input.recorded.iter().any(|recorded| {
+                    matches!(recorded,
+                IngressEffectIntent::RouteDirect { recipient, fanout, route_identity, .. }
+                    if recipient == owner && !fanout.is_empty()
+                        && !matches!(route_identity, EffectMessageIdentity::InboxPush(_)))
+                })
+                && !input.recorded.iter().any(|recorded| {
+                    matches!(recorded,
+                IngressEffectIntent::PendingDelivery {
+                    mutation: PendingDeliveryMutation::Archived { recipient, .. }
+                        | PendingDeliveryMutation::Transient { recipient, .. }
+                } if recipient == owner)
+                })
+        })
+        .map(super::super::durable::receipt_key)
+        .collect()
 }
 
 /// Restore only approved local writes; a replay never fetches fresh enrichment.
