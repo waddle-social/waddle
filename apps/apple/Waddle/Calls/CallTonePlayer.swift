@@ -17,29 +17,36 @@ final class CallTonePlayer {
     static let watchInterval: Duration = .seconds(1)
 
     func play(_ tone: CallTone) {
-        if self.tone == tone, let player {
-            if !player.isPlaying { player.play() }
+        if self.tone == tone, player != nil {
+            startIfQuiet()
             return
         }
         stop()
-        #if os(iOS)
-        // A ring obeys the silent switch like any other ring. Ringback is
-        // the sound of a call the person placed themselves, so it does not.
-        // The media engine sets its own category when the call connects.
-        try? AVAudioSession.sharedInstance().setCategory(tone == .ring ? .soloAmbient : .playback)
-        #endif
         guard let player = try? AVAudioPlayer(data: tone.waveData(), fileTypeHint: AVFileType.wav.rawValue) else { return }
         player.numberOfLoops = -1
-        player.play()
         self.player = player
         self.tone = tone
+        startIfQuiet()
         watch = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.watchInterval)
-                guard !Task.isCancelled, let player = self?.player else { return }
-                if !player.isPlaying { player.play() }
+                guard !Task.isCancelled, let self else { return }
+                self.startIfQuiet()
             }
         }
+    }
+
+    private func startIfQuiet() {
+        guard let player, let tone, !player.isPlaying else { return }
+        #if os(iOS)
+        // A ring obeys the silent switch like any other ring. Ringback is
+        // the sound of a call the person placed themselves, so it does not.
+        // Set before every start: a call that just ended can leave its own
+        // category behind, and the media engine sets its own again when
+        // the next call connects.
+        try? AVAudioSession.sharedInstance().setCategory(tone == .ring ? .soloAmbient : .playback)
+        #endif
+        player.play()
     }
 
     func stop() {

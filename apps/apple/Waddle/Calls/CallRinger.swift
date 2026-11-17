@@ -58,9 +58,10 @@ final class CallRinger {
     }
 
     #if os(macOS)
+    /// Only a window that shows the call dock counts: Settings does not.
     private static var isInFront: Bool {
         NSApplication.shared.isActive
-            && NSApplication.shared.windows.contains { $0.isVisible && !$0.isMiniaturized && $0.canBecomeMain }
+            && CallSurfaceWindow.windows.allObjects.contains { $0.isVisible && !$0.isMiniaturized }
     }
     #endif
 
@@ -98,3 +99,26 @@ final class CallRinger {
         #endif
     }
 }
+
+#if os(macOS)
+import SwiftUI
+
+/// Marks the window it sits in as one that shows the call dock, so the
+/// ringer can tell a call that can be answered on screen from one that
+/// cannot.
+struct CallSurfaceWindow: NSViewRepresentable {
+    /// Held weakly, and the window's own identifier is left alone: the
+    /// system uses it to restore the window and its frame.
+    @MainActor static let windows = NSHashTable<NSWindow>.weakObjects()
+
+    func makeNSView(context: Context) -> NSView { Marker() }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    private final class Marker: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { CallSurfaceWindow.windows.add(window) }
+        }
+    }
+}
+#endif
