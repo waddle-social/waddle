@@ -12,7 +12,7 @@ import {
 import type { WasmThreadEntry } from "../src/lib/xmpp/wasm-types";
 import { $callState } from "../src/lib/calls/call-store";
 import { $dmCallActivities, clearDmCallActivities } from "../src/lib/calls/dm-call-activity";
-import { dmCallAnchorId } from "../src/lib/calls/dm-call-anchor";
+import { buildDmCallOutcomeAnchor, buildDmCallStartedAnchor, dmCallAnchorId } from "../src/lib/calls/dm-call-anchor";
 import { $mucCallMedia, $mucCallParticipants, clearMucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { dmMessageFromArchived, roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
@@ -104,6 +104,33 @@ describe("call-thread anchor timeline mapping", () => {
     messages.value.push(...replies);
     expect(callThreadAnchorReplyCount(anchor, index.value)).toBe(2);
     expect(callThreadAnchorReplyCount(replies[0], index.value)).toBeUndefined();
+  });
+
+  test("excludes DM call markers from the feed and panel chat counts", () => {
+    const call = {
+      peerBareJid: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+      initiator: "alice@example.com",
+    };
+    const started = buildDmCallStartedAnchor({ ...call, started: "2026-06-07T14:30:00Z" }, session.jid);
+    const ended = buildDmCallOutcomeAnchor({
+      ...call,
+      outcome: "ended",
+      ended: "2026-06-07T14:35:00Z",
+    }, session.jid);
+    const reply = { ...started, id: "chat-reply", body: "Thanks!", createdAt: "2026-06-07T14:32:00Z", callThread: undefined };
+    const messages = ref([started, ended]);
+    const { index } = useMessageThreads(messages);
+
+    expect(callThreadAnchorReplyCount(ended, index.value)).toBe(0);
+    messages.value.push(reply);
+    expect(callThreadAnchorReplyCount(started, index.value)).toBe(1);
+    expect(callThreadAnchorReplyCount(ended, index.value)).toBe(1);
+    expect(index.value.get(call.sid)?.directChildren).toEqual([reply]);
+    messages.value = [reply, ended];
+    expect(index.value.get(call.sid)?.root?.id).toBe(ended.id);
+    expect(callThreadAnchorReplyCount(ended, index.value)).toBe(1);
   });
 
   test("derives rich anchor card state from room live detectors with stale-live override", () => {
