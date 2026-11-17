@@ -783,6 +783,7 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
     {
         return;
     }

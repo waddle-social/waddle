@@ -255,6 +255,33 @@ impl DatabasePubSubStorage {
                 },
             )?;
         }
+        // `urn:waddle:joined-spaces:0` is the owner's private list of
+        // Spaces on other servers (XEP-0223): only the owner writes it,
+        // whatever affiliation or publish model the node was given, and
+        // each item is addressed by the Space it names, so a publish
+        // without an item id (which would get a generated one) is refused.
+        if node_name == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES {
+            match publisher {
+                Some(publisher_jid) if publisher_jid == owner => {}
+                _ => {
+                    warn!(
+                        owner = %owner,
+                        publisher = ?publisher,
+                        "urn:waddle:joined-spaces:0 publish rejected: publisher is not the node owner"
+                    );
+                    return Err(XmppError::forbidden(Some(
+                        "urn:waddle:joined-spaces:0 may only be published by the node owner"
+                            .to_string(),
+                    )));
+                }
+            }
+            if item.id.as_deref().is_none_or(str::is_empty) {
+                return Err(XmppError::bad_request(Some(
+                    "urn:waddle:joined-spaces:0 publish requires the item id of the Space it names"
+                        .to_string(),
+                )));
+            }
+        }
 
         let (node, node_created) = match self.get_node_impl(owner, node_name).await? {
             Some(node) => (node, false),
