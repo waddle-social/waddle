@@ -53,36 +53,72 @@ function requireRoomJid(roomJid: string): string {
   return canonical;
 }
 
-/** Read the user's bookmark of one room, or `null` when there is none. */
-export async function fetchRoomBookmark(
+/** Every item id the bookmark node holds for `roomJid`, in any spelling of its address. */
+interface StoredRoomBookmarks {
+  /** The bookmark to carry forward: the canonical item if there is one, else the first other spelling. */
+  bookmark: RoomBookmark | null;
+  /** Ids of items naming the same room under another spelling of its address. */
+  otherSpellings: string[];
+}
+
+/**
+ * Read the user's bookmarks of one room. The node is read whole, because
+ * an item for the room may have been written by another client under a
+ * spelling of its address that is not canonical (another letter case, a
+ * trailing dot on the domain); every such item names the same room.
+ */
+async function fetchStoredRoomBookmarks(
   xmpp: RawIqClient,
   ownBareJid: string,
   roomJid: string,
-): Promise<RoomBookmark | null> {
-  const itemId = requireRoomJid(roomJid);
+): Promise<StoredRoomBookmarks> {
+  const canonical = requireRoomJid(roomJid);
   const id = crypto.randomUUID();
   const xml = buildIqXml({
     type: "get",
     id,
-    payload: {
-      name: "pubsub",
-      ns: NS_PUBSUB,
-      children: [{
-        name: "items",
-        attrs: { node: NS_BOOKMARKS },
-        children: [{ name: "item", attrs: { id: itemId } }],
-      }],
-    },
+    payload: { name: "pubsub", ns: NS_PUBSUB, children: [{ name: "items", attrs: { node: NS_BOOKMARKS } }] },
   });
   let response: string;
   try {
     response = await sendRawIq(xmpp, { xml, id, to: ownBareJid, node: NS_BOOKMARKS });
   } catch (error) {
-    // No bookmark node yet, or no such item: there is nothing stored.
-    if (stanzaErrorContext(error).condition === "item-not-found") return null;
+    // No bookmark node yet: there is nothing stored.
+    if (stanzaErrorContext(error).condition === "item-not-found") return { bookmark: null, otherSpellings: [] };
     throw error;
   }
-  return parseRoomBookmarkItem(parseXmlResponse(response), itemId);
+  return findRoomBookmarks(parseXmlResponse(response), canonical);
+}
+
+/** The bookmarks of one room in an `<items/>` response, matched by canonical address. */
+export function findRoomBookmarks(doc: Document | Element, roomJid: string): StoredRoomBookmarks {
+  const canonical = canonicalRoomJid(roomJid);
+  const items = firstElementNS(doc, NS_PUBSUB, "items");
+  if (!canonical || !items) return { bookmark: null, otherSpellings: [] };
+  let exact: RoomBookmark | null = null;
+  let firstOther: RoomBookmark | null = null;
+  const otherSpellings: string[] = [];
+  for (const item of childElements(items, "item", NS_PUBSUB)) {
+    const itemId = item.getAttribute("id") ?? "";
+    if (canonicalRoomJid(itemId) !== canonical) continue;
+    const bookmark = parseRoomBookmarkItem(doc, itemId);
+    if (itemId === canonical) {
+      exact = bookmark ? { ...bookmark, roomJid: canonical } : null;
+    } else {
+      otherSpellings.push(itemId);
+      if (!firstOther && bookmark) firstOther = { ...bookmark, roomJid: canonical };
+    }
+  }
+  return { bookmark: exact ?? firstOther, otherSpellings };
+}
+
+/** Read the user's bookmark of one room, in any spelling of its address, or `null`. */
+export async function fetchRoomBookmark(
+  xmpp: RawIqClient,
+  ownBareJid: string,
+  roomJid: string,
+): Promise<RoomBookmark | null> {
+  return (await fetchStoredRoomBookmarks(xmpp, ownBareJid, roomJid)).bookmark;
 }
 
 /** The bookmark for `itemId` in an `<items/>` response, or `null`. */
@@ -164,7 +200,7 @@ export async function saveRoomBookmark(
   change: { roomJid: string; name?: string; autojoin: boolean },
 ): Promise<RoomBookmark> {
   const roomJid = requireRoomJid(change.roomJid);
-  const existing = await fetchRoomBookmark(xmpp, ownBareJid, roomJid);
+  const { bookmark: existing, otherSpellings } = await fetchStoredRoomBookmarks(xmpp, ownBareJid, roomJid);
   const name = change.name ?? existing?.name;
   const bookmark: RoomBookmark = {
     roomJid,
@@ -179,12 +215,19 @@ export async function saveRoomBookmark(
     if (stanzaErrorContext(error).condition === "precondition-not-met") throw new BookmarkNodeConfigError();
     throw error;
   }
+  // The room now has its canonical item; other spellings would list it twice.
+  for (const itemId of otherSpellings) await retractBookmarkItem(xmpp, ownBareJid, itemId);
   const { stored: _moved, ...saved } = bookmark;
   return saved;
 }
 
-/** The retract request for a bookmark, notifying the user's other clients. */
-export function buildRetractRoomBookmarkIq(id: string, roomJid: string): string {
+/**
+ * The retract request for one bookmark item, notifying the user's other
+ * clients. `itemId` is the item's id as stored, which another client may
+ * have spelled differently from the canonical room JID.
+ */
+export function buildRetractRoomBookmarkIq(id: string, itemId: string): string {
+  if (!canonicalRoomJid(itemId)) throw new Error("A bookmark needs a room address.");
   return buildIqXml({
     type: "set",
     id,
@@ -194,23 +237,31 @@ export function buildRetractRoomBookmarkIq(id: string, roomJid: string): string 
       children: [{
         name: "retract",
         attrs: { node: NS_BOOKMARKS, notify: "true" },
-        children: [{ name: "item", attrs: { id: requireRoomJid(roomJid) } }],
+        children: [{ name: "item", attrs: { id: itemId } }],
       }],
     },
   });
 }
 
-/**
- * Remove the user's bookmark of a room (XEP-0402 §3.5). A bookmark that is
- * already gone counts as removed. This neither leaves the room nor changes
- * anything the room's host holds.
- */
-export async function removeRoomBookmark(xmpp: RawIqClient, ownBareJid: string, roomJid: string): Promise<void> {
+async function retractBookmarkItem(xmpp: RawIqClient, ownBareJid: string, itemId: string): Promise<void> {
   const id = crypto.randomUUID();
   try {
-    await sendRawIq(xmpp, { xml: buildRetractRoomBookmarkIq(id, roomJid), id, to: ownBareJid, node: NS_BOOKMARKS });
+    await sendRawIq(xmpp, { xml: buildRetractRoomBookmarkIq(id, itemId), id, to: ownBareJid, node: NS_BOOKMARKS });
   } catch (error) {
     if (stanzaErrorContext(error).condition === "item-not-found") return;
     throw error;
   }
+}
+
+/**
+ * Remove the user's bookmark of a room (XEP-0402 §3.5), in every spelling
+ * of its address the node holds. A bookmark that is already gone counts as
+ * removed. This neither leaves the room nor changes anything the room's
+ * host holds.
+ */
+export async function removeRoomBookmark(xmpp: RawIqClient, ownBareJid: string, roomJid: string): Promise<void> {
+  const canonical = requireRoomJid(roomJid);
+  const { otherSpellings } = await fetchStoredRoomBookmarks(xmpp, ownBareJid, canonical);
+  await retractBookmarkItem(xmpp, ownBareJid, canonical);
+  for (const itemId of otherSpellings) await retractBookmarkItem(xmpp, ownBareJid, itemId);
 }

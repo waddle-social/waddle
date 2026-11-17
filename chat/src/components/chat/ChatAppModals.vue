@@ -41,8 +41,11 @@ const {
 <template>
     <!-- Dialogs -->
     <RemoteCommunitiesDialog
+      v-if="waddles.federationAvailable.value"
       v-model:open="ui.showRemoteCommunities.value"
       :remote="remoteCommunities"
+      :suggestions="waddles.remoteRoomSuggestions.value"
+      :home-spaces="waddles.sortedSpaces.value"
     />
     <NewDmDialog
       v-model:open="ui.showNewDm.value"
@@ -101,7 +104,7 @@ const {
       :new-member-affiliation="members.newMemberAffiliation.value"
       :search-results="members.memberSearchResults.value"
       :is-searching="members.isSearchingUsers.value"
-      :can-manage-members="waddles.canManageMembers.value"
+      :can-manage-members="waddles.canManageCurrentMembers.value"
       :home-domain="controller.selfDomain.value"
       :room-presence="messaging.roomPresence.value"
       :room-last-seen="messaging.roomLastSeen.value"

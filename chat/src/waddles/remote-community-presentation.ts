@@ -59,6 +59,8 @@ export function departureNote(departure: RoomDeparture | null): string | null {
       return "You were removed from the room. You can try to join again.";
     case "outage":
       return "The connection to the room's server was lost.";
+    case "destroyed":
+      return "The room was closed on its server. Your bookmark is kept until you forget it.";
     default:
       return null;
   }

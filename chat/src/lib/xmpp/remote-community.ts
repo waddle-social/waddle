@@ -37,10 +37,11 @@ const SPACE_BANNER_ITEM = "urn:xmpp:spaces:banner:metadata:0";
 /**
  * Budget for one request to a remote address. The home server keeps a
  * federated request open for 30 seconds and then answers
- * `remote-server-timeout` itself; waiting a little longer lets that
- * definitive answer arrive instead of a local guess.
+ * `remote-server-timeout` itself, which can take up to five seconds more
+ * when the request's expiry is swept on another replica; waiting well past
+ * that lets the definitive answer arrive instead of a local guess.
  */
-const REMOTE_IQ_TIMEOUT_MS = 35_000;
+const REMOTE_IQ_TIMEOUT_MS = 45_000;
 
 /** Most entries a listing shows. */
 const MAX_LISTED = 256;

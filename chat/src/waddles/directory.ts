@@ -2,6 +2,7 @@ import { ref, computed, watch, type Ref } from "vue";
 import type { SpaceSummary, ChannelSummary, GroupDmSummary, MemberSummary, RoomBotSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { RemoteRoomSuggestion, UnavailableRemoteRoom } from "@/lib/xmpp/types";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
 import { defaultCreateForm, defaultCreateFormForContext } from "@/lib/chat-ui";
 import {
@@ -14,8 +15,7 @@ import {
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
 import { fetchRoomFederated } from "@/lib/xmpp/federated-settings";
-import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
-import { isRemoteRoomJid } from "@/lib/xmpp/remote-address";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import { occupantJidDirectory } from "@/lib/avatars/author-jid";
 
 interface LoadSpaceOptions {
@@ -46,6 +46,17 @@ export function useWaddleDirectory(
   const serverRole = ref<SpaceSummary["role"]>(null);
   const mucServiceJid = ref<string | null>(null);
   const spacesServiceJid = ref<string | null>(null);
+  /** The home MUC service as discovered; `null` until a discovery found it. */
+  const homeMucService = ref<string | null>(null);
+  /**
+   * Whether the home server federates (it lists `urn:waddle:s2s:0`). Kept
+   * from the last discovery that could read it.
+   */
+  const federationAvailable = ref(false);
+  /** Rooms on other servers that home Spaces list, offered as suggestions only. */
+  const remoteRoomSuggestions = ref<RemoteRoomSuggestion[]>([]);
+  /** The user's bookmarks of rooms on other servers while the home server does not federate. */
+  const unavailableRemoteRooms = ref<UnavailableRemoteRoom[]>([]);
 
   const activeChannelId: Ref<string | null> = ref(null);
   const selectedSpaceId: Ref<string | null> = ref(null);
@@ -161,19 +172,11 @@ export function useWaddleDirectory(
   );
 
   /**
-   * Whether the selected room is hosted by another server. Its settings
-   * belong to that server: a role on this deployment, or on one of its
-   * Spaces, is no standing in it.
+   * Whether the selected room is hosted by another server, as discovery
+   * placed it. Its settings belong to that server: a role on this
+   * deployment, or on one of its Spaces, is no standing in it.
    */
-  const currentChannelIsRemote = computed(() => {
-    const roomJid = currentChannel.value?.jid;
-    const accountJid = session.value?.jid;
-    if (!roomJid || !accountJid) return false;
-    return isRemoteRoomJid(roomJid, {
-      accountDomain: jidDomain(accountJid),
-      mucService: mucServiceJid.value ?? mucServiceDomain(accountJid),
-    });
-  });
+  const currentChannelIsRemote = computed(() => !!currentChannel.value?.remoteHost);
 
   /** Room settings for the selected room: a channel manager, in a room of this deployment. */
   const canManageCurrentChannel = computed(() =>
@@ -182,6 +185,15 @@ export function useWaddleDirectory(
 
   const canManageMembers = computed(() =>
     ["owner", "admin"].includes(currentRole.value ?? ""),
+  );
+
+  /**
+   * Member controls for the selected room: a member manager, in a room of
+   * this deployment. Who holds what in a room on another server is that
+   * server's to change.
+   */
+  const canManageCurrentMembers = computed(() =>
+    canManageMembers.value && !currentChannelIsRemote.value,
   );
 
   watch(currentSpace, (w) => {
@@ -287,6 +299,12 @@ export function useWaddleDirectory(
       serverRole.value = topology.serverRole ?? null;
       mucServiceJid.value = topology.services?.muc ?? null;
       spacesServiceJid.value = topology.services?.spaces ?? null;
+      if (topology.services?.muc && topology.services.mucDiscovered) {
+        homeMucService.value = topology.services.muc;
+      }
+      if (typeof topology.federation === "boolean") federationAvailable.value = topology.federation;
+      remoteRoomSuggestions.value = topology.remoteRoomSuggestions ?? [];
+      unavailableRemoteRooms.value = topology.unavailableRemoteRooms ?? [];
       const discoveredSpaces = topology.spaces.map((space) => ({
         id: space.id,
         ...(space.serviceJid ? { serviceJid: space.serviceJid } : {}),
@@ -310,6 +328,7 @@ export function useWaddleDirectory(
         // non-owners get correct Pin action visibility without owner
         // affiliation.
         ...(c.pinPermission ? { pinPermission: c.pinPermission } : {}),
+        ...(c.remoteHost ? { remoteHost: c.remoteHost } : {}),
       }));
 
       const channelList = allRooms.filter((channel) => !channel.isGroupDm);
@@ -731,6 +750,10 @@ export function useWaddleDirectory(
     serverRole.value = null;
     mucServiceJid.value = null;
     spacesServiceJid.value = null;
+    homeMucService.value = null;
+    federationAvailable.value = false;
+    remoteRoomSuggestions.value = [];
+    unavailableRemoteRooms.value = [];
     activeChannelId.value = null;
     selectedSpaceId.value = null;
     hasLoadedStructure.value = false;
@@ -752,6 +775,10 @@ export function useWaddleDirectory(
     serverRole,
     mucServiceJid,
     spacesServiceJid,
+    homeMucService,
+    federationAvailable,
+    remoteRoomSuggestions,
+    unavailableRemoteRooms,
     activeSpaceId,
     activeChannelId,
     isLoadingStructure,
@@ -773,6 +800,7 @@ export function useWaddleDirectory(
     currentChannelIsRemote,
     loadChannelFederation,
     canManageMembers,
+    canManageCurrentMembers,
     loadSpace,
     loadStructure,
     reloadChannelMembers,

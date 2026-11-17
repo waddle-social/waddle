@@ -5,6 +5,7 @@ import AppDialog from "@/components/ui/AppDialog.vue";
 import { describeRemoteFailure } from "@/lib/xmpp/remote-outcome";
 import { communityAddressDomain, spaceNodeIri } from "@/lib/xmpp/remote-address";
 import type { RemoteDirectoryEntry } from "@/lib/xmpp/remote-community";
+import type { RemoteRoomSuggestion } from "@/lib/xmpp/types";
 import { roomActions, spaceActions } from "@/lib/xmpp/remote-membership";
 import type { RemoteCommunities, RemoteRoomEntry, RemoteSpaceEntry } from "@/waddles/remote-communities";
 import {
@@ -20,6 +21,10 @@ const open = defineModel<boolean>("open", { required: true });
 
 const props = defineProps<{
   remote: RemoteCommunities;
+  /** Rooms on other servers that the user's home Spaces list. */
+  suggestions?: readonly RemoteRoomSuggestion[];
+  /** The home Spaces, to name the Space a suggestion comes from. */
+  homeSpaces?: readonly { id: string; name: string }[];
 }>();
 
 const address = ref("");
@@ -50,6 +55,25 @@ function submitLookup() {
 function lookUpAddress(value: string) {
   address.value = value;
   void props.remote.lookUp(value);
+}
+
+/**
+ * A room a Space lists is joined only after the user looked it up on its
+ * own host; a room already in the user's list opens or joins directly.
+ */
+function spaceRoomAction(roomJid: string, name: string | null) {
+  const known = knownRoom(roomJid);
+  if (known?.joined || known?.bookmarked) {
+    void props.remote.joinAndOpenRoom(roomJid, name ?? known.name);
+    return;
+  }
+  lookUpAddress(roomJid);
+}
+
+function spaceRoomActionLabel(roomJid: string): string {
+  const known = knownRoom(roomJid);
+  if (known?.joined) return "Open";
+  return known?.bookmarked ? "Join" : "Look up";
 }
 
 function roomStatus(room: RemoteRoomEntry): StatusLine | null {
@@ -117,6 +141,25 @@ function directoryEntryAddress(entry: RemoteDirectoryEntry): string {
 
 function directoryEntryKey(entry: RemoteDirectoryEntry): string {
   return `${entry.kind}:${directoryEntryAddress(entry)}`;
+}
+
+/**
+ * Rooms on other servers that home Spaces list and that the user has not
+ * bookmarked. A Space's listing is its publisher's claim: each is looked up
+ * on its own host before it can be joined.
+ */
+const roomSuggestions = computed(() => {
+  const known = new Set(rooms.value.map((room) => room.roomJid));
+  const seen = new Set<string>();
+  return (props.suggestions ?? []).filter((suggestion) => {
+    if (known.has(suggestion.roomJid) || seen.has(suggestion.roomJid)) return false;
+    seen.add(suggestion.roomJid);
+    return true;
+  });
+});
+
+function suggestionSpaceName(spaceId: string): string {
+  return props.homeSpaces?.find((space) => space.id === spaceId)?.name ?? spaceId;
 }
 
 function directoryEntryTitle(entry: RemoteDirectoryEntry): string {
@@ -277,10 +320,11 @@ function directoryEntryTitle(entry: RemoteDirectoryEntry): string {
                 <button
                   class="chat-action-button chat-action-button--secondary type-control"
                   type="button"
+                  :title="knownRoom(room.roomJid) ? undefined : 'Ask the room\'s own server about it before joining'"
                   :disabled="knownRoom(room.roomJid)?.status.state === 'working'"
-                  @click="props.remote.joinAndOpenRoom(room.roomJid, room.name)"
+                  @click="spaceRoomAction(room.roomJid, room.name)"
                 >
-                  {{ knownRoom(room.roomJid)?.joined ? "Open" : "Join" }}
+                  {{ spaceRoomActionLabel(room.roomJid) }}
                 </button>
               </li>
             </ul>
@@ -403,14 +447,46 @@ function directoryEntryTitle(entry: RemoteDirectoryEntry): string {
               <button
                 class="chat-action-button chat-action-button--secondary type-control"
                 type="button"
+                :title="knownRoom(room.roomJid) ? undefined : 'Ask the room\'s own server about it before joining'"
                 :disabled="knownRoom(room.roomJid)?.status.state === 'working'"
-                @click="props.remote.joinAndOpenRoom(room.roomJid, room.name)"
+                @click="spaceRoomAction(room.roomJid, room.name)"
               >
-                {{ knownRoom(room.roomJid)?.joined ? "Open" : "Join" }}
+                {{ spaceRoomActionLabel(room.roomJid) }}
               </button>
             </li>
           </ul>
         </article>
+      </section>
+
+      <!-- Rooms on other servers that home Spaces list: suggestions only -->
+      <section v-if="roomSuggestions.length > 0" class="grid gap-2" aria-label="Suggested by your Spaces">
+        <h3 class="type-section-label text-muted-foreground">Suggested by your Spaces</h3>
+        <p class="type-caption text-muted-foreground">
+          These rooms are on other servers. A Space listing them is not their server's word: look each up
+          before you join.
+        </p>
+        <ul class="grid gap-1">
+          <li
+            v-for="suggestion in roomSuggestions"
+            :key="suggestion.roomJid"
+            class="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-1.5"
+          >
+            <div class="min-w-0 flex-1">
+              <div class="type-control truncate">{{ suggestion.name ?? suggestion.roomJid }}</div>
+              <div class="type-meta text-muted-foreground truncate">
+                {{ suggestion.roomJid }} · listed in {{ suggestionSpaceName(suggestion.spaceId) }}
+              </div>
+            </div>
+            <button
+              class="chat-action-button chat-action-button--secondary type-control"
+              type="button"
+              @click="lookUpAddress(suggestion.roomJid)"
+            >
+              <Search class="h-3.5 w-3.5" aria-hidden="true" />
+              Look up
+            </button>
+          </li>
+        </ul>
       </section>
 
       <!-- Rooms the user bookmarked or joined -->
@@ -453,8 +529,8 @@ function directoryEntryTitle(entry: RemoteDirectoryEntry): string {
                   v-else
                   class="chat-action-button type-control text-destructive-text hover:bg-destructive/10"
                   type="button"
-                  :disabled="room.status.state === 'working'"
-                  title="Remove the room's bookmark on every device. Your access to the room is not changed."
+                  :disabled="room.status.state === 'working' || room.joining"
+                  :title="room.joining ? 'A join of this room is under way.' : 'Remove the room\'s bookmark on every device. Your access to the room is not changed.'"
                   @click="props.remote.forgetRoom(room.roomJid)"
                 >Forget</button>
               </template>

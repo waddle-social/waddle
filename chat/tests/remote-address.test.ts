@@ -7,6 +7,7 @@ import {
   isRemoteRoomJid,
   parseCommunityAddress,
   parseSpaceNodeIri,
+  roomHost,
   spaceNodeIri,
 } from "../src/lib/xmpp/remote-address";
 import { channelIdForRoom } from "../src/lib/xmpp/discovery";
@@ -110,6 +111,17 @@ describe("home and remote addresses", () => {
   test("a room is remote when its service is not one of the home's", () => {
     expect(isRemoteRoomJid("general@muc.home.test", HOME)).toBe(false);
     expect(isRemoteRoomJid("general@muc.other.test", HOME)).toBe(true);
+  });
+
+  test("until the home MUC service is discovered no room is remote, and none is guessed home", () => {
+    const undiscovered = { accountDomain: "home.test", mucService: null, spacesService: "spaces.home.test" };
+    expect(roomHost("general@muc.other.test", undiscovered)).toBe("unknown");
+    // `muc.<domain>` is not assumed to be the home service.
+    expect(roomHost("general@muc.home.test", undiscovered)).toBe("unknown");
+    expect(isRemoteRoomJid("general@muc.other.test", undiscovered)).toBe(false);
+    expect(roomHost("general@muc.home.test", HOME)).toBe("home");
+    expect(roomHost("general@muc.other.test", HOME)).toBe("remote");
+    expect(roomHost("not a jid", HOME)).toBe("unknown");
   });
 });
 

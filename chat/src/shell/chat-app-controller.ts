@@ -178,7 +178,7 @@ export function useChatAppController() {
     waddles.activeSpaceId,
     waddles.activeChannelId,
     waddles.members,
-    waddles.canManageMembers,
+    waddles.canManageCurrentMembers,
     ui.normalizeError,
     ui.actionError,
     ui.clearActionError,
@@ -260,10 +260,12 @@ export function useChatAppController() {
       if (!jid) return null;
       return {
         accountDomain: jidDomain(jid),
-        mucService: waddles.mucServiceJid.value,
+        // Only a discovered MUC service tells home rooms from remote ones.
+        mucService: waddles.homeMucService.value,
         spacesService: waddles.spacesServiceJid.value,
       };
     }),
+    federation: waddles.federationAvailable,
     reloadRooms: () => {
       const activeChannelId = waddles.activeChannelId.value;
       return activeChannelId

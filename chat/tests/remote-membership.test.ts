@@ -84,4 +84,9 @@ describe("own departures", () => {
     expect(classifyOwnDeparture([110, 307])).toBe("kicked");
     expect(classifyOwnDeparture([110])).toBe("left");
   });
+
+  test("a destroyed room is gone, whatever status codes come with it", () => {
+    expect(classifyOwnDeparture([], { destroyed: true })).toBe("destroyed");
+    expect(classifyOwnDeparture([110, 333], { destroyed: true })).toBe("destroyed");
+  });
 });

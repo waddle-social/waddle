@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { discoverTopology } from "../src/lib/xmpp/discovery";
+import { discoverTopology, HOME_FEDERATION_FEATURE } from "../src/lib/xmpp/discovery";
 import { discoInfoXml, discoItemsXml, pubsubItemsXml, withFakeDomParser } from "./helpers/disco-xml";
 
 type Bookmark = { id: string; name?: string; autojoin?: boolean };
@@ -8,8 +8,14 @@ type Bookmark = { id: string; name?: string; autojoin?: boolean };
 function topologyClient(options: {
   rooms: Array<{ jid: string; name?: string }>;
   userBookmarks?: Bookmark[];
+  /** Items of the home Space `space-engineering`. */
+  spaceItems?: Bookmark[];
   parents?: Record<string, string>;
   serverItemsFail?: boolean;
+  /** The home server lists the federation feature (default: it does). */
+  federation?: boolean;
+  /** The home server's own disco#info fails. */
+  serverInfoFails?: boolean;
 }) {
   const sent: string[] = [];
   const client = {
@@ -58,11 +64,17 @@ function topologyClient(options: {
             features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
           });
         }
-        if (xml.includes("remote.test")) throw new Error(`no request to a remote room was expected: ${xml}`);
-        return discoInfoXml({ identities: [{ category: "server", type: "im" }] });
+        if (xml.includes("remote.test") || xml.includes("evil.test")) {
+          throw new Error(`no request to a remote room was expected: ${xml}`);
+        }
+        if (options.serverInfoFails) throw new Error("server info unavailable");
+        return discoInfoXml({
+          identities: [{ category: "server", type: "im" }],
+          features: options.federation === false ? [] : [HOME_FEDERATION_FEATURE],
+        });
       }
       if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
-        return pubsubItemsXml(xml.includes('to="spaces.example.test"') ? [] : options.userBookmarks ?? []);
+        return pubsubItemsXml(xml.includes('to="spaces.example.test"') ? options.spaceItems ?? [] : options.userBookmarks ?? []);
       }
       throw new Error(`Unexpected IQ: ${xml}`);
     },
@@ -106,6 +118,37 @@ describe("rooms on other servers in the room list", () => {
     });
   });
 
+  test("a bookmarked remote room is not listed or joined while the home server does not federate", async () => {
+    await withFakeDomParser(async () => {
+      const { client } = topologyClient({
+        rooms: [{ jid: "general@muc.example.test", name: "General" }],
+        userBookmarks: [{ id: "general@muc.remote.test", name: "Their general", autojoin: true }],
+        federation: false,
+      });
+      const topology = await discoverTopology(client, "alice@example.test");
+      expect(topology.federation).toBe(false);
+      expect(topology.rooms.some((room) => room.jid === "general@muc.remote.test")).toBe(false);
+      expect(topology.unavailableRemoteRooms).toEqual([{ roomJid: "general@muc.remote.test", name: "Their general" }]);
+      expect(topology.rooms.find((room) => room.jid === "general@muc.example.test")).toBeDefined();
+    });
+  });
+
+  test("an unreadable home disco#info keeps the federation answer of the last discovery", async () => {
+    await withFakeDomParser(async () => {
+      const userBookmarks = [{ id: "general@muc.remote.test", name: "Their general", autojoin: true }];
+      const unknown = await discoverTopology(topologyClient({ rooms: [], userBookmarks, serverInfoFails: true }).client, "alice@example.test");
+      expect(unknown.federation).toBeNull();
+      expect(unknown.unavailableRemoteRooms).toHaveLength(1);
+
+      const remembered = await discoverTopology(
+        topologyClient({ rooms: [], userBookmarks, serverInfoFails: true }).client,
+        "alice@example.test",
+        { lastKnownFederation: true },
+      );
+      expect(remembered.rooms.some((room) => room.jid === "general@muc.remote.test")).toBe(true);
+    });
+  });
+
   test("a parent Space on another service is not taken for the home Space of the same name", async () => {
     await withFakeDomParser(async () => {
       const { client } = topologyClient({
@@ -122,6 +165,69 @@ describe("rooms on other servers in the room list", () => {
 
       expect(topology.rooms.find((room) => room.jid === "claims-remote@muc.example.test")?.spaceId).toBeUndefined();
       expect(topology.rooms.find((room) => room.jid === "claims-home@muc.example.test")?.spaceId).toBe("space-engineering");
+    });
+  });
+});
+
+describe("home Spaces listing rooms on other servers", () => {
+  test("a Space item naming a remote room is a suggestion only: not listed, not in the Space, never joined", async () => {
+    await withFakeDomParser(async () => {
+      const { client, sent } = topologyClient({
+        rooms: [{ jid: "general@muc.example.test", name: "General" }],
+        spaceItems: [
+          { id: "general@muc.example.test", name: "General", autojoin: true },
+          { id: "lobby@chat.evil.test", name: "Lobby", autojoin: true },
+        ],
+      });
+      const topology = await discoverTopology(client, "alice@example.test");
+
+      expect(topology.rooms.some((room) => room.jid === "lobby@chat.evil.test")).toBe(false);
+      expect(topology.rooms.every((room) => room.autojoin === false || !room.jid?.endsWith("evil.test"))).toBe(true);
+      expect(topology.remoteRoomSuggestions).toEqual([
+        { spaceId: "space-engineering", roomJid: "lobby@chat.evil.test", name: "Lobby" },
+      ]);
+      // The home room of the same Space keeps its place and autojoin.
+      expect(topology.rooms.find((room) => room.jid === "general@muc.example.test")).toMatchObject({
+        spaceId: "space-engineering",
+        autojoin: true,
+      });
+      // Nothing is asked of the remote room's server.
+      expect(sent.some((xml) => xml.includes("evil.test"))).toBe(false);
+    });
+  });
+
+  test("the user's own bookmark lists a Space-named remote room on its own, outside the Space", async () => {
+    await withFakeDomParser(async () => {
+      const { client } = topologyClient({
+        rooms: [],
+        spaceItems: [{ id: "dev@chat.remote.test", name: "Dev", autojoin: true }],
+        userBookmarks: [{ id: "dev@chat.remote.test", name: "Dev", autojoin: false }],
+      });
+      const topology = await discoverTopology(client, "alice@example.test");
+      const remote = topology.rooms.find((room) => room.jid === "dev@chat.remote.test");
+      expect(remote).toMatchObject({ autojoin: false, standalone: true, remoteHost: "chat.remote.test" });
+      expect(remote?.spaceId).toBeUndefined();
+    });
+  });
+
+  test("while the home MUC service is unknown a Space item is placed only by the home catalog", async () => {
+    await withFakeDomParser(async () => {
+      const { client } = topologyClient({
+        rooms: [{ jid: "general@muc.example.test", name: "General" }],
+        serverItemsFail: true,
+        spaceItems: [
+          { id: "general@muc.example.test", name: "General", autojoin: true },
+          { id: "lobby@chat.evil.test", name: "Lobby", autojoin: true },
+        ],
+      });
+      const topology = await discoverTopology(client, "alice@example.test");
+      expect(topology.services?.mucDiscovered).toBe(false);
+      expect(topology.rooms.find((room) => room.jid === "general@muc.example.test")?.spaceId).toBe("space-engineering");
+      expect(topology.rooms.some((room) => room.jid === "lobby@chat.evil.test")).toBe(false);
+      // It cannot be placed yet, so it is neither a suggestion nor authoritatively absent.
+      expect(topology.remoteRoomSuggestions).toEqual([]);
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.roomReconciliationAuthority.absentRoomKeysAuthoritative).toBe(false);
     });
   });
 });

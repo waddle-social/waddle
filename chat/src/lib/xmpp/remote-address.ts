@@ -34,12 +34,29 @@ export type ParsedCommunityAddress =
   | { ok: true; address: CommunityAddress }
   | { ok: false; error: CommunityAddressError };
 
-/** The home deployment's own addresses: its account domain and the services it discovered. */
+/**
+ * The home deployment's own addresses: its account domain and the services
+ * it discovered. `mucService` is set only once the home MUC service was
+ * discovered; a conventional name such as `muc.<domain>` is never put here,
+ * since it may name another server.
+ */
 export interface HomeAddresses {
   accountDomain: string;
   mucService?: string | null;
   spacesService?: string | null;
 }
+
+/**
+ * Where a room is hosted, as far as the home deployment's discovered
+ * services tell:
+ * - `home`: on the account domain or a discovered home service;
+ * - `remote`: anywhere else, once the home MUC service is known;
+ * - `unknown`: anywhere else while the home MUC service is not yet
+ *   discovered. Callers decide what waiting means for them: timers and
+ *   copy treat it as home, while nothing that grants a room a place in a
+ *   home Space or joins it on someone else's word treats it as either.
+ */
+export type RoomHost = "home" | "remote" | "unknown";
 
 const NON_ASCII = /[^\u0000-\u007f]/;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -175,10 +192,25 @@ export function isHomeDomain(domain: string, home: HomeAddresses): boolean {
     .some((candidate) => !!candidate && canonicalDomain(domainOf(candidate)) === canonical);
 }
 
-/** Whether a room JID is hosted by a server other than the home deployment. */
-export function isRemoteRoomJid(roomJid: string, home: HomeAddresses): boolean {
+/** Where a room JID is hosted; see {@link RoomHost}. */
+export function roomHost(roomJid: string, home: HomeAddresses): RoomHost {
   const domain = domainOf(roomJid);
-  return !!domain && !isHomeDomain(domain, home);
+  if (!canonicalDomain(domain)) return "unknown";
+  if (isHomeDomain(domain, home)) return "home";
+  return home.mucService && canonicalDomain(domainOf(home.mucService)) ? "remote" : "unknown";
+}
+
+/**
+ * Whether a room JID is known to be hosted by a server other than the home
+ * deployment. False while the home MUC service is not discovered.
+ */
+export function isRemoteRoomJid(roomJid: string, home: HomeAddresses): boolean {
+  return roomHost(roomJid, home) === "remote";
+}
+
+/** The canonical domain of a room's host, or `null` when the JID names none. */
+export function roomHostDomain(roomJid: string): string | null {
+  return canonicalDomain(domainOf(roomJid));
 }
 
 function domainOf(jid: string): string {

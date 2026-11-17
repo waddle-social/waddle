@@ -4,7 +4,13 @@ import { useRemoteCommunities } from "../src/waddles/remote-communities";
 import { RoomJoinError } from "../src/lib/xmpp/room-join-error";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { JoinedSpacePreference, JoinedSpaceStore } from "../src/lib/xmpp/joined-spaces";
+import {
+  joinedSpaceKey,
+  type JoinedSpacePreference,
+  type JoinedSpaceStore,
+  type SpaceUnfollowIntent,
+  type SpaceUnfollowIntentStore,
+} from "../src/lib/xmpp/joined-spaces";
 import { discoInfoXml, withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
 
 const ROOM = "dev@chat.remote.test";
@@ -36,25 +42,60 @@ function manualTimer() {
 }
 
 function memoryStore(initial: JoinedSpacePreference[] = []) {
-  const state = { preferences: [...initial], saves: 0 };
+  const state = { preferences: [...initial], saves: 0, failWrites: false };
   const store: JoinedSpaceStore = {
     async load() { return [...state.preferences]; },
-    async save(preferences) { state.saves += 1; state.preferences = [...preferences]; },
+    async put(preference) {
+      if (state.failWrites) throw stanzaError("internal-server-error", "wait");
+      state.saves += 1;
+      const key = joinedSpaceKey(preference);
+      const index = state.preferences.findIndex((candidate) => joinedSpaceKey(candidate) === key);
+      state.preferences = index < 0
+        ? [...state.preferences, preference]
+        : state.preferences.map((candidate, position) => (position === index ? preference : candidate));
+    },
+    async remove(preference) {
+      if (state.failWrites) throw stanzaError("internal-server-error", "wait");
+      state.saves += 1;
+      const key = joinedSpaceKey(preference);
+      state.preferences = state.preferences.filter((candidate) => joinedSpaceKey(candidate) !== key);
+    },
   };
   return { state, store };
 }
 
-function fakeClient(options: { joinErrors?: Error[]; bookmarks?: Array<{ jid: string; name: string | null; autojoin: boolean }> } = {}) {
+function memoryIntents(initial: SpaceUnfollowIntent[] = []) {
+  const state = { intents: [...initial] };
+  const store: SpaceUnfollowIntentStore = {
+    load: () => [...state.intents],
+    save: (intents) => { state.intents = [...intents]; },
+  };
+  return { state, store };
+}
+
+type Departure = (roomJid: string, codes: readonly number[], details?: { destroyed: boolean }) => void;
+
+function fakeClient(options: {
+  joinErrors?: Error[];
+  bookmarks?: Array<{ jid: string; name: string | null; autojoin: boolean }>;
+  /** Fail every request whose XML contains this text with this error. */
+  failRequests?: { match: string; error: Error };
+  /** Joins wait until released. */
+  holdJoins?: boolean;
+} = {}) {
   const sent: string[] = [];
   const joined: string[] = [];
   const left: string[] = [];
-  const departures: Array<(roomJid: string, codes: readonly number[]) => void> = [];
+  const departures: Departure[] = [];
   const joinFailures: Array<(roomJid: string, error: RoomJoinError) => void> = [];
+  const joinStarts: Array<(roomJid: string) => void> = [];
   const nicks: Array<(roomJid: string, nick: string | null) => void> = [];
   const joinErrors = [...(options.joinErrors ?? [])];
+  const heldJoins: Array<() => void> = [];
   const agent = {
     async send_raw_iq(xml: string): Promise<string> {
       sent.push(xml);
+      if (options.failRequests && xml.includes(options.failRequests.match)) throw options.failRequests.error;
       if (xml.includes('node="urn:xmpp:bookmarks:1"') && xml.includes('type="get"')) throw stanzaError("item-not-found");
       if (xml.includes("disco#info")) {
         return discoInfoXml({
@@ -72,19 +113,25 @@ function fakeClient(options: { joinErrors?: Error[]; bookmarks?: Array<{ jid: st
     agent,
     async ensureJoined(roomJid: string) {
       joined.push(roomJid);
+      for (const handler of joinStarts) handler(roomJid);
+      if (options.holdJoins) await new Promise<void>((resolve) => { heldJoins.push(resolve); });
       const error = joinErrors.shift();
       if (error) throw error;
       for (const handler of nicks) handler(roomJid, "alice");
     },
     async leaveRoom(roomJid: string) {
       left.push(roomJid);
-      for (const handler of departures) handler(roomJid, [110]);
+      for (const handler of departures) handler(roomJid, [110], { destroyed: false });
     },
     async fetchUserBookmarks() {
       return (options.bookmarks ?? []).map((bookmark) => ({ ...bookmark, notifyMode: null, richPayloadOptIn: false }));
     },
-    onOwnRoomDeparture(handler: (roomJid: string, codes: readonly number[]) => void) {
+    onOwnRoomDeparture(handler: Departure) {
       departures.push(handler);
+      return () => undefined;
+    },
+    onRoomJoinStarted(handler: (roomJid: string) => void) {
+      joinStarts.push(handler);
       return () => undefined;
     },
     onRoomJoinFailed(handler: (roomJid: string, error: RoomJoinError) => void) {
@@ -101,25 +148,41 @@ function fakeClient(options: { joinErrors?: Error[]; bookmarks?: Array<{ jid: st
     sent,
     joined,
     left,
-    depart: (roomJid: string, codes: number[]) => { for (const handler of departures) handler(roomJid, codes); },
+    depart: (roomJid: string, codes: number[], destroyed = false) => {
+      for (const handler of departures) handler(roomJid, codes, { destroyed });
+    },
     failJoin: (roomJid: string, error: RoomJoinError) => { for (const handler of joinFailures) handler(roomJid, error); },
+    releaseJoins: () => { for (const release of heldJoins.splice(0)) release(); },
+    startJoin: (roomJid: string) => { for (const handler of joinStarts) handler(roomJid); },
   };
 }
 
+async function settle(): Promise<void> {
+  for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function setup(
-  options: Parameters<typeof fakeClient>[0] & { roomListed?: boolean } = {},
+  options: Parameters<typeof fakeClient>[0] & {
+    roomListed?: boolean;
+    federation?: boolean;
+    intents?: SpaceUnfollowIntent[];
+    home?: typeof HOME;
+  } = {},
   preferences: JoinedSpacePreference[] = [],
 ) {
   const fake = fakeClient(options);
   const timer = manualTimer();
   const memory = memoryStore(preferences);
+  const intents = memoryIntents(options.intents);
+  const federation = ref(options.federation ?? true);
   const opened: string[] = [];
   const closed: string[] = [];
   let reloads = 0;
   const remote = useRemoteCommunities({
     xmppClient: shallowRef<BrowserXmppClient | null>(fake.client),
     session: ref({ jid: "alice@home.test" } as WaddleSession),
-    home: computed(() => HOME),
+    home: computed(() => options.home ?? HOME),
+    federation,
     reloadRooms: async () => { reloads += 1; },
     openRoom: async (roomJid) => {
       if (options.roomListed === false) return false;
@@ -128,10 +191,12 @@ function setup(
     },
     closeRoom: (roomJid) => { closed.push(roomJid); },
     createStore: () => memory.store,
+    createIntentStore: () => intents.store,
     timer: timer.timer,
     now: () => 0,
+    random: () => 0.5,
   });
-  return { remote, fake, timer, memory, opened, closed, reloads: () => reloads };
+  return { remote, fake, timer, memory, intents, federation, opened, closed, reloads: () => reloads };
 }
 
 function roomEntry(remote: ReturnType<typeof setup>["remote"], roomJid = ROOM) {
@@ -324,7 +389,7 @@ describe("following, unfollowing and forgetting Spaces", () => {
 
       await remote.unsubscribeSpace(key);
       expect(fake.sent.some((xml) => xml.includes('<unsubscribe node="eng" jid="alice@home.test">'))).toBe(true);
-      expect(memory.state.preferences).toEqual([{ serviceJid: "spaces.remote.test", node: "eng", follow: false }]);
+      expect(memory.state.preferences).toMatchObject([{ serviceJid: "spaces.remote.test", node: "eng", follow: false }]);
       expect(remote.spaces.value[0]).toMatchObject({ listed: true, following: false });
 
       await remote.forgetSpace(key);
@@ -360,6 +425,198 @@ describe("looking up an address", () => {
       await remote.lookUp("room@127.0.0.1");
       expect(remote.lookup.value).toEqual({ state: "invalid", error: "refused-domain" });
       expect(fake.sent).toHaveLength(0);
+    });
+  });
+});
+
+describe("rejoining after an outage", () => {
+  test("a lost stream after the user left is no reason to join again", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer } = setup();
+      await remote.joinRoom(ROOM);
+      await remote.leaveRoom(ROOM);
+      timer.pending.length = 0;
+      fake.depart(ROOM, [110, 333]);
+      expect(timer.pending).toHaveLength(0);
+      expect(fake.joined).toEqual([ROOM]);
+      expect(roomEntry(remote)?.departure).toBe("outage");
+    });
+  });
+
+  test("a room that was not joined is not joined because of an outage", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer } = setup({ bookmarks: [{ jid: ROOM, name: "Developers", autojoin: false }] });
+      await remote.load();
+      fake.depart(ROOM, [110, 332]);
+      expect(timer.pending).toHaveLength(0);
+      expect(fake.joined).toEqual([]);
+    });
+  });
+
+  test("a destroyed room is shown as gone and never joined again", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer } = setup();
+      await remote.joinRoom(ROOM);
+      fake.depart(ROOM, [], true);
+      expect(roomEntry(remote)).toMatchObject({
+        departure: "destroyed",
+        joined: false,
+        status: { state: "failed", failure: { kind: "deletion", retry: "none" } },
+      });
+      expect(timer.pending).toHaveLength(0);
+    });
+  });
+});
+
+describe("one room, several user actions", () => {
+  test("Forget is refused while a join of the room is under way, whoever started it", async () => {
+    await withXml(async () => {
+      const { remote, fake } = setup({ bookmarks: [{ jid: ROOM, name: "Developers", autojoin: true }] });
+      await remote.load();
+      // A sign-in autojoin of the room, started by the client.
+      fake.startJoin(ROOM);
+      expect(roomEntry(remote)?.joining).toBe(true);
+      fake.sent.length = 0;
+      await remote.forgetRoom(ROOM);
+      expect(fake.sent.some((xml) => xml.includes("<retract "))).toBe(false);
+
+      fake.failJoin(ROOM, new RoomJoinError("no", { roomJid: ROOM, condition: "forbidden", errorType: "auth" }));
+      expect(roomEntry(remote)?.joining).toBe(false);
+      await remote.forgetRoom(ROOM);
+      expect(fake.sent.some((xml) => xml.includes("<retract "))).toBe(true);
+    });
+  });
+
+  test("a Leave chosen while the join was under way wins: the join does not turn autojoin on", async () => {
+    await withXml(async () => {
+      const { remote, fake } = setup({ holdJoins: true });
+      const join = remote.joinRoom(ROOM, "Developers");
+      await settle();
+      const leave = remote.leaveRoom(ROOM);
+      fake.releaseJoins();
+      await Promise.all([join, leave]);
+      const publishes = fake.sent.filter((xml) => xml.includes("<publish "));
+      expect(publishes.some((xml) => xml.includes('autojoin="true"'))).toBe(false);
+    });
+  });
+});
+
+describe("unfollowing when the host cannot confirm it", () => {
+  test("an outage unfollows here, keeps the unsubscribe on this device, and lets the Space be forgotten", async () => {
+    await withXml(async () => {
+      const { remote, memory, intents } = setup(
+        { failRequests: { match: "<unsubscribe ", error: stanzaError("remote-server-timeout", "wait") } },
+        [{ serviceJid: "spaces.remote.test", node: "eng", follow: true }],
+      );
+      await remote.load();
+      await settle();
+      const key = remote.spaces.value[0]!.key;
+      await remote.unsubscribeSpace(key);
+      expect(remote.spaces.value[0]).toMatchObject({ following: false });
+      expect(remote.spaces.value[0]!.note).toContain("next sign-in");
+      expect(intents.state.intents).toEqual([
+        { serviceJid: "spaces.remote.test", node: "eng", remoteDone: false, preferenceDone: true },
+      ]);
+      expect(memory.state.preferences).toMatchObject([{ follow: false }]);
+
+      await remote.forgetSpace(key);
+      expect(memory.state.preferences).toEqual([]);
+      // The unsubscribe still waits to be told to the host.
+      expect(intents.state.intents).toMatchObject([{ remoteDone: false }]);
+    });
+  });
+
+  test("an unfollow whose list entry could not be written is not undone by the next sign-in", async () => {
+    await withXml(async () => {
+      const first = setup({}, [{ serviceJid: "spaces.remote.test", node: "eng", follow: true }]);
+      await first.remote.load();
+      await settle();
+      first.memory.state.failWrites = true;
+      await first.remote.unsubscribeSpace(first.remote.spaces.value[0]!.key);
+      expect(first.intents.state.intents).toMatchObject([{ remoteDone: true, preferenceDone: false }]);
+      // The list still says to follow.
+      expect(first.memory.state.preferences).toMatchObject([{ follow: true }]);
+
+      const next = setup({ intents: first.intents.state.intents }, first.memory.state.preferences);
+      await settle();
+      for (const entry of [...next.timer.pending]) entry.callback();
+      next.timer.pending.length = 0;
+      await settle();
+      expect(next.fake.sent.some((xml) => xml.includes("<subscribe "))).toBe(false);
+      expect(next.remote.spaces.value[0]).toMatchObject({ following: false });
+      // The list entry is written at that sign-in, which settles the record.
+      expect(next.memory.state.preferences).toMatchObject([{ follow: false }]);
+      expect(next.intents.state.intents).toEqual([]);
+    });
+  });
+});
+
+describe("renewing followed Spaces at sign-in", () => {
+  test("each followed Space is renewed once, spread out, and only while the home server federates", async () => {
+    await withXml(async () => {
+      const preferences = [
+        { serviceJid: "spaces.remote.test", node: "eng", follow: true },
+        { serviceJid: "spaces.remote.test", node: "ops", follow: true },
+        { serviceJid: "spaces.remote.test", node: "old", follow: false },
+      ];
+      const { fake, timer, federation, remote } = setup({ federation: false }, preferences);
+      await settle();
+      expect(timer.pending).toHaveLength(0);
+      expect(fake.sent).toHaveLength(0);
+
+      federation.value = true;
+      await settle();
+      expect(timer.pending.map((entry) => entry.delayMs)).toEqual([1_500, 4_500]);
+      for (const entry of timer.pending.splice(0)) entry.callback();
+      await settle();
+      const subscribes = fake.sent.filter((xml) => xml.includes("<subscribe "));
+      expect(subscribes).toHaveLength(2);
+      expect(subscribes.some((xml) => xml.includes('node="old"'))).toBe(false);
+
+      // Opening the dialog reads content; it does not subscribe again.
+      fake.sent.length = 0;
+      await remote.load();
+      await settle();
+      expect(fake.sent.some((xml) => xml.includes("<subscribe "))).toBe(false);
+    });
+  });
+
+  test("a denial is shown and not retried; an outage is retried with backoff", async () => {
+    await withXml(async () => {
+      const denied = setup(
+        { failRequests: { match: "<subscribe ", error: stanzaError("forbidden", "auth") } },
+        [{ serviceJid: "spaces.remote.test", node: "eng", follow: true }],
+      );
+      await settle();
+      for (const entry of denied.timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(denied.remote.spaces.value[0]?.status).toMatchObject({ state: "failed", failure: { kind: "denial" }, retryAt: null });
+      expect(denied.timer.pending).toHaveLength(0);
+
+      const down = setup(
+        { failRequests: { match: "<subscribe ", error: stanzaError("remote-server-timeout", "wait") } },
+        [{ serviceJid: "spaces.remote.test", node: "eng", follow: true }],
+      );
+      await settle();
+      for (const entry of down.timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(down.remote.spaces.value[0]?.status).toMatchObject({ state: "failed", failure: { kind: "outage" } });
+      expect(down.timer.pending).toHaveLength(1);
+    });
+  });
+});
+
+describe("while the home MUC service is not discovered", () => {
+  test("no room is taken for a remote one, so no entry is made", async () => {
+    await withXml(async () => {
+      const { remote, fake } = setup({
+        home: { ...HOME, mucService: null as unknown as string },
+        bookmarks: [{ jid: ROOM, name: "Developers", autojoin: true }],
+      });
+      await remote.load();
+      fake.failJoin(ROOM, new RoomJoinError("slow", { roomJid: ROOM, timedOut: true }));
+      fake.depart(ROOM, [110, 333]);
+      expect(remote.rooms.value).toHaveLength(0);
     });
   });
 });

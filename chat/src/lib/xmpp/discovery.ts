@@ -6,12 +6,23 @@ import type {
   DiscoveredChannel,
   DiscoveredSpace,
   DiscoveredTopology,
+  RemoteRoomSuggestion,
   RoomCatalogFingerprintField,
+  UnavailableRemoteRoom,
 } from "./types";
 import type { XmppCondition, XmppStreamReason } from "../telemetry-observations";
 import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { qualifiedSpaceKey } from "./qualified-identity";
-import { canonicalDomain, canonicalRoomJid, isRemoteRoomJid, parseSpaceNodeIri } from "./remote-address";
+import {
+  canonicalDomain,
+  canonicalRoomJid,
+  isRemoteRoomJid,
+  parseSpaceNodeIri,
+  roomHost,
+  roomHostDomain,
+  type HomeAddresses,
+  type RoomHost,
+} from "./remote-address";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 import { stanzaErrorContext } from "./stanza-error-context";
 
@@ -505,17 +516,49 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   return hydrated.map((room, position) => ({ id: room.id, jid: room.jid, name: room.name, channelType: room.channelType, position }));
 }
 
-export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
+/**
+ * Feature the home server lists in its domain's `disco#info` while it
+ * federates with other servers. Until it does, nothing on other servers is
+ * offered or joined: rooms the user bookmarked there are listed as
+ * unavailable, and Spaces there are neither read nor renewed.
+ */
+export const HOME_FEDERATION_FEATURE = "urn:waddle:s2s:0";
+
+interface DiscoverTopologyOptions {
+  /**
+   * Whether the home server advertised federation at the last discovery
+   * that could read its `disco#info`; used when this discovery cannot.
+   */
+  lastKnownFederation?: boolean | null;
+}
+
+export async function discoverTopology(
+  xmpp: HybridClient,
+  jid: string,
+  options: DiscoverTopologyOptions = {},
+): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const { services, mucDiscovered } = await discoverComponentServices(xmpp, domain, jid);
+  // Only a discovered MUC service tells home rooms from remote ones: the
+  // conventional name may not be this deployment's service.
+  const home: HomeAddresses = {
+    accountDomain: domain,
+    mucService: mucDiscovered ? services.muc : null,
+    spacesService: services.spaces,
+  };
   let rooms: DiscoveredChannel[] = [];
   let roomCatalogComplete = true;
   let bookmarkCatalogComplete = true;
   let mucCatalogComplete = true;
   let userBookmarksComplete = true;
   const bookmarkedRooms = new Map<string, { spaceId?: string; autojoin: boolean; name?: string }>();
+  const remoteBookmarks = new Map<string, { autojoin: boolean; name?: string }>();
   const spaceBookmarkedRoomJids = new Set<string>();
   const userBookmarkedRoomJids = new Set<string>();
+  const spaceItems: Array<{ spaceId: string; roomJid: string; autojoin: boolean; name?: string }> = [];
+  const userBookmarkItems: Array<{ roomJid: string; autojoin: boolean; name?: string }> = [];
+  const remoteRoomSuggestions: RemoteRoomSuggestion[] = [];
+  const unavailableRemoteRooms: UnavailableRemoteRoom[] = [];
   const spaces: DiscoveredSpace[] = [];
   const seenSpaceKeys = new Set<string>();
   let serverRole: DiscoveryRole = null;
@@ -524,10 +567,12 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   if (serverInfoResult) {
     serverRole = parseDiscoveryRole(serverInfoResult.fields.get("waddle#server_affiliation") ?? null);
   }
+  const advertisedFederation = serverInfoResult ? hasDiscoFeature(serverInfoResult, HOME_FEDERATION_FEATURE) : null;
+  const federation = advertisedFederation ?? options.lastKnownFederation ?? false;
 
   try {
-    const spaceItems = await sendDiscoItems(xmpp, services.spaces);
-    for (const item of spaceItems) {
+    const spaceList = await sendDiscoItems(xmpp, services.spaces);
+    for (const item of spaceList) {
       if (!item.node) continue;
       const spaceId = item.node;
       const spaceKey = qualifiedSpaceKey(services.spaces, item.node);
@@ -546,10 +591,9 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
         const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
         for (const bookmark of bookmarks) {
           if (bookmark.jid) {
-            const roomJid = barePeerJid(bookmark.jid);
-            spaceBookmarkedRoomJids.add(roomJid);
-            bookmarkedRooms.set(roomJid, {
+            spaceItems.push({
               spaceId,
+              roomJid: barePeerJid(bookmark.jid),
               autojoin: bookmark.autojoin ?? false,
               name: bookmark.name,
             });
@@ -571,13 +615,10 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     const userBookmarks = await sendPubsubItems(xmpp, barePeerJid(jid), NS_BOOKMARKS_1);
     for (const bookmark of userBookmarks) {
       if (!bookmark.jid) continue;
-      const roomJid = barePeerJid(bookmark.jid);
-      userBookmarkedRoomJids.add(roomJid);
-      const existing = bookmarkedRooms.get(roomJid);
-      bookmarkedRooms.set(roomJid, {
-        ...existing,
+      userBookmarkItems.push({
+        roomJid: barePeerJid(bookmark.jid),
         autojoin: bookmark.autojoin ?? false,
-        name: bookmark.name ?? existing?.name,
+        name: bookmark.name,
       });
     }
   } catch {
@@ -607,6 +648,61 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     mucCatalogComplete = false;
     void err;
   }
+  const catalogRoomKeys = new Set(
+    mucRooms.flatMap((room) => (room.jid ? [bareJidKey(room.jid)] : [])),
+  );
+  // A room is of this deployment when the home MUC catalog lists it or its
+  // address is on a home service. A Space's say-so is never evidence: any
+  // Space publisher could otherwise make every member's client join a room
+  // on a server of its choosing.
+  const hostOf = (roomJid: string): RoomHost =>
+    catalogRoomKeys.has(bareJidKey(roomJid)) ? "home" : roomHost(roomJid, home);
+
+  // A home Space lists rooms of this deployment. One naming a room
+  // elsewhere is no part of the Space here: it is offered as a suggestion
+  // the user can look up, and is never listed in the Space or joined on
+  // the Space's word. While the home MUC service is not discovered, such
+  // an item cannot be placed and waits for a later discovery.
+  for (const item of spaceItems) {
+    const host = hostOf(item.roomJid);
+    if (host === "home") {
+      spaceBookmarkedRoomJids.add(item.roomJid);
+      bookmarkedRooms.set(item.roomJid, { spaceId: item.spaceId, autojoin: item.autojoin, name: item.name });
+    } else if (host === "remote") {
+      remoteRoomSuggestions.push({
+        spaceId: item.spaceId,
+        roomJid: canonicalRoomJid(item.roomJid) ?? item.roomJid,
+        ...(item.name ? { name: item.name } : {}),
+      });
+    } else {
+      roomCatalogComplete = false;
+      bookmarkCatalogComplete = false;
+    }
+  }
+
+  // The user's own XEP-0402 bookmarks. A bookmark of a room on another
+  // server is the only record that lists or joins it, and only while the
+  // home server federates; until then it is listed as unavailable.
+  for (const bookmark of userBookmarkItems) {
+    const roomJid = bookmark.roomJid;
+    userBookmarkedRoomJids.add(roomJid);
+    if (hostOf(roomJid) === "remote") {
+      const canonical = canonicalRoomJid(roomJid) ?? roomJid;
+      if (!federation) {
+        unavailableRemoteRooms.push({ roomJid: canonical, ...(bookmark.name ? { name: bookmark.name } : {}) });
+      } else {
+        remoteBookmarks.set(canonical, { autojoin: bookmark.autojoin, ...(bookmark.name ? { name: bookmark.name } : {}) });
+      }
+      continue;
+    }
+    const existing = bookmarkedRooms.get(roomJid);
+    bookmarkedRooms.set(roomJid, {
+      ...existing,
+      autojoin: bookmark.autojoin,
+      name: bookmark.name ?? existing?.name,
+    });
+  }
+
   const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean; remote?: boolean }> =
     mucRooms.map((room) => ({ ...room, bookmarkOnly: false }));
   const discoveredRoomJids = new Set(
@@ -614,18 +710,13 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       .map((room) => room.jid ? barePeerJid(room.jid) : null)
       .filter((roomJid): roomJid is string => roomJid !== null),
   );
-  const home = { accountDomain: domain, mucService: services.muc, spacesService: services.spaces };
   for (const [roomJid, bookmark] of bookmarkedRooms.entries()) {
     if (!discoveredRoomJids.has(roomJid)) {
-      roomItems.push({
-        jid: roomJid,
-        name: bookmark.name,
-        bookmarkOnly: true,
-        // Only a discovered MUC service tells home rooms from remote ones:
-        // the conventional name may not be this deployment's service.
-        remote: mucDiscovered && isRemoteRoomJid(roomJid, home),
-      });
+      roomItems.push({ jid: roomJid, name: bookmark.name, bookmarkOnly: true, remote: false });
     }
+  }
+  for (const [roomJid, bookmark] of remoteBookmarks.entries()) {
+    roomItems.push({ jid: roomJid, name: bookmark.name, bookmarkOnly: true, remote: true });
   }
   // A bookmarked room on another server is listed from the bookmark alone.
   // Asking its host here would put a federated round trip (and, while that
@@ -634,10 +725,13 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const hydratedSettled = await Promise.allSettled(
     roomItems.map((room, position) => {
       const roomJid = room.jid ?? "";
-      const id = room.bookmarkOnly && mucDiscovered ? channelIdForRoom(roomJid, services.muc) : undefined;
+      const id = room.remote ? channelIdForRoom(roomJid, services.muc) : undefined;
       const channel = channelFromRoom({ jid: roomJid, name: room.name }, position, id);
       return room.remote
-        ? Promise.resolve<RoomInfoHydration>({ room: channel, fingerprintComplete: false })
+        ? Promise.resolve<RoomInfoHydration>({
+          room: { ...channel, remoteHost: roomHostDomain(roomJid) ?? undefined },
+          fingerprintComplete: false,
+        })
         : hydrateRoomInfo(xmpp, channel, services.spaces);
     }),
   );
@@ -672,8 +766,16 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   });
   const validSpaceIds = new Set(spaces.map((space) => space.id));
   rooms = hydrated.map((room, position) => {
-    const bookmark = room.jid ? bookmarkedRooms.get(barePeerJid(room.jid)) : undefined;
-    const parentSpaceId = room.spaceId && validSpaceIds.has(room.spaceId) ? room.spaceId : undefined;
+    const roomJid = room.jid ? barePeerJid(room.jid) : "";
+    const bookmark: { spaceId?: string; autojoin: boolean; name?: string } | undefined = roomJid
+      ? bookmarkedRooms.get(roomJid) ?? remoteBookmarks.get(roomJid)
+      : undefined;
+    // A room's own claim of a parent Space places it there only when the
+    // room is of this deployment: a room elsewhere naming a home Space
+    // claims nothing here.
+    const parentSpaceId = room.spaceId && validSpaceIds.has(room.spaceId) && !!roomJid && hostOf(roomJid) === "home"
+      ? room.spaceId
+      : undefined;
     const { spaceId: _discardUnverifiedSpaceId, standalone: _discardUnverifiedStandalone, ...roomWithoutSpace } = room;
     return {
       ...roomWithoutSpace,
@@ -727,6 +829,9 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       roomFingerprints: authoritativeRoomFingerprints,
     },
     serverRole,
-    services,
+    services: { ...services, mucDiscovered },
+    federation: advertisedFederation,
+    remoteRoomSuggestions,
+    unavailableRemoteRooms,
   };
 }

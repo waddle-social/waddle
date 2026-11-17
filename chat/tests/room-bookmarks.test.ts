@@ -4,6 +4,7 @@ import {
   buildPublishRoomBookmarkIq,
   buildRetractRoomBookmarkIq,
   fetchRoomBookmark,
+  findRoomBookmarks,
   parseRoomBookmarkItem,
   removeRoomBookmark,
   saveRoomBookmark,
@@ -122,6 +123,61 @@ describe("XEP-0402 bookmark edits", () => {
     await withXml(async () => {
       const xmpp = { async send_raw_iq() { throw stanzaError("internal-server-error", "wait"); } };
       await expect(removeRoomBookmark(xmpp, OWN, ROOM)).rejects.toMatchObject({ condition: "internal-server-error" });
+    });
+  });
+});
+
+describe("bookmarks written under another spelling of the room's address", () => {
+  function spellingsXml(): string {
+    return '<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="urn:xmpp:bookmarks:1">'
+      + '<item id="Dev@Chat.Remote.TEST."><conference xmlns="urn:xmpp:bookmarks:1" name="Dev" autojoin="true"><nick>Puck</nick></conference></item>'
+      + '<item id="other@chat.remote.test"><conference xmlns="urn:xmpp:bookmarks:1" name="Other"/></item>'
+      + '</items></pubsub></iq>';
+  }
+
+  test("are found by the room's canonical address", async () => {
+    await withFakeDomParser(async () => {
+      const doc = new DOMParser().parseFromString(spellingsXml(), "text/xml");
+      const found = findRoomBookmarks(doc, ROOM);
+      expect(found.bookmark).toMatchObject({ roomJid: ROOM, name: "Dev", autojoin: true });
+      expect(found.otherSpellings).toEqual(["Dev@Chat.Remote.TEST."]);
+    });
+  });
+
+  test("an edit moves the bookmark to the canonical item and retracts the other spelling", async () => {
+    await withXml(async () => {
+      const sent: string[] = [];
+      const xmpp = {
+        async send_raw_iq(xml: string) {
+          sent.push(xml);
+          return xml.includes('type="get"') ? spellingsXml() : '<iq type="result"/>';
+        },
+      };
+      await saveRoomBookmark(xmpp, OWN, { roomJid: ROOM, autojoin: false });
+      const publish = sent.find((xml) => xml.includes("<publish "));
+      expect(publish).toContain(`<item id="${ROOM}">`);
+      // What the other spelling stored is carried over.
+      expect(publish).toContain("<nick>Puck</nick>");
+      expect(publish).toContain('name="Dev"');
+      const retracts = sent.filter((xml) => xml.includes("<retract "));
+      expect(retracts).toHaveLength(1);
+      expect(retracts[0]).toContain('<item id="Dev@Chat.Remote.TEST.">');
+      expect(sent.some((xml) => xml.includes("other@chat.remote.test") && xml.includes("<retract "))).toBe(false);
+    });
+  });
+
+  test("a removal retracts every spelling of the room, and only that room", async () => {
+    await withXml(async () => {
+      const sent: string[] = [];
+      const xmpp = {
+        async send_raw_iq(xml: string) {
+          sent.push(xml);
+          return xml.includes('type="get"') ? spellingsXml() : '<iq type="result"/>';
+        },
+      };
+      await removeRoomBookmark(xmpp, OWN, ROOM);
+      const retracted = sent.filter((xml) => xml.includes("<retract ")).map((xml) => /<item id="([^"]+)">/.exec(xml)?.[1]);
+      expect(retracted.sort()).toEqual(["Dev@Chat.Remote.TEST.", ROOM].sort());
     });
   });
 });

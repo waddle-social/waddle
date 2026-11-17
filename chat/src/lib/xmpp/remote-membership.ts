@@ -19,9 +19,12 @@
 // in the session. A bookmark that joins at sign-in is tried once at the
 // next sign-in, where the host's refusal (`forbidden` or
 // `registration-required`) blocks further automatic joins.
+// A destroyed room (`<destroy/>`) ends the occupancy as a revocation does,
+// and is not joined again either: joining would create a new room.
 // Forgetting is offered only once nothing is live (the room left, the
 // Space no longer followed), so a forgotten community never keeps
-// delivering traffic nothing shows.
+// delivering traffic nothing shows. An unsubscribe the Space's host could
+// not be told of is kept on the device and sent again at sign-in.
 
 type MembershipAction = "leave-room" | "forget-room" | "unsubscribe-space" | "forget-space";
 export type MembershipEnd = MembershipAction | "revoked";
@@ -104,16 +107,21 @@ export function spaceActions(state: { following: boolean; listed: boolean }): Sp
 }
 
 /** Why the room ended the user's own occupancy (XEP-0045 §7.14, §9, §10, §11). */
-export type RoomDeparture = "left" | "revoked" | "kicked" | "outage";
+export type RoomDeparture = "left" | "revoked" | "kicked" | "outage" | "destroyed";
 
 /**
- * Read the status codes of the user's own unavailable presence:
- * 301 (banned), 321 (affiliation removed) and 322 (room became members-only)
- * are revocations; 307 is a kick, after which a manual rejoin may succeed;
- * 332 (service shutdown) and 333 (technical reasons, such as a lost
- * federation stream) are outages after which joining again is expected.
+ * Read the user's own unavailable presence: a `<destroy/>` (§10.9) means
+ * the room is gone; status codes 301 (banned), 321 (affiliation removed)
+ * and 322 (room became members-only) are revocations; 307 is a kick, after
+ * which a manual rejoin may succeed; 332 (service shutdown) and 333
+ * (technical reasons, such as a lost federation stream) are outages after
+ * which joining again is expected.
  */
-export function classifyOwnDeparture(statusCodes: readonly number[]): RoomDeparture {
+export function classifyOwnDeparture(
+  statusCodes: readonly number[],
+  options: { destroyed?: boolean } = {},
+): RoomDeparture {
+  if (options.destroyed) return "destroyed";
   if (statusCodes.includes(301) || statusCodes.includes(321) || statusCodes.includes(322)) return "revoked";
   if (statusCodes.includes(307)) return "kicked";
   if (statusCodes.includes(332) || statusCodes.includes(333)) return "outage";

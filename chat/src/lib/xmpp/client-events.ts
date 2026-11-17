@@ -19,6 +19,12 @@
  */
 
 import type { RoomJoinError } from "./room-join-error";
+
+/** What the room's own unavailable presence says beyond its status codes. */
+export interface OwnRoomDeparture {
+  /** The room was destroyed (XEP-0045 §10.9 `<destroy/>`). */
+  destroyed: boolean;
+}
 import type { SmFailureCondition } from "./sm-failure-condition";
 import type {
   ChatStateEvent,
@@ -137,7 +143,9 @@ export type ClientEvents = {
   /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
   ownOccupantNick: [roomJid: string, nick: string | null];
   /** Our own occupancy of a room ended; `statusCodes` are the room's XEP-0045 status codes. */
-  ownRoomDeparture: [roomJid: string, statusCodes: readonly number[]];
+  ownRoomDeparture: [roomJid: string, statusCodes: readonly number[], departure: OwnRoomDeparture];
+  /** A room join was sent and waits for the room's answer; `roomJid` is the room's canonical key. */
+  roomJoinStarted: [roomJid: string];
   /** A room join failed; `roomJid` is the room's canonical key. */
   roomJoinFailed: [roomJid: string, error: RoomJoinError];
   chatState: [event: ChatStateEvent];

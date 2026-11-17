@@ -11,6 +11,8 @@ export class RoomJoinError extends Error {
   readonly condition?: string;
   readonly errorType?: XmppStanzaErrorType;
   readonly timedOut: boolean;
+  /** The join created the room: it did not exist on its server. */
+  readonly roomCreated: boolean;
 
   constructor(
     message: string,
@@ -19,6 +21,7 @@ export class RoomJoinError extends Error {
       condition?: string | null;
       errorType?: XmppStanzaErrorType | null;
       timedOut?: boolean;
+      roomCreated?: boolean;
     },
   ) {
     super(message);
@@ -27,5 +30,6 @@ export class RoomJoinError extends Error {
     if (details.condition) this.condition = details.condition;
     if (details.errorType) this.errorType = details.errorType;
     this.timedOut = details.timedOut ?? false;
+    this.roomCreated = details.roomCreated ?? false;
   }
 }

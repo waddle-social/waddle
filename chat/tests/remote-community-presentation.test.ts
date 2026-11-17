@@ -45,8 +45,8 @@ describe("labels", () => {
   });
 
   test("a revocation is told apart from a kick and an outage", () => {
-    const notes = new Set([departureNote("revoked"), departureNote("kicked"), departureNote("outage")]);
-    expect(notes.size).toBe(3);
+    const notes = new Set([departureNote("revoked"), departureNote("kicked"), departureNote("outage"), departureNote("destroyed")]);
+    expect(notes.size).toBe(4);
     expect(departureNote("left")).toBeNull();
   });
 

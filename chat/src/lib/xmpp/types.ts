@@ -563,6 +563,25 @@ export interface DiscoveredChannel {
    * can render the Pin action correctly under the `anyone`
    * policy without needing owner-config access. */
   pinPermission?: PinPermission;
+  /** Canonical domain of the server that hosts the room, for a room outside this deployment. */
+  remoteHost?: string;
+}
+
+/**
+ * A room on another server that a home Space lists. It is no part of the
+ * Space here: it is offered only as a suggestion the user looks up on its
+ * host before joining.
+ */
+export interface RemoteRoomSuggestion {
+  spaceId: string;
+  roomJid: string;
+  name?: string;
+}
+
+/** A room on another server the user bookmarked, while the home server does not federate. */
+export interface UnavailableRemoteRoom {
+  roomJid: string;
+  name?: string;
 }
 
 export interface DiscoveredSpace {
@@ -605,7 +624,18 @@ export interface DiscoveredTopology {
   services?: {
     muc?: string;
     spaces?: string;
+    /** The MUC service was discovered, not assumed from its conventional name. */
+    mucDiscovered?: boolean;
   };
+  /**
+   * Whether the home server's `disco#info` lists the federation feature;
+   * `null` when it could not be read.
+   */
+  federation?: boolean | null;
+  /** Rooms on other servers that home Spaces list. */
+  remoteRoomSuggestions?: RemoteRoomSuggestion[];
+  /** The user's bookmarks of rooms on other servers, while the home server does not federate. */
+  unavailableRemoteRooms?: UnavailableRemoteRoom[];
 }
 
 /** Cross-room activity event with optional mention data for notifications. */

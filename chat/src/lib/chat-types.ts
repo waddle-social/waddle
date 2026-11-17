@@ -28,6 +28,8 @@ export interface ChannelSummary {
    * `urn:waddle:roomconfig:pinpermission` field. Default
    * `admins-only`. */
   pinPermission?: PinPermission;
+  /** Canonical domain of the server hosting the room, for a room outside this deployment. */
+  remoteHost?: string;
 }
 
 export interface GroupDmSummary {
