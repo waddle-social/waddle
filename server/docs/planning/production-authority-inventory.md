@@ -18,7 +18,7 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `1b6d8a5cb129719d8ff0fbf8b3aed1a86a3ef189` (see the last refresh below); the original
+through `18e9f931904581aed7f848d0cd5458c0326b7226` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1200,7 +1200,7 @@ was added, and no decision of standing moved.
   that file moved because it gained lines.
 
 The selected evidence was refreshed a twenty-fifth time, through
-`1b6d8a5cb129719d8ff0fbf8b3aed1a86a3ef189`, after reviewing the delta of the reviewed files since the
+`18e9f931904581aed7f848d0cd5458c0326b7226`, after reviewing the delta of the reviewed files since the
 twenty-fourth refresh. Eight reviewed files changed, four files were added
 to the reviewed set, and seventeen anchors moved without a change to their
 text.
@@ -1243,8 +1243,8 @@ text.
   is on, written by a Space owner's configuration form through a session
   (`s2s-space-federated-setting`) and removed when the Space is deleted;
   and `s2s_space_subscriptions`, the subscriptions remote accounts made
-  themselves (`s2s-space-subscription-record`), each with the stream
-  evidence of its request. Neither is a grant store: the first only opens
+  themselves (`s2s-space-subscription-record`), one for an account and a
+  Space, each with the stream evidence of its request. Neither is a grant store: the first only opens
   a Space to requests that are then decided, and the second only admits
   notifications. Rows of the second are a second source of recorded stream
   evidence beside the seat table (`hg-seat-evidence` moved; the
@@ -1253,11 +1253,13 @@ text.
   Space's subscribers at other servers in its local loop and hands the
   event to `s2s-space-notify`, which decides each on the evidence its
   subscription recorded, reads the deliverable subscriptions again for the
-  publication, tells a subscriber only of a room it may be told of
-  (`s2s-space-room-visible`, the catalog's `federated` column and
-  `HostGrantGate::allows_as` for a managed room) and queues one stanza for
-  each on the router (`s2s-space-event-egress`), which checks peer
-  admission again at the write. Fan-out from an enrolled scope's Space
+  publication, tells a subscriber only of a room it may be told of (the
+  catalog's `federated` column, read once for the publication, and
+  `HostGrantGate::allows_as` for a managed room; `s2s-space-room-visible`
+  is the same rule for an item read) and queues one stanza for each on the
+  router (`s2s-space-event-egress`), which checks peer admission again at
+  the write. The pass returns before any read on a replica that runs no
+  S2S snapshot. Fan-out from an enrolled scope's Space
   still returns before any of it.
 - `server/http.rs` attaches the Spaces host where S2S is enabled
   (`startup-call` and `hg-recovery` moved), and the router's hosting module
