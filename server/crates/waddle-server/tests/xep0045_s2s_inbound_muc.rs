@@ -621,6 +621,78 @@ async fn an_owner_opens_a_room_to_other_servers_and_closing_it_removes_its_remot
 }
 
 #[tokio::test]
+async fn an_owner_or_admin_standing_is_not_issued_while_a_seat_another_replica_records_would_not_honour_it(
+) {
+    // `home-b.test` is a trusted home, so its accounts may hold an owner or
+    // admin standing (ADR-0020 D8 at issuance).
+    let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await;
+    // Another account of that home holds no seat on this replica, but the
+    // seat table every replica shares records one that another replica
+    // took for it over a dialback stream, which carries no moderator role.
+    let carol = "carol@home-b.test";
+    let seats = SqlSeatStore::new(hosted.state.deps.app_state.db_pool.global().clone());
+    let seat = Seat {
+        room: jid(ROOM).to_bare(),
+        occupant: full("carol@home-b.test/phone"),
+        nick: "carol".to_owned(),
+        session: OccupancySessionGeneration::mint(),
+        evidence: StreamEvidence::for_test(AuthenticationStrength::Dialback, None),
+        snapshot: uuid::Uuid::new_v4(),
+        owner: "another-replica".to_owned(),
+        lost_at_ms: None,
+        updated_at_ms: chrono::Utc::now().timestamp_millis(),
+    };
+    let wide = SeatLimits {
+        per_room: 64,
+        per_peer: 64,
+        per_account: 64,
+        total: 64,
+    };
+    assert_eq!(
+        seats
+            .insert(&seat, &wide)
+            .await
+            .expect("the other replica's seat"),
+        SeatInsert::Inserted
+    );
+    assert!(hosted.seat(ROOM, "carol@home-b.test/phone").is_none());
+    // The room makes every occupant of an owner or admin a moderator
+    // (XEP-0045 §5.1.3), so the standing is not issued while that seat is
+    // held, wherever it is held.
+    for (id, affiliation) in [("grant-admin", "admin"), ("grant-owner", "owner")] {
+        let answer = local_set(&mut alice, ROOM, id, affiliation_item(affiliation, carol)).await;
+        assert_eq!(answer.attr("type"), Some("error"), "{id}: {answer:?}");
+        assert_eq!(
+            error_condition(&answer).as_deref(),
+            Some("not-allowed"),
+            "{id}"
+        );
+    }
+    // A membership derives no moderator role and is issued.
+    let answer = local_set(
+        &mut alice,
+        ROOM,
+        "grant-member",
+        affiliation_item("member", carol),
+    )
+    .await;
+    assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
+    // Once the seat has ended, no seat stands against the standing.
+    assert!(seats.remove(&seat).await.expect("the seat ends"));
+    let answer = local_set(
+        &mut alice,
+        ROOM,
+        "grant-admin-2",
+        affiliation_item("admin", carol),
+    )
+    .await;
+    assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
+}
+
+#[tokio::test]
 async fn an_owner_or_admin_standing_is_not_issued_to_a_home_that_is_not_trusted() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;

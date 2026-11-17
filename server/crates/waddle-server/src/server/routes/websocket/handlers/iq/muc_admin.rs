@@ -147,28 +147,48 @@ async fn check_host_grant_admin_items(
             "This room takes one affiliation change per request.",
         )));
     }
-    check_privileged_seats(state, room_jid, affiliation_updates)?;
+    check_privileged_seats(state, room_jid, affiliation_updates).await?;
     check_moderator_role_items(state, room_actor, room_jid, items).await
 }
 
 /// Refuse a set that gives an owner or admin standing to an account one of
 /// whose seats in the room would not honour it (ADR-0020 D8): the room
 /// would make that occupant a moderator with the standing.
-fn check_privileged_seats(
+///
+/// A remote occupant's seat is held by the replica that took its join,
+/// which need not be the one that holds the room, and another replica may
+/// adopt it, so the seats are read from the table every replica shares as
+/// well as from this replica's own. A set is refused while that table
+/// cannot be read.
+async fn check_privileged_seats(
     state: &WebSocketState,
     room_jid: &BareJid,
     affiliation_updates: &[(BareJid, Affiliation)],
 ) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
-    let unhonoured = affiliation_updates.iter().any(|(jid, affiliation)| {
-        matches!(affiliation, Affiliation::Owner | Affiliation::Admin)
-            && !super::muc_admin_host_grant::seats_honour_privilege(state, room_jid, jid)
-    });
-    if unhonoured {
-        return Err(Box::new(not_allowed_iq_error(
-            "This account is in the room over a stream that does not carry owner or admin \
-             standing. Grant it once that occupant has left, or has entered over a \
-             certificate-authenticated stream of a trusted server.",
-        )));
+    let global = state.deps.app_state.db_pool.global();
+    for (jid, affiliation) in affiliation_updates {
+        if !matches!(affiliation, Affiliation::Owner | Affiliation::Admin) {
+            continue;
+        }
+        match super::muc_admin_host_grant::seats_honour_privilege_anywhere(
+            state, global, room_jid, jid,
+        )
+        .await
+        {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Box::new(not_allowed_iq_error(
+                    "This account is in the room over a stream that does not carry owner or \
+                     admin standing. Grant it once that occupant has left, or has entered over \
+                     a certificate-authenticated stream of a trusted server.",
+                )));
+            }
+            None => {
+                return Err(Box::new(internal_server_error_iq_error(
+                    "The seats of occupants from other servers could not be read.",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -197,7 +217,7 @@ async fn check_legacy_admin_items(
              trusted servers only.",
         )));
     }
-    check_privileged_seats(state, room_jid, affiliation_updates)?;
+    check_privileged_seats(state, room_jid, affiliation_updates).await?;
     check_moderator_role_items(state, room_actor, room_jid, items).await
 }
 
