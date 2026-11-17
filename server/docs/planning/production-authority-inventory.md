@@ -1256,7 +1256,7 @@ moved.
   changed files moved because those files gained lines.
 
 The selected evidence was refreshed a twenty-seventh time, through
-`b3fa4f78f91ae66bf46fcffcb19ec1b64aaa5338`, after reviewing the delta of the reviewed files since the
+`9d55985c1890dfe12686551cbf273d35c6c915c0`, after reviewing the delta of the reviewed files since the
 twenty-sixth refresh. `auth/retirement.rs`,
 `websocket/handlers/message/muc_invite.rs` and
 `websocket/handlers/message/group_dm_invite.rs` changed. No grant writer or
@@ -1277,7 +1277,8 @@ evidence changed, and no decision of standing moved.
   `service-unavailable`; a mediated invitation rolls back as for any
   delivery failure.
 - The raw scan holds 1636 records, unchanged in content; records in the
-  changed files moved because those files gained lines.
+  changed files, and in `pending_delivery/tests.rs`, whose quota race case
+  names the new refusal, moved because those files gained lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.

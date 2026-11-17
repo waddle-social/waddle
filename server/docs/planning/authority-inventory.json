@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "b3fa4f78f91ae66bf46fcffcb19ec1b64aaa5338",
+  "baseline_commit": "9d55985c1890dfe12686551cbf273d35c6c915c0",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -1121,7 +1121,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "0f93bd5179917997f067d8ed3283d9a58058d74efd5383510642f4613cd8ddc2",
+    "sha256": "c11815360f6ad53bb7393928d3192e493eb3b4a91ca4cd5b1c31898332106932",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,
