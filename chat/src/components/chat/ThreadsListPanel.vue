@@ -82,7 +82,6 @@ const listClass = css({
   overflow: "hidden",
   "& > li + li": { borderTop: "1px solid {colors.border.soft}" },
 });
-const emptyClass = cx(pc.empty, css({ pt: "48px" }));
 const inlineErrorClass = css({ margin: 0, textStyle: "caption", color: "danger.text" });
 const srOnly = css({ srOnly: true });
 const grow = css({ flex: 1, minWidth: 0 });
@@ -188,7 +187,7 @@ onMounted(() => {
         </ul>
       </section>
 
-      <div v-if="!hasEntries" :class="emptyClass" role="status">
+      <div v-if="!hasEntries" :class="pc.empty" role="status">
         <img :src="spotEmpty" alt="" />
         <h2 :class="pc.emptyTitle">{{ search ? "Nothing matches" : "It is quiet here" }}</h2>
         <p>

@@ -14,7 +14,7 @@ const spotClass = css({ width: "120px", height: "120px", alignSelf: "center" });
 const heading = css({ display: "flex", flexDirection: "column", gap: "2", textAlign: "center" });
 const title = css({ margin: 0, font: "700 36px/1.1 {fonts.display}", letterSpacing: "-0.03em" });
 const lead = css({ margin: 0, fontSize: "base", color: "fg.muted" });
-const card = css({ display: "flex", flexDirection: "column", gap: "14px", p: "5", borderRadius: "panel", bg: "surface", border: "1px solid {colors.border}", "--ring-bg": "{colors.surface}" });
+const card = css({ display: "flex", flexDirection: "column", gap: "4", p: "5", borderRadius: "panel", bg: "surface", border: "1px solid {colors.border}", "--ring-bg": "{colors.surface}" });
 const row = css({ display: "flex", alignItems: "center", gap: "2" });
 const kickerClass = kicker();
 const grow = cx(kickerClass, css({ flex: 1 }));
@@ -27,7 +27,7 @@ const option = css({
   flexDirection: "column",
   gap: "2",
   py: "3",
-  px: "14px",
+  px: "4",
   borderRadius: "control",
   border: "1px solid {colors.border}",
   bg: "surface",
@@ -37,7 +37,7 @@ const option = css({
   _hover: { bgImage: "linear-gradient({colors.state.hover}, {colors.state.hover})" },
   "&:has(> div > input:checked)": { borderColor: "action", bg: "action.subtle" },
   "&:has(> div > input:focus-visible)": { outline: "3px solid {colors.focus}", outlineOffset: "2px" },
-  "& > div": { display: "flex", alignItems: "center", gap: "10px" },
+  "& > div": { display: "flex", alignItems: "center", gap: "2.5" },
 });
 const dot = css({
   width: "16px",

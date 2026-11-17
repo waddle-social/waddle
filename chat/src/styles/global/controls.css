@@ -110,7 +110,7 @@
 }
 
 .chat-field-control--search {
-  padding-inline-start: 2.25rem;
+  padding-inline-start: var(--control-md);
 }
 
 .chat-field-control:focus {

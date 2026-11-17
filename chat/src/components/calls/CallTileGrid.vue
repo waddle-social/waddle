@@ -229,10 +229,10 @@ function activateOverflow(): void {
 
 // HuddleStage grid: 10px gaps inside the stage padding; the speaker view is
 // one large tile over a strip of thumbnails.
-const rootClass = css({ display: "flex", height: "100%", width: "100%", flexDirection: "column", gap: "2.5", overflow: "hidden", padding: "0 10px 6px", _narrow: { padding: "0 6px 2px", gap: "2" } });
-const equalClass = css({ display: "grid", height: "100%", width: "100%", gap: "2.5", padding: "6px", overflow: "hidden", _narrow: { gap: "2" } });
-const focusClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", padding: "6px" });
-const thumbsClass = css({ display: "flex", gap: "2.5", overflowX: "auto", flexShrink: 0, padding: "6px", maxHeight: "116px" });
+const rootClass = css({ display: "flex", height: "100%", width: "100%", flexDirection: "column", gap: "2.5", overflow: "hidden", padding: "0 {spacing.2.5} {spacing.1.5}", _narrow: { padding: "0 {spacing.1.5} {spacing.0.5}", gap: "2" } });
+const equalClass = css({ display: "grid", height: "100%", width: "100%", gap: "2.5", padding: "1.5", overflow: "hidden", _narrow: { gap: "2" } });
+const focusClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", padding: "1.5" });
+const thumbsClass = css({ display: "flex", gap: "2.5", overflowX: "auto", flexShrink: 0, padding: "1.5", maxHeight: "116px" });
 const thumbClass = css({ width: "144px", aspectRatio: "16 / 9", flex: "0 0 auto" });
 const overflowClass = css({
   display: "flex",

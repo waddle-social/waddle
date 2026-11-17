@@ -330,7 +330,7 @@ const ctlClass = cx(huddleCtl(), css({
 const ctlLabelClass = css({ _narrow: { srOnly: true }, "@container (max-width: 900px)": { srOnly: true } });
 const hangupLabelClass = css({ _narrow: { srOnly: true } });
 const srOnly = css({ srOnly: true });
-const segClass = css({ display: "inline-flex", padding: "3px", gap: "2px", borderRadius: "pill", bg: "surface.2" });
+const segClass = css({ display: "inline-flex", padding: "1", gap: "0.5", borderRadius: "pill", bg: "surface.2" });
 const segItemClass = css({
   display: "inline-flex",
   width: "38px",
@@ -368,7 +368,7 @@ const hangupClass = cx(btn({ variant: "danger" }), css({
   height: "44px",
   minHeight: "44px",
   borderRadius: "pill",
-  px: "4.5",
+  px: "4",
   _narrow: { width: "68px", height: "52px", px: 0, justifyContent: "center" },
 }));
 const popWrapClass = css({ position: "relative", display: "inline-flex" });

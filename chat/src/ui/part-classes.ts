@@ -76,7 +76,7 @@ export const liveKicker = cx(kicker(), LIVE_KICKER);
  * body / foot, with the padding moved onto the parts so a body can scroll).
  */
 export const dialogParts = {
-  head: css({ display: "flex", alignItems: "center", gap: "2", padding: "20px 20px 0 24px", "& h2": { margin: 0, flex: 1, minWidth: 0, font: "700 20px/1.25 {fonts.display}" } }),
-  body: css({ display: "flex", flexDirection: "column", gap: "3", padding: "16px 24px", overflowY: "auto", minHeight: 0, color: "fg.muted" }),
-  foot: css({ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "2", padding: "8px 24px 24px" }),
+  head: css({ display: "flex", alignItems: "center", gap: "2", padding: "{spacing.5} {spacing.5} 0 {spacing.6}", "& h2": { margin: 0, flex: 1, minWidth: 0, font: "700 20px/1.25 {fonts.display}" } }),
+  body: css({ display: "flex", flexDirection: "column", gap: "3", padding: "{spacing.4} {spacing.6}", overflowY: "auto", minHeight: 0, color: "fg.muted" }),
+  foot: css({ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "2", padding: "{spacing.2} {spacing.6} {spacing.6}" }),
 };

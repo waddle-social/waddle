@@ -69,15 +69,13 @@
    * `--font-mono`); these are the legacy aliases. */
   --font-ui: var(--font-body);
   --font-code: var(--font-mono);
-  --space-2xs: 0.25rem;
-  --space-xs: 0.5rem;
-  --space-sm: 0.75rem;
-  --space-md: 1rem;
-  --space-lg: 1.5rem;
-  --space-xl: 2rem;
-  --space-2xl: 3rem;
-  --space-3xl: 4rem;
-  --space-4xl: 6rem;
+  /* Legacy spacing names use the same 4 px scale as Panda utilities. */
+  --space-2xs: var(--spacing-1);
+  --space-xs: var(--spacing-2);
+  --space-sm: var(--spacing-3);
+  --space-md: var(--spacing-4);
+  --space-lg: var(--spacing-6);
+  --space-xl: var(--spacing-8);
   --radius-xs: var(--radii-tag);
   --radius-sm: var(--radii-sm);
   --radius-md: var(--radii-control);
@@ -109,7 +107,7 @@
   --leading-message: 1.5;
   --chat-sidebar-width: clamp(16.5rem, 18vw, 19rem);
   --chat-header-height: 3.5rem;
-  --chat-content-inline: clamp(1rem, 2vw, 2rem);
+  --chat-content-inline: clamp(var(--space-md), 2vw, var(--space-xl));
   --chat-message-lane: clamp(42rem, 68vw, 60rem);
   --chat-copy-measure: 68ch;
   --chat-readable-measure: 72ch;

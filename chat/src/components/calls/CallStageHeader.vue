@@ -38,7 +38,7 @@ const rootClass = css({
   display: "flex",
   alignItems: "center",
   gap: "2.5",
-  padding: "12px 16px",
+  padding: "{spacing.3} {spacing.4}",
   flexWrap: "wrap",
   color: "fg",
   "& .call-stage-header__recording": {
@@ -51,7 +51,7 @@ const rootClass = css({
   },
 });
 const recordingDotClass = css({ flex: "none", width: "10px", height: "10px", borderRadius: "pill", bg: "currentColor" });
-const compactClass = css({ padding: "10px 12px" });
+const compactClass = css({ padding: "{spacing.2.5} {spacing.3}" });
 const dotClass = css({
   flex: "none",
   width: "10px",

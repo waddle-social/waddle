@@ -87,7 +87,7 @@ const ui = {
     minWidth: 0,
     display: "flex",
     flexDirection: "column",
-    gap: "3.5",
+    gap: "4",
     padding: "4",
     borderRadius: "12px",
     border: "1px solid {colors.border.soft}",

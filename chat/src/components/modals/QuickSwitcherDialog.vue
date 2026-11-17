@@ -170,9 +170,9 @@ function groupHeading(index: number): string | null {
 }
 
 const srOnly = css({ srOnly: true });
-const searchRow = css({ display: "flex", alignItems: "center", gap: "2.5", py: "14px", px: "4", borderBottom: "1px solid {colors.border.soft}", "& > svg": { width: "20px", height: "20px", flex: "none", color: "fg.muted" } });
+const searchRow = css({ display: "flex", alignItems: "center", gap: "2.5", py: "4", px: "4", borderBottom: "1px solid {colors.border.soft}", "& > svg": { width: "20px", height: "20px", flex: "none", color: "fg.muted" } });
 const inputClass = css({ flex: 1, minWidth: 0, border: 0, bg: "transparent", color: "fg", font: "18px/1.4 {fonts.body}", outline: "none", _placeholder: { color: "fg.soft" }, _coarse: { fontSize: "base" } });
-const kbd = css({ font: "600 12px/1 {fonts.mono}", py: "5px", px: "7px", borderRadius: "tag", border: "1px solid {colors.border}", color: "fg.muted" });
+const kbd = css({ font: "600 12px/1 {fonts.mono}", py: "1", px: "2", borderRadius: "tag", border: "1px solid {colors.border}", color: "fg.muted" });
 const list = css({ minHeight: 0, flex: 1, overflowY: "auto", margin: 0, listStyle: "none", pt: "1.5", px: "2", pb: "2.5" });
 const groupLabel = css({ margin: 0, pt: "2.5", px: "3", pb: "1", font: "700 13px/1.3 {fonts.body}", color: "fg.muted" });
 const optionClass = css({

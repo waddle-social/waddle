@@ -46,7 +46,7 @@ const rootClass = css({
   bg: "surface",
   border: "1px solid {colors.border.soft}",
   color: "fg",
-  "&.call-anchor-card--ended": { padding: "12px 16px", bg: "transparent", border: "1px dashed {colors.border}", opacity: 0.7 },
+  "&.call-anchor-card--ended": { padding: "{spacing.3} {spacing.4}", bg: "transparent", border: "1px dashed {colors.border}", opacity: 0.7 },
 });
 const rowClass = css({ display: "flex", minWidth: 0, alignItems: "center", gap: "2.5" });
 const iconClass = css({

@@ -47,7 +47,7 @@ const ui = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    margin: { base: "0 12px", md: "0 16px" },
+    mx: { base: "3", md: "4" },
     height: { base: "380px", md: "420px" },
     maxHeight: "56dvh",
     borderRadius: "14px",

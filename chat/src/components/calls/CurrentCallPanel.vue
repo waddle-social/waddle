@@ -194,7 +194,7 @@ const rootClass = css({
   display: "flex",
   flexDirection: "column",
   gap: "2",
-  padding: "10px 12px",
+  padding: "{spacing.2.5} {spacing.3}",
   borderRadius: "14px",
   border: "1px solid {colors.live}",
   bg: "live.subtle",

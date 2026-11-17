@@ -73,7 +73,7 @@ const bots = computed(() => filterPeople(groups.value.bots, query.value));
 const roomTitle = computed(() => activeRoomChannel.value ? "In this room" : "");
 
 const rootClass = css({ display: "flex", flexDirection: "column", minHeight: 0, gap: "1" });
-const searchClass = css({ padding: "0 2px 4px" });
+const searchClass = css({ padding: "0 {spacing.0.5} {spacing.1}" });
 const inputClass = css({
   width: "100%",
   height: "40px",

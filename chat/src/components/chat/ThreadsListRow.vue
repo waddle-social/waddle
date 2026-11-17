@@ -35,18 +35,18 @@ const rowClass = css({
   display: "flex",
   alignItems: "center",
   gap: "3",
-  padding: "0 16px 0 0",
+  padding: "0 {spacing.4} 0 0",
   transition: "background-color {durations.fast} {easings.out}",
   _hover: { bg: "state.hover" },
 });
-const callOpenClass = css({ flex: 1, minWidth: 0, padding: "12px 0 12px 16px", cursor: "pointer" });
+const callOpenClass = css({ flex: 1, minWidth: 0, padding: "{spacing.3} 0 {spacing.3} {spacing.4}", cursor: "pointer" });
 const openClass = css({
   display: "flex",
   flex: 1,
   minWidth: 0,
   alignItems: "center",
   gap: "3",
-  padding: "12px 0 12px 16px",
+  padding: "{spacing.3} 0 {spacing.3} {spacing.4}",
   border: 0,
   bg: "transparent",
   color: "fg",

@@ -39,7 +39,7 @@ const c = {
     gap: "1",
     width: "100%",
     p: "3",
-    pb: "max(12px, env(safe-area-inset-bottom))",
+    pb: "max({spacing.3}, env(safe-area-inset-bottom))",
     bg: "surface",
     color: "fg",
     border: "1px solid {colors.border}",

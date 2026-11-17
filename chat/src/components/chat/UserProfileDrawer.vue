@@ -105,7 +105,7 @@ const hasVCardSection = computed(
 // then the vCard and PEP fields as a hairline-separated list.
 const drawerWidth = css({ width: "min(88vw, 360px)" });
 const kickerClass = kicker();
-const bodyClass = css({ display: "flex", flexDirection: "column", gap: "14px", padding: "4px 18px 16px" });
+const bodyClass = css({ display: "flex", flexDirection: "column", gap: "4", padding: "{spacing.1} {spacing.4} {spacing.4}" });
 const headClass = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "1", textAlign: "center" });
 const nameClass = css({ marginTop: "2", font: "700 20px/1.25 {fonts.display}", overflowWrap: "anywhere" });
 const jidClass = css({ font: "13px/1.4 {fonts.mono}", color: "fg.muted", wordBreak: "break-all" });
@@ -117,8 +117,8 @@ const listClass = css({ margin: 0, display: "flex", flexDirection: "column" });
 const fieldClass = css({
   display: "flex",
   flexDirection: "column",
-  gap: "3px",
-  padding: "12px 0",
+  gap: "1",
+  padding: "{spacing.3} 0",
   borderTop: "1px solid {colors.border.soft}",
   "& dd": { margin: 0, fontSize: "14px", lineHeight: 1.5, overflowWrap: "anywhere" },
 });

@@ -295,7 +295,7 @@ const rootClass = css({
   "&.call-activity-dock--mobile": {
     borderBottom: "1px solid {colors.border.soft}",
     bg: "bg.rail",
-    padding: "6px 12px",
+    padding: "{spacing.1.5} {spacing.3}",
     md: { display: "none" },
   },
 });
@@ -303,14 +303,14 @@ const headClass = cx(liveKicker, css({
   display: "flex",
   alignItems: "center",
   gap: "1.5",
-  padding: "14px 8px 4px 12px",
+  padding: "{spacing.4} {spacing.2} {spacing.1} {spacing.3}",
   ".call-activity-dock--mobile &": { srOnly: true },
 }));
 const listClass = css({
   display: "flex",
   flexDirection: "column",
   gap: "1.5",
-  margin: "0 2px",
+  margin: "0 {spacing.0.5}",
   ".call-activity-dock--mobile &": {
     flexDirection: "row",
     overflowX: "auto",
@@ -336,7 +336,7 @@ const rowClass = css({
   display: "flex",
   alignItems: "center",
   gap: "2.5",
-  padding: "10px 12px",
+  padding: "{spacing.2.5} {spacing.3}",
   border: 0,
   borderRadius: "inherit",
   bg: "transparent",

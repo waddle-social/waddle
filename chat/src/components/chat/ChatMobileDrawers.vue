@@ -98,8 +98,8 @@ const drawerExtensionRoutes = computed(() =>
 );
 
 const navWidthClass = css({ width: "min(88vw, 320px)" });
-const liveRowClass = cx(liveKicker, css({ display: "flex", alignItems: "center", gap: "2", padding: "14px 12px 4px" }));
-const detailsClass = css({ display: "flex", flexDirection: "column", gap: "3.5", padding: "8px 12px 28px 16px" });
+const liveRowClass = cx(liveKicker, css({ display: "flex", alignItems: "center", gap: "2", padding: "{spacing.4} {spacing.3} {spacing.1}" }));
+const detailsClass = css({ display: "flex", flexDirection: "column", gap: "4", padding: "{spacing.2} {spacing.3} {spacing.8} {spacing.4}" });
 const spaceCardClass = cx(floe(), css({ "--pad": "14px", gap: "1", borderRadius: "14px", borderColor: "border.soft" }));
 const spaceNameClass = css({ font: "700 16px/1.3 {fonts.display}" });
 const captionClass = css({ textStyle: "caption", color: "fg.muted" });
@@ -122,7 +122,7 @@ const rowClass = css({
   "& svg": { width: "20px", height: "20px", flex: "none", color: "fg.muted" },
 });
 const growClass = css({ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
-const sectionClass = cx(kicker(), css({ margin: 0, padding: "6px 4px 0" }));
+const sectionClass = cx(kicker(), css({ margin: 0, padding: "{spacing.1.5} {spacing.1} 0" }));
 
 function openExtensionRoute(route: DiscoveredExtensionRoute) {
   const channel = waddles.currentChannel.value;

@@ -39,7 +39,7 @@ function optionDot(state: DotState): string {
 const root = css({ display: "flex", flexDirection: "column", gap: "1" });
 const currentRow = css({ display: "flex", alignItems: "center", gap: "2.5", minHeight: "40px", px: "3", font: "500 14px/1.25 {fonts.body}" });
 const meta = css({ color: "fg.muted" });
-const box = css({ display: "flex", flexDirection: "column", ml: "22px", mr: "1", p: "1", borderRadius: "control", bg: "surface.2" });
+const box = css({ display: "flex", flexDirection: "column", ml: "6", mr: "1", p: "1", borderRadius: "control", bg: "surface.2" });
 const option = css({
   display: "flex",
   alignItems: "center",

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
-import { ArrowDown, ArrowUp, CornerDownRight } from "lucide-vue-next";
+import { CornerDownRight } from "lucide-vue-next";
 import { css } from "styled-system/css";
 import { waddle } from "styled-system/recipes";
+import JumpToLatestButton from "./JumpToLatestButton.vue";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -207,10 +208,7 @@ const virtualTimelineRef = ref<VirtualTimelineHandle | null>(null);
 const jumpToLive = useJumpToLiveEdge({
   scrollElement: computed(() => virtualTimelineRef.value?.scrollElement ?? null),
   mode: scrollDirectionMode,
-  scrollToEdge: () => {
-    void scrollToPinnedEdge();
-    return true;
-  },
+  scrollToEdge: scrollToPinnedEdge,
 });
 const threadScrollFrame = createScrollFrameScheduler(() => {
   updateCurrentDayMarker();
@@ -222,8 +220,9 @@ function onThreadScroll() {
 }
 
 async function scrollToPinnedEdge() {
-  await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
+  const didScroll = await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   updateCurrentDayMarker();
+  return didScroll;
 }
 
 function updateCurrentDayMarker() {
@@ -352,16 +351,16 @@ const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
 // under the root, sub-thread links in the action colour, a waddle loader.
 const rootClass = css({ display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0, bg: "bg.rail", color: "fg", borderLeft: "1px solid {colors.border.soft}" });
 const noneClass = css({ flex: "none" });
-const noticeClass = css({ flex: "none", padding: "8px 16px", bg: "warning.subtle", borderBottom: "1px solid {colors.border.soft}", fontSize: "13px", color: "fg" });
+const noticeClass = css({ flex: "none", padding: "{spacing.2} {spacing.4}", bg: "warning.subtle", borderBottom: "1px solid {colors.border.soft}", fontSize: "13px", color: "fg" });
 const separatorClass = css({ display: "flex", alignItems: "center", gap: "2.5", px: "4", py: "3", fontSize: "xs", fontWeight: 700, color: "fg.muted", "&::before, &::after": { content: '""', flex: 1, height: "1px", bg: "border.soft" } });
 const childClass = css({ position: "relative", py: "1" });
-const subThreadRowClass = css({ display: "flex", padding: "0 16px 8px calc({sizes.msgAvatar} + 28px)" });
+const subThreadRowClass = css({ display: "flex", padding: "0 {spacing.4} {spacing.2} calc({sizes.msgAvatar} + 28px)" });
 const subThreadClass = css({
   display: "inline-flex",
   alignItems: "center",
   gap: "1.5",
   minHeight: "28px",
-  padding: "0 4px",
+  padding: "0 {spacing.1}",
   border: 0,
   borderRadius: "tag",
   bg: "transparent",
@@ -374,11 +373,10 @@ const subThreadClass = css({
   _coarse: { minHeight: "44px" },
   "& svg": { width: "16px", height: "16px" },
 });
-const loadingScrollClass = css({ flex: "1 1 0%", minHeight: 0, overflowY: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" });
+const loadingScrollClass = css({ flex: "1 1 0%", minHeight: 0, overflowY: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: "4" });
 const loadingClass = css({ display: "flex", alignItems: "center", gap: "2.5", fontSize: "14px", color: "fg.muted" });
 const loaderClass = waddle();
-const jumpIconClass = css({ width: "14px", height: "14px" });
-const emptyRepliesClass = css({ flex: "none", margin: 0, padding: "16px", textAlign: "center", fontSize: "14px", color: "fg.muted" });
+const emptyRepliesClass = css({ flex: "none", margin: 0, padding: "4", textAlign: "center", fontSize: "14px", color: "fg.muted" });
 const threadCallAnchorState = useCallAnchorCardState(
   () => activeEntry.value?.root ?? { body: "", author: "" },
   () => props.roomJid,
@@ -625,19 +623,11 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         </template>
       </template>
     </VirtualTimeline>
-    <button
+    <JumpToLatestButton
       v-if="jumpToLive.shouldShow.value"
-      type="button"
-      class="chat-jump-to-live"
-      :class="isTopPinned ? 'chat-jump-to-live--top' : 'chat-jump-to-live--bottom'"
-      title="Jump to latest"
-      aria-label="Jump to latest message"
-      @click="jumpToLive.jump"
-    >
-      <ArrowUp v-if="isTopPinned" :class="jumpIconClass" aria-hidden="true" />
-      <ArrowDown v-else :class="jumpIconClass" aria-hidden="true" />
-      <span>Latest</span>
-    </button>
+      :top="isTopPinned"
+      @jump="jumpToLive.jump"
+    />
     </div>
 
     <div

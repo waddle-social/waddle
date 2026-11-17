@@ -83,13 +83,13 @@ function dismiss(kind: MediaKind): void {
 }
 
 // HuddleStage notice strip: warning tint, recoverable (not the danger row).
-const rootClass = css({ display: "flex", flexDirection: "column", gap: "2", margin: "0 16px 10px", _narrow: { mx: "3" } });
+const rootClass = css({ display: "flex", flexDirection: "column", gap: "2", margin: "0 {spacing.4} {spacing.2.5}", _narrow: { mx: "3" } });
 const rowClass = css({
   display: "flex",
   alignItems: "center",
   gap: "2.5",
   flexWrap: "wrap",
-  padding: "10px 12px",
+  padding: "{spacing.2.5} {spacing.3}",
   borderRadius: "12px",
   bg: "color-mix(in srgb, {colors.presence.away} 12%, transparent)",
   border: "1px solid color-mix(in srgb, {colors.presence.away} 35%, transparent)",

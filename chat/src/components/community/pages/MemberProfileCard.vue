@@ -73,7 +73,7 @@ const inHuddle = computed(() => props.member.status === "in-huddle" || props.mem
 
 // ProfileCard board: centred identity, one Message action, then a
 // definition list with hairline separators.
-const root = css({ display: "flex", flexDirection: "column", gap: "3.5", padding: "16px 18px", color: "fg", minWidth: 0 });
+const root = css({ display: "flex", flexDirection: "column", gap: "4", padding: "4", color: "fg", minWidth: 0 });
 const topRow = css({ display: "flex", alignItems: "center", "& > :first-child": { flex: 1 } });
 const identity = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "1", textAlign: "center", minWidth: 0 });
 const nameClass = css({ mt: "2", font: "700 20px/1.25 {fonts.display}", overflowWrap: "anywhere" });

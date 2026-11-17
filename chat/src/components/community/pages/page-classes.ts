@@ -29,8 +29,8 @@ export const pageClasses = {
     width: "100%",
     maxWidth: "1000px",
     boxSizing: "border-box",
-    padding: "14px 12px 32px",
-    md: { padding: "32px 40px" },
+    padding: "{spacing.4} {spacing.3} {spacing.8}",
+    md: { padding: "{spacing.8} {spacing.10}" },
   }),
   head: css({ display: "flex", alignItems: "flex-end", gap: "3", flexWrap: "wrap" }),
   /** The phone header bar already names the page, so below md the heading block is visually hidden (still read). */
@@ -48,5 +48,5 @@ export const pageClasses = {
   liveKicker: cx(kicker(), css({ display: "inline-flex", alignItems: "center", gap: "1.5", color: "live.text" })),
   /** Small live dot beside a live kicker. */
   ember: css({ width: "8px", height: "8px", flex: "none", borderRadius: "pill", bg: "live" }),
-  sectionTitle: cx(kicker(), css({ margin: "8px 0 0" })),
+  sectionTitle: cx(kicker(), css({ margin: "{spacing.2} 0 0" })),
 };

@@ -1,4 +1,4 @@
-import { css } from "styled-system/css";
+import { css, cx } from "styled-system/css";
 import { empty } from "styled-system/recipes";
 
 /**
@@ -15,8 +15,8 @@ export const pageClasses = {
     display: "flex",
     flexDirection: "column",
     gap: "2.5",
-    padding: "12px",
-    md: { gap: "6", padding: "32px 40px" },
+    padding: "3",
+    md: { gap: "6", padding: "{spacing.8} {spacing.10}" },
   }),
   head: css({ display: "flex", alignItems: "flex-end", flexWrap: "wrap", gap: "4" }),
   headText: css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1.5" }),
@@ -26,14 +26,14 @@ export const pageClasses = {
     md: { position: "static", width: "auto", height: "auto", overflow: "visible", clip: "auto", whiteSpace: "normal", margin: 0, font: "700 30px/1.2 {fonts.display}", letterSpacing: "-0.01em" },
   }),
   sub: css({ margin: 0, fontSize: "15px", color: "fg.muted" }),
-  empty: empty(),
+  empty: cx(empty(), css({ pt: "12", md: { pt: "16" } })),
   emptyTitle: css({ margin: 0, font: "700 24px/1.25 {fonts.display}", color: "fg" }),
-  status: css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "2.5", padding: "48px 0", color: "fg.muted", fontSize: "14px" }),
+  status: css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "2.5", padding: "{spacing.12} 0", color: "fg.muted", fontSize: "14px" }),
   alert: css({
     display: "flex",
     alignItems: "center",
     gap: "3",
-    padding: "12px 16px",
+    padding: "{spacing.3} {spacing.4}",
     borderRadius: "panel",
     bg: "danger.subtle",
     border: "1px solid {colors.danger}",

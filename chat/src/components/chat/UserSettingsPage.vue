@@ -59,8 +59,8 @@ const pageClass = css({
   display: "flex",
   flexDirection: "column",
   gap: "3",
-  padding: "14px 12px 48px",
-  md: { gap: "5", padding: "32px 40px 64px" },
+  padding: "{spacing.4} {spacing.3} {spacing.12}",
+  md: { gap: "5", padding: "{spacing.8} {spacing.10} {spacing.16}" },
 });
 const titleClass = css({
   position: "absolute", width: "1px", height: "1px", overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap",
@@ -71,7 +71,7 @@ const offlineClass = css({
   alignItems: "center",
   gap: "2.5",
   margin: 0,
-  padding: "12px 14px",
+  padding: "{spacing.3} {spacing.4}",
   borderRadius: "control",
   bg: "color-mix(in srgb, {colors.presence.away} 12%, transparent)",
   border: "1px solid color-mix(in srgb, {colors.presence.away} 40%, transparent)",

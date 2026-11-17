@@ -80,14 +80,14 @@ const headClass = css({
   display: "flex",
   alignItems: "center",
   gap: "1",
-  padding: "4px 4px 8px 12px",
+  padding: "{spacing.1} {spacing.1} {spacing.2} {spacing.3}",
   "& h3": { margin: 0, flex: 1, minWidth: 0, font: "700 13px/1.3 {fonts.body}", color: "fg.muted" },
 });
 const smIconClass = iconbtn({ size: "sm" });
-const listClass = css({ display: "flex", flexDirection: "column", gap: "0.5", padding: "0 4px 8px" });
+const listClass = css({ display: "flex", flexDirection: "column", gap: "0.5", padding: "0 {spacing.1} {spacing.2}" });
 const groupClass = css({ display: "flex", flexDirection: "column", gap: "0.5" });
 const rowClass = cx(room(), css({ flex: 1, cursor: "pointer", border: 0, bg: "transparent", width: "100%", textAlign: "left", font: "inherit", "& .wd-badge, & .wd-tag": { flex: "none" } }));
-const threadRowClass = cx(rowClass, css({ minHeight: "36px", pl: "9", fontSize: "sm", "& svg": { width: "16px", height: "16px" } }));
+const threadRowClass = cx(rowClass, css({ minHeight: "36px", pl: "8", fontSize: "sm", "& svg": { width: "16px", height: "16px" } }));
 const rowWrapClass = css({ display: "flex", alignItems: "center", gap: "1" });
 const metaClass = css({ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", font: "400 12px/1.35 {fonts.body}", color: "fg.muted" });
 const nameStackClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", "& > :first-child": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "fg", fontWeight: 600 } });
@@ -106,7 +106,7 @@ const sectionToggleClass = css({
   alignItems: "center",
   gap: "1.5",
   minHeight: "36px",
-  padding: "10px 8px 4px 10px",
+  padding: "{spacing.2.5} {spacing.2} {spacing.1} {spacing.2.5}",
   border: 0,
   bg: "transparent",
   textAlign: "left",
@@ -117,7 +117,7 @@ const sectionToggleClass = css({
   "& > svg": { width: "16px", height: "16px", flex: "none", transition: "rotate {durations.base} {easings.out}" },
   "&[aria-expanded=false] > svg:first-child": { rotate: "-90deg" },
 });
-const callsHeadClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "10px 8px 4px 10px", font: "700 13px/1.3 {fonts.body}", color: "fg.muted" });
+const callsHeadClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "{spacing.2.5} {spacing.2} {spacing.1} {spacing.2.5}", font: "700 13px/1.3 {fonts.body}", color: "fg.muted" });
 const sectionLabelClass = css({ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const callChipClass = css({
   display: "inline-flex",
@@ -151,7 +151,7 @@ const callIconClass = css({
 const leaveClass = cx(iconbtn(), css({ color: "danger.text", _hover: { bg: "danger.subtle", color: "danger.text" } }));
 const forumTagClass = tag();
 const dotClass = badge({ dot: true });
-const emptyGroupClass = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "2", padding: "6px 10px 6px 34px", fontSize: "sm", color: "fg.muted" });
+const emptyGroupClass = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "2", padding: "{spacing.1.5} {spacing.2.5} {spacing.1.5} {spacing.8}", fontSize: "sm", color: "fg.muted" });
 const createClass = css({
   display: "inline-flex",
   alignItems: "center",
@@ -167,7 +167,7 @@ const createClass = css({
   _hover: { bg: "action", color: "action.fg" },
   "& svg": { width: "14px", height: "14px" },
 });
-const emptyClass = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "3", padding: "40px 16px", textAlign: "center", fontSize: "sm", color: "fg.muted" });
+const emptyClass = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "3", padding: "{spacing.10} {spacing.4}", textAlign: "center", fontSize: "sm", color: "fg.muted" });
 const newClass = css({
   display: "inline-flex",
   alignItems: "center",
@@ -184,9 +184,9 @@ const newClass = css({
   "& svg": { width: "16px", height: "16px" },
 });
 const skelGroupClass = css({ display: "flex", flexDirection: "column", gap: "1" });
-const skelHeadClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "10px 8px 4px" });
+const skelHeadClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "{spacing.2.5} {spacing.2} {spacing.1}" });
 const skelRowClass = css({ display: "flex", alignItems: "center", gap: "2.5", minHeight: "rowH", px: "2.5" });
-const footClass = css({ padding: "8px 4px 0", borderTop: "1px solid {colors.border.soft}" });
+const footClass = css({ padding: "{spacing.2} {spacing.1} 0", borderTop: "1px solid {colors.border.soft}" });
 const footRowClass = cx(rowClass, css({ "& svg:last-child": { width: "16px", height: "16px", transition: "translate {durations.base} {easings.out}" }, "&:hover svg:last-child": { translate: "2px 0" } }));
 
 /**

@@ -67,7 +67,7 @@ const TONE = {
   danger: css({ px: "2.5", color: "danger.text", bg: "color-mix(in srgb, {colors.danger} 14%, transparent)" }),
 };
 const healthyClass = css({ color: "presence.available" });
-const barsClass = css({ display: "inline-flex", alignItems: "flex-end", gap: "2px", width: "16px", height: "16px" });
+const barsClass = css({ display: "inline-flex", alignItems: "flex-end", gap: "0.5", width: "16px", height: "16px" });
 const barClass = css({ flex: 1, borderRadius: "1px", bg: "currentColor" });
 const barOffClass = css({ opacity: 0.25 });
 const srOnly = css({ srOnly: true });

@@ -21,7 +21,7 @@ interface VCardFeedback {
   message: string;
 }
 
-const headClass = css({ display: "flex", alignItems: "center", gap: "14px" });
+const headClass = css({ display: "flex", alignItems: "center", gap: "4" });
 const growClass = css({ flex: 1, minWidth: 0 });
 const formClass = css({ display: "flex", flexDirection: "column", gap: "4" });
 

@@ -151,7 +151,7 @@ const rowClass = css({
   gap: "3",
   minWidth: 0,
   minHeight: "56px",
-  padding: "10px 16px",
+  padding: "{spacing.2.5} {spacing.4}",
   borderRadius: "panel",
   border: "1px solid {colors.border.soft}",
   bg: "surface",
@@ -175,10 +175,9 @@ const rowLiveLineClass = cx(rowLineClass, css({ color: "live.text" }));
 const pillClass = css({ display: "inline-flex", alignItems: "center", gap: "1", height: "20px", px: "1.5", flex: "none", borderRadius: "pill", border: "1px solid {colors.border}", fontSize: "xs", color: "fg.muted", whiteSpace: "nowrap", "& svg": { width: "12px", height: "12px" } });
 const livePillClass = cx(pillClass, css({ borderColor: "live", color: "live.text" }));
 const openPillShapeClass = cx(openPillClass, css({ flex: "none", borderRadius: "pill" }));
-const noteClass = css({ margin: 0, padding: "24px 16px", borderRadius: "panel", border: "1px dashed {colors.border}", textStyle: "caption", color: "fg.muted", md: { gridColumn: "1 / -1" } });
-const skeletonRowClass = css({ display: "flex", alignItems: "center", gap: "3", padding: "10px 16px", borderRadius: "panel", border: "1px solid {colors.border.soft}", bg: "surface" });
+const noteClass = css({ margin: 0, padding: "{spacing.6} {spacing.4}", borderRadius: "panel", border: "1px dashed {colors.border}", textStyle: "caption", color: "fg.muted", md: { gridColumn: "1 / -1" } });
+const skeletonRowClass = css({ display: "flex", alignItems: "center", gap: "3", padding: "{spacing.2.5} {spacing.4}", borderRadius: "panel", border: "1px solid {colors.border.soft}", bg: "surface" });
 const skeletonTextClass = css({ display: "flex", flex: 1, minWidth: 0, flexDirection: "column", gap: "1.5" });
-const emptyClass = cx(pc.empty, css({ pt: "72px" }));
 const bellyClass = css({ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "120px", height: "120px", borderRadius: "pill", bg: "belly", "& img": { width: "88px", height: "88px", animation: "none" } });
 const srOnlyClass = css({ srOnly: true });
 
@@ -769,7 +768,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
         <button v-else type="button" :class="heroCtaClass" @click="browseRooms">Browse rooms</button>
       </header>
 
-      <div v-if="isQuiet && channels.length === 0" :class="emptyClass" role="status">
+      <div v-if="isQuiet && channels.length === 0" :class="pc.empty" role="status">
         <span :class="bellyClass" aria-hidden="true"><img src="/waddle-logo.svg" alt="" /></span>
         <h2 :class="pc.emptyTitle">Nothing here yet</h2>
         <p>Join a room and your mentions, events and people show up here.</p>

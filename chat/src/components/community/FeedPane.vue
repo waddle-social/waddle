@@ -56,7 +56,7 @@ const ui = {
   sub: css({ margin: 0, fontSize: "15px", color: "fg.muted" }),
   filters: cx(seg(), css({ alignSelf: "flex-start", maxWidth: "100%", overflowX: "auto", flex: "none" })),
   count: css({ fontFamily: "mono", fontSize: "11px", color: "fg.muted", fontVariantNumeric: "tabular-nums" }),
-  alert: css({ padding: "10px 12px", borderRadius: "10px", bg: "danger.subtle", border: "1px solid {colors.danger}", color: "danger.text", fontSize: "13px" }),
+  alert: css({ padding: "{spacing.2.5} {spacing.3}", borderRadius: "10px", bg: "danger.subtle", border: "1px solid {colors.danger}", color: "danger.text", fontSize: "13px" }),
   list: css({ display: "flex", flexDirection: "column", gap: "3" }),
   card: cx(floe(), css({ "--pad": "16px", gap: "2.5" })),
   who: css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0 }),
