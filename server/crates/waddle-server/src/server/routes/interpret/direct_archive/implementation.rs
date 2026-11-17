@@ -631,27 +631,23 @@ pub(in crate::server::routes::interpret::direct_archive) async fn update_direct_
         return;
     }
     let global_db_actor = state.deps.app_state.db_pool.global_actor();
-    let correction_target_message_id =
-        if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
-            match correction_target_or_own_message(
-                deps,
-                archive_jid,
-                sender,
-                &correction.replaces_id,
-            )
+    let correction_target_message_id = if let Some(correction) =
+        waddle_xmpp::xep::extract_correction_from_message(message)
+    {
+        match correction_target_or_own_message(deps, archive_jid, sender, &correction.replaces_id)
             .await
-            {
-                Ok(target) => target,
-                Err(error) => {
-                    warn!(%archive_jid, %error, "correction preview target lookup failed");
-                    deps.effects
-                        .fail_plan(effects::PlanFailure::RichTargetLookup);
-                    return;
-                }
+        {
+            Ok(target) => target,
+            Err(error) => {
+                warn!(%archive_jid, %error, "correction preview target lookup failed");
+                deps.effects
+                    .fail_plan(effects::PlanFailure::RichTargetLookup);
+                return;
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
     let message_id = correction_target_message_id
         .as_ref()
         .map(waddle_xmpp::mam::RichMessageId::as_str)

@@ -279,7 +279,8 @@ async fn a_replica_that_stops_renewing_its_lease_is_reported_lapsed() {
         "a lease is not taken for lapsed before it could have run out"
     );
     assert!(
-        started.elapsed() < SESSION_ENDING_LEASE_TTL + SESSION_ENDING_LAPSE_GRACE + Duration::from_secs(10)
+        started.elapsed()
+            < SESSION_ENDING_LEASE_TTL + SESSION_ENDING_LAPSE_GRACE + Duration::from_secs(10)
     );
     assert!(report.confirmed(), "{report:?}");
     let ending_of = |replica: Uuid| {

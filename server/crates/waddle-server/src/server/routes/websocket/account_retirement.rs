@@ -265,7 +265,9 @@ async fn close_live_stream(state: &WebSocketState, jid: &FullJid, entry: &Connec
             return true;
         }
         if tokio::time::Instant::now() + STREAM_CLOSE_POLL > deadline {
-            warn!("a retired account's stream did not close in time; trying again at the next poll");
+            warn!(
+                "a retired account's stream did not close in time; trying again at the next poll"
+            );
             return false;
         }
         tokio::time::sleep(STREAM_CLOSE_POLL).await;

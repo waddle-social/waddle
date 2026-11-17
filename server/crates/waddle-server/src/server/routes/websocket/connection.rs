@@ -2121,7 +2121,9 @@ pub(super) async fn finish_connection<S, R, E>(
     // transfer, and still must not be answered for an unobserved pump.
     if pumps == PumpTermination::Missed
         && !fenced
-        && late_requests.iter().any(|request| request.origin.is_transfer())
+        && late_requests
+            .iter()
+            .any(|request| request.origin.is_transfer())
     {
         fail_unjoined_transfer(state, conn);
         fenced = true;

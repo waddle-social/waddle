@@ -298,8 +298,10 @@ fn snapshot_admits(app_state: &crate::server::AppState, domain: &jid::DomainRef)
 /// were stored gets none of them delivered. A sender is remote when its
 /// domain is not one this deployment serves (`served`). The sender of a
 /// row that refers to the account's archive, as the ingress acceptance of
-/// a remote sender's message stores it, is read from `archive`; the
-/// archived copy itself stays in the account's archive. Only rows no
+/// a remote sender's message stores it, is read from `archive`, a local
+/// sender's row included: such a row names no sender, and only the read
+/// tells the two apart. The archived copy itself stays in the account's
+/// archive. Only rows no
 /// session has claimed are deleted; a claimed row is being handed to a
 /// session already.
 ///
@@ -1032,7 +1034,8 @@ async fn receive_direct(
         // and a recipient that does not exist; anything else that did not
         // commit is a failure, and the message is lost (S2S has no
         // retransmission of a stanza the receiving server took).
-        if decision.class == waddle_xmpp::telemetry::attributes::IngressDecisionClass::PrincipalMissing
+        if decision.class
+            == waddle_xmpp::telemetry::attributes::IngressDecisionClass::PrincipalMissing
         {
             telemetry::direct_refused();
         } else {

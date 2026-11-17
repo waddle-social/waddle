@@ -127,7 +127,9 @@ async fn a_remote_senders_link_card_is_removed_before_storage() {
     let federated = federated(&pki).await;
     federated.account("alice").await;
 
-    federated.from_peer(with_card(BOB_PHONE, "card-offline")).await;
+    federated
+        .from_peer(with_card(BOB_PHONE, "card-offline"))
+        .await;
 
     let held = wait_for_stored(&federated).await;
     assert_eq!(held.len(), 1, "{held:?}");
@@ -142,7 +144,9 @@ async fn a_resourceless_remote_senders_link_card_is_removed_before_storage() {
 
     // A sender without a resource keeps the earlier producer: its message
     // is stored whole.
-    federated.from_peer(with_card(BOB, "card-resourceless")).await;
+    federated
+        .from_peer(with_card(BOB, "card-resourceless"))
+        .await;
 
     let held = wait_for_stored(&federated).await;
     assert_eq!(held.len(), 1, "{held:?}");

@@ -144,7 +144,12 @@ fn recipient_intent(intent: &IngressEffectIntent, recipient: &BareJid, sender: &
             recipient: routed,
             fanout,
             ..
-        } => routed == recipient && fanout.iter().all(|resource| resource.to_bare() == *recipient),
+        } => {
+            routed == recipient
+                && fanout
+                    .iter()
+                    .all(|resource| resource.to_bare() == *recipient)
+        }
         IngressEffectIntent::Carbons {
             carbon_recipients,
             excluded_source,
@@ -156,7 +161,10 @@ fn recipient_intent(intent: &IngressEffectIntent, recipient: &BareJid, sender: &
                     .all(|resource| resource.to_bare() == *recipient)
         }
         IngressEffectIntent::RelayCarbons { owner, exclude, .. } => {
-            owner == recipient && exclude.iter().all(|resource| resource.to_bare() == *recipient)
+            owner == recipient
+                && exclude
+                    .iter()
+                    .all(|resource| resource.to_bare() == *recipient)
         }
         IngressEffectIntent::InboxProject { owner, mutation } => {
             owner == recipient
