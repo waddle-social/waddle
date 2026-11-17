@@ -1,9 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import { effectScope, nextTick, ref } from "vue";
+import { useChannelInbox } from "../src/channels/inbox";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 import type { ChannelSummary } from "../src/lib/chat-types";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { LiveRoomMessage, MamHistoryPage } from "../src/lib/xmpp-client";
+import type { BrowserXmppClient, LiveRoomMessage, MamHistoryPage } from "../src/lib/xmpp-client";
 import type { WasmArchivedMessage } from "../src/lib/xmpp/wasm-types";
 import type { InboxEntry } from "../src/lib/xmpp/inbox-types";
 import { applyEntries, createInboxState } from "../src/services/inbox";
@@ -134,9 +135,10 @@ describe("selectUnreadRoomCandidates", () => {
       muc({ partner: ROOM, thread: "t2", unread: 0, lastUpdated: 90 }), // read thread, skipped
       { partner: "bob@waddle.example", kind: "direct", lastStanzaId: "s", lastUpdated: 999, unread: 5 },
       muc({ partner: "quiet@muc.waddle.example", unread: 0, lastUpdated: 10 }), // no unread, skipped
+      muc({ partner: "general@muc.old.example", unread: 9, lastUpdated: 200 }), // different room, same slug
     ]);
 
-    const candidates = selectUnreadRoomCandidates(state);
+    const candidates = selectUnreadRoomCandidates(state, channels);
     expect(candidates).toHaveLength(1);
     const room = candidates[0]!;
     expect(room.roomJid).toBe(ROOM);
@@ -150,7 +152,7 @@ describe("selectUnreadRoomCandidates", () => {
     const state = applyEntries(createInboxState(), [
       muc({ partner: ROOM, thread: "t1", preview: "hi there", unread: 1, lastUpdated: 50 }),
     ]);
-    const candidates = selectUnreadRoomCandidates(state);
+    const candidates = selectUnreadRoomCandidates(state, channels);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]!.channelUnread).toBe(0);
     expect(candidates[0]!.threads[0]).toMatchObject({ threadId: "t1", title: "hi there" });
@@ -162,7 +164,8 @@ describe("selectUnreadRoomCandidates", () => {
       muc({ partner: "b@muc.x", unread: 1, lastUpdated: 30 }),
       muc({ partner: "c@muc.x", unread: 1, lastUpdated: 20 }),
     ]);
-    expect(selectUnreadRoomCandidates(state).map((c) => c.roomJid)).toEqual([
+    const activeChannels = ["a", "b", "c"].map((id) => ({ id, name: id, jid: `${id}@muc.x` }));
+    expect(selectUnreadRoomCandidates(state, activeChannels).map((c) => c.roomJid)).toEqual([
       "b@muc.x",
       "c@muc.x",
       "a@muc.x",
@@ -546,7 +549,7 @@ describe("useUnreadOverview", () => {
     await flushOverviewRefresh();
 
     expect(fetchRoomMessagesByStanzaIds).toHaveBeenCalledTimes(1);
-    expect(overview.groups.value).toEqual([]);
+    expect(overview.groups.value[0]?.channelMessages).toEqual([]);
     scope.stop();
   });
 
@@ -586,7 +589,7 @@ describe("useUnreadOverview", () => {
     await flushOverviewRefresh();
 
     expect(fetchRoomMessagesByStanzaIds).toHaveBeenCalledTimes(1);
-    expect(overview.groups.value).toEqual([]);
+    expect(overview.groups.value[0]?.channelMessages).toEqual([]);
     scope.stop();
   });
 
@@ -716,6 +719,44 @@ describe("useUnreadOverview", () => {
     await flushOverviewRefresh();
 
     expect(fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+    expect(overview.groups.value[0]?.channelMessages).toEqual([]);
+    scope.stop();
+  });
+
+  test("keeps unread rows without archive previews until the room and thread are marked read", async () => {
+    const markInboxRead = mock(async () => {});
+    const client = {
+      markInboxRead,
+      queryMamPage: mock(async () => mamPage([])),
+      queryMamThreadPage: mock(async () => { throw new Error("Archive unavailable"); }),
+    } as unknown as BrowserXmppClient;
+    const xmppClient = ref<BrowserXmppClient | null>(client);
+    const inbox = useChannelInbox(xmppClient);
+    inbox.onInboxPush(muc({ partner: ROOM, unread: 1 }));
+    inbox.onInboxPush(muc({ partner: ROOM, thread: "t1", threadTitle: "Deploys", unread: 2 }));
+    const scope = effectScope();
+    const overview = scope.run(() => useUnreadOverview({
+      xmppClient,
+      session: ref(session),
+      channels: ref(channels),
+      inboxState: inbox.inboxState,
+    }))!;
+
+    await flushOverviewRefresh();
+    expect(overview.groups.value).toHaveLength(1);
+    const group = overview.groups.value[0]!;
+    expect(group.roomJid).toBe(ROOM);
+    expect(group.channelUnreadCount).toBe(1);
+    expect(group.channelMessages).toHaveLength(0);
+    expect(group.threads).toHaveLength(1);
+    expect(group.threads[0]?.unreadCount).toBe(2);
+    expect(group.threads[0]?.messages).toHaveLength(0);
+
+    inbox.markRead(ROOM);
+    inbox.markThreadRead(ROOM, "t1");
+    expect(markInboxRead.mock.calls).toEqual([[ROOM], [ROOM, "t1"]]);
+    expect(selectUnreadRoomCandidates(inbox.inboxState.value, channels)).toEqual([]);
+    await flushOverviewRefresh();
     expect(overview.groups.value).toEqual([]);
     scope.stop();
   });

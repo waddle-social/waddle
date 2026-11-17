@@ -146,11 +146,6 @@ export function useChannelInbox(
   // Server total unread counts conversation rows only; thread rows are nested detail.
   const totalUnreadCount = totalChannelUnreadCount;
 
-  const totalMentionCount = computed(() => {
-    // Server doesn't track mentions separately yet — return 0
-    return 0;
-  });
-
   async function hydrateFromInbox(): Promise<boolean> {
     const client = xmppClient.value;
     if (!client) {
@@ -279,7 +274,6 @@ export function useChannelInbox(
     totalChannelUnreadCount,
     totalThreadUnreadCount,
     totalUnreadCount,
-    totalMentionCount,
     hydrateFromInbox,
     onInboxPush,
     clearUnread,
