@@ -135,6 +135,10 @@ struct Reflected {
     occupant: Jid,
 }
 
+/// Joins a room answered with a challenge, by room and occupant: the
+/// nickname and the join's id.
+type ChallengedJoins = HashMap<(BareJid, FullJid), (String, Option<String>)>;
+
 /// A minimal XEP-0045 room service on `muc.home-b.test`: it seats a
 /// [`HOST`] occupant in every room, answers a join with the host's presence
 /// and the joiner's own presence (status 110), leaves and nickname changes
@@ -175,8 +179,8 @@ pub struct FakeMuc {
     jid_disco: Mutex<HashMap<BareJid, Result<Element, StanzaError>>>,
     challenge_joins: AtomicBool,
     /// Joins answered with a challenge, waiting for
-    /// [`FakeMuc::pass_challenge`]: the nickname and the join's id.
-    challenged: Mutex<HashMap<(BareJid, FullJid), (String, Option<String>)>>,
+    /// [`FakeMuc::pass_challenge`].
+    challenged: Mutex<ChallengedJoins>,
     defer_leaves: AtomicBool,
     /// Answers to leaves withheld until the occupant joins the room again.
     deferred_leaves: Mutex<Vec<(BareJid, FullJid, Presence)>>,
