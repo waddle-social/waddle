@@ -75,6 +75,13 @@ of the window.
      directory's `kustomization.yaml` lists `restricted-runtime/prepare` and
      `restricted-runtime/serve`, and the pods connect as `waddle_runtime`) or
      as the login that owns the schema. The window has a branch for each;
+   - under the restricted runtime: the chart is 0.4.13 or later and the
+     values set `restrictedRuntime.handoff.awaitOwnerJob` (the `serve`
+     component does on `main`). Window steps 7 and 8 rely on both; the
+     integration branch has them only once rebased on `main`;
+   - the name of the Flux Kustomization that applies the `waddle-server`
+     directory, and that the HelmRelease's values come from it (the
+     published artifact sets `image.digest` and `WADDLE_GIT_SHA`);
    - the update strategy is `Recreate`, and the deployment UUID
      (`deployment.uuid` in the HelmRelease) is the one production has used;
    - the replica count, and that no other process writes SpiceDB
@@ -119,10 +126,10 @@ of the window.
     `SELECT` on `retired_account_jids` included; a server whose role cannot
     read that ledger refuses to start. Under a schema-owning login the server
     applies the migrations itself and owns the new relations. The restore
-    fence also needs `EXECUTE` on `pg_current_wal_flush_lsn()` and
-    `pg_walfile_name()` for the runtime role; without it the fence refuses
-    (`position_unreadable`), which with no scope enrolled is logged as
-    information and changes nothing else.
+    fence reads `pg_current_wal_flush_lsn()` and `pg_walfile_name()`, which
+    PostgreSQL grants to every role and the provisioning leaves in place; if
+    they were revoked the fence refuses (`position_unreadable`), which with
+    no scope enrolled is logged as information and changes nothing else.
 12. **Backups possible.** A PostgreSQL backup of the `waddle` database and a
     copy of SpiceDB's datastore (`postgresql-spicedb`) can be taken inside
     the window, and restoring them has been rehearsed. These are the only way
@@ -169,33 +176,44 @@ The constraint that orders the steps: **no binary from before the codec may
 start, or write SpiceDB, between the moment the store is emptied and the
 moment this release has marked it**. Such a binary would write IDs in the old
 encoding into a store this release reads as `v2_` IDs, and the marker cannot
-detect rows written before it. The HelmRelease has drift detection on, so a
-manual scale-down is reverted unless Flux is held first.
+detect rows written before it.
+
+How a release reaches the cluster decides how that is enforced. Publication
+pushes the rendered `infrastructure/waddle.cloud/gitops/waddle-server/`
+directory, with the new image digest and `WADDLE_GIT_SHA` written into the
+HelmRelease values, as an OCI artifact (`waddle-server-source.yaml`); a Flux
+Kustomization applies it, and helm-controller rolls the HelmRelease. The
+HelmRelease has drift detection on, so a manual scale-down is reverted unless
+the HelmRelease is suspended. While the Kustomization is suspended the
+in-cluster HelmRelease keeps the previous release's digest, and resuming the
+HelmRelease alone starts the **previous** image. Steps 7 to 9 therefore check
+the digest before anything starts.
 
 The merge happens before the server stops, so the image is built and
 published while the previous release still serves, and the outage lasts from
-step 5 to step 9. The web client (`chat`) deploys from the same merge through
+step 4 to step 9. The web client (`chat`) deploys from the same merge through
 its own pipeline, independently of the server; its changes work against
 either server release (see [Clients](#clients)).
 
-| Step | What | Check before going on | Rollback from here |
-| --- | --- | --- | --- |
-| 1 | Hold Flux | Both suspended | Resume |
-| 2 | Merge | Merge commit is the verified head plus nothing | Revert on `main`; no server is deployed while Flux is held, but `chat` has deployed and redeploys from the revert |
-| 3 | Wait for publication | Published image digest and Git SHA recorded | As step 2 |
-| 4 | Final inventory | Counts recorded | Resume Flux; the previous release keeps serving |
-| 5 | Stop the server | No server pod; no other SpiceDB writer | Scale up the previous release |
-| 6 | Back up | Both backups complete | As step 5 |
-| 7 | Empty SpiceDB | Every definition reads empty | Restore SpiceDB from step 6, start the previous release |
-| 8 | Owner phase (restricted runtime) | Owner Job complete; handoff published | Restore PostgreSQL and SpiceDB from step 6 |
-| 9 | Start this release | Both replicas ready; startup checks pass | As step 8 |
-| 10 | Restore grants and bans | Bans and ownerships applied | Roll forward |
-| 11 | Verify and release Flux | [After the window](#after-the-window) checklist done | Roll forward |
+| Step | What | Check before going on |
+| --- | --- | --- |
+| 1 | Hold Flux | Kustomization and HelmRelease suspended |
+| 2 | Merge | The merge commit is the verified head |
+| 3 | Wait for publication | Published image digest and Git SHA recorded |
+| 4 | Stop the server | No server pod; no other SpiceDB writer |
+| 5 | Final inventory and backups | Counts recorded; both backups complete |
+| 6 | Empty SpiceDB | Every definition reads empty |
+| 7 | Load the new release's configuration | HelmRelease still suspended and carrying the step 3 digest; SpiceDB empty |
+| 8 | Owner phase (restricted runtime) | Owner Job ran the step 3 image and completed; handoff published |
+| 9 | Start this release | Pods run the step 3 digest; both ready; startup checks pass |
+| 10 | Restore grants and bans | Bans and ownerships applied |
+| 11 | Verify | [After the window](#after-the-window) checklist done |
 
-1. **Hold Flux.** Suspend the Flux Kustomization that applies
-   `infrastructure/waddle.cloud/gitops/waddle-server/` (find it with
-   `flux get kustomizations -A`) and the HelmRelease, so a publication does
-   not roll the new image and nothing reverts the manual steps below.
+[Rollback](#rollback) gives the way back from each step.
+
+1. **Hold Flux.** Suspend the Flux Kustomization that applies the
+   `waddle-server` directory (find it with `flux get kustomizations -A`) and
+   the HelmRelease:
 
    ```sh
    flux suspend kustomization <name> -n flux-system
@@ -204,14 +222,11 @@ either server release (see [Clients](#clients)).
 
 2. **Merge** the verified head into `main`, as one merge, with the hosted
    checks passed at that exact commit (prerequisite 3).
-3. **Wait for publication.** The server's default pipeline builds the image,
-   pins its digest and sets `WADDLE_GIT_SHA` in the generated Flux artifact.
-   Record the digest and the SHA. Nothing is deployed while the HelmRelease
-   is suspended.
-4. **Final inventory.** Repeat the SpiceDB counts and the ban list of
-   [Before the window](#before-the-window) step 2, so they reflect the last
-   state the previous release wrote.
-5. **Stop the server.**
+3. **Wait for publication.** The server's default pipeline builds the image
+   and pushes the artifact. Record the image digest and the Git SHA it
+   carries. Nothing changes in the cluster while the Kustomization is
+   suspended.
+4. **Stop the server.**
 
    ```sh
    kubectl -n waddle scale deployment/waddle-server --replicas=0
@@ -221,20 +236,24 @@ either server release (see [Clients](#clients)).
    Confirm that no pod of the previous image remains and that no other
    process holds the SpiceDB preshared key and writes relationships. Under
    the restricted runtime, confirm that no owner Job is running.
-6. **Back up.** Take a PostgreSQL backup of `waddle` and wait for it to
-   complete; keep a copy of the migration ledger with the change record:
+5. **Final inventory and backups.** With the server stopped, SpiceDB is
+   still readable and holds the last state the previous release wrote:
+   - repeat the SpiceDB counts and the ban list of
+     [Before the window](#before-the-window) step 2;
+   - take a PostgreSQL backup of `waddle` and wait for it to complete, and
+     keep a copy of the migration ledger with the change record:
 
-   ```sh
-   psql_primary -c "\copy (SELECT version, description, checksum FROM _migrations ORDER BY version) TO STDOUT WITH CSV" > migrations-before-2047.csv
-   ```
+     ```sh
+     psql_primary -c "\copy (SELECT version, description, checksum FROM _migrations ORDER BY version) TO STDOUT WITH CSV" > migrations-before-2047.csv
+     ```
 
-   Take a copy of SpiceDB's datastore database (`postgresql-spicedb`) as
-   well. It is the only record of the grants step 7 deletes, and the only
-   way to run the previous release again with them. It holds account JIDs:
-   keep it under the access controls of the account database. Under the
-   restricted runtime, also keep a copy of the published handoff ConfigMap
-   (`waddle-server-runtime-handoff-pins`).
-7. **Empty SpiceDB** ([codec cutover, Procedure step 3](authz-codec-cutover.md#procedure)).
+   - take a copy of SpiceDB's datastore database (`postgresql-spicedb`). It
+     is the only record of the grants step 6 deletes, and the only way to
+     run the previous release again with them. It holds account JIDs: keep it
+     under the access controls of the account database;
+   - under the restricted runtime, keep a copy of the published handoff
+     ConfigMap (`waddle-server-runtime-handoff-pins`).
+6. **Empty SpiceDB** ([codec cutover, Procedure step 3](authz-codec-cutover.md#procedure)).
    Either:
    - **delete every relationship** of each definition from the inventory, for
      example `zed relationship bulk-delete <definition>`, repeated until
@@ -242,28 +261,52 @@ either server release (see [Clients](#clients)).
      them. The bulk-delete syntax and its default limit must be confirmed
      against the `zed` build in use before the window; or
    - **recreate the datastore**: delete the `SpiceDBCluster` and its
-     PostgreSQL cluster `postgresql-spicedb`, then create both again from the
-     manifests in `infrastructure/waddle.cloud/gitops/waddle-server/`, so the
-     operator migrates a new, empty datastore.
+     PostgreSQL cluster `postgresql-spicedb` and their volumes. Step 7's
+     reconciliation creates both again from the manifests, and the SpiceDB
+     operator migrates the new, empty datastore.
 
-   The existing schema may stay; this release rewrites it. Then restart
-   SpiceDB: `ReadSchema` can serve a cached schema after its datastore was
-   reset, and the schema-version check reads it
-   ([schema versions](authz-schema-versions.md)). Verify again that every
-   definition reads empty.
+   The existing schema may stay; this release rewrites it.
+7. **Load the new release's configuration.**
+   1. Under the restricted runtime, delete the handoff ConfigMap
+      `waddle-server-runtime-handoff-pins` (its copy is kept from step 5).
+      With no handoff and the Deployment at zero replicas, a release renders
+      the Deployment at zero replicas, and still renders the owner CronJob,
+      when `restrictedRuntime.handoff.awaitOwnerJob` is set (prerequisite 5).
+   2. Resume the Flux Kustomization, and only it:
+      `flux resume kustomization <name> -n flux-system`.
+   3. Confirm the HelmRelease is still suspended
+      (`flux get helmreleases -n waddle`) and now carries the step 3 image:
+
+      ```sh
+      kubectl -n waddle get helmrelease waddle-server -o jsonpath='{.spec.values.image.digest}{"\n"}'
+      kubectl -n waddle get helmrelease waddle-server -o yaml | grep -A1 'name: WADDLE_GIT_SHA'
+      ```
+
+      If the digest is not the step 3 digest, stop: resuming the HelmRelease
+      would start the previous image on the empty store.
+   4. Restart SpiceDB (or wait for the recreated one to be ready): `ReadSchema`
+      can serve a cached schema after its datastore was reset, and the
+      schema-version check reads it ([schema versions](authz-schema-versions.md)).
+      Verify again that every definition reads empty.
 8. **Owner phase, restricted runtime only.** The owner phase of this
    release's image must apply migrations 2001 to 2013 and grant the runtime
    role before any server of this release starts; servers of this release
    refuse a database whose ledger lacks them. Nothing in the chart sequences
-   it for an upgrade. The chart's fresh-install path does: with
-   `restrictedRuntime.handoff.awaitOwnerJob` set and no published handoff, a
-   release renders the Deployment at zero replicas and still renders the
-   owner CronJob. Applied here, with the Deployment already at zero:
-   1. delete the handoff ConfigMap `waddle-server-runtime-handoff-pins` (its
-      copy is kept from step 6);
-   2. resume the HelmRelease. The release renders the owner CronJob with the
-      new image and the Deployment at zero replicas;
-   3. run the owner Job from that CronJob and wait for it:
+   it for an upgrade; this step uses the chart's fresh-install path set up in
+   step 7.
+   1. Resume the HelmRelease: `flux resume helmrelease waddle-server -n waddle`.
+      It renders the owner CronJob with the new image and the Deployment at
+      zero replicas.
+   2. Confirm both before going on:
+
+      ```sh
+      kubectl -n waddle get cronjob waddle-server-owner -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[*].image}{"\n"}'
+      kubectl -n waddle get deployment waddle-server -o jsonpath='{.spec.replicas}{"\n"}'   # 0
+      ```
+
+      The CronJob's image must be pinned to the step 3 digest; otherwise
+      suspend the HelmRelease again and stop.
+   3. Run the owner Job from that CronJob and wait for it:
 
       ```sh
       JOB=owner-$(date +%Y%m%d%H%M%S)
@@ -274,38 +317,38 @@ either server release (see [Clients](#clients)).
 
       Its exit codes are those of
       [the restricted runtime cutover](../runbooks/restricted-runtime-cutover.md);
-      a refusal names its cause and changes nothing;
-   4. confirm the handoff ConfigMap was published again.
+      a refusal names its cause and changes nothing.
+   4. Confirm the handoff ConfigMap was published again.
 
-   This sequence is derived from the chart and has to be proven in the
+   This sequence is derived from the chart and must be proven in the
    rehearsal (prerequisite 13).
 
    With a schema-owning login there is no owner phase: the first server to
-   start applies the migrations under the migration lock. Resume the
-   HelmRelease in step 9.
+   start applies the migrations under the migration lock.
 9. **Start this release.** Under the restricted runtime,
-   `flux reconcile helmrelease waddle-server -n waddle --force`; otherwise
-   resume the HelmRelease. Then:
+   `flux reconcile helmrelease waddle-server -n waddle --force`; with a
+   schema-owning login, resume the HelmRelease (its digest was checked in
+   step 7). Then:
 
    ```sh
    kubectl -n waddle rollout status deployment/waddle-server --timeout=10m
-   kubectl -n waddle get pods -l app.kubernetes.io/name=waddle-server -o wide
+   kubectl -n waddle get pods -l app.kubernetes.io/name=waddle-server \
+     -o jsonpath='{range .items[*]}{.metadata.name} {.status.containerStatuses[*].imageID}{"\n"}{end}'
    ```
 
-   Both replicas must become ready, and every check under
-   [Startup checks](#startup-checks) must pass. One replica logs
-   `Marked empty authorization store for the current ID codec` and one
-   `Recorded the authorization schema version`. A replica refused because
-   the store `changed while its codec marker was being written` only needs a
-   restart.
+   Every pod must run the step 3 digest, both replicas must become ready,
+   and every check under [Startup checks](#startup-checks) must pass. One
+   replica logs `Marked empty authorization store for the current ID codec`
+   and one `Recorded the authorization schema version`. A replica refused
+   because the store `changed while its codec marker was being written` only
+   needs a restart.
 10. **Restore grants and bans.** Grant again the room and Space ownerships
     decided before the window, and ban again through the normal XEP-0045
     admin path or the `set-affiliation` ad-hoc command, so SpiceDB and the
     SQL room affiliations agree. Confirm that the rooms kept closed are
     closed ([codec cutover, Accepted loss](authz-codec-cutover.md#accepted-loss)).
-11. **Verify and release Flux.** Run [After the window](#after-the-window),
-    then resume the Flux Kustomization. Keep `Recreate`; a return to
-    `RollingUpdate` is a separate change under the guard in
+11. **Verify.** Run [After the window](#after-the-window). Keep `Recreate`;
+    a return to `RollingUpdate` is a separate change under the guard in
     [relay cutovers](relay-cutovers.md#rollingupdate-guard).
 
 ## S2S stays off
@@ -318,12 +361,20 @@ The production chart has no S2S port or setting. Confirm after step 9:
 
 - **Not configured.** The rendered Deployment and every ConfigMap and Secret
   it reads set neither `WADDLE_S2S_ENABLED=true` nor
-  `WADDLE_S2S_CONFIG_FILE`:
+  `WADDLE_S2S_CONFIG_FILE`. Secrets are read through `envFrom`
+  (`extraSecretRefs` in the values), so list their keys as well:
 
   ```sh
   kubectl -n waddle get deployment waddle-server -o yaml | grep -n WADDLE_S2S
   kubectl -n waddle get configmap -o yaml | grep -n WADDLE_S2S
+  for secret in $(kubectl -n waddle get deployment waddle-server \
+      -o jsonpath='{.spec.template.spec.containers[*].envFrom[*].secretRef.name}'); do
+    kubectl -n waddle get secret "$secret" -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}' \
+      | grep -n WADDLE_S2S && echo "in $secret"
+  done
   ```
+
+  Every command prints nothing.
 
 - **No listener.** No server log contains `Bound S2S listener`, and the
   Service exposes no port besides the chart's HTTP port
@@ -354,7 +405,7 @@ what a later rolling update has to respect.
 | Part | An old binary after the window | Rule |
 | --- | --- | --- |
 | Authorization ID codec | Its schema write would remove `waddle_authz_codec` and `waddle_authz_schema`, which hold relationships, so SpiceDB refuses it and its startup fails. A process that writes relationships without writing the schema (a tool with the preshared key) is not fenced and would write the old encoding | No pre-codec binary or tool runs against the marked store. Never delete the marker to get past a refusal ([codec cutover, Rollback](authz-codec-cutover.md#rollback)) |
-| Schema version 2 | Refused at startup: `authorization store schema is version N, newer than version M of this server` | A crash-looping old pod is a binary that was not retired; remove it ([schema versions](authz-schema-versions.md#rollout-within-2047)) |
+| Schema version 2 | The previous release has no version check of its own: its schema write would remove `waddle_authz_schema`, which holds the version marker, so SpiceDB refuses it and its startup fails. A versioned binary older than the store logs `authorization store schema is version N, newer than version M of this server` | A crash-looping old pod is a binary that was not retired; remove it ([schema versions](authz-schema-versions.md#rollout-within-2047)) |
 | Migration ledger | The previous release refuses a ledger that holds a version it does not know: `found unknown migration v2001 ...; this usually means an older binary is starting against a newer ledger` | Migrations are forward-only. See [Rollback](#rollback) |
 | Identity profile | A replica of the previous release folds inputs, accepts `ALICE` at sign-in and provisions Unicode OpenID Connect names | Every replica runs this release before any client relies on the refusals |
 | Destination routing | A replica of the previous release answers IQs to other domains per namespace (`not-allowed` for ping, Carbons, session and discovery; other namespaces reach local handlers), archives a message to another domain and drops it silently. The decision is taken by the replica that holds the client's connection and leaves no stored state, so a client on another replica sees the other behaviour | No migration is needed; the behaviour converges when the last old replica is gone |
@@ -387,10 +438,10 @@ The release refuses a populated SpiceDB store that carries no codec marker,
 before it writes the schema. Each replica logs `Refusing the authorization
 store: it is not bound to the current ID codec` and startup fails with
 `Failed to ensure permission schema: Authorization store refused: authorization
-store holds ...`. That is the expected outcome of skipping step 7, and it
+store holds ...`. That is the expected outcome of skipping step 6, and it
 writes nothing. The full procedure, what is lost, the refusals and the
 verification are in the [codec cutover](authz-codec-cutover.md); this
-runbook's step 7 is its step 3.
+runbook's step 6 is its step 3.
 
 Verification, after step 9:
 
@@ -470,7 +521,7 @@ release runs these at startup:
 | Retired-account ledger readable as the runtime role, before the first provisioning | Startup fails: `the runtime database role cannot read retired_account_jids ...` | Passes |
 | Host-grant enrolled set loaded (PostgreSQL) | Retried every second for up to 30 s, then the process exits: `the host-grant enrolled set could not be loaded; refusing to serve until it is` | Loaded; reloaded every 5 s |
 | Host-grant runtime privileges and restore fence | Never stops the replica. With no scope enrolled a failure is logged as information and retried; readiness stays ready | Readiness ready: with a verified attachment the `/readyz` body has no `host_grants` field, without one it says `"host_grants": "unmanaged"` (always the case under a schema-owning login) |
-| Session-ending lease registered (migration 2013) | Logged; the replica is then missing from retirement reports | Lease renewed every 5 s |
+| Session-ending lease kept (migration 2013) | Never stops the replica: warning `the session-ending lease could not be kept; retrying`, and the replica is missing from retirement reports until it succeeds | Lease renewed every 5 s |
 | Revocation fence clock skew | Recorded only while the replica holds a fence lease, which needs an enrolled scope | Absent |
 
 ## What users see with S2S off
@@ -494,12 +545,15 @@ the slice is in brackets.
 | Corrections and retractions | A room compared occupant addresses only, so a nickname could retract another account's archived message | Accepted only from the account the archive records as the author | Routing |
 | Room configuration | — | New boolean field `urn:waddle:roomconfig:federated`, off for every room; changing it is announced with status 104 and has no effect with S2S off | Routing |
 | Space configuration | — | New field `urn:waddle:spaces:federated`, off by default | Routing |
-| MUC service `disco#items` | A public managed room was listed to nobody | Listed to a session whose grants allow `view`; the first-party client joins every listed room it has no bookmark for, so members join such rooms at connect | Routing |
-| Session room listings | Live rooms asked one at a time, 5 s each; a slow managed room's grants left it out | Asked sixteen at a time within 1.2 s; a managed room not decided within 1 s answers `internal-server-error` (type `wait`); a shortened listing tells no count; concurrent listings share one read | Routing |
+| MUC service `disco#items` (dormant: needs an enrolled scope) | A public managed room was listed to nobody | Listed to a session whose grants allow `view`; the first-party client joins every listed room it has no bookmark for, so members join such rooms at connect | Routing |
+| Session room listings | Live rooms asked one at a time, 5 s each; a slow managed room's grants left it out; an instant room naming a channel was kept when the catalog read filled its bound | Asked sixteen at a time within 1.2 s; a managed room not decided within 1 s answers `internal-server-error` (type `wait`); an instant room naming a channel that the catalog check cannot clear is left out when the catalog read fills its bound; a shortened listing tells no count; concurrent listings share one read | Routing |
 | Space node `disco#items` | An empty list for any node | The rooms the Space holds (up to 1,024), or `item-not-found` for a node the session may not read | Routing |
 | Rooms leaving a Space | Only a retract notified subscribers | A publish into another Space and the admin channel delete, channel update and Space delete commands notify local subscribers as a retract | Routing |
 | `urn:waddle:joined-spaces:0` | Created like any PEP node | A private node: `whitelist` access, up to 1,024 items, only its owner reads or publishes, a publish without an item id is refused | Routing |
 | Inbox and activity | Rows for room members at other domains | Written only for addresses at served domains; earlier rows stay | Routing |
+| Re-seating after a room's claim moves (clustering) | A recorded occupant at a domain the deployment does not serve was left out of a managed room and seated again in any other | Left out of every room | Routing |
+| Remote member-level grant in a managed room (dormant: needs an enrolled scope) | Admitted the remote account | Admits nothing, because no remote domain is admitted; a remote recipient planned in a groupchat is frozen no child | [Host-grant design, effect boundary rollout](../../server/docs/planning/host-grant-authority-2047.md#rollout-part-of-the-effect-boundary-g24) |
+| Revocation sweep in a managed room (dormant: needs an enrolled scope) | An occupant at an unadmitted domain kept its seat while its recorded affiliation was a membership | Removed, as is an occupant whose membership is a recorded increase not yet effective; with S2S off only an occupancy recorded while S2S was on is affected | Effect boundary rollout |
 
 ### Addressing, routing and accounts
 
@@ -509,7 +563,12 @@ the slice is in brackets.
 | MUC nicknames | Folded (`ｎｉｃｋ` joined as `nick`) | The stanza is refused; a client must use the nickname exactly | Identity profile rollout |
 | Sign-in | `ALICE` signed in as `alice`; OAUTHBEARER re-slugged | Only the exact canonical name; OpenID Connect accounts with a non-canonical stored name can no longer sign in over XMPP | Identity profile rollout |
 | New account names | Any valid localpart | 1–64 bytes of `a-z`, `0-9`, `.`, `_`, `-`, `+`; OpenID Connect names transliterated | Identity profile rollout |
-| Lookups, XEP-0055, admin ad-hoc JID fields, resource binding, `<open from>`, XEP-0198 counts, bookmark ids | Folded or stored as written | Taken exactly, refused when not canonical; see the full table | Identity profile rollout |
+| Resource binding | `ｗｅｂ` bound as `web` | `<bad-request/>` | Identity profile rollout |
+| RFC 7395 `<open from>` | Folded | A non-canonical hint closes the stream with `invalid-from` | Identity profile rollout |
+| XEP-0198 handled count | A stanza refused at parsing was not counted, so later acknowledgements named the wrong stanza | Every well-formed stanza refused at parsing counts as handled | Identity profile rollout |
+| Admin ad-hoc commands (`group-dm:create`, `channels:set-affiliation`, `channels:kick`, `spaces:set-role`, push operator commands) | JID fields folded | A non-canonical JID refused: `<jid-malformed/>` for a typed field, `<bad-request/>` for an untyped one | Identity profile rollout |
+| Account lookups (roster, presence, group DMs, XEP-0055) | Input folded before the lookup | Taken exactly; a non-canonical spelling names no account; XEP-0055 leaves out rows whose stored name is not canonical | Identity profile rollout |
+| Bookmark item ids (Spaces, XEP-0402, DM bookmarks) | Stored as written and folded when read | Publishing a non-canonical id is refused with `<bad-request/>`, including a U-label remote room; a retract by the exact stored id is accepted | [Identity profile rollout, stored bookmark items](identity-profile-rollout.md#stored-bookmark-items-with-non-canonical-ids) |
 | IQ to a domain the deployment does not serve | Ping, Carbons, session and discovery refused with `not-allowed`; other namespaces reached local handlers | Every `get`/`set` refused with `remote-server-not-found` (type `cancel`) from the home server, before any handler; before resource binding, `not-authorized`; results and errors to such a domain dropped without an error; XEP-0410 self-ping reads the error as undecided | [`destination.rs`](../../server/crates/waddle-server/src/destination.rs), [remote ping note](../planning/remote-ping-2047.md) |
 | IQ to a numeric IPv4 domain (`2130706433`, `0x7f.1`, `127.1`) | Classified as a remote or unqualified domain | Never routable: `remote-server-not-found`, as for IP literals and single-label names | Identity profile rollout |
 | Message to an unserved domain | Archived, put in the sender's inbox and carbon-copied, then dropped silently | Message error `remote-server-not-found` (type `cancel`) from the addressed JID, without the body; nothing archived | Routing |
@@ -518,6 +577,7 @@ the slice is in brackets.
 | Direct-message pin marker for a remote peer | `forbidden` | `remote-server-not-found`; no pin recorded | Routing |
 | Received carbons | Private messages with `muc#user` from a full JID outside the account domain were carbon-copied | Not carbon-copied | Routing |
 | Roster contacts at other domains | Removed at every start | Kept, dormant; adding a new one is still refused (`item-not-found`) | [Account traffic, Behaviour with S2S off](../../server/docs/planning/s2s-account-traffic-2047.md#behaviour-with-s2s-off) |
+| Message or presence to a remote JID, and `unsubscribed` | — | Answered `remote-server-not-found` before any roster or blocking check; an `unsubscribed` first removes a request recorded from that JID, which exists only if recorded while S2S was on | Account traffic |
 | Retired accounts | No retirement existed | `waddle-server account retire` records a JID in a ledger no provisioning path reuses (an identity-provider login with a retired name gets `name1`, `name2`, …) and ends the account's sessions | [Account retirement](account-retirement.md) |
 | Configured domains and owner entries | Any JID-valid spelling | Must be canonical, or startup fails | Identity profile rollout |
 
@@ -535,6 +595,7 @@ The web client changes listed in
 | Retained rooms at session-ready | Rejoined only when on the account domain or placed at home by discovery |
 | A room on another domain created by the join (status 201) | Left at once and recorded as missing; its bookmark's `autojoin` turned off |
 | Media from a room whose host is not known yet | Waits for the user to load it |
+| Leaving a room on another domain | `autojoin` turned off on the stored bookmark, whatever this device last read of it; when the home server stops advertising `urn:waddle:s2s:0`, every room placed on another domain is left and a lost stream rejoins none |
 | Unfollowing a Space on another domain | Dropped when another device followed it later |
 | A Space's `federated` change | Sends `pubsub#max_items` back unchanged |
 | Last-seen anchors | Keyed by room address; legacy anchors deleted once |
@@ -558,7 +619,10 @@ Not visible to users; expected in database load and logs:
 - Session creation reads the retired ledger once; registration and
   identity-provider provisioning insert under its condition.
 - A Spaces publication lists the node's deliverable subscriptions once more
-  before it hands over.
+  before it hands over, and its fan-out no longer looks up connections for a
+  subscriber at a domain the deployment does not serve.
+- A self-ping and the media grants of a call participant ask the host-grant
+  gate, which answers an unmanaged room from the enrolled set in memory.
 - At startup, the identity and bookmark reports read both account stores and
   the PubSub store.
 
@@ -578,7 +642,7 @@ Metric names are those of the [metrics reference](server-metrics.md).
 | `waddle.muc.room_listings.session_builds` | Near one per listing burst per replica | Growth with connect rate |
 | `waddle.restricted_runtime.startup.refusals`, `.attach.failures` | Zero | Any |
 | `waddle.account_retirement.*` | Only after an operator runs a retirement | — |
-| Logs | The startup lines above; host-grant verification failures at information level | `Refusing the authorization store`, `the host-grant enrolled set could not be loaded`, `cannot read retired_account_jids`, a `clock_skew` warning, an error-level host-grant verification log |
+| Logs | The startup lines above; host-grant verification failures at information level | `Refusing the authorization store`, `the host-grant enrolled set could not be loaded`, `cannot read retired_account_jids`, `the session-ending lease could not be kept`, a `clock_skew` warning, an error-level host-grant verification log |
 
 ## Rollback
 
@@ -586,11 +650,11 @@ Prefer roll-forward. What a step changed decides how far back is possible:
 
 | Failure at or before | Way back | Loses |
 | --- | --- | --- |
-| Steps 1 to 4 (nothing stopped) | Resume Flux; if `main` holds the merge, revert it so a later publication does not deploy it | Nothing |
-| Step 5 or 6 (stopped, stores untouched) | Scale the previous release back up, resume Flux, revert the merge | Nothing |
-| Step 7 (SpiceDB emptied, PostgreSQL untouched) | Restore SpiceDB's datastore from step 6, restart SpiceDB, start the previous release, revert the merge | Nothing, if the copy is complete and nothing wrote SpiceDB in between |
-| Step 8 or 9 (migrations applied, store marked) | Stop every replica; restore PostgreSQL from step 6 (adopting the lineage as the [lineage runbook](../../server/docs/operations/db-lineage.md) requires for the restore method used); restore SpiceDB's datastore from step 6, or empty it again including both markers; restore the handoff ConfigMap kept in step 6 (restricted runtime); start the previous release; revert the merge | Everything written since step 5. With an emptied rather than restored SpiceDB, every grant again, as in the [reverse codec cutover](authz-codec-cutover.md#rollback) |
-| After step 10 (serving) | The same as steps 8 and 9 | Messages, accounts and grants written while this release served, in addition |
+| Steps 1 to 3 (the previous release serves) | Revert the merge on `main` and wait for the revert's publication. Then resume the Kustomization and the HelmRelease, and confirm the HelmRelease carries the revert's digest. Resuming Flux before the revert is published rolls this release onto the populated store, where it refuses to start | Nothing |
+| Step 4 or 5 (stopped, stores untouched) | The same; the revert's release starts on the untouched stores | Nothing |
+| Step 6 or 7 (SpiceDB emptied, PostgreSQL untouched) | Keep the HelmRelease suspended. Restore SpiceDB's datastore from step 5 and restart SpiceDB; under the restricted runtime, restore the handoff ConfigMap from step 5. Then as for steps 1 to 3 | Nothing, if the copy is complete and nothing wrote SpiceDB in between |
+| Step 8 or 9 (migrations applied, store marked) | Suspend the HelmRelease and stop every replica. Restore PostgreSQL from step 5, adopting the lineage as the [lineage runbook](../../server/docs/operations/db-lineage.md) requires for the restore method used. Restore SpiceDB's datastore from step 5, or empty it again including both markers. Under the restricted runtime, restore the handoff ConfigMap from step 5; if the restore recreated pinned objects, the previous release's owner Job has to publish a new handoff. Then as for steps 1 to 3 | Everything written since step 4. With an emptied rather than restored SpiceDB, every grant again, as in the [reverse codec cutover](authz-codec-cutover.md#rollback) |
+| After step 10 (serving) | The same as steps 8 and 9 | In addition, the messages, accounts and grants written while this release served |
 
 The limits:
 
@@ -696,9 +760,13 @@ These steps are undefined, unproven or disagree between documents. Each needs
 an answer, or the rehearsal's evidence, before the go-ahead is acted on.
 
 1. **Owner phase on an upgrade.** The chart does not sequence the owner Job
-   before serving pods for a release with migrations. Window step 8 derives a
-   sequence from the chart's fresh-install path (`awaitOwnerJob` and a
-   missing handoff); it has not been run.
+   before serving pods for a release with migrations. Window steps 7 and 8
+   derive a sequence from the chart's fresh-install path (`awaitOwnerJob`
+   and a missing handoff, chart 0.4.13 or later) and from how publication
+   reaches the HelmRelease (through the Flux Kustomization, not the
+   HelmRelease alone); it has not been run. Whether resuming the
+   Kustomization leaves a suspended HelmRelease suspended is checked in step
+   7 but not established.
 2. **`zed` bulk deletion.** The codec cutover leaves the exact
    `zed relationship bulk-delete` syntax and its default limit to be
    confirmed against the deployed `zed`.
