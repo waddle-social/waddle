@@ -156,7 +156,10 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0313_s2s_account_archive_ws` (6) | W6c, W6d | as `s2s_account_traffic_ws` | Not run since W6d (before it: run 2/2 of the earlier cases, run7 S2S final log) |
 | `s2s_account_inbox_ws` (2) | W6d | as `s2s_account_traffic_ws` | Not run |
 | `xep0357_s2s_account_push_ws` (1) | W6d | as `s2s_account_traffic_ws` | Not run |
-| `xep0424_s2s_account_retraction_ws` (2) | W6d | as `s2s_account_traffic_ws` | Not run |
+| `xep0424_s2s_account_retraction_ws` (3) | W6d | as `s2s_account_traffic_ws` | Not run |
+| `xep0308_s2s_account_corrections_ws` (3) | W6d | as `s2s_account_traffic_ws` | Not run |
+| `xep0353_s2s_account_call_threads_ws` (3) | W6d | as `s2s_account_traffic_ws`; one case seeds the replica's call state through a test-support helper | Not run |
+| `xep0511_s2s_account_link_metadata_ws` (3) | W6d | as `s2s_account_traffic_ws` | Not run |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -186,8 +189,8 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18, run7 host-grant final log |
 | `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run7 host-grant final log |
 | `xep0045_host_grant_revocation` (14) | W5d, integration, W6a | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 14/14, run7 host-grant final log |
-| `account_jid_retirement` (11) | W5d, W6c | PostgreSQL 17 | Run 11/11, run7 host-grant final log |
-| `account_retirement_sessions` (9) | W6d | loopback (production `/ws` router in process, in-memory test state); SQLite files of their own; one case runs the `waddle-server` binary's operator subcommand against an SQLite file beside a replica simulated in process; one waits about 7 s for a lease to lapse | Not run |
+| `account_jid_retirement` (11) | W5d, W6c, W6d (code under test: the retirement also deletes the offline store) | PostgreSQL 17 | Not run since W6d (before it: run 11/11, run7 host-grant final log) |
+| `account_retirement_sessions` (10) | W6d | loopback (production `/ws` router in process, in-memory test state); SQLite files of their own; one case runs the `waddle-server` binary's operator subcommand against an SQLite file beside a replica simulated in process; one waits about 17 s for a lease to lapse; one attaches the offline store in the test state's database | Not run |
 | `xep0198_account_retirement_ws` (3) | W6d | loopback (production `/ws` router in process, in-memory test state) | Not run |
 | `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run7 host-grant final log |
 | `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run7 host-grant final log |
@@ -261,6 +264,8 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | `waddle-server/src/db/migrations/tests.rs` | W5b | PostgreSQL for the `postgres_` cases; they skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2010, 2011 and 2015 in the version order) | W6c, W6d | none | Not run |
 | `waddle-server/src/server/routes/websocket/connection.rs` (`tests`: three cases pass the force-detach close the stream error it now takes, `<conflict/>` as before) | W6d | none | Not run |
+| `waddle-server/src/server/routes/websocket/tests/retirement.rs` (edited: the retirement cause of a retired account's detach, not a transfer) | W6d | none | Not run |
+| `waddle-server/src/server/routes/websocket/cleanup.rs` (`force_detach_tests`, edited: a retirement's detach removes the actor entry as a replacing bind's does) | W6d | none | Not run |
 | `waddle-server/src/ingress/room_pin_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/permissions/schema/tests.rs` | W5o | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/muc.rs` | W5c | none | Not run |
@@ -289,9 +294,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 117 (94 integration targets, 21 library test modules, 2 chat test files) |
-| Run, with a cited log | 57 targets, 969 cases, all passed in their latest cited run |
-| Not run | 60 targets (21 of them library modules) |
+| Test targets listed | 122 (97 integration targets, 23 library test modules, 2 chat test files) |
+| Run, with a cited log | 56 targets, 958 cases, all passed in their latest cited run |
+| Not run | 66 targets (23 of them library modules) |
 
 By log: the run7 S2S final log covers 44 targets (133 `waddle-xmpp` cases
 in 4, 621 `waddle-server` cases in 40, of which 9 targets and 72 cases
@@ -299,7 +304,30 @@ are not run since W6d changed their code or their fixture); the run7
 clustering final log
 covers 3 targets with the `clustering` feature (44 cases; two of them also
 in the S2S log); the run7 host-grant final log covers 21 targets (283
-cases). Every target of W6a and W6c ran there for the first time.
+cases, of which `account_jid_retirement`'s 11 are not run since W6d
+changed the retirement). Every target of W6a and W6c ran there for the
+first time.
+
+W6d also changed paths of local traffic that suites outside this
+checklist cover, and none of them has run since: the connection's
+teardown of a force-detached binding (`characterization_bind`,
+`characterization_resume_muc`, `sm_durable_resume`, the
+`xep0198_*_resume*`, `xep0198_durable_*` and `xep0198_enable_binding_ws`
+suites), the preview references of a local direct message's correction
+and retraction and the reference write that skips an upload slot that
+does not exist (`xep0308_message_corrections_ws`,
+`xep0424_message_retraction_ws`, `xep0424_ingress_tombstone`,
+`xep0372_references_ws`, and the library modules
+`ingress/execute_projection_tests.rs`,
+`ingress/recorded/preview_replay_tests.rs`,
+`ingress/recovery_rebuild_tests.rs`, `interpret/preview_plan.rs`,
+`interpret/direct_archive_correction_plan_tests.rs` and
+`websocket/link_preview_refs.rs`), the end of a direct call thread
+projected only for served peers (`interpret/direct_call_thread.rs`,
+`interpret/direct_archive_plan.rs`), and the offline store's
+`xep0160_*` and `xep0198_pending_delivery_ws` suites around the
+retirement's removal of a retired account's rows. Verification runs them
+with the targets above.
 
 A target is counted as run only when the whole binary's cases appear in a
 log. Skipped prerequisites are not recorded as passed: nothing here was run
