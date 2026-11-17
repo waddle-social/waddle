@@ -18,7 +18,7 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `3302678966ce3557b815755291b08632d382be1a` (see the last refresh below); the original
+through `72e120b689f7e9e9830b1d5453d1c692345a24ab` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1359,6 +1359,27 @@ moved without a change to their text, and no anchor's text changed.
   notified publications before a publication is queued, and counts what is
   discarded at shutdown; `space-admin`, `d8-space-set-role` and
   `hg-admin-space-listing` moved with the lines added above them.
+- The raw scan still holds 1639 records, each token's count unchanged; the
+  records in the changed files moved with the lines.
+
+The selected evidence was refreshed a twenty-eighth time, through
+`72e120b689f7e9e9830b1d5453d1c692345a24ab`, after reviewing the delta of the reviewed files since the
+twenty-seventh refresh. Four reviewed files changed (`pubsub_dispatch.rs`,
+`spaces_retract.rs`, `spaces_remote.rs` and the fan-out
+`pubsub_fanout/implementation.rs`), no file was added to the reviewed set,
+three anchors moved without a change to their text, and no anchor's text
+changed.
+
+- A retract on a Space node (`parent-retract` moved) now notifies the
+  node's subscribers once it stands, through a new service-node retract
+  fan-out that honours the request's `notify` attribute; the Spaces
+  retract takes the request's node, item and `notify` together, from the
+  session's dispatch (`hg-space-pubsub` moved) and from a remote
+  principal's change (`s2s-space-remote-change` moved). The fan-out's
+  enrolled-Space skip, deliverable re-read and hand-over to the Spaces
+  host are those a publish takes. No grant, parent or placement decision
+  changed; the retract's checks and its removal of the parent tuple and
+  link are as before the notification.
 - The raw scan still holds 1639 records, each token's count unchanged; the
   records in the changed files moved with the lines.
 
