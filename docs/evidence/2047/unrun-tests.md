@@ -153,8 +153,8 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Run 3/3, run7 S2S final log |
 | `xep0313_s2s_account_archive_ws` (2) | W6c | as `s2s_account_traffic_ws` | Run 2/2, run7 S2S final log |
 | `xep0503_s2s_inbound_spaces` (9) | W7a | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Not run |
-| `xep0060_s2s_inbound_spaces_pubsub` (18) | W7a | as `xep0503_s2s_inbound_spaces` | Not run |
-| `xep0503_s2s_inbound_spaces_host_grant` (2) | W7a | PostgreSQL; loopback; both cases return early without `WADDLE_TEST_POSTGRES_URL` and fail under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Not run |
+| `xep0060_s2s_inbound_spaces_pubsub` (22) | W7a | as `xep0503_s2s_inbound_spaces` | Not run |
+| `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Not run |
 | `xep0503_s2s_outbound_spaces_ws` (3) | W7a | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Not run |
 | `spaces_privileged_issuance` (10) | W7a | none (in-memory SQLite, the local permission backend; one case loads an S2S snapshot through the production loader from temporary files) | Not run |
 | `admin_spaces_ws` (edited, 22) | W7a | TestServer process | Not run (one case added: a privileged role refused for an account at another server) |
@@ -206,7 +206,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `rfc6121_roster_ws` (edited, 12) | W5i | TestServer process | Not run |
 | `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Not run |
 | `xep0492_dm_bookmarks_ws` (edited, 6) | W5i | none | Not run |
-| `xep0503_spaces_ws` (edited, 9) | W5i | TestServer process | Not run |
+| `xep0503_spaces_ws` (edited, 11) | W5i, W7a | TestServer process | Not run (W7a added two cases: a session's Space and channel under the startup issuance policy, and `spaces:delete` destroying only the rooms whose parent the Space is) |
 
 ### waddle-client-session
 
@@ -260,7 +260,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | --- | --- | --- | --- |
 | `waddle-server/src/admin/channel_inventory_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/admin/channels.rs` (`tests`) | W6a | none; one catalog record literal gained the `federated` field | Not run |
-| `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W7a | none; one call of `destroy_space_channel` gained the `SpaceService` argument, and `run_delete` there now also closes the Space to other servers and removes the Space's own relations | Not run; not compiled |
+| `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W7a | none; one call of `destroy_space_channel` gained the `SpaceService` argument (which now names the account domain, as `run_delete` does: `"localhost"` in the four calls), and `run_delete` there now also closes the Space to other servers, removes the service's subscription records of accounts at other servers and the Space's own relations, runs under the Space's deletion lock, and destroys a room only where its parent grant on the Space is found, which the cases' `link` writes | Not run; not compiled |
 | `waddle-server/src/server/xmpp_channels.rs` (`tests`) | W6a | none; the catalog row literal gained the `federated` column | Not run |
 | `waddle-xmpp/src/muc/owner/tests.rs` | W6a | none; two cases added (the `federated` field of the owner form, and a stored configuration without it) | Not run |
 | `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W5c | none | Not run |
@@ -358,7 +358,10 @@ recorded through the store, and "not honoured" for a request is shown
 through the trusted-home list alone); concurrency on PostgreSQL (the
 advisory locks that make the bounds exact and close the race between a
 subscription and turning the setting off run only on the SQLite fixture,
-where one immediate transaction serialises every writer); the router's
+where one immediate transaction serialises every writer; on PostgreSQL the
+host-grant Spaces suite shows a sweep of the whole store passing over a
+row another transaction holds, and a Space's deletion lock holding off a
+second deletion of it, and no race between two writers); the router's
 per-pair share of queued notifications, a Space's allowance of notified
 publications and the queue of publications, which depend on timing; a
 request the Spaces host does not decide in time; two replicas serving one
@@ -505,7 +508,9 @@ implemented unless the text says so.
   days without being made again), a `federated` setting for single peers,
   the field in the web client, and advertising the further PubSub features
   (W11). A trusted home's owner holds every owner power over a Space,
-  deletion with the `spaces:delete` cascade included; the recovery path is
+  deletion included; a deletion through PubSub, by a session or a remote
+  owner, takes the Space's rooms out of it and destroys none, and only the
+  admin command `spaces:delete` destroys rooms. The recovery path is
   `spaces:set-role`.
 - Inbound MUC (W6a), written and not run: a remote principal reaches only
   rooms whose `federated` setting is on, and the setting opens a room to

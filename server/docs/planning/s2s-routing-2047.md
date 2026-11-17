@@ -1974,30 +1974,48 @@ affiliations, under D8 issuance, and its subscriptions. It creates no
 Space, and places no room in one: a publish is decided by the Space's
 `owner` relationship, which no writer issues to a remote account.
 
-- **Deletion runs the cascade of `spaces:delete`**, for a remote owner as
-  for a session (`admin::spaces::delete_space`). Before anything changes,
-  a Space, or a room it names, of an enrolled host-grant scope refuses the
-  whole deletion with `forbidden`. Then: the Space is closed to other
-  servers (its `federated` row and its remote subscription rows, in one
-  transaction); every room the Space's links or items name loses its
-  parent grant on the Space and its link to it, and every room an item
-  names under its canonical address is destroyed with its catalog row;
-  the items are retracted; the Space's own relations (`owner`, `admin`,
-  `moderator`, `member`) are removed; the node is purged and deleted; its
-  metadata is removed. A Space created again under the name inherits none
-  of it. A failure part-way rolls back what `spaces:delete` rolls back and
-  answers `internal-server-error`, and leaves the Space closed to other
-  servers, which its owner turns on again in a session; a failure after the node is gone is
-  completed by `spaces:delete`, since the PubSub request then answers
-  `item-not-found`.
+- **Deleting a Space through PubSub takes its rooms out of it and destroys
+  none**, for a remote owner as for a session
+  (`admin::spaces::delete_space`). Before anything changes, a Space, or a
+  room it names, of an enrolled host-grant scope refuses the whole
+  deletion with `forbidden`. Then, under the Space's deletion lock (below):
+  the Space is closed to other servers (its `federated` row and its remote
+  subscription rows, in one transaction, and then the service's
+  subscription records of accounts at other servers); every room the
+  Space's links or items name loses its parent grant on the Space and its
+  link to it; the items, which are the rooms' bookmarks in the Space, are
+  retracted; the Space's own relations (`owner`, `admin`, `moderator`,
+  `member`) are removed; the node is purged and deleted; its metadata is
+  removed. The rooms stay, each a standalone room with its catalog row,
+  its occupants and its own grants. A Space created again under the name
+  inherits none of it. A failure part-way puts back the links, parent
+  grants and items it removed and answers `internal-server-error`, and
+  leaves the Space closed to other servers, which its owner turns on again
+  in a session; a failure after the node is gone is completed by
+  `spaces:delete`, since the PubSub request then answers `item-not-found`.
+- **Only the admin command `spaces:delete` destroys rooms.** It runs the
+  same deletion, and destroys, with its catalog row, every room whose
+  parent the Space was: its parent grant on the Space is found and removed
+  by the deletion, no link names another Space, and an item under the
+  room's canonical address names it. A room an item or a link names
+  without that parent grant, and a room of another MUC service, is only
+  taken out of the Space.
+- **Two deletions of one Space never interleave.** Each runs under a lock
+  of the Space's deletion: a transaction-scoped advisory lock of its own
+  on PostgreSQL, held for the whole deletion, and a lock in the process on
+  SQLite, which one process serves. A deletion that fails, and puts back
+  what it removed, therefore never does so beside one that completed; a
+  deletion that waited reads the node again and answers `item-not-found`
+  when the other deleted it.
 - **Purging a Space's items** takes the rooms they name out of the Space
   first (each loses its parent grant on the Space and its link to it, as a
   retract does); the rooms stay. A purge leaves nothing of S2S behind: the
   `federated` setting and the remote subscriptions name the node, which
   remains.
-- A remote owner's deletion destroys rooms of this deployment. Listing a
-  home as trusted is the operator's decision to give its accounts that
-  power over the Spaces they are made owners of.
+- A remote owner can empty and delete a Space of this deployment, which
+  leaves its rooms standing alone. Listing a home as trusted is the
+  operator's decision to give its accounts that power over the Spaces they
+  are made owners of.
 
 **Recovering a Space from a remote owner.** These are server-administrator
 steps; nothing a remote owner can do reaches them.
@@ -2015,19 +2033,27 @@ steps; nothing a remote owner can do reaches them.
    gives a local owner its standing back, a ban included, and a local
    owner's configuration form restores the access model. Subscriptions the
    remote owner removed are made again by their accounts.
-4. A deleted Space, and the rooms it destroyed, are not recovered by any
-   command: restoring them is a restore from backup.
+4. A Space deleted through PubSub is not recovered by any command; its
+   rooms remain, and a local owner creates a Space again and places them
+   in it (a publish of each room's bookmark). The rooms `spaces:delete`
+   destroyed are recovered only by a restore from backup.
 
 **Event notifications to remote subscribers.** A publish or a retract on a
 Space fans out to local subscribers as before; a subscriber at another
 server is skipped there. Once the publication is stored, the fan-out only
 queues it for the Spaces host (`queue_remote_notification`, then
 `RemoteRoute::space_published`): a bounded queue of 1,024 publications for
-each replica, which a publication that finds full is not notified through
-(counted by `waddle.s2s.spaces.publications.dropped`). One task of the host
-takes them in order and decides each for the remote subscribers
-(`notify_remote_subscribers`), so a publisher's request never waits for
-what is read about them. A notification leaves for an address at another
+each replica. A publication takes one of its Space's allowance of notified
+publications before anything is queued or read, and one beyond it is not
+queued (counted by `waddle.s2s.spaces.events.limited`), so one Space holds
+at most its burst of the queue's places and a busy Space cannot fill the
+queue for the others. A publication that finds the queue full is not
+notified (counted by `waddle.s2s.spaces.publications.dropped`). One task
+of the host takes them in order and decides each for the remote
+subscribers (`notify_remote_subscribers`), so a publisher's request never
+waits for what is read about them. Publications still queued when the
+replica's state goes away are never decided, and are counted by
+`waddle.s2s.spaces.publications.discarded`. A notification leaves for an address at another
 server only where all of this holds when it is handed over:
 
 - the replica serves its Spaces to remote principals, the Space is
@@ -2062,7 +2088,17 @@ ban does not bring the subscription back; the Space being closed to other
 servers or deleted; and thirty days without the account subscribing again
 (below). A domain that is no longer admitted receives nothing from the
 moment it is not, and its rows give way when they would keep an admitted
-account out (below).
+account out (below). Where a row goes because it lapsed or its domain is
+no longer admitted, the request that removed it then removes the
+service's record of that subscriber too.
+
+A ban and a subscription being recorded at the same time cannot leave a
+row behind: the ban is written before the row is removed, and the removal
+takes the Space's lock; the subscription reads the account's affiliation
+again under that lock, after the `federated` setting, and is refused for a
+ban it finds, `forbidden` in a public Space and `item-not-found` in a
+private one, as for a banned account's request. Either the removal finds
+the row, or the subscription finds the ban.
 
 Turning the `federated` setting off removes the setting's row and every
 remote subscription row of the Space in one transaction, under the
@@ -2089,8 +2125,9 @@ outlives the setting.
 | Subscriptions of one remote domain (exact) | 4,096 |
 | Subscriptions accounts at other servers hold in the deployment (approximate on PostgreSQL, below) | 65,536 |
 | How long a remote subscription holds without being made again | 30 days |
+| Domains read, and rows removed, by one sweep of the whole store | 4,096, 1,024 |
 | Publications awaiting the decision for remote subscribers, for each replica | 1,024 |
-| Publications of one Space whose notifications leave for other servers, on average and at once, for each replica | 4 a second, 16 |
+| Publications of one Space queued for that decision, on average and at once, for each replica | 4 a second, 16 |
 | Event notifications waiting for one directional pair's stream | 256 |
 
 A request beyond its account's share or its domain's allowance is answered
@@ -2126,14 +2163,29 @@ costs one row read whatever its size. A subscription the account already
 holds is recorded again whatever the bounds, which renews it. Only the
 subscriptions of domains admitted now hold a place against a Space's bound
 and the deployment's: when either is reached, the rows of domains the
-replica's snapshot does not admit are removed (for the deployment's bound,
-of at most 4,096 domains read, together with every lapsed row) and the
-bound is counted again. A row whose subscription was last made more than
-thirty days ago has lapsed: it counts against no bound, names no
-subscriber, and is removed when its Space is next subscribed to or the
-deployment's bound is reached. A replica on an older snapshot may remove
-the rows of a domain another replica still admits; that account then
-receives nothing until it subscribes again, which is the safe side.
+replica's snapshot does not admit are removed and the bound is counted
+again. A row whose subscription was last made more than thirty days ago
+has lapsed: it counts against no bound, names no subscriber, and is
+removed when its Space is next subscribed to or the deployment's bound is
+reached. A replica on an older snapshot may remove the rows of a domain
+another replica still admits; that account then receives nothing until it
+subscribes again, which is the safe side.
+
+When the deployment's bound is reached, the subscription sweeps the whole
+store: lapsed rows first, oldest first (`subscribed_at_ms` is indexed),
+then the rows of domains that are not admitted, reading at most 4,096
+domains and removing at most 1,024 rows in all. The domains are read from
+the one after the last domain the replica's previous sweep read, wrapping
+round to the first, so successive sweeps reach every domain and not only
+the first 4,096 by name; the cursor is the replica's own and kept in
+memory. The sweep's deletions reach rows of Spaces whose lock the
+transaction does not hold, so on PostgreSQL they pass over a row another
+transaction holds rather than wait for it (`FOR UPDATE SKIP LOCKED`): a
+sweep never waits for a row, and so closes no cycle of waits with a
+transaction counting another Space. Every other deletion of the table
+reaches only the rows of the Space whose lock its transaction holds. A
+sweep that does not bring the count below the bound is undone with the
+rest of the refused subscription.
 
 **Amplification.** One publication sends at most one stanza to each
 subscribed account at another server, at most 256 for a Space, and only
@@ -2634,12 +2686,22 @@ runbook (G24):
   notified publication until it unsubscribes, its domain is no longer
   admitted or thirty days pass without it subscribing again.
 - **Spaces: the allowance of notified publications is per replica and in
-  memory.** Each Spaces host's notification task keeps it, so a deployment
-  of several replicas notifies up to the allowance on each, and a restart
-  refills it.
+  memory.** Each Spaces host keeps it and takes from it as a publication is
+  handed over, so a deployment of several replicas notifies up to the
+  allowance on each, and a restart refills it. It is taken whether or not
+  the Space has remote subscribers, so `waddle.s2s.spaces.events.limited`
+  also counts busy Spaces that notify nobody at other servers, and up to
+  4,096 Spaces spending their allowance at once keep a further Space's
+  publications from being notified until one has refilled.
+- **Spaces: the sweep cursor is per replica.** Each replica starts its
+  sweeps of the whole store after the last domain it read itself, so two
+  replicas may read the same domains in turn; each replica still reaches
+  every domain in turn, in as many of its own sweeps as there are 4,096s
+  of domains.
 - **Spaces: what a remote owner can do.** A trusted home's owner of a Space
   holds every power a session's owner holds through PubSub, deleting the
-  Space and the rooms it holds included
+  Space included; the deletion takes the Space's rooms out of it and
+  destroys none
   ([what a remote owner of a Space can do](#what-a-remote-owner-of-a-space-can-do)).
   Trusting a home is the operator's decision to give its accounts that
   power over the Spaces they are made owners of; the recovery path is the
