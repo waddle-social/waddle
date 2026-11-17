@@ -42,6 +42,7 @@ const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";
 const JOINED_ROOMS_PREFIX = "waddle.chat.joined-rooms";
 const AUTO_JOIN_BLOCKS_PREFIX = "waddle.chat.auto-join-blocks";
+const MISSING_REMOTE_ROOMS_PREFIX = "waddle.chat.missing-remote-rooms";
 const OWNER_LEASE_PREFIX = `${SM_PREFIX}.owner-lease`;
 const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
 const OWN_RESUME_PREFIX = `${SM_PREFIX}.own-resume`;
@@ -222,6 +223,13 @@ export interface ResumePersistence {
   loadAutoJoinBlocks?(): PersistedAutoJoinBlock[];
   saveAutoJoinBlocks?(blocks: readonly PersistedAutoJoinBlock[]): void;
   clearAutoJoinBlocks?(): void;
+  /**
+   * Rooms on other servers that a join found did not exist (their host
+   * created them for the join): nothing joins them on its own again.
+   */
+  loadMissingRemoteRooms?(): string[];
+  saveMissingRemoteRooms?(roomJids: readonly string[]): void;
+  clearMissingRemoteRooms?(): void;
 }
 
 /** No-op persistence — used in tests / non-browser contexts. */
@@ -245,6 +253,9 @@ export const nullResumePersistence: ResumePersistence = {
   loadAutoJoinBlocks: () => [],
   saveAutoJoinBlocks: () => undefined,
   clearAutoJoinBlocks: () => undefined,
+  loadMissingRemoteRooms: () => [],
+  saveMissingRemoteRooms: () => undefined,
+  clearMissingRemoteRooms: () => undefined,
 };
 
 export function createLocalStorageResumePersistence(
@@ -271,6 +282,7 @@ export function createLocalStorageResumePersistence(
   const ownResumeKey = (previd: string) => `${ownResumeKeyPrefix}${previd.length}:${previd}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
+  const missingRemoteRoomsKey = `${MISSING_REMOTE_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   gcOwnResumeMarkers(ownResumeKeyPrefix);
 
   return {
@@ -466,6 +478,24 @@ export function createLocalStorageResumePersistence(
     clearAutoJoinBlocks() {
       if (disposed) return;
       removeKey(autoJoinBlocksKey, "auto-join-blocks");
+    },
+    loadMissingRemoteRooms() {
+      if (disposed) return [];
+      const stored = readJson<string[]>(missingRemoteRoomsKey, isStringArray, "missing-remote-rooms") ?? [];
+      return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
+    },
+    saveMissingRemoteRooms(roomJids) {
+      if (disposed) return;
+      const normalized = [...new Set(roomJids.map(normalizeRoomJid).filter(Boolean))];
+      if (normalized.length === 0) {
+        removeKey(missingRemoteRoomsKey, "missing-remote-rooms");
+        return;
+      }
+      writeJson(missingRemoteRoomsKey, normalized, "missing-remote-rooms");
+    },
+    clearMissingRemoteRooms() {
+      if (disposed) return;
+      removeKey(missingRemoteRoomsKey, "missing-remote-rooms");
     },
   };
 }
@@ -1450,6 +1480,7 @@ type ResumeStorageKind =
   | "auto-join-blocks"
   | "catchup"
   | "joined-rooms"
+  | "missing-remote-rooms"
   | "owner-handoff"
   | "owner-lease"
   | "own-resume"
@@ -1466,6 +1497,7 @@ function storageAreaForKind(kind: ResumeStorageKind): StorageArea {
       return "own-resume";
     case "auto-join-blocks":
     case "joined-rooms":
+    case "missing-remote-rooms":
     case "sm":
     case "sm-consumed":
       return "sm-resume";

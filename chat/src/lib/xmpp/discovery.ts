@@ -682,11 +682,21 @@ export async function discoverTopology(
 
   // The user's own XEP-0402 bookmarks. A bookmark of a room on another
   // server is the only record that lists or joins it, and only while the
-  // home server federates; until then it is listed as unavailable.
+  // home server federates; until then it is listed as unavailable. While
+  // the home MUC service is not discovered, a bookmark whose room is not
+  // shown to be of this deployment cannot be placed: it waits for a later
+  // discovery, unasked and unjoined, since asking or joining it would
+  // reach another server before federation is known to be on.
   for (const bookmark of userBookmarkItems) {
     const roomJid = bookmark.roomJid;
     userBookmarkedRoomJids.add(roomJid);
-    if (hostOf(roomJid) === "remote") {
+    const host = hostOf(roomJid);
+    if (host === "unknown") {
+      roomCatalogComplete = false;
+      bookmarkCatalogComplete = false;
+      continue;
+    }
+    if (host === "remote") {
       const canonical = canonicalRoomJid(roomJid) ?? roomJid;
       if (!federation) {
         unavailableRemoteRooms.push({ roomJid: canonical, ...(bookmark.name ? { name: bookmark.name } : {}) });
@@ -823,6 +833,7 @@ export async function discoverTopology(
     spaces,
     rooms: rooms.map((room, position) => ({ ...room, position, ...(room.jid && roomSpaceIds.get(barePeerJid(room.jid)) ? { standalone: false } : { standalone: room.standalone ?? true }) })),
     roomCatalogComplete,
+    mucCatalogRead: mucCatalogComplete,
     roomReconciliationAuthority: {
       absentRoomKeysAuthoritative:
         roomCatalogComplete && bookmarkCatalogComplete && mucCatalogComplete,

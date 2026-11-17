@@ -104,17 +104,42 @@ describe("rooms on other servers in the room list", () => {
     });
   });
 
-  test("without a discovered MUC service no bookmarked room is taken for a remote one", async () => {
+  test("without a discovered MUC service a bookmark that cannot be placed waits: not asked, listed or joined", async () => {
     await withFakeDomParser(async () => {
-      const { client } = topologyClient({
+      const { client, sent } = topologyClient({
         rooms: [],
         serverItemsFail: true,
         userBookmarks: [{ id: "general@muc.remote.test", name: "Their general", autojoin: true }],
       });
       const topology = await discoverTopology(client, "alice@example.test");
-      // The room is asked about like any bookmark-only room (here its host
-      // does not answer, so it is not listed) and gets no qualified id.
-      expect(topology.rooms.some((room) => room.id === "general@muc.remote.test")).toBe(false);
+      expect(topology.services?.mucDiscovered).toBe(false);
+      // Nothing is sent to the room's server: no disco#info, no join.
+      expect(sent.some((xml) => xml.includes("remote.test"))).toBe(false);
+      expect(topology.rooms.some((room) => room.jid === "general@muc.remote.test")).toBe(false);
+      expect(topology.unavailableRemoteRooms).toEqual([]);
+      // Its absence is no evidence the bookmark is gone.
+      expect(topology.roomCatalogComplete).toBe(false);
+      expect(topology.roomReconciliationAuthority.absentRoomKeysAuthoritative).toBe(false);
+    });
+  });
+
+  test("without a discovered MUC service a bookmark of a room the home catalog lists is placed at home", async () => {
+    await withFakeDomParser(async () => {
+      const { client, sent } = topologyClient({
+        rooms: [{ jid: "general@muc.example.test", name: "General" }],
+        serverItemsFail: true,
+        userBookmarks: [
+          { id: "general@muc.example.test", name: "General", autojoin: true },
+          { id: "lobby@muc.remote.test", name: "Lobby", autojoin: true },
+        ],
+      });
+      const topology = await discoverTopology(client, "alice@example.test");
+      expect(topology.rooms.find((room) => room.jid === "general@muc.example.test")).toMatchObject({
+        autojoin: true,
+        isBookmarked: true,
+      });
+      expect(topology.rooms.some((room) => room.jid === "lobby@muc.remote.test")).toBe(false);
+      expect(sent.some((xml) => xml.includes("remote.test"))).toBe(false);
     });
   });
 

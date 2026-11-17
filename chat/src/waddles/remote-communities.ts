@@ -22,7 +22,7 @@ import {
   type RemoteSpaceContent,
   type SpaceSubscriptionState,
 } from "@/lib/xmpp/remote-community";
-import { removeRoomBookmark, saveRoomBookmark } from "@/lib/xmpp/room-bookmarks";
+import { removeRoomBookmark, saveRoomBookmark, turnOffRoomBookmarkAutojoin } from "@/lib/xmpp/room-bookmarks";
 import {
   joinedSpaceKey,
   localSpaceUnfollowIntentStore,
@@ -468,12 +468,12 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
       deps.closeRoom(canonical);
       try {
         await writeBookmark(key, intent, async () => {
-          // Read when the write runs: a join's write queued before this one
-          // may have turned autojoin on meanwhile.
-          const entry = findRoom(canonical);
-          if (!entry?.bookmarked || !entry.autojoin) return;
-          await saveRoomBookmark(xmpp, own, { roomJid: canonical, autojoin: false });
-          updateRoom(canonical, { autojoin: false });
+          // The stored bookmark decides, read when the write runs: this
+          // device's copy may be stale or not loaded, and a join's write
+          // queued before this one may have turned autojoin on meanwhile.
+          if (await turnOffRoomBookmarkAutojoin(xmpp, own, canonical)) {
+            updateRoom(canonical, { autojoin: false });
+          }
         });
       } catch {
         updateRoom(canonical, { note: "You left, but your other devices may still join this room at login." });
@@ -582,8 +582,9 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
         retryKey,
         { kind: "outage", retry: "automatic" },
         () => {
-          // The user may have left meanwhile; an outage is then no reason to join.
-          if (!leftByUser.has(key)) void joinRoom(roomJid, null, { saveBookmark: false });
+          // The user may have left meanwhile, or the home server may have
+          // stopped federating; neither leaves a reason to join.
+          if (!leftByUser.has(key) && deps.federation.value) void joinRoom(roomJid, null, { saveBookmark: false });
         },
       ),
     });
@@ -597,11 +598,58 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
    */
   function handleJoinFailure(roomKey: string, error: unknown) {
     setKey(joiningRoomKeys, bareJidKey(roomKey), false);
+    const failure = classifyRemoteError(error);
+    // The client reports a missing room only for a room on another server,
+    // so this does not wait for the home addresses to be known here.
+    if (failure.roomMissing) {
+      handleMissingRoom(roomKey, failure);
+      return;
+    }
     if (!isRemoteRoom(roomKey)) return;
     const entry = findRoom(roomKey);
     updateRoom(entry?.roomJid ?? roomKey, {
-      status: { state: "failed", failure: classifyRemoteError(error), retryAt: null },
+      status: { state: "failed", failure, retryAt: null },
     });
+  }
+
+  /**
+   * A join found the room did not exist. Its bookmark's `autojoin` is
+   * turned off, through the same queue as the user's own join and leave,
+   * so no device joins it at sign-in again (each would create the room
+   * and leave it). The bookmark stays; the user may forget it.
+   */
+  function handleMissingRoom(roomKey: string, failure: RemoteFailure) {
+    const canonical = canonicalRoomJid(roomKey);
+    if (!canonical) return;
+    const key = bareJidKey(canonical);
+    resetRetries(`room:${canonical}`);
+    markJoined(canonical, false);
+    updateRoom(findRoom(canonical)?.roomJid ?? canonical, {
+      status: { state: "failed", failure, retryAt: null },
+    });
+    let context: ReturnType<typeof requireXmpp>;
+    try {
+      context = requireXmpp();
+    } catch {
+      return;
+    }
+    const intent = nextRoomIntent(key);
+    const startedGeneration = generation;
+    void writeBookmark(key, intent, async () => {
+      if (await turnOffRoomBookmarkAutojoin(context.xmpp, context.own, canonical)) {
+        if (startedGeneration === generation) updateRoom(canonical, { autojoin: false });
+      }
+    }).then(
+      (wrote) => {
+        if (wrote && startedGeneration === generation) void deps.reloadRooms();
+      },
+      () => {
+        if (startedGeneration !== generation) return;
+        updateRoom(canonical, {
+          note: "Your bookmark of this room still joins it at sign-in; your other devices will try it again.",
+        });
+      },
+    );
   }
 
   function handleJoinStarted(roomKey: string) {

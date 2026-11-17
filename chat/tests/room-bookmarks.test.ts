@@ -8,6 +8,7 @@ import {
   parseRoomBookmarkItem,
   removeRoomBookmark,
   saveRoomBookmark,
+  turnOffRoomBookmarkAutojoin,
 } from "../src/lib/xmpp/room-bookmarks";
 import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
 
@@ -178,6 +179,44 @@ describe("bookmarks written under another spelling of the room's address", () =>
       await removeRoomBookmark(xmpp, OWN, ROOM);
       const retracted = sent.filter((xml) => xml.includes("<retract ")).map((xml) => /<item id="([^"]+)">/.exec(xml)?.[1]);
       expect(retracted.sort()).toEqual(["Dev@Chat.Remote.TEST.", ROOM].sort());
+    });
+  });
+});
+
+describe("turning autojoin off", () => {
+  function bookmarkNode(stored: string | null) {
+    const sent: string[] = [];
+    const xmpp = {
+      async send_raw_iq(xml: string) {
+        sent.push(xml);
+        if (xml.includes('type="get"')) {
+          if (stored === null) throw stanzaError("item-not-found");
+          return bookmarkItemsXml(stored);
+        }
+        return '<iq type="result"/>';
+      },
+    };
+    return { sent, xmpp };
+  }
+
+  test("a bookmark that joins at sign-in is rewritten without autojoin, keeping the rest", async () => {
+    await withXml(async () => {
+      const { sent, xmpp } = bookmarkNode('<conference xmlns="urn:xmpp:bookmarks:1" name="Dev" autojoin="true"><nick>Puck</nick></conference>');
+      expect(await turnOffRoomBookmarkAutojoin(xmpp, OWN, ROOM)).toBe(true);
+      const publish = sent.find((xml) => xml.includes("<publish "));
+      expect(publish).not.toContain("autojoin=");
+      expect(publish).toContain('name="Dev"');
+      expect(publish).toContain("<nick>Puck</nick>");
+    });
+  });
+
+  test("a room without a bookmark, or whose bookmark already stays put, is not written", async () => {
+    await withXml(async () => {
+      for (const stored of [null, '<conference xmlns="urn:xmpp:bookmarks:1" name="Dev"/>']) {
+        const { sent, xmpp } = bookmarkNode(stored);
+        expect(await turnOffRoomBookmarkAutojoin(xmpp, OWN, ROOM)).toBe(false);
+        expect(sent.some((xml) => xml.includes("<publish "))).toBe(false);
+      }
     });
   });
 });

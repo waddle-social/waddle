@@ -200,7 +200,36 @@ export async function saveRoomBookmark(
   change: { roomJid: string; name?: string; autojoin: boolean },
 ): Promise<RoomBookmark> {
   const roomJid = requireRoomJid(change.roomJid);
-  const { bookmark: existing, otherSpellings } = await fetchStoredRoomBookmarks(xmpp, ownBareJid, roomJid);
+  const stored = await fetchStoredRoomBookmarks(xmpp, ownBareJid, roomJid);
+  return writeRoomBookmark(xmpp, ownBareJid, roomJid, change, stored);
+}
+
+/**
+ * Turn `autojoin` off on the user's bookmark of a room, so no device joins
+ * it at sign-in. A room without a bookmark is left without one: this never
+ * adds a room to the user's list. Resolves whether a bookmark was written.
+ */
+export async function turnOffRoomBookmarkAutojoin(
+  xmpp: RawIqClient,
+  ownBareJid: string,
+  roomJid: string,
+): Promise<boolean> {
+  const canonical = requireRoomJid(roomJid);
+  const stored = await fetchStoredRoomBookmarks(xmpp, ownBareJid, canonical);
+  // Another spelling of the address may still join at sign-in on a client
+  // that reads it; writing the canonical item retracts those.
+  if (!stored.bookmark || (!stored.bookmark.autojoin && stored.otherSpellings.length === 0)) return false;
+  await writeRoomBookmark(xmpp, ownBareJid, canonical, { autojoin: false }, stored);
+  return true;
+}
+
+async function writeRoomBookmark(
+  xmpp: RawIqClient,
+  ownBareJid: string,
+  roomJid: string,
+  change: { name?: string; autojoin: boolean },
+  { bookmark: existing, otherSpellings }: StoredRoomBookmarks,
+): Promise<RoomBookmark> {
   const name = change.name ?? existing?.name;
   const bookmark: RoomBookmark = {
     roomJid,

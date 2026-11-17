@@ -464,6 +464,7 @@ export class ResumeStateStore {
     this.persistence.clearSm();
     this.persistence.clearJoinedRooms();
     this.persistence.clearAutoJoinBlocks?.();
+    this.persistence.clearMissingRemoteRooms?.();
   }
 
   /**

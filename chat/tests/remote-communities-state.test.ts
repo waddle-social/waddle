@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { computed, ref, shallowRef } from "vue";
 import { useRemoteCommunities } from "../src/waddles/remote-communities";
 import { RoomJoinError } from "../src/lib/xmpp/room-join-error";
+import { describeRemoteFailure } from "../src/lib/xmpp/remote-outcome";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
@@ -82,8 +83,12 @@ function fakeClient(options: {
   failRequests?: { match: string; error: Error };
   /** Joins wait until released. */
   holdJoins?: boolean;
+  /** XEP-0402 items already stored, by item id: the `<conference/>` each holds. */
+  storedBookmarks?: Record<string, string>;
 } = {}) {
   const sent: string[] = [];
+  // The user's bookmark node: publishes store their item, retracts remove it.
+  const storedBookmarks = new Map(Object.entries(options.storedBookmarks ?? {}));
   const joined: string[] = [];
   const left: string[] = [];
   const departures: Departure[] = [];
@@ -96,7 +101,19 @@ function fakeClient(options: {
     async send_raw_iq(xml: string): Promise<string> {
       sent.push(xml);
       if (options.failRequests && xml.includes(options.failRequests.match)) throw options.failRequests.error;
-      if (xml.includes('node="urn:xmpp:bookmarks:1"') && xml.includes('type="get"')) throw stanzaError("item-not-found");
+      if (xml.includes('node="urn:xmpp:bookmarks:1"') && xml.includes('type="get"')) {
+        if (storedBookmarks.size === 0) throw stanzaError("item-not-found");
+        const items = [...storedBookmarks].map(([id, conference]) => `<item id="${id}">${conference}</item>`).join("");
+        return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="urn:xmpp:bookmarks:1">${items}</items></pubsub></iq>`;
+      }
+      if (xml.includes('<publish node="urn:xmpp:bookmarks:1">')) {
+        const item = /<item id="([^"]+)">([\s\S]*?)<\/item>/.exec(xml);
+        if (item) storedBookmarks.set(item[1]!, item[2]!);
+      }
+      if (xml.includes('<retract node="urn:xmpp:bookmarks:1"')) {
+        const item = /<item id="([^"]+)"/.exec(xml.slice(xml.indexOf("<retract ")));
+        if (item) storedBookmarks.delete(item[1]!);
+      }
       if (xml.includes("disco#info")) {
         return discoInfoXml({
           identities: [{ category: "pubsub", type: "leaf" }],
@@ -146,6 +163,7 @@ function fakeClient(options: {
   return {
     client: client as unknown as BrowserXmppClient,
     sent,
+    storedBookmarks,
     joined,
     left,
     depart: (roomJid: string, codes: number[], destroyed = false) => {
@@ -617,6 +635,98 @@ describe("while the home MUC service is not discovered", () => {
       fake.failJoin(ROOM, new RoomJoinError("slow", { roomJid: ROOM, timedOut: true }));
       fake.depart(ROOM, [110, 333]);
       expect(remote.rooms.value).toHaveLength(0);
+    });
+  });
+});
+
+const STORED_AUTOJOIN = '<conference xmlns="urn:xmpp:bookmarks:1" name="Developers" autojoin="true"/>';
+
+function roomCreatedError(): RoomJoinError {
+  return new RoomJoinError("This room doesn't exist on its server.", {
+    roomJid: ROOM,
+    condition: "item-not-found",
+    errorType: "cancel",
+    roomCreated: true,
+  });
+}
+
+describe("a room that turned out not to exist", () => {
+  test("its bookmark stops joining at sign-in, and the dialog says the room doesn't exist", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer, reloads } = setup({ storedBookmarks: { [ROOM]: STORED_AUTOJOIN } });
+      // A sign-in autojoin, started by the client, found no room.
+      fake.failJoin(ROOM, roomCreatedError());
+      await settle();
+      const publish = fake.sent.find((xml) => xml.includes('<publish node="urn:xmpp:bookmarks:1">'));
+      expect(publish).toBeDefined();
+      expect(publish).not.toContain("autojoin=");
+      // The bookmark stays, with its name.
+      expect(fake.storedBookmarks.get(ROOM)).toContain('name="Developers"');
+      expect(fake.storedBookmarks.get(ROOM)).not.toContain("autojoin=");
+      const status = roomEntry(remote)?.status;
+      expect(status).toMatchObject({ state: "failed", failure: { kind: "deletion", retry: "none", roomMissing: true } });
+      if (status?.state !== "failed") throw new Error("expected a failed status");
+      expect(describeRemoteFailure(status.failure, "room").title).toBe("This room doesn't exist");
+      expect(timer.pending).toHaveLength(0);
+      expect(reloads()).toBe(1);
+
+      // The room's answer to the client leaving the room it created is
+      // no outage: nothing joins it again.
+      fake.depart(ROOM, [110]);
+      await settle();
+      expect(timer.pending).toHaveLength(0);
+      expect(fake.joined).toEqual([]);
+    });
+  });
+
+  test("a missing room the user never bookmarked is not bookmarked now", async () => {
+    await withXml(async () => {
+      const { fake } = setup();
+      fake.failJoin(ROOM, roomCreatedError());
+      await settle();
+      expect(fake.sent.some((xml) => xml.includes("<publish "))).toBe(false);
+      expect(fake.storedBookmarks.size).toBe(0);
+    });
+  });
+
+  test("a join the user asked for that finds no room is shown as such, without a retry", async () => {
+    await withXml(async () => {
+      const { remote, timer } = setup({ joinErrors: [roomCreatedError()] });
+      await remote.joinRoom(ROOM);
+      expect(roomEntry(remote)?.status).toMatchObject({ state: "failed", failure: { kind: "deletion", roomMissing: true } });
+      expect(timer.pending).toHaveLength(0);
+    });
+  });
+});
+
+describe("leaving reads the stored bookmark", () => {
+  test("a room this device has not listed yet still stops joining at sign-in", async () => {
+    await withXml(async () => {
+      const { remote, fake } = setup({ storedBookmarks: { [ROOM]: STORED_AUTOJOIN } });
+      expect(roomEntry(remote)).toBeUndefined();
+      await remote.leaveRoom(ROOM);
+      expect(fake.left).toEqual([ROOM]);
+      expect(fake.storedBookmarks.get(ROOM)).not.toContain("autojoin=");
+    });
+  });
+
+  test("leaving a room without a bookmark adds none", async () => {
+    await withXml(async () => {
+      const { remote, fake } = setup();
+      await remote.leaveRoom(ROOM);
+      expect(fake.sent.some((xml) => xml.includes("<publish "))).toBe(false);
+    });
+  });
+
+  test("an outage after the home server stopped federating is not rejoined", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer, federation } = setup();
+      await remote.joinRoom(ROOM);
+      federation.value = false;
+      fake.depart(ROOM, [110, 333]);
+      for (const entry of timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(fake.joined).toEqual([ROOM]);
     });
   });
 });

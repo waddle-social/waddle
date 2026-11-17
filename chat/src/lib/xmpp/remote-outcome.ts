@@ -43,6 +43,11 @@ export interface RemoteFailure {
   retry: RemoteRetry;
   condition?: string;
   errorType?: XmppStanzaErrorType;
+  /**
+   * A room join found no room: its host created one for the join (XEP-0045
+   * status 201), which the client left at once. A `deletion` failure.
+   */
+  roomMissing?: boolean;
 }
 
 export type RemoteSubject = "room" | "space" | "server";
@@ -117,12 +122,20 @@ export function classifyRemoteFailure(input: {
  * `timedOut` property is true, or named `DiscoTimeoutError`) as no answer.
  */
 export function classifyRemoteError(error: unknown): RemoteFailure {
+  if (isRoomCreatedError(error)) {
+    return { kind: "deletion", retry: "none", condition: "item-not-found", errorType: "cancel", roomMissing: true };
+  }
   const context = stanzaErrorContext(error);
   return classifyRemoteFailure({
     condition: context.condition ?? null,
     errorType: context.errorType ?? null,
     timedOut: isTimeoutError(error),
   });
+}
+
+/** A room join the room's host answered by creating the room (see `RoomJoinError.roomCreated`). */
+function isRoomCreatedError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { roomCreated?: unknown }).roomCreated === true;
 }
 
 function isTimeoutError(error: unknown): boolean {
@@ -155,6 +168,12 @@ export function describeRemoteFailure(
             : "Its server refused the request. Retrying will not help until an admin there grants access.",
       };
     case "deletion":
+      if (failure.roomMissing && subject === "room") {
+        return {
+          title: "This room doesn't exist",
+          detail: "Its server has no room at this address. Waddle left without creating one there, and no longer joins it at sign-in.",
+        };
+      }
       return {
         title: `This ${noun} isn't available`,
         detail: `Its server doesn't know this ${noun}. It may have been removed, or it is not open to accounts on other servers.`,

@@ -604,6 +604,11 @@ export interface DiscoveredTopology {
   /** False when room discovery or hydration degraded and `rooms` may be incomplete. */
   roomCatalogComplete: boolean;
   /**
+   * Whether the home MUC service's room list was read. Only then does
+   * `rooms` say which rooms are of this deployment whatever their address.
+   */
+  mucCatalogRead?: boolean;
+  /**
    * Exact authority available for terminal-denial reconciliation. Whole-cache
    * replacement remains gated by `roomCatalogComplete`.
    */

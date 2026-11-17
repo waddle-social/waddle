@@ -10,6 +10,7 @@ import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import { RoomJoinError } from "../src/lib/xmpp/room-join-error";
 import { classifyRemoteError } from "../src/lib/xmpp/remote-outcome";
 import { HOME_FEDERATION_FEATURE } from "../src/lib/xmpp/discovery";
+import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import { discoInfoXml, discoItemsXml, pubsubItemsXml, withFakeDomParser } from "./helpers/disco-xml";
 
 const REMOTE_ROOM = "dev@chat.remote.test";
@@ -377,5 +378,207 @@ describe("sign-in joins of rooms on other servers", () => {
   test("while the home server does not federate, not even the user's bookmark joins a room elsewhere", async () => {
     const joined = await joinedAfterSignIn(false);
     expect(joined).toEqual(["general@muc.example.com"]);
+  });
+});
+
+/**
+ * Browser storage shared by successive clients of one account, as a page
+ * reload or the next sign-in in the same browser sees it.
+ */
+function sharedStorage(initial: { joinedRooms?: string[]; missingRemoteRooms?: string[] } = {}) {
+  const stored = {
+    joinedRooms: [...(initial.joinedRooms ?? [])],
+    missingRemoteRooms: [...(initial.missingRemoteRooms ?? [])],
+  };
+  const persistence: ResumePersistence = {
+    ...nullResumePersistence,
+    loadJoinedRooms: () => [...stored.joinedRooms],
+    saveJoinedRooms: (roomJids) => { stored.joinedRooms = [...roomJids]; },
+    loadMissingRemoteRooms: () => [...stored.missingRemoteRooms],
+    saveMissingRemoteRooms: (roomJids) => { stored.missingRemoteRooms = [...roomJids]; },
+  };
+  return { stored, persistence };
+}
+
+/**
+ * A home deployment `example.com` (MUC service `muc.example.com`, unless
+ * its listing fails) whose user's bookmarks the test chooses, wired so the
+ * test can deliver room presences.
+ */
+function homeDeployment(options: {
+  persistence?: ResumePersistence;
+  bookmarks?: Array<{ id: string; name?: string; autojoin?: boolean }>;
+  catalog?: Array<{ jid: string; name?: string }>;
+}) {
+  const config = {
+    federation: true,
+    serverItemsFail: false,
+    catalog: options.catalog ?? [{ jid: "general@muc.example.com", name: "General" }],
+    bookmarks: options.bookmarks ?? [],
+  };
+  const sent: string[] = [];
+  let onPresence: ((presence: Presence) => void) | null = null;
+  const joinRoom = mock(async () => undefined);
+  const leaveRoom = mock(async () => undefined);
+  const xmpp = {
+    join_room: joinRoom,
+    leave_room: leaveRoom,
+    set_on_presence(cb: (presence: Presence) => void) {
+      onPresence = cb;
+    },
+    async send_raw_iq(xml: string): Promise<string> {
+      sent.push(xml);
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+        if (xml.includes('to="example.com"')) {
+          if (config.serverItemsFail) throw new Error("server items unavailable");
+          return discoItemsXml([{ jid: "muc.example.com" }]);
+        }
+        if (xml.includes('to="muc.example.com"')) return discoItemsXml(config.catalog);
+        return discoItemsXml([]);
+      }
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+        if (xml.includes("remote.test") || xml.includes("elsewhere.test")) {
+          throw new Error(`no request to another server was expected: ${xml}`);
+        }
+        if (xml.includes('to="example.com"')) {
+          return discoInfoXml({
+            identities: [{ category: "server", type: "im" }],
+            features: config.federation ? [HOME_FEDERATION_FEATURE] : [],
+          });
+        }
+        return discoInfoXml({
+          identities: [{ category: "conference", type: "text" }],
+          features: ["http://jabber.org/protocol/muc"],
+        });
+      }
+      if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) return pubsubItemsXml(config.bookmarks);
+      throw new Error(`Unexpected IQ: ${xml}`);
+    },
+  };
+  const client = new BrowserXmppClient(session(), options.persistence);
+  const state = client as unknown as PrivateState;
+  state.xmpp = xmpp;
+  state.connected = true;
+  state.wireEvents(xmpp);
+  const joined = () => joinRoom.mock.calls.map((call) => (call as unknown[])[0] as string);
+  async function discover() {
+    await withFakeDomParser(async () => {
+      await client.discoverTopology();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+  return {
+    client,
+    state,
+    config,
+    sent,
+    joinRoom,
+    leaveRoom,
+    joined,
+    discover,
+    deliver: (presence: Presence) => onPresence?.(presence),
+  };
+}
+
+describe("a bookmarked room on another server that does not exist", () => {
+  const bookmarks = [{ id: REMOTE_ROOM, name: "Dev", autojoin: true }];
+
+  test("is joined once, left, and not joined on its own at the next sign-in", async () => {
+    const storage = sharedStorage();
+    const first = homeDeployment({ persistence: storage.persistence, bookmarks });
+    await first.discover();
+    expect(first.joined()).toContain(REMOTE_ROOM);
+    // Its host creates the room for the join (XEP-0045 status 201).
+    first.deliver({ from: `${REMOTE_ROOM}/alice`, presence_type: "available", muc_status_codes: [110, 201] });
+    expect(first.leaveRoom).toHaveBeenCalledWith(REMOTE_ROOM, "alice");
+    expect(storage.stored.missingRemoteRooms).toEqual([REMOTE_ROOM]);
+
+    // The next sign-in: the bookmark still says to join (the write that
+    // turns it off may not have reached the server), and nothing joins it.
+    const second = homeDeployment({ persistence: storage.persistence, bookmarks });
+    await second.discover();
+    expect(second.joined()).toEqual(["general@muc.example.com"]);
+    expect(second.leaveRoom).not.toHaveBeenCalled();
+  });
+
+  test("a join the user starts is still sent, and finding the room ends the record", async () => {
+    const storage = sharedStorage({ missingRemoteRooms: [REMOTE_ROOM] });
+    const { client, joined, deliver } = homeDeployment({ persistence: storage.persistence, bookmarks });
+    const join = client.ensureJoined(REMOTE_ROOM);
+    await Promise.resolve();
+    expect(joined()).toEqual([REMOTE_ROOM]);
+    deliver({ from: `${REMOTE_ROOM}/alice`, presence_type: "available", muc_status_codes: [110] });
+    await join;
+    expect(storage.stored.missingRemoteRooms).toEqual([]);
+  });
+
+  test("a bookmark whose autojoin was turned off is not joined at sign-in", async () => {
+    const { discover, joined } = homeDeployment({ bookmarks: [{ id: REMOTE_ROOM, name: "Dev", autojoin: false }] });
+    await discover();
+    expect(joined()).not.toContain(REMOTE_ROOM);
+  });
+});
+
+describe("rooms whose host is not known yet", () => {
+  test("a bookmark of a room elsewhere is neither asked nor joined while the home MUC service is unknown", async () => {
+    const deployment = homeDeployment({ bookmarks: [{ id: REMOTE_ROOM, name: "Dev", autojoin: true }] });
+    deployment.config.serverItemsFail = true;
+    await deployment.discover();
+    expect(deployment.joined()).not.toContain(REMOTE_ROOM);
+    expect(deployment.sent.some((xml) => xml.includes("remote.test"))).toBe(false);
+    // Nothing placed the room at home either.
+    expect(deployment.state.homeMucService).toBeNull();
+
+    // A later discovery that finds the service places it, and the user's
+    // bookmark joins it while the home server federates.
+    deployment.config.serverItemsFail = false;
+    await deployment.discover();
+    expect(deployment.joined()).toContain(REMOTE_ROOM);
+  });
+
+  test("a retained room is rejoined at session-ready only on the account domain; discovery places the others", async () => {
+    const storage = sharedStorage({
+      joinedRooms: ["lounge@example.com", "quiet@muc.example.com", "old@chat.elsewhere.test"],
+    });
+    const deployment = homeDeployment({ persistence: storage.persistence });
+    deployment.state.fanOutJoinableRooms();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deployment.joined()).toEqual(["lounge@example.com"]);
+    // A page hidden before discovery keeps the parked rooms for the next page.
+    (deployment.client as unknown as { persistRetainedJoinedRooms(): void }).persistRetainedJoinedRooms();
+    expect(storage.stored.joinedRooms).toContain("quiet@muc.example.com");
+    expect(storage.stored.joinedRooms).toContain("old@chat.elsewhere.test");
+
+    await deployment.discover();
+    expect(deployment.joined()).toContain("quiet@muc.example.com");
+    expect(deployment.joined()).not.toContain("old@chat.elsewhere.test");
+    expect(storage.stored.joinedRooms).not.toContain("old@chat.elsewhere.test");
+    expect(storage.stored.joinedRooms).toContain("quiet@muc.example.com");
+  });
+
+  test("a room is placed at home by the latest catalog read, not by every catalog ever read", async () => {
+    const odd = "odd@rooms.example.org";
+    const deployment = homeDeployment({ catalog: [{ jid: odd, name: "Odd" }] });
+    await deployment.discover();
+    expect(deployment.client.isRemoteRoom(odd)).toBe(false);
+
+    deployment.config.catalog = [];
+    await deployment.discover();
+    expect(deployment.client.isRemoteRoom(odd)).toBe(true);
+  });
+});
+
+describe("the home server stops federating", () => {
+  test("rooms on other servers the session is in are left, and home rooms are kept", async () => {
+    const deployment = homeDeployment({ bookmarks: [{ id: REMOTE_ROOM, name: "Dev", autojoin: true }] });
+    await deployment.discover();
+    deployment.deliver({ from: `${REMOTE_ROOM}/alice`, presence_type: "available", muc_status_codes: [110] });
+    deployment.deliver({ from: "general@muc.example.com/alice", presence_type: "available", muc_status_codes: [110] });
+
+    deployment.config.federation = false;
+    await deployment.discover();
+    const left = deployment.leaveRoom.mock.calls.map((call) => (call as unknown[])[0]);
+    expect(left).toEqual([REMOTE_ROOM]);
+    expect(deployment.state.retainedJoinedRoomJids.has(REMOTE_ROOM)).toBe(false);
   });
 });
