@@ -520,7 +520,9 @@ fn forged_room_item() -> Element {
 }
 
 /// Every element below `element` that only the account's server states, of
-/// those [`forged_room_item`] and the event's own payloads forge.
+/// those [`forged_room_item`] and the event's own payloads forge. The stanza
+/// id the account's archive stamps on the notification it keeps is this
+/// server's own, so only the forged one counts.
 fn forged_below(element: &Element) -> Vec<String> {
     let message = element.name() == "message";
     element
@@ -532,7 +534,7 @@ fn forged_below(element: &Element) -> Vec<String> {
                 || ns == waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0
                 || (message && ns.starts_with("urn:waddle:"))
                 || (child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
-                    && child.attr("by") == Some(ALICE))
+                    && child.attr("id") == Some("forged"))
             {
                 found.push([ns.as_str(), " ", child.name()].concat());
             }
