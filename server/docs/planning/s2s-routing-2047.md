@@ -2298,9 +2298,11 @@ and a managed room's grants are read four rooms at a time; every grant
 that allowed `view` is confirmed with `HostGrantGate::still_allows` just
 before the answer is built, the decision itself while its fence ticket is
 current and a decision read again otherwise. A managed room not decided
-or confirmed within the listing's time (2.5 s in all) is left out; a
-listing whose catalog or enrolled set cannot be read is answered with
-`internal-server-error` (type `wait`).
+or confirmed within the listing's time is left out: 2.5 s in all for a
+remote asker, and for a session 1 s once its rooms are read, which takes
+it at most 2.7 s (a read that started before it asked, and a whole read of
+its own). A listing whose catalog or enrolled set cannot be read is
+answered with `internal-server-error` (type `wait`).
 
 **What a listing left out.** A listing that left a room out tells no
 count (XEP-0059 §1), whatever the reason: a read that filled its bound, a
@@ -2311,10 +2313,11 @@ the rooms that were listed. A session is answered with
 `internal-server-error` (type `wait`) when a room was not read or decided
 in time, the live rooms included, rather than with a listing that lacks
 it: the first-party client takes a listing as the whole of the service's
-rooms (`chat/src/lib/xmpp/discovery.ts`), so a partial one presented as
-complete would have it forget rooms. A session's listing left short by a
-bound or by grants that could not be read is answered with the rest and no
-count.
+rooms and reads no `<set/>` (`chat/src/lib/xmpp/discovery.ts`), while it
+takes an error as a listing it may not rely on and keeps the rooms it
+knows. A session's listing left short by a bound or by grants that could
+not be read is answered with the rest and no count; the first-party
+client, which reads no `<set/>`, still takes such a listing as complete.
 
 **Shared reads.** What the catalog and the rooms' actors say of the rooms
 (not who manages them, and not anyone's grants) is read at most once at a
@@ -2328,7 +2331,8 @@ configuration changed, a room closed to other servers included, can be
 listed as it was for up to 2 s. A session is answered only from a read
 that started once its request arrived, waiting for the read running now
 to end if that one started earlier, so a change the session made before
-it asked is in its answer.
+it asked is in its answer. An asker that waited for a read which ran out
+of the time of the asker that started it asks again.
 
 A request of an account at another server for the service's rooms is
 handed by the room shard that took it to a task of its own, so no room's
@@ -2420,9 +2424,11 @@ the same pinned commit. A `<set/>` that is not well formed is
   remote listing that tells no count, two remote listings asked at once
   built from one read, a session's listing refused with
   `internal-server-error` (type `wait`) and naming the room once the actor
-  answers; and a client that walks from the server's items to the
-  service's, finds a Space's room and enters it by its plain JID while the
-  Space is not open to other servers;
+  answers; live rooms whose catalog rows are hidden or closed to other
+  servers not listed to a remote asker, though their actors say open; and
+  a client that walks from the server's items to the service's, finds a
+  Space's room and enters it by its plain JID while the Space is not open
+  to other servers;
 - `crates/waddle-server/tests/xep0045_s2s_inbound_muc.rs`: a managed room
   listed only to a remote member its grants admit, and to nobody once it
   is closed to other servers and the reuse window has passed
@@ -2507,11 +2513,15 @@ runbook (G24):
   2.5 s; a session's listing whose catalog or enrolled set cannot be read
   is answered with `internal-server-error`, as it was.
 - A session's listing of the MUC service asks the actors of live instant
-  rooms sixteen at a time within 1.5 s, where it asked them one after
-  another with 5 s each. When a room is not read or decided in time (an
-  instant room whose actor is slower, a managed room whose grants are not
-  read within 2.5 s) the session is answered with `internal-server-error`
-  (type `wait`); before, it was answered with the rest of the rooms. A
+  rooms sixteen at a time within one read of 1.2 s, where it asked them
+  one after another with 5 s each. When a room is not read or decided in
+  time (an instant room whose actor is slower, a managed room whose grants
+  are not decided within 1 s of the read) the session is answered with
+  `internal-server-error` (type `wait`); before, it was answered with the
+  rest of the rooms. One live instant room whose actor answers slower than
+  that fails every session's listing on the replica that holds it, until
+  the actor answers again; the first-party client then keeps the rooms it
+  knows and joins none it does not. A
   listing left short by a bound, or by a managed room whose grants could
   not be read, tells no count where it told the count of what it listed.
   When the catalog read fills its bound, an instant-room candidate whose
@@ -2981,6 +2991,14 @@ runbook (G24):
   Neither read is cached. The `disco#items` of a Space's node reads up to
   256 items and, for each room, whether it is open to other servers and,
   for a managed room, its grants, as `<items/>` does.
+- **MUC fallback: one slow room fails a session's listing.** A live
+  instant room whose actor does not answer within one read (1.2 s) makes
+  every session's listing of the MUC service on its replica an
+  `internal-server-error` until it answers again, where it was left out
+  before. A session's listing left short by a bound (10,000 catalog rows,
+  1,000 live rooms) or by a managed room whose grants cannot be read tells
+  no count, but the first-party client reads no `<set/>` and takes it as
+  complete.
 - **MUC fallback: what one listing reads.** The MUC service's `disco#items`
   for a remote asker reads, at most once at a time on a replica and reused
   for 2 s, up to 4,096 catalog rows in one query and the actor of each live
@@ -3058,6 +3076,12 @@ runbook (G24):
   lost its membership of a private Space; until then such a row receives
   nothing and lapses after thirty days.
 - Spaces, the cost of one request: page or cache the service's listing.
+- MUC fallback, the first-party client: read the `<set/>` of the MUC
+  service's listing, page through a listing that does not fit in one
+  answer, and take one that tells no count as incomplete
+  (`chat/src/lib/xmpp/discovery.ts` reads only the items).
+- MUC fallback, a remote Space node listing: tell no count when a room's
+  openness or grants could not be read, as the MUC service's listing does.
 - Spaces, a federated setting for single peers: the setting opens a Space
   to every admitted domain.
 - Spaces, the web client: offer the `federated` field in a Space's
