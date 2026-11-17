@@ -204,10 +204,11 @@ blocking list or resource is read. The ingress acceptance of a direct
 message checks it again in its transaction, with the account row locked
 against a concurrent retirement, and refuses a retired or nonexistent
 recipient as it refuses a sender whose domain is no longer admitted:
-nothing is committed and nothing answers the sender. Retirement does not end an account's
-open streams or remove every row keyed by its JID (host-grant design,
+nothing is committed and nothing answers the sender. Retirement does not
+remove every row keyed by its JID, and the account's open streams end
+only once each replica takes the retirement up (host-grant design,
 "Non-reuse of retired account JIDs"); a retired JID is nonexistent here
-even while such rows or a resource remain. Retirement does remove, in its
+from the ledger's commit on, even while such rows or a resource remain. Retirement does remove, in its
 transaction, the rows of migrations 2010 and 2011 for the account: its
 recorded subscription requests, its remote PubSub subscription records
 and the offline admissions of strangers' messages.
@@ -726,7 +727,7 @@ store. This is the slice's rollout part (G24).
 | G18-11 | No path answers a remote sender's message: the account side, the expiry of a detached session and the ingress quota bounce all drop instead of bouncing a sender at a domain the deployment does not serve. | Bouncing on quota as for local senders (rejected: tells the sender the account is offline). |
 | G18-12 | The router abandons account work at its deadline and the account side then applies nothing more; roster read-modify-write runs under a per-account lock; a change is announced only once stored. | Letting abandoned work run to its end (replaced: its effects could land after the sender's next stanza's). |
 | G18-14 | A remote sender's `chat` or `normal` message is accepted through the ingress authority as the recipient's half of a local direct message: the recipient's archive, inbox, received carbons, offline row and push notification, nothing of the sender's; an account-target acceptance arm decides D1 and the recipient's existence, the ledger included, in the transaction; a plan that would answer the sender or act beyond the recipient's account is not committed; the acceptance's frames are never sent (owner decision, 2026-11-17). | A `Transient` offline row outside the ingress commit, without archive, inbox or push (replaced); `IngressPrincipal::Remote`'s room arm (rejected: it admits only a room's bare JID, decided on the room's witness). |
-| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check; retirement removes the account's rows of migrations 2010 and 2011. | Ending the stream at retirement (out of scope: retirement does not end streams); refusing account traffic only (replaced: requests and room traffic still left). |
+| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check, until the replica that holds it ends it; retirement removes the account's rows of migrations 2010 and 2011. | Relying on the end of the stream alone (rejected: each replica ends it only when it takes the retirement up, and the router's check covers the time before); refusing account traffic only (replaced: requests and room traffic still left). |
 
 ## Restrictions and risks
 
@@ -849,10 +850,18 @@ store. This is the slice's rollout part (G24).
   enumeration").
 - **A retired account's still-open session** sends nothing to remote
   JIDs, refused at the router for every stanza it sends and failing closed
-  (G18-13). A local room's stanzas for remote occupants leave from the
-  room's address, through the seats of inbound MUC, not through that
-  check: a retired account's messages never reach them, since retiring
-  the account deletes its sessions with it and the room's ingress then
-  refuses the session's principal, but its presence in a local room it
-  still occupies, which the room handles without the ingress commit,
-  reaches the room's remote occupants until its session ends.
+  (G18-13), until the replica that holds it ends it, which each serving
+  replica does within a tick of the retirement request (the retirement
+  runbook, `docs/operations/account-retirement.md`). A local room's
+  stanzas for remote occupants leave from the room's address, through the
+  seats of inbound MUC, not through that check: a retired account's
+  messages never reach them, since retiring the account deletes its
+  sessions with it and the room's ingress then refuses the session's
+  principal, but its presence in a local room it still occupies, which
+  the room handles without the ingress commit, reaches the room's remote
+  occupants until its session ends. Ending the session leaves its rooms:
+  the room's remote occupants see it leave, and the remote rooms it
+  joined are left by the router's own presence. Its remote contacts are
+  sent no final `unavailable`, since the router refuses what the retired
+  account sends, and keep its last presence: a probe of a retired account
+  is not answered (no enumeration).
