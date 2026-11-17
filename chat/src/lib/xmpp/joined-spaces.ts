@@ -316,6 +316,13 @@ export interface SpaceUnfollowIntent {
    * that followed again, and the unfollow no longer applies.
    */
   seenRevision?: string;
+  /**
+   * The list had not been read when the unfollow was made, so the entry's
+   * revision then is not known: the first read of the list supplies it (see
+   * `resolveUnfollowRevision`) instead of any revision counting as a later
+   * follow.
+   */
+  seenRevisionPending?: boolean;
 }
 
 /**
@@ -326,7 +333,22 @@ export function unfollowOvertaken(
   intent: SpaceUnfollowIntent,
   entry: JoinedSpacePreference | undefined,
 ): boolean {
+  if (intent.seenRevisionPending) return false;
   return !!entry && entry.follow && entry.revision !== intent.seenRevision;
+}
+
+/**
+ * An unfollow whose list revision was not known when it was made takes the
+ * revision of the entry as first read afterwards: the unfollow applies to
+ * the list as it then stood.
+ */
+export function resolveUnfollowRevision(
+  intent: SpaceUnfollowIntent,
+  entry: JoinedSpacePreference | undefined,
+): SpaceUnfollowIntent {
+  if (!intent.seenRevisionPending) return intent;
+  const { seenRevision: _unknown, seenRevisionPending: _pending, ...rest } = intent;
+  return { ...rest, ...(entry?.revision ? { seenRevision: entry.revision } : {}) };
 }
 
 export interface SpaceUnfollowIntentStore {
@@ -374,6 +396,7 @@ export function localSpaceUnfollowIntentStore(
             ...(typeof entry.seenRevision === "string" && entry.seenRevision
               ? { seenRevision: entry.seenRevision }
               : {}),
+            ...(entry.seenRevisionPending === true ? { seenRevisionPending: true } : {}),
           }];
         }).slice(0, MAX_JOINED_SPACES);
       } catch {

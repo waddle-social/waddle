@@ -11,6 +11,7 @@ import {
   parseJoinedSpaceItems,
   parseJoinedSpaces,
   pepJoinedSpaceStore,
+  resolveUnfollowRevision,
   unfollowOvertaken,
 } from "../src/lib/xmpp/joined-spaces";
 import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
@@ -247,5 +248,32 @@ describe("telling whether an entry changed since this device saw it", () => {
     const { seenRevision: _none, ...older } = intent;
     expect(unfollowOvertaken(older, { ...entry, follow: true })).toBe(false);
     expect(unfollowOvertaken(older, { ...entry, follow: true, revision: "r-2" })).toBe(true);
+  });
+});
+
+describe("an unfollow made before the list was read", () => {
+  const entry = { serviceJid: "spaces.a.test", node: "main" };
+  const pending = { ...entry, remoteDone: true, preferenceDone: false, seenRevisionPending: true as const };
+
+  test("is not overtaken by a revision it never saw, and takes the first one read", () => {
+    const listed = { ...entry, follow: true, revision: "r-elsewhere" };
+    expect(unfollowOvertaken(pending, listed)).toBe(false);
+    const resolved = resolveUnfollowRevision(pending, listed);
+    expect(resolved).toEqual({ ...entry, remoteDone: true, preferenceDone: false, seenRevision: "r-elsewhere" });
+    // Once resolved, a follow written under yet another revision overtakes it.
+    expect(unfollowOvertaken(resolved, { ...listed, revision: "r-later" })).toBe(true);
+    // No entry, or one without a revision, leaves no revision to remember.
+    expect(resolveUnfollowRevision(pending, undefined)).toEqual({ ...entry, remoteDone: true, preferenceDone: false });
+  });
+
+  test("keeps that it waits for a revision across a reload", () => {
+    const storage = memoryStorage();
+    localSpaceUnfollowIntentStore("alice@home.test", storage).save([pending]);
+    expect(localSpaceUnfollowIntentStore("alice@home.test", storage).load()).toEqual([pending]);
+  });
+
+  test("an unfollow whose revision is known is left as it is", () => {
+    const known = { ...entry, remoteDone: true, preferenceDone: false, seenRevision: "r-1" };
+    expect(resolveUnfollowRevision(known, { ...entry, follow: true, revision: "r-2" })).toBe(known);
   });
 });

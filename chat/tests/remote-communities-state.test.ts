@@ -43,9 +43,12 @@ function manualTimer() {
 }
 
 function memoryStore(initial: JoinedSpacePreference[] = []) {
-  const state = { preferences: [...initial], saves: 0, failWrites: false };
+  const state = { preferences: [...initial], saves: 0, failWrites: false, failLoads: false };
   const store: JoinedSpaceStore = {
-    async load() { return [...state.preferences]; },
+    async load() {
+      if (state.failLoads) throw stanzaError("remote-server-timeout", "wait");
+      return [...state.preferences];
+    },
     async put(preference) {
       if (state.failWrites) throw stanzaError("internal-server-error", "wait");
       state.saves += 1;
@@ -861,6 +864,83 @@ describe("rooms placed by a later discovery", () => {
       const { fake, reloads } = setup();
       fake.placementChanged();
       expect(reloads()).toBe(1);
+    });
+  });
+});
+
+describe("unfollow and follow racing", () => {
+  const space = { serviceJid: "spaces.remote.test", node: "eng" };
+
+  test("an unfollow keeps what another device wrote to the entry since it was read", async () => {
+    await withXml(async () => {
+      const { remote, memory } = setup({}, [{ ...space, name: "Engineering", follow: true, revision: "first" }]);
+      await remote.load();
+      await settle();
+      memory.state.preferences = [{ ...space, name: "Engineering (renamed)", follow: true, revision: "second" }];
+      await remote.unsubscribeSpace(remote.spaces.value[0]!.key);
+      expect(memory.state.preferences).toMatchObject([{ name: "Engineering (renamed)", follow: false }]);
+      expect(memory.state.preferences[0]!.revision).not.toBe("second");
+    });
+  });
+
+  test("a follow chosen while an unfollow waits for the host wins", async () => {
+    await withXml(async () => {
+      const { remote, memory, intents } = setup({}, [{ ...space, follow: true, revision: "first" }]);
+      await remote.load();
+      await settle();
+      const key = remote.spaces.value[0]!.key;
+      const unfollow = remote.unsubscribeSpace(key);
+      const follow = remote.followSpace(space.serviceJid, space.node);
+      await Promise.all([unfollow, follow]);
+      await settle();
+      expect(remote.spaces.value[0]).toMatchObject({ following: true });
+      expect(intents.state.intents).toEqual([]);
+      expect(memory.state.preferences).toMatchObject([{ follow: true }]);
+    });
+  });
+
+  test("an unfollow made before the list could be read applies to the list as first read", async () => {
+    await withXml(async () => {
+      // The list cannot be read at this sign-in, so its revision is not known.
+      const first = setup({ federation: false }, [{ ...space, follow: true, revision: "elsewhere" }]);
+      first.memory.state.failLoads = true;
+      first.memory.state.failWrites = true;
+      // Followed here, but the list entry could not be written either.
+      await first.remote.followSpace(space.serviceJid, space.node);
+      await first.remote.unsubscribeSpace(first.remote.spaces.value[0]!.key);
+      expect(first.intents.state.intents).toMatchObject([{ preferenceDone: false, seenRevisionPending: true }]);
+
+      // The next sign-in reads the list: the unfollow applies to it rather
+      // than losing to the revision it did not know.
+      const next = setup({ intents: first.intents.state.intents }, first.memory.state.preferences);
+      await settle();
+      for (const entry of next.timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(next.fake.sent.some((xml) => xml.includes("<subscribe "))).toBe(false);
+      expect(next.remote.spaces.value[0]).toMatchObject({ following: false });
+      expect(next.memory.state.preferences).toMatchObject([{ follow: false }]);
+      expect(next.intents.state.intents).toEqual([]);
+    });
+  });
+
+  test("after an overtake, the revision kept here is the other device's", async () => {
+    await withXml(async () => {
+      const { remote, memory, timer, intents } = setup(
+        { intents: [{ ...space, remoteDone: false, preferenceDone: true, seenRevision: "written-here" }] },
+        [{ ...space, follow: false, revision: "written-here" }],
+      );
+      await settle();
+      memory.state.preferences = [{ ...space, follow: true, revision: "written-elsewhere" }];
+      for (const entry of timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(remote.spaces.value[0]).toMatchObject({ following: true });
+
+      // An unfollow here whose list write fails records the revision it
+      // last saw, not the one it wrote before the overtake.
+      memory.state.failLoads = true;
+      memory.state.failWrites = true;
+      await remote.unsubscribeSpace(remote.spaces.value[0]!.key);
+      expect(intents.state.intents).toMatchObject([{ seenRevision: "written-elsewhere", preferenceDone: false }]);
     });
   });
 });
