@@ -18,7 +18,9 @@ sender's direct message" below).
 The rules were read against the pinned sources in `xeps/`: RFC 6121 (from
 the RFC Editor) and the XSF sources at
 `4132c531487fe9450ae90b905b8df950d0d478b2`: XEP-0060 1.30.0, XEP-0115
-1.6.0, XEP-0191 1.3, XEP-0199 2.0.1, XEP-0280 1.0.1 and XEP-0313 1.1.3.
+1.6.0, XEP-0191 1.3, XEP-0199 2.0.1, XEP-0280 1.0.1, XEP-0313 1.1.3 and
+XEP-0359 0.7.0; XEP-0424 0.5.0 and XEP-0357 0.4.1, which `xeps/` does not hold,
+were read at the same commit of the XSF repository.
 
 Nothing here is executed evidence. The evidence is written and compiled but
 not run until verification (D9):
@@ -356,8 +358,10 @@ inbox and archive only as the conversation's peer.
   left meanwhile sends the message to the store, within the bounds.
 - **Retractions.** The recipient pass replaces the message a XEP-0424
   retraction names in the recipient's archive with a tombstone; for a
-  local sender its own server checks first that the sender wrote it. For
-  a remote sender the account side checks it: a retraction naming an
+  local sender its own server checks first that the sender wrote it
+  (XEP-0424 0.5.0, Business Rules: a retraction is processed only when it
+  and the original message come from the same bare JID). For a remote
+  sender the account side checks it: a retraction naming an
   archived message another sender wrote, or whose target cannot be read,
   is dropped unanswered. A correction (XEP-0308) names its target by the
   sender and its origin id, and needs no such check.
