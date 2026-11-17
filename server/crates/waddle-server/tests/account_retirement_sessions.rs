@@ -37,9 +37,10 @@ use waddle_server::auth::session_endings::{
 };
 use waddle_server::db::actor::{DbActor, DbExecute, DbQueryOne};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner, Value};
-use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+use waddle_server::server::ResolvedXmppDatabaseUrl;
+use waddle_server::test_support::attach_pending_startup;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use xmpp_parsers::bind::BindQuery;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Lang, Message};
@@ -139,10 +140,11 @@ async fn a_retired_accounts_offline_store_is_emptied() {
     let alice = server.account("alice").await;
 
     // The retirement removes what the store holds in the deployment's
-    // database in its transaction.
-    let stored = DatabasePendingDeliveryStorage::attach_existing(
-        server.db().clone(),
-        QuotaPolicy::default_policy(),
+    // database in its transaction. The store is the one startup attaches
+    // to that database.
+    let stored = attach_pending_startup(
+        &ResolvedXmppDatabaseUrl::InheritedGlobal(server.db().database_url().to_owned()),
+        server.db(),
     )
     .await
     .expect("the offline store attaches");

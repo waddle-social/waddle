@@ -804,6 +804,8 @@ async fn retirement_removes_what_remote_senders_left_for_the_account() {
 async fn retirement_empties_the_offline_store_under_every_spelling_of_the_account() {
     use waddle_server::db::actor::DbExecute;
     use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+    use waddle_server::server::ResolvedXmppDatabaseUrl;
+    use waddle_server::test_support::attach_pending_startup;
     use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
     use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
     use xmpp_parsers::message::{Lang, Message};
@@ -826,6 +828,8 @@ async fn retirement_empties_the_offline_store_under_every_spelling_of_the_accoun
 
     for store in Store::each("retire_offline_spellings").await {
         let engine = store.engine;
+        // An offline store on the deployment's database: on SQLite the one
+        // startup attaches, which shares the in-memory database's pool.
         let offline = match &store.postgres {
             Some(fixture) => DatabasePendingDeliveryStorage::open(
                 Some(fixture.db.database_url()),
@@ -833,9 +837,9 @@ async fn retirement_empties_the_offline_store_under_every_spelling_of_the_accoun
             )
             .await
             .expect("the offline store"),
-            None => DatabasePendingDeliveryStorage::attach_existing(
-                store.db.clone(),
-                QuotaPolicy::Unlimited,
+            None => attach_pending_startup(
+                &ResolvedXmppDatabaseUrl::InheritedGlobal(store.db.database_url().to_owned()),
+                &store.db,
             )
             .await
             .expect("the offline store"),
