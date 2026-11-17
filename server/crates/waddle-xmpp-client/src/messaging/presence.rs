@@ -58,6 +58,9 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
                 .collect()
         })
         .unwrap_or_default();
+    // XEP-0045 §10.9: a destroyed room removes each occupant with one
+    // unavailable presence whose `muc#user` payload carries `<destroy/>`.
+    let muc_destroyed = muc_x.is_some_and(|x| x.has_child("destroy", NS_MUC_USER));
     let vcard_avatar = el
         .get_child("x", NS_VCARD_UPDATE)
         .and_then(|x| x.get_child("photo", NS_VCARD_UPDATE))
@@ -136,6 +139,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         muc_role,
         muc_jid,
         muc_status,
+        muc_destroyed,
         vcard_avatar,
         muji,
         hand_raised,
@@ -588,6 +592,35 @@ mod tests {
         let elem: Element = xml.parse().unwrap();
         let p = parse_presence(&elem);
         assert_eq!(p.muc_status, vec![MucStatus::Other(999)]);
+    }
+
+    #[test]
+    fn room_destruction_is_surfaced() {
+        // XEP-0045 §10.9 Example 205: no status code, no real JID.
+        let xml = r#"<presence xmlns="jabber:client" from="heath@chat.shakespeare.lit/firstwitch" type="unavailable">
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="none" role="none"/>
+                <destroy jid="coven@chat.shakespeare.lit">
+                    <reason>Macbeth doth come.</reason>
+                </destroy>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(p.muc_destroyed);
+        assert!(p.muc_status.is_empty());
+    }
+
+    #[test]
+    fn ordinary_unavailable_presence_is_not_a_destruction() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice" type="unavailable">
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="member" role="none"/>
+                <status code="110"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        assert!(!parse_presence(&elem).muc_destroyed);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 // suppresses interactive affordances that belong on the timeline only
 // (extension action buttons).
 //
-import { computed, reactive, ref, nextTick, watch } from "vue";
+import { computed, inject, reactive, ref, nextTick, watch } from "vue";
 import {
   Lock,
   AlertCircle,
@@ -36,6 +36,7 @@ import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
+import { remoteMediaPolicyKey } from "@/lib/remote-media";
 import HlsVideoPlayer from "@/components/chat/HlsVideoPlayer.vue";
 
 const props = withDefaults(
@@ -51,6 +52,14 @@ const props = withDefaults(
 
 const messageRef = computed(() => props.message);
 const invokeExtensionActionRef = computed(() => props.invokeExtensionAction);
+
+// Media of a message from another server is fetched only once the user
+// asks (see `@/lib/remote-media`). Without a policy, media loads as before.
+const remoteMediaPolicy = inject(remoteMediaPolicyKey, () => null);
+const remoteMediaHost = computed(() => remoteMediaPolicy(props.message));
+const remoteMediaRequested = ref(false);
+watch(() => props.message.id, () => { remoteMediaRequested.value = false; });
+const mediaShown = computed(() => !remoteMediaHost.value || remoteMediaRequested.value);
 
 const {
   imageAttachments,
@@ -71,7 +80,7 @@ const {
   openLightbox,
   openInlineImageLightbox,
   downloadAttachment,
-} = useMessageAttachments(messageRef);
+} = useMessageAttachments(messageRef, { mediaAllowed: mediaShown });
 
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
 const linkPreviews = computed(() => props.message.linkPreviews ?? []);
@@ -191,6 +200,27 @@ const {
 
 const isSticker = computed(() => !!props.message.isSticker && imageAttachments.value.length > 0);
 
+/** What a message from another server would fetch, named instead of loaded. */
+const withheldMedia = computed(() => {
+  if (mediaShown.value) return [];
+  const files = [
+    ...imageAttachments.value,
+    ...videoAttachments.value,
+    ...audioAttachments.value,
+    ...pdfAttachments.value,
+  ].map((file) => ({ key: attachmentKey(file), label: file.name ?? file.url, url: file.url }));
+  const bodyImage = isInlineImageBodyUrl.value
+    ? [{ key: "inline-body-image", label: props.message.body.trim(), url: props.message.body.trim() }]
+    : [];
+  const previewImages = linkPreviewCards.value.some((card) =>
+    card.mediaState.kind === "image"
+    || ((card.mediaState.kind === "video" || card.mediaState.kind === "player") && !!card.mediaState.poster),
+  )
+    ? [{ key: "link-preview-images", label: "Link preview pictures", url: "" }]
+    : [];
+  return [...files, ...bodyImage, ...previewImages];
+});
+
 // XEP-0245: a body starting with exactly "/me " renders as an italic
 // "* Author action" line. Corrections (XEP-0308) replace `body`, so an
 // edited `/me` message follows the same path.
@@ -244,7 +274,7 @@ watch(
          v-else-if chains with displayBody and isInlineImageBodyUrl so only one body/media branch
          renders per message (XEP-0449 stickers carry a <body> alt-text that must
          not also render as a text bubble). -->
-    <div v-else-if="isSticker">
+    <div v-else-if="isSticker && mediaShown">
       <img
         v-if="resolvedAttachmentUrl(imageAttachments[0])"
         :src="resolvedAttachmentUrl(imageAttachments[0])!"
@@ -270,7 +300,7 @@ watch(
     </div>
 
     <!-- Inline image body URL -->
-    <div v-else-if="isInlineImageBodyUrl">
+    <div v-else-if="isInlineImageBodyUrl && mediaShown">
       <img
         :src="message.body.trim()"
         alt="Image"
@@ -305,7 +335,7 @@ watch(
         {{ linkPreviewHost(preview.originalUrl) }}
       </span>
       <img
-        v-if="mediaState.kind === 'image'"
+        v-if="mediaState.kind === 'image' && mediaShown"
         :src="mediaState.image.url"
         :alt="mediaState.image.alt ?? preview.title ?? 'Link preview image'"
         :width="mediaState.image.width"
@@ -365,7 +395,7 @@ watch(
         @click.stop.prevent="startVideoPlayback(card.preview)"
       >
         <img
-          v-if="card.poster"
+          v-if="card.poster && mediaShown"
           :src="card.poster.url"
           :alt="card.poster.alt ?? ''"
           loading="lazy"
@@ -415,7 +445,7 @@ watch(
         @click.stop.prevent="startEmbedPlayback(card.preview)"
       >
         <img
-          v-if="card.poster"
+          v-if="card.poster && mediaShown"
           :src="card.poster.url"
           :alt="card.poster.alt ?? ''"
           loading="lazy"
@@ -529,8 +559,34 @@ watch(
       </template>
     </div>
 
+    <!-- Media from another server, named until the user asks to load it -->
+    <div
+      v-if="withheldMedia.length > 0"
+      class="chat-attachment-card flex max-w-xl flex-col gap-1.5 rounded-lg border border-dashed border-border bg-muted/30 p-3"
+      @click.stop
+    >
+      <span class="type-caption text-muted-foreground">
+        Images and files from {{ remoteMediaHost }} aren't loaded until you choose to.
+      </span>
+      <ul class="flex flex-col gap-0.5">
+        <li
+          v-for="item in withheldMedia"
+          :key="item.key"
+          class="type-meta truncate text-muted-foreground"
+          :title="item.url || undefined"
+        >{{ item.label }}</li>
+      </ul>
+      <button
+        type="button"
+        class="type-caption self-start rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
+        @click.stop="remoteMediaRequested = true"
+      >
+        Load
+      </button>
+    </div>
+
     <!-- Image attachments gallery -->
-    <div v-if="imageAttachments.length > 0 && !isSticker" class="chat-attachment-strip">
+    <div v-if="imageAttachments.length > 0 && !isSticker && mediaShown" class="chat-attachment-strip">
       <div
         v-for="img in imageAttachments"
         :key="attachmentRenderKey(img)"
@@ -592,7 +648,7 @@ watch(
     />
 
     <!-- Inline video attachments -->
-    <div v-if="videoAttachments.length > 0" class="flex flex-col gap-2">
+    <div v-if="videoAttachments.length > 0 && mediaShown" class="flex flex-col gap-2">
       <div
         v-for="file in videoAttachments"
         :key="attachmentKey(file)"
@@ -631,7 +687,7 @@ watch(
     </div>
 
     <!-- Inline audio attachments -->
-    <div v-if="audioAttachments.length > 0" class="flex flex-col gap-2">
+    <div v-if="audioAttachments.length > 0 && mediaShown" class="flex flex-col gap-2">
       <div
         v-for="file in audioAttachments"
         :key="attachmentKey(file)"
@@ -672,7 +728,7 @@ watch(
     <!-- Downloadable attachments (non-compact) / chip (compact) -->
     <template v-if="!compact">
       <!-- Inline PDF attachments -->
-      <div v-if="pdfAttachments.length > 0" class="flex flex-col gap-2">
+      <div v-if="pdfAttachments.length > 0 && mediaShown" class="flex flex-col gap-2">
         <div
           v-for="file in pdfAttachments"
           :key="attachmentKey(file)"

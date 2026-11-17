@@ -758,9 +758,9 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
     }
 }
 
-/// Bring a well-known PEP node's stored config into line with the
-/// current `NodeConfig::pep_for_node` defaults BEFORE a publish lands
-/// its item.
+/// Bring a well-known PEP node's stored config into line with
+/// `NodeConfig::reconciled_for_node` BEFORE a publish lands its item:
+/// the current `NodeConfig::pep_for_node` defaults for most nodes.
 ///
 /// Use case: an earlier version of Waddle auto-created the
 /// `urn:xmpp:vcard4` node with `AccessModel::Presence` (the bare
@@ -773,16 +773,24 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// publish lands on a spec-conformant node.
 ///
 /// Avatar nodes are repaired only from the legacy Presence default and
-/// never after the owner configured them (see `NodeConfig::needs_reconcile`).
+/// never after the owner configured them (see `NodeConfig::reconciled_for_node`).
+///
+/// The joined-spaces node is not reset to its defaults: its stored config
+/// is rewritten only when its privacy and durability invariants
+/// (`NodeConfig::normalize_waddle_joined_spaces`) do not hold, and then
+/// with those invariants forced onto it, so a `max_items` the owner chose
+/// within the node's bound survives the publish.
 ///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
 /// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
-/// nodes, DND) — we don't bulk-rewrite arbitrary user node configs here.
+/// nodes, DND, joined-spaces) — we don't bulk-rewrite arbitrary user
+/// node configs here.
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
     {
         return;
     }
@@ -808,15 +816,16 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             return;
         }
     };
-    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(node, &existing.config) {
+    let Some(reconciled) =
+        waddle_xmpp_core::pubsub::NodeConfig::reconciled_for_node(node, &existing.config)
+    else {
         return;
-    }
-    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
-    if let Err(error) = storage.update_node_config(owner, node, &canonical).await {
+    };
+    if let Err(error) = storage.update_node_config(owner, node, &reconciled).await {
         warn!(
             node,
             error = %error,
-            "Failed to reconcile PEP node config to XEP-defaults on publish; \
+            "Failed to reconcile PEP node config on publish; \
              publish will proceed against the divergent config"
         );
     }

@@ -2675,6 +2675,119 @@ runbook (G24):
   needs S2S; with S2S off it is left out, in every room. Before, it was
   left out of a managed room and seated again in any other, where nothing
   could reach it.
+- The PEP node `urn:waddle:joined-spaces:0` is a well-known private node:
+  it is created with `whitelist` access, up to 1,024 items and no
+  last-item delivery, an owner configure cannot weaken that, only its
+  owner reads, publishes to or administers it whatever affiliation rows
+  it holds, and a publish without an item id is refused (`bad-request`).
+  An owner affiliations set that would make another entity a member,
+  publisher, publish-only entity or owner of it, or the account an
+  outcast of it, is answered with `not-acceptable` (type `modify`)
+  carrying only those entities with their existing affiliation, and the
+  request's other changes apply (XEP-0060 §8.9.2.4). Before, a client could create it as any other PEP node,
+  with presence access and one item. Nothing on the server reads it.
+
+The web client changes these whether or not S2S is on (the S2S-off
+behaviour of the chat app, for the same runbook):
+
+- The client no longer joins a room again in the session after its own
+  unavailable presence carries status 301 (banned), 321 (affiliation
+  removed) or 322 (room made members-only), in a room of this deployment
+  too, and no longer carries such a room into a later sign-in as one it
+  had joined. Before, a reconnect or a scheduled retry joined it again and
+  was refused.
+- A room's `<destroy/>` presence (XEP-0045 §10.9, which carries no status
+  110) is taken as the end of the user's own occupancy, and the room is not
+  joined again in the session. Before, it was not recognised as the user's
+  own and the room stayed shown as joined.
+- An error presence that answers a join after the client's own wait for
+  it ran out (15 seconds for a room of this deployment) is applied to that
+  join: it replaces the retry the timeout scheduled, and a denial blocks
+  automatic joins as a timely one does. Before, it was dropped and the
+  retry went ahead.
+- A home Space item naming a room on another domain is neither listed in
+  the Space nor joined from it; while the home MUC service has not been
+  discovered, a Space item is placed only when the home MUC catalog lists
+  its room, and the others wait for a later discovery. Before, such an
+  item was asked for its `disco#info` and, when it answered as a room,
+  listed in the Space and joined at sign-in. With S2S off the request
+  failed and the item was dropped, so only the second part is visible.
+- The user's own XEP-0402 bookmarks of rooms on another domain are listed
+  under "Rooms on other servers — unavailable", with Forget only, until the
+  home server advertises `urn:waddle:s2s:0`; nothing joins them. This holds
+  only once the home MUC service has been discovered: the component the
+  home domain's `disco#items` lists that advertises
+  `http://jabber.org/protocol/muc` (a `conference`/`text` identity alone
+  only names its address, and the `conference`/`audio-video` call mixer is
+  never taken for it). While it has not, a bookmark of a room that the home
+  MUC catalog does not list and that is not on the account domain, a
+  discovered home service or a component the home domain lists cannot be
+  placed: it is neither asked for its `disco#info`, listed nor joined, and
+  waits for a later discovery, retried after 2 seconds and then at doubling
+  intervals up to a minute, each spread by up to a fifth either way. The
+  retry runs only while a room is parked or cannot be placed, and stops
+  after ten tries a minute apart until the next session-ready. Every
+  discovery that reads the home domain's components or identifies the MUC
+  service, a retry's included, updates what the client counts as home.
+  Before,
+  such bookmarks were asked for their `disco#info`, which fails with S2S
+  off, and were not listed; while the home MUC service was undiscovered a
+  room on another domain was taken for a home room, asked for its
+  `disco#info` and joined at sign-in.
+- Rooms the client retained from an earlier page are rejoined at
+  session-ready only when their address is on the account domain; the
+  others wait for a discovery to place them. Those it places at home (the
+  catalog lists them, or they are on a home service or listed component)
+  are rejoined at once; the rest are dropped only by a discovery that
+  identified the home MUC service and read its catalog. The rooms the
+  client counts as home whatever their address are those the latest
+  discovery that read the home MUC catalog placed there, not every room any
+  earlier discovery did. Before, every retained room was rejoined at
+  session-ready, and a room once placed at home stayed there for the page.
+- A join of a room on another domain that the room's host answers by
+  creating the room (status 201) is left at once, recorded in the browser
+  as a missing room that nothing joins on its own again (a join the user
+  starts from the communities dialog is still sent and ends the record, as
+  does any seated join; a restored route, the focused room after a
+  reconnect, a retained room and a retry are refused without a request),
+  and the user's bookmark of it, if it joins at sign-in, is rewritten with
+  `autojoin` off, once the stream is back if it was down. The record is the
+  account's in that browser, shared by its tabs and kept across reconnects
+  and reloads; signing out clears it.
+  The communities dialog shows
+  "This room doesn't exist". Before, only the current page stopped joining
+  it, and every later sign-in created and left it again.
+- Leaving a room on another domain turns `autojoin` off on the stored
+  bookmark whatever this device last read of it; a room without a bookmark
+  gets none. When a discovery reads that the home server no longer
+  advertises `urn:waddle:s2s:0`, the client leaves every room it has placed
+  on another domain that it is in or joining, and a lost stream rejoins
+  none of them until the home server advertises it again. Only a home MUC
+  service identified by some discovery places a room elsewhere, and a room
+  the last catalog read placed at home stays home. Before, leaving relied
+  on this device's copy
+  of the bookmark, and rooms joined while the home server federated stayed
+  joined.
+- Media in a message from a room whose host is not known yet (the home
+  MUC service is not discovered, and the room is not on the account domain,
+  a discovered home service or a component the home domain lists) waits
+  for the user to load it, as media
+  from a room on another domain does. Before, it loaded. Media from a
+  sender on a discovered home service or listed component (an extension's
+  bot, for one) loads as a home sender's does.
+- An unfollow of a Space on another domain that this device could not
+  finish is dropped when the joined-space list shows a follow written
+  after it by another device (each write of an entry carries a new random
+  `rev`), and it is checked again just before its delayed unsubscribe is
+  sent and just before `follow` is written off. An unfollow made before
+  the list could be read applies to the list as first read. The entry is
+  read again just before each write, which narrows but does not close the
+  window in which another device's write is lost: PEP publishes carry no
+  compare-and-set. Before, it unsubscribed and wrote `follow` off, undoing
+  that follow.
+- Changing a Space's `federated` setting sends its `pubsub#max_items` back
+  unchanged. Before, the change omitted it and the Spaces service reset it
+  to unlimited.
 
 ## Restrictions and risks
 

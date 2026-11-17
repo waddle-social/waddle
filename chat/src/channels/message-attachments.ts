@@ -31,7 +31,17 @@ type SelectedLightboxImage = Pick<LightboxImage, "sourceId" | "fingerprint"> & {
   fingerprintUnique: boolean;
 };
 
-export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
+export function useMessageAttachments(
+  message: ReadonlyRef<TimelineMessage>,
+  options: {
+    /**
+     * Whether the message's media may be fetched now. Media from other
+     * servers waits for the user (see `@/lib/remote-media`); while this is
+     * false no encrypted attachment is downloaded to be decrypted.
+     */
+    mediaAllowed?: ReadonlyRef<boolean>;
+  } = {},
+) {
   const sharedFiles = computed(() => message.value.sharedFiles ?? []);
   const isInlineImageBodyUrl = computed(() => sharedFiles.value.length === 0 && isImageUrl(message.value.body));
 
@@ -247,14 +257,16 @@ export function useMessageAttachments(message: ReadonlyRef<TimelineMessage>) {
     ...pdfAttachments.value,
   ]);
 
+  const mediaAllowed = computed(() => options.mediaAllowed?.value ?? true);
   const stopPreviewableAttachmentsWatchHandle = watch(
-    previewableAttachments,
-    (attachments) => {
+    [previewableAttachments, mediaAllowed],
+    ([attachments, allowed]) => {
       if (typeof window === "undefined") return;
       const activeKeys = new Set(attachments.map((attachment) => attachmentKey(attachment)));
       for (const key of Object.keys(decryptedAttachmentUrls.value)) {
         if (!activeKeys.has(key)) revokeAttachmentUrl(key);
       }
+      if (!allowed) return;
       for (const attachment of attachments) {
         if (hasEncryptedAttachmentMetadata(attachment)) void ensureAttachmentReady(attachment, true);
       }

@@ -1002,6 +1002,12 @@ pub struct InboundPresence {
     /// (`MucStatus::SelfPresence`) identifies the recipient's own
     /// presence regardless of room anonymity or nick.
     pub muc_status: Vec<MucStatus>,
+    /// Whether the `muc#user` payload carries `<destroy/>`: the room was
+    /// destroyed (XEP-0045 §10.9). The service sends this unavailable
+    /// presence once to each occupant from that occupant's own occupant
+    /// JID, without status code 110, so it is how the recipient learns
+    /// its own occupancy ended with the room.
+    pub muc_destroyed: bool,
     /// Hash identifying the vCard-based avatar.
     pub vcard_avatar: Option<String>,
     /// XEP-0272 (Muji) presence advertisement —

@@ -375,6 +375,8 @@ impl NodeConfig {
             config = Self::waddle_dnd_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS {
             config = Self::waddle_dm_bookmarks_defaults();
+        } else if node == super::pep::PEP_NODE_WADDLE_JOINED_SPACES {
+            config = Self::waddle_joined_spaces_defaults();
         } else if node == PEP_NODE_WADDLE_STATUS_PREFERENCE {
             config = Self::waddle_status_preference_defaults();
         } else if node == PEP_NODE_WADDLE_STORY_READS {
@@ -499,6 +501,32 @@ impl NodeConfig {
         }
     }
 
+    /// Defaults for the Waddle joined-spaces PEP node.
+    ///
+    /// XEP-0223 private storage of the user's list of Spaces on other
+    /// servers: one persistent item per Space, read by the owner's own
+    /// resources only. `whitelist` keeps it off the roster fan-out
+    /// (issue #1094) and from non-owner item reads; `never` keeps a new
+    /// subscription from receiving it. Like the bookmarks node it holds
+    /// many items under the same finite anti-DoS cap
+    /// (`PEP_BOOKMARK_MAX_ITEMS`), so one Space never evicts another and
+    /// eviction still bounds the node. Retractions notify the owner's
+    /// other resources, as XEP-0402 retractions do.
+    #[must_use]
+    pub fn waddle_joined_spaces_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            node_type: None,
+            max_items: PEP_BOOKMARK_MAX_ITEMS,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
+    }
+
     /// Defaults for the Waddle DND PEP node (issue #367).
     ///
     /// The payload contains personally-identifying schedule data
@@ -601,18 +629,37 @@ impl NodeConfig {
     }
 
     /// Whether a stored config for a well-known PEP node should be
-    /// rewritten to [`Self::pep_for_node`].
-    ///
-    /// Never for avatar nodes: they are created canonical, and legacy
-    /// Presence avatar nodes are repaired by the storage's atomic
-    /// `repair_legacy_avatar_node`, which respects owner choices.
+    /// rewritten, to the config [`Self::reconciled_for_node`] returns.
     #[must_use]
     pub fn needs_reconcile(node: &str, existing: &Self) -> bool {
+        Self::reconciled_for_node(node, existing).is_some()
+    }
+
+    /// The config a stored well-known PEP node config is rewritten to, or
+    /// `None` when it already conforms.
+    ///
+    /// - Avatar nodes: never. They are created canonical, and legacy
+    ///   Presence avatar nodes are repaired by the storage's atomic
+    ///   `repair_legacy_avatar_node`, which respects owner choices.
+    /// - `urn:waddle:joined-spaces:0`: the stored config with the node's
+    ///   privacy and durability invariants forced onto it
+    ///   ([`Self::normalize_waddle_joined_spaces`]), only when that
+    ///   changes it. An owner's permitted choices, such as a `max_items`
+    ///   within `2..=PEP_BOOKMARK_MAX_ITEMS`, are kept.
+    /// - Any other node: [`Self::pep_for_node`], when the stored config
+    ///   differs from it.
+    #[must_use]
+    pub fn reconciled_for_node(node: &str, existing: &Self) -> Option<Self> {
         if node == super::pep::PEP_NODE_AVATAR_DATA || node == super::pep::PEP_NODE_AVATAR_METADATA
         {
-            return false;
+            return None;
         }
-        *existing != Self::pep_for_node(node)
+        let reconciled = if node == super::pep::PEP_NODE_WADDLE_JOINED_SPACES {
+            existing.clone().normalize_waddle_joined_spaces()
+        } else {
+            Self::pep_for_node(node)
+        };
+        (*existing != reconciled).then_some(reconciled)
     }
 
     /// XEP-0490 §3 Message Displayed Synchronization node defaults.
@@ -670,6 +717,26 @@ impl NodeConfig {
         self.access_model = AccessModel::Whitelist;
         self.publish_model = PublishModel::Publishers;
         if self.max_items == 0 || self.max_items > PEP_BOOKMARK_MAX_ITEMS {
+            self.max_items = PEP_BOOKMARK_MAX_ITEMS;
+        }
+        self.persist_items = true;
+        self.send_last_published_item = SendLastPublishedItem::Never;
+        self
+    }
+
+    /// Force the `urn:waddle:joined-spaces:0` privacy and durability
+    /// invariants onto a config.
+    ///
+    /// Applied on every owner reconfigure, whatever the client submits
+    /// (XEP-0223 publish-options or a `pubsub#owner` configure form): the
+    /// list of Spaces an account reads must never become readable by its
+    /// contacts, lose its items to a single-item cap, or grow without a
+    /// bound.
+    #[must_use]
+    pub fn normalize_waddle_joined_spaces(mut self) -> Self {
+        self.access_model = AccessModel::Whitelist;
+        self.publish_model = PublishModel::Publishers;
+        if self.max_items <= 1 || self.max_items > PEP_BOOKMARK_MAX_ITEMS {
             self.max_items = PEP_BOOKMARK_MAX_ITEMS;
         }
         self.persist_items = true;
@@ -823,6 +890,100 @@ mod tests {
         assert_eq!(
             normalized.send_last_published_item,
             SendLastPublishedItem::Never
+        );
+    }
+
+    #[test]
+    fn joined_spaces_pep_config_is_private_with_bounded_multi_item_retention() {
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_WADDLE_JOINED_SPACES);
+        assert_eq!(config, NodeConfig::waddle_joined_spaces_defaults());
+        assert_eq!(config.access_model, AccessModel::Whitelist);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert_eq!(config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert!(config.persist_items);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+        assert!(NodeConfig::pins_whitelist_access(
+            super::super::pep::PEP_NODE_WADDLE_JOINED_SPACES
+        ));
+    }
+
+    #[test]
+    fn joined_spaces_normalization_restores_privacy_and_bounds() {
+        let mut opened = NodeConfig::spaces_public();
+        opened.access_model = AccessModel::Open;
+        opened.publish_model = PublishModel::Open;
+        opened.max_items = u32::MAX;
+        opened.persist_items = false;
+        opened.send_last_published_item = SendLastPublishedItem::OnSubAndPresence;
+
+        let normalized = opened.normalize_waddle_joined_spaces();
+
+        assert_eq!(normalized.access_model, AccessModel::Whitelist);
+        assert_eq!(normalized.publish_model, PublishModel::Publishers);
+        assert_eq!(normalized.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert!(normalized.persist_items);
+        assert_eq!(
+            normalized.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+
+        let mut single = NodeConfig::pep_default();
+        single.max_items = 1;
+        assert_eq!(
+            single.normalize_waddle_joined_spaces().max_items,
+            PEP_BOOKMARK_MAX_ITEMS
+        );
+
+        let mut bounded = NodeConfig::waddle_joined_spaces_defaults();
+        bounded.max_items = 64;
+        assert_eq!(bounded.normalize_waddle_joined_spaces().max_items, 64);
+    }
+
+    #[test]
+    fn joined_spaces_reconcile_keeps_permitted_owner_choices() {
+        let node = super::super::pep::PEP_NODE_WADDLE_JOINED_SPACES;
+
+        let defaults = NodeConfig::waddle_joined_spaces_defaults();
+        assert!(!NodeConfig::needs_reconcile(node, &defaults));
+        assert_eq!(NodeConfig::reconciled_for_node(node, &defaults), None);
+
+        let mut owner_bounded = NodeConfig::waddle_joined_spaces_defaults();
+        owner_bounded.max_items = 64;
+        owner_bounded.notify_retract = false;
+        assert!(!NodeConfig::needs_reconcile(node, &owner_bounded));
+        assert_eq!(NodeConfig::reconciled_for_node(node, &owner_bounded), None);
+
+        let mut opened = owner_bounded.clone();
+        opened.access_model = AccessModel::Open;
+        opened.send_last_published_item = SendLastPublishedItem::OnSubAndPresence;
+        assert!(NodeConfig::needs_reconcile(node, &opened));
+        let reconciled =
+            NodeConfig::reconciled_for_node(node, &opened).expect("an opened node is reconciled");
+        assert_eq!(reconciled, owner_bounded);
+
+        let mut single = NodeConfig::waddle_joined_spaces_defaults();
+        single.max_items = 1;
+        assert_eq!(
+            NodeConfig::reconciled_for_node(node, &single).map(|config| config.max_items),
+            Some(PEP_BOOKMARK_MAX_ITEMS)
+        );
+    }
+
+    #[test]
+    fn other_well_known_nodes_reconcile_to_their_defaults() {
+        let node = super::super::pep::PEP_NODE_WADDLE_DND;
+        let mut diverged = NodeConfig::pep_for_node(node);
+        diverged.max_items = 64;
+        assert_eq!(
+            NodeConfig::reconciled_for_node(node, &diverged),
+            Some(NodeConfig::pep_for_node(node))
+        );
+        assert_eq!(
+            NodeConfig::reconciled_for_node(super::super::pep::PEP_NODE_AVATAR_DATA, &diverged),
+            None
         );
     }
 

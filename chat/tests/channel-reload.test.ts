@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
-import { withFakeDomParser } from "./helpers/disco-xml";
+import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
 import { useWaddleDirectory } from "../src/waddles/directory";
 import type { MemberSummary, RoomBotSummary } from "../src/lib/chat-types";
 import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
@@ -433,7 +433,8 @@ describe("directory client lifetime", () => {
   });
 
   test.each(["edit", "move", "create"])("delayed %s completion cannot mutate a replacement client", async (operation) => {
-    await withFakeDomParser(async () => {
+    // The owner, room and Space requests are built with the DOM.
+    await withFakeDomParser(() => withFakeXmlDocument(async () => {
       const pending = deferred<string>();
       const send = mock((xml: string) => xml.includes('type="get"')
         ? Promise.resolve('<iq type="result"/>') : pending.promise);
@@ -470,7 +471,7 @@ describe("directory client lifetime", () => {
       expect(actionError.value).toBe("New client status");
       expect(w.isSubmitting.value).toBe(true);
       expect(discoverFresh).toHaveBeenCalledTimes(1);
-    });
+    }));
   });
 
   test("old structure member completion cannot reset replacement forms or return its selection", async () => {

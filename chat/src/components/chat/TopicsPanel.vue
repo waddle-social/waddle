@@ -276,7 +276,10 @@ function channelRowLabel(
   const preview = callParticipantCount(channel) > 0
     ? callParticipantPreviewForRoom(roomJid)
     : "";
-  const label = `${channel.name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
+  // A room on another server says where it is: two servers can each have
+  // a room of the same name.
+  const name = channel.remoteHost ? `${channel.name} on ${channel.remoteHost}` : channel.name;
+  const label = `${name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
     unread: unread.unread,
     mentions: unread.mentions,
     hasActivity: hasActivity(channel.id),
@@ -737,6 +740,11 @@ watch(
                       (unread.unread > 0 || hasActivity(channel.id)) && !isActiveChannelPage(channel) ? 'type-strong text-sidebar-foreground' : '',
                     ]"
                   >{{ channel.name }}</span>
+                  <span
+                    v-if="channel.remoteHost"
+                    class="type-meta max-w-[45%] truncate text-sidebar-muted"
+                    :title="`Hosted on ${channel.remoteHost}`"
+                  >{{ channel.remoteHost }}</span>
                   <span
                     v-if="detectForumChannel(channel)"
                     class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"

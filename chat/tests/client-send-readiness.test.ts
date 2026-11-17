@@ -18,6 +18,22 @@ import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 import { ManualRoomJoinRetryTimer } from "./helpers/manual-room-join-retry-timer";
 
+/**
+ * As after a discovery that found the home MUC service `muc.example.com`:
+ * the rooms a reload retained there are placed at home, so they are
+ * retained (and retried) rather than waiting for discovery.
+ */
+function placeRetainedRoomsAtHome(client: BrowserXmppClient): void {
+  const state = client as unknown as {
+    homeMucService: string | null;
+    parkedRetainedRoomJids: Set<string>;
+    retainedJoinedRoomJids: Set<string>;
+  };
+  state.homeMucService = "muc.example.com";
+  for (const roomJid of state.parkedRetainedRoomJids) state.retainedJoinedRoomJids.add(roomJid);
+  state.parkedRetainedRoomJids.clear();
+}
+
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
     username: "alice",
@@ -903,6 +919,7 @@ describe("client send readiness", () => {
       ...nullResumePersistence,
       loadJoinedRooms: () => [roomJid],
     });
+    placeRetainedRoomsAtHome(client);
     const retryTimer = new ManualRoomJoinRetryTimer();
     const retryCoordinator = new RoomJoinRetryCoordinator({
       timer: retryTimer,
@@ -989,6 +1006,7 @@ describe("client send readiness", () => {
       ...nullResumePersistence,
       loadJoinedRooms: () => [roomJid],
     });
+    placeRetainedRoomsAtHome(client);
     const retryTimer = new ManualRoomJoinRetryTimer();
     const retryCoordinator = new RoomJoinRetryCoordinator({
       timer: retryTimer,
@@ -1282,6 +1300,7 @@ describe("client send readiness", () => {
       ...nullResumePersistence,
       loadJoinedRooms: () => [roomJid],
     });
+    placeRetainedRoomsAtHome(client);
     const retryTimer = new ManualRoomJoinRetryTimer();
     const retryCoordinator = new RoomJoinRetryCoordinator({
       timer: retryTimer,
@@ -1825,6 +1844,7 @@ describe("client send readiness", () => {
       clearJoinedRooms: () => undefined,
     };
     const client = new BrowserXmppClient(session(), persistence);
+    placeRetainedRoomsAtHome(client);
     let onPresence: ((presence: {
       from?: string;
       presence_type?: string;

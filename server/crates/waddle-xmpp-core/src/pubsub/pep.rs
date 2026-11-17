@@ -79,6 +79,22 @@ pub const PEP_NODE_WADDLE_DND: &str = "urn:waddle:dnd:0";
 /// roster-contact PEP fan-out. The authoritative consumer is the
 /// server-side projection at the T1 push gate.
 pub const PEP_NODE_WADDLE_DM_BOOKMARKS: &str = "urn:waddle:dm-bookmarks:0";
+
+/// Waddle joined-spaces PEP node + namespace.
+///
+/// The user's list of Spaces hosted on other servers, kept as XEP-0223
+/// private data: one item per Space, whose id is the Space's node IRI
+/// (`xmpp:service?;node=name`) and whose payload is
+/// `<space xmlns='urn:waddle:joined-spaces:0' service='…' node='…'/>`.
+/// No XEP defines a list of Spaces a user shows, so the carrier is
+/// project-local.
+///
+/// The list says which communities on other servers the account reads,
+/// so it is owner-only whatever a client requests: the well-known
+/// config pins `access_model = whitelist`, a bounded multi-item
+/// `max_items` and `send_last_published_item = never`, and an owner
+/// configure cannot weaken them.
+pub const PEP_NODE_WADDLE_JOINED_SPACES: &str = "urn:waddle:joined-spaces:0";
 /// Check if an IQ is a PEP request for the current user.
 #[must_use]
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
@@ -120,6 +136,7 @@ impl PepHandler {
             || node == PEP_NODE_VCARD4
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
+            || node == PEP_NODE_WADDLE_JOINED_SPACES
             || node == PEP_NODE_WADDLE_STATUS_PREFERENCE
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
@@ -136,6 +153,7 @@ impl PepHandler {
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
+            || node == PEP_NODE_WADDLE_JOINED_SPACES
             || node == PEP_NODE_WADDLE_STATUS_PREFERENCE
         {
             return AccessModel::Whitelist;

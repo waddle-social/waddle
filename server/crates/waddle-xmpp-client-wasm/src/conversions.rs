@@ -820,6 +820,7 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
             .iter()
             .map(|status| status.code())
             .collect(),
+        muc_destroyed: presence.muc_destroyed,
         vcard_avatar: presence.vcard_avatar,
         muji: presence.muji.map(|m| WaddleMujiPresence {
             preparing: m.preparing,
@@ -1114,6 +1115,7 @@ mod inbound_to_js_tests {
                 MucStatus::SelfPresence,
                 MucStatus::Other(210),
             ],
+            muc_destroyed: false,
             vcard_avatar: None,
             muji: None,
             hand_raised: false,
