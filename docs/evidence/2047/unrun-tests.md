@@ -757,16 +757,17 @@ implemented unless the text says so.
   `spaces:set-role`. A room leaving a Space is notified to its subscribers
   here and at other servers whichever path took it out (a retract, a
   publish that moves it, the admin channel delete and update commands and
-  `spaces:delete`), and a group conversation's bookmark retracted from a
-  member's XEP-0402 node is told to the member's resources. Left open: a
-  subscriber at another server is not told that a deleted room left a
+  `spaces:delete`). Left open: a group conversation's bookmark retracted
+  from a member's XEP-0402 node when the member leaves or the conversation
+  is destroyed is told to none of the member's resources (the PEP fan-out
+  would also run its roster pass over that node, which needs the node's
+  access model shown first); a subscriber at another server is not told that a deleted room left a
   Space (whether it was open to other servers can no longer be read when
   the notification is decided); an admin command that places a room in a
   Space notifies nobody; the retractions that roll back an admin
-  command's own unnotified publish notify nobody either. The group
-  conversation paths and the `channels:update` retraction have no case of
-  their own; `channels:delete` and `spaces:delete` have one each, for
-  local subscribers.
+  command's own unnotified publish notify nobody either. The
+  `channels:update` retraction has no case of its own; `channels:delete`
+  and `spaces:delete` have one each, for local subscribers.
 - Inbound MUC (W6a), written and not run: a remote principal reaches only
   rooms whose `federated` setting is on, and the setting opens a room to
   every admitted domain, not to named ones; a request for a room another

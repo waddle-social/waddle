@@ -21,7 +21,7 @@ the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab75
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings through
 `fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, the joined-spaces node's gates through
 `ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, and the fixes before verification through
-`9d3a6b9442e6fe4aef3acd28de8e5d1788e8d4e8` (see the last refresh below); the original
+`478f0f4292e53afb47e5d738f6acadcce1c48a7a` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1805,8 +1805,8 @@ moved.
   and `pubsub_admin.rs` moved as on the slice's branch.
 
 The selected evidence was refreshed a forty-ninth time, through
-`9d3a6b9442e6fe4aef3acd28de8e5d1788e8d4e8`, the fixes made before verification and their merge
-with the integration branch at `3ef273961`. Sixteen reviewed files changed;
+`478f0f4292e53afb47e5d738f6acadcce1c48a7a`, the fixes made before verification and their merge
+with the integration branch at `3ef273961`. Fifteen reviewed files changed;
 what changed in each, for the authority this inventory maps:
 
 - `handlers/iq/muc_admin.rs`: an owner or admin standing written through
@@ -1816,12 +1816,10 @@ what changed in each, for the authority this inventory maps:
   channel administration command already used), and refused while that
   table cannot be read. This only narrows issuance.
 - `admin/channels.rs`, `admin/spaces.rs`, `handlers/iq/spaces_publish.rs`,
-  `handlers/iq/spaces_bookmark_cleanup.rs`,
-  `handlers/iq/muc_owner_moderation.rs`, `server/http.rs`: once a Space
-  item's or a member's XEP-0402 bookmark's retraction stands, the node's
-  subscribers are notified through the ordinary fan-out
-  (`AppState::notify_space_retracted`, `notify_bookmark_retracted`, bound
-  to the WebSocket state at startup). The fan-out keeps its own checks
+  `handlers/iq/spaces_bookmark_cleanup.rs`, `server/http.rs`: once a Space
+  item's retraction stands, the node's subscribers are notified through
+  the ordinary fan-out (`AppState::notify_space_retracted`, bound to the
+  WebSocket state at startup). The fan-out keeps its own checks
   (an enrolled scope's Space node delivers nothing; remote subscribers are
   decided on the Spaces host's task as before). No grant, relationship or
   standing is written or read for a decision.
@@ -1845,7 +1843,10 @@ what changed in each, for the authority this inventory maps:
   it cannot.
 - `db/s2s_spaces.rs`: the migration numbers in its module documentation.
 
-Thirty-six anchors moved with the lines added above them; no anchor's text
+`handlers/iq/muc_owner_moderation.rs` changed and then returned to its
+earlier text: the retraction of a group conversation's XEP-0402 bookmark
+notifies nobody, there and in `admin/channels.rs`, as before. Thirty-four
+anchors moved with the lines added above them; no anchor's text
 changed. No grant writer or storage plane of the host-grant authority was
 added, and no producer of stream evidence changed.
 

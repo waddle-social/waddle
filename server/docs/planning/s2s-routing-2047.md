@@ -2128,11 +2128,11 @@ commands that delete a channel, update one (which takes its bookmark out
 of every Space other than the one it is linked to), and delete a Space
 (its rooms, before its node is deleted). Admin
 commands reach the fan-out through the WebSocket state that startup binds
-to the application state (`AppState::notify_space_retracted`). The
-retraction of a group conversation's bookmark from a member's XEP-0402
-node, when the member leaves or the conversation is destroyed, tells the
-member's own resources, so that a client leaves the room (XEP-0402). Two
-gaps remain: a subscriber at another server is not told that a deleted
+to the application state (`AppState::notify_space_retracted`). Three
+gaps remain: the retraction of a group conversation's bookmark from a
+member's XEP-0402 node, when the member leaves or the conversation is
+destroyed, tells none of the member's resources, although XEP-0402 asks a
+client to leave a room whose bookmark is retracted; a subscriber at another server is not told that a deleted
 room left a Space, because when its notification is decided the room is
 gone and whether it was open to other servers can no longer be read, so
 its client finds the room gone when it joins it; and an admin command that
@@ -2547,7 +2547,7 @@ exists, so no Spaces host is attached, the pass that notifies subscribers
 at other servers returns before it reads anything, and migrations 2011 and
 2012 create two tables that stay empty unless an owner turns a Space's
 `federated` setting on. The
-setting can be set while S2S is off and takes effect once it is on. Two of
+setting can be set while S2S is off and takes effect once it is on. Three of
 its changes apply whether or not S2S is on, and are listed below.
 
 The MUC fallback changes nothing for remote senders while S2S is
@@ -2596,6 +2596,11 @@ runbook (G24):
   First-party clients read a Space's rooms through `<items/>`, which is
   unchanged.
 
+- A room that leaves a Space by a path other than a retract of its
+  bookmark (a session's publish that places it in another Space, and the
+  admin commands that delete a channel, update one or delete a Space) is
+  notified to the Space's local subscribers as a retract, where nobody was
+  told before; the retract itself already notified them.
 - A Space owner's configuration form on the Spaces service carries one
   more field, `urn:waddle:spaces:federated`, off by default.
 - A privileged standing on a Space is no longer written for an account at

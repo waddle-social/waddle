@@ -1,11 +1,11 @@
 {
   "format": 2,
-  "baseline_commit": "9d3a6b9442e6fe4aef3acd28de8e5d1788e8d4e8",
+  "baseline_commit": "478f0f4292e53afb47e5d738f6acadcce1c48a7a",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "sha256": "01b9eaede872ada61b7e419c934f40a3aa45835eb88cce300c8fc5a908c89598"
+      "sha256": "8e219595109144719876e718541a17767128c73f1969db09c8511c56eee96ecc"
     },
     {
       "path": "server/crates/waddle-server/src/admin/mod.rs",
@@ -197,7 +197,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs",
-      "sha256": "0b163ed3507466131e248e6658b177911128123971f7f58d2564baee402f1b8e"
+      "sha256": "130bbd89dfd1f869801eadd127c08e00f5be5e3f4d33243d4f4336898e2714e9"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pin_query.rs",
@@ -470,17 +470,17 @@
     },
     "group-dm": {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "line": 4028,
+      "line": 4022,
       "text": "pub(crate) async fn persist_group_dm_member_tuple("
     },
     "group-dm-sql": {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "line": 4086,
+      "line": 4080,
       "text": "async fn persist_durable_group_dm_member_tuple("
     },
     "group-dm-delete": {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "line": 4125,
+      "line": 4119,
       "text": "async fn delete_group_dm_member_tuple("
     },
     "pubsub-auth": {
@@ -755,7 +755,7 @@
     },
     "hg-owner-iq": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs",
-      "line": 1365,
+      "line": 1357,
       "text": "let authorized = {"
     },
     "hg-owner-config": {
@@ -775,7 +775,7 @@
     },
     "hg-group-dm": {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "line": 4074,
+      "line": 4068,
       "text": "async fn refuse_enrolled_group_dm("
     },
     "hg-space-pubsub": {
@@ -840,7 +840,7 @@
     },
     "hg-moderation": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_owner_moderation.rs",
-      "line": 1822,
+      "line": 1814,
       "text": "HostGrantAction::Moderate,"
     },
     "hg-call-token": {
@@ -1040,7 +1040,7 @@
     },
     "admin-set-affiliation": {
       "path": "server/crates/waddle-server/src/admin/channels.rs",
-      "line": 5154,
+      "line": 5148,
       "text": "async fn run_set_affiliation("
     },
     "outbox-seat-delivery": {
@@ -1231,7 +1231,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "e950f4859d1396523b275144fe94163c94f52b63d4690bc04e4b602bbd61ab43",
+    "sha256": "4f930ff35e5bfc8439f81ab17b1af8e9dc0a13664014a82fb376aa9621b40528",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,
