@@ -106,27 +106,34 @@ pub struct PermissionActor {
     /// an object it holds (only the host-grant authority decides there),
     /// without any PostgreSQL read in this actor's mailbox.
     enrolled: EnrolledScopes,
-    /// Whose accounts may be written a privileged relation that no writer
-    /// of its own decides ([`privileged_without_writer`]): the accounts of
-    /// the served domains and of the trusted homes (ADR-0020 D8). A replica
-    /// that serves attaches it ([`Self::with_privileged_issuance`]); an
-    /// actor without one, as the suites build, asks nothing.
+    /// Whose accounts may be written a privileged relation
+    /// ([`privileged_relation`]): the accounts of the served domains and of
+    /// the trusted homes (ADR-0020 D8). A replica that serves attaches it
+    /// ([`Self::with_privileged_issuance`]); an actor without one, as the
+    /// suites build, asks nothing.
     privileged_issuance: Option<IssuancePolicy>,
 }
 
 /// Whether `relation` on `object` is a privileged or room-moderation
-/// relation that no handler, command or repair path writes by name: the
-/// channel `manager` and `moderator`, the Space `moderator` and the role
-/// `manager` (ADR-0020, "Privileged grant" and "Room moderation"). The
-/// owner, admin and affiliation relations each have a writer that decides
-/// issuance itself, on what it knows of the request; these four reach the
-/// store only through this actor's write messages, so issuance is decided
-/// here.
-fn privileged_without_writer(object: &Object, relation: &Relation) -> bool {
+/// relation whose issuance this actor decides (ADR-0020, "Privileged
+/// grant" and "Room moderation"):
+///
+/// - the channel and Space `owner` and `admin`, which administer a
+///   community. Each has writers that decide issuance themselves, on what
+///   they know of the request; the actor refuses them as well, so that a
+///   writer that omits or misreads its own check still issues nothing to
+///   an account whose home is neither served nor trusted;
+/// - the channel `manager` and `moderator`, the Space `moderator` and the
+///   role `manager`, which no handler, command or repair path writes by
+///   name: they reach the store only through this actor's write messages,
+///   so issuance is decided here alone.
+fn privileged_relation(object: &Object, relation: &Relation) -> bool {
     matches!(
         (object.object_type, relation.name.as_str()),
-        (ObjectType::Channel, "manager" | "moderator")
-            | (ObjectType::Space, "moderator")
+        (
+            ObjectType::Channel,
+            "owner" | "admin" | "manager" | "moderator"
+        ) | (ObjectType::Space, "owner" | "admin" | "moderator")
             | (ObjectType::Role, "manager")
     )
 }
@@ -209,8 +216,8 @@ impl PermissionActor {
         }
     }
 
-    /// Decide issuance of the privileged relations no writer names
-    /// ([`privileged_without_writer`]) under `policy`: such a relation is
+    /// Decide issuance of the privileged relations
+    /// ([`privileged_relation`]) under `policy`: such a relation is
     /// written for an account only when its home is a domain this
     /// deployment serves or a trusted home (ADR-0020 D8). Whether a stored
     /// relation is honoured is decided where it is used, from the
@@ -221,7 +228,7 @@ impl PermissionActor {
     }
 
     /// Refuse to write `relation` on `object` for `subject` when it is one
-    /// of the privileged relations no writer names and `subject` is not an
+    /// of the privileged relations ([`privileged_relation`]) and `subject` is not an
     /// account that may hold it: an account of a served domain or of a
     /// trusted home. A subject that is no account (a Space or channel
     /// userset) is not a grant to a principal and is not asked about. A
@@ -235,7 +242,7 @@ impl PermissionActor {
         let (Some(policy), Some(relation)) = (&self.privileged_issuance, relation) else {
             return Ok(());
         };
-        if !privileged_without_writer(object, relation)
+        if !privileged_relation(object, relation)
             || subject.subject_type != SubjectType::User
             || subject.relation.is_some()
         {

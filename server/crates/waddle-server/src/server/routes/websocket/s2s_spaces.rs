@@ -38,13 +38,15 @@
 //! subscription to a Space is no grant in any of those rooms: entering one
 //! is a join of the room, decided by the room.
 //!
-//! [`notify_remote_subscribers`] sends a Space's event notifications to the
-//! subscribers at other servers, each only for a subscription the remote
+//! A Space's publications are handed to [`WebSocketLocalSpaces`] once they
+//! are stored, on a bounded queue, and a task of its own sends their event
+//! notifications to the subscribers at other servers
+//! ([`notify_remote_subscribers`]), each only for a subscription the remote
 //! account made itself and decided on the evidence that subscription
-//! recorded.
+//! recorded. The publisher's request waits for none of it.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -54,7 +56,7 @@ use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::pubsub::{
     build_pubsub_error, build_pubsub_items_result, build_pubsub_subscribe_result,
     build_pubsub_success, parse_pubsub_iq, AccessModel, Affiliation, PubSubError, PubSubItem,
-    PubSubNode, PubSubRequest, SubId, NS_PUBSUB, NS_PUBSUB_OWNER,
+    PubSubNode, PubSubRequest, SubId, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_OWNER,
 };
 use waddle_xmpp::xep::build_spaces_metadata_form_for_remote;
 use waddle_xmpp::xep::xep0402::NS_BOOKMARKS2;
@@ -67,7 +69,7 @@ use xmpp_parsers::message::Message;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::handlers::iq::spaces_change_for_remote;
-use super::handlers::presence::{get_managed_channel_for_room, principal_witness};
+use super::handlers::presence::principal_witness;
 use super::WebSocketState;
 use crate::db::s2s_spaces::{
     FederatedSpaces, SpaceSubscriptions, SubscriptionRecord, SubscriptionRequest,
@@ -76,6 +78,7 @@ use crate::db::Database;
 use crate::permissions::host_grant::{
     HostGrantAction, PrincipalEvidence, PrincipalWitness, RoomBinding, RoomGate,
 };
+use crate::s2s::route::SpacePublication;
 use crate::s2s::route::{LocalSpaces, SpaceOperation, SpaceRequest};
 use crate::space_identity::SpaceNode;
 
@@ -103,49 +106,65 @@ const EVENT_BURST: f64 = 16.0;
 /// servers, so the table never grows with the Spaces that publish.
 const EVENT_ALLOWANCES: usize = 4096;
 
+/// Publications stored in local Spaces and not yet decided for their
+/// subscribers at other servers. One that finds the queue full is not
+/// notified to them, so a burst of publications never holds a publisher
+/// and never grows the replica's memory.
+const PUBLICATION_QUEUE: usize = 1024;
+
 /// What one Space may still have notified to other servers.
 struct EventAllowance {
     tokens: f64,
     refilled: Instant,
 }
 
-/// The allowances of notified publications of this replica's Spaces.
-static EVENT_BUDGET: Mutex<Option<HashMap<String, EventAllowance>>> = Mutex::new(None);
+/// The allowances of notified publications of the Spaces of one host,
+/// kept by its notification task.
+#[derive(Default)]
+struct EventBudget {
+    allowances: HashMap<String, EventAllowance>,
+}
 
-/// Take one publication of the allowance of publications notified to other
-/// servers that the Space `node` of `service` has: `false` when it is spent
-/// or the table has no place for the Space.
-fn take_event(service: &BareJid, node: &str) -> bool {
-    let node = [service.as_str(), "/", node].concat();
-    let node = node.as_str();
-    let now = Instant::now();
-    let mut budget = EVENT_BUDGET
-        .lock()
-        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-    let allowances = budget.get_or_insert_with(HashMap::new);
-    if allowances.len() >= EVENT_ALLOWANCES && !allowances.contains_key(node) {
-        // A Space whose allowance has refilled needs no entry.
-        allowances.retain(|_, allowance| {
-            now.duration_since(allowance.refilled).as_secs_f64() * EVENT_RATE
-                < EVENT_BURST - allowance.tokens
+impl EventBudget {
+    /// Take one publication of the allowance of publications notified to
+    /// other servers that the Space `node` of `service` has: `false` when
+    /// it is spent or the table has no place for the Space.
+    fn take(&mut self, service: &BareJid, node: &str) -> bool {
+        let node = [service.as_str(), "/", node].concat();
+        let now = Instant::now();
+        let allowances = &mut self.allowances;
+        if allowances.len() >= EVENT_ALLOWANCES && !allowances.contains_key(&node) {
+            // A Space whose allowance has refilled needs no entry.
+            allowances.retain(|_, allowance| {
+                now.duration_since(allowance.refilled).as_secs_f64() * EVENT_RATE
+                    < EVENT_BURST - allowance.tokens
+            });
+            if allowances.len() >= EVENT_ALLOWANCES {
+                return false;
+            }
+        }
+        let allowance = allowances.entry(node).or_insert(EventAllowance {
+            tokens: EVENT_BURST,
+            refilled: now,
         });
-        if allowances.len() >= EVENT_ALLOWANCES {
-            return false;
+        let refill = now.duration_since(allowance.refilled).as_secs_f64() * EVENT_RATE;
+        allowance.tokens = (allowance.tokens + refill).min(EVENT_BURST);
+        allowance.refilled = now;
+        if allowance.tokens >= 1.0 {
+            allowance.tokens -= 1.0;
+            true
+        } else {
+            false
         }
     }
-    let allowance = allowances.entry(node.to_owned()).or_insert(EventAllowance {
-        tokens: EVENT_BURST,
-        refilled: now,
-    });
-    let refill = now.duration_since(allowance.refilled).as_secs_f64() * EVENT_RATE;
-    allowance.tokens = (allowance.tokens + refill).min(EVENT_BURST);
-    allowance.refilled = now;
-    if allowance.tokens >= 1.0 {
-        allowance.tokens -= 1.0;
-        true
-    } else {
-        false
-    }
+}
+
+/// What the notification task of a host is handed.
+enum Queued {
+    /// A stored publication to decide for the Space's remote subscribers.
+    Publication(Box<SpacePublication>),
+    /// Answered once everything queued before it has been decided.
+    Settled(tokio::sync::oneshot::Sender<()>),
 }
 
 mod telemetry {
@@ -169,7 +188,18 @@ mod telemetry {
         counter_add!(
             "waddle.s2s.spaces.subscriptions.limited",
             "{stanza}",
-            "Subscriptions of remote accounts to local Spaces refused with resource-constraint because a bound on the Space's remote subscribers, on the account's or its domain's subscriptions or on the deployment's was reached.",
+            "Subscriptions of remote accounts to local Spaces refused with resource-constraint because a bound on the Space's remote subscribers, on those of one domain in the Space, on the account's or its domain's subscriptions or on the deployment's was reached.",
+            1,
+        );
+    }
+
+    /// A publication of a local Space was not handed to the task that
+    /// notifies its subscribers at other servers: the queue was full.
+    pub(super) fn publication_dropped() {
+        counter_add!(
+            "waddle.s2s.spaces.publications.dropped",
+            "{event}",
+            "Publications of local Spaces whose event notifications were not sent to subscribers at other servers because the queue of publications awaiting that decision was full.",
             1,
         );
     }
@@ -202,14 +232,45 @@ mod telemetry {
 /// [`LocalSpaces`] over the WebSocket state's PubSub storage and grants.
 ///
 /// It holds the state weakly: the state holds the router, which holds this.
+/// Its notification task holds the state weakly too, and ends once the
+/// state is gone or this host is dropped.
 pub struct WebSocketLocalSpaces {
     state: Weak<WebSocketState>,
+    publications: tokio::sync::mpsc::Sender<Queued>,
 }
 
 impl WebSocketLocalSpaces {
+    /// A host of `state`'s Spaces, with its notification task started on
+    /// the current Tokio runtime.
     pub fn new(state: &Arc<WebSocketState>) -> Self {
+        let (publications, queued) = tokio::sync::mpsc::channel(PUBLICATION_QUEUE);
+        tokio::spawn(notify_publications(Arc::downgrade(state), queued));
         Self {
             state: Arc::downgrade(state),
+            publications,
+        }
+    }
+}
+
+/// The notification task of one host: each publication taken, in the order
+/// taken, decided for the Space's subscribers at other servers within the
+/// Space's allowance of notified publications, which this task keeps.
+async fn notify_publications(
+    state: Weak<WebSocketState>,
+    mut queued: tokio::sync::mpsc::Receiver<Queued>,
+) {
+    let mut budget = EventBudget::default();
+    while let Some(next) = queued.recv().await {
+        match next {
+            Queued::Publication(publication) => {
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                notify_remote_subscribers(&state, &publication, &mut budget).await;
+            }
+            Queued::Settled(settled) => {
+                let _ = settled.send(());
+            }
         }
     }
 }
@@ -268,6 +329,18 @@ fn internal() -> StanzaError {
     )
 }
 
+/// XEP-0060 §6.2.3.2: an `<unsubscribe/>` from an account that holds no
+/// subscription to the node, with the PubSub condition `<not-subscribed/>`.
+fn not_subscribed() -> StanzaError {
+    let mut error = error(
+        ErrorType::Cancel,
+        DefinedCondition::UnexpectedRequest,
+        "You are not subscribed to this Space.",
+    );
+    error.other = Some(Element::builder("not-subscribed", NS_PUBSUB_ERRORS).build());
+    error
+}
+
 fn busy() -> StanzaError {
     error(
         ErrorType::Wait,
@@ -299,22 +372,6 @@ fn result(iq: &Iq, payload: Option<Element>) -> Vec<Stanza> {
 
 fn answer(iq: Iq) -> Vec<Stanza> {
     vec![Stanza::Iq(Box::new(iq))]
-}
-
-/// The frames a PubSub handler written for WebSocket sessions returns are
-/// that transport's wire form; they are read back into typed stanzas once,
-/// here. `None` when one of them is not an IQ: an answer read only in part
-/// must not be taken for the whole.
-fn iqs_of(frames: Vec<String>) -> Option<Vec<Stanza>> {
-    frames
-        .into_iter()
-        .map(|frame| {
-            let element = frame.parse::<Element>().ok()?;
-            Iq::try_from(element)
-                .ok()
-                .map(|iq| Stanza::Iq(Box::new(iq)))
-        })
-        .collect()
 }
 
 /// What a PubSub affiliation `stored` for a remote principal is honoured as
@@ -410,8 +467,11 @@ pub(crate) async fn space_federated(
 
 /// Set the `federated` setting of the Space `node` of `service`, created at
 /// `node_created_at_ms`. Turning it off forgets the subscriptions remote
-/// accounts made to the Space, so nothing more leaves for them. `false`
-/// when the setting could not be written.
+/// accounts made to the Space, in the transaction that turns it off, and
+/// then removes the service's own subscription records of accounts this
+/// deployment does not serve, so nothing more leaves for them and nothing
+/// of theirs is left behind. `false` when the setting could not be written
+/// or those records could not all be removed.
 pub(crate) async fn set_space_federated(
     state: &WebSocketState,
     service: &BareJid,
@@ -429,28 +489,82 @@ pub(crate) async fn set_space_federated(
             Ok(true)
         );
     }
-    let closed = FederatedSpaces::new(db.clone())
-        .disable(service, node)
-        .await;
-    let forgotten = SpaceSubscriptions::new(db.clone())
-        .forget_node(service, node)
-        .await;
-    closed.is_ok() && forgotten.is_ok()
+    if close_space(db, service, node).await.is_err() {
+        return false;
+    }
+    remove_remote_pubsub_subscriptions(state, service, node).await
 }
 
-/// Forget what S2S recorded for the Space `node` of `service`, which was
-/// deleted: its `federated` setting and the subscriptions remote accounts
-/// made to it. A row that could not be removed counts for nothing anyway,
-/// since it names the deleted node's creation time.
-pub(crate) async fn forget_space(db: &Database, service: &BareJid, node: &str) {
-    let closed = FederatedSpaces::new(db.clone())
-        .disable(service, node)
-        .await;
-    let forgotten = SpaceSubscriptions::new(db.clone())
-        .forget_node(service, node)
-        .await;
-    if closed.is_err() || forgotten.is_err() {
-        tracing::warn!("failed to forget the S2S records of a deleted Space");
+/// Close the Space `node` of `service` to other servers: its `federated`
+/// setting and the subscriptions remote accounts made to it are removed in
+/// one transaction ([`FederatedSpaces::close`]).
+pub(crate) async fn close_space(
+    db: &Database,
+    service: &BareJid,
+    node: &str,
+) -> Result<(), crate::db::s2s_spaces::SpaceStoreError> {
+    FederatedSpaces::new(db.clone()).close(service, node).await
+}
+
+/// Remove the PubSub service's subscription records of `node` held for
+/// addresses this deployment does not serve: they were made by remote
+/// accounts, or recorded for one by an owner, and nothing is sent for them
+/// once the Space is closed to other servers. `false` when one could not be
+/// read or removed.
+async fn remove_remote_pubsub_subscriptions(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &str,
+) -> bool {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let Ok(subscriptions) = storage.list_node_subscriptions(service, node).await else {
+        return false;
+    };
+    let mut removed = true;
+    for subscription in subscriptions {
+        if state.serves(&subscription.subscriber.to_bare()) {
+            continue;
+        }
+        removed &= storage
+            .unsubscribe(
+                service,
+                node,
+                &subscription.subscriber,
+                Some(&subscription.subid),
+            )
+            .await
+            .is_ok();
+    }
+    removed
+}
+
+/// Forget the subscription the remote `account` made to the Space `node`
+/// of `service`: its owner removed the service's subscription record of
+/// the account, or banned it. `false` when the row could not be removed.
+pub(crate) async fn forget_remote_subscription(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &str,
+    account: &BareJid,
+) -> bool {
+    if state.serves(account) {
+        return true;
+    }
+    SpaceSubscriptions::new(database(state).clone())
+        .remove(service, node, account)
+        .await
+        .is_ok()
+}
+
+/// Whether the domain of a remote account is admitted now by the S2S
+/// snapshot the replica runs (ADR-0020 D1): never while S2S is off.
+fn admitted_now(state: &WebSocketState) -> impl Fn(&str) -> bool + Send + Sync + '_ {
+    let federation = state.deps.app_state.s2s_federation.as_ref();
+    move |domain| {
+        federation.is_some_and(|federation| {
+            waddle_xmpp::identity::CanonicalDomain::parse_canonical(domain)
+                .is_ok_and(|domain| federation.admission().decide(&domain).is_ok())
+        })
     }
 }
 
@@ -537,16 +651,13 @@ fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) 
         .then_some(room)
 }
 
-/// Whether `room` is open to accounts at other servers at all: its catalog
-/// row says so and it is no group conversation. A room without a row, or
-/// one that cannot be read now, is not.
+/// Whether `room` is open to accounts at other servers at all, read as the
+/// room's own host reads it for every request
+/// ([`super::s2s_rooms::room_open_to_other_servers`]): from the room's
+/// actor where this replica holds one, and otherwise from the channel
+/// catalog. A room that cannot be told now is not told.
 async fn room_open(state: &WebSocketState, room: &BareJid) -> bool {
-    matches!(
-        get_managed_channel_for_room(state, room).await,
-        Ok(Some(channel))
-            if channel.federated
-                && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
-    )
+    super::s2s_rooms::room_open_to_other_servers(state, room).await == Some(true)
 }
 
 /// Whether the grants of `room` let the remote principal `account`,
@@ -956,6 +1067,7 @@ impl Asked<'_> {
             return self.refuse(internal());
         };
         let subscriber = Jid::from(self.account.clone());
+        let admitted = admitted_now(self.state);
         let recorded = subscriptions
             .record(
                 &self.service,
@@ -967,6 +1079,7 @@ impl Asked<'_> {
                     snapshot: self.snapshot,
                     now_ms: chrono::Utc::now().timestamp_millis(),
                 },
+                &admitted,
             )
             .await;
         match recorded {
@@ -975,28 +1088,50 @@ impl Asked<'_> {
                 telemetry::subscription_limited();
                 return self.refuse(busy());
             }
+            // The Space was closed to other servers since it was read.
+            Ok(SubscriptionRecord::NotFederated) => return self.refuse(no_such_node()),
             Err(_) => return self.refuse(internal()),
         }
-        match self
+        let subscribed = match self
             .storage()
             .subscribe(&self.service, node, &subscriber)
             .await
         {
-            Ok(subscription) => answer(build_pubsub_subscribe_result(
-                self.iq,
-                node,
-                &subscriber,
-                &subscription.subid,
-            )),
+            Ok(subscription) => subscription,
             Err(_) => {
                 // Nothing is delivered for a record without the service's
                 // own subscription; it is removed all the same.
                 let _ = subscriptions
                     .remove(&self.service, node, &self.account)
                     .await;
-                self.refuse(internal())
+                return self.refuse(internal());
             }
+        };
+        // Closing the Space removes the remote subscription records it
+        // finds. One written after that ran is found here, by reading the
+        // setting again, and removed with this account's row.
+        let still_open = FederatedSpaces::new(database(self.state).clone())
+            .is_federated(&self.service, node, space.created_at_ms())
+            .await;
+        if !matches!(still_open, Ok(true)) {
+            let _ = self
+                .storage()
+                .unsubscribe(&self.service, node, &subscriber, Some(&subscribed.subid))
+                .await;
+            let _ = subscriptions
+                .remove(&self.service, node, &self.account)
+                .await;
+            return match still_open {
+                Ok(_) => self.refuse(no_such_node()),
+                Err(_) => self.refuse(internal()),
+            };
         }
+        answer(build_pubsub_subscribe_result(
+            self.iq,
+            node,
+            &subscriber,
+            &subscribed.subid,
+        ))
     }
 
     /// XEP-0060 §6.2: the account's own subscription ends. Leaving only
@@ -1029,7 +1164,7 @@ impl Asked<'_> {
         }
         match (removed, forgotten) {
             (Ok(true), Ok(())) => answer(build_pubsub_success(self.iq)),
-            (Ok(false), Ok(())) => self.pubsub_error(PubSubError::NotSubscribed),
+            (Ok(false), Ok(())) => self.refuse(not_subscribed()),
             _ => self.refuse(internal()),
         }
     }
@@ -1067,11 +1202,14 @@ impl Asked<'_> {
         // An owner's change of subscriptions may name a JID at another
         // server. Nothing is sent to it: a notification leaves only for a
         // subscription the remote account made itself.
-        let frames = spaces_change_for_remote(self.state, self.iq, &self.account, request).await;
-        match iqs_of(frames) {
-            Some(answers) if !answers.is_empty() => answers,
-            _ => self.refuse(internal()),
+        let answers = spaces_change_for_remote(self.state, self.iq, &self.account, request).await;
+        if answers.is_empty() {
+            return self.refuse(internal());
         }
+        answers
+            .into_iter()
+            .map(|iq| Stanza::Iq(Box::new(iq)))
+            .collect()
     }
 }
 
@@ -1130,6 +1268,31 @@ impl LocalSpaces for WebSocketLocalSpaces {
             }
         }
     }
+
+    fn published(&self, publication: SpacePublication) -> bool {
+        match self
+            .publications
+            .try_send(Queued::Publication(Box::new(publication)))
+        {
+            Ok(()) => true,
+            Err(_) => {
+                telemetry::publication_dropped();
+                false
+            }
+        }
+    }
+
+    async fn publications_settled(&self) {
+        let (settled, done) = tokio::sync::oneshot::channel();
+        if self
+            .publications
+            .send(Queued::Settled(settled))
+            .await
+            .is_ok()
+        {
+            let _ = done.await;
+        }
+    }
 }
 
 /// The item a Space's event notification names, and so the room a
@@ -1173,17 +1336,41 @@ fn for_remote_subscriber(event: &Message, to: &Jid) -> Message {
     message
 }
 
-/// Send `event`, an event notification of the Space `node` of `service`,
-/// to the Space's subscribers at other servers (XEP-0060 §7.1).
+/// Hand `event`, an event notification of the Space `node` of `service`
+/// just stored, to the host's notification task for the Space's
+/// subscribers at other servers. It only queues: the publisher's request
+/// waits for none of what is decided about them. Nothing is queued while
+/// the replica runs no S2S snapshot.
+pub(crate) fn queue_remote_notification(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &PubSubNode,
+    event: &Message,
+) {
+    if state.deps.app_state.s2s_federation.is_none() {
+        return;
+    }
+    // A route that serves no Spaces to remote principals takes nothing,
+    // and counts nothing.
+    let _ = state.deps.remote_route.space_published(SpacePublication {
+        service: service.clone(),
+        node: node.node_name.clone(),
+        node_created_at_ms: node.created_at.timestamp_millis(),
+        event: event.clone(),
+    });
+}
+
+/// Send the event notification of `publication` to the Space's subscribers
+/// at other servers (XEP-0060 §7.1), on the host's notification task.
 ///
 /// A notification leaves only where all of this holds when it is handed
 /// over:
 ///
-/// - the Space is open to other servers and the replica serves its Spaces
-///   to them;
+/// - the Space still exists as the node the publication was made to, it is
+///   open to other servers and the replica serves its Spaces to them;
 /// - the subscriber made the subscription itself over an inbound stream,
-///   and the service's own record still holds it as deliverable, read
-///   for this publication;
+///   within the last thirty days, and the service's own record still holds
+///   it as deliverable, read for this publication;
 /// - the subscriber's domain is admitted now (D1) and its standing in the
 ///   Space, honoured for the evidence its subscription recorded (D8),
 ///   still lets it read the Space;
@@ -1193,27 +1380,49 @@ fn for_remote_subscriber(event: &Message, to: &Jid) -> Message {
 /// accounts, within the Space's allowance of notified publications;
 /// what does not fit a domain pair's queue is dropped, as a headline may
 /// be. Nothing is sent to an address at a domain this deployment serves.
-pub(crate) async fn notify_remote_subscribers(
+async fn notify_remote_subscribers(
     state: &WebSocketState,
-    service: &BareJid,
-    node: &PubSubNode,
-    event: &Message,
+    publication: &SpacePublication,
+    budget: &mut EventBudget,
 ) {
     // Without an S2S snapshot nothing leaves for another server, and
     // nothing is read to find that out.
     if state.deps.app_state.s2s_federation.is_none() {
         return;
     }
+    let SpacePublication {
+        service,
+        node: node_name,
+        node_created_at_ms: created_at_ms,
+        event,
+    } = publication;
+    let created_at_ms = *created_at_ms;
     let db = database(state).clone();
-    let created_at_ms = node.created_at.timestamp_millis();
     let federated = FederatedSpaces::new(db.clone())
-        .is_federated(service, &node.node_name, created_at_ms)
+        .is_federated(service, node_name, created_at_ms)
         .await;
     if !matches!(federated, Ok(true)) {
         return;
     }
+    // The node as it is now: the publication is decided after its
+    // publisher was answered, and a Space deleted since tells nothing.
+    let node = match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(service, node_name)
+        .await
+    {
+        Ok(Some(node)) if node.created_at.timestamp_millis() == created_at_ms => node,
+        Ok(_) => return,
+        Err(_) => {
+            tracing::warn!("event notifications withheld: the Space could not be read");
+            return;
+        }
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let Ok(subscriptions) = SpaceSubscriptions::new(db)
-        .of_node(service, &node.node_name, created_at_ms)
+        .of_node(service, node_name, created_at_ms, now_ms)
         .await
     else {
         tracing::warn!("event notifications withheld: the remote subscriptions could not be read");
@@ -1233,7 +1442,7 @@ pub(crate) async fn notify_remote_subscribers(
     if !room_open(state, &room).await {
         return;
     }
-    if !take_event(service, &node.node_name) {
+    if !budget.take(service, node_name) {
         telemetry::publication_limited();
         return;
     }
@@ -1244,7 +1453,7 @@ pub(crate) async fn notify_remote_subscribers(
         .deps
         .protocol
         .pubsub_storage
-        .list_deliverable_subscribers(service, &node.node_name)
+        .list_deliverable_subscribers(service, node_name)
         .await
     else {
         tracing::warn!("event notifications withheld: the subscriptions could not be read");
@@ -1260,7 +1469,7 @@ pub(crate) async fn notify_remote_subscribers(
         let evidence = PrincipalEvidence::Stream(subscription.evidence);
         let sent = !state.serves(account)
             && deliverable.contains(account)
-            && subscriber_reads(state, service, node, account, &evidence).await
+            && subscriber_reads(state, service, &node, account, &evidence).await
             && room_admits(state, &room, account, &evidence).await
             && state.deps.remote_route.space_event(
                 service,

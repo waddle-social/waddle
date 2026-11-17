@@ -934,6 +934,16 @@ impl S2sRouter {
         self.inner.spaces.set(host).is_ok()
     }
 
+    /// Wait until the Spaces host has decided every publication it took
+    /// before this call, for a case that then reads what left for remote
+    /// subscribers.
+    #[cfg(feature = "test-support")]
+    pub async fn spaces_publications_settled(&self) {
+        if let Some(spaces) = self.inner.spaces.get() {
+            spaces.publications_settled().await;
+        }
+    }
+
     /// Queue `stanza`, an event notification of the local Space service
     /// `service`, for `subscriber` at another server, without waiting.
     /// `false` when it was not taken: the subscriber's domain is not
@@ -1108,6 +1118,13 @@ impl RemoteRoute for S2sRouter {
         // their notifications to remote subscribers.
         self.inner.spaces.get().is_some()
             && self.inner.offer_space_event(service, subscriber, stanza)
+    }
+
+    fn space_published(&self, publication: super::local_spaces::SpacePublication) -> bool {
+        self.inner
+            .spaces
+            .get()
+            .is_some_and(|spaces| spaces.published(publication))
     }
 }
 

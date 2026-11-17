@@ -13,15 +13,14 @@ use xmpp_parsers::iq::Iq;
 
 use super::pubsub_admin::handle_pubsub_admin_request;
 use super::{
-    handle_spaces_publish, handle_spaces_retract, iq_to_xml, spaces_service_bare_jid,
-    WebSocketState,
+    handle_spaces_publish, handle_spaces_retract, spaces_service_bare_jid, WebSocketState,
 };
 use crate::auth::Session;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 /// Decide `request`, a change to a Space that the remote account `account`
-/// asked for in `iq`, as a session's request is decided, and answer it in
-/// the session transport's wire form.
+/// asked for in `iq`, as a session's request is decided, and answer it with
+/// the typed IQs the session handlers build.
 ///
 /// - A publish or a retract places a room in the Space or takes it out. It
 ///   is decided by the Space's `owner` relationship or the deployment's
@@ -37,13 +36,10 @@ pub(crate) async fn spaces_change_for_remote(
     iq: &Iq,
     account: &BareJid,
     request: PubSubRequest,
-) -> Vec<String> {
+) -> Vec<Iq> {
     let domains = &state.deps.service_domains;
     let Ok(spaces_jid) = spaces_service_bare_jid(&domains.spaces) else {
-        return vec![iq_to_xml(build_pubsub_error(
-            iq,
-            PubSubError::InternalServerError,
-        ))];
+        return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
     };
     // The placement checks read their subject from a session. This one
     // names the remote account and nothing else: it is no credential, is
@@ -79,7 +75,7 @@ pub(crate) async fn spaces_change_for_remote(
             .await
         }
         PubSubRequest::CreateNode { .. } => {
-            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+            vec![build_pubsub_error(iq, PubSubError::Forbidden)]
         }
         request => {
             handle_pubsub_admin_request(

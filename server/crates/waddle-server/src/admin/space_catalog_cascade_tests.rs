@@ -157,6 +157,7 @@ async fn external_bookmark_destruction_preserves_same_named_local_catalog_channe
     catalog_channel(&state).await;
     destroy_space_channel(
         &state,
+        super::SpaceService::of(&state),
         &"dormant@remote.example".parse().expect("remote room"),
     )
     .await

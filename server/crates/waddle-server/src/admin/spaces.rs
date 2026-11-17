@@ -46,8 +46,8 @@ use crate::admin::channels::{forget_extension_bot_room, restore_channel_catalog_
 use crate::admin::is_community_owner;
 use crate::channel_space_links::ChannelSpaceLink;
 use crate::permissions::{
-    DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
-    WriteTuple,
+    DeleteTuple, ListSubjects, Object, ObjectType, PermissionError, Relation, Subject, SubjectType,
+    Tuple, WriteTuple,
 };
 use crate::server::xmpp_state::{delete_xmpp_channel, get_xmpp_channel};
 use crate::server::AppState;
@@ -788,6 +788,7 @@ struct SpaceDeleteCleanup {
 
 async fn rollback_space_delete_cleanups(
     state: &AppState,
+    service: SpaceService<'_>,
     cleanups: &[SpaceDeleteCleanup],
     space_node: &str,
     skip_rooms: &BTreeSet<BareJid>,
@@ -801,9 +802,9 @@ async fn rollback_space_delete_cleanups(
             cleanup.had_bookmark_item && !skip_parent_tuple_rooms.contains(&cleanup.room_jid);
         if !cleanup.had_bookmark_item {
             if let Some(item) = cleanup.rollback_bookmark_item.as_ref() {
-                match state
-                    .pubsub_storage
-                    .publish_item(&state.spaces_jid, space_node, item, None, false)
+                match service
+                    .storage
+                    .publish_item(service.spaces_jid, space_node, item, None, false)
                     .await
                 {
                     Ok(_) => {
@@ -848,7 +849,7 @@ async fn rollback_space_delete_cleanups(
 }
 
 async fn restore_space_node_items(
-    state: &AppState,
+    service: SpaceService<'_>,
     space_node: &str,
     items: &[(String, PubSubItem)],
     skip_rooms: &BTreeSet<BareJid>,
@@ -861,9 +862,9 @@ async fn restore_space_node_items(
         {
             continue;
         }
-        if let Err(error) = state
-            .pubsub_storage
-            .publish_item(&state.spaces_jid, space_node, item, None, false)
+        if let Err(error) = service
+            .storage
+            .publish_item(service.spaces_jid, space_node, item, None, false)
             .await
         {
             tracing::warn!(
@@ -882,6 +883,7 @@ async fn restore_space_node_items(
 
 async fn rollback_channel_bookmark_item(
     state: &AppState,
+    service: SpaceService<'_>,
     room_jid: &BareJid,
     channel_id: &str,
 ) -> Option<PubSubItem> {
@@ -920,7 +922,7 @@ async fn rollback_channel_bookmark_item(
             name: config.name,
             channel_type,
         },
-        &state.muc_domain.to_string(),
+        service.muc_domain,
     ) {
         Ok(item) => Some(item),
         Err(error) => {
@@ -1126,6 +1128,198 @@ async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRe
 }
 
 async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), AdminErr> {
+    let (node_name, space_jid) =
+        canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    super::refuse_host_grant_space(state, &node_name).await?;
+    cascade_delete(state, SpaceService::of(state), &node_name, Some(&space_jid)).await
+}
+
+/// The Spaces PubSub service a Space's deletion works on: its store, its
+/// address and the MUC service whose rooms its items name. `spaces:delete`
+/// uses the admin state's; a PubSub request uses those of the WebSocket
+/// state it reached, which a deployment builds from the same values.
+#[derive(Clone, Copy)]
+pub(crate) struct SpaceService<'a> {
+    pub(crate) storage: &'a Arc<dyn waddle_xmpp::pubsub::PubSubStorage>,
+    pub(crate) spaces_jid: &'a BareJid,
+    pub(crate) muc_domain: &'a str,
+}
+
+impl<'a> SpaceService<'a> {
+    /// The service the admin state `state` names.
+    pub(crate) fn of(state: &'a AppState) -> Self {
+        Self {
+            storage: &state.pubsub_storage,
+            spaces_jid: &state.spaces_jid,
+            muc_domain: state.muc_domain.as_str(),
+        }
+    }
+}
+
+/// What became of a Space's deletion asked through PubSub (XEP-0060 §8.4),
+/// by a session or by a remote owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpaceDeletion {
+    /// The Space and everything that named it are gone.
+    Deleted,
+    /// No such node.
+    NotFound,
+    /// The Space, or a room in it, belongs to an enrolled host-grant scope.
+    Refused,
+    /// A store failed; what was changed before it was undone where it could
+    /// be, and deleting the Space again completes it.
+    Failed,
+}
+
+fn deletion_of(error: &CommandResult) -> SpaceDeletion {
+    match error {
+        CommandResult::Error(XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::NotAllowed,
+            ..
+        }) => SpaceDeletion::Refused,
+        _ => SpaceDeletion::Failed,
+    }
+}
+
+/// Delete the Space `node` with the cascade `spaces:delete` runs, for a
+/// deletion asked through PubSub: whoever may delete the node removes, with
+/// it, the rooms it holds, their parent grants and their links to it, the
+/// relations of the Space itself, its metadata, and what S2S recorded for
+/// it. A PubSub deletion leaves nothing behind that a Space created again
+/// under the same name would inherit.
+pub(crate) async fn delete_space(
+    state: &AppState,
+    service: SpaceService<'_>,
+    node: &str,
+) -> SpaceDeletion {
+    match service.storage.get_node(service.spaces_jid, node).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return SpaceDeletion::NotFound,
+        Err(_) => return SpaceDeletion::Failed,
+    }
+    if let Err(error) = super::refuse_host_grant_space(state, node).await {
+        return deletion_of(&error);
+    }
+    let node_name = SpaceNode::from(node);
+    let space_jid = space_jid_for_node(service.spaces_jid, &node_name);
+    match cascade_delete(state, service, &node_name, space_jid.as_ref()).await {
+        Ok(()) => SpaceDeletion::Deleted,
+        Err(error) => {
+            tracing::warn!(space_node = %node_name, "PubSub deletion of a Space did not complete");
+            deletion_of(&error)
+        }
+    }
+}
+
+/// What became of taking the rooms out of a Space before its items are
+/// purged through PubSub (XEP-0060 §8.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpaceUnlink {
+    /// No room the Space's items name keeps a parent grant on it, or a link
+    /// to it.
+    Unlinked,
+    /// The Space, or a room it names, belongs to an enrolled host-grant
+    /// scope.
+    Refused,
+    /// A store failed; the items are still there, and purging again
+    /// completes it.
+    Failed,
+}
+
+/// Take every room the items of the Space `node` name out of the Space, as
+/// retracting each item does: the room's parent grant on the Space and its
+/// link to it go. The rooms themselves stay. Run before the items are
+/// purged, so that a failure leaves the items that name what remains.
+pub(crate) async fn unlink_space_rooms(
+    state: &AppState,
+    service: SpaceService<'_>,
+    node: &str,
+) -> SpaceUnlink {
+    let unlinked = async {
+        super::refuse_host_grant_space(state, node).await?;
+        let items = service
+            .storage
+            .get_items(service.spaces_jid, node, None, &[])
+            .await
+            .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
+        let rooms: BTreeSet<BareJid> = items
+            .iter()
+            .filter_map(|stored| stored.id.parse::<BareJid>().ok())
+            .collect();
+        for room_jid in &rooms {
+            super::refuse_host_grant_room(state, room_jid).await?;
+        }
+        for room_jid in &rooms {
+            if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+                delete_channel_parent_tuple(state, &channel_id, node).await?;
+            }
+            let link = state
+                .channel_space_link_store
+                .get(room_jid)
+                .await
+                .map_err(|e| internal_err(format!("channel-space link storage: {e}")))?;
+            if link.is_some_and(|link| link.space_node == node) {
+                state
+                    .channel_space_link_store
+                    .clear(room_jid)
+                    .await
+                    .map_err(|e| internal_err(format!("channel-space link storage: {e}")))?;
+            }
+        }
+        Ok::<(), AdminErr>(())
+    };
+    match unlinked.await {
+        Ok(()) => SpaceUnlink::Unlinked,
+        Err(error) => match deletion_of(&error) {
+            SpaceDeletion::Refused => SpaceUnlink::Refused,
+            _ => SpaceUnlink::Failed,
+        },
+    }
+}
+
+/// Remove every relation whose object is the Space `node`: its owners,
+/// admins, moderators and members. A Space created again under the name
+/// starts with none of them.
+async fn delete_space_relations(state: &AppState, node: &str) -> Result<(), AdminErr> {
+    let object = Object::new(ObjectType::Space, node);
+    for relation in ["owner", "admin", "moderator", "member"] {
+        let subjects = state
+            .permission_actor
+            .ask(ListSubjects {
+                object: object.clone(),
+                relation: Relation::new(relation),
+            })
+            .await
+            .map_err(|error| {
+                internal_err(format!(
+                    "permission actor failed listing Space relations: {error}"
+                ))
+            })?;
+        for subject in subjects {
+            let tuple = Tuple::new(object.clone(), Relation::new(relation), subject);
+            match state.permission_actor.ask(DeleteTuple { tuple }).await {
+                Ok(())
+                | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {}
+                Err(error) => {
+                    return Err(internal_err(format!(
+                        "permission actor failed deleting a Space relation: {error}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The cascade of a Space's deletion, for `spaces:delete` and for a PubSub
+/// deletion alike; the caller has refused the Space of an enrolled scope.
+/// `space_jid` is the Space's address, where its node name has one.
+async fn cascade_delete(
+    state: &AppState,
+    service: SpaceService<'_>,
+    node_name: &SpaceNode,
+    space_jid: Option<&BareJid>,
+) -> Result<(), AdminErr> {
     // Cascade destroy. There are two sources of "channels in this
     // space" we need to honor:
     //   1. The persistent channel↔space link projection
@@ -1141,9 +1335,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     // that room a parent tuple on this node and moved its link here. Such
     // a room loses that tuple and link, but is destroyed only when an item
     // under its canonical id is on this node too.
-    let (node_name, space_jid) =
-        canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
-    super::refuse_host_grant_space(state, &node_name).await?;
+    let node_name = node_name.clone();
 
     // Collect channels-to-destroy from both sources.
     let mut targets: BTreeSet<BareJid> = BTreeSet::new();
@@ -1157,9 +1349,9 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         targets.insert(jid);
     }
 
-    let items = state
-        .pubsub_storage
-        .get_items(&state.spaces_jid, &node_name, None, &[])
+    let items = service
+        .storage
+        .get_items(service.spaces_jid, &node_name, None, &[])
         .await
         .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
     for stored in &items {
@@ -1173,6 +1365,17 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     for room_jid in &targets {
         super::refuse_host_grant_room(state, room_jid).await?;
     }
+    // A Space being deleted is closed to other servers first: its
+    // `federated` setting and the subscriptions remote accounts made to it
+    // go in one transaction, and nothing is subscribed to it after. A
+    // deletion that fails later leaves it closed, which is the safe side.
+    crate::server::routes::websocket::s2s_spaces::close_space(
+        state.db_pool.global(),
+        service.spaces_jid,
+        &node_name,
+    )
+    .await
+    .map_err(|e| internal_err(format!("closing the Space to other servers failed: {e}")))?;
     let bookmarked_rooms: BTreeSet<BareJid> = items
         .iter()
         .filter_map(|stored| stored.id.parse::<BareJid>().ok())
@@ -1206,12 +1409,14 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                     cleanup.parent_tuple_deleted = true;
                     if !cleanup.had_bookmark_item {
                         cleanup.rollback_bookmark_item =
-                            rollback_channel_bookmark_item(state, room_jid, &channel_id).await;
+                            rollback_channel_bookmark_item(state, service, room_jid, &channel_id)
+                                .await;
                         if cleanup.rollback_bookmark_item.is_none() {
                             let _ =
                                 write_channel_parent_tuple(state, &channel_id, &node_name).await;
                             rollback_space_delete_cleanups(
                                 state,
+                                service,
                                 &cleanups,
                                 &node_name,
                                 &BTreeSet::new(),
@@ -1233,6 +1438,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                     );
                     rollback_space_delete_cleanups(
                         state,
+                        service,
                         &cleanups,
                         &node_name,
                         &BTreeSet::new(),
@@ -1250,6 +1456,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                 cleanups.push(cleanup);
                 rollback_space_delete_cleanups(
                     state,
+                    service,
                     &cleanups,
                     &node_name,
                     &BTreeSet::new(),
@@ -1273,7 +1480,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         match state.channel_space_link_store.clear(room_jid).await {
             Ok(true) => {
                 cleanup.removed_link = existing_link.or_else(|| {
-                    Some(ChannelSpaceLink {
+                    space_jid.map(|space_jid| ChannelSpaceLink {
                         channel_jid: room_jid.clone(),
                         space_jid: space_jid.clone(),
                         space_node: node_name.clone(),
@@ -1286,6 +1493,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                 cleanups.push(cleanup);
                 rollback_space_delete_cleanups(
                     state,
+                    service,
                     &cleanups,
                     &node_name,
                     &BTreeSet::new(),
@@ -1318,16 +1526,17 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     for stored in &items {
         let item_id = stored.id.clone();
         let item = stored.to_pubsub_item();
-        if let Err(error) = state
-            .pubsub_storage
-            .retract_item(&state.spaces_jid, &node_name, &item_id)
+        if let Err(error) = service
+            .storage
+            .retract_item(service.spaces_jid, &node_name, &item_id)
             .await
         {
             let failed_restores =
-                restore_space_node_items(state, &node_name, &retracted_items, &BTreeSet::new())
+                restore_space_node_items(service, &node_name, &retracted_items, &BTreeSet::new())
                     .await;
             rollback_space_delete_cleanups(
                 state,
+                service,
                 &cleanups,
                 &node_name,
                 &BTreeSet::new(),
@@ -1347,12 +1556,13 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         // `DurableWipeFailed` means the registry kept the room because
         // its fenced clustering wipe failed — the cascade must fail
         // and roll back, not record the room as destroyed (#1261).
-        if let Err(error) = destroy_space_channel(state, room_jid).await {
+        if let Err(error) = destroy_space_channel(state, service, room_jid).await {
             let failed_restores =
-                restore_space_node_items(state, &node_name, &retracted_items, &destroyed_rooms)
+                restore_space_node_items(service, &node_name, &retracted_items, &destroyed_rooms)
                     .await;
             rollback_space_delete_cleanups(
                 state,
+                service,
                 &cleanups,
                 &node_name,
                 &destroyed_rooms,
@@ -1369,25 +1579,21 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         forget_extension_bot_room(state, room_jid).await;
     }
 
-    state
-        .pubsub_storage
-        .purge_node(&state.spaces_jid, &node_name)
+    // The Space's own relations go while its node still exists, so that a
+    // failure here is completed by deleting the Space again.
+    delete_space_relations(state, &node_name).await?;
+
+    service
+        .storage
+        .purge_node(service.spaces_jid, &node_name)
         .await
         .map_err(|e| internal_err(format!("pubsub purge_node failed: {e}")))?;
 
-    let _deleted = state
-        .pubsub_storage
-        .delete_node(&state.spaces_jid, &node_name)
+    let _deleted = service
+        .storage
+        .delete_node(service.spaces_jid, &node_name)
         .await
         .map_err(|e| internal_err(format!("pubsub delete_node failed: {e}")))?;
-    // A deleted Space is open to nobody: its `federated` setting and the
-    // subscriptions remote accounts made to it go with it.
-    crate::server::routes::websocket::s2s_spaces::forget_space(
-        state.db_pool.global(),
-        &state.spaces_jid,
-        &node_name,
-    )
-    .await;
 
     let _existed = state
         .spaces_metadata_store
@@ -1401,10 +1607,14 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
 /// Delete catalog membership before destroying the room, so discovery cannot
 /// recreate a successfully deleted dormant channel. Failed destruction restores
 /// this target; the caller restores its relationships and unprocessed targets.
-async fn destroy_space_channel(state: &AppState, room_jid: &BareJid) -> Result<(), AdminErr> {
+async fn destroy_space_channel(
+    state: &AppState,
+    service: SpaceService<'_>,
+    room_jid: &BareJid,
+) -> Result<(), AdminErr> {
     // Legacy space bookmarks may point at other MUC services. Their localpart
     // must never be used to delete an unrelated channel in our own catalog.
-    let channel_id = if room_jid.domain().as_str() == state.muc_domain.as_str() {
+    let channel_id = if room_jid.domain().as_str() == service.muc_domain {
         waddle_xmpp::parse_managed_room_jid(room_jid)
     } else {
         None

@@ -1,6 +1,6 @@
 use super::permissions::{delete_channel_parent_tuple, write_channel_parent_tuple};
 use super::{
-    build_pubsub_error, build_pubsub_success, iq_to_xml, spaces_node_mutation_allowed,
+    build_pubsub_error, build_pubsub_success, spaces_node_mutation_allowed,
     spaces_service_bare_jid, warn, BareJid, PubSubError, WebSocketState, XmppError,
 };
 use crate::channel_space_links::ChannelSpaceLink;
@@ -22,13 +22,13 @@ pub(super) async fn handle_spaces_retract(
     node: &str,
     item_id: &str,
     principal: Option<ResolvedPrincipal<'_>>,
-) -> Vec<String> {
+) -> Vec<xmpp_parsers::iq::Iq> {
     match spaces_node_mutation_allowed(state, principal, node).await {
         Ok(true) => {}
-        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Ok(false) => return vec![build_pubsub_error(iq, PubSubError::Forbidden)],
         Err(error) => {
             warn!(node, error = %error, "Failed to authorize Spaces retract");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
         }
     }
 
@@ -37,10 +37,10 @@ pub(super) async fn handle_spaces_retract(
     let exact_grant = match waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id) {
         Ok(room_jid) => {
             if room_jid.domain().as_str() != muc_domain {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+                return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
             }
             let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+                return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
             };
             // A room an enrolled host-grant scope manages is placed by its
             // canonical topology only; a Spaces retract does not move it.
@@ -52,9 +52,7 @@ pub(super) async fn handle_spaces_retract(
                 .await
             {
                 Ok(false) => {}
-                Ok(true) | Err(_) => {
-                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
-                }
+                Ok(true) | Err(_) => return vec![build_pubsub_error(iq, PubSubError::Forbidden)],
             }
             Some(ParentGrant {
                 room_jid,
@@ -64,7 +62,7 @@ pub(super) async fn handle_spaces_retract(
         Err(_) => None,
     };
     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
     let item_filter = [item_id.to_string()];
     let previous_item = match state
@@ -77,18 +75,15 @@ pub(super) async fn handle_spaces_retract(
         Ok(items) => match items.into_iter().next() {
             Some(item) => item.to_pubsub_item(),
             None if exact_grant.is_some() => {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+                return vec![build_pubsub_error(iq, PubSubError::ItemNotFound)];
             }
             // A non-canonical id is accepted only as the exact id of a
             // stored item; otherwise it names no room.
-            None => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))],
+            None => return vec![build_pubsub_error(iq, PubSubError::InvalidJid)],
         },
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to preflight Spaces item before retract");
-            return vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))];
+            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
         }
     };
     let grant = match exact_grant {
@@ -97,10 +92,7 @@ pub(super) async fn handle_spaces_retract(
             Ok(grant) => grant,
             Err(error) => {
                 warn!(item_id, node, error = %error, "Failed to resolve the room of a non-canonical Spaces item");
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InternalServerError,
-                ))];
+                return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
             }
         },
     };
@@ -117,10 +109,7 @@ pub(super) async fn handle_spaces_retract(
             Ok(_) => None,
             Err(error) => {
                 warn!(item_id, node, error = %error, "Failed to read channel-space link before Spaces retract");
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InternalServerError,
-                ))];
+                return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
             }
         },
         None => None,
@@ -130,10 +119,7 @@ pub(super) async fn handle_spaces_retract(
             Ok(deleted) => deleted,
             Err(error) => {
                 warn!(item_id, node, error = %error, "Failed to clear channel parent tuple before Spaces retract");
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InternalServerError,
-                ))];
+                return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
             }
         },
         None => false,
@@ -150,10 +136,7 @@ pub(super) async fn handle_spaces_retract(
                 let _ = write_channel_parent_tuple(state, &grant.channel_id, node).await;
             }
             warn!(item_id, node, error = %error, "Failed to clear channel-space link before Spaces retract");
-            return vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))];
+            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
         }
     }
     let restore = SpacesRetractRestore {
@@ -173,10 +156,10 @@ pub(super) async fn handle_spaces_retract(
     {
         Ok(true) => {
             let Some(grant) = grant.as_ref() else {
-                return vec![iq_to_xml(build_pubsub_success(iq))];
+                return vec![build_pubsub_success(iq)];
             };
             match delete_channel_parent_tuple(state, &grant.channel_id, node).await {
-                Ok(_) => vec![iq_to_xml(build_pubsub_success(iq))],
+                Ok(_) => vec![build_pubsub_success(iq)],
                 Err(error) => {
                     if let Err(restore_error) = state
                         .deps
@@ -194,24 +177,18 @@ pub(super) async fn handle_spaces_retract(
                     }
                     restore.run("final parent tuple cleanup failure").await;
                     warn!(item_id, node, error = %error, "Failed to clear channel parent tuple after Spaces retract");
-                    vec![iq_to_xml(build_pubsub_error(
-                        iq,
-                        PubSubError::InternalServerError,
-                    ))]
+                    vec![build_pubsub_error(iq, PubSubError::InternalServerError)]
                 }
             }
         }
         Ok(false) => {
             restore.run("retract returned item-not-found").await;
-            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))]
+            vec![build_pubsub_error(iq, PubSubError::ItemNotFound)]
         }
         Err(error) => {
             restore.run("retract failure").await;
             warn!(item_id, node, error = %error, "Failed to retract Spaces item");
-            vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))]
+            vec![build_pubsub_error(iq, PubSubError::InternalServerError)]
         }
     }
 }

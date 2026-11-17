@@ -69,7 +69,7 @@ pub use local_rooms::{
     CarriedRoomOutcome, CarriedRoomRequest, LocalRooms, RoomPlacement, RoomReplies, RoomRequest,
     SeatChange, SeatEnd, HOLDER_ASK_LIMIT,
 };
-pub use local_spaces::{LocalSpaces, SpaceRequest, MAX_SPACE_REPLIES};
+pub use local_spaces::{LocalSpaces, SpacePublication, SpaceRequest, MAX_SPACE_REPLIES};
 pub use occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomStoreError,
     RoomVerdict, SqlRemoteRoomStore, MAX_JOIN_ID_BYTES, MAX_OCCUPANCY_ADDRESS_BYTES,

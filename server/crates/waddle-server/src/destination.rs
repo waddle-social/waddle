@@ -673,6 +673,15 @@ pub trait RemoteRoute: Send + Sync {
     ) -> bool {
         false
     }
+
+    /// Take `publication`, stored in a local Space, for the Space's
+    /// subscribers at other servers. It only queues, so the publisher's
+    /// request never waits for what is decided about them; `false` when it
+    /// was not taken. A route that serves no Spaces to remote principals
+    /// takes none.
+    fn space_published(&self, _publication: crate::s2s::route::SpacePublication) -> bool {
+        false
+    }
 }
 
 /// The remote route used while server-to-server transport is not enabled:

@@ -4,8 +4,8 @@ use super::permissions::{
 use super::{
     build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
     build_pubsub_owner_subscriptions_result, build_pubsub_subscribe_result, build_pubsub_success,
-    debug, iq_to_xml, is_pep_self_or_to, spaces_service_bare_jid, warn, BareJid, Permission,
-    PubSubError, PubSubRequest, Session, SubId, SubscriptionState, WebSocketState,
+    debug, is_pep_self_or_to, spaces_service_bare_jid, warn, BareJid, Permission, PubSubError,
+    PubSubRequest, Session, SubId, SubscriptionState, WebSocketState,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
@@ -28,11 +28,11 @@ pub(super) async fn handle_pubsub_admin_request(
     spaces_domain: &str,
     authenticated_session: Option<&Session>,
     request: PubSubRequest,
-) -> Vec<String> {
+) -> Vec<xmpp_parsers::iq::Iq> {
     match request {
         PubSubRequest::CreateNode { node } => {
             if is_pubsub_attachment_or_summary_node(&node) {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             if target_jid.to_string() == spaces_domain {
                 if server_permission_allowed(
@@ -44,11 +44,11 @@ pub(super) async fn handle_pubsub_admin_request(
                 .unwrap_or(false)
                 {
                     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
-                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+                        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
                     };
                     let space_node = SpaceNode::from(node.as_str());
                     if space_jid_for_node(&spaces_jid, &space_node).is_none() {
-                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                        return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
                     }
                     match state
                         .deps
@@ -70,43 +70,37 @@ pub(super) async fn handle_pubsub_admin_request(
                                 .await
                             {
                                 warn!(node = %node, error = %error, "Failed to configure Spaces node");
-                                return vec![iq_to_xml(build_pubsub_error(
-                                    iq,
-                                    PubSubError::Forbidden,
-                                ))];
+                                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
                             }
                             if let Err(error) =
                                 write_space_owner_tuple(state, &node, authenticated_session).await
                             {
                                 warn!(node = %node, error = %error, "Failed to persist Space owner tuple");
-                                return vec![iq_to_xml(build_pubsub_error(
-                                    iq,
-                                    PubSubError::Forbidden,
-                                ))];
+                                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
                             }
                             seed_spaces_node_owners(state, &spaces_jid, &node, user_jid).await;
                             let response = build_pubsub_success(iq);
-                            return vec![iq_to_xml(response)];
+                            return vec![response];
                         }
                         Ok((_, false)) => {
                             let error = build_pubsub_error(iq, PubSubError::NodeExists);
-                            return vec![iq_to_xml(error)];
+                            return vec![error];
                         }
                         Err(error) => {
                             warn!(node = %node, error = %error, "Failed to create Spaces node");
                             let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                            return vec![iq_to_xml(error)];
+                            return vec![error];
                         }
                     }
                 } else {
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
+                    return vec![error];
                 }
             }
 
             if target_jid != user_jid {
                 let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                return vec![error];
             }
 
             let result = state
@@ -124,12 +118,12 @@ pub(super) async fn handle_pubsub_admin_request(
                         debug!(node = %node, "PubSub node already exists");
                     }
                     let response = build_pubsub_success(iq);
-                    vec![iq_to_xml(response)]
+                    vec![response]
                 }
                 Err(e) => {
                     warn!("PubSub node creation failed: {}", e);
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    vec![iq_to_xml(error)]
+                    vec![error]
                 }
             }
         }
@@ -146,7 +140,7 @@ pub(super) async fn handle_pubsub_admin_request(
             .await
             .unwrap_or(false)
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             let Some(node_meta) = state
                 .deps
@@ -157,7 +151,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 .ok()
                 .flatten()
             else {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+                return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)];
             };
             let response = build_pubsub_configure_form_result(iq, &node, &node_meta.config);
             // A Space's owner is shown whether the Space is open to other
@@ -173,18 +167,15 @@ pub(super) async fn handle_pubsub_admin_request(
                 )
                 .await;
                 let Some(federated) = federated else {
-                    return vec![iq_to_xml(build_pubsub_error(
-                        iq,
-                        PubSubError::InternalServerError,
-                    ))];
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 };
-                return vec![iq_to_xml(
+                return vec![
                     crate::server::routes::websocket::s2s_spaces::with_federated_field(
                         response, federated,
                     ),
-                )];
+                ];
             }
-            vec![iq_to_xml(response)]
+            vec![response]
         }
 
         PubSubRequest::DeleteNode { node } => {
@@ -200,7 +191,38 @@ pub(super) async fn handle_pubsub_admin_request(
             .unwrap_or(false)
             {
                 let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                return vec![error];
+            }
+
+            // A Space is deleted with the cascade `spaces:delete` runs,
+            // whoever asks: its rooms, their parent grants and links, the
+            // Space's own relations and metadata, and what S2S recorded for
+            // it go with the node, so nothing is left for a Space created
+            // again under the name to inherit.
+            if matches!(
+                spaces_service_bare_jid(spaces_domain),
+                Ok(spaces_jid) if target_jid == &spaces_jid
+            ) {
+                use crate::admin::spaces::SpaceDeletion;
+                return match crate::admin::spaces::delete_space(
+                    &state.deps.app_state,
+                    spaces_service(state, target_jid),
+                    &node,
+                )
+                .await
+                {
+                    SpaceDeletion::Deleted => {
+                        debug!(node = %node, "Space deleted via PubSub");
+                        vec![build_pubsub_success(iq)]
+                    }
+                    SpaceDeletion::NotFound => {
+                        vec![build_pubsub_error(iq, PubSubError::NodeNotFound)]
+                    }
+                    SpaceDeletion::Refused => vec![build_pubsub_error(iq, PubSubError::Forbidden)],
+                    SpaceDeletion::Failed => {
+                        vec![build_pubsub_error(iq, PubSubError::InternalServerError)]
+                    }
+                };
             }
 
             let result = state
@@ -214,31 +236,17 @@ pub(super) async fn handle_pubsub_admin_request(
                 Ok(deleted) => {
                     if deleted {
                         debug!(node = %node, "PubSub node deleted via WebSocket");
-                        // A deleted Space is open to nobody: its setting and
-                        // the subscriptions remote accounts made to it go
-                        // with it.
-                        if matches!(
-                            spaces_service_bare_jid(spaces_domain),
-                            Ok(spaces_jid) if target_jid == &spaces_jid
-                        ) {
-                            crate::server::routes::websocket::s2s_spaces::forget_space(
-                                state.deps.app_state.db_pool.global(),
-                                target_jid,
-                                &node,
-                            )
-                            .await;
-                        }
                         let response = build_pubsub_success(iq);
-                        vec![iq_to_xml(response)]
+                        vec![response]
                     } else {
                         let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
-                        vec![iq_to_xml(error)]
+                        vec![error]
                     }
                 }
                 Err(e) => {
                     warn!("PubSub node deletion failed: {}", e);
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    vec![iq_to_xml(error)]
+                    vec![error]
                 }
             }
         }
@@ -247,7 +255,7 @@ pub(super) async fn handle_pubsub_admin_request(
             let subscription_jid = jid.to_bare();
             if subscription_jid != *user_jid {
                 let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                return vec![error];
             }
             // A room-bound extension node is subscribed to by the room's
             // current right, not by an affiliation an earlier read left.
@@ -262,7 +270,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 == super::ExtensionRouteAccess::Denied
             {
                 let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                return vec![error];
             }
 
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
@@ -293,12 +301,12 @@ pub(super) async fn handle_pubsub_admin_request(
                     } else {
                         build_pubsub_error(iq, PubSubError::NodeNotFound)
                     };
-                    return vec![iq_to_xml(error)];
+                    return vec![error];
                 }
                 Err(e) => {
                     warn!("PubSub access check failed: {e}");
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
+                    return vec![error];
                 }
             }
 
@@ -311,12 +319,12 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 Ok(sub) => {
                     let response = build_pubsub_subscribe_result(iq, &node, &jid, &sub.subid);
-                    vec![iq_to_xml(response)]
+                    vec![response]
                 }
                 Err(e) => {
                     warn!("PubSub subscribe failed: {e}");
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    vec![iq_to_xml(error)]
+                    vec![error]
                 }
             }
         }
@@ -325,7 +333,7 @@ pub(super) async fn handle_pubsub_admin_request(
             let subscription_jid = jid.to_bare();
             if subscription_jid != *user_jid {
                 let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                return vec![error];
             }
             let typed_subid = subid.as_deref().map(SubId::from_raw);
             match state
@@ -337,16 +345,16 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 Ok(true) => {
                     let response = build_pubsub_success(iq);
-                    vec![iq_to_xml(response)]
+                    vec![response]
                 }
                 Ok(false) => {
                     let error = build_pubsub_error(iq, PubSubError::NotSubscribed);
-                    vec![iq_to_xml(error)]
+                    vec![error]
                 }
                 Err(e) => {
                     warn!("PubSub unsubscribe failed: {e}");
                     let error = build_pubsub_error(iq, PubSubError::NotSubscribed);
-                    vec![iq_to_xml(error)]
+                    vec![error]
                 }
             }
         }
@@ -364,12 +372,38 @@ pub(super) async fn handle_pubsub_admin_request(
                 Ok(true) => {}
                 Ok(false) => {
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
+                    return vec![error];
                 }
                 Err(e) => {
                     warn!("PubSub purge authz failed: {e}");
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
+                    return vec![error];
+                }
+            }
+            // Purging a Space's items takes its rooms out of it, as
+            // retracting each item would: no room keeps a parent grant on
+            // the Space, or a link to it, that no item names any more. The
+            // rooms stay, and so does what S2S recorded, which names the
+            // node and not its items.
+            if matches!(
+                spaces_service_bare_jid(spaces_domain),
+                Ok(spaces_jid) if target_jid == &spaces_jid
+            ) {
+                use crate::admin::spaces::SpaceUnlink;
+                match crate::admin::spaces::unlink_space_rooms(
+                    &state.deps.app_state,
+                    spaces_service(state, target_jid),
+                    &node,
+                )
+                .await
+                {
+                    SpaceUnlink::Unlinked => {}
+                    SpaceUnlink::Refused => {
+                        return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
+                    }
+                    SpaceUnlink::Failed => {
+                        return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
+                    }
                 }
             }
             match state
@@ -380,11 +414,11 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
             {
                 Ok(_) => {
-                    vec![iq_to_xml(build_pubsub_success(iq))]
+                    vec![build_pubsub_success(iq)]
                 }
                 Err(e) => {
                     warn!("PubSub purge failed: {e}");
-                    vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+                    vec![build_pubsub_error(iq, PubSubError::NodeNotFound)]
                 }
             }
         }
@@ -404,7 +438,7 @@ pub(super) async fn handle_pubsub_admin_request(
             .await
             .unwrap_or(false)
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             let is_spaces_service = matches!(
                 spaces_service_bare_jid(spaces_domain),
@@ -427,10 +461,7 @@ pub(super) async fn handle_pubsub_admin_request(
                     // Fail closed: writing the marker over an unrepaired
                     // legacy node would block its repair forever.
                     warn!(node = %node, error = %error, "Failed to repair legacy avatar node before configure");
-                    return vec![iq_to_xml(build_pubsub_error(
-                        iq,
-                        PubSubError::InternalServerError,
-                    ))];
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
             }
             let existing_node = match state
@@ -442,14 +473,11 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 Ok(Some(node)) => node,
                 Ok(None) => {
-                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+                    return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)];
                 }
                 Err(error) => {
                     warn!(node = %node, error = %error, "Failed to load PubSub node before configure");
-                    return vec![iq_to_xml(build_pubsub_error(
-                        iq,
-                        PubSubError::InternalServerError,
-                    ))];
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
             };
             // Whether the Space is open to other servers is its owner's to
@@ -461,7 +489,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 match crate::server::routes::websocket::s2s_spaces::submitted_federated(iq) {
                     Ok(federated) => federated,
                     Err(()) => {
-                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                        return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
                     }
                 }
             } else {
@@ -479,7 +507,7 @@ pub(super) async fn handle_pubsub_admin_request(
                             access_model = %access_model,
                             "Rejected Spaces node configuration with unsupported access model"
                         );
-                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                        return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
                     }
                 }
             } else {
@@ -496,10 +524,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
             {
                 warn!(node = %node, error = %error, "Failed to record owner-configured PubSub node");
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InternalServerError,
-                ))];
+                return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
             }
             match state
                 .deps
@@ -520,16 +545,13 @@ pub(super) async fn handle_pubsub_admin_request(
                             )
                             .await;
                         if !applied {
-                            return vec![iq_to_xml(build_pubsub_error(
-                                iq,
-                                PubSubError::InternalServerError,
-                            ))];
+                            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                         }
                     }
-                    vec![iq_to_xml(build_pubsub_success(iq))]
+                    vec![build_pubsub_success(iq)]
                 }
                 Err(_) => {
-                    vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+                    vec![build_pubsub_error(iq, PubSubError::NodeNotFound)]
                 }
             }
         }
@@ -546,7 +568,7 @@ pub(super) async fn handle_pubsub_admin_request(
             .await
             .unwrap_or(false)
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             let rows = state
                 .deps
@@ -556,7 +578,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
                 .unwrap_or_default();
             let response = build_pubsub_affiliations_result(iq, &node, &rows);
-            vec![iq_to_xml(response)]
+            vec![response]
         }
 
         PubSubRequest::AffiliationsSet { node, changes } => {
@@ -571,7 +593,7 @@ pub(super) async fn handle_pubsub_admin_request(
             .await
             .unwrap_or(false)
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             // ADR-0020 D8 at issuance: on the Spaces service an Owner
             // administers the Space and a publisher places rooms in it, so
@@ -592,7 +614,7 @@ pub(super) async fn handle_pubsub_admin_request(
                         )
                 })
             {
-                return vec![iq_to_xml(privileged_affiliation_refused(iq))];
+                return vec![privileged_affiliation_refused(iq)];
             }
             for (entity, aff) in &changes {
                 if let Err(e) = state
@@ -603,10 +625,21 @@ pub(super) async fn handle_pubsub_admin_request(
                     .await
                 {
                     warn!("set_affiliation failed: {e}");
-                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                    return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
+                }
+                // A banned account at another server keeps no subscription
+                // to the Space: lifting the ban does not bring it back.
+                if is_spaces_service
+                    && *aff == waddle_xmpp::pubsub::Affiliation::Outcast
+                    && !crate::server::routes::websocket::s2s_spaces::forget_remote_subscription(
+                        state, target_jid, &node, entity,
+                    )
+                    .await
+                {
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
             }
-            vec![iq_to_xml(build_pubsub_success(iq))]
+            vec![build_pubsub_success(iq)]
         }
 
         PubSubRequest::OwnerSubscriptionsGet { node } => {
@@ -621,7 +654,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 .flatten()
                 .is_none()
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+                return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)];
             }
             if !crate::pubsub_authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
@@ -633,7 +666,7 @@ pub(super) async fn handle_pubsub_admin_request(
             .await
             .unwrap_or(false)
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             let rows = state
                 .deps
@@ -643,11 +676,15 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
                 .unwrap_or_default();
             let response = build_pubsub_owner_subscriptions_result(iq, &node, &rows);
-            vec![iq_to_xml(response)]
+            vec![response]
         }
 
         PubSubRequest::OwnerSubscriptionsSet { node, changes } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
+            let is_spaces_service = matches!(
+                spaces_service_bare_jid(spaces_domain),
+                Ok(spaces_jid) if target_jid == &spaces_jid
+            );
             if state
                 .deps
                 .protocol
@@ -658,7 +695,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 .flatten()
                 .is_none()
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+                return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)];
             }
             if !crate::pubsub_authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
@@ -670,7 +707,7 @@ pub(super) async fn handle_pubsub_admin_request(
             .await
             .unwrap_or(false)
             {
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
             for (subscriber, state_value, subid) in changes {
                 match state_value {
@@ -697,13 +734,26 @@ pub(super) async fn handle_pubsub_admin_request(
                             .await
                         {
                             warn!("PubSub owner subscription add failed: {error}");
-                            return vec![iq_to_xml(build_pubsub_error(
-                                iq,
-                                PubSubError::InternalServerError,
-                            ))];
+                            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                         }
                     }
                     SubscriptionState::None => {
+                        // The subscription an account at another server made
+                        // to a Space ends with the owner's removal of it.
+                        if is_spaces_service
+                            && !crate::server::routes::websocket::s2s_spaces::forget_remote_subscription(
+                                state,
+                                target_jid,
+                                &node,
+                                &subscriber.to_bare(),
+                            )
+                            .await
+                        {
+                            return vec![build_pubsub_error(
+                                iq,
+                                PubSubError::InternalServerError,
+                            )];
+                        }
                         let typed_subid = subid.as_deref().map(SubId::from_raw);
                         if let Some(typed_subid) = typed_subid.as_ref() {
                             match state
@@ -715,17 +765,17 @@ pub(super) async fn handle_pubsub_admin_request(
                             {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    return vec![iq_to_xml(build_pubsub_error(
+                                    return vec![build_pubsub_error(
                                         iq,
                                         PubSubError::NotSubscribed,
-                                    ))];
+                                    )];
                                 }
                                 Err(error) => {
                                     warn!("PubSub owner subscription remove failed: {error}");
-                                    return vec![iq_to_xml(build_pubsub_error(
+                                    return vec![build_pubsub_error(
                                         iq,
                                         PubSubError::InternalServerError,
-                                    ))];
+                                    )];
                                 }
                             }
                             continue;
@@ -741,10 +791,10 @@ pub(super) async fn handle_pubsub_admin_request(
                             Ok(rows) => rows,
                             Err(error) => {
                                 warn!("PubSub owner subscription lookup failed: {error}");
-                                return vec![iq_to_xml(build_pubsub_error(
+                                return vec![build_pubsub_error(
                                     iq,
                                     PubSubError::InternalServerError,
-                                ))];
+                                )];
                             }
                         };
                         let subscriber_bare = subscriber.to_bare();
@@ -754,10 +804,7 @@ pub(super) async fn handle_pubsub_admin_request(
                             .map(|row| row.subid)
                             .collect();
                         if matching_subids.is_empty() {
-                            return vec![iq_to_xml(build_pubsub_error(
-                                iq,
-                                PubSubError::NotSubscribed,
-                            ))];
+                            return vec![build_pubsub_error(iq, PubSubError::NotSubscribed)];
                         }
                         for matching_subid in matching_subids {
                             if let Err(error) = state
@@ -768,31 +815,44 @@ pub(super) async fn handle_pubsub_admin_request(
                                 .await
                             {
                                 warn!("PubSub owner subscription remove failed: {error}");
-                                return vec![iq_to_xml(build_pubsub_error(
+                                return vec![build_pubsub_error(
                                     iq,
                                     PubSubError::InternalServerError,
-                                ))];
+                                )];
                             }
                         }
                     }
                     SubscriptionState::Pending | SubscriptionState::Unconfigured => {
-                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                        return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
                     }
                 }
             }
-            vec![iq_to_xml(build_pubsub_success(iq))]
+            vec![build_pubsub_success(iq)]
         }
 
         PubSubRequest::Unsupported { feature } => {
-            vec![iq_to_xml(build_pubsub_error(
+            vec![build_pubsub_error(
                 iq,
                 PubSubError::UnsupportedFeature(feature),
-            ))]
+            )]
         }
         PubSubRequest::Publish { .. }
         | PubSubRequest::Items { .. }
         | PubSubRequest::Retract { .. } => Vec::new(),
         _ => Vec::new(),
+    }
+}
+
+/// The Spaces service `spaces_jid` as the WebSocket state reaches it: its
+/// PubSub store and the MUC service whose rooms its items name.
+fn spaces_service<'a>(
+    state: &'a WebSocketState,
+    spaces_jid: &'a BareJid,
+) -> crate::admin::spaces::SpaceService<'a> {
+    crate::admin::spaces::SpaceService {
+        storage: &state.deps.protocol.pubsub_storage,
+        spaces_jid,
+        muc_domain: &state.deps.service_domains.muc,
     }
 }
 

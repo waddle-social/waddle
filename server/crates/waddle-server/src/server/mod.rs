@@ -104,4 +104,6 @@ pub(crate) use lifecycle::register_inbox_lineage;
 pub use lifecycle::start;
 pub use lifecycle::start_with_config;
 pub use lifecycle::start_with_config_and_owner_outbox;
+#[cfg(feature = "test-support")]
+pub(crate) use lifecycle::with_replica_privileged_issuance;
 pub use lifecycle::RestrictedStartupError;

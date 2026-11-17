@@ -416,15 +416,15 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
 
     // A Space's subscribers at other servers: each is notified only for a
     // subscription it made itself, decided on the evidence that
-    // subscription recorded, and only of a room it may be told of.
+    // subscription recorded, and only of a room it may be told of. That is
+    // decided off this request: the publication is only queued here.
     if space_node {
-        crate::server::routes::websocket::s2s_spaces::notify_remote_subscribers(
+        crate::server::routes::websocket::s2s_spaces::queue_remote_notification(
             state,
             owner,
             &node_record,
             &event,
-        )
-        .await;
+        );
     }
 
     // XEP-0163 §3: presence-driven fan-out. Two passes follow the

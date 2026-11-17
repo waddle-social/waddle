@@ -250,12 +250,10 @@ pub async fn start_with_config_and_owner_outbox(
             .with_host_grant_authority(store.clone(), host_grants.enrolled().clone()),
         None => permission_actor_impl,
     };
-    // The privileged relations no writer names (the channel manager and
-    // moderator, the Space moderator and the role manager) are written only
-    // for accounts of the served domain and of the trusted homes of the S2S
-    // snapshot this replica runs (ADR-0020 D8).
-    let permission_actor_impl = permission_actor_impl.with_privileged_issuance(
-        replica_privileged_issuance(&xmpp_config, s2s_config.as_deref()),
+    let permission_actor_impl = with_replica_privileged_issuance(
+        permission_actor_impl,
+        &xmpp_config,
+        s2s_config.as_deref(),
     );
     info!(
         backend = permission_actor_impl.backend_name(),
@@ -991,6 +989,20 @@ fn check_trusted_homes(
              deployment's services, or a service domain is not canonical"
         )
     })
+}
+
+/// `actor` deciding issuance of the privileged relations as this replica
+/// does: the channel and Space owner and admin, the channel manager and
+/// moderator, the Space moderator and the role manager are written only for
+/// accounts of the served domain and of the trusted homes of the S2S
+/// snapshot it runs (ADR-0020 D8). Startup builds the replica's actor with
+/// it, and so does the test-support seam that stands for startup.
+pub(crate) fn with_replica_privileged_issuance(
+    actor: crate::permissions::PermissionActor,
+    xmpp_config: &XmppConfig,
+    s2s_config: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::PermissionActor {
+    actor.with_privileged_issuance(replica_privileged_issuance(xmpp_config, s2s_config))
 }
 
 /// The accounts a privileged relation may be written for on this replica:

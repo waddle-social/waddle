@@ -330,6 +330,28 @@ pub fn host_rooms_for_remote_occupants(
     crate::server::routes::websocket::s2s_rooms::host_rooms(state, router, seats);
 }
 
+/// `actor` deciding issuance of the privileged relations as startup makes a
+/// replica's permission actor decide it, for the served domain of `xmpp`
+/// and the trusted homes of `s2s` (ADR-0020 D8). It is the function startup
+/// calls, so a case that writes through the result shows what a serving
+/// replica refuses.
+#[cfg(feature = "test-support")]
+pub fn permission_actor_as_startup_builds(
+    actor: crate::permissions::PermissionActor,
+    xmpp: &crate::server::XmppConfig,
+    s2s: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::PermissionActor {
+    crate::server::with_replica_privileged_issuance(actor, xmpp, s2s)
+}
+
+/// Wait until the Spaces host attached to `router` has decided every
+/// publication it took, so that a case reads what left for subscribers at
+/// other servers after its last publication.
+#[cfg(feature = "test-support")]
+pub async fn spaces_publications_settled(router: &crate::s2s::route::S2sRouter) {
+    router.spaces_publications_settled().await;
+}
+
 /// Have `router` serve the Spaces of `state` to remote principals, as
 /// startup does for a replica with S2S enabled: the router hands what
 /// remote principals ask of the Spaces PubSub service to the state's

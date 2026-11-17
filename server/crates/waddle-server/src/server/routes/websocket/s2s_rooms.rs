@@ -620,38 +620,7 @@ impl Asked<'_> {
     /// found, as before the actor was unreachable, so the retryable answer
     /// never tells a closed room from one that does not exist.
     async fn open_to_other_servers(&self, room: &BareJid) -> Option<bool> {
-        if !is_muc_room_jid(self.state, room).await {
-            return Some(false);
-        }
-        let read_catalog = || async {
-            let channel = get_managed_channel_for_room(self.state, room).await.ok()?;
-            // `None` for an address without a row.
-            Some(channel.map(|channel| {
-                channel.federated
-                    && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
-            }))
-        };
-        match get_room_actor_result(self.state, room).await {
-            Ok(Some(actor)) => {
-                let config = actor
-                    .ask(GetConfig)
-                    .reply_timeout(ROOM_ASK_TIMEOUT)
-                    .await
-                    .ok()?;
-                Some(config.federated && !config.group_dm)
-            }
-            Ok(None) => Some(read_catalog().await?.unwrap_or(false)),
-            Err(_) => {
-                let may_be_open = read_catalog()
-                    .await?
-                    .unwrap_or_else(|| self.state.deps.app_state.federates_new_rooms());
-                if may_be_open {
-                    None
-                } else {
-                    Some(false)
-                }
-            }
-        }
+        room_open_to_other_servers(self.state, room).await
     }
 
     /// The refusal of a request for a room accounts at other servers may
@@ -1461,5 +1430,53 @@ impl LocalRooms for WebSocketLocalRooms {
             .reply_timeout(ROOM_ASK_TIMEOUT)
             .await
             .ok()
+    }
+}
+
+/// Whether accounts at other servers may reach `room` at all, as the room
+/// host decides it for every request and as a Space decides whether to tell
+/// a remote principal of the room: it exists, it is not a group
+/// conversation of this deployment's accounts, and its `federated` setting
+/// is on. `None` when that cannot be told now.
+///
+/// The setting is read from the room's actor when this replica holds one,
+/// and otherwise from the channel catalog, which a room's configuration
+/// keeps in step. A room whose actor cannot be reached now is "cannot be
+/// told" only when it may be open: its catalog row says so, or it has no
+/// row while this deployment opens its new rooms to other servers.
+pub(crate) async fn room_open_to_other_servers(
+    state: &WebSocketState,
+    room: &BareJid,
+) -> Option<bool> {
+    if !is_muc_room_jid(state, room).await {
+        return Some(false);
+    }
+    let read_catalog = || async {
+        let channel = get_managed_channel_for_room(state, room).await.ok()?;
+        // `None` for an address without a row.
+        Some(channel.map(|channel| {
+            channel.federated && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+        }))
+    };
+    match get_room_actor_result(state, room).await {
+        Ok(Some(actor)) => {
+            let config = actor
+                .ask(GetConfig)
+                .reply_timeout(ROOM_ASK_TIMEOUT)
+                .await
+                .ok()?;
+            Some(config.federated && !config.group_dm)
+        }
+        Ok(None) => Some(read_catalog().await?.unwrap_or(false)),
+        Err(_) => {
+            let may_be_open = read_catalog()
+                .await?
+                .unwrap_or_else(|| state.deps.app_state.federates_new_rooms());
+            if may_be_open {
+                None
+            } else {
+                Some(false)
+            }
+        }
     }
 }
