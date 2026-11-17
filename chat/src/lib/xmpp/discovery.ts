@@ -11,6 +11,7 @@ import type {
 import type { XmppCondition, XmppStreamReason } from "../telemetry-observations";
 import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { qualifiedSpaceKey } from "./qualified-identity";
+import { canonicalDomain, canonicalRoomJid, isRemoteRoomJid, parseSpaceNodeIri } from "./remote-address";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 import { stanzaErrorContext } from "./stanza-error-context";
 
@@ -146,18 +147,6 @@ function textContent(element: Element | null | undefined): string | null {
   return value ? value : null;
 }
 
-function parseSpaceNodeIri(value: string | null): string | null {
-  if (!value) return null;
-  try {
-    const iri = new URL(value);
-    const node = iri.searchParams.get(";node") ?? iri.searchParams.get("node");
-    return node?.trim() || null;
-  } catch {
-    const match = /(?:^|[?&;])node=([^&;]+)/.exec(value);
-    return match?.[1] ? decodeURIComponent(match[1]).trim() || null : null;
-  }
-}
-
 function parseBooleanValue(value: string | null): boolean | null {
   if (!value) return null;
   const normalized = value.toLowerCase();
@@ -212,9 +201,18 @@ function isSpacesNodeInfo(info: DiscoInfoData | null | undefined): boolean {
     && formField(info, NS_PUBSUB_METADATA, "pubsub#type") === NS_SPACES_0;
 }
 
-function roomParentSpaceId(info: DiscoInfoData): string | null {
-  return parseSpaceNodeIri(formField(info, NS_SPACES_0, "parent"))
+/**
+ * The Space a room names as its parent, as a node on `spacesServiceJid`.
+ * A Space is identified by its service and node together: a parent on any
+ * other service, or one that names no service, is not one of the home
+ * deployment's Spaces, whatever its node is called.
+ */
+function roomParentSpaceId(info: DiscoInfoData, spacesServiceJid: string | undefined): string | null {
+  const home = spacesServiceJid ? canonicalDomain(barePeerJid(spacesServiceJid)) : null;
+  if (!home) return null;
+  const parent = parseSpaceNodeIri(formField(info, NS_SPACES_0, "parent"))
     ?? parseSpaceNodeIri(formField(info, NS_MUC_ROOMINFO, "muc#roomconfig_pubsub"));
+  return parent && parent.serviceJid === home ? parent.node : null;
 }
 
 function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: string | undefined, err: unknown): void {
@@ -361,7 +359,15 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
 export function spacesServiceDomain(jid: string): string { return `spaces.${jidDomain(jid)}`; }
 export function mucServiceDomain(jid: string): string { return `muc.${jidDomain(jid)}`; }
 
-async function discoverComponentServices(xmpp: HybridClient, domain: string, jid: string): Promise<{ muc: string; spaces: string }> {
+/**
+ * The home deployment's MUC and Spaces services, with whether the MUC
+ * service was discovered rather than assumed from the conventional name.
+ */
+async function discoverComponentServices(
+  xmpp: HybridClient,
+  domain: string,
+  jid: string,
+): Promise<{ services: { muc: string; spaces: string }; mucDiscovered: boolean }> {
   const fallback = { muc: mucServiceDomain(jid), spaces: spacesServiceDomain(jid) };
   try {
     const items = await sendDiscoItems(xmpp, domain);
@@ -385,22 +391,41 @@ async function discoverComponentServices(xmpp: HybridClient, domain: string, jid
         ? entry.value
         : { serviceJid: candidates[index]!, info: null },
     );
-    const muc = serviceInfo.find(({ info }) =>
+    const discoveredMuc = serviceInfo.find(({ info }) =>
       hasDiscoFeature(info, NS_MUC)
       || info?.identities.some((identity) => identity.category === "conference")
-    )?.serviceJid ?? fallback.muc;
+    )?.serviceJid;
+    const muc = discoveredMuc ?? fallback.muc;
     // A generic pubsub identity is not enough: the extensions component is
     // also pubsub. Keep the conventional Spaces fallback unless a component
     // explicitly advertises the XEP-0503 namespace.
     const spaces = serviceInfo.find(({ info }) => isSpacesServiceInfo(info))?.serviceJid ?? fallback.spaces;
-    return { muc, spaces };
+    return { services: { muc, spaces }, mucDiscovered: discoveredMuc !== undefined };
   } catch {
-    return fallback;
+    return { services: fallback, mucDiscovered: false };
   }
 }
 
-function channelFromRoom(room: { jid: string; name?: string; channel_type?: string }, position: number): DiscoveredChannel {
-  const id = jidLocalpart(room.jid);
+/**
+ * Local id of a room known only from a bookmark. A room of the home MUC
+ * service keeps its localpart, as rooms of the home catalog do, so existing
+ * routes and stored state still resolve. A room anywhere else is identified
+ * by its canonical bare JID: a localpart names a room only relative to its
+ * service, and a remote `general` must never take the id of the home
+ * `general`. A localpart cannot contain `@`, so the two forms never collide.
+ */
+export function channelIdForRoom(roomJid: string, homeMucService: string): string {
+  const home = canonicalDomain(barePeerJid(homeMucService));
+  const room = canonicalRoomJid(barePeerJid(roomJid));
+  if (room && home && isRemoteRoomJid(room, { accountDomain: "", mucService: home })) return room;
+  return jidLocalpart(roomJid);
+}
+
+function channelFromRoom(
+  room: { jid: string; name?: string; channel_type?: string },
+  position: number,
+  id: string = jidLocalpart(room.jid),
+): DiscoveredChannel {
   return { id, name: room.name || id, jid: room.jid, channelType: normalizeChannelType(room.channel_type || "text"), position };
 }
 
@@ -418,8 +443,12 @@ export function pinPermissionFromDiscoFields(fields: Map<string, string>): "admi
  * tests) can verify the full mapping without going through DOMParser.
  * `hydrateRoomInfo` is the IO-boundary wrapper; this function is the
  * pure transform. */
-export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfoData): DiscoveredChannel {
-  const parentSpaceId = roomParentSpaceId(info);
+export function applyDiscoInfoToChannel(
+  room: DiscoveredChannel,
+  info: DiscoInfoData,
+  spacesServiceJid?: string,
+): DiscoveredChannel {
+  const parentSpaceId = roomParentSpaceId(info, spacesServiceJid);
   const pinPermission = pinPermissionFromDiscoFields(info.fields);
   return {
     ...room,
@@ -436,7 +465,11 @@ type RoomInfoHydration = {
   fingerprintComplete: boolean;
 };
 
-async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<RoomInfoHydration> {
+async function hydrateRoomInfo(
+  xmpp: HybridClient,
+  room: DiscoveredChannel,
+  spacesServiceJid?: string,
+): Promise<RoomInfoHydration> {
   if (!room.jid) return { room, fingerprintComplete: false };
   // No internal try/catch: callers wrap this in `Promise.allSettled` and
   // map rejected entries to the unhydrated `channelFromRoom` record, so a
@@ -446,7 +479,7 @@ async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Pro
   const info = await sendDiscoInfo(xmpp, room.jid);
   if (!info) return { room, fingerprintComplete: false };
   return {
-    room: applyDiscoInfoToChannel(room, info),
+    room: applyDiscoInfoToChannel(room, info, spacesServiceJid),
     fingerprintComplete: true,
   };
 }
@@ -461,7 +494,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   const items = await sendPubsubItems(xmpp, spacesService, spaceNode);
   const settled = await Promise.allSettled(
     items.map((item, position) =>
-      hydrateRoomInfo(xmpp, channelFromRoom({ jid: item.jid ?? "", name: item.name }, position)),
+      hydrateRoomInfo(xmpp, channelFromRoom({ jid: item.jid ?? "", name: item.name }, position), spacesService),
     ),
   );
   const hydrated = settled.map((entry, index) =>
@@ -474,7 +507,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
 
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
-  const services = await discoverComponentServices(xmpp, domain, jid);
+  const { services, mucDiscovered } = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
   let roomCatalogComplete = true;
   let bookmarkCatalogComplete = true;
@@ -574,27 +607,44 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     mucCatalogComplete = false;
     void err;
   }
-  const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean }> =
+  const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean; remote?: boolean }> =
     mucRooms.map((room) => ({ ...room, bookmarkOnly: false }));
   const discoveredRoomJids = new Set(
     roomItems
       .map((room) => room.jid ? barePeerJid(room.jid) : null)
       .filter((roomJid): roomJid is string => roomJid !== null),
   );
+  const home = { accountDomain: domain, mucService: services.muc, spacesService: services.spaces };
   for (const [roomJid, bookmark] of bookmarkedRooms.entries()) {
     if (!discoveredRoomJids.has(roomJid)) {
-      roomItems.push({ jid: roomJid, name: bookmark.name, bookmarkOnly: true });
+      roomItems.push({
+        jid: roomJid,
+        name: bookmark.name,
+        bookmarkOnly: true,
+        // Only a discovered MUC service tells home rooms from remote ones:
+        // the conventional name may not be this deployment's service.
+        remote: mucDiscovered && isRemoteRoomJid(roomJid, home),
+      });
     }
   }
+  // A bookmarked room on another server is listed from the bookmark alone.
+  // Asking its host here would put a federated round trip (and, while that
+  // server is down, a full timeout) into every structure load, and its
+  // answer is no part of the home catalog: joining the room asks the host.
   const hydratedSettled = await Promise.allSettled(
-    roomItems.map((room, position) =>
-      hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
-    ),
+    roomItems.map((room, position) => {
+      const roomJid = room.jid ?? "";
+      const id = room.bookmarkOnly && mucDiscovered ? channelIdForRoom(roomJid, services.muc) : undefined;
+      const channel = channelFromRoom({ jid: roomJid, name: room.name }, position, id);
+      return room.remote
+        ? Promise.resolve<RoomInfoHydration>({ room: channel, fingerprintComplete: false })
+        : hydrateRoomInfo(xmpp, channel, services.spaces);
+    }),
   );
   if (hydratedSettled.some(
-    (entry) =>
-      entry.status === "rejected"
-      || !entry.value.fingerprintComplete
+    (entry, index) =>
+      !roomItems[index]!.remote
+      && (entry.status === "rejected" || !entry.value.fingerprintComplete)
   )) {
     roomCatalogComplete = false;
   }
@@ -610,6 +660,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     if (entry.status === "fulfilled") {
       if (
         source.bookmarkOnly
+        && !source.remote
         && !entry.value.room.features?.some((feature) => feature === NS_MUC)
       ) {
         return [];

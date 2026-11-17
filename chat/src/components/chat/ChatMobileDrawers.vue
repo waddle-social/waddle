@@ -217,7 +217,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
 
         <div class="flex flex-col gap-1.5">
           <button
-            v-if="waddles.currentChannel.value && waddles.canManageChannels.value"
+            v-if="waddles.currentChannel.value && waddles.canManageCurrentChannel.value"
             class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
             type="button"
             @click="openChannelEdit(); ui.showMobileDetails.value = false"

@@ -13,7 +13,8 @@ import {
   moveMucToSpace,
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
+import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
+import { isRemoteRoomJid } from "@/lib/xmpp/remote-address";
 import { occupantJidDirectory } from "@/lib/avatars/author-jid";
 
 interface LoadSpaceOptions {
@@ -156,6 +157,26 @@ export function useWaddleDirectory(
   const canManageChannels = computed(() =>
     ["owner"].includes(serverRole.value ?? "") ||
     ["owner"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
+  );
+
+  /**
+   * Whether the selected room is hosted by another server. Its settings
+   * belong to that server: a role on this deployment, or on one of its
+   * Spaces, is no standing in it.
+   */
+  const currentChannelIsRemote = computed(() => {
+    const roomJid = currentChannel.value?.jid;
+    const accountJid = session.value?.jid;
+    if (!roomJid || !accountJid) return false;
+    return isRemoteRoomJid(roomJid, {
+      accountDomain: jidDomain(accountJid),
+      mucService: mucServiceJid.value ?? mucServiceDomain(accountJid),
+    });
+  });
+
+  /** Room settings for the selected room: a channel manager, in a room of this deployment. */
+  const canManageCurrentChannel = computed(() =>
+    canManageChannels.value && !currentChannelIsRemote.value,
   );
 
   const canManageMembers = computed(() =>
@@ -700,6 +721,8 @@ export function useWaddleDirectory(
     sortedMembers,
     canManageCommunity,
     canManageChannels,
+    canManageCurrentChannel,
+    currentChannelIsRemote,
     canManageMembers,
     loadSpace,
     loadStructure,

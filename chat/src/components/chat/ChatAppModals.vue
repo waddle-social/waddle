@@ -79,7 +79,7 @@ const {
       :form="waddles.editChannelForm.value"
       :is-submitting="waddles.isSubmitting.value"
       :spaces="waddles.sortedSpaces.value"
-      :can-move-channel="waddles.canManageChannels.value"
+      :can-move-channel="waddles.canManageCurrentChannel.value"
       @update:form="waddles.editChannelForm.value = $event"
       @save="handleUpdateChannel"
       @delete="handleDeleteChannel"

@@ -954,7 +954,7 @@ async function recoverSupersededFromShell() {
               :is-loading-older-messages="activeIsLoadingOlderMessages"
               :has-older-messages="activeHasOlderMessages"
               :is-sending="activeIsSending"
-              :can-manage-channels="waddles.canManageChannels.value"
+              :can-manage-channels="waddles.canManageCurrentChannel.value"
               :member-count="displayedMemberCount"
               :member-state="displayedMemberState"
               :typing-users="activeTypingUsers"

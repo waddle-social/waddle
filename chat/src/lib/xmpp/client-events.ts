@@ -18,6 +18,7 @@
  *   must not break the others or the client.
  */
 
+import type { RoomJoinError } from "./room-join-error";
 import type { SmFailureCondition } from "./sm-failure-condition";
 import type {
   ChatStateEvent,
@@ -135,6 +136,10 @@ export type ClientEvents = {
   ownProfilePublished: [ownBareJid: string];
   /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
   ownOccupantNick: [roomJid: string, nick: string | null];
+  /** Our own occupancy of a room ended; `statusCodes` are the room's XEP-0045 status codes. */
+  ownRoomDeparture: [roomJid: string, statusCodes: readonly number[]];
+  /** A room join failed; `roomJid` is the room's canonical key. */
+  roomJoinFailed: [roomJid: string, error: RoomJoinError];
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
   dmReaction: [event: DmReactionEvent];

@@ -58,7 +58,7 @@ type PresenceManagerDeps = {
   /** Own available self-presence (XEP-0045 §7.2.2 status 110): the join completed. */
   onOwnSelfPresence: (roomJid: string) => void;
   /** Own unavailable self-presence that is not a §7.6 nick change: readiness revoked. */
-  onOwnUnavailable: (roomJid: string) => void;
+  onOwnUnavailable: (roomJid: string, statusCodes: readonly number[]) => void;
 };
 
 export class PresenceManager {
@@ -207,7 +207,7 @@ export class PresenceManager {
         // so it must NOT revoke room readiness.
         const isNickChange = presence.muc_status_codes?.includes(303) ?? false;
         if (this.isOwnMucSelfPresence(presence)) {
-          if (!isNickChange) this.deps.onOwnUnavailable(room);
+          if (!isNickChange) this.deps.onOwnUnavailable(room, presence.muc_status_codes ?? []);
           // The old occupant stops identifying us immediately, including
           // during a nick change before the new available self-presence.
           this.deps.events.emitSafe("ownOccupantNick", room, null);
