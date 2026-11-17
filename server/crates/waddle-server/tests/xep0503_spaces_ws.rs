@@ -911,3 +911,112 @@ async fn spaces_delete_destroys_only_the_rooms_whose_parent_the_space_is() {
     let _ = admin.close().await;
     pool.close().await;
 }
+
+const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
+
+/// A `disco#items` query, of `node` if given.
+fn disco_items(node: Option<&str>) -> Element {
+    let mut query = Element::builder("query", NS_DISCO_ITEMS);
+    if let Some(node) = node {
+        query = query.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    }
+    query.build()
+}
+
+/// The `(jid, name)` of each item of a `disco#items` answer.
+fn disco_item_pairs(frame: &str) -> Vec<(String, Option<String>)> {
+    let response: Element = frame.parse().expect("disco#items response XML");
+    response
+        .get_child("query", NS_DISCO_ITEMS)
+        .map(|query| {
+            query
+                .children()
+                .filter(|item| item.name() == "item")
+                .map(|item| {
+                    (
+                        item.attr("jid").unwrap_or_default().to_owned(),
+                        item.attr("name").map(str::to_owned),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// XEP-0503, "Advertising space membership", and its MUC fallback: the
+/// `disco#items` of a Space's node lists the rooms the Space holds, as
+/// XEP-0060 §5.5 lists published items (the service's address and the item
+/// ID, the room's JID, as its name); a node the session may not read is not
+/// found. A session that never asks the Spaces service finds the same room
+/// in the MUC service's `disco#items` (XEP-0045 §6.3) and enters it by its
+/// plain JID (§7.2).
+#[tokio::test]
+async fn a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-space-children").await;
+    space_holding_a_new_room(&mut admin, "made", "lab").await;
+    let room = format!("lab@muc.{DOMAIN}");
+
+    let children = iq_get_to(
+        &mut admin,
+        "made-children",
+        "spaces.localhost",
+        disco_items(Some("made")),
+    )
+    .await;
+    assert!(is_result(&children), "{children}");
+    assert_eq!(
+        disco_item_pairs(&children),
+        vec![("spaces.localhost".to_owned(), Some(room.clone()))]
+    );
+    let missing = iq_get_to(
+        &mut admin,
+        "missing-children",
+        "spaces.localhost",
+        disco_items(Some("nowhere")),
+    )
+    .await;
+    assert!(
+        missing.contains("item-not-found"),
+        "a node that does not exist must not be listed: {missing}"
+    );
+
+    let mut plain = admin_client(&server, "xep0503-no-spaces").await;
+    let rooms = iq_get_to(
+        &mut plain,
+        "muc-rooms",
+        &format!("muc.{DOMAIN}"),
+        disco_items(None),
+    )
+    .await;
+    assert!(
+        disco_item_pairs(&rooms).iter().any(|(jid, _)| jid == &room),
+        "the Space's room must be listed by the MUC service: {rooms}"
+    );
+    let occupant = format!("{room}/plain");
+    let join = Element::builder("presence", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            occupant.clone(),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .build();
+    plain.send(&String::from(&join)).await.expect("send join");
+    let entered = plain
+        .recv_matching(|frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                element.name() == "presence" && element.attr("from") == Some(occupant.as_str())
+            })
+        })
+        .await
+        .expect("the room answers the join");
+    let entered: Element = entered.parse().expect("presence XML");
+    assert_eq!(
+        entered.attr("type"),
+        None,
+        "the join was refused: {entered:?}"
+    );
+    let _ = plain.close().await;
+    let _ = admin.close().await;
+}

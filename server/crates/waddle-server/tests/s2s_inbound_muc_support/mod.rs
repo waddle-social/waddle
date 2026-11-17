@@ -383,6 +383,47 @@ impl Hosted {
         }
     }
 
+    /// Insert the channel catalog row of the room `id`, as the admin
+    /// commands write it, with whether MUC service discovery lists it
+    /// (`public_room`), whether it is open to accounts at other servers
+    /// (`federated`) and its `channel_type`. No room actor is started: a
+    /// catalogued room is listed from its row.
+    pub async fn catalogued_room(
+        &self,
+        id: &str,
+        public_room: bool,
+        federated: bool,
+        channel_type: &str,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(waddle_server::db::actor::DbExecute {
+                sql: "INSERT INTO channels (id, name, description, channel_type, position, \
+                      is_default, pin_permission, members_only, public_room, federated, \
+                      created_at, updated_at) \
+                      VALUES (?, ?, ?, ?, 0, ?, 'anyone', ?, ?, ?, ?, ?)"
+                    .to_owned(),
+                params: vec![
+                    id.into(),
+                    id.into(),
+                    None::<String>.into(),
+                    channel_type.into(),
+                    false.into(),
+                    false.into(),
+                    public_room.into(),
+                    federated.into(),
+                    now.clone().into(),
+                    now.into(),
+                ],
+            })
+            .await
+            .expect("channel catalog row");
+    }
+
     /// The seat `occupant` holds in `room` on `example.com`.
     pub fn seat(&self, room: &str, occupant: &str) -> Option<Seat> {
         let room: BareJid = room.parse().expect("a room JID");

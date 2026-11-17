@@ -500,6 +500,9 @@ async fn channel_search_finds_a_managed_room_only_for_an_account_that_may_view_i
     fixture.close().await;
 }
 
+/// The MUC service lists the managed room to an account whose grants allow
+/// `view` and to nobody else (XEP-0045 §6.3); the scope's Space node is
+/// described and listed to nobody, its node's `disco#items` included.
 #[tokio::test]
 async fn the_enrolled_space_and_the_managed_room_are_not_described_by_the_services() {
     let Some(fixture) = ManagedRoom::start("hg_sink_disco").await else {
@@ -532,13 +535,35 @@ async fn the_enrolled_space_and_the_managed_room_are_not_described_by_the_servic
         "the enrolled Space node was described: {reply:?}"
     );
 
-    // Neither service lists them, though the room's catalog row is public.
+    // Nor are its children listed.
+    let node_items = Element::builder("query", NS_DISCO_ITEMS)
+        .attr(attribute("node"), node.as_str())
+        .build();
+    let reply = round_trip(&mut romeo, get("space-items", SPACES, node_items)).await;
+    assert!(
+        is_error(&reply, DefinedCondition::ItemNotFound),
+        "the enrolled Space node's children were listed: {reply:?}"
+    );
+
+    // The MUC service lists the room, whose catalog row is public, to the
+    // member, whose grants allow `view`, and not to an account whose
+    // grants do not, whatever legacy relationship it holds.
     let reply = round_trip(&mut romeo, get("rooms", MUC, disco_items())).await;
     assert!(is_result(&reply), "MUC disco#items: {reply:?}");
     assert!(
-        !item_jids(&reply).contains(&room.to_string()),
-        "the managed room was listed: {reply:?}"
+        item_jids(&reply).contains(&room.to_string()),
+        "the managed room was not listed to a member: {reply:?}"
     );
+    fixture.legacy_grants(CAROL).await;
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let reply = round_trip(&mut carol, get("carol-rooms", MUC, disco_items())).await;
+    assert!(is_result(&reply), "MUC disco#items: {reply:?}");
+    assert!(
+        !item_jids(&reply).contains(&room.to_string()),
+        "the managed room was listed to an ungranted account: {reply:?}"
+    );
+
+    // The Spaces service does not list the scope's Space node.
     let reply = round_trip(&mut romeo, get("spaces", SPACES, disco_items())).await;
     assert!(is_result(&reply), "Spaces disco#items: {reply:?}");
     let nodes = item_nodes(&reply);
