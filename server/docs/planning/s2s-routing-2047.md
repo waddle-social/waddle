@@ -2391,8 +2391,13 @@ runbook (G24):
 - The PEP node `urn:waddle:joined-spaces:0` is a well-known private node:
   it is created with `whitelist` access, up to 1,024 items and no
   last-item delivery, an owner configure cannot weaken that, only its
-  owner publishes to it, and a publish without an item id is refused
-  (`bad-request`). Before, a client could create it as any other PEP node,
+  owner reads, publishes to or administers it whatever affiliation rows
+  it holds, and a publish without an item id is refused (`bad-request`).
+  An owner affiliations set that would make another entity a member,
+  publisher, publish-only entity or owner of it, or the account an
+  outcast of it, is answered with `not-acceptable` (type `modify`)
+  carrying only those entities with their existing affiliation, and the
+  request's other changes apply (XEP-0060 §8.9.2.4). Before, a client could create it as any other PEP node,
   with presence access and one item. Nothing on the server reads it.
 
 The web client changes these whether or not S2S is on (the S2S-off
