@@ -18,7 +18,7 @@ use waddle_server::server::account_session_endings::{ReplicaLease, RequestedEndi
 use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::test_support::{
     attach_pending_startup, make_deployment_owner, router, seed_local_account, websocket_state,
-    websocket_state_without_durable_sm, WebSocketState,
+    WebSocketState,
 };
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::WsXmppClient;
@@ -54,12 +54,12 @@ impl Server {
         Self::serve(websocket_state().await).await
     }
 
-    /// A server on a state whose session registry keeps detached sessions
-    /// and their ingress custody itself (no durable stream-management
-    /// authority), with the offline store startup attaches: rows in the
-    /// state's database, which also holds the ledger of retired JIDs.
-    pub async fn start_with_registry_sessions() -> Self {
-        let mut state = websocket_state_without_durable_sm().await;
+    /// A server whose offline store is the one startup attaches: rows in the
+    /// state's database, which also holds the ledger of retired JIDs and the
+    /// durable stream-management authority's sessions and their ingress
+    /// custody.
+    pub async fn start_with_offline_store() -> Self {
+        let mut state = websocket_state().await;
         let global = state.deps.app_state.db_pool.global().clone();
         let pending = attach_pending_startup(
             &ResolvedXmppDatabaseUrl::InheritedGlobal(global.database_url().to_owned()),

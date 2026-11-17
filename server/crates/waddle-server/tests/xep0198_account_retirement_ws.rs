@@ -184,7 +184,7 @@ fn direct_message(to: &FullJid, id: &str) -> Message {
 
 #[tokio::test]
 async fn a_retired_accounts_ingress_custody_is_discarded_and_never_reaches_its_offline_store() {
-    let server = Server::start_with_registry_sessions().await;
+    let server = Server::start_with_offline_store().await;
     let alice = server.account("alice").await;
     server.account("bob").await;
     let resource: FullJid = alice.with_resource_str("phone").expect("full JID");

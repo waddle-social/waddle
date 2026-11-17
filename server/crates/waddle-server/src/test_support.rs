@@ -292,25 +292,6 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
-/// The default in-memory WebSocket state on a replica that selected no
-/// durable stream-management authority: the session registry keeps a
-/// detached session, and the ingress custody of what it holds, itself.
-///
-/// # Panics
-/// Panics if database schema or WebSocket fixture construction fails.
-#[cfg(feature = "test-support")]
-pub async fn websocket_state_without_durable_sm() -> Arc<WebSocketState> {
-    create_test_websocket_state_with_ingress_factory(
-        empty_extension_manager().await,
-        TestStateOverrides {
-            without_durable_sm: true,
-            ..TestStateOverrides::default()
-        },
-        || std::future::ready(None),
-    )
-    .await
-}
-
 /// Run one pass of the recovery of ingress custody whose stream-management
 /// session is gone, as the session janitor does: a payload the store takes
 /// is handed to the recipient's offline store. Returns whether every
