@@ -69,3 +69,19 @@ describe("rooms on a component the home server lists", () => {
     expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob" }), home)).toBe("chat.remote.test");
   });
 });
+
+describe("senders on a home component", () => {
+  test("an extension bot posting from a component the home server lists loads its media", () => {
+    const home = { ...HOME, components: ["muc.home.test", "extensions.home.test"] };
+    expect(remoteMediaSource(message({ authorJid: "plugin@extensions.home.test" }), home)).toBeNull();
+    expect(remoteMediaSource(message({
+      authorOccupantJid: "general@muc.home.test/plugin",
+      authorRealJid: "plugin@extensions.home.test",
+    }), home)).toBeNull();
+    // A sender on a discovered home service loads too.
+    expect(remoteMediaSource(message({ authorJid: "bot@spaces.home.test" }), HOME)).toBeNull();
+    // A component nobody listed is still another server's.
+    expect(remoteMediaSource(message({ authorJid: "plugin@extensions.remote.test" }), home)).toBe("extensions.remote.test");
+    expect(remoteMediaSource(message({ authorJid: "plugin@extensions.home.test" }), HOME)).toBe("extensions.home.test");
+  });
+});

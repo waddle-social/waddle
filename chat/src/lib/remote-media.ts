@@ -11,7 +11,7 @@
 
 import type { InjectionKey } from "vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
-import { canonicalDomain, roomHost, roomHostDomain, type HomeAddresses } from "@/lib/xmpp/remote-address";
+import { canonicalDomain, isHomeDomain, roomHost, roomHostDomain, type HomeAddresses } from "@/lib/xmpp/remote-address";
 
 /** Decides, per message, the other server whose media waits for the user, or `null`. */
 export type RemoteMediaPolicy = (message: TimelineMessage) => string | null;
@@ -37,7 +37,9 @@ function domainOf(jid: string | undefined): string | null {
  *   home MUC service is discovered only rooms on the account domain, a
  *   known home service or a component the home server lists count as home,
  *   and the others are placed once it is;
- * - a message whose sender's real address is on another domain waits.
+ * - a message whose sender's real address is on another domain waits,
+ *   unless that domain is a home service or a component the home server
+ *   lists (an extension's bot, for one, posts from a component).
  *
  * A sender in a room of this deployment whose real address the room does
  * not disclose cannot be placed, and its media loads as before.
@@ -48,9 +50,8 @@ export function remoteMediaSource(message: TimelineMessage, home: HomeAddresses 
   if (roomJid.includes("@") && roomHost(roomJid, home) !== "home") {
     return roomHostDomain(roomJid) ?? roomJid.slice(roomJid.lastIndexOf("@") + 1);
   }
-  const accountDomain = canonicalDomain(home.accountDomain);
   const senderJid = message.authorRealJid ?? (message.authorOccupantJid ? undefined : message.authorJid);
   const senderDomain = domainOf(senderJid);
-  if (senderDomain && accountDomain && senderDomain !== accountDomain) return senderDomain;
+  if (senderDomain && canonicalDomain(home.accountDomain) && !isHomeDomain(senderDomain, home)) return senderDomain;
   return null;
 }
