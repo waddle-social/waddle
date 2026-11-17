@@ -101,6 +101,27 @@ let _mainCheckNames = [
 	"checkXmppClientFfiBindings",
 	"renderDeployment",
 ]
+// Pull requests run the same short gates plus the format check in one job.
+let _pullRequestCheckNames = list.Concat([_mainCheckNames, ["nixFmt"]])
+
+// One job for several short tasks: they take one runner and one Nix, cache
+// and cuenv setup. Every task runs even after an earlier one fails, and the
+// job fails if any did.
+let _batchArgs = {
+	#names: [...string]
+	out: ["-uo", "pipefail", "-c", #"""
+		failed=()
+		for check in \#(strings.Join(#names, " ")); do
+		  echo "::group::${check}"
+		  cuenv task "${check}" || failed+=("${check}")
+		  echo "::endgroup::"
+		done
+		if (( ${#failed[@]} )); then
+		  echo "Failed checks: ${failed[*]}" >&2
+		  exit 1
+		fi
+		"""#]
+}
 let _deploymentInputs = ["deployment.cue", "observer-release.json", "scripts/observer_release.py", "scripts/test_observer_release.py"]
 
 schema.#Project & {
@@ -256,10 +277,12 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
+			// The short checks share one job (pullRequestChecks): each job
+			// repeats about 75 seconds of Nix, cache and cuenv setup and
+			// takes one of the 20 concurrent GitHub job slots.
 			tasks: [
-				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.checkAlertRules,
-				_t.nixFmt, _t.nixClippy,
-				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
+				_t.pullRequestChecks,
+				_t.nixClippy, _t.nixDoctest,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
@@ -391,7 +414,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkAllCiDrift, _t.checkRootSyncDrift]
+			tasks: [_t.rootSyncChecks]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -986,26 +1009,27 @@ schema.#Project & {
 			inputs: _namespaceRustTaskInputs
 		}
 
-		// The main pipeline's short publish gates in one job, so they take
-		// one runner and one Nix, cache and cuenv setup. Every check runs
-		// even after an earlier one fails, and the job fails if any did.
+		// The main pipeline's short publish gates in one job.
 		mainChecks: schema.#Task & {
 			hermetic: false
 			command:  "bash"
-			args: ["-uo", "pipefail", "-c", #"""
-				failed=()
-				for check in \#(strings.Join(_mainCheckNames, " ")); do
-				  echo "::group::${check}"
-				  cuenv task "${check}" || failed+=("${check}")
-				  echo "::endgroup::"
-				done
-				if (( ${#failed[@]} )); then
-				  echo "Failed checks: ${failed[*]}" >&2
-				  exit 1
-				fi
-				"""#]
+			args:     (_batchArgs & {#names: _mainCheckNames}).out
 			inputs: list.Concat([for name in _mainCheckNames {tasks[name].inputs}])
 			dependsOn: [tasks.fmt]
+		}
+
+		pullRequestChecks: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     (_batchArgs & {#names: _pullRequestCheckNames}).out
+			inputs: list.Concat([for name in _pullRequestCheckNames {tasks[name].inputs}])
+		}
+
+		rootSyncChecks: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     (_batchArgs & {#names: ["checkAllCiDrift", "checkRootSyncDrift"]}).out
+			inputs: list.Concat([tasks.checkAllCiDrift.inputs, tasks.checkRootSyncDrift.inputs])
 		}
 
 		// The main pipeline's compile-heavy publish gates. They are the
@@ -1029,11 +1053,15 @@ schema.#Project & {
 			dependsOn: [tasks.fmt]
 		}
 
+		// The Nix doctest check that pull requests build: the same workspace
+		// and features as the namespace doctest task, with dependencies from
+		// the shared artifact. When main's tree is the one a pull request
+		// already checked, the result comes from the cache.
 		mainDoctest: schema.#Task & {
 			hermetic: false
-			command:  tasks.doctest.command
-			args:     tasks.doctest.args
-			inputs:   tasks.doctest.inputs
+			command:  tasks.nixDoctest.command
+			args:     tasks.nixDoctest.args
+			inputs:   tasks.nixDoctest.inputs
 			dependsOn: [tasks.fmt]
 		}
 

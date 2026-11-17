@@ -44,7 +44,10 @@ schema.#Project & {
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
-			env:    _nativeRustEnv
+			// Each run builds in a fresh sandbox, so incremental state is
+			// never reused. Without it the build is 8 to 13% faster and the
+			// target directory 10 GB smaller (docs/ci-performance.md).
+			env: _nativeRustEnv & {CARGO_INCREMENTAL: "0"}
 			hermetic: sandbox: "dir"
 		}
 

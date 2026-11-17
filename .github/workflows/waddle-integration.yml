@@ -428,142 +428,6 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_namespacerustchecks == 'true' }}"
-  waddle_server_pullrequest__checkalertrules:
-    permissions:
-      contents: read
-    name: waddle-server-pullRequest / checkAlertRules
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: checkAlertRules
-        run: cuenv task checkAlertRules --skip-dependencies
-        working-directory: server
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_pullrequest__checkcidrift:
-    permissions:
-      contents: read
-    name: waddle-server-pullRequest / checkCiDrift
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: checkCiDrift
-        run: cuenv task checkCiDrift --skip-dependencies
-        working-directory: server
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_pullrequest__checkswitchablealternativeprogram:
-    permissions:
-      contents: read
-    name: waddle-server-pullRequest / checkSwitchableAlternativeProgram
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: checkSwitchableAlternativeProgram
-        run: cuenv task checkSwitchableAlternativeProgram --skip-dependencies
-        working-directory: server
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_pullrequest__checkxmppclientffibindings:
-    permissions:
-      contents: read
-    name: waddle-server-pullRequest / checkXmppClientFfiBindings
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: checkXmppClientFfiBindings
-        run: cuenv task checkXmppClientFfiBindings --skip-dependencies
-        working-directory: server
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
   waddle_server_pullrequest__nixbuildci:
     permissions:
       contents: read
@@ -724,10 +588,10 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_pullrequest__nixfmt:
+  waddle_server_pullrequest__pullrequestchecks:
     permissions:
       contents: read
-    name: waddle-server-pullRequest / nixFmt
+    name: waddle-server-pullRequest / pullRequestChecks
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -746,8 +610,10 @@ jobs:
           drain-timeout: "900"
           upstream-cache-filter: "true"
           version: v2.0.0
-      - name: nixFmt
-        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-fmt"
+      - name: Setup cuenv (release)
+        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
+      - name: pullRequestChecks
+        run: cuenv task pullRequestChecks --skip-dependencies
         working-directory: server
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
@@ -756,10 +622,10 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_pullrequest__renderdeployment:
+  waddle_server_rootsync__rootsyncchecks:
     permissions:
       contents: read
-    name: waddle-server-pullRequest / renderDeployment
+    name: waddle-server-rootSync / rootSyncChecks
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -780,77 +646,8 @@ jobs:
           version: v2.0.0
       - name: Setup cuenv (release)
         run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: renderDeployment
-        run: cuenv task renderDeployment --skip-dependencies
-        working-directory: server
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_rootsync__checkallcidrift:
-    permissions:
-      contents: read
-    name: waddle-server-rootSync / checkAllCiDrift
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: checkAllCiDrift
-        run: cuenv task checkAllCiDrift --skip-dependencies
-        working-directory: server
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-          WADDLE_CI_INPUT_GUARD: "1"
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_rootsync == 'true' }}"
-  waddle_server_rootsync__checkrootsyncdrift:
-    permissions:
-      contents: read
-    name: waddle-server-rootSync / checkRootSyncDrift
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: checkRootSyncDrift
-        run: cuenv task checkRootSyncDrift --skip-dependencies
+      - name: rootSyncChecks
+        run: cuenv task rootSyncChecks --skip-dependencies
         working-directory: server
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
@@ -979,19 +776,13 @@ jobs:
       - waddle_server_authzidcodec__checkauthzidcodec
       - waddle_server_federationgrantfencepullrequest__federationgrantfenceproof
       - waddle_server_namespacerustchecks__test
-      - waddle_server_pullrequest__checkalertrules
-      - waddle_server_pullrequest__checkcidrift
-      - waddle_server_pullrequest__checkswitchablealternativeprogram
-      - waddle_server_pullrequest__checkxmppclientffibindings
       - waddle_server_pullrequest__nixbuildci
       - waddle_server_pullrequest__nixbuildextensionmodules
       - waddle_server_pullrequest__nixbuildimagestream
       - waddle_server_pullrequest__nixclippy
       - waddle_server_pullrequest__nixdoctest
-      - waddle_server_pullrequest__nixfmt
-      - waddle_server_pullrequest__renderdeployment
-      - waddle_server_rootsync__checkallcidrift
-      - waddle_server_rootsync__checkrootsyncdrift
+      - waddle_server_pullrequest__pullrequestchecks
+      - waddle_server_rootsync__rootsyncchecks
       - waddle_server_xmppcompliance__nixxmppunittests
       - waddle_server_xmppcompliance__nixxmppxepintegration
       - waddle_website_pullrequest__waddle-website-pullrequest
