@@ -1142,6 +1142,15 @@ projected subject are that canonical text.
   that renumbering migrated (a development or test database; none shipped)
   records versions that now name other migrations, with other checksums,
   and every later startup refuses it: recreate it.
+- Migration 2014 indexes the offline store's recipients by their
+  lower-case spelling (`idx_pending_delivery_recipient_lower`, with
+  `text_pattern_ops` on PostgreSQL), which an account's retirement reads.
+  It is a plain `CREATE INDEX`, which holds writes to `pending_delivery`
+  while it builds; the owner phase runs it before any server of the
+  release starts, so on a large offline store the build adds to that
+  phase's time. Every startup now reads
+  `retired_account_jids` once as the runtime role and refuses to start
+  when it cannot, naming the table.
 - The schema tooling that compares a history-built database with a
   baseline-built one (`scripts/schema_history.py`) does not yet account for
   relations added after the baseline.

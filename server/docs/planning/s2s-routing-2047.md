@@ -2120,6 +2120,25 @@ other servers is read once for a publication; what is decided for each
 subscriber is its standing and, for a managed room, its grants. The pair's worker checks once more before it
 writes: peer admission must admit the remote domain then.
 
+A room leaves a Space in other ways than a retract of its bookmark, and
+each notifies the Space's subscribers, here and at other servers, once the
+bookmark's retraction stands, as the retract does: a publish that places
+the room in another Space (the Spaces it moved out of), and the admin
+commands that delete a channel, update one so that it moves to another
+Space, and delete a Space (its rooms, before its node is deleted). Admin
+commands reach the fan-out through the WebSocket state that startup binds
+to the application state (`AppState::notify_space_retracted`). The
+retraction of a group conversation's bookmark from a member's XEP-0402
+node, when the member leaves or the conversation is destroyed, tells the
+member's own resources, so that a client leaves the room (XEP-0402). Two
+gaps remain: a subscriber at another server is not told that a deleted
+room left a Space, because when its notification is decided the room is
+gone and whether it was open to other servers can no longer be read, so
+its client finds the room gone when it joins it; and an admin command that
+places a room in a Space (`channels:create`, `channels:update`) notifies
+nobody, so subscribers learn of that room at their next read of the
+Space's items.
+
 A subscription outlives the stream that made it, so its row records what
 that stream proved (authentication strength, trust profile and the snapshot
 it was admitted under), as a seat does. Peer admission and trusted-home
