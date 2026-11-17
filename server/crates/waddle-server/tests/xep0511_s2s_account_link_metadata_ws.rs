@@ -5,9 +5,10 @@
 //! recipient client trusts a card as the server's: it plays an inline
 //! video only from a URL a card names. Senders can inject metadata that
 //! does not represent what is at the link (Security Considerations). A remote sender's message therefore
-//! loses both before it is delivered, archived or stored, and no card is
-//! stamped in their place. Through the production `/ws` router, the real
-//! S2S router and a loopback peer.
+//! loses both before it is delivered, archived, stored, held by a detached
+//! session or copied as a carbon to the account's other resources, and no
+//! card is stamped in their place. Through the production `/ws` router, the
+//! real S2S router and a loopback peer.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -18,13 +19,16 @@ mod support;
 use std::sync::Arc;
 
 use minidom::Element;
-use support::{federated, message, receive, Federated, Pki, BOB, BOB_PHONE};
+use support::{federated, message, receive, receive_until, Federated, Pki, BOB, BOB_PHONE};
 use waddle_server::pending_delivery::{ArchiveResolver, MamArchiveResolver};
+use waddle_ws_test_support::iq::round_trip;
 use waddle_xmpp::pending_delivery::PendingPayload;
 use waddle_xmpp::xep::{
     build_link_metadata_element, build_link_preview_request_element, is_link_metadata_element,
     is_link_preview_request_element, LinkMetadata, LinkPreviewToken,
 };
+use xmpp_parsers::carbons::Enable;
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 const ALICE: &str = "alice@example.com";
@@ -53,10 +57,13 @@ fn with_card(from: &str, id: &str) -> Message {
     sent
 }
 
-/// Whether any of `payloads` is a XEP-0511 card or a link-preview request.
+/// Whether any of `payloads`, or anything they nest at any depth, is a
+/// XEP-0511 card or a link-preview request.
 fn carries_card<'a>(mut payloads: impl Iterator<Item = &'a Element>) -> bool {
     payloads.any(|payload| {
-        is_link_metadata_element(payload) || is_link_preview_request_element(payload)
+        is_link_metadata_element(payload)
+            || is_link_preview_request_element(payload)
+            || carries_card(payload.children())
     })
 }
 
@@ -152,4 +159,71 @@ async fn a_resourceless_remote_senders_link_card_is_removed_before_storage() {
     let held = wait_for_stored(&federated).await;
     assert_eq!(held.len(), 1, "{held:?}");
     assert!(!carries_card(held[0].payloads.iter()), "{held:?}");
+}
+
+#[tokio::test]
+async fn a_remote_senders_link_card_is_removed_before_a_detached_session_holds_it() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let phone = federated.detached("alice", "phone", 5).await;
+
+    federated
+        .from_peer(with_card(BOB_PHONE, "card-detached"))
+        .await;
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+
+    // The session holds the message for its resumption without the card.
+    let held = federated.held_from(&phone, BOB_PHONE).await;
+    let ids: Vec<&str> = held.iter().filter_map(|stanza| stanza.attr("id")).collect();
+    assert_eq!(ids, vec!["card-detached"], "{held:?}");
+    assert!(!carries_card(held.iter()), "{held:?}");
+    assert!(
+        held[0]
+            .children()
+            .any(|child| child.name() == "body" && child.text().contains(VIDEO)),
+        "{held:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_remote_senders_link_card_is_removed_from_the_carbon_copy() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    // Alice's phone is the most available resource; her laptop has Carbons
+    // enabled and receives a copy of what the phone receives (XEP-0280 §6).
+    let mut phone = federated.online("alice", "phone", 5).await;
+    let mut laptop = federated.online("alice", "laptop", 1).await;
+    let enabled = round_trip(&mut laptop, Iq::from_set("laptop-carbons", Enable)).await;
+    assert!(matches!(enabled, Iq::Result { .. }), "{enabled:?}");
+
+    federated
+        .from_peer(with_card(BOB_PHONE, "card-carbon"))
+        .await;
+
+    let delivered = receive(&mut phone, "message", "card-carbon").await;
+    assert!(!carries_card(delivered.children()), "{delivered:?}");
+    let on_laptop = receive_until(&mut laptop, |frame| {
+        frame.name() == "message"
+            && frame
+                .get_child("received", waddle_xmpp::carbons::CARBONS_NS)
+                .and_then(|carbon| carbon.get_child("forwarded", xmpp_parsers::ns::FORWARD))
+                .and_then(|forwarded| forwarded.get_child("message", "jabber:client"))
+                .is_some_and(|copy| copy.attr("id") == Some("card-carbon"))
+    })
+    .await;
+    let carbon = on_laptop.last().expect("the laptop's carbon");
+    // The copy keeps the text and carries no card at any depth.
+    assert!(!carries_card(carbon.children()), "{carbon:?}");
+    let copy = carbon
+        .get_child("received", waddle_xmpp::carbons::CARBONS_NS)
+        .and_then(|carbon| carbon.get_child("forwarded", xmpp_parsers::ns::FORWARD))
+        .and_then(|forwarded| forwarded.get_child("message", "jabber:client"))
+        .expect("the carbon forwards the message");
+    assert!(
+        copy.children()
+            .any(|child| child.name() == "body" && child.text().contains(VIDEO)),
+        "{copy:?}"
+    );
 }
