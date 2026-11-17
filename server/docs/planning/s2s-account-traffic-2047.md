@@ -401,10 +401,14 @@ inbox and archive only as the conversation's peer.
   the corrector wrote it.
 - **Call threads (XEP-0353).** A remote sender's `propose` records a
   pending call offer only within bounds: eight pending offers per remote
-  initiator, and 32 per local account from remote initiators together.
-  The process's table of pending offers is shared by every account and,
-  once full, prunes the oldest offer of the initiator that holds the
-  most, so a stranger's flood crowds out only its own. A `finish` ends
+  initiator; 32 per local account from remote initiators together, and
+  16 of those from the initiators of any one remote domain; and 64 from
+  the initiators of one remote domain to all accounts together. The
+  process's table of pending offers is shared by every account and, once
+  full, prunes the oldest offer of the initiator that holds the most, so
+  a stranger's flood crowds out only its own; the bounds per domain keep
+  a server that mints strangers from crowding out the callers of other
+  servers, which that pruning, fair between initiators, does not. A `finish` ends
   the call thread in the local account's inbox only; the remote peer's
   inbox is its own server's. An offer beyond the bounds leaves the
   message as it is: it is archived and delivered, and only its call

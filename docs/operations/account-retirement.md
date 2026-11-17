@@ -21,7 +21,11 @@ One transaction:
 - removes its account row (`users`) and, with it, its identity-provider
   links and its sessions;
 - removes the messages its offline store holds for its next session
-  (`pending_delivery`): the account has no next session.
+  (`pending_delivery`): the account has no next session. From the
+  commit on the store refuses every message for the account, whoever
+  offers it: a sender, the end of one of its sessions, or the recovery of
+  messages a session was holding. Such a message is discarded and its
+  sender is not answered.
 
 Then, in the same command, every serving server ends the account's open
 sessions. The command records a request; each server reads it within about
@@ -32,9 +36,10 @@ a second, and from then on:
   closed; the session is not kept for resumption;
 - ends every stream-management session of the account that waits for the
   client to resume (XEP-0198), wherever the session's state is held. What
-  such a session held for the client is discarded, not stored;
-- once it holds neither, removes what the end of a live stream stored in
-  the account's offline store, and does so again for a minute;
+  such a session held for the client is discarded, not stored, and no
+  later recovery delivers it;
+- once it holds neither, checks that the account's offline store is
+  empty;
 - refuses a stream of the account that authenticated before the
   retirement and binds a resource or resumes afterwards, with the same
   `<not-authorized/>`.

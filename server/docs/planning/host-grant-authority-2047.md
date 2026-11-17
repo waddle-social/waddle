@@ -2937,10 +2937,16 @@ A home never issues the JID of a retired account to a new holder
   `users` row cascades to its identity-provider links and its sessions; one
   delete for each row of the account, usually one native row and one
   account row), two reads of the account rows that carry no lookup key,
-  the delete of the account's offline store (`pending_delivery`) and the
-  three deletes of what remote senders left for it: nine statements for a
-  usual account, so a login can be held up for 2 s of waiting plus up to
-  45 s, and is in practice for milliseconds. An account
+  the delete of the account's offline store (`pending_delivery`), taken
+  after the advisory lock every insert into that store takes for the
+  account's canonical JID, and the three deletes of what remote senders
+  left for it: ten statements for a usual account, so a login can be held
+  up for 2 s of waiting plus up to 50 s, and is in practice for
+  milliseconds. From the commit on the store refuses every row for the
+  account (`InsertOutcome::RecipientRetired`), whichever producer offers
+  it: an insert that held the lock first commits before the delete reads
+  the store, and one that waits for it reads the ledger the retirement
+  wrote. The message is discarded and no sender is answered. An account
   whose delete does not finish within the statement bound is not retired;
   nothing splits that delete.
 - **Ending the account's open sessions** (`auth/session_endings.rs`,
@@ -2973,18 +2979,24 @@ A home never issues the JID of a retired account to a new holder
     rooms, and retires the binding. A stream counts as closed once the
     registry no longer holds its binding;
   - every stream-management session of the account that waits for a
-    resume is ended: those held in memory through the invalidation a
-    replacing bind uses, those of the durable authority under their claim.
-    Both run the terminal path of an invalidated detached session (room
-    leaves, unavailable presence). What an in-memory session held for the
-    client is discarded, not promoted to the offline store: its durable
-    rows are deleted and its claim released as after a promotion. A
-    session whose claim another replica holds is left to it, and the
-    request stays incomplete until none is left;
-  - once no stream and no detached session is left, the account's offline
-    store is emptied through the store (the end of a live stream moves
-    what it had not delivered there), and again on each pass for a minute
-    after the replica took the request up;
+    resume is ended: those held in memory through the invalidation and
+    the displaced promotion a replacing bind uses, those of the durable
+    authority under their claim. Both run the terminal path of an
+    invalidated detached session (room leaves, unavailable presence). The
+    promotion settles the session's acknowledgement windows, reads the
+    ledger before any sink, so that what the session held for the client
+    is discarded rather than redelivered or stored, ends the ingress
+    custody of what it held as `Tombstoned` (the recovery of orphaned
+    custody reads the ledger the same way and ends it so too), and
+    deletes its durable rows and releases its claim under the captured
+    fence. A session whose promotion fails is kept for a retry, and one
+    whose claim another replica holds is left to it; the request stays
+    incomplete until none is left. A live stream whose connection already
+    has another detach queued ends by that detach; if that one keeps the
+    session for a resume, the session is ended as a detached one in the
+    same pass or the next poll, and a resume of it is refused meanwhile;
+  - once no stream and no detached session is left, the pass checks that
+    the account's offline store is empty;
   - from the moment the account is in the set, a binding or resume of it is
     refused before it is published (`<not-authorized/>`). For a minute after
     taking a request up the replica also closes any stream of the account
