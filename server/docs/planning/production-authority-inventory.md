@@ -1502,6 +1502,28 @@ evidence changed, and no decision of standing moved.
   no standing.
 - The raw scan holds 1636 records, unchanged in content and place.
 
+The selected evidence was refreshed a thirty-fourth time, through
+`b4433549da663184e7dfaffbbc0bcf748423a534`, the merge of that slice into the integration branch, after
+reviewing what the merge changed in the reviewed files beyond either side.
+Two reviewed files changed on both sides and were merged: `server/http.rs`
+(the Spaces host is attached where S2S is enabled, the session-ending task
+is spawned when the replica starts serving, and the state holds the
+replica's set of retired accounts) and
+`server/routes/websocket/s2s_rooms.rs` (the room host's extracted
+`room_open_to_other_servers`, and the room arm's
+`RemoteIngressTarget::Room`). No file was added to the reviewed set, no
+anchor's text changed, and `s2s-room-host`, `s2s-room-placement` and
+`s2s-unseated-removal` moved by one line. No grant writer or storage plane
+of the host-grant authority was added by the merge, no producer of stream
+evidence changed, and no decision of standing moved. Every message from
+another server to a local account, a Space's event notification among
+them, is cleaned by the one sanitizer the account side and the room path
+share (`s2s/remote_content.rs`, outside the reviewed files).
+
+- The raw scan holds 1642 records: the 1639 of the twenty-ninth refresh and
+  the three uses of `RemoteOccupantPrincipal` the thirtieth added, each
+  unchanged in content; records in the merged files moved with the lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

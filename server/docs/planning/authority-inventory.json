@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "0ee8556e2eea373a6d7820b525b96f3e2188e540",
+  "baseline_commit": "b4433549da663184e7dfaffbbc0bcf748423a534",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -145,7 +145,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "7cdd06f151163fa36224c7b29b4fa8a1c36107cdf675c147706b0f973bd1761d"
+      "sha256": "0cf6b164557178908c6cada923c7879fefd4b679a776ff301bb9e7d2531b5ed9"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -253,7 +253,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "sha256": "112532dd2a17b0e7f8aa037b4072ceb9fc4c481480507d611f5e041da88e3b42"
+      "sha256": "05f640e3b43d485fc1d84de706f654bbc1f5357d7857979f52e5d710373668f5"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/tests/iq.rs",
@@ -946,7 +946,7 @@
     },
     "s2s-room-host": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1270,
+      "line": 1271,
       "text": "impl LocalRooms for WebSocketLocalRooms {"
     },
     "s2s-room-archive": {
@@ -1001,7 +1001,7 @@
     },
     "s2s-room-placement": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1343,
+      "line": 1344,
       "text": "async fn place(&self, principal: &RemotePrincipal, stanza: &Stanza) -> RoomPlacement {"
     },
     "s2s-remote-admin": {
@@ -1076,7 +1076,7 @@
     },
     "s2s-unseated-removal": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1373,
+      "line": 1374,
       "text": "async fn remove_unseated("
     },
     "d8-actor-privileged-issuance": {
@@ -1207,7 +1207,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "1c364d61faca7bc677356f79997a5e120ad9b46bc1aed1b62f042541af406e82",
+    "sha256": "0d5f4fe09f37abfb0b1e07ad92aef0369eb2f3fb1255e5470ad42f93dc648010",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,
