@@ -266,6 +266,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | `waddle-server/src/server/routes/websocket/connection.rs` (`tests`: three cases pass the force-detach close the stream error it now takes, `<conflict/>` as before) | W6d | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/retirement.rs` (edited: the retirement cause of a retired account's detach, not a transfer) | W6d | none | Not run |
 | `waddle-server/src/server/routes/websocket/cleanup.rs` (`force_detach_tests`, edited: a retirement's detach removes the actor entry as a replacing bind's does) | W6d | none | Not run |
+| `waddle-server/src/pending_delivery/tests.rs` (edited: the quota race case orders a retired recipient's refusal too; every insert now reads the ledger of retired JIDs) | W6d | PostgreSQL for the cases that read `WADDLE_TEST_POSTGRES_URL`; they skip without it | Not run |
 | `waddle-server/src/ingress/room_pin_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/permissions/schema/tests.rs` | W5o | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/muc.rs` | W5c | none | Not run |
@@ -294,9 +295,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 122 (97 integration targets, 23 library test modules, 2 chat test files) |
+| Test targets listed | 123 (97 integration targets, 24 library test modules, 2 chat test files) |
 | Run, with a cited log | 55 targets, 917 cases, all passed in their latest cited run |
-| Not run | 67 targets (23 of them library modules) |
+| Not run | 68 targets (24 of them library modules) |
 
 By log: the run7 S2S final log covers 44 targets (133 `waddle-xmpp` cases
 in 4, 621 `waddle-server` cases in 40, of which 10 targets and 113 cases
@@ -330,7 +331,7 @@ retirement's removal of a retired account's rows, every insert into the
 offline store, which reads the ledger of retired JIDs under the
 recipient's lock (`xep0160_*`, `xep0198_*`, `pending_runtime_attach`,
 the `physical_attestation` SM route race, the `muc_invite` and group DM
-invitation suites, and the library modules `pending_delivery/tests.rs`,
+invitation suites, and the library modules
 `pending_delivery/database/custody/tests.rs`, `sm_promotion/tests.rs`,
 `sm_promotion/tests/receipt_completion.rs` and the `ingress/execute_*`
 tests), the promotion of a retained stanza, which reads the ledger before
