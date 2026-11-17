@@ -42,6 +42,7 @@ final class AppState {
     @ObservationIgnored var finishPendingPushRegistration: (@MainActor (SessionCoordinator) async -> Void)?
 
     let notifications = NotificationController()
+    @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
     let preferences = Preferences()
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -69,6 +70,12 @@ final class AppState {
         notifications.onMarkRead = { [weak self] account, conversation in
             await self?.perform(.markRead(conversation), for: account)
         }
+        notifications.onAnswerCall = { [weak self] account, sid in
+            await self?.perform(.answerCall(sid: sid), for: account)
+        }
+        notifications.onDeclineCall = { [weak self] account, sid in
+            await self?.perform(.declineCall(sid: sid), for: account)
+        }
     }
 
     /// A notification action. One that arrives before the session exists
@@ -78,6 +85,8 @@ final class AppState {
         case open(ConversationID)
         case reply(ConversationID, String)
         case markRead(ConversationID)
+        case answerCall(sid: String)
+        case declineCall(sid: String)
     }
 
     func perform(_ action: NotificationAction, for account: BareJID) async {
@@ -94,7 +103,34 @@ final class AppState {
             await coordinator.send(Draft(text: text), in: conversation)
         case let .markRead(conversation):
             await coordinator.markDisplayed(conversation)
+        case let .answerCall(sid):
+            // Only the call that rang: by now another may hold the slot.
+            guard case .incoming(let call) = coordinator.calls.state, call.sid == sid else { return }
+            _ = await coordinator.calls.acceptIncoming()
+        case let .declineCall(sid):
+            guard case .incoming(let call) = coordinator.calls.state, call.sid == sid else { return }
+            _ = await coordinator.calls.declineIncoming()
         }
+    }
+
+    /// Keeps the ringer in step with `active`'s call slot for as long as it
+    /// is the session; whoever ends the session stops the ringer.
+    private func ringForCalls(of active: ActiveSession) {
+        let coordinator = active.coordinator
+        let alert = withObservationTracking {
+            CallAlert(state: coordinator.calls.state, isDoNotDisturb: coordinator.status.availability == .doNotDisturb)
+        } onChange: { [weak self, weak active] in
+            Task { @MainActor in
+                guard let self, let active else { return }
+                self.ringForCalls(of: active)
+            }
+        }
+        guard session === active else { return }
+        ringer.show(alert.map { alert in
+            var callerName = ""
+            if case .ring(let ring) = alert { callerName = coordinator.directory.title(for: .direct(ring.from)) }
+            return .init(alert: alert, account: coordinator.account.jid, callerName: callerName)
+        })
     }
 
     // MARK: - Lifecycle
@@ -134,6 +170,9 @@ final class AppState {
 
     func sceneActivityChanged(isActive: Bool) {
         notifications.isAppActive = isActive
+        #if os(iOS)
+        ringer.isAppActive = isActive
+        #endif
         if isActive { notifications.refreshAuthorizationStatus() }
         guard let coordinator = session?.coordinator else { return }
         if isActive {
@@ -266,6 +305,7 @@ final class AppState {
         }
         session = active
         phase = .signedIn
+        ringForCalls(of: active)
         active.coordinator.start()
         notifications.requestAuthorizationIfNeeded()
         // Actions queued for another account (a failed restore followed by
@@ -325,6 +365,7 @@ final class AppState {
         guard let active = session else { return }
         await finishPendingPushRegistration?(active.coordinator)
         session = nil
+        ringer.show(nil)
         pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()
         if signingOut {

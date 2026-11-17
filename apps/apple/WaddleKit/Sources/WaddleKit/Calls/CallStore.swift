@@ -26,6 +26,7 @@ import Observation
     @ObservationIgnored private let newSid: () -> String
     @ObservationIgnored private let ringTimeout: Duration
     @ObservationIgnored private let sessionTimeout: Duration
+    @ObservationIgnored private let unansweredTimeout: Duration
     @ObservationIgnored private var ringTimer: Task<Void, Never>?
     @ObservationIgnored private var sessionTimer: Task<Void, Never>?
     /// Abort history is bounded because reductions can outpace the effects queue.
@@ -39,6 +40,7 @@ import Observation
         port: any CallPort, ownJID: @escaping @MainActor () -> JID?, ownBareJID: BareJID,
         media: (any CallMediaController)? = nil,
         ringTimeout: Duration = .seconds(45), sessionTimeout: Duration = .seconds(45),
+        unansweredTimeout: Duration = .seconds(60),
         groupPreparingEchoTimeout: Duration = .seconds(2), groupOtherPreparingTimeout: Duration = .seconds(2),
         groupAcceptTimeout: Duration = .seconds(10),
         newSid: @escaping () -> String = { "c" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased() }
@@ -48,6 +50,7 @@ import Observation
             echoTimeout: groupPreparingEchoTimeout, peersTimeout: groupOtherPreparingTimeout, acceptTimeout: groupAcceptTimeout)
         self.ringTimeout = ringTimeout
         self.sessionTimeout = sessionTimeout
+        self.unansweredTimeout = unansweredTimeout
         self.port = port
         self.ownJID = ownJID
         self.ownBareJID = ownBareJID
@@ -126,6 +129,9 @@ import Observation
             if case .incoming(var current) = state, current.sid == target.sid {
                 current.isAccepting = false
                 state = .incoming(current)
+                // The ring is back, and its first timer may have come due
+                // while the answer was on its way.
+                scheduleUnansweredTimeout(sid: current.sid)
             }
             lastError = "call proceed failed"
         }
@@ -181,7 +187,13 @@ import Observation
                 cancelTimers()
             }
             lastError = nil
+            let previous = state
             state = next
+            // Every way a call starts ringing here bounds the ring: a
+            // proposal, a tie-break won, a slot taken over.
+            if case .incoming(let call) = next, !call.isAccepting, !(previous.isIncoming && previous.sid == call.sid) {
+                scheduleUnansweredTimeout(sid: call.sid)
+            }
         }
     }
 
@@ -228,6 +240,22 @@ import Observation
             let sent = await self.port.sendCallRetract(to: current.to, sid: sid)
             guard self.generation == epoch else { return }
             if !sent { self.lastError = "call retract failed" }
+        }
+    }
+
+    /// A caller who lost their connection never retracts, so a call nobody
+    /// answers ends here by itself, a little after the caller's own ring
+    /// would have run out. Nobody is told: there is nobody left to tell.
+    /// An accepted call is bounded by the session timeout instead.
+    func scheduleUnansweredTimeout(sid: String) {
+        ringTimer?.cancel()
+        let epoch = generation
+        ringTimer = Task { [weak self, unansweredTimeout] in
+            do { try await Task.sleep(for: unansweredTimeout) } catch { return }
+            guard !Task.isCancelled, let self, self.generation == epoch,
+                case .incoming(let current) = self.state, current.sid == sid, !current.isAccepting
+            else { return }
+            self.state = .ended(sid: sid, reason: .missed)
         }
     }
 

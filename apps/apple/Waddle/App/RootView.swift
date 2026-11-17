@@ -20,6 +20,9 @@ struct RootView: View {
                 }
             }
         }
+        #if os(macOS)
+        .background(CallSurfaceWindow())
+        #endif
         .preferredColorScheme(app.preferences.appearance.colorScheme)
         .animation(.default, value: app.phase)
         .task { await app.bootstrap() }
