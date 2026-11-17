@@ -199,13 +199,19 @@ async fn a_direct_tls_endpoint_is_reached_with_sni_and_alpn_and_no_starttls() {
         observed.first_header.to,
         HeaderAddress::Domain(domain(HOME_B))
     );
-    assert_eq!(
+    // The session hands the stream to the dialer before it counts the
+    // establishment, so the count may follow the stream by a moment.
+    let established = || {
         metrics.counter_sum(
             "waddle.s2s.established",
             &[("direction", "outbound"), ("transport", "direct_tls")],
-        ),
-        Some(1)
-    );
+        )
+    };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while established().is_none() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(established(), Some(1));
 }
 
 #[tokio::test(flavor = "multi_thread")]

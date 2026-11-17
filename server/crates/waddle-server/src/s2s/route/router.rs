@@ -52,6 +52,7 @@ use crate::s2s::conn::{
     ConnectError, S2sHandle, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd,
     TransmitError, VerifiedPeerStream, Waited,
 };
+use crate::s2s::remote_content::{sanitize_message, RemoteSource};
 
 mod accounts;
 
@@ -2300,6 +2301,17 @@ impl Inner {
             }
         }
         if admitted == Some(true) {
+            // The room's groupchat, private messages and subject carry
+            // nothing a client would read as this server's
+            // (`crate::s2s::remote_content`), before the recipient pass
+            // archives a private message or any resource sees one.
+            let stanza = match stanza {
+                Stanza::Message(mut message) => {
+                    sanitize_message(&mut message, Some(&self.served), RemoteSource::Room(&room));
+                    Stanza::Message(message)
+                }
+                other => other,
+            };
             self.deliver_room(occupant, stanza, LocalOrigin::Remote)
                 .await;
             return;

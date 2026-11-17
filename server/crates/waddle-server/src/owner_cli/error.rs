@@ -23,9 +23,11 @@ pub enum ExitStatus {
     /// The arguments or the environment are incomplete or invalid. Nothing
     /// was sent to the database.
     Usage,
-    /// Every schema is prepared and granted, and the keypair-pool generation
-    /// is inside its activation delay. Run `owner-phase` again after the
-    /// printed time.
+    /// Run the subcommand again later. `owner-phase`: every schema is
+    /// prepared and granted, and the keypair-pool generation is inside its
+    /// activation delay; run it after the printed time. `account retire`:
+    /// the account is retired, and a serving replica has not confirmed
+    /// ending its sessions within the wait.
     Pending,
     /// A verifier refused the database, the plan or the document. A rerun
     /// refuses again until an operator changes one of them or, for a
@@ -101,6 +103,20 @@ pub enum OwnerCliError {
     RevokeAccountIncomplete { failed: usize },
     #[error("the account was not retired")]
     Retirement(#[source] crate::auth::retirement::RetireAccountError),
+    /// The account is retired; ending its open sessions could not be
+    /// requested, or the replicas' acknowledgements could not be read.
+    #[error(
+        "the account is retired, and ending its open sessions did not complete: run the \
+         command again"
+    )]
+    SessionEnding(#[source] crate::auth::session_endings::SessionEndingError),
+    /// The account is retired; `pending` serving replicas have not
+    /// confirmed ending its sessions within the wait.
+    #[error(
+        "the account is retired, and {pending} serving replica(s) have not confirmed ending \
+         its sessions: run the command again"
+    )]
+    SessionsUnconfirmed { pending: usize },
 }
 
 impl OwnerCliError {
@@ -112,7 +128,8 @@ impl OwnerCliError {
             Self::Write { .. }
             | Self::Connect(_)
             | Self::FenceUnacknowledged
-            | Self::RevokeAccountIncomplete { .. } => ExitStatus::Failed,
+            | Self::RevokeAccountIncomplete { .. }
+            | Self::SessionEnding(_) => ExitStatus::Failed,
             Self::RevokesRefused { .. } => ExitStatus::Refused,
             Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {
                 ExitStatus::Usage
@@ -121,7 +138,9 @@ impl OwnerCliError {
                 crate::auth::retirement::RetireAccountError::Database(_)
                 | crate::auth::retirement::RetireAccountError::BoundsUnproven,
             ) => ExitStatus::Failed,
-            Self::KeypoolActivationPending { .. } => ExitStatus::Pending,
+            Self::KeypoolActivationPending { .. } | Self::SessionsUnconfirmed { .. } => {
+                ExitStatus::Pending
+            }
             // The throwaway preflight pool did not close in time: the
             // preflight itself reached no verdict.
             Self::Preflight(RuntimeStartupError::PreflightPoolCloseIndeterminate) => {

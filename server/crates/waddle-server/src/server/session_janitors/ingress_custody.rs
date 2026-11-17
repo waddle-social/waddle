@@ -7,7 +7,7 @@ use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmIngressAppendK
 
 use crate::server::routes::websocket::WebSocketState;
 use crate::sm_promotion::{
-    promote_ingress_custody, recent_tombstones_for_promotion,
+    custody_completion, promote_ingress_custody, recent_tombstones_for_promotion,
     scrub_pending_for_tombstones_recorded_during_promotion, PromotedOutcome, PromotionScrubOutcome,
     TerminalOverflowPromotionDeps,
 };
@@ -137,6 +137,9 @@ async fn drain_page(
                 continue;
             }
         };
+        // A retired recipient's payload is discarded here, not handed to the
+        // store: the promotion reads the ledger before any sink
+        // (ADR-0020 D8), and its custody ends without delivery below.
         let outcome = promote_ingress_custody(
             &append,
             TerminalOverflowPromotionDeps {
@@ -173,7 +176,7 @@ async fn drain_page(
             continue;
         }
         if let Err(error) = registry
-            .complete_ingress_append(&append, IngressCustodyDisposition::Promoted)
+            .complete_ingress_append(&append, custody_completion(&outcome))
             .await
         {
             // The sink accepted the payload but its receipt failed. Retrying

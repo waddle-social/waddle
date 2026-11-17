@@ -10,7 +10,8 @@
 //!
 //! 1. the sender's admission (D1), from its stream's evidence and the S2S
 //!    snapshot the replica runs, so that work queued before its domain
-//!    stopped being admitted applies nothing;
+//!    stopped being admitted applies nothing (and, for a direct message,
+//!    again in its ingress acceptance);
 //! 2. whether the account exists, the ledger of retired JIDs included, so
 //!    that a retired JID is a nonexistent one whatever rows or resources
 //!    remain;
@@ -18,6 +19,14 @@
 //!
 //! A non-contact learns nothing from the answers about which of these held
 //! (`s2s-account-traffic-2047.md`, "No enumeration").
+//!
+//! A `chat` or `normal` message from a sender with a resource is accepted
+//! through the ingress authority, as the recipient's half of a local direct
+//! message ([`receive_direct`]): the ingress acceptance checks admission
+//! again against the snapshot captured when it built the submission, and
+//! reads the account's existence again, the ledger of retired JIDs
+//! included, in its transaction, by the same lookup keys as the check
+//! before it.
 //!
 //! Each stanza's work checks, before every effect, that the router has not
 //! abandoned it ([`AccountWork`]), and the read-modify-write of an
@@ -32,8 +41,8 @@ use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
-use waddle_xmpp::carbons::CARBONS_NS;
 use waddle_xmpp::identity::CanonicalDomain;
+use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::muc::presence::NS_MUC_USER;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
@@ -41,10 +50,7 @@ use waddle_xmpp::protocol::dm_routing::{classify_dm_intake, OnlineResources, Pen
 use waddle_xmpp::protocol::Blocklist;
 use waddle_xmpp::pubsub::{NS_PUBSUB, NS_PUBSUB_EVENT};
 use waddle_xmpp::roster::Subscription;
-use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
-use waddle_xmpp::xep::{NS_INBOX, NS_WADDLE_INBOX};
 use waddle_xmpp::Stanza;
-use waddle_xmpp_core::mam::MAM_NS;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -60,6 +66,7 @@ use crate::db::s2s_accounts::{
 use crate::db::Database;
 use crate::destination::{ServedDomains, UnservedDestination};
 use crate::permissions::host_grant::PrincipalEvidence;
+use crate::s2s::remote_content::{sanitize_message, RemoteSource};
 use crate::s2s::route::{AccountWork, LocalAccounts, RemotePrincipal};
 use crate::server::routes::interpret::{
     deliver_peer_to_full_with_registered_remote, FullJidDeliveryOutcome,
@@ -68,6 +75,11 @@ use crate::server::routes::interpret::{
 /// How many stale candidates a message to the bare JID tries before it is
 /// handled as if no resource were available.
 const DELIVERY_ATTEMPTS: usize = 3;
+
+/// How long the effects of a remote sender's accepted direct message are
+/// waited for before the ingress authority's recovery is left to finish
+/// them.
+const DIRECT_EFFECTS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The most nodes one message's event notifications may name; a message
 /// naming more is dropped, so that one stanza cannot cause more than this
@@ -281,7 +293,12 @@ fn snapshot_admits(app_state: &crate::server::AppState, domain: &jid::DomainRef)
 /// before the store is flushed to a session of the account: a domain
 /// removed from the allowlist or denylisted after its senders' messages
 /// were stored gets none of them delivered. A sender is remote when its
-/// domain is not one this deployment serves (`served`). Only rows no
+/// domain is not one this deployment serves (`served`). The sender of a
+/// row that refers to the account's archive, as the ingress acceptance of
+/// a remote sender's message stores it, is read from `archive`, a local
+/// sender's row included: such a row names no sender, and only the read
+/// tells the two apart. The archived copy itself stays in the account's
+/// archive. Only rows no
 /// session has claimed are deleted; a claimed row is being handed to a
 /// session already.
 ///
@@ -293,6 +310,7 @@ pub(crate) async fn forget_unadmitted_remote_messages(
     app_state: &crate::server::AppState,
     served: Option<&ServedDomains>,
     storage: &Arc<dyn PendingDeliveryStorage>,
+    archive: &Arc<dyn MamStorage>,
     account: &BareJid,
 ) {
     if app_state.s2s_federation.is_none() {
@@ -312,12 +330,10 @@ pub(crate) async fn forget_unadmitted_remote_messages(
         if row.flushed_in_session.is_some() {
             continue;
         }
-        let PendingPayload::Transient(message) = &row.payload else {
+        let Some(sender) = stored_sender(archive, &row.payload).await else {
             continue;
         };
-        let Some(sender) = message.from.as_ref() else {
-            continue;
-        };
+        let sender = &sender;
         let remote = matches!(
             served.classify(Some(sender)).unserved(),
             Some(UnservedDestination::Remote(_))
@@ -332,6 +348,27 @@ pub(crate) async fn forget_unadmitted_remote_messages(
             Ok(_) => telemetry::offline_unadmitted(),
             Err(error) => {
                 warn!(%error, "deleting a stored message of a domain no longer admitted failed");
+            }
+        }
+    }
+}
+
+/// The sender of a stored message: the `from` of a message stored whole,
+/// or of the archived message a row refers to. `None` when it has none or
+/// the archive cannot be read; such a row is left in place.
+async fn stored_sender(archive: &Arc<dyn MamStorage>, payload: &PendingPayload) -> Option<Jid> {
+    match payload {
+        PendingPayload::Transient(message) => message.from.clone(),
+        PendingPayload::Archived(stanza_id) => {
+            match archive
+                .get_message_by_archive_or_stanza_id(&stanza_id.by.to_bare(), stanza_id.as_str())
+                .await
+            {
+                Ok(archived) => archived.map(|archived| archived.from),
+                Err(error) => {
+                    warn!(%error, "reading a stored message's sender to check its admission failed");
+                    None
+                }
             }
         }
     }
@@ -557,55 +594,6 @@ fn refuse_message(state: &WebSocketState, message: &Message) -> Vec<Stanza> {
     vec![Stanza::Message(reply)]
 }
 
-/// Remove from a remote message the payloads only this server originates
-/// for its own accounts: the inbox elements, the DM pin marker, the
-/// XEP-0280 `<received/>` and `<sent/>` wrappers of carbon copies and the
-/// XEP-0313 `<result/>` wrapper of archive results, and the stanza ids it
-/// could have assigned ([`strip_local_stanza_ids`]). A carbon or an archive
-/// result names the account's own traffic; one from a remote sender is a
-/// forgery a client could take for its own (XEP-0280 §11).
-fn strip_private_payloads(message: &mut Message, served: Option<&ServedDomains>) {
-    strip_local_stanza_ids(message, served);
-    message.payloads.retain(|payload| {
-        let namespace = payload.ns();
-        namespace != NS_INBOX
-            && namespace != NS_WADDLE_INBOX
-            && namespace != NS_WADDLE_PIN_V0
-            && !payload.is("received", CARBONS_NS)
-            && !payload.is("sent", CARBONS_NS)
-            && !payload.is("result", MAM_NS)
-    });
-}
-
-/// Remove from a remote message every XEP-0359 `<stanza-id/>` this
-/// deployment could have assigned: one whose `by` names an address at a
-/// domain it serves (the recipient account's archive among them), or that
-/// cannot be read as an address. A client takes an id in its own
-/// account's name for the one its archive gave the message, so a remote
-/// sender must not supply it; an entity that assigns stanza ids deletes
-/// one whose `by` it would set (XEP-0359 §3); the recipient pass replaces
-/// only an id in the name it stamps itself, and a stored message has not
-/// met it yet. An id a remote entity assigned in its own name is left, as
-/// a routing entity leaves it (§3). Without the served domains every
-/// `<stanza-id/>` is removed.
-fn strip_local_stanza_ids(message: &mut Message, served: Option<&ServedDomains>) {
-    message.payloads.retain(|payload| {
-        if !payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID) {
-            return true;
-        }
-        let Some(served) = served else {
-            return false;
-        };
-        let Some(by) = payload.attr("by").and_then(|by| by.parse::<Jid>().ok()) else {
-            return false;
-        };
-        matches!(
-            served.classify(Some(&by)).unserved(),
-            Some(UnservedDestination::Remote(_))
-        )
-    });
-}
-
 /// The nodes the XEP-0060 event notifications in `message` name, if it
 /// carries any: one entry for each child of each `<event/>`, `None` for a
 /// child that names no node (§7.1.2: `items`, `purge`, `delete`,
@@ -660,7 +648,7 @@ async fn receive_message(
         {
             return Vec::new();
         }
-        strip_private_payloads(&mut message, served.as_ref());
+        sanitize_message(&mut message, served.as_ref(), RemoteSource::Account);
         deliver_headline(
             state,
             &account,
@@ -673,7 +661,7 @@ async fn receive_message(
         .await;
         return Vec::new();
     }
-    strip_private_payloads(&mut message, served.as_ref());
+    sanitize_message(&mut message, served.as_ref(), RemoteSource::Account);
     match message.type_ {
         MessageType::Error => {
             if let Some(full) = full.as_ref() {
@@ -697,6 +685,29 @@ async fn receive_message(
             Vec::new()
         }
         MessageType::Chat | MessageType::Normal => {
+            // Nothing answers the sender, whatever becomes of the message, so
+            // that no sender learns whether the account exists or is online.
+            if let Some(from) = message
+                .from
+                .clone()
+                .and_then(|from| from.try_into_full().ok())
+                .filter(|from| from.to_bare() == sender)
+            {
+                receive_direct(
+                    state,
+                    principal,
+                    &account,
+                    &from,
+                    full.as_ref(),
+                    message,
+                    work,
+                )
+                .await;
+                return Vec::new();
+            }
+            // A sender without a resource has no place in an ingress
+            // acceptance, which names a full sender: its message is delivered
+            // through the recipient's connection and stored offline whole.
             let admitted =
                 match deliver_direct(state, &account, &sender, full.as_ref(), &message, work).await
                 {
@@ -704,13 +715,291 @@ async fn receive_message(
                     Direct::Untaken { admitted } => admitted,
                 };
             // RFC 6121 §8.5.2.2.1: stored for the account's next session,
-            // from a contact and a stranger alike. Nothing answers the
-            // sender, whatever became of it, so that no sender learns
-            // whether the account is online.
+            // from a contact and a stranger alike.
             store_offline(state, &account, &sender, &message, work, admitted).await;
             Vec::new()
         }
         MessageType::Groupchat => Vec::new(),
+    }
+}
+
+/// Where a remote sender's `chat` or `normal` message to an account goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DirectRoute {
+    /// A live resource: the full JID the message names, or the one most
+    /// available resource.
+    Live(FullJid),
+    /// A detached stream-management session awaiting resumption.
+    Detached(FullJid),
+    /// No resource: the account's offline store.
+    Offline,
+}
+
+impl DirectRoute {
+    /// The address the plan routes the message to: the selected resource,
+    /// or the account's bare JID.
+    fn address(&self, account: &BareJid) -> Jid {
+        match self {
+            Self::Live(resource) | Self::Detached(resource) => Jid::from(resource.clone()),
+            Self::Offline => Jid::from(account.clone()),
+        }
+    }
+}
+
+/// Select where a `chat` or `normal` message from a remote sender goes
+/// (RFC 6121 §8.5.2.1.1, §8.5.3; `s2s-account-traffic-2047.md`,
+/// "Messages"): the full JID it names when that resource is bound, live or
+/// detached; otherwise, for a `chat` message or one to the bare JID, the
+/// live available resource with the highest non-negative priority (ties
+/// broken by address), else a connected resource that has not sent presence
+/// yet, else a detached session that was available, else the offline
+/// store. A `normal` message to a full JID that is not bound is dropped
+/// (`None`, §8.5.3.2.1).
+///
+/// One resource is selected: its recipient pass archives the message once,
+/// projects it into the inbox once and copies it to the account's other
+/// Carbons-enabled resources as a received carbon (XEP-0280 §6).
+async fn select_direct_route(
+    state: &WebSocketState,
+    account: &BareJid,
+    full: Option<&FullJid>,
+    message: &Message,
+) -> Option<DirectRoute> {
+    let resources = super::handlers::account_reads::resources(state, account).await;
+    if let Some(full) = full {
+        if is_detached(state, full).await {
+            return Some(DirectRoute::Detached(full.clone()));
+        }
+        if resources.contains(full) {
+            return Some(DirectRoute::Live(full.clone()));
+        }
+        if message.type_ != MessageType::Chat {
+            return None;
+        }
+    }
+    if let Some(resource) = non_negative_resources(state, account)
+        .await
+        .into_iter()
+        .next()
+    {
+        return Some(DirectRoute::Live(resource));
+    }
+    // A connected resource that has not sent presence yet, as local
+    // delivery to the bare JID does (RFC 6121 §8.5.2.1: an available or
+    // connected resource). An available resource with a negative priority
+    // is never one (§8.5.2.1.1).
+    let available: Vec<FullJid> =
+        super::handlers::account_reads::available_resources(state, account)
+            .await
+            .into_iter()
+            .map(|(resource, _)| resource)
+            .collect();
+    let mut connected: Vec<FullJid> = resources
+        .into_iter()
+        .filter(|resource| !available.contains(resource))
+        .collect();
+    connected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    if let Some(resource) = connected.into_iter().next() {
+        return Some(DirectRoute::Live(resource));
+    }
+    if let Some(resource) = detached_resources(state, account).await.into_iter().next() {
+        return Some(DirectRoute::Detached(resource));
+    }
+    Some(DirectRoute::Offline)
+}
+
+/// Whether a XEP-0424 retraction or a XEP-0308 correction in `message`,
+/// from the remote `sender`, names a message of `account`'s archive that
+/// the sender wrote. The recipient pass tombstones the archived message a
+/// retraction names by its id, and keys a correction's state under the
+/// message it replaces; for a local sender its own server checked the
+/// author first (the Business Rules of XEP-0424 and XEP-0308), and for a remote
+/// one this does, by the same lookup the tombstone resolves its target
+/// with. A message that retracts and corrects nothing, or names a message
+/// the archive does not hold, passes; one whose target another sender
+/// wrote, or whose target cannot be read, does not, and is dropped
+/// unanswered.
+async fn targets_own_message(
+    state: &WebSocketState,
+    account: &BareJid,
+    sender: &BareJid,
+    message: &Message,
+) -> bool {
+    let target = match waddle_xmpp::xep::xep0424::extract_retraction_from_message(message) {
+        Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) => {
+            retraction.retracts_id
+        }
+        _ => match waddle_xmpp::xep::extract_correction_from_message(message) {
+            Some(correction) => correction.replaces_id,
+            None => return true,
+        },
+    };
+    match state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_message_id(account, &target)
+        .await
+    {
+        Ok(None) => true,
+        Ok(Some(archived)) => archived.from.to_bare() == *sender,
+        Err(error) => {
+            warn!(%error, "reading the target of a remote sender's retraction or correction failed");
+            false
+        }
+    }
+}
+
+/// The S2S admission policy this replica runs (ADR-0020 D1), from which the
+/// acceptance of a remote sender's message decides its domain again.
+fn admission_policy(
+    state: &WebSocketState,
+) -> Option<crate::permissions::host_grant::PrincipalPolicy> {
+    let domain =
+        CanonicalDomain::parse_canonical(state.deps.auth_state.xmpp_domain.as_str()).ok()?;
+    Some(state.deps.app_state.grant_principals(domain))
+}
+
+/// Accept a `chat` or `normal` message from the remote sender `from` to
+/// `account` through the ingress authority, as a local direct message is
+/// accepted for its recipient: the recipient's archive (XEP-0313), inbox
+/// and received carbons (XEP-0280), its delivery to the selected resource
+/// or a detached session, or, with no resource, the offline store
+/// (XEP-0160) and the push notification of a local direct message. The
+/// sender's own archive, inbox and carbons are its server's. `full` is the
+/// full JID the message names, if any.
+///
+/// A stranger's message that would be held by a detached session or stored
+/// offline is admitted only within the strangers' bounds
+/// ([`admit_offline`]), and one the store would not keep is not held for a
+/// stranger at all. Nothing the plan or the acceptance does answers the
+/// sender: a plan that would answer it, or act on anybody but the
+/// recipient, is not committed ([`classify_remote_direct_plan`]), and the
+/// acceptance's frames are recorded as answered without being sent.
+///
+/// [`classify_remote_direct_plan`]: crate::server::routes::interpret::classify_remote_direct_plan
+async fn receive_direct(
+    state: &WebSocketState,
+    principal: &RemotePrincipal,
+    account: &BareJid,
+    from: &FullJid,
+    full: Option<&FullJid>,
+    message: Message,
+    work: &AccountWork,
+) {
+    use crate::ingress::submission::digest_input;
+    use crate::ingress::{
+        ImmediateSink, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
+        RemoteIngressTarget, RemoteOccupantPrincipal,
+    };
+    use crate::permissions::host_grant::StreamEvidence;
+    use crate::server::routes::interpret::{
+        classify_remote_direct_plan, plan_remote_direct_message, RemoteDirectPlan,
+    };
+    use waddle_xmpp::ingress::{DigestContext, NormalizedTarget, TransportGeneration};
+
+    let sender = from.to_bare();
+    let Some(route) = select_direct_route(state, account, full, &message).await else {
+        return;
+    };
+    if !targets_own_message(state, account, &sender, &message).await {
+        telemetry::direct_refused();
+        return;
+    }
+    let Some(admission) = admission_policy(state) else {
+        return;
+    };
+    let target = match message.to.as_ref() {
+        Some(to) => match to.try_as_full() {
+            Ok(to) => NormalizedTarget::Full(to.clone()),
+            Err(to) => NormalizedTarget::Bare(to.clone()),
+        },
+        None => return,
+    };
+    // The recipient's archive is the one authority of this deployment that
+    // stamps the message; the sender's archive is its own server's.
+    let Ok(digest_input) = digest_input(
+        &message,
+        &DigestContext {
+            target: target.clone(),
+            server_authorities: vec![account.clone()],
+            stanza_lang: None,
+        },
+    ) else {
+        telemetry::direct_refused();
+        return;
+    };
+    let deps = build_interpret_deps(state, None);
+    let plan = plan_remote_direct_message(&deps, route.address(account), message.clone()).await;
+    let held = match classify_remote_direct_plan(&plan, account, &sender) {
+        RemoteDirectPlan::Recipient { held } => held,
+        RemoteDirectPlan::Empty => return,
+        RemoteDirectPlan::Refused => {
+            telemetry::direct_refused();
+            return;
+        }
+    };
+    // What a detached session holds goes to the offline store when its
+    // resume window closes, so a stranger's message is held by one only as
+    // it would be stored. The plan, not the route selected before it,
+    // decides: a resource that left meanwhile sends the message to the
+    // store.
+    if held && !admit_offline(state, account, &sender, &message).await {
+        return;
+    }
+    if work.abandoned() {
+        return;
+    }
+    let submission = IngressSubmission {
+        identity: IngressStreamIdentity::Remote {
+            account: sender.clone(),
+            target: RemoteIngressTarget::Account {
+                admission: Box::new(admission),
+            },
+        },
+        principal: IngressPrincipal::Remote(RemoteOccupantPrincipal {
+            account: sender,
+            evidence: StreamEvidence::of(principal),
+        }),
+        sender: from.clone(),
+        target,
+        plan,
+        digest_input,
+        connection_generation: TransportGeneration::Host,
+    };
+    let authority = &state.deps.protocol.ingress;
+    let decision = authority.commit(&submission).await;
+    if !decision.class.advances() {
+        // The acceptance's assertions refuse a domain no longer admitted
+        // and a recipient that does not exist; anything else that did not
+        // commit is a failure, and the message is lost (S2S has no
+        // retransmission of a stanza the receiving server took).
+        if decision.class
+            == waddle_xmpp::telemetry::attributes::IngressDecisionClass::PrincipalMissing
+        {
+            telemetry::direct_refused();
+        } else {
+            telemetry::direct_failed();
+        }
+        return;
+    }
+    telemetry::direct_accepted();
+    // The acceptance is committed: its effects run within their own budget,
+    // and an effect that does not finish is recovered by the ingress
+    // authority.
+    let executed = authority.execute(&decision, &ImmediateSink, &deps);
+    let Ok(mut report) = tokio::time::timeout(DIRECT_EFFECTS_TIMEOUT, executed).await else {
+        return;
+    };
+    // A frame of the acceptance would answer the sender. A remote sender is
+    // answered nothing, so none is sent, and the obligations are recorded as
+    // answered.
+    if authority
+        .complete_frame_obligations(&mut report)
+        .await
+        .is_err()
+    {
+        warn!("recording a remote sender's accepted direct message failed");
     }
 }
 
@@ -863,7 +1152,10 @@ async fn store_offline(
         .await
     {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => telemetry::offline_stored(),
-        Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
+        Ok(
+            waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded
+            | waddle_xmpp::pending_delivery::InsertOutcome::RecipientRetired,
+        ) => {
             telemetry::offline_dropped();
         }
         Err(error) => warn!(%error, "storing a remote sender's message offline failed"),
@@ -1150,13 +1442,51 @@ pub(crate) mod telemetry {
         );
     }
 
-    /// A remote sender's message no resource took was stored in the
-    /// account's offline store.
+    /// A remote sender's direct message was accepted through the ingress
+    /// authority for the recipient account.
+    pub(crate) fn direct_accepted() {
+        counter_add!(
+            "waddle.s2s.account_traffic.direct_accepted",
+            "{stanza}",
+            "Direct messages from remote senders accepted through the ingress authority for a local account: archived, projected, delivered or stored as a local direct message is for its recipient.",
+            1,
+        );
+    }
+
+    /// A remote sender's direct message was refused unanswered before or
+    /// at its acceptance, by a rule: its plan would have answered the
+    /// sender or acted beyond the recipient's account, its retraction or
+    /// correction named another sender's message, it could not be read as
+    /// offered, or the acceptance's assertions refused its domain or its
+    /// recipient.
+    pub(crate) fn direct_refused() {
+        counter_add!(
+            "waddle.s2s.account_traffic.direct_refused",
+            "{stanza}",
+            "Direct messages from remote senders refused unanswered by a rule before or at their ingress acceptance.",
+            1,
+        );
+    }
+
+    /// A remote sender's direct message whose ingress acceptance failed to
+    /// commit (a timeout, an exhausted retry, an unknown outcome, a storage
+    /// failure): it is lost unanswered.
+    pub(crate) fn direct_failed() {
+        counter_add!(
+            "waddle.s2s.account_traffic.direct_failed",
+            "{stanza}",
+            "Direct messages from remote senders whose ingress acceptance did not commit, lost unanswered.",
+            1,
+        );
+    }
+
+    /// A message from a remote sender without a resource that no resource
+    /// took was stored whole in the account's offline store.
     pub(crate) fn offline_stored() {
         counter_add!(
             "waddle.s2s.account_traffic.offline_stored",
             "{stanza}",
-            "Messages from remote senders that no resource of the local account took, stored in the account's offline store.",
+            "Messages from remote senders without a resource that no resource of the local account took, stored whole in the account's offline store; a sender with a resource's message is accepted through the ingress authority instead.",
             1,
         );
     }
@@ -1168,7 +1498,7 @@ pub(crate) mod telemetry {
         counter_add!(
             "waddle.s2s.account_traffic.offline_dropped",
             "{stanza}",
-            "Messages from remote senders that no resource of the local account took, dropped unanswered because a bound on offline storage for remote senders or the offline store's quota was reached.",
+            "Messages from remote senders that a detached session or the offline store would have held, dropped unanswered because a bound on offline storage for remote senders, or the offline store's quota for a message stored whole, was reached.",
             1,
         );
     }

@@ -10,7 +10,8 @@
 //! account tables in time fails and changes nothing. Retirement also
 //! removes what remote senders left for the account: recorded
 //! subscription requests, remote PubSub subscription records and offline
-//! admissions (gate G18).
+//! admissions (gate G18), and the account's offline store under every
+//! spelling of its JID.
 //!
 //! Every case runs on SQLite; the cases that take a store run on PostgreSQL
 //! as well, on a database of their own, and the exclusion cases need
@@ -795,6 +796,97 @@ async fn retirement_removes_what_remote_senders_left_for_the_account() {
                 "{engine}: {sql}"
             );
         }
+        store.close().await;
+    }
+}
+
+#[tokio::test]
+async fn retirement_empties_the_offline_store_under_every_spelling_of_the_account() {
+    use waddle_server::db::actor::DbExecute;
+    use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+    use waddle_server::server::ResolvedXmppDatabaseUrl;
+    use waddle_server::test_support::attach_pending_startup;
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+    use xmpp_parsers::message::{Lang, Message};
+
+    /// A message from Bob that the offline store keeps whole for `to`.
+    fn row(to: &BareJid) -> PendingRow {
+        let mut message = Message::new(Some(jid::Jid::from(to.clone())));
+        message.from = Some("bob@example.com/phone".parse().expect("Bob's JID"));
+        message.bodies.insert(Lang::new(), "later".to_owned());
+        PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: to.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        }
+    }
+    const COUNT: &str = "SELECT count(*) FROM pending_delivery WHERE recipient_jid = ?";
+
+    for store in Store::each("retire_offline_spellings").await {
+        let engine = store.engine;
+        // An offline store on the deployment's database: on SQLite the one
+        // startup attaches, which shares the in-memory database's pool.
+        let offline = match &store.postgres {
+            Some(fixture) => DatabasePendingDeliveryStorage::open(
+                Some(fixture.db.database_url()),
+                QuotaPolicy::Unlimited,
+            )
+            .await
+            .expect("the offline store"),
+            None => attach_pending_startup(
+                &ResolvedXmppDatabaseUrl::InheritedGlobal(store.db.database_url().to_owned()),
+                &store.db,
+            )
+            .await
+            .expect("the offline store"),
+        };
+        // The account, at a domain with a U-label, and its localpart holding
+        // a character a `LIKE` pattern reads as a wildcard.
+        let canonical: BareJid = "al_ce@xn--bcher-kva.example".parse().expect("a JID");
+        // The `jid` parser keeps the U-label: another spelling of the
+        // account.
+        let unicode: BareJid = "al_ce@b\u{fc}cher.example".parse().expect("a JID");
+        assert_eq!(unicode.as_str(), "al_ce@b\u{fc}cher.example");
+        // A localpart the wildcard would also match, and the account's
+        // localpart at another domain: neither is the account.
+        let lookalike: BareJid = "alxce@xn--bcher-kva.example".parse().expect("a JID");
+        let elsewhere: BareJid = "al_ce@example.com".parse().expect("a JID");
+        for recipient in [&canonical, &unicode, &canonical, &lookalike, &elsewhere] {
+            offline
+                .insert(row(recipient))
+                .await
+                .expect("a stored message");
+        }
+        // A row written before recipients were prepared, in another letter
+        // case.
+        let legacy = "AL_CE@XN--BCHER-KVA.EXAMPLE";
+        let rewritten = store
+            .actor
+            .ask(DbExecute {
+                sql: "UPDATE pending_delivery SET recipient_jid = ? WHERE row_id = \
+                      (SELECT min(row_id) FROM pending_delivery WHERE recipient_jid = ?)"
+                    .to_owned(),
+                params: vec![legacy.into(), canonical.as_str().into()],
+            })
+            .await
+            .expect("a legacy spelling");
+        assert_eq!(rewritten, 1, "{engine}");
+
+        let retirement = retire_account(&store.db, &canonical)
+            .await
+            .expect("retirement");
+        assert_eq!(retirement.offline_messages, 3, "{engine}");
+        for gone in [canonical.as_str(), unicode.as_str(), legacy] {
+            assert_eq!(store.count(COUNT, gone).await, 0, "{engine}: {gone}");
+        }
+        for kept in [lookalike.as_str(), elsewhere.as_str()] {
+            assert_eq!(store.count(COUNT, kept).await, 1, "{engine}: {kept}");
+        }
+        drop(offline);
         store.close().await;
     }
 }

@@ -702,7 +702,8 @@ pub async fn accept_pending_if_quiescent(
     let outcome = database::insert_in_transaction(tx, row, quota, None)
         .await
         .map_err(|error| CandidateRouteError::Storage(error.to_string()))?;
-    if outcome == InsertOutcome::QuotaExceeded {
+    // Nothing was accepted, whether for the quota or a retired recipient.
+    if outcome != InsertOutcome::Inserted {
         tx.execute(
             &format!("UPDATE {qualified_schema}.sm_recipient_route_guards SET closed = FALSE WHERE recipient = ? AND closed = TRUE"),
             crate::db_params![recipient.to_string()],

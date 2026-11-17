@@ -12,6 +12,8 @@
 //!   Off by default.
 //! - [`route`]: the router between S2S streams and local entities: what a
 //!   remote sender may reach, egress queues per peer and IQ correlation.
+//! - `remote_content`: what is removed from a message another server sent
+//!   before a local client, archive or store sees it.
 //!
 //! Nothing is advertised beyond what a remote asker of the server domain's
 //! service discovery is answered.
@@ -20,5 +22,6 @@ pub mod config;
 pub mod conn;
 pub mod dialback;
 pub mod discovery;
+pub(crate) mod remote_content;
 pub mod route;
 pub mod verify;

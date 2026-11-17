@@ -279,6 +279,9 @@ async fn finish(
         tx.commit().await?;
         return Ok(Finished::Uncertain);
     }
+    // A retired recipient's store keeps nothing, now or later
+    // (`InsertOutcome::RecipientRetired`): the invitation is settled
+    // without a row, as no retry could store it.
     for recipient in &route.resources {
         SendAttemptRepository::retire_expired_attempt(
             &mut tx,

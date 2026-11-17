@@ -56,6 +56,7 @@ use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
 
 mod account_binding;
+mod account_retirement;
 mod batch_write;
 mod call_signaling_telemetry;
 #[cfg(feature = "test-support")]
@@ -129,6 +130,7 @@ pub(crate) use cleanup::{
 /// wedged room must not stall disconnect cleanup, the departure janitor, an
 /// administrative removal, or an explicit leave's wait-class bounce.
 pub(crate) const LEAVE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) use account_retirement::{close_live_streams, end_account_sessions, RetiredAccounts};
 pub(crate) use cleanup::{
     broadcast_muc_leave_to_remaining_resumable, broadcast_muc_muji_clear_to_remaining_resumable,
     maybe_evict_empty_room, LeaveFanOutProgress,

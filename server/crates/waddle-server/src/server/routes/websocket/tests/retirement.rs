@@ -27,13 +27,14 @@ use waddle_xmpp::registry::{
 };
 use waddle_xmpp::telemetry::attributes::ActorRetirementCause;
 
-const EVERY_CAUSE: [RetirementCause; 15] = [
+const EVERY_CAUSE: [RetirementCause; 16] = [
     RetirementCause::PeerClose,
     RetirementCause::StreamClosed,
     RetirementCause::Shutdown,
     RetirementCause::IdentityRevoked,
     RetirementCause::PermitRevoked,
     RetirementCause::ForceDetach,
+    RetirementCause::AccountRetired,
     RetirementCause::Replaced,
     RetirementCause::WriteFailure,
     RetirementCause::PumpExit,
@@ -83,6 +84,7 @@ fn each_cause_retires_exactly_once_with_its_own_outcome() {
             RetirementCause::ForceDetach
             | RetirementCause::Replaced
             | RetirementCause::SessionSuperseded => ActorRetirementCause::Replaced,
+            RetirementCause::AccountRetired => ActorRetirementCause::Policy,
             RetirementCause::WriteFailure | RetirementCause::PumpExit => {
                 ActorRetirementCause::TransportError
             }

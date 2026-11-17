@@ -520,6 +520,10 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         ("pending_delivery", "SELECT, INSERT, UPDATE, DELETE"),
         ("pending_delivery_sm_promotions", "SELECT, INSERT, DELETE"),
         ("pending_delivery_startup_migrations", "SELECT"),
+        // Every insert into the offline store reads the ledger of retired
+        // account JIDs (ADR-0020 D8), which the runtime role may read and
+        // nothing else (`server/runtime_owner.rs`).
+        ("retired_account_jids", "SELECT"),
         ("inbox_entries", "SELECT, INSERT, UPDATE"),
         (
             "groupchat_notification_recovery",

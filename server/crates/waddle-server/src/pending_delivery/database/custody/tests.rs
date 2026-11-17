@@ -255,9 +255,15 @@ async fn postgres_custody_transfer_serializes_both_tombstone_orders() {
     let database = pending.database();
     let mut handoff = database.begin().await.expect("handoff transaction");
     assert_eq!(
-        transfer(&mut handoff, &row, &append, QuotaPolicy::Unlimited)
-            .await
-            .expect("atomic transfer"),
+        transfer(
+            &mut handoff,
+            &row,
+            &append,
+            QuotaPolicy::Unlimited,
+            &pending.retired_ledger,
+        )
+        .await
+        .expect("atomic transfer"),
         CustodyInsertOutcome::Inserted
     );
     let recipient = row.recipient.clone();

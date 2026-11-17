@@ -248,12 +248,17 @@ async fn drain_one(
                     stream: stream.as_str().to_owned(),
                     source,
                 })?;
-                if outcome != InsertOutcome::Inserted {
-                    return Err(LegacyDrainError::OfflineRefused {
-                        stream: stream.as_str().to_owned(),
-                    });
+                match outcome {
+                    InsertOutcome::Inserted => committed.stored += 1,
+                    // The recipient's account was retired: its store keeps
+                    // nothing, and the frame goes as a dropped one does.
+                    InsertOutcome::RecipientRetired => committed.dropped += 1,
+                    InsertOutcome::QuotaExceeded => {
+                        return Err(LegacyDrainError::OfflineRefused {
+                            stream: stream.as_str().to_owned(),
+                        });
+                    }
                 }
-                committed.stored += 1;
             }
             FrameDisposition::Drop => committed.dropped += 1,
         }

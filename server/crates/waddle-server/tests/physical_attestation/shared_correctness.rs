@@ -496,6 +496,10 @@ async fn exercise_postgres(
         ("mam_archive_sequences", "SELECT, INSERT"),
         ("mam_messages", "SELECT, INSERT"),
         ("pending_delivery", "SELECT, INSERT, UPDATE, DELETE"),
+        // Every insert into the offline store reads the ledger of retired
+        // account JIDs (ADR-0020 D8), which the runtime role may read and
+        // nothing else (`server/runtime_owner.rs`).
+        ("retired_account_jids", "SELECT"),
         ("_lineage", "SELECT"),
         ("_migrations", "SELECT"),
     ] {

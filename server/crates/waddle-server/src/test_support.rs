@@ -292,6 +292,16 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Run one pass of the recovery of ingress custody whose stream-management
+/// session is gone, as the session janitor does: a payload the store takes
+/// is handed to the recipient's offline store. Returns whether every
+/// candidate was settled.
+#[cfg(feature = "test-support")]
+pub async fn run_ingress_custody_sweep(state: &WebSocketState) -> bool {
+    let mut cursor = None;
+    crate::server::session_janitors::run_ingress_custody_sweep(state, &mut cursor).await
+}
+
 /// The default in-memory WebSocket state of a replica that runs the S2S
 /// snapshot `config`, as startup records it when S2S is enabled: decisions
 /// about remote principals read its admission policy and trusted-home list.
@@ -422,6 +432,42 @@ pub fn undone_join_recipients(
         joiner,
         nick_holders,
     )
+}
+
+/// The most entries each table of a replica's XEP-0353 call state (its
+/// pending offers and its active calls) holds before its oldest are pruned.
+#[cfg(feature = "test-support")]
+pub fn dm_call_state_capacity() -> usize {
+    crate::server::routes::interpret::dm_call_state_capacity()
+}
+
+/// Record in `state`'s call state an active XEP-0353 call under `key`,
+/// which `initiator` proposed and the other peer accepted, whose call
+/// thread the peers in `projected` have projected into their inboxes: the
+/// state a replica holds once a `proceed` was accepted.
+#[cfg(feature = "test-support")]
+pub fn seed_active_dm_call(
+    state: &WebSocketState,
+    key: waddle_xmpp::ingress::DmCallThreadKey,
+    initiator: jid::BareJid,
+    projected: &[jid::BareJid],
+) {
+    let protocol = &state.deps.protocol;
+    for owner in projected {
+        protocol
+            .dm_call_thread_projections
+            .insert((owner.clone(), key.clone()));
+    }
+    protocol.dm_call_threads.insert(
+        key.clone(),
+        crate::server::routes::websocket::ActiveCallThread {
+            anchor_origin_id: String::new(),
+            initiator,
+            media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            started: chrono::Utc::now(),
+            thread_id: key.sid.0,
+        },
+    );
 }
 
 /// Make the account `localpart` of the state's domain an owner of the

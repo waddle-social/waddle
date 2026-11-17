@@ -226,6 +226,10 @@ pub enum CustodyInsertOutcome {
     Inserted,
     AlreadyCompleted,
     QuotaExceeded,
+    /// The recipient's account was retired: nothing was written, and the
+    /// allocation's custody ended without delivery in the same transaction
+    /// ([`InsertOutcome::RecipientRetired`]).
+    RecipientRetired,
 }
 
 /// Trusted host backend capability, never inferred from wire IDs or row data.
@@ -256,8 +260,20 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// [`InsertOutcome::QuotaExceeded`] when the configured
     /// [`QuotaPolicy`] would be violated; the caller is then
     /// responsible for returning `<service-unavailable/>` per XEP-0160
-    /// §3 step 3 (locked Q9b).
+    /// §3 step 3 (locked Q9b). A store that reads the ledger of retired
+    /// account JIDs returns [`InsertOutcome::RecipientRetired`] for a
+    /// recipient it holds, from every insert path.
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError>;
+
+    /// Whether the account `recipient` names was retired, so that this
+    /// store refuses every row for it ([`InsertOutcome::RecipientRetired`]).
+    /// A producer reads it to discard such a message before it would try
+    /// any other sink. A store without the ledger of retired account JIDs
+    /// refuses no recipient.
+    async fn recipient_retired(&self, recipient: &BareJid) -> Result<bool, PendingStorageError> {
+        let _ = recipient;
+        Ok(false)
+    }
 
     /// Fenced variant of [`Self::insert`] for the XEP-0198 §5 Q6 promotion
     /// write path (ADR-0017 Phase 3 Slice 5 FIX 3, council-adjudicated):
