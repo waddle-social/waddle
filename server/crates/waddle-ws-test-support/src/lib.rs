@@ -352,6 +352,10 @@ impl TestServer {
                 // The startup error is at the end; keep the panic readable.
                 let tail: Vec<&str> = stderr.lines().rev().take(40).collect();
                 let tail: Vec<&str> = tail.into_iter().rev().collect();
+                if tail.is_empty() {
+                    // Inherited stdio already printed the error above.
+                    panic!("Server exited before writing its port file: {status}");
+                }
                 panic!(
                     "Server exited before writing its port file: {status}; \
                      last lines of its stderr:\n{}",
