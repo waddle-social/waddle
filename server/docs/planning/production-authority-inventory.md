@@ -1280,6 +1280,20 @@ evidence changed, and no decision of standing moved.
   changed files, and in `pending_delivery/tests.rs`, whose quota race case
   names the new refusal, moved because those files gained lines.
 
+The selected evidence was refreshed a twenty-eighth time, through
+`42240e113bc1c879fd631e706542fc157e3aedda`, after reviewing the delta of the reviewed files since the
+twenty-seventh refresh. `auth/retirement.rs` changed. No grant writer or
+storage plane of the host-grant authority was added, no producer of stream
+evidence changed, and no decision of standing moved.
+
+- Retirement (`account-retire`, its anchor unchanged) also deletes the
+  account's offline rows kept under another spelling of its JID: it reads
+  the store's recipients that start with the account's localpart, compared
+  without letter case, and deletes those whose ledger key is the
+  account's, under the same advisory lock. It writes no grant and decides
+  no standing.
+- The raw scan holds 1636 records, unchanged in content and place.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "9d55985c1890dfe12686551cbf273d35c6c915c0",
+  "baseline_commit": "42240e113bc1c879fd631e706542fc157e3aedda",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "sha256": "145486afa97fd28f7d276b9b7706043d112f76168dd648443456708a8d2038f1"
+      "sha256": "02977663153dfbdb0aca087745c2d125e67ef13f58b278b5e8d48e8488a61a37"
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
