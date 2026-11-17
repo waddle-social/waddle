@@ -600,12 +600,19 @@ pub(super) async fn handle_pubsub_admin_request(
             // joined-spaces node enforces affiliation rules stricter than the
             // state chart. A change it does not support is not applied and
             // comes back in a `not-acceptable` error with the entity's
-            // existing affiliation. Any change left out
-            // of that error counts as a successful modification, so every
-            // permitted change of the same request is applied as usual.
+            // existing affiliation. Any change left out of that error counts
+            // as a successful modification, so every permitted change of the
+            // same request is applied as usual. A request naming an entity
+            // twice, which the section answers with `bad-request`, is refused
+            // before any of it is applied: one of its changes could otherwise
+            // be applied while the other is reported as not made.
             let (changes, refused) = if is_pep
                 && node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
             {
+                let mut named = std::collections::HashSet::with_capacity(changes.len());
+                if !changes.iter().all(|(entity, _)| named.insert(entity)) {
+                    return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
+                }
                 let (permitted, unsupported): (Vec<_>, Vec<_>) =
                     changes.into_iter().partition(|(entity, affiliation)| {
                         joined_spaces_affiliation_allowed(target_jid, entity, *affiliation)
