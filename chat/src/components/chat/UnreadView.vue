@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { Hash, ListTree, RefreshCw } from "lucide-vue-next";
 import spotStickers from "@waddle/design/assets/spot-stickers.svg?url";
-import { css, cx } from "styled-system/css";
+import { css } from "styled-system/css";
 import { badge, btn, waddle } from "styled-system/recipes";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
@@ -36,7 +36,6 @@ const countClass = badge();
 const refreshButtonClass = btn({ size: "sm" });
 const openButtonClass = btn({ size: "sm" });
 const loaderClass = waddle();
-const emptyClass = cx(pc.empty, css({ pt: "64px" }));
 const spinClass = css({ _motionSafe: { animation: "spin 1s linear infinite" } });
 
 // App-Unread board: one card per room, its new messages, then its threads.
@@ -45,7 +44,7 @@ const cardHeadClass = css({
   display: "flex",
   alignItems: "center",
   gap: "2.5",
-  padding: "10px 12px 10px 16px",
+  padding: "{spacing.2.5} {spacing.3} {spacing.2.5} {spacing.4}",
   borderBottom: "1px solid {colors.border.soft}",
   "& > svg": { width: "16px", height: "16px", flex: "none", color: "fg.soft" },
 });
@@ -58,7 +57,7 @@ const threadButtonClass = css({
   gap: "2",
   width: "100%",
   minHeight: "40px",
-  padding: "8px 16px",
+  padding: "{spacing.2} {spacing.4}",
   border: 0,
   bg: "transparent",
   color: "action.text",
@@ -119,7 +118,7 @@ async function refreshUnread() {
         Couldn't load unread: {{ error }}
       </div>
 
-      <div v-else-if="!hasGroups" :class="emptyClass" role="status">
+      <div v-else-if="!hasGroups" :class="pc.empty" role="status">
         <img :src="spotStickers" alt="" />
         <h2 :class="pc.emptyTitle">All caught up</h2>
         <p>Nothing unread. The room is yours.</p>

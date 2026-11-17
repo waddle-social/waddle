@@ -24,7 +24,7 @@ export const connectionNoticeClasses = {
   card: css({
     display: "flex",
     alignItems: "center",
-    gap: "14px",
+    gap: "4",
     mx: "gutter",
     my: "3",
     py: "3",

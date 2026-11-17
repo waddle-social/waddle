@@ -148,7 +148,7 @@ const rootClass = css({
   fontFamily: "body",
   overflow: "hidden",
 });
-const topClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "12px 10px 8px 12px", flex: "none" });
+const topClass = css({ display: "flex", alignItems: "center", gap: "1.5", padding: "{spacing.3} {spacing.2.5} {spacing.2} {spacing.3}", flex: "none" });
 const communityClass = css({
   flex: 1,
   minWidth: 0,
@@ -156,7 +156,7 @@ const communityClass = css({
   alignItems: "center",
   gap: "2.5",
   height: "44px",
-  padding: "0 8px 0 2px",
+  padding: "0 {spacing.2} 0 {spacing.0.5}",
   border: 0,
   borderRadius: "control",
   bg: "transparent",
@@ -178,14 +178,14 @@ const markClass = css({
   "& img": { width: "26px", height: "26px" },
 });
 const communityNameClass = css({ flex: 1, minWidth: 0, font: "800 17px/1.2 {fonts.display}", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
-const jumpWrapClass = css({ padding: "0 10px 6px", flex: "none" });
+const jumpWrapClass = css({ padding: "0 {spacing.2.5} {spacing.1.5}", flex: "none" });
 const jumpClass = css({
   width: "100%",
   display: "flex",
   alignItems: "center",
   gap: "2",
   height: "40px",
-  padding: "0 10px",
+  padding: "0 {spacing.2.5}",
   borderRadius: "control",
   border: "1px solid {colors.border.strong}",
   bg: "surface",
@@ -195,9 +195,9 @@ const jumpClass = css({
   _hover: { borderColor: "fg.soft" },
   "& svg": { width: "18px", height: "18px", flex: "none" },
   "& span": { flex: 1, textAlign: "left" },
-  "& kbd": { font: "600 12px/1 {fonts.mono}", padding: "4px 6px", borderRadius: "tag", border: "1px solid {colors.border}", color: "fg.muted", _coarse: { display: "none" } },
+  "& kbd": { font: "600 12px/1 {fonts.mono}", padding: "{spacing.1} {spacing.1.5}", borderRadius: "tag", border: "1px solid {colors.border}", color: "fg.muted", _coarse: { display: "none" } },
 });
-const scrollClass = css({ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 8px 8px", display: "flex", flexDirection: "column", gap: "0.5" });
+const scrollClass = css({ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 {spacing.2} {spacing.2}", display: "flex", flexDirection: "column", gap: "0.5" });
 const rowClass = cx(room(), css({ cursor: "pointer", border: 0, bg: "transparent", width: "100%", textAlign: "left", "& .wd-badge": { flex: "none" } }));
 const viewRowClass = cx(rowClass, css({ color: "fg" }));
 // Group DMs sit among avatar rows: same 28px tile as a `sm` avatar.
@@ -206,13 +206,13 @@ const sectionClass = css({
   display: "flex",
   alignItems: "center",
   gap: "1",
-  padding: "14px 8px 4px 12px",
+  padding: "{spacing.4} {spacing.2} {spacing.1} {spacing.3}",
   "& h2": { margin: 0, flex: 1, font: "700 13px/1.3 {fonts.body}", color: "fg.muted" },
   "& .wd-iconbtn": { width: "32px", height: "32px", "& svg": { width: "18px", height: "18px" } },
 });
-const emptyClass = css({ margin: "2px 12px 6px", fontSize: "sm", lineHeight: "1.45", color: "fg.muted" });
-const footClass = css({ display: "flex", alignItems: "center", gap: "2.5", padding: "10px 10px 12px 14px", marginTop: "1.5", borderTop: "1px solid {colors.border.soft}", flex: "none" });
-const dockClass = css({ flex: "none", padding: "6px 10px 0", display: "flex", flexDirection: "column", gap: "2", _empty: { display: "none" } });
+const emptyClass = css({ margin: "{spacing.0.5} {spacing.3} {spacing.1.5}", fontSize: "sm", lineHeight: "1.45", color: "fg.muted" });
+const footClass = css({ display: "flex", alignItems: "center", gap: "2.5", padding: "{spacing.2.5} {spacing.2.5} {spacing.3} {spacing.4}", marginTop: "1.5", borderTop: "1px solid {colors.border.soft}", flex: "none" });
+const dockClass = css({ flex: "none", padding: "{spacing.1.5} {spacing.2.5} 0", display: "flex", flexDirection: "column", gap: "2", _empty: { display: "none" } });
 </script>
 
 <template>

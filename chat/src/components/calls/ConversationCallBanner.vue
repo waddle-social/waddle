@@ -399,7 +399,7 @@ function activateSecondaryBanner(): void {
 // A live call in this conversation (Huddle-Join board): a card above the
 // timeline with who is in it and Join / Leave. `data-tone` quiets it when you
 // are busy elsewhere or the call is still syncing.
-const laneClass = css({ padding: "12px 24px 0", _narrow: { padding: "8px 12px 0" } });
+const laneClass = css({ padding: "{spacing.3} {spacing.6} 0", _narrow: { padding: "{spacing.2} {spacing.3} 0" } });
 const cardClass = css({
   display: "flex",
   flexWrap: "wrap",

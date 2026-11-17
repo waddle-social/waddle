@@ -65,7 +65,7 @@ const rootClass = css({
   color: "fg",
   "@media (max-width: 760px)": { flexBasis: "auto", width: "100%", maxHeight: "18rem" },
 });
-const headerClass = css({ flex: "none", display: "flex", alignItems: "center", gap: "1", padding: "0 8px 0 4px", borderBottom: "1px solid {colors.border.soft}" });
+const headerClass = css({ flex: "none", display: "flex", alignItems: "center", gap: "1", padding: "0 {spacing.2} 0 {spacing.1}", borderBottom: "1px solid {colors.border.soft}" });
 const tabsClass = css({ flex: 1, minWidth: 0, borderBottom: 0 });
 const bodyClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" });
 const countClass = badge({ variant: "quiet" });

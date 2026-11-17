@@ -62,7 +62,7 @@ const deniedMessage = computed(() =>
 
 // Admin-Access board: a centred loader, or the empty state with one way back.
 // The shell's main column is a flex column; the box fills it.
-const centreClass = css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "3", flex: 1, minHeight: 0, padding: "32px 16px", boxSizing: "border-box", bg: "bg", color: "fg.muted", fontSize: "15px" });
+const centreClass = css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "3", flex: 1, minHeight: 0, padding: "{spacing.8} {spacing.4}", boxSizing: "border-box", bg: "bg", color: "fg.muted", fontSize: "15px" });
 const deniedClass = cx(empty(), css({ maxWidth: "420px", color: "fg", "& h1": { margin: 0, font: "700 24px/1.25 {fonts.display}" } }));
 const backClass = btn();
 

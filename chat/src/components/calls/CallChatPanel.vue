@@ -94,9 +94,9 @@ onMounted(() => void nextTick(scrollToBottom));
 
 // HuddlePanel board thread: avatar · author + time · body, composer below.
 const rootClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" });
-const logClass = css({ flex: "1 1 auto", minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", padding: "8px 0" });
+const logClass = css({ flex: "1 1 auto", minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", padding: "{spacing.2} 0" });
 const emptyClass = css({ margin: "auto", padding: "4", textAlign: "center", fontSize: "13px", color: "fg.muted" });
-const rowClass = css({ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr)", gap: "2px 10px", padding: "8px 16px", "& > :first-child": { gridRow: "1 / span 2" } });
+const rowClass = css({ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr)", gap: "{spacing.0.5} {spacing.2.5}", padding: "{spacing.2} {spacing.4}", "& > :first-child": { gridRow: "1 / span 2" } });
 const metaClass = css({ display: "flex", alignItems: "baseline", gap: "1.5", minWidth: 0 });
 const authorClass = css({ font: "700 14px/1.3 {fonts.body}", color: "fg" });
 const timeClass = css({ fontSize: "13px", color: "fg.muted" });

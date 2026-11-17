@@ -213,7 +213,7 @@ const tabs: { value: Tab; label: string }[] = [
 
 const tabsClass = cx(tabsRecipe(), css({ flexWrap: "wrap" }));
 const tabClass = tabRecipe();
-const tabPanelClass = css({ display: "flex", flexDirection: "column", gap: "14px" });
+const tabPanelClass = css({ display: "flex", flexDirection: "column", gap: "4" });
 
 const affiliationCountLabel = computed(() => {
   if (affiliations.value.length === 0) return "";

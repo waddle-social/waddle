@@ -229,7 +229,7 @@ const row = css({
   alignItems: "center",
   gap: "3",
   minHeight: "64px",
-  padding: "12px 16px",
+  padding: "{spacing.3} {spacing.4}",
   borderBottom: "1px solid {colors.border.soft}",
   _last: { borderBottom: 0 },
   "&[data-live]": { bg: "live.subtle" },

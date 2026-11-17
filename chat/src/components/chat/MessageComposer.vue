@@ -525,7 +525,7 @@ const cls = {
   // The composer row under the timeline (Room / DM / Mobile Room boards).
   // A size container so the card fits narrow panels (call dock, thread) on wide screens.
   root: css({ position: "relative", flex: "none", px: "6", containerType: "inline-size", _narrow: { px: "3", bg: "bg.rail" } }),
-  rootBottom: css({ pb: "5", _narrow: { pt: "2", pb: "max(12px, env(safe-area-inset-bottom))", borderTop: "1px solid {colors.border.soft}" } }),
+  rootBottom: css({ pb: "5", _narrow: { pt: "2", pb: "max({spacing.3}, env(safe-area-inset-bottom))", borderTop: "1px solid {colors.border.soft}" } }),
   rootTop: css({ pt: "4", _narrow: { pt: "2", pb: "2", borderBottom: "1px solid {colors.border.soft}" } }),
   aux: css({ display: "flex", flexDirection: "column", gap: "2", pb: "2" }),
   chip: css({

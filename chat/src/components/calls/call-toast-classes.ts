@@ -23,8 +23,8 @@ const card = {
 } as const;
 
 export const callToastClasses = {
-  root: css(card, { bottom: "24px", display: "flex", flexDirection: "column", gap: "3.5" }),
-  error: css(card, { top: "80px", width: "340px", display: "flex", alignItems: "flex-start", gap: "3", padding: "14px 16px", borderColor: "danger" }),
+  root: css(card, { bottom: "24px", display: "flex", flexDirection: "column", gap: "4" }),
+  error: css(card, { top: "80px", width: "340px", display: "flex", alignItems: "flex-start", gap: "3", padding: "4", borderColor: "danger" }),
   head: css({ display: "flex", alignItems: "center", gap: "3" }),
   icon: css({
     display: "inline-flex",
@@ -45,7 +45,7 @@ export const callToastClasses = {
   title: css({ font: "700 15px/1.35 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
   errorTitle: css({ font: "700 14px/1.35 {fonts.body}" }),
   status: css({ textStyle: "caption", color: "fg.muted" }),
-  alert: css({ padding: "6px 10px", borderRadius: "control", border: "1px solid {colors.danger}", bg: "danger.subtle", color: "danger.text", textStyle: "caption" }),
+  alert: css({ padding: "{spacing.1.5} {spacing.2.5}", borderRadius: "control", border: "1px solid {colors.danger}", bg: "danger.subtle", color: "danger.text", textStyle: "caption" }),
   actions: css({ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2" }),
   decline: cx(btn(), css({ height: "40px", justifyContent: "center", color: "danger.text", _coarse: { height: "44px" } })),
   accept: cx(btn({ variant: "primary" }), css({ height: "40px", justifyContent: "center", _coarse: { height: "44px" } })),

@@ -92,7 +92,7 @@ const ui = {
     bg: "transparent",
     color: "fg",
     font: "15px/1.5 {fonts.body}",
-    padding: "4px 6px",
+    padding: "{spacing.1} {spacing.1.5}",
     borderRadius: "sm",
     _placeholder: { color: "fg.soft" },
     _focusVisible: { outlineOffset: "0" },

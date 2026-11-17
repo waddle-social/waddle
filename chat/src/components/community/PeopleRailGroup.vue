@@ -32,7 +32,7 @@ function personLabel(person: PeopleRailPerson): string {
   return parts.join(", ");
 }
 
-const kickerRowClass = css({ display: "flex", alignItems: "center", gap: "2", padding: "8px 10px 4px" });
+const kickerRowClass = css({ display: "flex", alignItems: "center", gap: "2", padding: "{spacing.2} {spacing.2.5} {spacing.1}" });
 const kickerClass = cx(kicker(), css({ display: "inline-flex", alignItems: "center", gap: "1.5" }));
 const liveKickerClass = cx(kickerClass, css({ color: "live.text" }));
 const moreClass = css({
@@ -55,11 +55,11 @@ const textClass = css({ display: "flex", flexDirection: "column", flex: 1, minWi
 const nameClass = css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 });
 const statusClass = css({ textStyle: "caption", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const liveStatusClass = cx(statusClass, css({ color: "live.text" }));
-const emptyClass = css({ padding: "2px 10px 6px", fontSize: "sm", lineHeight: "1.45", color: "fg.muted" });
+const emptyClass = css({ padding: "{spacing.0.5} {spacing.2.5} {spacing.1.5}", fontSize: "sm", lineHeight: "1.45", color: "fg.muted" });
 const barsClass = css({
   display: "inline-flex",
   alignItems: "flex-end",
-  gap: "2px",
+  gap: "0.5",
   height: "14px",
   flex: "none",
   "& > span": { width: "3px", height: "100%", borderRadius: "2px", bg: "live", transformOrigin: "bottom", animation: "wd-grow 0.9s {easings.inOut} infinite alternate", _motionReduce: { animation: "none" } },

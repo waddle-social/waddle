@@ -492,12 +492,12 @@ const sectionClass = css({
   display: "flex",
   flexDirection: "column",
   gap: "2.5",
-  padding: "18px 0",
+  padding: "{spacing.4} 0",
   borderTop: "1px solid {colors.border.soft}",
   "& h3": { margin: 0, display: "flex", alignItems: "center", gap: "2", font: "600 15px/1.3 {fonts.display}" },
   "& h3 svg": { width: "16px", height: "16px", color: "fg.muted" },
 });
-const subheadClass = cx(kicker(), css({ margin: "4px 0 0" }));
+const subheadClass = cx(kicker(), css({ margin: "{spacing.1} 0 0" }));
 const captionClass = css({ margin: 0, fontSize: "13px", lineHeight: "1.45", color: "fg.muted" });
 const errorClass = css({ margin: 0, fontSize: "13px", lineHeight: "1.45", color: "danger.text" });
 const listClass = css({ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.5" });
@@ -508,7 +508,7 @@ const deviceRowClass = css({
   justifyContent: "space-between",
   gap: "3",
   minHeight: "40px",
-  padding: "8px 12px",
+  padding: "{spacing.2} {spacing.3}",
   border: "1px solid transparent",
   borderRadius: "control",
   bg: "transparent",
@@ -555,7 +555,7 @@ const processingRowClass = css({ display: "flex", flexDirection: "column", gap: 
 const processingHeadClass = css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "3" });
 const stateBadgeClass = css({
   borderRadius: "tag",
-  padding: "1px 8px",
+  padding: "1px {spacing.2}",
   font: "600 12px/1.5 {fonts.body}",
   whiteSpace: "nowrap",
   fontVariantNumeric: "tabular-nums",
@@ -593,10 +593,10 @@ const tileClass = css({
 const tileCheckClass = css({ position: "absolute", top: "2px", right: "2px", borderRadius: "pill", bg: "surface", color: "action.text", padding: "1px" });
 const srOnlyClass = css({ srOnly: true });
 const statsClass = css({ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column" });
-const statRowClass = css({ display: "flex", flexDirection: "column", gap: "1", padding: "8px 0", borderTop: "1px solid {colors.border.soft}", _first: { borderTop: 0 } });
+const statRowClass = css({ display: "flex", flexDirection: "column", gap: "1", padding: "{spacing.2} 0", borderTop: "1px solid {colors.border.soft}", _first: { borderTop: 0 } });
 const statHeadClass = css({ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "3", fontSize: "13px" });
-const statMonoClass = css({ display: "flex", flexWrap: "wrap", gap: "1 3", font: "400 13px/1.5 {fonts.mono}", fontVariantNumeric: "tabular-nums", color: "fg.muted" });
-const footClass = cx(dialogParts.foot, css({ paddingTop: "14px", paddingBottom: "14px", borderTop: "1px solid {colors.border.soft}" }));
+const statMonoClass = css({ display: "flex", flexWrap: "wrap", gap: "{spacing.1} {spacing.3}", font: "400 13px/1.5 {fonts.mono}", fontVariantNumeric: "tabular-nums", color: "fg.muted" });
+const footClass = cx(dialogParts.foot, css({ paddingTop: "4", paddingBottom: "4", borderTop: "1px solid {colors.border.soft}" }));
 </script>
 
 <template>

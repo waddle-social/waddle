@@ -40,7 +40,7 @@ const emit = defineEmits<{
 // ThreadPanel board: one header bar (back when nested, title, close), then a
 // caption line with who started it, the reply count, recency and faces.
 // The `chat-thread-header__*` names are unstyled hooks the tests read.
-const rootClass = css({ display: "flex", flexDirection: "column", gap: "2", flex: "none", padding: "10px 12px 12px 16px", borderBottom: "1px solid {colors.border.soft}" });
+const rootClass = css({ display: "flex", flexDirection: "column", gap: "2", flex: "none", padding: "{spacing.2.5} {spacing.3} {spacing.3} {spacing.4}", borderBottom: "1px solid {colors.border.soft}" });
 const topClass = css({ display: "flex", alignItems: "center", gap: "2", minWidth: 0, minHeight: "40px" });
 const titleClass = css({ flex: 1, minWidth: 0, margin: 0, font: "700 16px/1.3 {fonts.display}", color: "fg", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const crumbsClass = css({ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: "1", overflow: "hidden", fontSize: "13px", color: "fg.muted", "& > svg": { width: "14px", height: "14px", flex: "none", color: "fg.soft" } });
@@ -51,7 +51,7 @@ const crumbClass = css({
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  padding: "2px 6px",
+  padding: "{spacing.0.5} {spacing.1.5}",
   border: 0,
   borderRadius: "tag",
   bg: "transparent",
@@ -65,7 +65,7 @@ const crumbActiveClass = cx(crumbClass, css({ color: "fg", fontFamily: "display"
 const actionsClass = css({ display: "flex", alignItems: "center", gap: "0.5", flex: "none", ml: "auto" });
 const iconClass = iconbtn();
 const metaRowClass = css({ display: "flex", alignItems: "center", gap: "3", minWidth: 0 });
-const metaClass = css({ flex: 1, minWidth: 0, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "1 0", fontSize: "13px", color: "fg.muted" });
+const metaClass = css({ flex: 1, minWidth: 0, display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: "1", fontSize: "13px", color: "fg.muted" });
 const metaItemClass = css({ display: "inline-flex", alignItems: "center", gap: "1.5", "& + &::before": { content: '"·"', mx: "1.5", color: "fg.soft" }, "& strong": { color: "fg", fontWeight: 600, fontVariantNumeric: "tabular-nums" } });
 const metaValueClass = css({ color: "fg" });
 const pulseClass = css({ width: "8px", height: "8px", borderRadius: "pill", bg: "live", flex: "none" });

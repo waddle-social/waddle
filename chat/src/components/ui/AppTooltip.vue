@@ -44,7 +44,7 @@ const contentClass = css({
   zIndex: "tooltip",
   pointerEvents: "none",
   maxWidth: "280px",
-  padding: "6px 10px",
+  padding: "{spacing.1.5} {spacing.2.5}",
   borderRadius: "sm",
   bg: "fg",
   color: "bg",

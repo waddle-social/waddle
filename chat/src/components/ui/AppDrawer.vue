@@ -31,7 +31,7 @@ const contentClass = css({
   "&[data-side=right]": { borderLeft: "1px solid {colors.border}" },
 });
 const defaultWidth = css({ width: "min(88vw, 320px)" });
-const headClass = css({ display: "flex", alignItems: "center", gap: "2", flex: "none", padding: "12px 12px 4px 16px" });
+const headClass = css({ display: "flex", alignItems: "center", gap: "2", flex: "none", padding: "{spacing.3} {spacing.3} {spacing.1} {spacing.4}" });
 const titleClass = css({ flex: 1, minWidth: 0, font: "700 18px/1.3 {fonts.display}" });
 const closeClass = cx(iconbtn(), css({ width: "44px", height: "44px" }));
 const bodyClass = css({ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain" });

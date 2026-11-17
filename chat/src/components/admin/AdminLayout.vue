@@ -75,8 +75,8 @@ const mainClass = css({
   display: "flex",
   flexDirection: "column",
   gap: "4",
-  padding: "16px 12px 32px",
-  md: { padding: "32px 40px" },
+  padding: "{spacing.4} {spacing.3} {spacing.8}",
+  md: { padding: "{spacing.8} {spacing.10}" },
 });
 const headClass = css({ display: "flex", alignItems: "flex-start", gap: "4" });
 const headTextClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1.5" });
@@ -84,13 +84,13 @@ const titleClass = css({ display: "none", margin: 0, font: "700 30px/1.2 {fonts.
 const captionClass = css({ margin: 0, fontSize: "15px", lineHeight: 1.5, color: "fg.muted" });
 const actionsClass = css({ display: "flex", gap: "2", flex: "none", "&:empty": { display: "none" } });
 const segClass = cx(seg(), css({ alignSelf: "flex-start", display: "none", md: { display: "inline-flex" } }));
-const drawerHeadClass = css({ display: "flex", alignItems: "center", padding: "12px 12px 8px 20px", "& b": { flex: 1, font: "700 20px/1.3 {fonts.display}" } });
-const drawerNavClass = css({ display: "flex", flexDirection: "column", gap: "1", padding: "0 12px 12px", minHeight: "calc(100dvh - 64px)", boxSizing: "border-box" });
+const drawerHeadClass = css({ display: "flex", alignItems: "center", padding: "{spacing.3} {spacing.3} {spacing.2} {spacing.5}", "& b": { flex: 1, font: "700 20px/1.3 {fonts.display}" } });
+const drawerNavClass = css({ display: "flex", flexDirection: "column", gap: "1", padding: "0 {spacing.3} {spacing.3}", minHeight: "calc(100dvh - 64px)", boxSizing: "border-box" });
 const drawerItemClass = css({
   display: "flex",
   alignItems: "center",
   minHeight: "48px",
-  padding: "0 12px",
+  padding: "0 {spacing.3}",
   border: 0,
   borderRadius: "control",
   bg: "transparent",

@@ -34,7 +34,7 @@ const positionerClass = css({
   alignItems: "flex-start",
   justifyContent: "center",
   overflow: "auto",
-  padding: "12vh 16px 16px",
+  padding: "12vh {spacing.4} {spacing.4}",
   _narrow: { paddingTop: "8vh" },
 });
 const surfaceClass = css({

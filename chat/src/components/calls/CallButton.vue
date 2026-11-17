@@ -136,14 +136,14 @@ const groupClass = css({
   display: "inline-flex",
   alignItems: "center",
   gap: "1",
-  "&[data-activity=true]": { padding: "2px", borderRadius: "pill", bg: "live.subtle", border: "1px solid {colors.live}" },
+  "&[data-activity=true]": { padding: "0.5", borderRadius: "pill", bg: "live.subtle", border: "1px solid {colors.live}" },
 });
 const hintClass = css({
   maxWidth: "8rem",
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  paddingInline: "8px 2px",
+  paddingInline: "{spacing.2} {spacing.0.5}",
   font: "600 13px/1 {fonts.body}",
   color: "live.text",
   _narrow: { display: "none" },

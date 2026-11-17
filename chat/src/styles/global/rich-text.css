@@ -4,7 +4,7 @@
   }
 
   :where(.chat-editor .ProseMirror) p + p {
-  margin-top: 0.5rem;
+  margin-top: var(--space-xs);
   }
 
   :where(.chat-editor .ProseMirror) strong {

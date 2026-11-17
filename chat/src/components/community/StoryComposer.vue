@@ -42,7 +42,7 @@ const ui = {
   root: css({ display: "flex", flexDirection: "column", gap: "3" }),
   card: cx(floe(), css({ "--pad": "16px", gap: "3" })),
   modes: cx(seg(), css({ alignSelf: "flex-start" })),
-  alert: css({ margin: 0, padding: "10px 12px", borderRadius: "10px", bg: "danger.subtle", border: "1px solid {colors.danger}", color: "danger.text", fontSize: "13px" }),
+  alert: css({ margin: 0, padding: "{spacing.2.5} {spacing.3}", borderRadius: "10px", bg: "danger.subtle", border: "1px solid {colors.danger}", color: "danger.text", fontSize: "13px" }),
   drop: css({
     display: "flex",
     flexDirection: "column",
@@ -103,7 +103,7 @@ const ui = {
     font: "700 13px/1 {fonts.mono}",
     "& i": { width: "8px", height: "8px", borderRadius: "pill", bg: "live.fg", animation: "wd-pulse 1s infinite" },
   }),
-  shutter: css({ position: "absolute", left: 0, right: 0, bottom: "14px", display: "flex", justifyContent: "center", "& .wd-btn": { height: "44px", borderRadius: "pill", px: "22px" } }),
+  shutter: css({ position: "absolute", left: 0, right: 0, bottom: "14px", display: "flex", justifyContent: "center", "& .wd-btn": { height: "44px", borderRadius: "pill", px: "6" } }),
   textarea: cx(input(), css({ height: "auto", minHeight: "3rem", py: "2.5", resize: "none", font: "14px/1.5 {fonts.body}" })),
   foot: css({ display: "flex", alignItems: "center", gap: "2" }),
   expires: css({ flex: 1, display: "inline-flex", alignItems: "center", gap: "1.5", textStyle: "caption", color: "fg.muted", "& svg": { width: "14px", height: "14px" } }),

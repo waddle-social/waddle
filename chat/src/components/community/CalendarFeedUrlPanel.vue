@@ -21,7 +21,7 @@ const rootClass = css({
   display: "flex",
   flexDirection: "column",
   gap: "2.5",
-  padding: "14px 16px",
+  padding: "4",
   borderRadius: "12px",
   bg: "surface",
   border: "1px solid {colors.border.soft}",

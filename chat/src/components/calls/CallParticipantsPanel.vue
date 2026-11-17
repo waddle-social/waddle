@@ -74,13 +74,13 @@ function avatarJid(identity: string): string | null {
 // HuddleStage board dock roster: 28px avatar · name · hand/mic/cam, then
 // the volume slider(s) with a % readout under the name.
 const rootClass = css({ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" });
-const listClass = css({ flex: "1 1 auto", minHeight: 0, overflowY: "auto", listStyle: "none", margin: 0, padding: "6px", display: "flex", flexDirection: "column", gap: "0.5" });
+const listClass = css({ flex: "1 1 auto", minHeight: 0, overflowY: "auto", listStyle: "none", margin: 0, padding: "1.5", display: "flex", flexDirection: "column", gap: "0.5" });
 const rowClass = css({
   display: "grid",
   gridTemplateColumns: "28px minmax(0, 1fr) auto",
   alignItems: "center",
-  gap: "4px 10px",
-  padding: "8px 10px",
+  gap: "{spacing.1} {spacing.2.5}",
+  padding: "{spacing.2} {spacing.2.5}",
   borderRadius: "control",
   _hover: { bg: "state.hover" },
 });

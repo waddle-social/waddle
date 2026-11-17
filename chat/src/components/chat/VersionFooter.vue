@@ -23,7 +23,7 @@ const tooltip = computed(
 );
 
 const detailClass = css({ display: "flex", flexDirection: "column", gap: "2.5", userSelect: "text" });
-const dlClass = css({ margin: 0, display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "6px 16px", fontSize: "14px", "& dt": { color: "fg.muted" }, "& dd": { margin: 0, fontFamily: "mono", color: "fg" } });
+const dlClass = css({ margin: 0, display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "{spacing.1.5} {spacing.4}", fontSize: "14px", "& dt": { color: "fg.muted" }, "& dd": { margin: 0, fontFamily: "mono", color: "fg" } });
 const madeClass = css({ display: "flex", alignItems: "center", gap: "1", textStyle: "caption", color: "fg.muted" });
 const inlineClass = css({ display: "flex", flexDirection: "column", gap: "1", textStyle: "caption", color: "fg.muted", userSelect: "text" });
 const inlineShaClass = css({ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: "3", rowGap: "0.5", fontFamily: "mono" });

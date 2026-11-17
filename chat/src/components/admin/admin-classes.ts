@@ -9,7 +9,7 @@ export const adminClasses = {
   textarea: cx(input(), css({ width: "100%", height: "auto", py: "2.5", color: "fg", fontWeight: 400, font: "400 14px/1.5 {fonts.body}", resize: "vertical" })),
   smallSelect: cx(input(), css({ height: "36px", minHeight: "36px", width: "120px", flex: "none", fontSize: "13px", _coarse: { height: "44px", minHeight: "44px" } })),
   search: cx(input(), css({ width: "100%", maxWidth: "480px" })),
-  alert: css({ padding: "10px 14px", borderRadius: "control", border: "1px solid {colors.danger}", bg: "danger.subtle", color: "fg", fontSize: "14px" }),
+  alert: css({ padding: "{spacing.2.5} {spacing.4}", borderRadius: "control", border: "1px solid {colors.danger}", bg: "danger.subtle", color: "fg", fontSize: "14px" }),
   status: css({ padding: "12", textAlign: "center", color: "fg.muted", fontSize: "14px", "& p": { margin: 0 } }),
   list: css({ display: "flex", flexDirection: "column", margin: 0, padding: 0, listStyle: "none", border: "1px solid {colors.border.soft}", borderRadius: "panel", bg: "surface", overflow: "hidden", "& > li + li": { borderTop: "1px solid {colors.border.soft}" } }),
   row: css({
@@ -17,7 +17,7 @@ export const adminClasses = {
     alignItems: "center",
     gap: "3",
     width: "100%",
-    padding: "12px 16px",
+    padding: "{spacing.3} {spacing.4}",
     border: 0,
     bg: "transparent",
     color: "fg",
@@ -35,9 +35,9 @@ export const adminClasses = {
   tag: tag(),
   more: cx(btn(), css({ alignSelf: "center" })),
   /** Drawer body and its sections. */
-  drawerBody: css({ display: "flex", flexDirection: "column", gap: "4", padding: "4px 22px 22px" }),
-  section: css({ display: "flex", flexDirection: "column", gap: "2.5", pt: "14px", borderTop: "1px solid {colors.border.soft}", "& h3": { margin: 0, font: "700 15px/1.3 {fonts.display}" } }),
-  danger: css({ display: "flex", flexDirection: "column", gap: "2.5", padding: "14px", borderRadius: "control", border: "1px solid {colors.danger}", bg: "danger.subtle", "& h3": { margin: 0, font: "700 15px/1.3 {fonts.display}", color: "danger.text" }, "& p": { margin: 0, fontSize: "13px", lineHeight: 1.5 } }),
+  drawerBody: css({ display: "flex", flexDirection: "column", gap: "4", padding: "{spacing.1} {spacing.6} {spacing.6}" }),
+  section: css({ display: "flex", flexDirection: "column", gap: "2.5", pt: "4", borderTop: "1px solid {colors.border.soft}", "& h3": { margin: 0, font: "700 15px/1.3 {fonts.display}" } }),
+  danger: css({ display: "flex", flexDirection: "column", gap: "2.5", padding: "4", borderRadius: "control", border: "1px solid {colors.danger}", bg: "danger.subtle", "& h3": { margin: 0, font: "700 15px/1.3 {fonts.display}", color: "danger.text" }, "& p": { margin: 0, fontSize: "13px", lineHeight: 1.5 } }),
   /** Small row inside a drawer list (member role, affiliation, occupant). */
   subRow: css({ display: "flex", alignItems: "center", gap: "2.5", py: "2", borderTop: "1px solid {colors.border.soft}", _first: { borderTop: 0 } }),
   checks: css({ display: "flex", flexDirection: "column", gap: "2", "& label": { display: "flex", alignItems: "center", gap: "2.5", fontSize: "14px", color: "fg", cursor: "pointer" }, "& input": { width: "18px", height: "18px", accentColor: "{colors.action}" }, "& p": { margin: 0, fontSize: "13px", color: "fg.muted" } }),

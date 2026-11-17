@@ -17,7 +17,7 @@ export const bandClasses = {
     flexDirection: "column",
     gap: "1",
     width: "100%",
-    padding: "10px {spacing.4} 10px {spacing.6}",
+    padding: "{spacing.2.5} {spacing.4} {spacing.2.5} {spacing.6}",
     mb: "2",
     borderBlock: "1px solid {colors.border.soft}",
     transition: "background-color {durations.fast} {easings.out}",
@@ -55,7 +55,7 @@ export const bandClasses = {
     _hover: { color: "var(--band-tone)" },
     "& svg": { width: "14px", height: "14px", opacity: 0.6 },
   }),
-  meta: css({ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "2px {spacing.2}", textStyle: "caption", color: "fg.muted" }),
+  meta: css({ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "{spacing.0.5} {spacing.2}", textStyle: "caption", color: "fg.muted" }),
   metaItem: css({
     display: "inline-flex",
     alignItems: "baseline",

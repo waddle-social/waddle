@@ -17,7 +17,7 @@ defineProps<{
 }>();
 
 // The board's `wd-msg` row, square-cornered inside its Inbox card.
-const rowClass = cx(msg(), css({ borderRadius: 0, padding: "10px 16px", _hover: { bg: "transparent" } }));
+const rowClass = cx(msg(), css({ borderRadius: 0, padding: "{spacing.2.5} {spacing.4}", _hover: { bg: "transparent" } }));
 const avatarClass = css({ gridRow: "span 2", alignSelf: "start", mt: "0.5" });
 const retractedClass = css({ gridColumn: 2, margin: 0, textStyle: "caption", fontStyle: "italic", color: "fg.muted" });
 const bodyClass = css({ gridColumn: 2, minWidth: 0 });

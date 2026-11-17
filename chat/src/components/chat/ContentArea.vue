@@ -40,9 +40,9 @@ import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
 import { formatTimelineDayDivider, isFeedTimelineMessage } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
+import JumpToLatestButton from "./JumpToLatestButton.vue";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import { createScrollFrameScheduler } from "@/ui/scroll-frame";
-import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
 import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
@@ -835,32 +835,7 @@ const cls = {
   emptyScroll: css({ flex: 1, minHeight: 0, overflowX: "hidden", overflowY: "auto", px: "6", py: "4", _narrow: { px: "4" } }),
   // A short timeline sits on the composer, like a chat log (App-Room / App-DM).
   liveEdgeEnd: css({ mt: "auto" }),
-  pane: css({ position: "relative", display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0 }),
   dayMarker: css({ flex: "none", pt: "1" }),
-  jump: css({
-    position: "absolute",
-    left: "50%",
-    translate: "-50% 0",
-    zIndex: "sticky",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "1.5",
-    height: "36px",
-    px: "3.5",
-    border: "1px solid {colors.border}",
-    borderRadius: "pill",
-    bg: "surface",
-    color: "fg",
-    font: "600 13px/1 {fonts.body}",
-    boxShadow: "elev.2",
-    cursor: "pointer",
-    animation: "wd-rise {durations.base} {easings.out}",
-    transition: "background-color {durations.fast} {easings.out}",
-    _hover: { bg: "surface.2" },
-    "& svg": { width: "14px", height: "14px" },
-  }),
-  jumpTop: css({ top: "4" }),
-  jumpBottom: css({ bottom: "4" }),
 };
 </script>
 
@@ -1094,7 +1069,7 @@ const cls = {
 
     </div>
 
-    <div v-else :class="cls.pane">
+    <div v-else class="chat-message-pane">
     <VirtualTimeline
       :ref="setVirtualTimelineRef"
       :items="orderedFeedMessages"
@@ -1170,18 +1145,11 @@ const cls = {
           </div>
       </template>
     </VirtualTimeline>
-    <button
+    <JumpToLatestButton
       v-if="jumpToLive.shouldShow.value"
-      type="button"
-      :class="cx(cls.jump, isTopPinned ? cls.jumpTop : cls.jumpBottom)"
-      aria-label="Jump to latest message"
-      title="Jump to latest"
-      @click="jumpToLive.jump"
-    >
-      <ArrowUp v-if="isTopPinned" aria-hidden="true" />
-      <ArrowDown v-else aria-hidden="true" />
-      <span>Latest</span>
-    </button>
+      :top="isTopPinned"
+      @jump="jumpToLive.jump"
+    />
     </div>
 
     <!-- Typing indicator (chat / bottom-pinned mode) -->

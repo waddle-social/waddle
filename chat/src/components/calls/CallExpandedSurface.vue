@@ -745,8 +745,8 @@ const chromeHiddenClass = css({ opacity: 0, pointerEvents: "none", visibility: "
 const headerHiddenClass = css({ transform: "translateY(-8px)" });
 const footerHiddenClass = css({ transform: "translateY(8px)" });
 const errorClass = css({
-  margin: "0 16px 10px",
-  padding: "10px 12px",
+  margin: "0 {spacing.4} {spacing.2.5}",
+  padding: "{spacing.2.5} {spacing.3}",
   borderRadius: "12px",
   bg: "color-mix(in srgb, {colors.danger} 14%, transparent)",
   border: "1px solid color-mix(in srgb, {colors.danger} 40%, transparent)",
@@ -769,7 +769,7 @@ const reactionClass = css({
 });
 const pipClass = css({
   flex: 1,
-  margin: "0 16px 12px",
+  margin: "0 {spacing.4} {spacing.3}",
   display: "flex",
   flexDirection: "column",
   alignItems: "center",
@@ -794,7 +794,7 @@ const dockImmersiveClass = css({
   maxWidth: "min(384px, calc(100vw - 32px))",
   "@media (max-width: 760px)": { insetBlock: "auto 80px", insetInline: "12px", maxWidth: "none" },
 });
-const footerClass = css({ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 16px 16px", _narrow: { padding: "12px 12px 20px" } });
+const footerClass = css({ display: "flex", alignItems: "center", justifyContent: "center", padding: "{spacing.3} {spacing.4} {spacing.4}", _narrow: { padding: "{spacing.3} {spacing.3} {spacing.5}" } });
 const parkingClass = css({ display: "none" });
 </script>
 
