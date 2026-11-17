@@ -2459,5 +2459,8 @@ describe("missing rooms on other servers", () => {
     before.dispose();
     const after = createLocalStorageResumePersistence("missing-later@example.com", "missing-after");
     expect(after.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test"]);
+    // Signed in again from another resource, the account is the same.
+    const otherResource = createLocalStorageResumePersistence("Missing-Later@example.com/phone", "missing-phone");
+    expect(otherResource.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test"]);
   });
 });

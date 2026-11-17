@@ -287,9 +287,11 @@ export function createLocalStorageResumePersistence(
   const ownResumeKey = (previd: string) => `${ownResumeKeyPrefix}${previd.length}:${previd}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
-  // Keyed by account alone: every tab and later sign-in of the account in
-  // this browser reads the same record.
-  const missingRemoteRoomsKey = `${MISSING_REMOTE_ROOMS_PREFIX}.${accountKey.length}:${accountKey}`;
+  // Keyed by the account's bare JID alone: every tab and later sign-in of
+  // the account in this browser, whatever its resource, reads the same
+  // record.
+  const missingAccount = bareJidKey(accountKey);
+  const missingRemoteRoomsKey = `${MISSING_REMOTE_ROOMS_PREFIX}.${missingAccount.length}:${missingAccount}`;
   gcOwnResumeMarkers(ownResumeKeyPrefix);
 
   return {

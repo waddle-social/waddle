@@ -618,6 +618,11 @@ export class BrowserXmppClient {
   private placementRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private placementRetryDelayMs = PLACEMENT_RETRY_INITIAL_MS;
   /**
+   * The last discovery could not place rooms. A lost stream cancels the
+   * retry; the next session-ready arms it again from two seconds.
+   */
+  private placementOwed = false;
+  /**
    * Whether the home server advertised federation at the last discovery
    * that could read its `disco#info`; `null` before any did.
    */
@@ -2033,6 +2038,7 @@ export class BrowserXmppClient {
    * room list was read from a discovery that could not.
    */
   private settlePlacementRetry(xmpp: unknown, placementAuthoritative: boolean): void {
+    this.placementOwed = !placementAuthoritative;
     if (placementAuthoritative) {
       this.cancelPlacementRetry();
       return;
@@ -2202,9 +2208,6 @@ export class BrowserXmppClient {
   ) {
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
-    // The user opened the room: its join is theirs, and a room recorded as
-    // missing is tried again (and recorded again if it still is).
-    if (intent === "explicit-navigation") this.forgetMissingRoom(nextRoom);
     if (
       intent !== "explicit-navigation"
       && this.roomIsTerminallyDenied(nextRoom)
@@ -3501,6 +3504,9 @@ export class BrowserXmppClient {
     // new handle gets its own session-setup + catch-up.
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
+    // A discovery of an earlier stream could not place rooms, and the lost
+    // stream cancelled its retry: try again on this one.
+    if (this.placementOwed) this.settlePlacementRetry(xmpp, false);
     if (lifecycle.type === "fresh") {
       // Occupancy was lost, so the rejoin below rebuilds presence from
       // scratch. A resume keeps occupancy and the server does not resend
