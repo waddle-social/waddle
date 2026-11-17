@@ -1548,6 +1548,32 @@ producer of stream evidence changed, and no decision of standing moved.
   for the DND node. The anchors of both files are unchanged.
 - The raw scan holds 1642 records, unchanged in content and place.
 
+The selected evidence was refreshed a thirty-seventh time, through
+`387e4ac3dcdda9285403f14bf7f442eed3e2ca4d`, after reviewing the delta of the reviewed files since the
+thirty-sixth refresh. `pubsub_authz.rs`, `pubsub_admin.rs`,
+`pubsub_dispatch.rs` and `pubsub_fanout/implementation.rs` changed. No
+grant writer or storage plane of the host-grant authority was added, no
+producer of stream evidence changed, and no decision of standing moved.
+
+- The read gate of PubSub (`can_subscribe_with_config` in
+  `pubsub_authz.rs`, shared by items, subscribe and the fan-out
+  entitlement) answers `urn:waddle:joined-spaces:0` as it answers the
+  XEP-0402 bookmarks node: the account alone, whatever its access model
+  or affiliation rows. It only narrows who may read the owner's own node.
+- An owner affiliations set on that node (`pubsub_admin.rs`) is refused
+  whole, with `not-allowed`, when it would make another entity a member,
+  publisher, publish-only entity or owner, or the account an outcast of
+  its own node; it writes nothing then. `pubsub-admin` and
+  `d8-space-affiliations` moved down by eight lines, their text
+  unchanged.
+- The publish-time reconcile (`pubsub_dispatch.rs`) rewrites that node's
+  stored configuration only when its normalization changes it, and then
+  to the normalized configuration rather than the defaults, so an owner's
+  bounded `max_items` survives. A doc comment of the fan-out changed.
+- The raw scan holds 1642 records, unchanged in content; those in
+  `pubsub_authz.rs` (its unit tests) and `pubsub_admin.rs` moved with the
+  lines added above them.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
