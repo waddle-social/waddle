@@ -158,13 +158,25 @@ It does not:
    1 and nothing changed. The request and the wait that follow lock
    nothing.
 
-3. **Check the report.** Exit code 0 with every server `completed` means no
-   server holds a session of the account. A `lapsed` server that is still
-   running is stalled: once it serves again within a day it ends what it
-   holds; restart it if it does not recover. A server started more than a
-   day after the retirement holds no session of the account from before
-   it started and refuses none of its bindings, which the removed
-   credentials and sessions already prevent.
+3. **Check the report.** The command sees only the servers that hold a
+   lease, so first check that `replicas` lists every server that serves
+   the deployment. A server is missing when it runs a release without this
+   step, when its restricted runtime role lacks the grants the owner phase
+   of this release adds, when it cannot write its lease, or when its clock
+   runs well behind the command's host (see [Ending sessions](#ending-sessions)); such a server
+   ends nothing, and the account's streams on it stay open until the client
+   disconnects or the server restarts.
+
+   With every serving server listed, exit code 0 and every server
+   `completed` mean that no server holds a session of the account. A
+   `lapsed` server that is still running is stalled: once it serves again
+   within a day it ends what it holds; restart it if it does not recover. A
+   server started more than a day after the retirement holds no session of
+   the account from before it started and refuses none of its bindings,
+   which the removed credentials and sessions already prevent.
+
+   The step needs every serving server on a release that has it, with the
+   owner phase of that release applied first, as for any migration.
 
 4. **Tell the other deployments** that issued grants to the JID, where that
    matters: they cannot see the retirement. A home that keeps this ledger
