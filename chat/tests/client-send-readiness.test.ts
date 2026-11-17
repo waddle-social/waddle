@@ -1844,6 +1844,7 @@ describe("client send readiness", () => {
       clearJoinedRooms: () => undefined,
     };
     const client = new BrowserXmppClient(session(), persistence);
+    placeRetainedRoomsAtHome(client);
     let onPresence: ((presence: {
       from?: string;
       presence_type?: string;

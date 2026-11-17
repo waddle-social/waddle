@@ -146,7 +146,9 @@ async function rewriteImports(
   cache: Map<string, string>,
   options: { inlineTemplate?: boolean } = {},
 ): Promise<string> {
-  const specifiers = [...code.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
+  // A module specifier holds no whitespace, so template text that reads
+  // `from '<expression>'` once compiled is not taken for an import.
+  const specifiers = [...code.matchAll(/from\s+["']([^"'\s]+)["']/g)].map((m) => m[1]);
   let result = code;
   for (const specifier of specifiers) {
     const resolved = await resolveModuleSpecifier(specifier, importer, outDir, cache, options);
