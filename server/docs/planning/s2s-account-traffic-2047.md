@@ -738,6 +738,12 @@ store. This is the slice's rollout part (G24).
 - **A message is lost without notice** when it is a stranger's beyond its
   bounds; one beyond the offline store's quota is still in the account's
   archive and inbox, as for a local sender, and its sender is not told.
+- **A remote message whose acceptance does not commit is lost.** An
+  acceptance that times out, exhausts its retries or cannot tell whether
+  it committed is answered nothing and leaves nothing to retry: S2S has
+  no retransmission of a stanza the receiving server took, so neither the
+  sender nor the recipient learns of it. One that committed after all is
+  the ingress authority's recovery's to finish.
 - **Messages from senders without a resource** keep the earlier producer:
   delivered through the recipient's connection and, with no resource,
   stored whole outside the archive, without inbox or push.
