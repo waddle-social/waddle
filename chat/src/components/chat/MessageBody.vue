@@ -306,10 +306,10 @@ const c = {
   inlineImage: css({ borderRadius: "control", border: "1px solid {colors.border.soft}", cursor: "pointer", transition: "opacity {durations.fast} {easings.out}", _hover: { opacity: 0.9 } }),
   inlineImageCompact: css({ maxHeight: "96px" }),
   attachmentImage: css({
-    maxWidth: "min(100%, 320px)",
+    maxWidth: "100%",
     maxHeight: "256px",
     aspectRatio: "var(--image-width) / var(--image-height)",
-    width: "min(var(--image-width) * 1px, 256px * var(--image-width) / var(--image-height))",
+    width: "min(320px, var(--image-width) * 1px, 256px * var(--image-width) / var(--image-height))",
   }),
   linkCard: css({
     display: "flex",
@@ -371,11 +371,12 @@ const c = {
   embed: css({ width: "100%", borderRadius: "sm", border: "1px solid {colors.border.soft}", bg: "surface.code" }),
   embedRatio: css({ aspectRatio: "16 / 9" }),
   strip: css({ display: "flex", flexWrap: "wrap", gap: "2" }),
-  imageTile: css({ overflow: "hidden", borderRadius: "control", border: "1px solid {colors.border.soft}", bg: "surface" }),
+  imageTile: css({ maxWidth: "min(100%, 322px)", overflow: "hidden", borderRadius: "control", border: "1px solid {colors.border.soft}", bg: "surface" }),
   cover: css({ objectFit: "cover" }),
   contain: css({ objectFit: "contain" }),
   imageButton: css({
     display: "block",
+    maxWidth: "100%",
     cursor: "zoom-in",
     transition: "opacity {durations.fast} {easings.out}",
     _hover: { opacity: 0.9 },

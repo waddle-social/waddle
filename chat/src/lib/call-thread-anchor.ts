@@ -1,5 +1,6 @@
 import { computed, type ComputedRef } from "vue";
 import { useStore } from "@nanostores/vue";
+import type { MessageThreadIndex } from "@/channels/threads";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { $callState } from "@/lib/calls/call-store";
 import { isBusy } from "@/lib/calls/call-activity-dock";
@@ -45,6 +46,14 @@ export function callThreadAnchorLabel(message: Pick<TimelineMessage, "body" | "a
 
 export function callThreadAnchorThreadId(message: Pick<TimelineMessage, "threadId" | "callThread">): string | null {
   return message.callThread && message.threadId ? message.threadId : null;
+}
+
+export function callThreadAnchorReplyCount(
+  message: Pick<TimelineMessage, "threadId" | "callThread">,
+  threadIndex: MessageThreadIndex,
+): number | undefined {
+  const threadId = callThreadAnchorThreadId(message);
+  return threadId ? threadIndex.get(threadId)?.count ?? 0 : undefined;
 }
 
 /**

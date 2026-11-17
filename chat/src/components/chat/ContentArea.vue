@@ -9,6 +9,7 @@ import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
+import { callThreadAnchorReplyCount } from "@/lib/call-thread-anchor";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import { activeCallChatThreadId } from "@/lib/calls/call-chat-composer";
 import { $callState } from "@/lib/calls/call-store";
@@ -1134,7 +1135,7 @@ const cls = {
             :presence="roomPresence[msg.author] ?? 'offline'"
             :last-seen="roomLastSeen[msg.author]"
             :author-jid="authorJidByNick?.[msg.author]"
-            :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
+            :thread-reply-count="callThreadAnchorReplyCount(msg, threadIndex) ?? threadIndex.get(msg.id)?.count ?? 0"
             :thread-participants="threadChipParticipants(msg.id)"
             :thread-last-reply-at="threadChipLastReplyAt(msg.id)"
             :thread-latest-reply="threadChipLatestReply(msg.id)"

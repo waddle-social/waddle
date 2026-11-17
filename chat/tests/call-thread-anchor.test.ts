@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { ref } from "vue";
+import { useMessageThreads } from "../src/channels/threads";
 import { isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "../src/channels/timeline";
 import {
   callThreadAnchorLabel,
+  callThreadAnchorReplyCount,
   callThreadAnchorThreadId,
   readCallAnchorCardState,
   wasmThreadEntryToAnchorMessage,
@@ -84,6 +87,23 @@ describe("call-thread anchor timeline mapping", () => {
 
     expect(callThreadAnchorLabel(timelineMessage)).toBe("Alice started a call");
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
+  });
+
+  test("counts call replies by thread ID when it differs from the anchor message ID", () => {
+    const anchor = mapLiveRoomMessageToTimeline(session, callAnchor());
+    const replies = [1, 2].map((minute) => ({
+      ...anchor,
+      id: `reply-${minute}`,
+      createdAt: `2026-06-07T14:3${minute}:00Z`,
+      callThread: undefined,
+    }));
+    const messages = ref([anchor]);
+    const { index } = useMessageThreads(messages);
+
+    expect(callThreadAnchorReplyCount(anchor, index.value)).toBe(0);
+    messages.value.push(...replies);
+    expect(callThreadAnchorReplyCount(anchor, index.value)).toBe(2);
+    expect(callThreadAnchorReplyCount(replies[0], index.value)).toBeUndefined();
   });
 
   test("derives rich anchor card state from room live detectors with stale-live override", () => {

@@ -22,7 +22,7 @@ import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
 import { formatTimelineDayDivider } from "@/channels/timeline";
-import { useCallAnchorCardState } from "@/lib/call-thread-anchor";
+import { callThreadAnchorReplyCount, useCallAnchorCardState } from "@/lib/call-thread-anchor";
 import { buildReplyChildThreadTargets, resolveReplyChildThreadTarget } from "@/lib/thread-child-target";
 import type { CallMedia } from "@/lib/calls/types";
 import { currentDayMarkerLabelFor } from "./current-day-marker";
@@ -353,8 +353,8 @@ const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
 const rootClass = css({ display: "flex", flexDirection: "column", flex: "1 1 0%", minHeight: 0, bg: "bg.rail", color: "fg", borderLeft: "1px solid {colors.border.soft}" });
 const noneClass = css({ flex: "none" });
 const noticeClass = css({ flex: "none", padding: "8px 16px", bg: "warning.subtle", borderBottom: "1px solid {colors.border.soft}", fontSize: "13px", color: "fg" });
-const separatorClass = css({ display: "flex", alignItems: "center", gap: "2.5", padding: "8px 16px", fontSize: "xs", fontWeight: 700, color: "fg.muted", "&::before, &::after": { content: '""', flex: 1, height: "1px", bg: "border.soft" } });
-const childClass = css({ position: "relative" });
+const separatorClass = css({ display: "flex", alignItems: "center", gap: "2.5", px: "4", py: "3", fontSize: "xs", fontWeight: 700, color: "fg.muted", "&::before, &::after": { content: '""', flex: 1, height: "1px", bg: "border.soft" } });
+const childClass = css({ position: "relative", py: "1" });
 const subThreadRowClass = css({ display: "flex", padding: "0 16px 8px calc({sizes.msgAvatar} + 28px)" });
 const subThreadClass = css({
   display: "inline-flex",
@@ -592,7 +592,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :presence="presenceFor(message.author)"
               :last-seen="roomLastSeen[message.author]"
               :author-jid="authorJidByNick?.[message.author]"
-              :thread-reply-count="replyChildThreadCount(message)"
+              :thread-reply-count="callThreadAnchorReplyCount(message, threadIndex) ?? replyChildThreadCount(message)"
               :grouped="isGroupedFollowUp(message)"
               hide-thread-chip
               hide-reply-chip
