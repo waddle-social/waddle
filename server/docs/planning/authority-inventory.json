@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "cc7079cbad9d75b8f702bc9611714240690616d2",
+  "baseline_commit": "6ee605e3d45ef31f686c92a1b458f1f412b8248c",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -113,7 +113,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "sha256": "612e2db785fa4bafbf9e1f4bc779ded8f22c51dd9706ee5349b54c7e4d3fc07f"
+      "sha256": "de0ffbdfa93cd0fa079c0813e5507b74fed99ab22f778e5fee88ed41e2f40e68"
     },
     {
       "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
@@ -145,7 +145,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "7cdd06f151163fa36224c7b29b4fa8a1c36107cdf675c147706b0f973bd1761d"
+      "sha256": "18b9323b2d3d47791527e6c07c93adb10ddc67ba45a4d26b4f1eefa75619347f"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -253,7 +253,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "sha256": "4fe62089fd94bff4b46d0c25d20ed3c8ce035a943b142c8bf94a431170f1ee59"
+      "sha256": "164bdfcd84a45fd9dcfaed46f32f69620c58dfa2c9b5e1ec306fe569c9ed871f"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/tests/iq.rs",
@@ -333,7 +333,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "sha256": "47931ee9df73b8d85a25f2f8414ee62adaa78703bf4f681fba34459456666830"
+      "sha256": "87036e69536997e6d489653d60f1a99c35fad5826ec7243d015406fd86c8cdce"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_remote.rs",
@@ -349,7 +349,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "sha256": "0866b378478eea9921f2d3e717531aaf275a865199685dcce97551bf37f0871f"
+      "sha256": "6faf62453a79809f1ae28a155a213db614487618df5d205f477a43a62faadb88"
     }
   ],
   "anchors": {
@@ -950,22 +950,22 @@
     },
     "s2s-room-host": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1331,
+      "line": 1340,
       "text": "impl LocalRooms for WebSocketLocalRooms {"
     },
     "s2s-room-archive": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 860,
+      "line": 855,
       "text": "async fn archive(&self, iq: &Iq) -> RoomReplies {"
     },
     "s2s-room-message": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1177,
+      "line": 1183,
       "text": "async fn message(&self, message: &Message) -> RoomReplies {"
     },
     "s2s-seat-egress": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2043,
+      "line": 2118,
       "text": "pub(super) fn seat_of(&self, occupant: &FullJid, stanza: &Stanza) -> Option<Seat> {"
     },
     "foreign-delivery": {
@@ -990,22 +990,22 @@
     },
     "s2s-room-federated": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 641,
+      "line": 636,
       "text": "async fn open_to_other_servers(&self, room: &BareJid) -> Option<bool> {"
     },
     "s2s-room-admin": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1093,
+      "line": 1088,
       "text": "async fn admin(&self, iq: &Iq) -> RoomReplies {"
     },
     "s2s-room-owner": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1103,
+      "line": 1099,
       "text": "async fn owner_or_moderation(&self, iq: &Iq) -> RoomReplies {"
     },
     "s2s-room-placement": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1405,
+      "line": 1413,
       "text": "async fn place(&self, principal: &RemotePrincipal, stanza: &Stanza) -> RoomPlacement {"
     },
     "s2s-remote-admin": {
@@ -1020,7 +1020,7 @@
     },
     "s2s-carried-request": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 1144,
+      "line": 1170,
       "text": "pub(super) fn carried_room_request(&self, request: CarriedRoomRequest) -> CarriedRoomOutcome {"
     },
     "s2s-carried-principal": {
@@ -1065,7 +1065,7 @@
     },
     "s2s-adopted-seats": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2670,
+      "line": 2745,
       "text": "pub(super) fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {"
     },
     "hg-seats-honour-anywhere": {
@@ -1075,12 +1075,12 @@
     },
     "s2s-seat-adoption": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2603,
+      "line": 2678,
       "text": "pub(super) async fn adopt_seat("
     },
     "s2s-unseated-removal": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1435,
+      "line": 1443,
       "text": "async fn remove_unseated("
     },
     "d8-actor-privileged-issuance": {
@@ -1105,7 +1105,7 @@
     },
     "s2s-space-host": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1405,
+      "line": 1411,
       "text": "impl LocalSpaces for WebSocketLocalSpaces {"
     },
     "s2s-space-open": {
@@ -1125,12 +1125,12 @@
     },
     "s2s-space-change": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1366,
+      "line": 1372,
       "text": "async fn change(&self, request: PubSubRequest) -> Vec<Stanza> {"
     },
     "s2s-space-notify": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1582,
+      "line": 1588,
       "text": "async fn notify_remote_subscribers("
     },
     "s2s-space-federated-setting": {
@@ -1155,22 +1155,22 @@
     },
     "s2s-room-listing": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 735,
+      "line": 732,
       "text": "async fn disco_items(&self, iq: &Iq) -> RoomReplies {"
     },
     "s2s-space-children": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1017,
+      "line": 1023,
       "text": "async fn children(&self, node: String, rsm: Option<&SetQuery>) -> Vec<Stanza> {"
     },
     "hg-muc-listing": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "line": 1171,
+      "line": 1304,
       "text": "async fn rooms_listed_to("
     },
     "hg-space-children-listing": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "line": 1404,
+      "line": 1670,
       "text": "async fn space_children_for_session("
     }
   },
@@ -1231,7 +1231,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "6a1cf9a25728972464680743cea741e25f6e3ab2a8176aea135ae435c55ec890",
+    "sha256": "6efef75ff27095d3908200380dafda96d2a2b333809548f59e708101b7e707da",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,

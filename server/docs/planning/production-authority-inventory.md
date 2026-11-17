@@ -19,7 +19,7 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`cc7079cbad9d75b8f702bc9611714240690616d2` (see the last refresh below); the original
+`6ee605e3d45ef31f686c92a1b458f1f412b8248c` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1480,6 +1480,41 @@ answered with `remote-server-timeout` rather than
 (`s2s-seat-egress`, `s2s-adopted-seats` and `s2s-seat-adoption`) moved
 with the lines added above them, no anchor's text changed, and the raw
 scan still holds 1640 records.
+
+The selected evidence was refreshed a thirty-fourth time, through
+`6ee605e3d45ef31f686c92a1b458f1f412b8248c`, after reviewing the delta of the reviewed files since the
+thirty-third refresh:
+
+- The router's room host (`router/hosting.rs`; `s2s-seat-egress`,
+  `s2s-carried-request`, `s2s-adopted-seats` and `s2s-seat-adoption`
+  moved) hands the room host a mark it sets before a durable effect, and
+  leaves a request the host marked unanswered when the host did not answer
+  in time, unless it is an IQ, which it answers with
+  `internal-server-error`. It holds at most two of the four places for
+  room lists for one remote domain. It decides nothing for a room.
+- The room host (`s2s_rooms.rs`; `s2s-room-host` and the anchors of the
+  room's surfaces moved) sets that mark just before a message's ingress
+  commit and before an administration, configuration or moderation
+  request that asks for a change is handed to its handler; the handlers
+  decide and write what they did before. The MUC service's listing
+  (`s2s-room-listing` moved) tells no count when it left a room out.
+- The MUC service's listing (`hg-muc-listing` moved) and a Space node's
+  listing for a session (`hg-space-children-listing` moved) decide a
+  managed room as before, by the subject's canonical grants and
+  `HostGrantGate::still_allows`, and now carry what they left out: a
+  session is answered with `internal-server-error` when a room was not
+  decided in time, rather than with a listing that lacks it. What the
+  catalog and the rooms' actors say is read at most once at a time per
+  audience; the read for remote askers names only the catalog rows they
+  may be listed, and a session reads only from a read that started after
+  its request arrived. No grant is read less, none is issued, and no room
+  or Space is disclosed to a subject it was not disclosed to before.
+- The Spaces host (`s2s_spaces.rs`; `s2s-space-host`, `s2s-space-change`,
+  `s2s-space-notify` and `s2s-space-children` moved) tells no count for
+  its listing when a Space could not be decided now. `server/http.rs`
+  builds the state with the listings' shared reads; no anchor there moved.
+- The raw scan still holds 1640 records, each token's count unchanged;
+  its digest changed because matched lines moved.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
