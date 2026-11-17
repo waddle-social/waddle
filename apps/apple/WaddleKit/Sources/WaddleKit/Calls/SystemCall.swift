@@ -45,6 +45,8 @@ public enum SystemCallUpdate: Hashable, Sendable {
     /// The other side picked up, or the room's mixer let us in.
     case connecting(UUID)
     case connected(UUID)
+    /// The microphone was muted or unmuted in the app.
+    case setMuted(UUID, Bool)
     case end(UUID, SystemCallEnd)
 }
 
@@ -63,9 +65,11 @@ public struct SystemCallTracker {
     private enum Progress: Comparable { case started, connecting, connected }
 
     private struct Managed {
-        let call: SystemCall
+        var call: SystemCall
         var isAnswerKnown = false
         var progress = Progress.started
+        /// What the system's screen shows for the microphone.
+        var isMuted = false
     }
 
     private let newID: () -> UUID
@@ -101,6 +105,13 @@ public struct SystemCallTracker {
         managed?.isAnswerKnown = true
     }
 
+    /// The person muted or unmuted on the system's screen, so it need not
+    /// be told.
+    public mutating func systemSetMuted(_ id: UUID, _ muted: Bool) {
+        guard managed?.call.id == id else { return }
+        managed?.isMuted = muted
+    }
+
     /// The call is over on the system's side: the person ended it there,
     /// or the system dropped it. It need not be told, and the call's audio
     /// is over even while the slot still holds it.
@@ -119,9 +130,13 @@ public struct SystemCallTracker {
         unmanagedSid = call.sid
     }
 
-    public mutating func update(state: CallState, isMediaConnected: Bool, isDoNotDisturb: Bool = false) -> [SystemCallUpdate] {
+    /// - Parameter isMuted: the person chose to mute the microphone.
+    public mutating func update(
+        state: CallState, isMediaConnected: Bool, isMuted: Bool = false, isDoNotDisturb: Bool = false
+    ) -> [SystemCallUpdate] {
         var updates: [SystemCallUpdate] = []
         let live = state.isLive ? state.sid : nil
+        carryOverReplacedSession(to: state)
         if let current = managed, current.call.sid != live {
             updates.append(.end(current.call.id, Self.end(of: state, for: current.call)))
             managed = nil
@@ -140,7 +155,28 @@ public struct SystemCallTracker {
             updates.append(call.direction == .incoming ? .reportIncoming(call) : .startOutgoing(call))
         }
         updates.append(contentsOf: progress(to: state, isMediaConnected: isMediaConnected))
+        if let current = managed, current.isMuted != isMuted {
+            managed?.isMuted = isMuted
+            updates.append(.setMuted(current.call.id, isMuted))
+        }
         return updates
+    }
+
+    /// The other side can replace an established call's session with a new
+    /// one, which the slot accepts without asking. To the person, and so
+    /// to the system, it is the same call under a new session id.
+    private mutating func carryOverReplacedSession(to state: CallState) {
+        guard let current = managed, case .incoming(let next) = state, next.isAccepting, next.sid != current.call.sid,
+            current.call.conversation == .direct(next.from.bare),
+            // Only an established call is replaced; one still ringing or
+            // being placed is not.
+            current.call.direction == .incoming ? current.isAnswerKnown : current.progress >= .connecting
+        else { return }
+        managed?.call = SystemCall(
+            id: current.call.id, sid: next.sid, direction: current.call.direction, conversation: current.call.conversation,
+            isVideo: current.call.isVideo)
+        // It was answered, or placed by us, long ago.
+        managed?.isAnswerKnown = true
     }
 
     /// Only a call seen from its start is reported: ringing, being placed

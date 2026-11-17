@@ -121,8 +121,11 @@ final class AppState {
     /// whoever ends the session stops both.
     private func followCalls(of active: ActiveSession) {
         let coordinator = active.coordinator
-        let (state, isDoNotDisturb, isMediaConnected) = withObservationTracking {
-            (coordinator.calls.state, coordinator.status.availability == .doNotDisturb, active.callMedia.phase == .connected)
+        let (state, isDoNotDisturb, isMediaConnected, isMuted) = withObservationTracking {
+            (
+                coordinator.calls.state, coordinator.status.availability == .doNotDisturb,
+                active.callMedia.phase == .connected, active.callMedia.isMicrophoneMutedByChoice
+            )
         } onChange: { [weak self, weak active] in
             Task { @MainActor in
                 guard let self, let active else { return }
@@ -132,7 +135,9 @@ final class AppState {
         guard session === active else { return }
         #if os(iOS)
         systemCalls.handlers = systemCallHandlers(for: active)
-        systemCalls.update(state: state, isMediaConnected: isMediaConnected, isDoNotDisturb: isDoNotDisturb)
+        systemCalls.update(state: state, isMediaConnected: isMediaConnected, isMuted: isMuted, isDoNotDisturb: isDoNotDisturb)
+        #else
+        _ = (isMediaConnected, isMuted)
         #endif
         ringer.show(CallAlert(state: state, isDoNotDisturb: isDoNotDisturb).map { alert in
             var callerName = ""
@@ -388,7 +393,7 @@ final class AppState {
         session = nil
         ringer.show(nil)
         #if os(iOS)
-        systemCalls.update(state: .idle, isMediaConnected: false, isDoNotDisturb: false)
+        systemCalls.update(state: .idle, isMediaConnected: false, isMuted: false, isDoNotDisturb: false)
         #endif
         pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()

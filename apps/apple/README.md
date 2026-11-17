@@ -132,7 +132,8 @@ not in front.
 On an iPhone or iPad calls go through CallKit. `SystemCallTracker` in WaddleKit
 turns the call slot into what the system's call screen is told, each thing
 once; `Calls/SystemCallCenter.swift` tells it and carries Answer, End and Mute
-back to the slot. The system owns the audio session of a call it manages:
+back to the slot. A mute made in the dock is told to the system too, and a
+call whose session the other side replaces stays the same system call. The system owns the audio session of a call it manages:
 `Calls/SystemCallAudio.swift` starts the media engine when CallKit activates
 the session and stops it when CallKit takes it back. A call the system does
 not manage (it arrived under Do Not Disturb, or the system refused it) keeps

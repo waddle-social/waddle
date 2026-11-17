@@ -43,8 +43,10 @@ final class SystemCallCenter: NSObject {
     }
 
     /// The call slot, its media or Do Not Disturb changed.
-    func update(state: CallState, isMediaConnected: Bool, isDoNotDisturb: Bool) {
-        for update in tracker.update(state: state, isMediaConnected: isMediaConnected, isDoNotDisturb: isDoNotDisturb) {
+    func update(state: CallState, isMediaConnected: Bool, isMuted: Bool, isDoNotDisturb: Bool) {
+        let updates = tracker.update(
+            state: state, isMediaConnected: isMediaConnected, isMuted: isMuted, isDoNotDisturb: isDoNotDisturb)
+        for update in updates {
             tell(update)
         }
         audio.setOwner(tracker.audioOwner)
@@ -77,6 +79,11 @@ final class SystemCallCenter: NSObject {
             provider.reportOutgoingCall(with: id, startedConnectingAt: nil)
         case .connected(let id):
             provider.reportOutgoingCall(with: id, connectedAt: nil)
+        case .setMuted(let id, let isMuted):
+            // Muted in the dock: the system's mute button follows. The
+            // action comes back through the delegate, which sets the
+            // microphone to what it already is.
+            controller.request(CXTransaction(action: CXSetMutedCallAction(call: id, muted: isMuted))) { _ in }
         case .end(let id, let reason):
             provider.reportCall(with: id, endedAt: nil, reason: Self.reason(reason))
         }
@@ -185,6 +192,7 @@ extension SystemCallCenter: CXProviderDelegate {
         MainActor.assumeIsolated {
             guard let sid = tracker.sid(for: action.callUUID), let handlers else { return action.fail() }
             let isMuted = action.isMuted
+            tracker.systemSetMuted(action.callUUID, isMuted)
             Task {
                 await handlers.setMuted(sid, isMuted)
                 action.fulfill()

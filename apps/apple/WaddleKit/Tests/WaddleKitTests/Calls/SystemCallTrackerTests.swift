@@ -196,6 +196,82 @@ import WaddleKit
         #expect(t.update(state: .idle, isMediaConnected: false) == [.end(id1, .remoteEnded)])
     }
 
+    // MARK: - Mute
+
+    @Test func aMuteMadeInTheAppIsToldToTheSystemOnce() {
+        var t = tracker()
+        _ = t.update(state: outgoing(), isMediaConnected: false)
+        _ = t.update(state: active(), isMediaConnected: true)
+        #expect(t.update(state: active(), isMediaConnected: true, isMuted: true) == [.setMuted(id1, true)])
+        #expect(t.update(state: active(), isMediaConnected: true, isMuted: true).isEmpty)
+        #expect(t.update(state: active(), isMediaConnected: true, isMuted: false) == [.setMuted(id1, false)])
+    }
+
+    @Test func aMuteMadeOnTheSystemScreenIsNotEchoedBack() {
+        var t = tracker()
+        _ = t.update(state: outgoing(), isMediaConnected: false)
+        t.systemSetMuted(id1, true)
+        #expect(t.update(state: outgoing(), isMediaConnected: false, isMuted: true).isEmpty)
+        // Unmuted in the app afterwards: the system's screen follows.
+        #expect(t.update(state: outgoing(), isMediaConnected: false, isMuted: false) == [.setMuted(id1, false)])
+    }
+
+    @Test func aCallTheSystemDoesNotManageHasNoMuteToTell() {
+        var t = tracker()
+        _ = t.update(state: incoming(), isMediaConnected: false, isDoNotDisturb: true)
+        #expect(t.update(state: active(), isMediaConnected: true, isMuted: true).isEmpty)
+    }
+
+    @Test func eachCallStartsUnmutedOnTheSystemScreen() {
+        var t = tracker()
+        _ = t.update(state: outgoing(), isMediaConnected: false)
+        _ = t.update(state: outgoing(), isMediaConnected: false, isMuted: true)
+        _ = t.update(state: .idle, isMediaConnected: false)
+        #expect(t.update(state: outgoing("s2"), isMediaConnected: false).count == 1)
+        #expect(t.update(state: outgoing("s2"), isMediaConnected: false, isMuted: true) == [.setMuted(id2, true)])
+    }
+
+    // MARK: - A session replaced during the call
+
+    @Test func aCallWhoseSessionIsReplacedStaysTheSameSystemCall() {
+        var t = tracker()
+        _ = t.update(state: outgoing(), isMediaConnected: false)
+        _ = t.update(state: active(), isMediaConnected: true)
+        // The other client re-proposes; to the person it is the same call.
+        #expect(t.update(state: incoming("s2", accepting: true), isMediaConnected: false).isEmpty)
+        #expect(t.isManaging)
+        #expect(t.audioOwner == .system)
+        #expect(t.sid(for: id1) == "s2")
+        #expect(t.update(state: active("s2"), isMediaConnected: true).isEmpty)
+        #expect(t.update(state: .idle, isMediaConnected: false) == [.end(id1, .remoteEnded)])
+    }
+
+    @Test func anAnsweredCallWhoseSessionIsReplacedIsNotAnsweredAgain() {
+        var t = tracker()
+        _ = t.update(state: incoming(), isMediaConnected: false)
+        _ = t.update(state: active(), isMediaConnected: true)
+        #expect(t.update(state: incoming("s2", accepting: true), isMediaConnected: false).isEmpty)
+        #expect(t.update(state: active("s2"), isMediaConnected: true).isEmpty)
+        #expect(t.sid(for: id1) == "s2")
+    }
+
+    @Test func aCallStillRingingIsNotReplaced() {
+        var t = tracker()
+        _ = t.update(state: incoming(), isMediaConnected: false)
+        #expect(t.update(state: incoming("s2", accepting: true), isMediaConnected: false) == [.end(id1, .remoteEnded)])
+        #expect(!t.isManaging)
+    }
+
+    @Test func aReplacementFromSomeoneElseIsAnotherCall() {
+        var t = tracker()
+        _ = t.update(state: outgoing(), isMediaConnected: false)
+        _ = t.update(state: active(), isMediaConnected: true)
+        let carol = JID(parsing: "carol@waddle.test/phone")!
+        let other = CallState.incoming(IncomingCall(from: carol, sid: "s2", media: audio, isAccepting: true))
+        #expect(t.update(state: other, isMediaConnected: false) == [.end(id1, .remoteEnded)])
+        #expect(!t.isManaging)
+    }
+
     // MARK: - One call after another
 
     @Test func aNewCallInTheSlotEndsTheOldOneFirst() {
