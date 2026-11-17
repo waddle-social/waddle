@@ -2280,7 +2280,10 @@ from at most 4,096 catalog rows of rooms that are public and open to other
 servers, read by one query, and from the live instant rooms (at most 1,000
 scanned, as for sessions); a room beyond those bounds is not listed to
 remote askers. A session's listing reads every catalog row, within the
-10,000 it read before.
+10,000 it read before. An instant room, which has no catalog row, is known
+only to the replica that holds its actor, so a listing built on another
+replica lacks it, and the pages of one listing built on different replicas
+can differ; a catalogued room is listed the same by every replica.
 
 Before this slice the service listed nothing to remote askers. XEP-0045
 §6.3 says a service SHOULD return the full list of the public rooms it
@@ -2379,8 +2382,24 @@ at other servers returns before it reads anything, and migrations 2012 and
 setting can be set while S2S is off and takes effect once it is on. Two of
 its changes apply whether or not S2S is on, and are listed below.
 
+The MUC fallback changes nothing for remote senders while S2S is
+disabled: no room or Spaces host is attached, so no listing is built for
+one. Two of its changes apply whether or not S2S is on, and are listed
+below.
+
 These change behaviour while S2S is disabled, and belong to the rollout
 runbook (G24):
+
+- The MUC service's `disco#items` lists a public room an enrolled
+  host-grant scope manages to a session whose canonical grants allow
+  `view`; before, such a room was listed to nobody. Every connect-time
+  listing of a session reads the grants of each public managed room in the
+  catalog, one after another.
+- The `disco#items` of a Space node answers a session with the rooms the
+  Space holds (the service's address and each room's JID as the item's
+  name), or `item-not-found` for a node the session may not read; before,
+  it answered an empty list for any node. First-party clients read a
+  Space's rooms through `<items/>`, which is unchanged.
 
 - A Space owner's configuration form on the Spaces service carries one
   more field, `urn:waddle:spaces:federated`, off by default.
