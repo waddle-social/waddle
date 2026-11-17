@@ -266,10 +266,15 @@ const ROOM_CREATED_STATUS = 201;
 
 /**
  * Delay before discovery is tried again when it could not place rooms; it
- * doubles with each further try, up to the cap.
+ * doubles with each further try, up to the cap. Each delay is spread by up
+ * to a fifth either way, so the clients of one deployment do not retry in
+ * step after it restarts. Tries at the cap stop after a bounded number
+ * until the next session-ready.
  */
 const PLACEMENT_RETRY_INITIAL_MS = 2_000;
 const PLACEMENT_RETRY_MAX_MS = 60_000;
+const PLACEMENT_RETRY_JITTER = 0.2;
+const PLACEMENT_RETRY_MAX_TRIES_AT_CAP = 10;
 
 /** Join-failure copy for a room on another server: outage, denial and missing room read differently. */
 function remoteJoinFailureMessage(input: Parameters<typeof classifyRemoteFailure>[0]): string {
@@ -571,7 +576,8 @@ export class BrowserXmppClient {
   /**
    * Rooms on other servers that a join found did not exist (see
    * `rejectCreatedRemoteRoom`), by room key. Persisted, so no later page
-   * joins them on its own either; a join the user starts is still sent.
+   * joins them on its own either: `ensureJoined` refuses them unless the
+   * user started the join, which ends the record. A sign-out clears it.
    */
   private readonly missingRemoteRooms = new Set<string>();
   private autoJoinRoomJids: ReadonlyArray<string> = [];
@@ -617,9 +623,19 @@ export class BrowserXmppClient {
    */
   private placementRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private placementRetryDelayMs = PLACEMENT_RETRY_INITIAL_MS;
+  /** Retries armed at the longest delay since the backoff last started afresh. */
+  private placementRetriesAtCap = 0;
+  /** Random source in [0, 1) for spreading the retry's delays. */
+  private placementJitter: () => number = Math.random;
   /**
-   * The last discovery could not place rooms. A lost stream cancels the
-   * retry; the next session-ready arms it again from two seconds.
+   * Rooms that home Spaces or the user's bookmarks name and the last
+   * discovery could not place (see `DiscoveredTopology.unplacedRooms`).
+   */
+  private lastUnplacedRooms = 0;
+  /**
+   * The last discovery could not place rooms that this session has to
+   * place. A lost stream cancels the retry; the next session-ready arms it
+   * again from two seconds.
    */
   private placementOwed = false;
   /**
@@ -947,12 +963,13 @@ export class BrowserXmppClient {
 
   /**
    * Normalized key under which a room's join waiter is registered.
-   * Keying on the bare room JID (case-folded) — not the full
-   * `room/nick` occupant JID — makes join resolution independent of
-   * the nick the service echoes back and of localpart case.
+   * Keying on the bare room JID (case-folded, without a domain's trailing
+   * dot) — not the full `room/nick` occupant JID — makes join resolution
+   * independent of the nick the service echoes back and of the address's
+   * spelling.
    */
   private roomJoinKey(roomJid: string): string {
-    return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+    return bareJidKey(roomJid);
   }
 
   /**
@@ -1084,6 +1101,13 @@ export class BrowserXmppClient {
     const roomsToJoin = new Set(tailRooms);
     if (this.currentRoom) roomsToJoin.add(this.currentRoom);
     for (const roomJid of this.homeRoomsFirst([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids])) roomsToJoin.add(roomJid);
+    // A room on another server is joined only while the home server
+    // advertised federation at its last readable discovery.
+    if (this.federationAdvertised !== true) {
+      for (const roomJid of roomsToJoin) {
+        if (this.isRemoteRoom(roomJid)) roomsToJoin.delete(roomJid);
+      }
+    }
     // Each worker holds its slot until self-presence, which only follows
     // `<enabled/>`, so every tail room needs a slot of its own. Still bounded
     // under the server's 56-frame per-stream read-ahead (#1219): an unbounded
@@ -1224,6 +1248,9 @@ export class BrowserXmppClient {
   }
   onRoomAccessChanged(hook: (event: RoomAccessChangedEvent) => void) { return this.events.on("roomAccessChanged", hook); }
   onRoomPlacementChanged(hook: () => void) { return this.events.on("roomPlacementChanged", hook); }
+  onHomeServicesChanged(hook: (services: { mucService: string | null; components: readonly string[] | null }) => void) {
+    return this.events.on("homeServicesChanged", hook);
+  }
   /** The user's own occupancy of a room ended, with the room's status codes (XEP-0045 §7.14). */
   onOwnRoomDeparture(hook: (roomJid: string, statusCodes: readonly number[], departure: OwnRoomDeparture) => void) { return this.events.on("ownRoomDeparture", hook); }
   /** A join of a room failed, whoever started it, with the room's stanza error or a timeout. */
@@ -1685,8 +1712,8 @@ export class BrowserXmppClient {
     this.clearRoomPresenceCaches();
     this.retainedJoinedRoomJids.clear();
     this.parkedRetainedRoomJids.clear();
-    // The missing-room record is the account's in this browser and outlives
-    // a sign-out, so a later sign-in of the account still skips those rooms.
+    // The missing-room record is kept here, since a replaced client keeps
+    // it; the sign-out flow clears it (`clearMissingRemoteRooms`).
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
@@ -1888,13 +1915,27 @@ export class BrowserXmppClient {
     this.presence.dispatchFocusedRoom();
   }
 
-  async ensureJoined(roomJid: string): Promise<void> {
+  /**
+   * Join a room, or wait for the join under way. A room recorded as missing
+   * on another server is joined only when the user started the join
+   * (`userInitiated`), which ends the record; any other join of it (a
+   * restored route, the focused room after a reconnect, a retained room,
+   * a retry) is refused without a request.
+   */
+  async ensureJoined(roomJid: string, options: { userInitiated?: boolean } = {}): Promise<void> {
     // Every join tracker keys on the canonical `roomJoinKey` (lowercased
     // bare JID) so case variants from topology vs. retained-room replay
     // resolve to a single entry (#1221). The raw `roomJid` still goes on
     // the wire (`performMucJoin`, `rememberJoinedRoom`).
     const key = this.roomJoinKey(roomJid);
+    if (options.userInitiated) this.forgetMissingRoom(key);
     if (this.joinedMucReady.has(key)) return;
+    if (this.missingRemoteRooms.has(key)) {
+      throw new RoomJoinError(
+        "This room doesn't exist on its server.",
+        { roomJid: key, condition: "item-not-found", errorType: "cancel" },
+      );
+    }
     const scheduledRetry = this.roomJoinRetry.pending(key);
     if (scheduledRetry) return scheduledRetry;
     const existing = this.joinedMucs.get(key);
@@ -1947,7 +1988,7 @@ export class BrowserXmppClient {
   }
 
   private rememberJoinedRoom(roomJid: string): void {
-    const normalized = roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+    const normalized = this.roomJoinKey(roomJid);
     if (!normalized) return;
     const sizeBefore = this.retainedJoinedRoomJids.size;
     // Joined now, so no longer waiting for discovery to place it.
@@ -2032,20 +2073,46 @@ export class BrowserXmppClient {
   }
 
   /**
-   * After a discovery: stop retrying once it could place rooms, or try
-   * again later, the delay doubling from two seconds to a minute. A retry
-   * that places them tells listeners (`roomPlacementChanged`), since their
-   * room list was read from a discovery that could not.
+   * Whether a room this session has to place is still unplaced: a retained
+   * room parked for discovery, a room a home Space or the user's bookmarks
+   * name that the last discovery could not place, or a room this session
+   * joins, retains or shows whose host is not known.
+   */
+  private placementPending(): boolean {
+    if (this.parkedRetainedRoomJids.size > 0 || this.lastUnplacedRooms > 0) return true;
+    const known = [
+      ...this.retainedJoinedRoomJids,
+      ...this.autoJoinRoomJids,
+      ...this.joinedMucs.keys(),
+      ...this.roomJoinWaiters.keys(),
+      ...(this.currentRoom ? [this.currentRoom] : []),
+    ];
+    return known.some((roomJid) => this.roomHostOf(roomJid) === "unknown");
+  }
+
+  /**
+   * After a discovery: stop retrying once it could place rooms or nothing
+   * waits to be placed, or try again later, the delay doubling from two
+   * seconds to a minute and spread by the jitter. After
+   * `PLACEMENT_RETRY_MAX_TRIES_AT_CAP` tries a minute apart, retries stop
+   * until the next session-ready; the placement stays owed. A retry that
+   * places rooms tells listeners (`roomPlacementChanged`), since their room
+   * list was read from a discovery that could not.
    */
   private settlePlacementRetry(xmpp: unknown, placementAuthoritative: boolean): void {
-    this.placementOwed = !placementAuthoritative;
-    if (placementAuthoritative) {
+    this.placementOwed = !placementAuthoritative && this.placementPending();
+    if (!this.placementOwed) {
       this.cancelPlacementRetry();
       return;
     }
     if (this.placementRetryTimer !== null) return;
     const delay = this.placementRetryDelayMs;
+    if (delay >= PLACEMENT_RETRY_MAX_MS) {
+      if (this.placementRetriesAtCap >= PLACEMENT_RETRY_MAX_TRIES_AT_CAP) return;
+      this.placementRetriesAtCap += 1;
+    }
     this.placementRetryDelayMs = Math.min(delay * 2, PLACEMENT_RETRY_MAX_MS);
+    const spread = 1 - PLACEMENT_RETRY_JITTER + 2 * PLACEMENT_RETRY_JITTER * this.placementJitter();
     this.placementRetryTimer = setTimeout(() => {
       this.placementRetryTimer = null;
       // Only on the stream it was armed for: a retry never starts a connect.
@@ -2060,16 +2127,17 @@ export class BrowserXmppClient {
           if (!this.destroying && this.xmpp === xmpp) this.settlePlacementRetry(xmpp, false);
         },
       );
-    }, delay);
+    }, Math.round(delay * spread));
     // A pending retry must not keep a non-browser host (tests, workers) alive.
     (this.placementRetryTimer as { unref?: () => void }).unref?.();
   }
 
-  /** Drop a pending placement retry and start the next epoch's backoff afresh. */
+  /** Drop a pending placement retry and start the next backoff afresh. */
   private cancelPlacementRetry(): void {
     if (this.placementRetryTimer !== null) clearTimeout(this.placementRetryTimer);
     this.placementRetryTimer = null;
     this.placementRetryDelayMs = PLACEMENT_RETRY_INITIAL_MS;
+    this.placementRetriesAtCap = 0;
   }
 
   private persistAutoJoinBlocks(): void {
@@ -2220,13 +2288,14 @@ export class BrowserXmppClient {
       if (this.roomSwitchTarget === nextRoom) return this.roomSwitchPromise;
       await this.roomSwitchPromise.catch(() => undefined);
     }
+    const userInitiated = intent === "explicit-navigation";
     if (this.currentRoom === nextRoom) {
-      await this.ensureJoined(nextRoom);
+      await this.ensureJoined(nextRoom, { userInitiated });
       this.dispatchFocusedRoomHandlers();
       await this.flushQueuedRoomMessages(nextRoom);
       return;
     }
-    const promise = this.performRoomSwitch(nextRoom);
+    const promise = this.performRoomSwitch(nextRoom, userInitiated);
     this.roomSwitchPromise = promise;
     this.roomSwitchTarget = nextRoom;
     try {
@@ -2239,7 +2308,7 @@ export class BrowserXmppClient {
     }
   }
 
-  private async performRoomSwitch(nextRoom: string) {
+  private async performRoomSwitch(nextRoom: string, userInitiated = false) {
     const xmpp = this.xmpp;
     if (!xmpp) return;
     if (this.currentRoom && this.roomJoinKey(this.currentRoom) !== this.roomJoinKey(nextRoom)) {
@@ -2250,7 +2319,7 @@ export class BrowserXmppClient {
     try {
       await withSpan(
         { kind: "room-switch" },
-        () => this.ensureJoined(nextRoom),
+        () => this.ensureJoined(nextRoom, { userInitiated }),
       );
     } catch (err) {
       if (!this.isCurrentXmpp(xmpp)) return;
@@ -3240,16 +3309,28 @@ export class BrowserXmppClient {
       absentRoomKeysAuthoritative,
     );
     if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
+    const previousMucService = this.homeMucService;
+    const previousComponents = this.homeComponents;
     if (topology.services?.muc && topology.services.mucDiscovered) {
       this.homeMucService = barePeerJid(topology.services.muc);
     }
     if (topology.services?.components) this.homeComponents = [...topology.services.components];
+    if (
+      this.homeMucService !== previousMucService
+      || (this.homeComponents ?? []).join("\n") !== (previousComponents ?? []).join("\n")
+      || (this.homeComponents === null) !== (previousComponents === null)
+    ) {
+      this.events.emitSafe("homeServicesChanged", {
+        mucService: this.homeMucService,
+        components: this.homeComponents ? [...this.homeComponents] : null,
+      });
+    }
     if (typeof topology.federation === "boolean") this.federationAdvertised = topology.federation;
-    // Rooms are only left, dropped or no longer rejoined as being elsewhere
-    // on the word of a discovery that identified the home MUC service and
-    // read its catalog. One that could not is no evidence that a room is
-    // elsewhere, and a room of this deployment must not be left because a
-    // component did not answer once.
+    // Rooms are only dropped from the parked list as being elsewhere on the
+    // word of a discovery that identified the home MUC service and read its
+    // catalog. One that could not is no evidence that a room is elsewhere,
+    // and a room of this deployment must not be left because a component
+    // did not answer once.
     const placementAuthoritative = !!topology.services?.mucDiscovered && topology.mucCatalogRead === true;
     // Without the catalog, the rooms it would place at home are unknown:
     // the previous placement stands until a discovery reads it again.
@@ -3260,15 +3341,20 @@ export class BrowserXmppClient {
     }
     // Rooms on other servers are joined only while the home server
     // federates: a room joined earlier is not joined again on its own, and
-    // one joined now is left when the home server says it stopped.
-    if (placementAuthoritative) {
+    // one joined now is left when the home server says it stopped. The home
+    // server's own answer decides that, whatever else this discovery could
+    // place: only rooms already placed elsewhere (by a home MUC service
+    // identified earlier) are affected, and a room an earlier catalog placed
+    // at home stays home until a catalog read says otherwise.
+    if (placementAuthoritative || topology.federation === false) {
       for (const room of topology.unavailableRemoteRooms ?? []) {
         const key = this.roomJoinKey(room.roomJid);
         if (this.roomHostOf(key) === "remote") this.stopRejoining(key);
       }
-      if (topology.federation === false) this.leaveRemoteRooms();
     }
+    if (topology.federation === false) this.leaveRemoteRooms();
     this.releaseParkedRetainedRooms(placementAuthoritative);
+    this.lastUnplacedRooms = topology.unplacedRooms ?? 0;
     this.settlePlacementRetry(xmpp, placementAuthoritative);
     const autoJoinRoomJids = topology.rooms
       .filter((room) => {
@@ -3505,8 +3591,12 @@ export class BrowserXmppClient {
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
     // A discovery of an earlier stream could not place rooms, and the lost
-    // stream cancelled its retry: try again on this one.
-    if (this.placementOwed) this.settlePlacementRetry(xmpp, false);
+    // stream cancelled its retry (or the retry ran out of tries): try again
+    // on this one, from the start of the backoff.
+    if (this.placementOwed) {
+      this.cancelPlacementRetry();
+      this.settlePlacementRetry(xmpp, false);
+    }
     if (lifecycle.type === "fresh") {
       // Occupancy was lost, so the rejoin below rebuilds presence from
       // scratch. A resume keeps occupancy and the server does not resend

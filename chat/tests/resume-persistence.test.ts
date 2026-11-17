@@ -18,6 +18,7 @@ import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection"
 import { enqueueQueuedMessage, listQueuedDmMessages, removeQueuedMessage } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
+  clearMissingRemoteRooms,
   createLocalStorageResumePersistence,
   nullResumePersistence,
   resumeOwnerLifecycleSnapshotForTests,
@@ -2451,7 +2452,7 @@ describe("missing rooms on other servers", () => {
     expect(createLocalStorageResumePersistence("other@example.com", "missing-other").loadMissingRemoteRooms?.()).toEqual([]);
   });
 
-  test("a later sign-in of the account in this browser still reads it", () => {
+  test("a reload or a replaced client of the account in this browser still reads it", () => {
     const before = createLocalStorageResumePersistence("missing-later@example.com", "missing-before");
     before.addMissingRemoteRoom?.("dev@chat.remote.test");
     before.clearJoinedRooms();
@@ -2462,5 +2463,18 @@ describe("missing rooms on other servers", () => {
     // Signed in again from another resource, the account is the same.
     const otherResource = createLocalStorageResumePersistence("Missing-Later@example.com/phone", "missing-phone");
     expect(otherResource.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test"]);
+  });
+
+  test("a sign-out forgets it for the account only", () => {
+    const signedIn = createLocalStorageResumePersistence("missing-out@example.com", "missing-out-tab");
+    signedIn.addMissingRemoteRoom?.("dev@chat.remote.test");
+    const other = createLocalStorageResumePersistence("missing-stays@example.com", "missing-stays-tab");
+    other.addMissingRemoteRoom?.("ops@chat.remote.test");
+    signedIn.dispose();
+
+    // The sign-out flow names the account by its full JID.
+    clearMissingRemoteRooms("Missing-Out@example.com/desktop");
+    expect(createLocalStorageResumePersistence("missing-out@example.com", "missing-next").loadMissingRemoteRooms?.()).toEqual([]);
+    expect(other.loadMissingRemoteRooms?.()).toEqual(["ops@chat.remote.test"]);
   });
 });

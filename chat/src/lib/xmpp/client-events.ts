@@ -175,6 +175,13 @@ export type ClientEvents = {
    * from the earlier one is out of date.
    */
   roomPlacementChanged: [];
+  /**
+   * A discovery learned the home MUC service or the components the home
+   * server lists, or found them changed. Sent by every discovery that
+   * learns them, including one that could not place rooms, so what decides
+   * which rooms and senders are of this deployment is current everywhere.
+   */
+  homeServicesChanged: [services: { mucService: string | null; components: readonly string[] | null }];
   roomIdAmbiguous: [channelId: string];
   // Observe-only telemetry hooks (multi-listener, error-isolated via
   // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health

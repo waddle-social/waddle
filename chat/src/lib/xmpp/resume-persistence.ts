@@ -229,8 +229,8 @@ export interface ResumePersistence {
    * Rooms on other servers that a join found did not exist (their host
    * created them for the join): nothing joins them on its own again. The
    * record is the account's in this browser, shared by its tabs and kept
-   * across sign-outs, so each change is one room's, applied to what is
-   * stored now.
+   * across reconnects and reloads, so each change is one room's, applied to
+   * what is stored now. A sign-out clears it (`clearMissingRemoteRooms`).
    */
   loadMissingRemoteRooms?(): string[];
   addMissingRemoteRoom?(roomJid: string): void;
@@ -287,11 +287,9 @@ export function createLocalStorageResumePersistence(
   const ownResumeKey = (previd: string) => `${ownResumeKeyPrefix}${previd.length}:${previd}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
-  // Keyed by the account's bare JID alone: every tab and later sign-in of
-  // the account in this browser, whatever its resource, reads the same
-  // record.
-  const missingAccount = bareJidKey(accountKey);
-  const missingRemoteRoomsKey = `${MISSING_REMOTE_ROOMS_PREFIX}.${missingAccount.length}:${missingAccount}`;
+  // Keyed by the account's bare JID alone: every tab and reload of the
+  // account in this browser, whatever its resource, reads the same record.
+  const missingRemoteRoomsKey = missingRemoteRoomsKeyFor(accountKey);
   gcOwnResumeMarkers(ownResumeKeyPrefix);
 
   return {
@@ -510,6 +508,21 @@ export function createLocalStorageResumePersistence(
       else writeJson(missingRemoteRoomsKey, remaining, "missing-remote-rooms");
     },
   };
+}
+
+function missingRemoteRoomsKeyFor(accountJid: string): string {
+  const account = bareJidKey(accountJid);
+  return `${MISSING_REMOTE_ROOMS_PREFIX}.${account.length}:${account}`;
+}
+
+/**
+ * Forget an account's missing-room record in this browser: its user signed
+ * out, and on a shared machine the next person must not learn which rooms
+ * elsewhere they tried. Reconnects and reloads keep the record.
+ */
+export function clearMissingRemoteRooms(accountJid: string): void {
+  if (!bareJidKey(accountJid)) return;
+  removeKey(missingRemoteRoomsKeyFor(accountJid), "missing-remote-rooms");
 }
 
 function readMissingRemoteRooms(key: string): string[] {

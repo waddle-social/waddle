@@ -233,7 +233,17 @@ export function useWaddleDirectory(
     if (previous !== undefined && previous !== client) clearData();
     if (!client) return;
     const unsubscribe = client.onRoomIdAmbiguous?.(quarantineChannel);
-    if (unsubscribe) onCleanup(unsubscribe);
+    // Every discovery that learns the home services, a background retry's
+    // included, updates them here: they decide which rooms and senders are
+    // of this deployment (and so whose media loads).
+    const unsubscribeHome = client.onHomeServicesChanged?.((services) => {
+      if (services.mucService) homeMucService.value = services.mucService;
+      if (services.components) homeComponents.value = [...services.components];
+    });
+    onCleanup(() => {
+      unsubscribe?.();
+      unsubscribeHome?.();
+    });
     for (const id of client.listAmbiguousRoomIds?.() ?? []) quarantineChannel(id);
   }, { immediate: true, flush: "sync" });
 

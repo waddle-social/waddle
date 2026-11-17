@@ -609,6 +609,14 @@ export interface DiscoveredTopology {
    */
   mucCatalogRead?: boolean;
   /**
+   * How many rooms that home Spaces or the user's bookmarks name this
+   * discovery could not place: their host is not shown to be of this
+   * deployment, and without an identified home MUC service it is not shown
+   * to be elsewhere either. They are left out of `rooms` until a discovery
+   * places them.
+   */
+  unplacedRooms?: number;
+  /**
    * Exact authority available for terminal-denial reconciliation. Whole-cache
    * replacement remains gated by `roomCatalogComplete`.
    */

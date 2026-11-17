@@ -408,17 +408,15 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     const retryKey = `room:${canonical}`;
     clearRetry(retryKey);
     const intent = options.saveBookmark ? nextRoomIntent(key) : null;
-    if (options.saveBookmark) {
-      leftByUser.delete(key);
-      // The user asked to join: a room recorded as missing is tried again.
-      deps.xmppClient.value?.forgetMissingRoom?.(canonical);
-    }
+    if (options.saveBookmark) leftByUser.delete(key);
     const startedGeneration = generation;
     updateRoom(canonical, { status: { state: "working" }, departure: null, note: null, ...(name ? { name } : {}) });
     let context: ReturnType<typeof requireXmpp>;
     try {
       context = requireXmpp();
-      await context.client.ensureJoined(canonical);
+      // A join the user asked for is tried even for a room recorded as
+      // missing, and ends that record; a rejoin after a lost stream is not.
+      await context.client.ensureJoined(canonical, { userInitiated: options.saveBookmark });
     } catch (error) {
       if (startedGeneration !== generation) return;
       const failure = classifyRemoteError(error);

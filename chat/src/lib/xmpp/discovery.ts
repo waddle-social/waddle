@@ -577,6 +577,8 @@ export async function discoverTopology(
   let bookmarkCatalogComplete = true;
   let mucCatalogComplete = true;
   let userBookmarksComplete = true;
+  // Space items and bookmarks whose room this discovery could not place.
+  let unplacedRooms = 0;
   const bookmarkedRooms = new Map<string, { spaceId?: string; autojoin: boolean; name?: string }>();
   const remoteBookmarks = new Map<string, { autojoin: boolean; name?: string }>();
   const spaceBookmarkedRoomJids = new Set<string>();
@@ -701,6 +703,7 @@ export async function discoverTopology(
         ...(item.name ? { name: item.name } : {}),
       });
     } else {
+      unplacedRooms += 1;
       roomCatalogComplete = false;
       bookmarkCatalogComplete = false;
     }
@@ -718,6 +721,7 @@ export async function discoverTopology(
     userBookmarkedRoomJids.add(roomJid);
     const host = hostOf(roomJid);
     if (host === "unknown") {
+      unplacedRooms += 1;
       roomCatalogComplete = false;
       bookmarkCatalogComplete = false;
       continue;
@@ -860,6 +864,7 @@ export async function discoverTopology(
     rooms: rooms.map((room, position) => ({ ...room, position, ...(room.jid && roomSpaceIds.get(barePeerJid(room.jid)) ? { standalone: false } : { standalone: room.standalone ?? true }) })),
     roomCatalogComplete,
     mucCatalogRead: mucCatalogComplete,
+    unplacedRooms,
     roomReconciliationAuthority: {
       absentRoomKeysAuthoritative:
         roomCatalogComplete && bookmarkCatalogComplete && mucCatalogComplete,

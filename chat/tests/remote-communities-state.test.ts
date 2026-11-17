@@ -133,7 +133,9 @@ function fakeClient(options: {
   };
   const client = {
     agent,
-    async ensureJoined(roomJid: string) {
+    async ensureJoined(roomJid: string, joinOptions: { userInitiated?: boolean } = {}) {
+      // As the client: a join the user started ends a missing-room record.
+      if (joinOptions.userInitiated) forgottenMissingRooms.push(roomJid);
       joined.push(roomJid);
       for (const handler of joinStarts) handler(roomJid);
       if (options.holdJoins) await new Promise<void>((resolve) => { heldJoins.push(resolve); });
