@@ -29,14 +29,17 @@ One transaction:
 
 Then, in the same command, after the commit:
 
+- every serving server ends the account's open sessions;
 - the messages the offline store kept from before the retirement under
   another spelling of the JID (a domain written with U-labels, a message
   stored before recipients were prepared) are removed. Finding them reads
   every recipient of the store, which no index serves, so this runs in a
   transaction of its own that locks no account table and holds up no
   login, with a 30 s bound on each statement. It removes nothing for a JID
-  the ledger does not hold, and running it again removes nothing more;
-- every serving server ends the account's open sessions. The command records a request; each server reads it within about
+  the ledger does not hold, and running it again removes nothing more. A
+  store too large to read within the bound fails it on every run; the
+  messages then stay, undelivered, and no other account can hold the
+  JID. The command records a request; each server reads it within about
 a second, and from then on:
 
 - closes every live stream of the account it hosts. The client is sent the
@@ -164,7 +167,9 @@ It does not:
      its JID were not all removed (`offline_spellings_removed` is `null`;
      the sweep failed or ran out of its 30 s bound and changed nothing) or
      its sessions' end was not requested or not read: run the command
-     again;
+     again. A sweep that runs out of its bound on every run means the
+     offline store is too large to read within it; those messages stay
+     undelivered;
    - 2: the JID names no account address or the database was not named;
    - 3: retired, and a serving server has not confirmed ending the
      account's sessions (`pending`). Run the command again; a server that

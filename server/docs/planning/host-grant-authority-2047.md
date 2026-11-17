@@ -1164,11 +1164,13 @@ projected subject are that canonical text.
   bound; it holds up no login. The store refuses every row for the
   account from the commit on, under any spelling, so the sweep removes
   only rows stored before and a second sweep removes nothing. A sweep
-  that fails or runs out of its bound changes nothing; the operator
-  command reports it with exit code 1 and runs the sweep again on its
-  next run. Until a sweep completes, rows under other spellings stay in
-  the store: no session of the account flushes them, and no other account
-  can hold the JID.
+  that fails changes nothing; the operator command reports it with exit
+  code 1 and runs the sweep again on its next run, after it has asked the
+  replicas to end the account's sessions, so a slow sweep never keeps a
+  live stream open. The read is one statement: on a store too large to
+  read within the bound every run fails the same way. Until a sweep
+  completes, rows under other spellings stay in the store: no session of
+  the account flushes them, and no other account can hold the JID.
 - The schema tooling that compares a history-built database with a
   baseline-built one (`scripts/schema_history.py`) does not yet account for
   relations added after the baseline.
@@ -2999,12 +3001,13 @@ A home never issues the JID of a retired account to a new holder
   letter case, and no index serves that read, so it is not made while the
   account tables are locked. The operator command runs it after the
   commit, in a transaction of its own that takes no lock on the account
-  tables, with a 30 s statement bound: it reads the ledger, refuses a JID
-  the ledger does not hold, and deletes each other spelling of the
-  account's JID among the recipients. Since the store refuses the
-  account's rows under every spelling from the commit on, the sweep
-  removes only rows stored before and is idempotent; one that fails
-  changes nothing, and the command runs it on every run.
+  tables, with a 30 s statement bound, after it has asked the replicas to
+  end the account's sessions: it reads the ledger, refuses a JID the
+  ledger does not hold, and deletes each other spelling of the account's
+  JID among the recipients. Since the store refuses the account's rows
+  under every spelling from the commit on, the sweep removes only rows
+  stored before and is idempotent; one that fails changes nothing, and
+  the command runs it on every run.
 - **Ending the account's open sessions** (`auth/session_endings.rs`,
   `server/account_session_endings.rs`,
   `server/routes/websocket/account_retirement.rs`, migration 2014, both

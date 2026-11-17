@@ -7,14 +7,16 @@
 //! the restricted runtime role may neither write the ledger nor delete an
 //! account. A deployment on SQLite names its database file instead.
 //!
-//! Once the retirement committed it removes the messages the account's
+//! Once the retirement committed it asks every serving replica to end the
+//! account's open sessions and waits for their acknowledgements
+//! (`auth::session_endings`), then removes the messages the account's
 //! offline store keeps under other spellings of its JID, outside the
-//! retirement's lock (`auth::retirement::sweep_offline_spellings`), then
-//! asks every serving replica to end the account's open sessions and waits
-//! for their acknowledgements (`auth::session_endings`). The retirement
-//! stands whatever follows: a run whose sweep did not complete exits as
-//! failed, one that is not confirmed by every serving replica exits as
-//! pending, and running it again does both again.
+//! retirement's lock (`auth::retirement::sweep_offline_spellings`). The
+//! sessions come first: the sweep's read can take up to its statement
+//! bound, and the account's live streams are not kept open meanwhile. The
+//! retirement stands whatever follows: a run whose sweep did not complete
+//! exits as failed, one that is not confirmed by every serving replica
+//! exits as pending, and running it again does both again.
 
 use std::time::Duration;
 
@@ -89,8 +91,8 @@ pub(super) async fn run(args: AccountArgs) -> Result<(), OwnerCliError> {
                 .map_err(OwnerCliError::Retirement)?;
             // From here on the retirement stands: what follows is printed
             // with it, whatever the outcome.
-            let spellings = sweep_offline_spellings(&database, &jid).await;
             let sessions = end_sessions(&database, &jid, Duration::from_secs(session_wait)).await;
+            let spellings = sweep_offline_spellings(&database, &jid).await;
             println!(
                 "{}",
                 json!({

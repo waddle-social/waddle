@@ -348,8 +348,11 @@ async fn retire_in(
 /// of 30 s. The store refuses every row for a retired account from the
 /// retirement's commit on, so the rows it finds were stored before, and
 /// none comes back once removed: a second run removes nothing. A run that
-/// fails or runs out of its bound changes nothing and is run again; the
-/// operator command runs it on every run.
+/// fails changes nothing and is run again; the operator command runs it on
+/// every run. The read is one statement, so a store too large to scan
+/// within the bound fails every run the same way, and the rows stay: no
+/// session of the account flushes them and no other account can hold the
+/// JID.
 ///
 /// It refuses a JID the ledger does not hold, read in its own transaction,
 /// so that it never removes the store of an account that is not retired.
