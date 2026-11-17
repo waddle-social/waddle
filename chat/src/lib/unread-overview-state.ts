@@ -64,6 +64,7 @@ export function selectUnreadRoomCandidates(
   state: InboxState,
   channels: readonly ChannelSummary[],
 ): UnreadRoomCandidate[] {
+  const inboxChannels = channels.filter((channel) => !channel.isGroupDm);
   const roomJids = new Set<string>();
   for (const entry of state.channels.values()) {
     if (entry.kind === "muc" && entry.unread > 0) roomJids.add(entry.partner);
@@ -74,7 +75,7 @@ export function selectUnreadRoomCandidates(
 
   const candidates: UnreadRoomCandidate[] = [];
   for (const roomJid of roomJids) {
-    const channel = findChannelForRoomJid(roomJid, channels);
+    const channel = findChannelForRoomJid(roomJid, inboxChannels);
     if (!channel) continue;
     const channelEntry = state.channels.get(roomJid);
     const channelUnread =

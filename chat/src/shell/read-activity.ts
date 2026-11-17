@@ -2,6 +2,7 @@ import { computed, type Ref } from "vue";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { selectUnreadRoomCandidates } from "@/lib/unread-overview-state";
 import { useChatReadReceipts } from "@/shell/read-receipts";
 import { useChatTabUnreadIndicator } from "@/shell/tab-unread-indicator";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
@@ -27,15 +28,21 @@ export function useChatReadActivity(options: {
   roomJidForChannelId: (session: WaddleSession, channels: ChannelSummary[], channelId: string) => string | null;
 }) {
   const computedChannelUnreadMap = computed(() => options.channelUnread.channelUnreadMap(options.channels.value));
-  const totalTabUnreadCount = computed(() =>
-    options.appReady.value && options.session.value && options.xmppClient.value
+  const canReadInbox = computed(() => options.appReady.value && !!options.session.value && !!options.xmppClient.value);
+  const inboxUnreadCount = computed(() => {
+    if (!canReadInbox.value) return 0;
+    return selectUnreadRoomCandidates(options.channelUnread.inboxState.value, options.channels.value)
+      .reduce((total, room) =>
+        total + room.channelUnread + room.threads.reduce((sum, thread) => sum + thread.unread, 0), 0);
+  });
+  const appBadgeUnreadCount = computed(() =>
+    canReadInbox.value
       ? options.dmConversations.totalUnreadCount.value + options.channelUnread.totalUnreadCount.value
       : 0
   );
 
-  useChatTabUnreadIndicator(totalTabUnreadCount, {
-    shouldAcceptServiceWorkerUnreadCount: () =>
-      options.appReady.value && !!options.session.value && !!options.xmppClient.value,
+  useChatTabUnreadIndicator(inboxUnreadCount, appBadgeUnreadCount, {
+    shouldAcceptServiceWorkerUnreadCount: () => canReadInbox.value,
     onServiceWorkerUnreadCount: () => Promise.all([
       options.dmConversations.hydrateFromInbox(),
       options.channelUnread.hydrateFromInbox(),
@@ -106,6 +113,6 @@ export function useChatReadActivity(options: {
 
   return {
     computedChannelUnreadMap,
-    totalTabUnreadCount,
+    inboxUnreadCount,
   };
 }
