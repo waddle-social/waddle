@@ -65,8 +65,8 @@ pub enum RemoteIngressTarget {
     /// An account of this deployment, addressed by its bare or a full JID:
     /// the account's archive is the authority that stamps the message.
     /// `admission` is the S2S admission policy of the replica that built
-    /// the submission (ADR-0020 D1), from which the acceptance transaction
-    /// decides the sender's domain again.
+    /// the submission (ADR-0020 D1), captured then: the acceptance checks
+    /// the sender's domain against it again, and reads no newer snapshot.
     Account {
         admission: Box<crate::permissions::host_grant::PrincipalPolicy>,
     },

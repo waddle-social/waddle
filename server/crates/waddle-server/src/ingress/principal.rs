@@ -20,8 +20,8 @@ pub struct ExtensionPrincipal {
 ///
 /// It names the account and what its stream proved, and nothing else: no
 /// session, credential or grant. Whether its domain is admitted, and what
-/// its grants are honoured as, is decided in the acceptance transaction
-/// from the S2S snapshot the replica runs.
+/// its grants are honoured as, is checked in the acceptance transaction
+/// against the S2S snapshot the replica ran when it built the submission.
 #[derive(Clone, Debug)]
 pub struct RemoteOccupantPrincipal {
     pub account: BareJid,
@@ -183,13 +183,19 @@ pub(super) async fn assert_admission(
 }
 
 /// The acceptance of a remote sender's direct message to a local account
-/// (ADR-0020 D7; gate G18), decided in the acceptance transaction:
+/// (ADR-0020 D7; gate G18), checked in the acceptance transaction:
 ///
 /// - D1 at the effect: the sender's domain is admitted under `admission`,
-///   the S2S policy of the replica that built the submission. A domain no
-///   longer admitted commits nothing, whatever admitted its stream earlier.
+///   the S2S policy of the replica that built the submission. The snapshot
+///   is the one captured then, before the commit, not one read in the
+///   transaction: a domain the snapshot no longer admitted commits nothing,
+///   whatever admitted its stream earlier, and one de-admitted by a
+///   snapshot swapped in while the acceptance runs is refused from the
+///   next stanza on.
 /// - The recipient named by the target, bare or full, is an account of this
-///   deployment and its JID is not retired (`RemoteRecipientRepository`).
+///   deployment, at a domain `admission` serves, and its JID is not
+///   retired; these are read in the transaction
+///   (`RemoteRecipientRepository`).
 ///
 /// Every refusal is the same failed assertion, so the caller, which answers
 /// a remote sender nothing whatever the outcome, cannot tell them apart
@@ -220,7 +226,7 @@ async fn assert_remote_direct_admission(
     if recipient.node().is_none() || recipient == principal.account {
         return Err(IngressUowError::PrincipalAssertionFailed);
     }
-    match RemoteRecipientRepository::assert_recipient(tx, &recipient).await? {
+    match RemoteRecipientRepository::assert_recipient(tx, &recipient, admission.served()).await? {
         RecipientAssertion::Asserted => Ok(()),
         RecipientAssertion::Unknown => Err(IngressUowError::PrincipalAssertionFailed),
     }

@@ -202,11 +202,18 @@ the protocols, not of this server:
 
 Existence is checked first on every path, against the account tables and
 the ledger of retired JIDs (`auth/retirement.rs`), before any roster row,
-blocking list or resource is read. The ingress acceptance of a direct
-message checks it again in its transaction, with the account row locked
-against a concurrent retirement, and refuses a retired or nonexistent
-recipient as it refuses a sender whose domain is no longer admitted:
-nothing is committed and nothing answers the sender. Retirement does not
+blocking list or resource is read. Both checks find an account by the
+same lookup keys (`auth::directory::account_lookup_keys`: the localpart
+against `users.localpart_key`, the bare JID against
+`native_users.jid_key`), so they agree on every row. The ingress
+acceptance of a direct message checks it again in its transaction, with
+the account row locked `FOR KEY SHARE` against a concurrent retirement's
+delete, and refuses a retired or nonexistent recipient, or one at a domain
+the deployment does not serve, as it refuses a sender whose domain is no
+longer admitted: nothing is committed and nothing answers the sender. The
+domain's admission is checked there against the S2S snapshot captured
+when the submission was built, before the commit, not one read in the
+transaction. Retirement does not
 remove every row keyed by its JID, and the account's open streams end
 only once each replica takes the retirement up (host-grant design,
 "Non-reuse of retired account JIDs"); a retired JID is nonexistent here
@@ -736,7 +743,7 @@ store. This is the slice's rollout part (G24).
 | G18-10 | Remote contacts stay in rosters with S2S off, dormant; the roster set may still refuse a new one while it is off (owner decision, 2026-11-16). | Pruning them at every start with S2S off (replaced: a deployment that turns S2S off for a while lost its users' remote contacts). |
 | G18-11 | No path answers a remote sender's message: the account side, the expiry of a detached session and the ingress quota bounce all drop instead of bouncing a sender at a domain the deployment does not serve. | Bouncing on quota as for local senders (rejected: tells the sender the account is offline). |
 | G18-12 | The router abandons account work at its deadline and the account side then applies nothing more; roster read-modify-write runs under a per-account lock; a change is announced only once stored. | Letting abandoned work run to its end (replaced: its effects could land after the sender's next stanza's). |
-| G18-14 | A remote sender's `chat` or `normal` message is accepted through the ingress authority as the recipient's half of a local direct message: the recipient's archive, inbox, received carbons, offline row and push notification, nothing of the sender's; an account-target acceptance arm decides D1 and the recipient's existence, the ledger included, in the transaction; a plan that would answer the sender or act beyond the recipient's account is not committed; the acceptance's frames are never sent (owner decision, 2026-11-17). | A `Transient` offline row outside the ingress commit, without archive, inbox or push (replaced); `IngressPrincipal::Remote`'s room arm (rejected: it admits only a room's bare JID, decided on the room's witness). |
+| G18-14 | A remote sender's `chat` or `normal` message is accepted through the ingress authority as the recipient's half of a local direct message: the recipient's archive, inbox, received carbons, offline row and push notification, nothing of the sender's; an account-target acceptance arm checks D1 against the snapshot captured when the submission was built, and reads the recipient's existence, the ledger included, in the transaction; a plan that would answer the sender or act beyond the recipient's account is not committed; the acceptance's frames are never sent (owner decision, 2026-11-17). | A `Transient` offline row outside the ingress commit, without archive, inbox or push (replaced); `IngressPrincipal::Remote`'s room arm (rejected: it admits only a room's bare JID, decided on the room's witness). |
 | G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check, until the replica that holds it ends it; retirement removes the account's rows of migrations 2010 and 2011. | Relying on the end of the stream alone (rejected: each replica ends it only when it takes the retirement up, and the router's check covers the time before); refusing account traffic only (replaced: requests and room traffic still left). |
 
 ## Restrictions and risks

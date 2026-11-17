@@ -5,6 +5,7 @@ use jid::BareJid;
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::db::DatabaseDriver;
+use crate::permissions::host_grant::{ServedAccountDomains, SubjectHome};
 
 /// Whether the recipient of a remote sender's direct message is an account
 /// of this deployment.
@@ -22,43 +23,61 @@ pub enum RecipientAssertion {
 pub struct RemoteRecipientRepository;
 
 impl RemoteRecipientRepository {
-    /// Assert that `recipient` is an account of this deployment that has not
-    /// been retired.
+    /// Assert that `recipient` is an account of this deployment, at one of
+    /// the `served` account domains, that has not been retired.
     ///
-    /// On PostgreSQL the account row is locked `FOR SHARE` until the
-    /// acceptance commits, so a retirement (whose delete of the row waits for
-    /// the lock, and whose ledger row commits with that delete) either
-    /// committed before this read and is seen, or retires the account after
-    /// the acceptance committed. SQLite runs one writing transaction at a
-    /// time. A native account without an account row is an account too, as
-    /// for an extension's requester.
+    /// The account is looked up by the keys every existence check reads
+    /// (`auth::directory::account_lookup_keys`): its localpart against the
+    /// account rows' lookup key, its bare JID against the native rows'. The
+    /// account side's check before the acceptance reads the same keys, so
+    /// the two agree on every row; a row without a lookup key, which only a
+    /// case-variant twin of a keyed row is after the startup pass, is no
+    /// account to either.
+    ///
+    /// On PostgreSQL the row found is locked `FOR KEY SHARE` until the
+    /// acceptance commits: a retirement deletes the row, and that delete
+    /// waits for the lock, while an update of the row that changes no key
+    /// column does not. A retirement (whose ledger row commits with that delete)
+    /// therefore either committed before this read and is seen, or retires
+    /// the account after the acceptance committed. SQLite runs one writing
+    /// transaction at a time. A native account without an account row is an
+    /// account too, as for an extension's requester.
     pub async fn assert_recipient(
         tx: &mut IngressUowTransaction<'_>,
         recipient: &BareJid,
+        served: &ServedAccountDomains,
     ) -> Result<RecipientAssertion, IngressUowError> {
-        let Some(key) = crate::auth::retirement::retirement_key_of(recipient) else {
+        if served.home_of(recipient) != SubjectHome::Served {
+            return Ok(RecipientAssertion::Unknown);
+        }
+        let Some((localpart, jid_key)) =
+            crate::auth::directory::account_lookup_keys(recipient, recipient.domain().as_str())
+        else {
+            return Ok(RecipientAssertion::Unknown);
+        };
+        let Some(ledger_key) = crate::auth::retirement::retirement_key_of(recipient) else {
             return Ok(RecipientAssertion::Unknown);
         };
         let account = dialect_sql(
             tx,
-            "SELECT jid FROM users WHERE jid = ? FOR SHARE",
-            "SELECT jid FROM users WHERE jid = ?",
+            "SELECT 1 FROM users WHERE localpart_key = ? FOR KEY SHARE",
+            "SELECT 1 FROM users WHERE localpart_key = ?",
         );
         let mut rows = tx
             .transaction_mut()
-            .query(account, crate::db_params![recipient.to_string()])
+            .query(account, crate::db_params![localpart])
             .await?;
         let held = rows.next().await?.is_some();
         drop(rows);
         if !held {
             let native = dialect_sql(
                 tx,
-                "SELECT 1 FROM native_users WHERE jid_key = ? FOR SHARE",
+                "SELECT 1 FROM native_users WHERE jid_key = ? FOR KEY SHARE",
                 "SELECT 1 FROM native_users WHERE jid_key = ?",
             );
             let mut rows = tx
                 .transaction_mut()
-                .query(native, crate::db_params![key.as_str()])
+                .query(native, crate::db_params![jid_key])
                 .await?;
             let native_held = rows.next().await?.is_some();
             drop(rows);
@@ -70,7 +89,7 @@ impl RemoteRecipientRepository {
             .transaction_mut()
             .query(
                 "SELECT 1 FROM retired_account_jids WHERE jid_key = ?",
-                crate::db_params![key.as_str()],
+                crate::db_params![ledger_key],
             )
             .await?;
         let retired = rows.next().await?.is_some();

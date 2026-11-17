@@ -22,9 +22,11 @@
 //!
 //! A `chat` or `normal` message from a sender with a resource is accepted
 //! through the ingress authority, as the recipient's half of a local direct
-//! message ([`receive_direct`]): the ingress acceptance decides admission
-//! and the account's existence again, the ledger of retired JIDs included,
-//! in its transaction.
+//! message ([`receive_direct`]): the ingress acceptance checks admission
+//! again against the snapshot captured when it built the submission, and
+//! reads the account's existence again, the ledger of retired JIDs
+//! included, in its transaction, by the same lookup keys as the check
+//! before it.
 //!
 //! Each stanza's work checks, before every effect, that the router has not
 //! abandoned it ([`AccountWork`]), and the read-modify-write of an
