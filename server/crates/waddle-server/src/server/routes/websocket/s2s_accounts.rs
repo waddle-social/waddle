@@ -1494,13 +1494,13 @@ pub(crate) mod telemetry {
         );
     }
 
-    /// A remote sender's message no resource took was stored in the
-    /// account's offline store.
+    /// A message from a remote sender without a resource that no resource
+    /// took was stored whole in the account's offline store.
     pub(crate) fn offline_stored() {
         counter_add!(
             "waddle.s2s.account_traffic.offline_stored",
             "{stanza}",
-            "Messages from remote senders that no resource of the local account took, stored in the account's offline store.",
+            "Messages from remote senders without a resource that no resource of the local account took, stored whole in the account's offline store; a sender with a resource's message is accepted through the ingress authority instead.",
             1,
         );
     }
@@ -1512,7 +1512,7 @@ pub(crate) mod telemetry {
         counter_add!(
             "waddle.s2s.account_traffic.offline_dropped",
             "{stanza}",
-            "Messages from remote senders that no resource of the local account took, dropped unanswered because a bound on offline storage for remote senders or the offline store's quota was reached.",
+            "Messages from remote senders that a detached session or the offline store would have held, dropped unanswered because a bound on offline storage for remote senders, or the offline store's quota for a message stored whole, was reached.",
             1,
         );
     }
