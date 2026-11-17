@@ -589,42 +589,51 @@ const REPLACEMENT_CLAIM_BUDGET: Duration = Duration::from_secs(5);
 /// is left as it is: the occupancy authority retires its generation at this
 /// bind, a later resume of it is refused for that reason, and it expires
 /// through its own resume window, transferring its frames then.
-pub(crate) async fn replace_durable_resource_sessions(state: &WebSocketState, resource: &FullJid) {
+///
+/// Returns how many sessions this node ended.
+pub(crate) async fn replace_durable_resource_sessions(
+    state: &WebSocketState,
+    resource: &FullJid,
+) -> usize {
     let Some(store) = selected_store(state) else {
-        return;
+        return 0;
     };
     if store.is_clustered() {
-        replace_claimed_resource_sessions(state, store, resource).await;
-        return;
+        return replace_claimed_resource_sessions(state, store, resource).await;
     }
     match store
         .replace_resource_sessions(resource, chrono::Utc::now())
         .await
     {
         Ok(replaced) => {
+            let ended = replaced.len();
             for terminal in replaced {
                 settle_terminal_session(state, store, terminal.session).await;
             }
+            ended
         }
         Err(error) => {
             warn!(jid = %resource, %error, "durable SM sessions of a rebound resource were not replaced");
+            0
         }
     }
 }
 
 /// Replace the resource's sessions one at a time, each under its own claim.
+/// Returns how many this node ended.
 async fn replace_claimed_resource_sessions(
     state: &WebSocketState,
     store: &DurableSmStore,
     resource: &FullJid,
-) {
+) -> usize {
     let sessions = match store.resource_sessions(resource).await {
         Ok(sessions) => sessions,
         Err(error) => {
             warn!(jid = %resource, %error, "durable SM sessions of a rebound resource could not be read");
-            return;
+            return 0;
         }
     };
+    let mut ended = 0;
     let binder = resource.to_bare();
     let deadline = tokio::time::Instant::now() + REPLACEMENT_CLAIM_BUDGET;
     for record in sessions {
@@ -647,6 +656,7 @@ async fn replace_claimed_resource_sessions(
         drop(claim);
         match replaced {
             Ok(terminal) => {
+                ended += 1;
                 settle_terminal_session(state, store, terminal.session).await;
             }
             // Ended meanwhile, by its own expiry or another bind; whoever
@@ -664,4 +674,5 @@ async fn replace_claimed_resource_sessions(
             }
         }
     }
+    ended
 }

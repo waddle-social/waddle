@@ -52,6 +52,11 @@ pub const S2S_ACCOUNT_TRAFFIC_VERSION: i64 = 2010;
 /// messages from remote senders that are not the account's contacts.
 pub const S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION: i64 = 2011;
 
+/// Version of the migration that creates the requests to end a retired
+/// account's open sessions, the replicas' leases and their
+/// acknowledgements.
+pub const ACCOUNT_SESSION_ENDINGS_VERSION: i64 = 2015;
+
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
     vec![
@@ -147,6 +152,16 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2011_s2s_remote_offline_admissions.postgres.sql"
             ),
         },
+        Migration {
+            version: ACCOUNT_SESSION_ENDINGS_VERSION,
+            description: "account session endings".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2015_account_session_endings.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2015_account_session_endings.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -154,11 +169,11 @@ pub fn all() -> Vec<Migration> {
 mod tests {
     use super::super::BASELINE_VERSION;
     use super::{
-        all, CHANNEL_FEDERATED_VERSION, HOST_GRANT_AUTHORITY_VERSION,
-        HOST_GRANT_RESTORE_INCARNATION_VERSION, HOST_GRANT_REVOCATION_FENCE_VERSION,
-        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_IQ_CORRELATIONS_VERSION,
-        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
-        S2S_REMOTE_ROOMS_VERSION,
+        all, ACCOUNT_SESSION_ENDINGS_VERSION, CHANNEL_FEDERATED_VERSION,
+        HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
+        HOST_GRANT_REVOCATION_FENCE_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
+        S2S_ACCOUNT_TRAFFIC_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
     };
 
     #[test]
@@ -178,7 +193,8 @@ mod tests {
                 S2S_LOCAL_ROOM_SEATS_VERSION,
                 CHANNEL_FEDERATED_VERSION,
                 S2S_ACCOUNT_TRAFFIC_VERSION,
-                S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION
+                S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
+                ACCOUNT_SESSION_ENDINGS_VERSION
             ]
         );
     }

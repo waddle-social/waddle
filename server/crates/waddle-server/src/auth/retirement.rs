@@ -41,6 +41,11 @@
 //! fails without having changed anything; it can be run again. Holding the
 //! lock it runs a few statements, each bounded at 5 s; the transaction has
 //! no deadline of its own beyond those.
+//!
+//! The account's open streams and detached stream-management sessions are
+//! held by the replicas that serve them, not by these tables. The operator
+//! command ends them in a second step once the retirement committed
+//! ([`super::session_endings`]); [`retire_account`] itself leaves them.
 
 use chrono::Utc;
 use jid::BareJid;
@@ -116,8 +121,9 @@ pub struct AccountRetirement {
 ///
 /// The caller's database role must be able to delete from both account
 /// tables: the schema owner, or a runtime that owns its schema. It does not
-/// end the account's live streams and does not touch the account's grants
-/// in any room; see the retirement runbook.
+/// end the account's live streams, which the operator command asks every
+/// replica to do after this commits ([`super::session_endings`]), and does
+/// not touch the account's grants in any room; see the retirement runbook.
 pub async fn retire_account(
     db: &Database,
     jid: &BareJid,

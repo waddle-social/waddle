@@ -52,8 +52,10 @@ Exit codes:
   1  the connection or the database returned an error, a lock stayed contended
      or timed out, or an outcome is unknown; a rerun may succeed
   2  invalid arguments or environment; nothing was sent to the database
-  3  owner-phase only: prepared, keypair-pool generation pending; run it again
-     after the printed activation time
+  3  pending; run it again later. owner-phase: prepared, keypair-pool
+     generation pending until the printed activation time. account retire:
+     retired, and a serving replica has not confirmed ending the account's
+     sessions
   4  refused: a verifier rejected the database, the plan or the document; a
      rerun refuses again until one of them changes";
 
@@ -136,9 +138,17 @@ retired JID again: native registration refuses it, and an identity-provider
 login is given another name. A JID that holds no account is recorded as well.
 The act cannot be undone.
 
-It does not end the account's open streams and does not change its grants in
-any room: revoke those first (`host-grant revoke-account`). See
-docs/operations/account-retirement.md.";
+It then ends the account's open sessions on every serving server: it records
+a request, and each server closes the account's live streams with
+<not-authorized/>, ends its detached stream-management sessions, refuses its
+bindings and acknowledges. The command waits for --session-wait seconds and
+prints each server's acknowledgement under `sessions`. Exit code 3 means the
+account is retired and a serving server has not confirmed ending its
+sessions; run the command again. A server that is stopped, or starts within
+a day, ends what is left when it serves.
+
+It does not change the account's grants in any room: revoke those first
+(`host-grant revoke-account`). See docs/operations/account-retirement.md.";
 
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -467,7 +477,8 @@ pub(super) struct AccountArgs {
 #[derive(Debug, Subcommand)]
 pub(super) enum AccountActionArgs {
     /// Retire an account: its JID is recorded as retired and never issued
-    /// again, and its account rows are removed
+    /// again, its account rows are removed, and every serving server ends
+    /// its open sessions
     Retire {
         /// The account's bare JID
         #[arg(long, value_name = "JID", value_parser = parse_bare_jid)]
@@ -501,8 +512,17 @@ pub(super) enum AccountActionArgs {
             value_parser = parse_role
         )]
         schema_owner: Option<PgRoleName>,
+        /// Seconds to wait for the serving servers to confirm ending the
+        /// account's open sessions
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_SESSION_WAIT_SECONDS)]
+        session_wait: u64,
     },
 }
+
+/// How long `account retire` waits for the serving servers by default:
+/// longer than a server takes to close a stream that does not answer, and
+/// than a stopped server's lease takes to run out.
+const DEFAULT_SESSION_WAIT_SECONDS: u64 = 30;
 
 #[derive(Debug, Args)]
 pub(super) struct InstallAttestorArgs {

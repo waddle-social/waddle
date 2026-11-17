@@ -17,6 +17,7 @@ pub mod providers;
 pub mod redirect;
 pub mod retirement;
 pub mod session;
+pub mod session_endings;
 
 use thiserror::Error;
 

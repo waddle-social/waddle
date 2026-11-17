@@ -138,6 +138,9 @@ pub(super) enum OwedClose {
     NodeUnavailable,
     /// The bounded conflict close of a displaced binding.
     Conflict,
+    /// The same bounded close with `<not-authorized/>`, for a binding of an
+    /// account this replica holds as retired.
+    NotAuthorized,
     /// The WebSocket close alone.
     Transport,
 }

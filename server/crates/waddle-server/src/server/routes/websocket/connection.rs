@@ -19,8 +19,8 @@ use super::state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CA
 use super::stream_management::SmRegistrationFinalization;
 use super::timers::TransportTimers;
 use super::transport_xml::{
-    build_conflict_stream_error, build_system_shutdown_stream_error,
-    websocket_stream_close_element, websocket_stream_close_xml,
+    build_conflict_stream_error, build_not_authorized_stream_error,
+    build_system_shutdown_stream_error, websocket_stream_close_element, websocket_stream_close_xml,
 };
 use super::{
     batch_write, cleanup, debug, error, get, info, mpsc, warn, Arc, ConnectionPhase, InboundEvent,
@@ -1317,7 +1317,8 @@ impl LiveSocketState {
                                 RetirementCause::ForceDetach,
                             ));
                         } else {
-                            info!("force-detaching this session (<conflict/> close)");
+                            let close = force_detach_close(state, conn);
+                            info!(?close, "force-detaching this session");
                             // Deferred: acked only after this connection's own
                             // detach-for-resume cleanup in `settle` actually runs.
                             pending_force_detach.push(request);
@@ -1330,7 +1331,7 @@ impl LiveSocketState {
                             }
                             return ControlFlow::Break(Retire::owing(
                                 RetirementCause::ForceDetach,
-                                OwedClose::Conflict,
+                                close,
                             ));
                         }
                     }
@@ -1777,10 +1778,11 @@ impl LiveSocketState {
                 )
                 .await;
             }
-            OwedClose::Conflict => {
+            close @ (OwedClose::Conflict | OwedClose::NotAuthorized) => {
                 close_live_session_for_force_detach(
                     ws_sender.uninterrupted(),
                     &self.conn,
+                    force_detach_stream_error(close),
                     ctx.admission_permit,
                     ctx.shutdown_token,
                 )
@@ -1962,10 +1964,12 @@ pub(super) async fn finish_connection<S, R, E>(
             conn.binding_ref.as_ref(),
         ));
         if !was_detaching && !pending_force_detach.is_empty() {
+            let stream_error = force_detach_stream_error(force_detach_close(state, conn));
             let (sender, _) = socket_io.halves_mut();
             close_live_session_for_force_detach(
                 sender.uninterrupted(),
                 conn,
+                stream_error,
                 admission_permit,
                 shutdown_token,
             )
@@ -2207,12 +2211,41 @@ fn fail_unjoined_transfer(state: &WebSocketState, conn: &WsConnState) {
     );
 }
 
-/// Close a live stream displaced by an XEP-0198 resume. The
-/// conflict wire frames are deliberately gated on a committed live stream;
-/// regardless of that gate the WebSocket transport is closed.
+/// The close a force-detach owes its live stream: `<not-authorized/>` for a
+/// binding of an account this replica holds as retired, whose retirement
+/// ended the session, and `<conflict/>` for one a resume or a replacing
+/// bind displaced.
+fn force_detach_close(state: &WebSocketState, conn: &WsConnState) -> OwedClose {
+    let retired = conn
+        .phase
+        .bound_jid()
+        .is_some_and(|jid| state.deps.protocol.retired_accounts.holds(&jid.to_bare()));
+    if retired {
+        OwedClose::NotAuthorized
+    } else {
+        OwedClose::Conflict
+    }
+}
+
+/// The stream error of a force-detach close.
+fn force_detach_stream_error(close: OwedClose) -> String {
+    match close {
+        OwedClose::NotAuthorized => build_not_authorized_stream_error(),
+        OwedClose::Conflict
+        | OwedClose::None
+        | OwedClose::NodeUnavailable
+        | OwedClose::Transport => build_conflict_stream_error(),
+    }
+}
+
+/// Close a live stream displaced by an XEP-0198 resume or a replacing bind,
+/// or ended by its account's retirement, with `stream_error`. The stream
+/// error and framing close are deliberately gated on a committed live
+/// stream; regardless of that gate the WebSocket transport is closed.
 async fn close_live_session_for_force_detach<S, E>(
     ws_sender: &mut S,
     conn: &WsConnState,
+    stream_error: String,
     admission_permit: &NodeAdmissionPermit,
     shutdown_token: &tokio_util::sync::CancellationToken,
 ) where
@@ -2226,15 +2259,15 @@ async fn close_live_session_for_force_detach<S, E>(
         if conn.has_committed_live_stream_open() {
             let _ = send_ws_text_frames_with_authority(
                 ws_sender,
-                [build_conflict_stream_error(), websocket_stream_close_xml()],
-                "Failed to send conflict stream error",
+                [stream_error, websocket_stream_close_xml()],
+                "Failed to send force-detach stream error",
                 (admission_permit, shutdown_token),
             )
             .await;
         }
         let _ = close_ws_connection(
             ws_sender,
-            "Failed to send WebSocket close frame after conflict",
+            "Failed to send WebSocket close frame after force-detach stream error",
         )
         .await;
     })
@@ -2830,7 +2863,8 @@ where
     {
         RegistrationAfterFrame::Unchanged => {}
         failure @ (RegistrationAfterFrame::SessionInitializationFailed
-        | RegistrationAfterFrame::RegistrationTemporarilyUnavailable) => {
+        | RegistrationAfterFrame::RegistrationTemporarilyUnavailable
+        | RegistrationAfterFrame::AccountRetired) => {
             if close_if_frame_authority_revoked(
                 state,
                 conn,
@@ -2842,6 +2876,7 @@ where
             {
                 return false;
             }
+            let account_retired = matches!(failure, RegistrationAfterFrame::AccountRetired);
             let stream_error = if matches!(
                 failure,
                 RegistrationAfterFrame::RegistrationTemporarilyUnavailable
@@ -2856,6 +2891,10 @@ where
                     )
                     .into(),
                 )
+            } else if account_retired {
+                // RFC 6120 §4.9.3.12: the account was retired after this
+                // stream authenticated; it may hold no session.
+                build_not_authorized_stream_error()
             } else {
                 build_internal_server_error_stream_error(
                     "Session initialization failed; please reconnect.",
@@ -2875,7 +2914,11 @@ where
                 && conn.pending_resume_stream_id.is_some()
             {
                 super::stream_management::observe_sm_resume_finalized(
-                    waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal,
+                    if account_retired {
+                        waddle_xmpp::telemetry::attributes::SmResumeOutcome::PrincipalUnavailable
+                    } else {
+                        waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal
+                    },
                     conn.pending_resume_stream_id
                         .as_deref()
                         .map(waddle_xmpp::pending_delivery::SmSessionId::new)
@@ -4296,7 +4339,14 @@ mod tests {
         conn.commit_server_stream_open_response();
         let mut sender = UpgradeCloseSink::default();
 
-        close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown).await;
+        close_live_session_for_force_detach(
+            &mut sender,
+            &conn,
+            build_conflict_stream_error(),
+            &permit,
+            &shutdown,
+        )
+        .await;
 
         assert_eq!(
             sender.sent,
@@ -4322,7 +4372,13 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown),
+            close_live_session_for_force_detach(
+                &mut sender,
+                &conn,
+                build_conflict_stream_error(),
+                &permit,
+                &shutdown,
+            ),
         )
         .await
         .expect("optional conflict writes must not block SM detach cleanup");
@@ -4337,7 +4393,14 @@ mod tests {
         conn.begin_server_stream_open_response();
         let mut sender = UpgradeCloseSink::default();
 
-        close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown).await;
+        close_live_session_for_force_detach(
+            &mut sender,
+            &conn,
+            build_conflict_stream_error(),
+            &permit,
+            &shutdown,
+        )
+        .await;
 
         assert!(sender.sent.is_empty());
         assert!(sender.closed);

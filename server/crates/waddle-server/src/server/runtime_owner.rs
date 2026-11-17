@@ -341,6 +341,14 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // runtime reads the ledger where it provisions an account and can
     // neither retire a JID nor make one available again.
     ("retired_account_jids", READ),
+    // Ending a retired account's sessions: the owner's command records a
+    // request, and a replica inserts and renews its lease and inserts and
+    // completes its acknowledgement of each request. The runtime deletes
+    // none of them; an expired lease is a row that no longer counts, and
+    // the command removes old rows.
+    ("account_session_ending_replicas", READ_INSERT_UPDATE),
+    ("account_session_ending_requests", READ),
+    ("account_session_ending_acks", READ_INSERT_UPDATE),
     ("permission_tuples", READ_WRITE),
     // Host-grant authority (ADR-0020 D5). The owner phase alone enrolls a
     // scope, binds its rooms and retires it, so the incarnation, the
