@@ -1097,6 +1097,96 @@ async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answer
     assert!(hosted.host.ends_of(BOB).is_empty());
 }
 
+/// A request the host took (`RoomRequest::taken`) and did not answer
+/// within the per-item budget: a message is not answered, since the room
+/// may have accepted it and its effects are recovered by the room, not by
+/// the sender sending it again; an IQ is answered, as every IQ request is
+/// (RFC 6120 §8.2.3), with `internal-server-error` saying that it may have
+/// been applied. A message the host had not taken is still answered as its
+/// kind is, with an error.
+#[tokio::test]
+async fn a_request_the_host_took_and_did_not_answer_in_time_is_answered_as_taken() {
+    let limits = RouterLimits {
+        room_request_timeout: Duration::from_secs(1),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-taken", limits).await;
+    let seat = with_bob(&hosted).await;
+    hosted.host.hold().await;
+    let condition_and_type = |stanza: &Element| {
+        (
+            error_condition(stanza),
+            error_of(stanza).and_then(|error| error.attr("type").map(str::to_owned)),
+        )
+    };
+
+    // Not taken: the message is answered with an error, as a refusal is.
+    hosted
+        .home_b
+        .send(remote_groupchat(BOB, ROOM, "untaken", "hello"))
+        .await;
+    let untaken = hosted.home_b.answered("untaken").await;
+    assert_eq!(untaken.name(), "message", "{untaken:?}");
+    assert_eq!(
+        condition_and_type(&untaken),
+        (
+            Some("internal-server-error".to_owned()),
+            Some("wait".to_owned()),
+        ),
+        "{untaken:?}"
+    );
+
+    // Taken: the room may have accepted the message, which is not answered.
+    hosted.host.take_before_holding();
+    hosted
+        .home_b
+        .send(remote_groupchat(BOB, ROOM, "taken", "hello again"))
+        .await;
+    wait_for(ARRIVES, || {
+        (!hosted.host.handled_with("taken").is_empty()).then_some(())
+    })
+    .await
+    .expect("the message reaches the host");
+    tokio::time::sleep(Duration::from_secs(1) + QUIET).await;
+    assert!(
+        hosted.home_b.captured.with_id("taken").is_empty(),
+        "a message the host took was answered: {:?}",
+        hosted.home_b.captured.with_id("taken")
+    );
+
+    // A taken IQ is answered, and not told to try again.
+    hosted
+        .home_b
+        .send(remote_get(BOB, ROOM, "taken-ping", ping()))
+        .await;
+    let taken_iq = hosted.home_b.answered("taken-ping").await;
+    assert_eq!(
+        condition_and_type(&taken_iq),
+        (
+            Some("internal-server-error".to_owned()),
+            Some("wait".to_owned()),
+        ),
+        "{taken_iq:?}"
+    );
+    let text = error_of(&taken_iq)
+        .and_then(|error| {
+            error
+                .children()
+                .find(|child| child.name() == "text")
+                .map(Element::text)
+        })
+        .unwrap_or_default();
+    assert!(text.contains("may have been applied"), "{taken_iq:?}");
+
+    hosted.host.release();
+    // Neither answer touched the sender's seat.
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
+    assert!(hosted.host.ends_of(BOB).is_empty());
+}
+
 #[tokio::test]
 async fn a_join_beyond_its_accounts_share_is_answered_while_its_answers_last() {
     let limits = RouterLimits {
