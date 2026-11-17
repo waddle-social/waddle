@@ -395,7 +395,9 @@ describe("following, unfollowing and forgetting Spaces", () => {
       const { remote, fake, memory } = setup();
       await remote.followSpace("spaces.remote.test", "eng", "Engineering");
       expect(fake.sent.some((xml) => xml.includes('<subscribe node="eng" jid="alice@home.test">'))).toBe(true);
-      expect(memory.state.preferences).toEqual([{ serviceJid: "spaces.remote.test", node: "eng", name: "Engineering", follow: true }]);
+      expect(memory.state.preferences).toMatchObject([{ serviceJid: "spaces.remote.test", node: "eng", name: "Engineering", follow: true }]);
+      // Each write carries a fresh revision (see `unfollowOvertaken`).
+      expect(memory.state.preferences[0]!.revision).toBeString();
       expect(remote.spaces.value[0]).toMatchObject({ listed: true, following: true });
     });
   });
