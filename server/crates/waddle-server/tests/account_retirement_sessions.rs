@@ -30,9 +30,10 @@ use waddle_server::auth::session_endings::{
 use waddle_server::auth::{NativeUserStore, RegisterRequest};
 use waddle_server::db::actor::{DbActor, DbExecute, DbQueryOne};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner, Value};
-use waddle_server::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
 use waddle_server::server::account_session_endings::{ReplicaLease, RequestedEndings};
-use waddle_server::test_support::{router, seed_local_account, websocket_state, WebSocketState};
+use waddle_server::test_support::{
+    make_deployment_owner, router, seed_local_account, websocket_state, WebSocketState,
+};
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::stream_management::SM_NS;
@@ -119,48 +120,15 @@ impl Server {
             .expect("authenticated client")
     }
 
-    /// A public channel that `members` are members of; its room JID.
-    async fn room(&self, channel: &str, members: &[&BareJid]) -> BareJid {
-        let now = chrono::Utc::now().to_rfc3339();
-        self.state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .ask(DbExecute {
-                sql: "INSERT INTO channels (id, name, description, channel_type, position, \
-                      is_default, pin_permission, members_only, public_room, created_at, \
-                      updated_at) VALUES (?, ?, ?, 'text', 0, ?, 'anyone', ?, ?, ?, ?)"
-                    .to_owned(),
-                params: vec![
-                    channel.into(),
-                    channel.into(),
-                    None::<String>.into(),
-                    false.into(),
-                    false.into(),
-                    true.into(),
-                    now.clone().into(),
-                    now.into(),
-                ],
-            })
-            .await
-            .expect("channel catalog row");
-        for member in members {
-            self.state
-                .deps
-                .app_state
-                .permission_actor
-                .ask(WriteTuple {
-                    tuple: Tuple::new(
-                        Object::new(ObjectType::Channel, channel),
-                        Relation::new("member"),
-                        Subject::user(member.as_str()),
-                    ),
-                })
-                .await
-                .expect("member relation");
-        }
-        [channel, "@", MUC].concat().parse().expect("room JID")
+    /// A new room on the test state's MUC service. `owner` is made the
+    /// deployment owner, whose first entry creates the room as an instant
+    /// room (XEP-0045 §10.1.3) that other accounts may then enter.
+    async fn room(&self, owner: &str) -> BareJid {
+        make_deployment_owner(&self.state, owner).await;
+        ["lobby-", &Uuid::new_v4().simple().to_string(), "@", MUC]
+            .concat()
+            .parse()
+            .expect("room JID")
     }
 
     /// Retire `account` and record the request to end its sessions, as the
@@ -289,6 +257,45 @@ fn ended_not_authorized(frames: &[Element]) {
     );
 }
 
+/// Whether `frame` is the room's presence of the occupant `nick`, of
+/// `type_` (`None` for available).
+fn occupant_presence(frame: &Element, room: &BareJid, nick: &str, type_: Option<&str>) -> bool {
+    let occupant = [room.as_str(), "/", nick].concat();
+    frame.name() == "presence"
+        && frame.attr("from") == Some(occupant.as_str())
+        && frame.attr("type") == type_
+}
+
+/// Bob, the deployment owner, creates a room and Alice enters it. Returns
+/// Alice's account, the room, Bob's client (which has seen Alice enter) and
+/// Alice's.
+async fn occupied_room(server: &Server) -> (BareJid, BareJid, WsXmppClient, WsXmppClient) {
+    let alice = server.account("alice").await;
+    server.account("bob").await;
+    let room = server.room("bob").await;
+    let mut bobs = server.client("bob", "laptop").await;
+    enter(&mut bobs, &room, "bob").await;
+    let mut alices = server.client("alice", "phone").await;
+    enter(&mut alices, &room, "alice").await;
+    receive(&mut bobs, |frame| {
+        occupant_presence(frame, &room, "alice", None)
+    })
+    .await;
+    (alice, room, bobs, alices)
+}
+
+/// XEP-0198 §4 with resumption: the stream's session can be resumed.
+async fn enable_resumption(client: &mut WsXmppClient) {
+    send(
+        client,
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    )
+    .await;
+    receive(client, |frame| frame.is("enabled", SM_NS)).await;
+}
+
 /// Whether `client` still has a working stream: its server answers a ping.
 async fn answers_ping(client: &mut WsXmppClient, id: &str) -> bool {
     matches!(
@@ -300,20 +307,7 @@ async fn answers_ping(client: &mut WsXmppClient, id: &str) -> bool {
 #[tokio::test]
 async fn a_live_stream_of_a_retired_account_is_closed_and_leaves_its_room() {
     let server = Server::start().await;
-    let alice = server.account("alice").await;
-    let bob = server.account("bob").await;
-    let room = server.room("lobby", &[&alice, &bob]).await;
-    let mut bobs = server.client("bob", "laptop").await;
-    enter(&mut bobs, &room, "bob").await;
-    let mut alices = server.client("alice", "phone").await;
-    enter(&mut alices, &room, "alice").await;
-    let alice_occupant = [room.as_str(), "/alice"].concat();
-    receive(&mut bobs, |frame| {
-        frame.name() == "presence"
-            && frame.attr("from") == Some(alice_occupant.as_str())
-            && frame.attr("type").is_none()
-    })
-    .await;
+    let (alice, room, mut bobs, mut alices) = occupied_room(&server).await;
 
     let request = server.retire(&alice).await;
     let (_lease, mut endings) = server.replica().await;
@@ -323,9 +317,7 @@ async fn a_live_stream_of_a_retired_account_is_closed_and_leaves_its_room() {
     ended_not_authorized(&frames_until_closed(&mut alices).await);
     // The room fans the departure out to the occupants who stay.
     receive(&mut bobs, |frame| {
-        frame.name() == "presence"
-            && frame.attr("from") == Some(alice_occupant.as_str())
-            && frame.attr("type") == Some("unavailable")
+        occupant_presence(frame, &room, "alice", Some("unavailable"))
     })
     .await;
     assert!(answers_ping(&mut bobs, "bob-still-here").await);
@@ -348,27 +340,44 @@ async fn a_live_stream_of_a_retired_account_is_closed_and_leaves_its_room() {
 }
 
 #[tokio::test]
+async fn a_resumable_live_stream_of_a_retired_account_is_closed_and_not_kept_for_resumption() {
+    let server = Server::start().await;
+    let (alice, room, mut bobs, mut alices) = occupied_room(&server).await;
+    enable_resumption(&mut alices).await;
+
+    let request = server.retire(&alice).await;
+    let (_lease, mut endings) = server.replica().await;
+    assert_eq!(endings.run(&server.state).await.expect("a pass"), 1);
+
+    // The stream is closed as a replacing bind closes one: its session is
+    // ended, not detached for a resumption.
+    ended_not_authorized(&frames_until_closed(&mut alices).await);
+    assert!(server.detached(&alice).await.is_empty());
+    receive(&mut bobs, |frame| {
+        occupant_presence(frame, &room, "alice", Some("unavailable"))
+    })
+    .await;
+    let report = await_session_endings(server.db(), &request, WAIT)
+        .await
+        .expect("the acknowledgements are readable");
+    assert_eq!(
+        report.replicas[0].ending,
+        ReplicaEnding::Completed(EndedSessions {
+            streams_closed: 1,
+            detached_sessions_ended: 0,
+        })
+    );
+}
+
+#[tokio::test]
 async fn a_detached_session_of_a_retired_account_is_ended_and_leaves_its_room() {
     let server = Server::start().await;
-    let alice = server.account("alice").await;
-    let bob = server.account("bob").await;
-    let room = server.room("lobby", &[&alice, &bob]).await;
-    let mut bobs = server.client("bob", "laptop").await;
-    enter(&mut bobs, &room, "bob").await;
-    let mut alices = server.client("alice", "phone").await;
-    enter(&mut alices, &room, "alice").await;
+    let (alice, room, mut bobs, mut alices) = occupied_room(&server).await;
     let resource: FullJid = alice.with_resource_str("phone").expect("full JID");
 
     // XEP-0198 §5: a resumable session whose connection is lost waits for
     // a resumption, and keeps its room.
-    send(
-        &mut alices,
-        Element::builder("enable", SM_NS)
-            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
-            .build(),
-    )
-    .await;
-    receive(&mut alices, |frame| frame.is("enabled", SM_NS)).await;
+    enable_resumption(&mut alices).await;
     drop(alices);
     let deadline = Instant::now() + WAIT;
     while !server.detached(&alice).await.contains(&resource) {
@@ -381,11 +390,8 @@ async fn a_detached_session_of_a_retired_account_is_ended_and_leaves_its_room() 
     assert_eq!(endings.run(&server.state).await.expect("a pass"), 1);
 
     assert!(server.detached(&alice).await.is_empty());
-    let alice_occupant = [room.as_str(), "/alice"].concat();
     receive(&mut bobs, |frame| {
-        frame.name() == "presence"
-            && frame.attr("from") == Some(alice_occupant.as_str())
-            && frame.attr("type") == Some("unavailable")
+        occupant_presence(frame, &room, "alice", Some("unavailable"))
     })
     .await;
     let report = await_session_endings(server.db(), &request, WAIT)
