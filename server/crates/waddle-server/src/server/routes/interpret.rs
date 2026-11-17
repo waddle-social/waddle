@@ -162,6 +162,13 @@ pub(crate) use message_plan::reject_malformed_message;
 pub use message_plan::{build_plan_deps, plan_message_dispatch};
 mod direct_archive;
 mod direct_call_thread;
+
+/// The most entries each table of a replica's XEP-0353 call state holds
+/// before its oldest are pruned.
+#[cfg(feature = "test-support")]
+pub(crate) fn dm_call_state_capacity() -> usize {
+    direct_archive::DM_CALL_STATE_MAX_KEYS
+}
 mod direct_inbox;
 mod direct_retraction;
 mod displayed_marker;

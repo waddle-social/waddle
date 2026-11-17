@@ -388,6 +388,13 @@ pub fn undone_join_recipients(
     )
 }
 
+/// The most entries each table of a replica's XEP-0353 call state (its
+/// pending offers and its active calls) holds before its oldest are pruned.
+#[cfg(feature = "test-support")]
+pub fn dm_call_state_capacity() -> usize {
+    crate::server::routes::interpret::dm_call_state_capacity()
+}
+
 /// Record in `state`'s call state an active XEP-0353 call under `key`,
 /// which `initiator` proposed and the other peer accepted, whose call
 /// thread the peers in `projected` have projected into their inboxes: the
