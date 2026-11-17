@@ -1524,6 +1524,14 @@ share (`s2s/remote_content.rs`, outside the reviewed files).
   the three uses of `RemoteOccupantPrincipal` the thirtieth added, each
   unchanged in content; records in the merged files moved with the lines.
 
+The selected evidence was refreshed a thirty-fifth time, through
+`90ea03fb44a2a05cbf744e344f0922ceec147c17`. No reviewed file changed. The test-support constructor of a state
+without the durable stream-management authority was removed from
+`src/test_support.rs`, outside the reviewed files, so the raw scan's six
+records there (`WriteTuple`, `EnrolledScopes` and
+`record_host_grant_affiliation`, two each) moved up with the lines removed;
+the scan still holds 1642 records, each unchanged in content.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
