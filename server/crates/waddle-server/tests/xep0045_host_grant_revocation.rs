@@ -30,6 +30,10 @@
 //! They need PostgreSQL only; a lane that sets
 //! `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them without it.
 #![cfg(feature = "test-support")]
+// With `clustering`, proving that the future of a spawned room broadcast is
+// `Send` walks the ingress authority's nested async state deeper than the
+// default limit of 128, as it does in the library (`src/lib.rs`).
+#![recursion_limit = "256"]
 
 // The shared fixtures serve several suites; this one uses a subset.
 #[allow(dead_code)]
