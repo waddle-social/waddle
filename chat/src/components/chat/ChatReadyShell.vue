@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { knownChannelIdForRoomJid } from "@/lib/channel-room";
+import { roomLinkCandidates, roomLinksKey } from "@/lib/room-links";
+import { channelRoute } from "@/router/routes/channel";
 import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { mentionDirectoryKey } from "@/shell/controllers/use-mention-directory";
 import { useStore } from "@nanostores/vue";
@@ -383,6 +386,31 @@ async function openEventConversation(roomJid: string) {
   await waddles.loadStructure(jidLocalpart(roomJid));
   await selectChannelByRoomJid(roomJid);
 }
+
+function linkedRoomId(roomJid: string) {
+  const channels = waddles.channels.value;
+  const channelId = knownChannelIdForRoomJid(roomJid, channels, managedMucDomain.value);
+  return channels.some((channel) => channel.id === channelId && !channel.isGroupDm) ? channelId : null;
+}
+
+const linkableRooms = computed(() => roomLinkCandidates(waddles.channels.value).filter((room) => linkedRoomId(room.jid)));
+provide(roomLinksKey, {
+  candidates: () => linkableRooms.value,
+  href: (roomJid) => {
+    const channelId = linkedRoomId(roomJid);
+    return channelId ? channelRoute.href({ params: { channelId } }) : null;
+  },
+  open: (roomJid) => {
+    const channelId = linkedRoomId(roomJid);
+    if (!channelId) return;
+    if (waddles.activeChannelId.value === channelId) {
+      closeThreadPanel();
+      closePinnedPanel();
+      closeExtensionRoutePanel();
+    }
+    void selectChannelByRoomJid(roomJid);
+  },
+});
 
 function onSelectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);

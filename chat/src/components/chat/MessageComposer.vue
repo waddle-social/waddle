@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount, nextTick, inject } from "vue";
+import { roomLinksKey } from "@/lib/room-links";
 import { mentionDirectoryKey } from "@/shell/controllers/use-mention-directory";
-import { AtSign, CaseSensitive, CornerDownLeft, FileText, Loader2, Plus, SendHorizontal, Smile, SquareSlash, X } from "lucide-vue-next";
+import { AtSign, CaseSensitive, CornerDownLeft, FileText, Hash, Loader2, Plus, SendHorizontal, Smile, SquareSlash, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import { css } from "styled-system/css";
 import { composer, iconbtn, kicker } from "styled-system/recipes";
@@ -34,7 +35,7 @@ import {
   type PendingAttachment,
 } from "./composer-attachments";
 import { composerPlaceholder } from "./composer-placeholder";
-import { spin } from "./composer-classes";
+import { composerPopover, spin } from "./composer-classes";
 import { useComposerAutocomplete } from "./composables/use-composer-autocomplete";
 import type { BuiltinSlashOutcome } from "@/lib/slash-builtins";
 import { rewriteBuiltinSendDoc } from "@/lib/slash-builtin-doc";
@@ -164,6 +165,7 @@ const mentionDirectory = inject(mentionDirectoryKey, null);
 
 const {
   showMentions,
+  roomResults,
   showEmoji,
   showSlash,
   slashPrefix,
@@ -177,6 +179,7 @@ const {
   clearAutocomplete,
   dismissSlash,
   insertMention,
+  insertRoomLink,
   insertEmoji,
   expandSlashCandidate,
   selectAutocompleteResult,
@@ -184,6 +187,7 @@ const {
 } = useComposerAutocomplete({
   getTiptapEditor,
   mentionCandidates: () => props.mentionCandidates,
+  roomCandidates: inject(roomLinksKey)?.candidates,
   searchMentionDirectory: mentionDirectory ? (query) => mentionDirectory.search(query) : undefined,
   slashCommands: () => props.slashCommands ?? [],
   inMuc: () => !!props.inMuc,
@@ -344,7 +348,7 @@ function onFileInputChange(e: Event) {
 
 function onEditorCancel() {
   const action = getComposerEscapeAction({
-    showMentions: showMentions.value,
+    showMentions: showMentions.value || roomResults.value.length > 0,
     showEmoji: showEmoji.value,
     showSlash: showSlash.value,
     isReplyingTo: !!props.replyingTo,
@@ -688,6 +692,31 @@ const cls = {
       @select="onGifSelected"
       @close="showGifPicker = false"
     />
+
+    <div
+      v-if="roomResults.length > 0"
+      role="group"
+      aria-label="Link a room"
+      :class="[composerPopover.root, isTopPinned ? composerPopover.below : composerPopover.above]"
+    >
+      <button
+        v-for="(room, index) in roomResults"
+        :key="room.jid"
+        type="button"
+        :title="room.jid"
+        :class="composerPopover.option"
+        :data-selected="index === selectedIndex || undefined"
+        @mousedown.prevent
+        @click.stop="insertRoomLink(room)"
+      >
+        <span :class="composerPopover.glyph"><Hash aria-hidden="true" /></span>
+        <span>{{ room.label }}</span>
+        <span
+          v-if="roomResults.some((other) => other !== room && other.label === room.label)"
+          :class="composerPopover.hint"
+        >{{ room.jid }}</span>
+      </button>
+    </div>
 
     <ComposerMentionPopover
       v-if="showMentions && mentionResults.length > 0"

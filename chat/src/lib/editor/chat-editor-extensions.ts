@@ -1,3 +1,4 @@
+import { roomJidFromJoinUri } from "@/lib/room-links";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import type { Extensions, JSONContent } from "@tiptap/core";
@@ -41,6 +42,7 @@ export function createChatEditorExtensions(options: ChatEditorExtensionsOptions 
     }),
     ChatLink.configure({
       openOnClick: false,
+      isAllowedUri: (uri, ctx) => !!roomJidFromJoinUri(uri) || ctx.defaultValidate(uri),
       autolink: true,
       linkOnPaste: true,
       HTMLAttributes: {
