@@ -29,11 +29,17 @@ async fn send_element(client: &mut WsXmppClient, element: Element) {
         .expect("send");
 }
 
+/// The content of the file the server's test seam writes at `path`, once
+/// it holds one. The seam writes with `std::fs::write`, which creates the
+/// file before it writes the content, so an empty read is a write in
+/// progress, not the content.
 async fn wait_for_file(path: &Path) -> String {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Ok(value) = std::fs::read_to_string(path) {
-                return value;
+                if !value.is_empty() {
+                    return value;
+                }
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -104,7 +110,7 @@ async fn replacement_revokes_before_enable_start_and_orphan_is_eventually_retire
     assert_eq!(
         stream_row_count(&pool, &stream).await,
         1,
-        "real enrollment committed before the hold"
+        "real enrollment committed before the hold of {stream:?}"
     );
 
     let mut replacement = authenticate(&server).await;
