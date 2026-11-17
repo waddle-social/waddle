@@ -800,6 +800,20 @@ Groupchat messages and MUC presence from the room are delivered to the
 occupant's full JID; none is archived in the account's archive,
 carbon-copied or projected into the inbox.
 
+**Payloads.** Before a message from the room is delivered, and so before
+the recipient pass archives a private message, the router removes what a
+client would read as this server's statement about its own account, as
+the account side does for a remote account's message
+(`crate::s2s::remote_content`): every `urn:waddle:*` payload, the
+`urn:xmpp:inbox:1` elements, XEP-0280 carbon wrappers, XEP-0511 link cards
+and link-preview requests, and every XEP-0359 `<stanza-id/>` whose `by`
+names a domain this deployment serves or cannot be read; the room's own
+`<stanza-id/>`, in its bare JID's name, is kept. A XEP-0313 `<result/>` is
+kept only on a message from the room's bare JID, the archive a query from
+the resource names (below); what it forwards is cleaned as anything a
+payload nests is. Presence from the room is delivered as it comes: a
+client reads none of these payloads from presence.
+
 A message a local resource sends to a remote room goes to the S2S router
 without entering the ingress authority, so it is not archived by the
 sender's server (the room archives groupchat; XEP-0313 §5). Once the

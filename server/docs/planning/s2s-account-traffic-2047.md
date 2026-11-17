@@ -309,10 +309,18 @@ and the offline admissions of strangers' messages.
   dropped.
 - **Payloads.** Before delivery or storage the server removes from a
   remote message the payloads only this server may originate for a local
-  account: the Waddle inbox elements (`urn:xmpp:inbox:1` and the Waddle
-  inbox namespace), the DM pin marker (`urn:waddle:pin:0`), the XEP-0280
+  account (`crate::s2s::remote_content`, the one function every path from
+  another server to a local account uses: this account side, a remote
+  room's traffic and remote PubSub event notifications): every payload in
+  a namespace this deployment defines (`urn:waddle:*`, the Waddle inbox
+  element, the DM pin marker and the extension framework's envelope
+  among them), the inbox elements of `urn:xmpp:inbox:1`, the XEP-0280
   `<sent/>` and `<received/>` wrappers of carbon copies and the XEP-0313
-  `<result/>` wrapper of archive results. A carbon or an archive result
+  `<result/>` wrapper of archive results. What the message keeps is
+  cleaned too, at every depth: the items of an event notification, and
+  anything a payload nests, lose a link card, a link-preview request, an
+  inbox element, a pin marker, an extension envelope, a carbon or archive
+  wrapper and a `<stanza-id/>` this deployment could have assigned. A carbon or an archive result
   names the account's own traffic; one from a remote sender is a forgery
   a client could take for its own (XEP-0280 §11). Every XEP-0359
   `<stanza-id/>` this deployment could have assigned is removed too: one
