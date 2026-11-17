@@ -13,7 +13,8 @@ use uuid::Uuid;
 use waddle_server::auth::retirement::retire_account;
 use waddle_server::auth::session_endings::{request_session_ending, SessionEndingRequest};
 use waddle_server::auth::{NativeUserStore, RegisterRequest};
-use waddle_server::db::Database;
+use waddle_server::db::actor::DbQuery;
+use waddle_server::db::{Database, Value};
 use waddle_server::server::account_session_endings::{ReplicaLease, RequestedEndings};
 use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::test_support::{
@@ -168,6 +169,50 @@ impl Server {
             .detached_resources_for_user(account)
             .await
             .expect("the session registry is readable")
+    }
+
+    /// The durable stream-management sessions of `resource` that wait for a
+    /// resumption.
+    pub async fn durable_detached_sessions(&self, resource: &FullJid) -> Vec<String> {
+        /// `sm_durable_sessions.state` of a session that waits for a
+        /// resumption.
+        const DURABLE_DETACHED: i64 = 2;
+        self.state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQuery {
+                sql: "SELECT session_id FROM sm_durable_sessions WHERE full_jid = ? AND state = ?"
+                    .to_owned(),
+                params: vec![resource.to_string().into(), DURABLE_DETACHED.into()],
+            })
+            .await
+            .expect("the durable sessions are readable")
+            .into_iter()
+            .filter_map(|row| match row.first() {
+                Some(Value::Text(session)) => Some(session.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many frames the durable authority retains for the sessions
+    /// `sessions` names, delivered to them and not acknowledged.
+    pub async fn held_frames(&self, sessions: &[String]) -> usize {
+        let actor = self.state.deps.app_state.db_pool.global_actor();
+        let mut held = 0;
+        for session in sessions {
+            held += actor
+                .ask(DbQuery {
+                    sql: "SELECT sequence FROM sm_unacked WHERE stream_id = ?".to_owned(),
+                    params: vec![session.clone().into()],
+                })
+                .await
+                .expect("the retained frames are readable")
+                .len();
+        }
+        held
     }
 
     /// How many messages `account`'s offline store holds.

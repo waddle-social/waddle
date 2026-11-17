@@ -6,10 +6,10 @@
 //! waits for a resumption is ended and leaves its rooms, what either held
 //! is discarded rather than stored for the account's next session, and a
 //! resumption of the account's session is refused: no `<resumed/>` is sent
-//! and no resource is bound. The ingress custody of what a detached session
-//! held ends with it: the recovery of custody whose session is gone hands
-//! none of it to the offline store, which refuses every row for the
-//! account from the retirement on. Through the production `/ws` router over a
+//! and no resource is bound. What a detached session held ends with it:
+//! nothing is left for a resumption or for the recovery of ingress custody
+//! to hand to the offline store, which refuses every row for the account
+//! from the retirement on. Through the production `/ws` router over a
 //! loopback socket against the in-memory test state; the replica's work
 //! runs one poll at a time. No PostgreSQL, SpiceDB or second process is
 //! involved.
@@ -202,26 +202,37 @@ async fn a_retired_accounts_ingress_custody_is_discarded_and_never_reaches_its_o
     }
 
     // Bob's messages reach the detached session through the ingress
-    // authority, which keeps custody of each until the session acknowledges
-    // it or the session ends.
+    // authority, and the durable stream-management authority, which holds
+    // every resumable session, retains each until the session acknowledges
+    // it or ends.
     let mut bobs = server.client("bob", "desk").await;
     for id in ["held-1", "held-2"] {
         send(&mut bobs, direct_message(&resource, id)).await;
     }
     let deadline = Instant::now() + WAIT;
-    while pending_custody(&server, &resource).await < 2 {
+    let sessions = loop {
+        let sessions = server.durable_detached_sessions(&resource).await;
+        if server.held_frames(&sessions).await >= 2 {
+            break sessions;
+        }
         assert!(
             Instant::now() < deadline,
-            "the detached session holds Bob's messages in ingress custody"
+            "the detached session holds Bob's messages: {} frames, {} custody appends, {} offline",
+            server.held_frames(&sessions).await,
+            pending_custody(&server, &resource).await,
+            server.offline_messages(&alice).await,
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
 
     server.retire(&alice).await;
     let (_lease, mut endings) = server.replica().await;
     assert_eq!(endings.run(&server.state).await.expect("a pass"), 1);
     assert!(server.detached(&alice).await.is_empty());
-    // The session's end ended its custody itself, before any recovery ran.
+    // The session's end discarded what it held, before any recovery ran:
+    // no frame is retained, no custody of the account's is pending, and the
+    // account's offline store is empty.
+    assert_eq!(server.held_frames(&sessions).await, 0);
     assert_eq!(pending_custody(&server, &resource).await, 0);
     assert_eq!(server.offline_messages(&alice).await, 0);
 
