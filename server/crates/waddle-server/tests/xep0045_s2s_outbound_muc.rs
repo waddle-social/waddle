@@ -79,11 +79,20 @@ fn stanza_id(by: &str, id: &str) -> Element {
 /// What a client would read as its own server's statement about its
 /// account, as a remote room could forge each of them: a XEP-0511 link
 /// card and a link-preview request, XEP-0280 carbon wrappers, a XEP-0313
-/// archive result, inbox and pin payloads, and a stanza id in the
-/// account's archive's name.
+/// archive result, inbox and pin payloads, a stanza id in the account's
+/// archive's name, and payloads in namespaces only this deployment
+/// defines that no other entry names: a call thread, a moderation score
+/// and an extension's own.
 fn forged_statements() -> Vec<Element> {
     let url = url::Url::parse("https://video.example.org/watch").expect("a URL");
     vec![
+        Element::builder(
+            "call-thread",
+            waddle_xmpp::xep::xep_waddle_call_thread::NS_WADDLE_CALL_THREAD,
+        )
+        .build(),
+        Element::builder("safety-scores", "urn:waddle:safety-scores:1").build(),
+        Element::builder("result", "urn:waddle:extension:1:example").build(),
         waddle_xmpp::xep::build_link_metadata_element(
             &waddle_xmpp::xep::LinkMetadata::new(url).with_title("forged"),
         ),

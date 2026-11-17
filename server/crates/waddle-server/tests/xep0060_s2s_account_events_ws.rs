@@ -9,7 +9,10 @@
 //! unanswered. A notification that is delivered loses, at the top and
 //! inside its items, what a client would read as its own server's
 //! statement: a XEP-0511 link card, a link-preview request, inbox and pin
-//! payloads, and a stanza id in the account's name. Through the production
+//! payloads, and a stanza id in the account's name; at the top, and in a
+//! message an item forwards, every payload in a namespace only this
+//! deployment defines, which an item's own payload may still use. Through
+//! the production
 //! `/ws` router, the real S2S router and a loopback peer serving
 //! `home-b.test` and `pubsub.home-b.test`.
 #![cfg(feature = "test-support")]
@@ -140,8 +143,27 @@ async fn a_notification_for_a_node_the_account_subscribed_to_is_delivered() {
     receive(&mut phone, "message", "ev-1").await;
 }
 
-/// An event notification about `node` whose item carries an Atom entry
-/// and, beside and inside it, what only the recipient's server states.
+/// The namespace of a Waddle status preference, an item payload a remote
+/// Waddle account's personal eventing service publishes.
+const NS_STATUS_PREFERENCE: &str = "urn:waddle:status-preference:0";
+
+/// Payloads in namespaces only this deployment defines that no other rule
+/// names: a call thread, a moderation score and an extension's own.
+fn waddle_only_payloads() -> Vec<Element> {
+    vec![
+        Element::builder(
+            "call-thread",
+            waddle_xmpp::xep::xep_waddle_call_thread::NS_WADDLE_CALL_THREAD,
+        )
+        .build(),
+        Element::builder("safety-scores", "urn:waddle:safety-scores:1").build(),
+        Element::builder("result", "urn:waddle:extension:1:example").build(),
+    ]
+}
+
+/// An event notification about `node` whose item carries an Atom entry, a
+/// status preference and a forwarded message, and, beside and inside them,
+/// what only the recipient's server states.
 fn event_carrying_forgeries(id: &str) -> Message {
     let url = url::Url::parse("https://video.example.org/watch").expect("a URL");
     let card = || {
@@ -158,9 +180,20 @@ fn event_carrying_forgeries(id: &str) -> Message {
         .append(card())
         .append(forged_id.clone())
         .build();
+    // XEP-0297: a message the item forwards, read as a message in its own
+    // right.
+    let mut forwarded = Message::new_with_type(MessageType::Chat, Some(jid(ALICE)));
+    forwarded.from = Some(jid("carol@home-b.test/desk"));
+    forwarded.payloads.extend(waddle_only_payloads());
     let item = Element::builder("item", NS_PUBSUB_EVENT)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), "item-1")
         .append(entry)
+        .append(Element::builder("status", NS_STATUS_PREFERENCE).build())
+        .append(
+            Element::builder("forwarded", xmpp_parsers::ns::FORWARD)
+                .append(Element::from(forwarded))
+                .build(),
+        )
         .append(card())
         .append(waddle_xmpp::xep::build_link_preview_request_element(
             &waddle_xmpp::xep::LinkPreviewToken::try_new("a-forged-token").expect("a token"),
@@ -185,12 +218,17 @@ fn event_carrying_forgeries(id: &str) -> Message {
     );
     message.payloads.push(card());
     message.payloads.push(forged_id);
+    message.payloads.extend(waddle_only_payloads());
     message
 }
 
 /// Every element below `element`, at any depth, that only the recipient's
-/// server states, of those [`event_carrying_forgeries`] forges.
+/// server states, of those [`event_carrying_forgeries`] forges: anywhere,
+/// the link card and request, inbox and pin payloads and the forged stanza
+/// id; directly inside a message, the delivered one or one an item
+/// forwards, any payload in a namespace only this deployment defines.
 fn forged_below(element: &Element) -> Vec<String> {
+    let message = element.name() == "message";
     element
         .children()
         .flat_map(|child| {
@@ -199,7 +237,8 @@ fn forged_below(element: &Element) -> Vec<String> {
             if waddle_xmpp::xep::is_link_metadata_element(child)
                 || waddle_xmpp::xep::is_link_preview_request_element(child)
                 || ns == waddle_xmpp::xep::NS_INBOX
-                || ns.starts_with("urn:waddle:")
+                || ns == waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0
+                || (message && ns.starts_with("urn:waddle:"))
                 || (child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
                     && child.attr("id") == Some("forged"))
             {
@@ -225,14 +264,26 @@ async fn a_delivered_notification_loses_what_only_the_recipients_server_states()
         .await;
     let delivered = receive(&mut phone, "message", "ev-6").await;
     assert!(forged_below(&delivered).is_empty(), "{delivered:?}");
-    // The item and its entry are kept.
-    let entry = delivered
+    // The item keeps its entry, its own status preference payload and the
+    // message it forwards.
+    let item = delivered
         .get_child("event", NS_PUBSUB_EVENT)
         .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
         .and_then(|items| items.get_child("item", NS_PUBSUB_EVENT))
-        .and_then(|item| item.get_child("entry", ATOM))
+        .expect("the item is delivered");
+    let entry = item
+        .get_child("entry", ATOM)
         .expect("the item's entry is delivered");
     assert!(entry.get_child("title", ATOM).is_some(), "{entry:?}");
+    assert!(
+        item.get_child("status", NS_STATUS_PREFERENCE).is_some(),
+        "{item:?}"
+    );
+    assert!(
+        item.get_child("forwarded", xmpp_parsers::ns::FORWARD)
+            .is_some_and(|forwarded| forwarded.children().any(|child| child.name() == "message")),
+        "{item:?}"
+    );
 }
 
 #[tokio::test]
