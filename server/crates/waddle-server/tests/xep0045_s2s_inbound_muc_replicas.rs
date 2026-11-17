@@ -174,7 +174,7 @@ async fn room_on_the_holder(
     assert_eq!(created.attr("type"), None, "{created:?}");
     replicas
         .holder
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-1"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-1"))
         .await;
     let own = replicas
         .holder
@@ -236,7 +236,7 @@ async fn messages_pass_both_ways_through_the_replica_that_holds_the_room() {
     // holder, and is reflected from there (§7.4).
     replicas
         .holder
-        .from_peer(remote_groupchat(BOB, ROOM, "remote-1", "hello from there"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "remote-1", "hello from there"))
         .await;
     let received = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("hello from there")
@@ -290,7 +290,7 @@ async fn administration_is_decided_by_the_holder_on_the_carried_evidence() {
     // The room holds no standing for the occupant yet.
     replicas
         .holder
-        .from_peer(remote_get(BOB, ROOM, "list-1", list()))
+        .peer_sends(remote_get(BOB, ROOM, "list-1", list()))
         .await;
     let refused = replicas.holder.answered("list-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
@@ -314,7 +314,7 @@ async fn administration_is_decided_by_the_holder_on_the_carried_evidence() {
     // home that carried the request to the front.
     replicas
         .holder
-        .from_peer(remote_get(BOB, ROOM, "list-2", list()))
+        .peer_sends(remote_get(BOB, ROOM, "list-2", list()))
         .await;
     let answered = replicas.holder.answered("list-2").await;
     assert_eq!(answered.attr("type"), Some("result"), "{answered:?}");
@@ -462,7 +462,7 @@ async fn a_request_the_holder_cannot_take_is_answered_where_the_stream_landed() 
     )
     .await;
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-1"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-1"))
         .await;
     let refused = hosted.answered("join-1").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
@@ -475,7 +475,7 @@ async fn a_request_the_holder_cannot_take_is_answered_where_the_stream_landed() 
     assert!(hosted.router.seats().is_empty());
     // A stanza for the service is every replica's own.
     hosted
-        .from_peer(remote_get(
+        .peer_sends(remote_get(
             BOB,
             MUC,
             "disco-1",
@@ -532,7 +532,7 @@ async fn a_stored_owners_standing_counts_only_on_a_stream_that_honours_it() {
             Stanza::Message(message) => Element::from(message),
             Stanza::Presence(presence) => Element::from(presence),
         };
-        replicas.holder.from_peer(element).await;
+        replicas.holder.peer_sends(element).await;
         let answered = replicas.holder.answered(&id).await;
         assert_eq!(answered.attr("type"), Some("result"), "{id}: {answered:?}");
     }

@@ -30,7 +30,7 @@ async fn a_remote_contacts_message_is_in_the_recipients_archive() {
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -88,7 +88,7 @@ async fn an_archive_result_wrapper_in_a_remote_message_is_removed_before_deliver
             .append(Element::builder("forwarded", NS_FORWARD).build())
             .build(),
     );
-    federated.from_peer(forged).await;
+    federated.peer_sends(forged).await;
 
     let delivered = receive(&mut phone, "message", "forged-result").await;
     assert!(

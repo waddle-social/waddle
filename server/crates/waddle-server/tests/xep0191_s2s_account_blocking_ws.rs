@@ -102,16 +102,16 @@ async fn nothing_from_a_blocked_remote_sender_is_delivered_or_answered_beyond_a_
     let mark = federated.peer_mark();
 
     federated
-        .from_peer(message(BOB_PHONE, ALICE, MessageType::Chat, "b1", "hello"))
+        .peer_sends(message(BOB_PHONE, ALICE, MessageType::Chat, "b1", "hello"))
         .await;
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Probe, "b2"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Probe, "b2"))
         .await;
     federated
-        .from_peer(presence(BOB_PHONE, ALICE, PresenceType::None, "b3"))
+        .peer_sends(presence(BOB_PHONE, ALICE, PresenceType::None, "b3"))
         .await;
     federated
-        .from_peer(get(BOB_PHONE, ALICE_PHONE, "b4", ping()))
+        .peer_sends(get(BOB_PHONE, ALICE_PHONE, "b4", ping()))
         .await;
     let barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
 
@@ -198,7 +198,7 @@ async fn removing_a_blocked_remote_contact_sends_it_nothing() {
 /// Bob asks Alice, offline, for a subscription: the request is recorded.
 async fn recorded_request(federated: &support::Federated) {
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "ask"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribe, "ask"))
         .await;
     federated.peer_barrier(BOB, ALICE).await;
     assert!(pending_request(federated, ALICE, BOB).await);
@@ -209,7 +209,7 @@ async fn recorded_request(federated: &support::Federated) {
 /// after Bob's would.
 async fn later_request(federated: &support::Federated, id: &str) {
     federated
-        .from_peer(presence(CAROL, ALICE, PresenceType::Subscribe, id))
+        .peer_sends(presence(CAROL, ALICE, PresenceType::Subscribe, id))
         .await;
     federated.peer_barrier(CAROL, ALICE).await;
     assert!(pending_request(federated, ALICE, CAROL).await);

@@ -57,7 +57,7 @@ async fn a_chat_message_to_the_bare_jid_reaches_the_one_most_available_resource(
     let mark = federated.peer_mark();
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -90,7 +90,7 @@ async fn a_chat_message_to_a_bound_full_jid_reaches_that_resource_only() {
     let mut laptop = federated.online("alice", "laptop", 1).await;
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE_LAPTOP,
             MessageType::Chat,
@@ -116,7 +116,7 @@ async fn a_chat_message_to_an_unbound_full_jid_is_handled_as_if_sent_to_the_bare
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             "alice@example.com/gone",
             MessageType::Chat,
@@ -137,7 +137,7 @@ async fn a_normal_message_to_an_unbound_full_jid_is_dropped_unanswered() {
     let mark = federated.peer_mark();
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             "alice@example.com/gone",
             MessageType::Normal,
@@ -165,7 +165,7 @@ async fn a_headline_reaches_every_resource_with_a_non_negative_priority() {
     let mut away = federated.online("alice", "away", -1).await;
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Headline,
@@ -192,7 +192,7 @@ async fn groupchat_to_an_account_is_refused_with_service_unavailable_without_the
     let _phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Groupchat,
@@ -225,10 +225,10 @@ async fn a_chat_message_never_reaches_a_resource_with_a_negative_priority() {
     let mark = federated.peer_mark();
 
     federated
-        .from_peer(message(BOB_PHONE, ALICE, MessageType::Chat, "n1", "hello"))
+        .peer_sends(message(BOB_PHONE, ALICE, MessageType::Chat, "n1", "hello"))
         .await;
     federated
-        .from_peer(message(MALLORY, ALICE, MessageType::Chat, "n2", "hello"))
+        .peer_sends(message(MALLORY, ALICE, MessageType::Chat, "n2", "hello"))
         .await;
 
     // RFC 6121 §8.5.2.1.1: handled as if no resource were available, so
@@ -260,7 +260,7 @@ async fn private_payloads_of_a_remote_message_are_removed_before_delivery() {
     forged
         .payloads
         .push(Element::builder("result", waddle_xmpp::xep::NS_INBOX).build());
-    federated.from_peer(forged).await;
+    federated.peer_sends(forged).await;
 
     let delivered = receive(&mut phone, "message", "p1").await;
     assert!(delivered.children().all(|child| {
@@ -286,7 +286,7 @@ async fn room_traffic_from_a_room_never_joined_is_dropped_but_a_mediated_invitat
     stale
         .payloads
         .push(xmpp_parsers::muc::user::MucUser::new().into());
-    federated.from_peer(stale).await;
+    federated.peer_sends(stale).await;
 
     let mut invitation = message(room, ALICE, MessageType::Normal, "invite", "join us");
     invitation.payloads.push(
@@ -298,7 +298,7 @@ async fn room_traffic_from_a_room_never_joined_is_dropped_but_a_mediated_invitat
             )
             .build(),
     );
-    federated.from_peer(invitation).await;
+    federated.peer_sends(invitation).await;
 
     // Both come from the room's bare JID and are decided in that order, so
     // the stale presence would have arrived before the invitation.
@@ -317,7 +317,7 @@ async fn a_chat_message_reaches_a_connected_resource_that_has_not_sent_presence(
     let mut quiet = federated.loopback.client("alice", "quiet").await;
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -567,7 +567,7 @@ async fn a_non_contact_gets_the_same_answer_whatever_the_accounts_state() {
         for (index, (class, build, _)) in classes.iter().enumerate() {
             let id = [*localpart, "-", *class].concat();
             let mark = federated.peer_mark();
-            federated.from_peer(build(&to, &id)).await;
+            federated.peer_sends(build(&to, &id)).await;
             // Everything the peer receives for this stanza has arrived once
             // a later stanza of Mallory's, decided after it, is answered.
             let barrier = federated.peer_barrier(MALLORY, &to).await;
@@ -631,7 +631,7 @@ async fn a_contacts_message_gets_nothing_back_whether_the_account_is_online_or_o
         let id = [to, "-contact-chat"].concat();
         let mark = federated.peer_mark();
         federated
-            .from_peer(message(BOB_PHONE, to, MessageType::Chat, &id, "hi"))
+            .peer_sends(message(BOB_PHONE, to, MessageType::Chat, &id, "hi"))
             .await;
         let barrier = federated.peer_barrier(BOB_PHONE, to).await;
         answers.push(observed(
@@ -663,10 +663,10 @@ async fn presence_to_the_bare_jid_reaches_available_resources_only_from_a_subscr
     let mut laptop = federated.online("alice", "laptop", 1).await;
 
     federated
-        .from_peer(presence(BOB_PHONE, ALICE, PresenceType::None, "pr1"))
+        .peer_sends(presence(BOB_PHONE, ALICE, PresenceType::None, "pr1"))
         .await;
     federated
-        .from_peer(presence(MALLORY, ALICE, PresenceType::None, "pr2"))
+        .peer_sends(presence(MALLORY, ALICE, PresenceType::None, "pr2"))
         .await;
 
     receive(&mut phone, "presence", "pr1").await;
@@ -687,7 +687,7 @@ async fn directed_presence_to_a_full_jid_reaches_that_resource() {
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(presence(MALLORY, ALICE_PHONE, PresenceType::None, "dp1"))
+        .peer_sends(presence(MALLORY, ALICE_PHONE, PresenceType::None, "dp1"))
         .await;
 
     let delivered = receive(&mut phone, "presence", "dp1").await;
@@ -709,7 +709,7 @@ async fn a_probe_from_a_contact_with_from_is_answered_with_each_available_resour
     contact(&federated, ALICE, BOB, "both").await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Probe, "pb1"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Probe, "pb1"))
         .await;
 
     let answered = support::wait_for(support::ARRIVES, || {
@@ -735,7 +735,7 @@ async fn a_probe_from_a_contact_of_an_account_with_no_resource_is_answered_unava
     contact(&federated, ALICE, BOB, "from").await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Probe, "pb2"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Probe, "pb2"))
         .await;
 
     let answered = support::wait_for(support::ARRIVES, || {
@@ -767,7 +767,7 @@ async fn a_probe_from_a_sender_without_from_is_not_answered() {
     let mark = federated.peer_mark();
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Probe, "pb3"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Probe, "pb3"))
         .await;
     let barrier = federated.peer_barrier(BOB, ALICE).await;
 
@@ -787,7 +787,7 @@ async fn a_subscription_request_reaches_available_resources_without_a_roster_ite
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(presence(BOB_PHONE, ALICE, PresenceType::Subscribe, "s1"))
+        .peer_sends(presence(BOB_PHONE, ALICE, PresenceType::Subscribe, "s1"))
         .await;
 
     let request = receive(&mut phone, "presence", "s1").await;
@@ -806,7 +806,7 @@ async fn a_subscription_request_to_an_offline_account_is_delivered_at_each_new_s
     federated.account("alice").await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "s2"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribe, "s2"))
         .await;
     tokio::time::sleep(support::QUIET).await;
 
@@ -825,7 +825,7 @@ async fn approving_a_remote_request_routes_subscribed_and_current_presence() {
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "s3"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribe, "s3"))
         .await;
     receive(&mut phone, "presence", "s3").await;
 
@@ -861,7 +861,7 @@ async fn denying_a_remote_request_routes_unsubscribed_and_forgets_it() {
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "s-deny"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribe, "s-deny"))
         .await;
     receive(&mut phone, "presence", "s-deny").await;
     assert!(support::pending_request(&federated, ALICE, BOB).await);
@@ -886,7 +886,7 @@ async fn a_request_from_a_contact_already_approved_is_answered_on_the_accounts_b
     contact(&federated, ALICE, BOB, "from").await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "s4"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribe, "s4"))
         .await;
 
     let answered = support::wait_for(support::ARRIVES, || {
@@ -922,7 +922,7 @@ async fn a_pre_approval_routes_nothing_and_approves_the_later_request() {
     assert_eq!(item.map(|(_, _, approved)| approved), Some(true));
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribe, "s5"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribe, "s5"))
         .await;
     support::wait_for(support::ARRIVES, || {
         federated
@@ -947,7 +947,7 @@ async fn subscribed_without_a_pending_request_is_ignored() {
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribed, "s6"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribed, "s6"))
         .await;
     federated.peer_barrier(BOB, ALICE).await;
 
@@ -968,7 +968,7 @@ async fn unsubscribe_from_a_contact_with_from_removes_it_and_sends_unavailable()
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Unsubscribe, "s7"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Unsubscribe, "s7"))
         .await;
 
     receive(&mut phone, "presence", "s7").await;
@@ -998,7 +998,7 @@ async fn unsubscribed_from_a_contact_with_to_removes_the_subscription() {
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Unsubscribed, "s8"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Unsubscribed, "s8"))
         .await;
 
     receive(&mut phone, "presence", "s8").await;
@@ -1035,7 +1035,7 @@ async fn a_subscription_request_to_a_remote_contact_is_routed_from_the_bare_jid_
 
     // The contact approves: the account is subscribed to it.
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Subscribed, "out1-ok"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Subscribed, "out1-ok"))
         .await;
     receive(&mut phone, "presence", "out1-ok").await;
     let item = roster_item(&federated, ALICE, BOB).await;
@@ -1211,7 +1211,7 @@ async fn an_iq_request_to_a_bare_jid_is_answered_service_unavailable_for_a_conta
     let _phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(get(BOB_PHONE, ALICE, "iq2", ping()))
+        .peer_sends(get(BOB_PHONE, ALICE, "iq2", ping()))
         .await;
 
     let refusal = federated.peer_receives("iq2").await;
@@ -1230,7 +1230,7 @@ async fn a_contacts_request_to_an_unbound_full_jid_is_answered_service_unavailab
     contact(&federated, ALICE, BOB, "from").await;
 
     federated
-        .from_peer(get(BOB_PHONE, "alice@example.com/gone", "iq3", ping()))
+        .peer_sends(get(BOB_PHONE, "alice@example.com/gone", "iq3", ping()))
         .await;
 
     let refusal = federated.peer_receives("iq3").await;
@@ -1251,7 +1251,7 @@ async fn a_response_from_another_resource_does_not_complete_a_remote_request() {
 
     let mark = federated.peer_mark();
     federated
-        .from_peer(get(BOB_PHONE, ALICE_PHONE, "iq4", ping()))
+        .peer_sends(get(BOB_PHONE, ALICE_PHONE, "iq4", ping()))
         .await;
     receive(&mut phone, "iq", "iq4").await;
     // The laptop answers in the phone's place: the answer is dropped.
@@ -1300,7 +1300,7 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
     let mark = federated.peer_mark();
 
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -1309,13 +1309,13 @@ async fn a_domain_the_replica_no_longer_admits_reaches_no_account() {
         ))
         .await;
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Probe, "d1-probe"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Probe, "d1-probe"))
         .await;
     federated
-        .from_peer(get(BOB_PHONE, ALICE_PHONE, "d1-iq", ping()))
+        .peer_sends(get(BOB_PHONE, ALICE_PHONE, "d1-iq", ping()))
         .await;
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Groupchat,

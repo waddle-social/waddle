@@ -61,6 +61,10 @@ pub struct Handled {
     pub session: Option<OccupancySessionGeneration>,
 }
 
+/// The occupants one room seats, each with its nickname and the
+/// generation of its occupancy.
+type Seats = HashMap<FullJid, (String, OccupancySessionGeneration)>;
+
 /// A room host that does what a case tells it.
 #[derive(Default)]
 pub struct ScriptedRooms {
@@ -75,7 +79,7 @@ pub struct ScriptedRooms {
     /// Occupants whose next request, other than a join, the host refuses.
     refused: Mutex<Vec<FullJid>>,
     /// The occupants each room seats, with nickname and generation.
-    seated: Mutex<HashMap<BareJid, HashMap<FullJid, (String, OccupancySessionGeneration)>>>,
+    seated: Mutex<HashMap<BareJid, Seats>>,
     handled: Mutex<Vec<Handled>>,
     unseated: Mutex<Vec<(FullJid, SeatEnd)>>,
     /// Occupants removed because no seat was held for them.

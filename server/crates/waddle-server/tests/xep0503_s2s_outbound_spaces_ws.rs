@@ -250,7 +250,7 @@ async fn a_local_account_discovers_and_reads_a_space_hosted_elsewhere() {
         )
         .build();
     federated
-        .from_peer_service(SERVICE, result(&alice, "list-1", Some(listing)))
+        .peer_service_sends(SERVICE, result(&alice, "list-1", Some(listing)))
         .await;
     let listed = receive(&mut phone, "iq", "list-1").await;
     assert_eq!(listed.attr("type"), Some("result"));
@@ -296,7 +296,7 @@ async fn a_local_account_discovers_and_reads_a_space_hosted_elsewhere() {
         )
         .build();
     federated
-        .from_peer_service(SERVICE, result(&alice, "info-1", Some(metadata)))
+        .peer_service_sends(SERVICE, result(&alice, "info-1", Some(metadata)))
         .await;
     let described = receive(&mut phone, "iq", "info-1").await;
     assert_eq!(
@@ -342,7 +342,7 @@ async fn a_local_account_discovers_and_reads_a_space_hosted_elsewhere() {
             .build(),
     );
     federated
-        .from_peer_service(SERVICE, result(&alice, "items-1", Some(content)))
+        .peer_service_sends(SERVICE, result(&alice, "items-1", Some(content)))
         .await;
     let read = receive(&mut phone, "iq", "items-1").await;
     assert!(descendant(&read, "conference").is_some(), "{read:?}");
@@ -374,14 +374,14 @@ async fn joining_a_space_hosted_elsewhere_is_a_subscription_whose_events_are_del
     assert_eq!(subscribe.attr("node"), Some(DEV));
     assert_eq!(subscribe.attr("jid"), Some(ALICE));
     federated
-        .from_peer_service(SERVICE, result(&alice, "join-1", None))
+        .peer_service_sends(SERVICE, result(&alice, "join-1", None))
         .await;
     receive(&mut phone, "iq", "join-1").await;
     recorded(&federated, DEV, true).await;
 
     // A room listed, and a room taken out.
     federated
-        .from_peer_service(SERVICE, event(DEV, "ev-1", room_item(NS_PUBSUB_EVENT)))
+        .peer_service_sends(SERVICE, event(DEV, "ev-1", room_item(NS_PUBSUB_EVENT)))
         .await;
     let listed = receive(&mut phone, "message", "ev-1").await;
     assert_eq!(listed.attr("from"), Some(SERVICE));
@@ -390,13 +390,13 @@ async fn joining_a_space_hosted_elsewhere_is_a_subscription_whose_events_are_del
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), ROOM)
         .build();
     federated
-        .from_peer_service(SERVICE, event(DEV, "ev-2", retraction))
+        .peer_service_sends(SERVICE, event(DEV, "ev-2", retraction))
         .await;
     receive(&mut phone, "message", "ev-2").await;
 
     // Another Space of the same service is not the one subscribed to.
     federated
-        .from_peer_service(SERVICE, event("sales", "ev-3", room_item(NS_PUBSUB_EVENT)))
+        .peer_service_sends(SERVICE, event("sales", "ev-3", room_item(NS_PUBSUB_EVENT)))
         .await;
     federated.peer_barrier(SERVICE, ALICE).await;
     assert!(!holds(
@@ -414,7 +414,7 @@ async fn joining_a_space_hosted_elsewhere_is_a_subscription_whose_events_are_del
     federated.peer_receives("leave-1").await;
     recorded(&federated, DEV, false).await;
     federated
-        .from_peer_service(SERVICE, event(DEV, "ev-4", room_item(NS_PUBSUB_EVENT)))
+        .peer_service_sends(SERVICE, event(DEV, "ev-4", room_item(NS_PUBSUB_EVENT)))
         .await;
     federated.peer_barrier(SERVICE, ALICE).await;
     assert!(!holds(
@@ -443,12 +443,12 @@ async fn a_subscription_to_a_remote_space_grants_nothing_in_its_rooms() {
     .await;
     federated.peer_receives("sub-1").await;
     federated
-        .from_peer_service(SERVICE, result(&alice, "sub-1", None))
+        .peer_service_sends(SERVICE, result(&alice, "sub-1", None))
         .await;
     receive(&mut phone, "iq", "sub-1").await;
     recorded(&federated, DEV, true).await;
     federated
-        .from_peer_service(SERVICE, event(DEV, "ev-5", room_item(NS_PUBSUB_EVENT)))
+        .peer_service_sends(SERVICE, event(DEV, "ev-5", room_item(NS_PUBSUB_EVENT)))
         .await;
     receive(&mut phone, "message", "ev-5").await;
 

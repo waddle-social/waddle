@@ -156,7 +156,7 @@ async fn messages_fan_out_to_and_from_a_remote_occupant() {
     // The remote occupant's message reaches the local occupant and is
     // reflected to its sender (§7.4).
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "remote-1", "hello from there"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "remote-1", "hello from there"))
         .await;
     let received = local_receives(&mut alice, ARRIVES, |stanza| {
         stanza.name() == "message" && body(stanza).as_deref() == Some("hello from there")
@@ -232,7 +232,7 @@ async fn a_remote_occupants_message_carries_standard_payloads_and_none_of_this_d
             .attr(minidom::rxml::xml_ncname!("by").to_owned(), ROOM)
             .build(),
     );
-    hosted.from_peer(carried).await;
+    hosted.peer_sends(carried).await;
     let received = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("text with baggage")
     })
@@ -263,7 +263,7 @@ async fn a_remote_occupant_leaves_no_inbox_or_activity_rows() {
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     let bob = "bob@home-b.test";
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "row-1", "nothing to keep"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "row-1", "nothing to keep"))
         .await;
     local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("nothing to keep")
@@ -271,7 +271,7 @@ async fn a_remote_occupant_leaves_no_inbox_or_activity_rows() {
     .await
     .expect("the message for the local occupant");
     hosted
-        .from_peer(remote_payload(
+        .peer_sends(remote_payload(
             BOB,
             ROOM,
             "row-2",
@@ -282,7 +282,7 @@ async fn a_remote_occupant_leaves_no_inbox_or_activity_rows() {
         .await
         .expect("the chat state for the local occupant");
     hosted
-        .from_peer(remote_leave(BOB, ROOM, "bob", "row-3"))
+        .peer_sends(remote_leave(BOB, ROOM, "bob", "row-3"))
         .await;
     assert!(hosted.unseated(ROOM, BOB).await);
     // The sender's own inbox row and its activity in the room belong to
@@ -318,7 +318,7 @@ async fn a_remote_occupant_changes_the_subject_only_where_the_room_lets_occupant
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     // XEP-0045 §8.1: by default only a moderator changes the subject.
     hosted
-        .from_peer(remote_subject("subject-1", "taken over"))
+        .peer_sends(remote_subject("subject-1", "taken over"))
         .await;
     let refused = hosted.answered("subject-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
@@ -332,7 +332,7 @@ async fn a_remote_occupant_changes_the_subject_only_where_the_room_lets_occupant
     .await;
     assert_eq!(set.attr("type"), Some("result"), "{set:?}");
     hosted
-        .from_peer(remote_subject("subject-2", "agreed on"))
+        .peer_sends(remote_subject("subject-2", "agreed on"))
         .await;
     let changed = local_receives(&mut alice, ARRIVES, |stanza| {
         stanza.name() == "message"
@@ -369,7 +369,7 @@ async fn a_remote_accounts_archived_messages_are_bounded() {
     for index in 0..120 {
         let id = format!("burst-{index}");
         hosted
-            .from_peer(remote_groupchat(BOB, ROOM, &id, "again"))
+            .peer_sends(remote_groupchat(BOB, ROOM, &id, "again"))
             .await;
     }
     let limited = hosted
@@ -399,7 +399,7 @@ async fn a_remote_accounts_archived_messages_are_bounded() {
     assert!((30..120).contains(&reflected), "{reflected}");
     // A chat state is not archived and is not counted.
     hosted
-        .from_peer(remote_payload(
+        .peer_sends(remote_payload(
             BOB,
             ROOM,
             "state-after",
@@ -421,7 +421,7 @@ async fn a_message_from_a_remote_entity_that_holds_no_seat_is_refused() {
     let mut alice = hosted.room_creator("alice", "desk").await;
     local_join(&mut alice, ROOM, "alice").await;
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "stranger-1", "let me in"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "stranger-1", "let me in"))
         .await;
     let refused = hosted.answered("stranger-1").await;
     assert_eq!(refused.attr("type"), Some("error"));
@@ -440,7 +440,7 @@ async fn a_remote_occupant_leaves_and_its_seat_ends() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     hosted
-        .from_peer(remote_leave(BOB, ROOM, "bob", "leave-1"))
+        .peer_sends(remote_leave(BOB, ROOM, "bob", "leave-1"))
         .await;
     let own = hosted
         .at_peer(|stanza| {
@@ -482,7 +482,7 @@ async fn a_seated_occupant_that_sends_its_join_again_is_answered_as_a_join() {
     // its join again, with the `muc` element.
     let before = hosted.received();
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-2"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-2"))
         .await;
     let is_own = |stanza: &Element| {
         presence_between(stanza, BOB_OCCUPANT, BOB)
@@ -536,7 +536,7 @@ async fn a_remote_principal_creates_no_room() {
     let hosted = Hosted::start(RouterLimits::default(), no_change).await;
     let missing = "nowhere@muc.example.com";
     hosted
-        .from_peer(remote_join(BOB, missing, "bob", "create-1"))
+        .peer_sends(remote_join(BOB, missing, "bob", "create-1"))
         .await;
     let refused = hosted.answered("create-1").await;
     assert_eq!(refused.attr("type"), Some("error"));
@@ -550,11 +550,11 @@ async fn a_room_that_is_not_federated_refuses_a_remote_join_as_a_room_that_does_
     let mut alice = hosted.room_creator("alice", "desk").await;
     local_join(&mut alice, ROOM, "alice").await;
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "closed-1"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "closed-1"))
         .await;
     let closed = hosted.answered("closed-1").await;
     hosted
-        .from_peer(remote_join(
+        .peer_sends(remote_join(
             BOB,
             "nowhere@muc.example.com",
             "bob",
@@ -582,7 +582,7 @@ async fn an_owner_opens_a_room_to_other_servers_and_closing_it_removes_its_remot
     let opened = local_set(&mut alice, ROOM, "open-1", federated_form(true)).await;
     assert_eq!(opened.attr("type"), Some("result"), "{opened:?}");
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-1"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-1"))
         .await;
     let own = hosted
         .at_peer(|stanza| {
@@ -612,7 +612,7 @@ async fn an_owner_opens_a_room_to_other_servers_and_closing_it_removes_its_remot
     assert!(hosted.unseated(ROOM, BOB).await);
     // The room is not found again.
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-2"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-2"))
         .await;
     let refused = hosted.answered("join-2").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("item-not-found"));
@@ -707,7 +707,7 @@ async fn private_messages_are_refused_to_remote_occupants() {
     let mut private = Message::new_with_type(MessageType::Chat, Some(jid(ALICE_OCCUPANT)));
     private.from = Some(jid(BOB));
     private.id = Some(xmpp_parsers::message::Id("pm-1".to_owned()));
-    hosted.from_peer(private).await;
+    hosted.peer_sends(private).await;
     let refused = hosted.answered("pm-1").await;
     assert_eq!(
         error_condition(&refused).as_deref(),
@@ -751,7 +751,7 @@ async fn room_administration_is_forbidden_to_a_remote_occupant_without_standing(
     // XEP-0045 §9.8, §8.2, §10.2 and §10.9: `forbidden` for a requester
     // that is neither moderator, admin nor owner.
     hosted
-        .from_peer(remote_get(
+        .peer_sends(remote_get(
             BOB,
             ROOM,
             "admin-1",
@@ -759,10 +759,10 @@ async fn room_administration_is_forbidden_to_a_remote_occupant_without_standing(
         ))
         .await;
     hosted
-        .from_peer(remote_set(BOB, ROOM, "admin-2", role_item("none", "alice")))
+        .peer_sends(remote_set(BOB, ROOM, "admin-2", role_item("none", "alice")))
         .await;
     hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             BOB,
             ROOM,
             "admin-3",
@@ -770,13 +770,13 @@ async fn room_administration_is_forbidden_to_a_remote_occupant_without_standing(
         ))
         .await;
     hosted
-        .from_peer(remote_get(BOB, ROOM, "owner-1", owner_query()))
+        .peer_sends(remote_get(BOB, ROOM, "owner-1", owner_query()))
         .await;
     hosted
-        .from_peer(remote_set(BOB, ROOM, "owner-2", federated_form(false)))
+        .peer_sends(remote_set(BOB, ROOM, "owner-2", federated_form(false)))
         .await;
     hosted
-        .from_peer(remote_set(BOB, ROOM, "owner-3", destroy()))
+        .peer_sends(remote_set(BOB, ROOM, "owner-3", destroy()))
         .await;
     for id in [
         "admin-1", "admin-2", "admin-3", "owner-1", "owner-2", "owner-3",
@@ -831,7 +831,7 @@ async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
 
     // XEP-0045 §9.8: an admin reads the ban list.
     hosted
-        .from_peer(remote_get(BOB, ROOM, "list-1", affiliation_list("outcast")))
+        .peer_sends(remote_get(BOB, ROOM, "list-1", affiliation_list("outcast")))
         .await;
     let list = hosted.answered("list-1").await;
     assert_eq!(list.attr("type"), Some("result"), "{list:?}");
@@ -839,7 +839,7 @@ async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
 
     // §9.3: it grants a membership.
     hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             BOB,
             ROOM,
             "member-1",
@@ -849,7 +849,7 @@ async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
     let granted = hosted.answered("member-1").await;
     assert_eq!(granted.attr("type"), Some("result"), "{granted:?}");
     hosted
-        .from_peer(remote_get(BOB, ROOM, "list-2", affiliation_list("member")))
+        .peer_sends(remote_get(BOB, ROOM, "list-2", affiliation_list("member")))
         .await;
     let members = hosted.answered("list-2").await;
     assert!(
@@ -863,7 +863,7 @@ async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
     // ADR-0020 D8 at issuance holds whoever asks: no owner or admin
     // standing for an account of a home that is not trusted.
     hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             BOB,
             ROOM,
             "admin-1",
@@ -876,7 +876,7 @@ async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
     // §8.2: it kicks an occupant, which is told with status 307, and the
     // result follows.
     hosted
-        .from_peer(remote_set(BOB, ROOM, "kick-1", role_item("none", "carol")))
+        .peer_sends(remote_set(BOB, ROOM, "kick-1", role_item("none", "carol")))
         .await;
     let kicked = local_receives(&mut carol, ARRIVES, |stanza| {
         stanza.name() == "presence"
@@ -890,10 +890,10 @@ async fn an_admin_of_a_trusted_home_administers_the_room_over_a_pkix_stream() {
 
     // §10.2 and §10.9: an admin is no owner.
     hosted
-        .from_peer(remote_get(BOB, ROOM, "owner-1", owner_query()))
+        .peer_sends(remote_get(BOB, ROOM, "owner-1", owner_query()))
         .await;
     hosted
-        .from_peer(remote_set(BOB, ROOM, "owner-2", destroy()))
+        .peer_sends(remote_set(BOB, ROOM, "owner-2", destroy()))
         .await;
     for id in ["owner-1", "owner-2"] {
         let refused = hosted.answered(id).await;
@@ -931,7 +931,7 @@ async fn an_owner_of_a_trusted_home_configures_and_destroys_the_room() {
     // XEP-0045 §10.2: the form names the room's settings, the federated
     // setting among them.
     hosted
-        .from_peer(remote_get(BOB, ROOM, "config-1", owner_query()))
+        .peer_sends(remote_get(BOB, ROOM, "config-1", owner_query()))
         .await;
     let form = hosted.answered("config-1").await;
     assert_eq!(form.attr("type"), Some("result"), "{form:?}");
@@ -946,7 +946,7 @@ async fn an_owner_of_a_trusted_home_configures_and_destroys_the_room() {
         "{fields:?}"
     );
     hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             BOB,
             ROOM,
             "config-2",
@@ -959,7 +959,7 @@ async fn an_owner_of_a_trusted_home_configures_and_destroys_the_room() {
     // §10.9: the owner destroys the room. Every occupant is told, the
     // remote one over S2S, and its seat ends.
     hosted
-        .from_peer(remote_set(BOB, ROOM, "destroy-1", destroy()))
+        .peer_sends(remote_set(BOB, ROOM, "destroy-1", destroy()))
         .await;
     let destroyed = local_receives(&mut alice, ARRIVES, |stanza| {
         stanza.name() == "presence"
@@ -1009,7 +1009,7 @@ async fn a_remote_admin_of_a_managed_room_changes_its_affiliations_through_its_g
     // and answered once the revocation fence has acknowledged it.
     managed
         .hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             GUEST_PHONE,
             room.as_str(),
             "grant-1",
@@ -1020,7 +1020,7 @@ async fn a_remote_admin_of_a_managed_room_changes_its_affiliations_through_its_g
     assert_eq!(granted.attr("type"), Some("result"), "{granted:?}");
     managed
         .hosted
-        .from_peer(remote_get(
+        .peer_sends(remote_get(
             GUEST_PHONE,
             room.as_str(),
             "list-1",
@@ -1039,7 +1039,7 @@ async fn a_remote_admin_of_a_managed_room_changes_its_affiliations_through_its_g
     // destroys it.
     managed
         .hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             GUEST_PHONE,
             room.as_str(),
             "destroy-1",
@@ -1064,7 +1064,7 @@ async fn a_remote_member_of_a_managed_room_administers_nothing() {
     let (_owner, _own) = managed_room_with_remote_member(&managed).await;
     managed
         .hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             GUEST_PHONE,
             room.as_str(),
             "grant-1",
@@ -1073,7 +1073,7 @@ async fn a_remote_member_of_a_managed_room_administers_nothing() {
         .await;
     managed
         .hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             GUEST_PHONE,
             room.as_str(),
             "kick-1",
@@ -1082,7 +1082,7 @@ async fn a_remote_member_of_a_managed_room_administers_nothing() {
         .await;
     managed
         .hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             GUEST_PHONE,
             room.as_str(),
             "config-1",
@@ -1110,7 +1110,7 @@ async fn remote_occupants_of_one_room_are_bounded() {
     let (hosted, _alice, _own) = room_with_remote_occupant(limits, no_change).await;
     let carol = "carol@home-b.test/laptop";
     hosted
-        .from_peer(remote_join(carol, ROOM, "carol", "join-2"))
+        .peer_sends(remote_join(carol, ROOM, "carol", "join-2"))
         .await;
     let refused = hosted.answered("join-2").await;
     assert_eq!(refused.attr("type"), Some("error"));
@@ -1152,7 +1152,7 @@ async fn a_delivery_error_from_the_occupants_server_removes_it_with_status_333()
         "en",
         "Gone.",
     )));
-    hosted.from_peer(bounce).await;
+    hosted.peer_sends(bounce).await;
     removed_with_333(&mut alice).await;
     assert!(hosted.unseated(ROOM, BOB).await);
 }
@@ -1174,7 +1174,7 @@ async fn a_service_unavailable_bounce_keeps_the_occupant_seated() {
         "en",
         "Blocked.",
     )));
-    hosted.from_peer(bounce).await;
+    hosted.peer_sends(bounce).await;
     let left = local_receives(&mut alice, QUIET, |stanza| {
         stanza.name() == "presence"
             && stanza.attr("from") == Some(BOB_OCCUPANT)
@@ -1268,7 +1268,7 @@ async fn a_rooms_stanza_leaves_only_for_a_seat_and_one_that_finds_no_place_ends_
     // told, `xep0045_s2s_inbound_muc_router`.)
     let before = hosted.received();
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-again"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-again"))
         .await;
     let own = hosted
         .at_peer_after(before, |stanza| {
@@ -1292,14 +1292,16 @@ async fn a_domain_this_replica_no_longer_admits_is_refused_where_the_room_decide
     let state = websocket_state_running_s2s(&delisted).await;
     let hosted = Hosted::serve(wiring, state, RouterLimits::default()).await;
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-1"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-1"))
         .await;
     let refused = hosted.answered("join-1").await;
     assert_eq!(refused.attr("type"), Some("error"));
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
     assert!(hosted.unseated(ROOM, BOB).await);
     let ping = Element::builder("ping", "urn:xmpp:ping").build();
-    hosted.from_peer(remote_get(BOB, MUC, "ping-1", ping)).await;
+    hosted
+        .peer_sends(remote_get(BOB, MUC, "ping-1", ping))
+        .await;
     let refused = hosted.answered("ping-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
 }
@@ -1354,12 +1356,12 @@ async fn a_trusted_homes_account_made_admin_enters_with_that_standing_over_pkix(
     // And where the seat is taken: it enters again with that standing,
     // because a `pkix` stream of its trusted home carries the join.
     hosted
-        .from_peer(remote_leave(BOB, ROOM, "bob", "leave-1"))
+        .peer_sends(remote_leave(BOB, ROOM, "bob", "leave-1"))
         .await;
     assert!(hosted.unseated(ROOM, BOB).await);
     let before = hosted.received();
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-2"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-2"))
         .await;
     // The room's own presence carries no id: it is the first one for the
     // occupant, after the join was sent, that is available and its own.
@@ -1389,7 +1391,7 @@ async fn managed_room_with_remote_member(
     assert_eq!(error_condition(&joined), None, "{joined:?}");
     managed
         .hosted
-        .from_peer(remote_join(GUEST_PHONE, room.as_str(), "guest", "join-1"))
+        .peer_sends(remote_join(GUEST_PHONE, room.as_str(), "guest", "join-1"))
         .await;
     let occupant = managed.occupant("guest");
     let own = managed
@@ -1424,7 +1426,7 @@ async fn a_remote_member_enters_a_managed_room_on_its_grant_and_a_stranger_does_
     // refused as any account without a membership is (XEP-0045 §7.2.6).
     managed
         .hosted
-        .from_peer(remote_join(
+        .peer_sends(remote_join(
             STRANGER_PHONE,
             room.as_str(),
             "mallory",
@@ -1444,7 +1446,7 @@ async fn a_remote_member_enters_a_managed_room_on_its_grant_and_a_stranger_does_
     // recipient is in the audience the acceptance freezes.
     managed
         .hosted
-        .from_peer(remote_groupchat(
+        .peer_sends(remote_groupchat(
             GUEST_PHONE,
             room.as_str(),
             "remote-1",
@@ -1474,7 +1476,7 @@ async fn a_remote_member_enters_a_managed_room_on_its_grant_and_a_stranger_does_
     // A stranger's message is not an occupant's.
     managed
         .hosted
-        .from_peer(remote_groupchat(
+        .peer_sends(remote_groupchat(
             STRANGER_PHONE,
             room.as_str(),
             "stranger-1",
@@ -1504,12 +1506,12 @@ async fn a_managed_room_that_is_not_federated_is_not_found_for_its_remote_member
     // server, which is decided first.
     managed
         .hosted
-        .from_peer(remote_join(GUEST_PHONE, room.as_str(), "guest", "closed-1"))
+        .peer_sends(remote_join(GUEST_PHONE, room.as_str(), "guest", "closed-1"))
         .await;
     let closed = managed.hosted.answered("closed-1").await;
     managed
         .hosted
-        .from_peer(remote_join(
+        .peer_sends(remote_join(
             GUEST_PHONE,
             "nowhere@muc.example.com",
             "guest",
@@ -1586,7 +1588,7 @@ async fn a_revoked_remote_member_is_removed_with_status_321_and_told_over_s2s() 
     // It does not enter again, and nothing of the room reaches it.
     managed
         .hosted
-        .from_peer(remote_join(GUEST_PHONE, room.as_str(), "guest", "join-3"))
+        .peer_sends(remote_join(GUEST_PHONE, room.as_str(), "guest", "join-3"))
         .await;
     let refused = managed.hosted.answered("join-3").await;
     assert_eq!(

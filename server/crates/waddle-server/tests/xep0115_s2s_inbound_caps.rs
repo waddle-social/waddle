@@ -76,7 +76,7 @@ async fn a_remote_occupants_presence_carries_its_caps_and_none_of_this_deploymen
             )
             .build(),
     );
-    hosted.from_peer(update).await;
+    hosted.peer_sends(update).await;
     let seen = local_receives(&mut alice, ARRIVES, |stanza| {
         stanza.name() == "presence"
             && stanza.attr("from") == Some(BOB_OCCUPANT)

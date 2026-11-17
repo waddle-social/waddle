@@ -47,7 +47,7 @@ async fn a_probe_answer_carries_the_resources_own_caps_and_the_caps_query_reache
     contact(&federated, ALICE, BOB, "from").await;
 
     federated
-        .from_peer(presence(BOB, ALICE, PresenceType::Probe, "caps-probe"))
+        .peer_sends(presence(BOB, ALICE, PresenceType::Probe, "caps-probe"))
         .await;
     let answer = support::wait_for(support::ARRIVES, || {
         federated
@@ -75,7 +75,7 @@ async fn a_probe_answer_carries_the_resources_own_caps_and_the_caps_query_reache
         )
         .build();
     federated
-        .from_peer(get(BOB_PHONE, ALICE_PHONE, "caps-query", query))
+        .peer_sends(get(BOB_PHONE, ALICE_PHONE, "caps-query", query))
         .await;
     let request = receive(&mut phone, "iq", "caps-query").await;
     assert_eq!(request.attr("from"), Some(BOB_PHONE));

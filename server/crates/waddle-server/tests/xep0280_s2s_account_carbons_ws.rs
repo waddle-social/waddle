@@ -80,7 +80,7 @@ async fn a_message_from_a_remote_contact_is_copied_as_a_received_carbon() {
     let (mut phone, mut laptop) = alice(&federated).await;
 
     federated
-        .from_peer(message(BOB_PHONE, ALICE, MessageType::Chat, "in1", "hello"))
+        .peer_sends(message(BOB_PHONE, ALICE, MessageType::Chat, "in1", "hello"))
         .await;
 
     receive(&mut phone, "message", "in1").await;
@@ -99,10 +99,10 @@ async fn a_remote_message_marked_private_is_not_copied() {
     private
         .payloads
         .push(Element::builder("private", CARBONS_NS).build());
-    federated.from_peer(private).await;
+    federated.peer_sends(private).await;
     receive(&mut phone, "message", "in2").await;
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -166,7 +166,7 @@ async fn carbon_wrappers_in_a_remote_message_are_removed_before_delivery() {
                 .build(),
         );
     }
-    federated.from_peer(forged).await;
+    federated.peer_sends(forged).await;
 
     let delivered = receive(&mut phone, "message", "forged").await;
     assert!(

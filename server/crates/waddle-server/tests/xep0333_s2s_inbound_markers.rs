@@ -45,7 +45,7 @@ async fn a_remote_occupants_displayed_marker_reaches_the_room_and_marks_no_inbox
     // §4: in a room a marker names the room's stanza-id.
     let read = stanza_id(&copy, ROOM).expect("the room's stanza-id");
     hosted
-        .from_peer(remote_payload(
+        .peer_sends(remote_payload(
             BOB,
             ROOM,
             "marker-1",
@@ -92,7 +92,7 @@ async fn a_remote_occupants_markers_count_against_its_accounts_share_and_are_not
     let ids: Vec<String> = (0..6).map(|index| format!("marker-{index}")).collect();
     for id in &ids {
         hosted
-            .from_peer(remote_payload(
+            .peer_sends(remote_payload(
                 BOB,
                 ROOM,
                 id,
@@ -103,7 +103,7 @@ async fn a_remote_occupants_markers_count_against_its_accounts_share_and_are_not
     // The share is spent by markers as by any stanza: a message that
     // follows at once is refused, and answered, since it carries a text.
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "text-1", "too soon"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "text-1", "too soon"))
         .await;
     let refused = hosted.answered("text-1").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");

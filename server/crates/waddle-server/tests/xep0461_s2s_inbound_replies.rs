@@ -46,7 +46,7 @@ async fn a_remote_occupants_reply_reaches_the_room_with_its_fallback() {
             .attr(minidom::rxml::xml_ncname!("for").to_owned(), NS_REPLY)
             .build(),
     );
-    hosted.from_peer(reply).await;
+    hosted.peer_sends(reply).await;
     let received = local_receives(&mut alice, ARRIVES, |stanza| {
         stanza.name() == "message" && stanza.attr("from") == Some(BOB_OCCUPANT)
     })
@@ -73,7 +73,7 @@ async fn a_reply_that_names_no_message_is_refused_as_a_sessions_is() {
     reply
         .payloads
         .push(Element::builder("reply", NS_REPLY).build());
-    hosted.from_peer(reply).await;
+    hosted.peer_sends(reply).await;
     let refused = hosted.answered("reply-2").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
     assert_eq!(error_condition(&refused).as_deref(), Some("bad-request"));

@@ -77,7 +77,7 @@ async fn the_service_answers_as_a_multi_user_chat_service_to_a_server_and_to_an_
     let hosted = Hosted::start(RouterLimits::default(), no_change).await;
     // A peer verifying a room's service asks from its bare domain.
     for (from, id) in [(HOME_B, "d1"), (BOB, "d2")] {
-        hosted.from_peer(remote_get(from, MUC, id, info())).await;
+        hosted.peer_sends(remote_get(from, MUC, id, info())).await;
         let answer = hosted.answered(id).await;
         assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
         assert_eq!(answer.attr("from"), Some(MUC));
@@ -105,7 +105,7 @@ async fn a_room_answers_as_a_conference_and_a_missing_one_with_item_not_found() 
     let mut alice = hosted.room_creator("alice", "desk").await;
     local_join(&mut alice, ROOM, "alice").await;
     hosted
-        .from_peer(remote_get(HOME_B, ROOM, "r1", info()))
+        .peer_sends(remote_get(HOME_B, ROOM, "r1", info()))
         .await;
     let answer = hosted.answered("r1").await;
     assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
@@ -120,7 +120,7 @@ async fn a_room_answers_as_a_conference_and_a_missing_one_with_item_not_found() 
     );
 
     hosted
-        .from_peer(remote_get(HOME_B, "nowhere@muc.example.com", "r2", info()))
+        .peer_sends(remote_get(HOME_B, "nowhere@muc.example.com", "r2", info()))
         .await;
     let missing = hosted.answered("r2").await;
     assert_eq!(missing.attr("type"), Some("error"));
@@ -133,7 +133,7 @@ async fn a_room_answers_as_a_conference_and_a_missing_one_with_item_not_found() 
             "http://jabber.org/protocol/commands",
         )
         .build();
-    hosted.from_peer(remote_get(BOB, ROOM, "r3", node)).await;
+    hosted.peer_sends(remote_get(BOB, ROOM, "r3", node)).await;
     let refused = hosted.answered("r3").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("item-not-found"));
 }
@@ -146,10 +146,10 @@ async fn a_room_that_is_not_federated_is_described_as_one_that_does_not_exist() 
     let missing = "nowhere@muc.example.com";
     // The room exists and its `federated` setting is off: its description
     // is refused with the condition, type and text of a missing room's.
-    hosted.from_peer(remote_get(BOB, ROOM, "c1", info())).await;
+    hosted.peer_sends(remote_get(BOB, ROOM, "c1", info())).await;
     let closed = hosted.answered("c1").await;
     hosted
-        .from_peer(remote_get(BOB, missing, "c2", info()))
+        .peer_sends(remote_get(BOB, missing, "c2", info()))
         .await;
     let absent = hosted.answered("c2").await;
     assert_eq!(closed.attr("type"), Some("error"), "{closed:?}");
@@ -158,11 +158,11 @@ async fn a_room_that_is_not_federated_is_described_as_one_that_does_not_exist() 
     // Neither a ping nor a `disco#items` request tells them apart.
     for (payload, first, second) in [(ping(), "c3", "c4"), (items(), "c5", "c6")] {
         hosted
-            .from_peer(remote_get(BOB, ROOM, first, payload.clone()))
+            .peer_sends(remote_get(BOB, ROOM, first, payload.clone()))
             .await;
         let of_closed = hosted.answered(first).await;
         hosted
-            .from_peer(remote_get(BOB, missing, second, payload))
+            .peer_sends(remote_get(BOB, missing, second, payload))
             .await;
         let of_absent = hosted.answered(second).await;
         assert_eq!(of_closed.attr("type"), of_absent.attr("type"));
@@ -179,7 +179,7 @@ async fn disco_items_lists_neither_rooms_nor_occupants_to_remote_askers() {
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     for (to, id) in [(MUC, "i1"), (ROOM, "i2")] {
         let items = Element::builder("query", DISCO_ITEMS).build();
-        hosted.from_peer(remote_get(BOB, to, id, items)).await;
+        hosted.peer_sends(remote_get(BOB, to, id, items)).await;
         let answer = hosted.answered(id).await;
         assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
         let listed = answer
@@ -197,7 +197,7 @@ async fn ping_is_answered_for_the_service_and_a_room() {
     let mut alice = hosted.room_creator("alice", "desk").await;
     local_join(&mut alice, ROOM, "alice").await;
     for (to, id) in [(MUC, "p1"), (ROOM, "p2")] {
-        hosted.from_peer(remote_get(BOB, to, id, ping())).await;
+        hosted.peer_sends(remote_get(BOB, to, id, ping())).await;
         let answer = hosted.answered(id).await;
         assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
         assert_eq!(answer.attr("from"), Some(to));
@@ -210,12 +210,12 @@ async fn a_self_ping_tells_a_remote_occupant_whether_it_is_joined() {
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     let own = "lounge@muc.example.com/bob";
     // XEP-0410 §3: joined.
-    hosted.from_peer(remote_get(BOB, own, "s1", ping())).await;
+    hosted.peer_sends(remote_get(BOB, own, "s1", ping())).await;
     let joined = hosted.answered("s1").await;
     assert_eq!(joined.attr("type"), Some("result"), "{joined:?}");
     // A ping for another occupant would be relayed to an account.
     hosted
-        .from_peer(remote_get(
+        .peer_sends(remote_get(
             BOB,
             "lounge@muc.example.com/alice",
             "s2",
@@ -229,10 +229,10 @@ async fn a_self_ping_tells_a_remote_occupant_whether_it_is_joined() {
     );
     // XEP-0410 §3: not joined, once the occupant left.
     hosted
-        .from_peer(remote_leave(BOB, ROOM, "bob", "leave-1"))
+        .peer_sends(remote_leave(BOB, ROOM, "bob", "leave-1"))
         .await;
     assert!(hosted.unseated(ROOM, BOB).await);
-    hosted.from_peer(remote_get(BOB, own, "s3", ping())).await;
+    hosted.peer_sends(remote_get(BOB, own, "s3", ping())).await;
     let left = hosted.answered("s3").await;
     assert_eq!(left.attr("type"), Some("error"));
     assert_eq!(error_condition(&left).as_deref(), Some("not-acceptable"));
@@ -251,7 +251,7 @@ async fn a_self_ping_the_room_cannot_decide_is_answered_as_undecided() {
         .await
         .expect("the room registry stops");
     hosted
-        .from_peer(remote_get(BOB, own, "s-undecided", ping()))
+        .peer_sends(remote_get(BOB, own, "s-undecided", ping()))
         .await;
     let answer = hosted.answered("s-undecided").await;
     assert_eq!(answer.attr("type"), Some("error"), "{answer:?}");

@@ -77,7 +77,7 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_delivery() {
     federated.account("alice").await;
     let mut phone = federated.online("alice", "phone", 5).await;
 
-    federated.from_peer(with_ids("ids-online")).await;
+    federated.peer_sends(with_ids("ids-online")).await;
 
     // The recipient pass may stamp the id Alice's archive gives the
     // message; none of the sender's ids in the deployment's name is left.
@@ -99,7 +99,7 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_storage() {
     let federated = federated(&pki).await;
     federated.account("alice").await;
 
-    federated.from_peer(with_ids("ids-offline")).await;
+    federated.peer_sends(with_ids("ids-offline")).await;
 
     let held = support::routing::wait_for_async(support::ARRIVES, || async {
         let rows = stored(&federated).await;

@@ -291,7 +291,7 @@ impl Hosted {
     }
 
     /// Send `stanza` from `home-b.test` to the MUC service.
-    pub async fn from_peer(&self, stanza: impl Into<Element>) {
+    pub async fn peer_sends(&self, stanza: impl Into<Element>) {
         let peer = self.peer.as_ref().expect("the peer is running");
         send(peer, HOME_B, MUC, stanza).await;
     }
@@ -804,7 +804,7 @@ pub async fn room_with_remote_occupant(
     let created = local_join(&mut alice, ROOM, "alice").await;
     assert_eq!(created.attr("type"), None, "{created:?}");
     hosted
-        .from_peer(remote_join(BOB, ROOM, "bob", "join-1"))
+        .peer_sends(remote_join(BOB, ROOM, "bob", "join-1"))
         .await;
     let occupant = [ROOM, "/bob"].concat();
     let own = hosted

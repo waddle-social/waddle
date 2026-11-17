@@ -217,7 +217,7 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
 
 impl Federated {
     /// Send `stanza` from the peer to the local deployment.
-    pub async fn from_peer(&self, stanza: impl Into<Element>) {
+    pub async fn peer_sends(&self, stanza: impl Into<Element>) {
         routing::send(&self.peer, PEER, LOCAL, stanza).await;
     }
 
@@ -229,7 +229,7 @@ impl Federated {
 
     /// Send `stanza` from the peer's domain `service` to the local
     /// deployment, on that domain's own stream.
-    pub async fn from_peer_service(&self, service: &str, stanza: impl Into<Element>) {
+    pub async fn peer_service_sends(&self, service: &str, stanza: impl Into<Element>) {
         routing::send(&self.peer, service, LOCAL, stanza).await;
     }
 
@@ -320,7 +320,7 @@ impl Federated {
     /// The ids of the barrier's own answers.
     pub async fn peer_barrier(&self, sender: &str, account: &str) -> Vec<String> {
         let barrier = unique("barrier");
-        self.from_sender(
+        self.send_from(
             sender,
             message(sender, account, MessageType::Groupchat, &barrier, "barrier"),
         )
@@ -341,7 +341,7 @@ impl Federated {
     /// follows a quiet period. The id of its answer.
     pub async fn peer_ping_barrier(&self, sender: &str) -> String {
         let id = unique("ping-barrier");
-        self.from_sender(sender, get(sender, LOCAL, &id, ping()))
+        self.send_from(sender, get(sender, LOCAL, &id, ping()))
             .await;
         self.peer_receives(&id).await;
         id
@@ -349,7 +349,7 @@ impl Federated {
 
     /// Send `stanza` from the peer on the stream of `sender`'s domain, one
     /// the peer serves.
-    pub async fn from_sender(&self, sender: &str, stanza: impl Into<Element>) {
+    pub async fn send_from(&self, sender: &str, stanza: impl Into<Element>) {
         let domain = jid(sender).domain().as_str().to_owned();
         routing::send(&self.peer, &domain, LOCAL, stanza).await;
     }
