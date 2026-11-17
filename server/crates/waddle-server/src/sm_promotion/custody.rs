@@ -98,6 +98,7 @@ pub(crate) async fn promote_session_with_custody(
             summary.not_promotable += single.not_promotable;
             summary.unparseable += single.unparseable;
             summary.scrubbed += single.scrubbed;
+            summary.discarded += single.discarded;
             summary.storage_failed += single.storage_failed;
             summary.first_failure = summary.first_failure.or(single.first_failure);
             summary.promoted_sequences.extend(single.promoted_sequences);
@@ -118,13 +119,14 @@ pub(crate) async fn promote_session_with_custody(
                 _ => None,
             };
             if failure.is_none() {
+                let disposition = custody_completion(&outcome);
                 for append in matching
                     .iter()
                     .filter(|append| append.disposition == IngressCustodyDisposition::Pending)
                 {
                     if let Err(error) = deps
                         .sm_registry
-                        .complete_ingress_append(append, IngressCustodyDisposition::Promoted)
+                        .complete_ingress_append(append, disposition)
                         .await
                     {
                         tracing::warn!(%error, %stream, "SM promotion: custody completion failed; retaining retry responsibility");
@@ -143,6 +145,21 @@ pub(crate) async fn promote_session_with_custody(
         }
     }
     summary
+}
+
+/// How a promotion that settled its stanza ends the stanza's ingress
+/// custody: handed on, or, for a retired recipient's stanza, ended without
+/// delivery as a retraction's scrub ends it, so that no later recovery hands
+/// the payload to the store.
+pub(crate) fn custody_completion(
+    outcome: &PromotedOutcome,
+) -> waddle_xmpp::stream_management::persistence::IngressCustodyDisposition {
+    use waddle_xmpp::stream_management::persistence::IngressCustodyDisposition;
+    if *outcome == PromotedOutcome::Discarded {
+        IngressCustodyDisposition::Tombstoned
+    } else {
+        IngressCustodyDisposition::Promoted
+    }
 }
 
 /// Recover the typed custody payload even when the bounded replay queue and

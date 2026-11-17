@@ -21,7 +21,9 @@
 
 use std::collections::HashMap;
 mod custody;
-pub(crate) use custody::{promote_ingress_custody, promote_session_with_custody};
+pub(crate) use custody::{
+    custody_completion, promote_ingress_custody, promote_session_with_custody,
+};
 mod live;
 mod pending;
 mod stanza;

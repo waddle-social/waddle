@@ -1260,6 +1260,21 @@ pub(in crate::sm_promotion) async fn promote_one(
         return PromotedOutcome::NotPromotable;
     }
 
+    // A retired account's messages reach none of its resources and none of
+    // its store (ADR-0020 D8), so the ledger is read before any sink. The
+    // store refuses the row as well should the retirement commit after this
+    // read.
+    if let Some(recipient) = message.to.as_ref().map(jid::Jid::to_bare) {
+        match ctx.pending_storage.recipient_retired(&recipient).await {
+            Ok(false) => {}
+            Ok(true) => return PromotedOutcome::Discarded,
+            Err(error) => {
+                tracing::warn!(%error, sequence, "Q6 promotion: the ledger of retired accounts could not be read; retaining the stanza for retry");
+                return PromotedOutcome::StorageFailure(PromotionFailureReason::PendingStorage);
+            }
+        }
+    }
+
     // Multi-hop Q6 chain (issue #1178): a stanza this promoter already
     // redelivered once carries our own `<delay/>` with the TRUE
     // original receipt time, while the queue entry's receipt time is
