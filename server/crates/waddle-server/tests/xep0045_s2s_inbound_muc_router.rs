@@ -15,10 +15,14 @@
 //! it once (§7.4); one account cannot spend its domain's request rate; and
 //! chat states are dropped before a seat ends. A room whose actor is slow
 //! holds no stream and ends no seat: what its share of the queues does not
-//! hold is answered at once, and what it took and did not decide in time is
-//! answered as its kind is. A request for the service's room list is built
-//! apart from the room shards and is always answered. A join beyond its account's share of presence
-//! is answered while the account's allowance of answers lasts, and neither
+//! hold is answered at once, and what the host did not decide in time is
+//! answered as its kind is, unless the host had begun a durable effect of
+//! it: a message the room may have accepted is then not answered, and an IQ
+//! is told that it may have been applied. A request for the service's room
+//! list is built apart from the room shards, one domain's requests holding
+//! at most two of the four places for them, and is always answered. A join
+//! beyond its account's share of presence is answered while the account's
+//! allowance of answers lasts, and neither
 //! one account's joins nor its leaves delay another account of the same
 //! domain, whose first leave for a seat is taken beyond its allowance. A
 //! leave for a room whose holder does not answer is kept and placed once
@@ -978,11 +982,12 @@ async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
 /// built apart from the room shards, so a room's own requests do not wait
 /// behind it, and it is never left unanswered. A list the host does not
 /// answer within the per-item budget is answered with
-/// `internal-server-error` (type `wait`), and one beyond the lists a
-/// replica builds at once with `resource-constraint`. A request the host
-/// does not decide in time is answered as its kind is: an IQ with
-/// `internal-server-error`, a self-ping with `remote-server-timeout`, a
-/// seated occupant's change of presence not at all, and its seat stands.
+/// `internal-server-error` (type `wait`), and one beyond the lists one
+/// domain's requests may hold at once with `resource-constraint`. A
+/// request the host does not decide in time is answered as its kind is: an
+/// IQ with `internal-server-error`, a self-ping with
+/// `remote-server-timeout`, a seated occupant's change of presence not at
+/// all, and its seat stands.
 #[tokio::test]
 async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answered() {
     let limits = RouterLimits {
@@ -1026,11 +1031,13 @@ async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answer
             error_of(stanza).and_then(|error| error.attr("type").map(str::to_owned)),
         )
     };
+    // One domain holds two of the four places for room lists: its three
+    // lists beyond them are refused at once.
     let busy = answers
         .iter()
         .filter(|stanza| error_condition(stanza).as_deref() == Some("resource-constraint"))
         .count();
-    assert_eq!(busy, 1, "{answers:?}");
+    assert_eq!(busy, 3, "{answers:?}");
     let undecided = answers
         .iter()
         .filter(|stanza| {
@@ -1041,7 +1048,7 @@ async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answer
                 )
         })
         .count();
-    assert_eq!(undecided, 4, "{answers:?}");
+    assert_eq!(undecided, 2, "{answers:?}");
 
     // The room's IQ, which the host did not decide in time, is answered.
     let ping_answer = hosted.home_b.answered("held-ping").await;
@@ -1095,6 +1102,56 @@ async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answer
         Some(seat.session)
     );
     assert!(hosted.host.ends_of(BOB).is_empty());
+}
+
+/// One remote domain's requests hold at most two of the four places a
+/// replica has for building the MUC service's room list: a third list of
+/// that domain is refused with `resource-constraint` while two places are
+/// free, another domain's lists take those two, and a place given back is
+/// taken again.
+#[tokio::test]
+async fn one_domain_holds_at_most_two_of_the_places_for_room_lists() {
+    let limits = RouterLimits {
+        room_request_timeout: Duration::from_secs(1),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-listing-share", limits).await;
+    hosted.host.hold().await;
+    let items = || Element::builder("query", "http://jabber.org/protocol/disco#items").build();
+    let busy = |stanza: &Element| error_condition(stanza).as_deref() == Some("resource-constraint");
+    let undecided =
+        |stanza: &Element| error_condition(stanza).as_deref() == Some("internal-server-error");
+
+    for id in ["b-0", "b-1", "b-2"] {
+        hosted.home_b.send(remote_get(BOB, MUC, id, items())).await;
+    }
+    // The third is refused at once, while the replica has two places free.
+    let third = hosted.home_b.answered("b-2").await;
+    assert!(busy(&third), "{third:?}");
+    for id in ["c-0", "c-1"] {
+        hosted
+            .home_c
+            .send(remote_get(CAROL, MUC, id, items()))
+            .await;
+    }
+    for (peer, id) in [
+        (&hosted.home_b, "b-0"),
+        (&hosted.home_b, "b-1"),
+        (&hosted.home_c, "c-0"),
+        (&hosted.home_c, "c-1"),
+    ] {
+        let answer = peer.answered(id).await;
+        assert!(undecided(&answer), "{id}: {answer:?}");
+    }
+
+    // Every place was given back with its list's answer.
+    hosted
+        .home_b
+        .send(remote_get(BOB, MUC, "b-again", items()))
+        .await;
+    let again = hosted.home_b.answered("b-again").await;
+    assert!(undecided(&again), "{again:?}");
+    hosted.host.release();
 }
 
 /// A request the host took (`RoomRequest::taken`) and did not answer
