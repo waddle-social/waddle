@@ -1377,8 +1377,12 @@ async fn an_owner_ends_remote_subscriptions_by_removing_banning_or_closing() {
 
 /// Two deletions of one Space asked at once, by a local owner's session and
 /// by a remote owner, run one after the other under the Space's deletion
-/// lock: one deletes the Space, the other finds no such node, and the room
-/// the Space held stands alone.
+/// lock: one deletes the Space and the other deletes nothing, and the room
+/// the Space held stands alone. The remote request that comes second finds
+/// no such node. The session's request is decided by the requester's Owner
+/// affiliation before it waits for the lock, so one that comes second
+/// finds no such node, or, when the Space and its affiliations were gone
+/// before it was decided, is refused as a non-owner's.
 #[tokio::test]
 async fn two_deletions_of_one_space_at_once_delete_it_once() {
     let pki = Pki::new();
@@ -1405,7 +1409,8 @@ async fn two_deletions_of_one_space_at_once_delete_it_once() {
         );
     } else {
         assert!(
-            is_error(&local, DefinedCondition::ItemNotFound),
+            is_error(&local, DefinedCondition::ItemNotFound)
+                || is_error(&local, DefinedCondition::Forbidden),
             "{local:?}"
         );
     }
