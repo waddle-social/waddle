@@ -6,6 +6,95 @@ use super::{
 };
 use crate::server::routes::websocket::{ActiveCallThread, DmCallThreadKey, PendingDmCallOffer};
 
+/// The most pending XEP-0353 call offers one initiator at a domain this
+/// deployment does not serve may hold here, to all recipients together.
+const REMOTE_OFFERS_PER_INITIATOR: usize = 8;
+/// The most pending call offers one account may hold from initiators at
+/// domains this deployment does not serve, all of them together.
+const REMOTE_OFFERS_PER_RECIPIENT: usize = 32;
+/// The most pending call offers one account may hold from the initiators
+/// of any one remote domain: half of [`REMOTE_OFFERS_PER_RECIPIENT`], so
+/// that the accounts of one server, however many it creates, leave room for
+/// callers at another.
+const REMOTE_OFFERS_PER_DOMAIN_TO_RECIPIENT: usize = 16;
+/// The most pending call offers the initiators of any one remote domain may
+/// hold here, to all recipients together: a small share of the replica's
+/// call state (`DM_CALL_STATE_MAX_KEYS`, 4096), whose pruning is fair
+/// between initiators and so between the many JIDs of one server only
+/// within this bound.
+const REMOTE_OFFERS_PER_DOMAIN: usize = 64;
+
+/// Whether the call offer `key`, proposed by `initiator` to `recipient`,
+/// may be recorded as pending. An offer from an account this deployment
+/// serves always may; one from a remote initiator only within
+/// [`REMOTE_OFFERS_PER_INITIATOR`], [`REMOTE_OFFERS_PER_RECIPIENT`],
+/// [`REMOTE_OFFERS_PER_DOMAIN_TO_RECIPIENT`] and
+/// [`REMOTE_OFFERS_PER_DOMAIN`], counting the offers of the replica's call
+/// state that have not expired. A proposal that replaces the initiator's
+/// own offer under the same key takes no new place.
+///
+/// The pending offers are one table of the process, shared by every
+/// account and pruned oldest first per initiator once it is full; the
+/// bounds keep a stranger, or a server minting strangers, from filling it,
+/// and its offers from crowding out those of other accounts and other
+/// servers. An offer that is not recorded leaves the message as it is: it
+/// is archived and delivered, and only the call thread it would have
+/// opened is not projected.
+fn admits_offer(
+    deps: &Deps<'_>,
+    key: &DmCallThreadKey,
+    initiator: &BareJid,
+    recipient: &BareJid,
+) -> bool {
+    if deps.serves(initiator) {
+        return true;
+    }
+    let Some(state) = deps.web_socket_state else {
+        return true;
+    };
+    let offers = &state.deps.protocol.pending_dm_call_offers;
+    if offers
+        .get(key)
+        .is_some_and(|offer| offer.initiator == *initiator)
+    {
+        return true;
+    }
+    let now = chrono::Utc::now();
+    let mut by_initiator = 0;
+    let mut to_recipient = 0;
+    let mut by_domain = 0;
+    let mut by_domain_to_recipient = 0;
+    for entry in offers.iter() {
+        let offer = entry.value();
+        if now.signed_duration_since(offer.started).num_seconds() > DM_CALL_PENDING_TTL_SECS {
+            continue;
+        }
+        if offer.initiator == *initiator {
+            by_initiator += 1;
+        }
+        let pair = entry.key();
+        let offered_to = if pair.low_peer == offer.initiator {
+            &pair.high_peer
+        } else {
+            &pair.low_peer
+        };
+        let same_domain = offer.initiator.domain() == initiator.domain();
+        if same_domain {
+            by_domain += 1;
+        }
+        if offered_to == recipient && !deps.serves(&offer.initiator) {
+            to_recipient += 1;
+            if same_domain {
+                by_domain_to_recipient += 1;
+            }
+        }
+    }
+    by_initiator < REMOTE_OFFERS_PER_INITIATOR
+        && to_recipient < REMOTE_OFFERS_PER_RECIPIENT
+        && by_domain_to_recipient < REMOTE_OFFERS_PER_DOMAIN_TO_RECIPIENT
+        && by_domain < REMOTE_OFFERS_PER_DOMAIN
+}
+
 fn snapshot(deps: &Deps<'_>, key: DmCallThreadKey) -> Option<PlannedDmCallState> {
     for effect in deps.effects.snapshot().into_iter().rev() {
         if let super::effects::Effect::External(super::effects::ExternalEffect::Direct(
@@ -156,8 +245,11 @@ pub(super) async fn project(
     message: &Message,
 ) {
     if let Some((sid, media)) = jmi_propose(message) {
-        let Some(mut state) = snapshot(deps, DmCallThreadKey::new(from.clone(), to.clone(), sid))
-        else {
+        let key = DmCallThreadKey::new(from.clone(), to.clone(), sid);
+        if !admits_offer(deps, &key, from, to) {
+            return;
+        }
+        let Some(mut state) = snapshot(deps, key) else {
             return;
         };
         state.pending = Some(PendingDmCallOffer {

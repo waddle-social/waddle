@@ -314,20 +314,50 @@ pub async fn local_account_exists(
     Ok(row.is_some())
 }
 
-/// Returns `true` when `jid` is a registered account on `local_domain`.
-/// Waddle has no s2s, so a JID on any other domain (a room, an extension
-/// bot) or one without a localpart is never an account.
+/// The keys an existence check of the account `jid` names at
+/// `local_domain` compares with the stored lookup keys: its localpart, for
+/// `users.localpart_key` (account rows carry no domain), and its bare JID,
+/// for `native_users.jid_key`. `None` when `jid` is at another domain, has
+/// no localpart, or names a localpart preparation would change: such a JID
+/// names no account.
+///
+/// Every check of whether an account exists reads these keys and nothing
+/// else, so that a read outside a transaction and one inside it agree. A
+/// row written without a lookup key is no account to them; the startup
+/// pass keys every row but a case-variant twin of a keyed one, which
+/// retirement removes with the account it folds onto.
+pub(crate) fn account_lookup_keys(
+    jid: &jid::BareJid,
+    local_domain: &str,
+) -> Option<(String, String)> {
+    let node = jid.node()?;
+    if jid.domain().as_str() != local_domain {
+        return None;
+    }
+    let exact = exact_account_jid(node.as_str(), local_domain)?;
+    Some((node.as_str().to_owned(), exact.as_str().to_owned()))
+}
+
+/// Returns `true` when `jid` is a registered account on `local_domain`,
+/// under [`account_lookup_keys`]. A JID on any other domain (a room, an
+/// extension bot, a remote account) or one without a localpart is never an
+/// account.
 pub async fn local_account_jid_exists(
     actor: &ActorRef<DbActor>,
     jid: &jid::BareJid,
     local_domain: &str,
 ) -> Result<bool, AuthError> {
-    match jid.node() {
-        Some(node) if jid.domain().as_str() == local_domain => {
-            local_account_exists(actor, node.as_str(), local_domain).await
-        }
-        _ => Ok(false),
-    }
+    let Some((localpart, jid_key)) = account_lookup_keys(jid, local_domain) else {
+        return Ok(false);
+    };
+    let row = actor
+        .ask(DbQueryOne {
+            sql: ACCOUNT_EXISTS_SQL.to_string(),
+            params: vec![localpart.into(), jid_key.into()],
+        })
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+    Ok(row.is_some())
 }
 
 /// XEP-0055 directory entries from both account stores. Prefer OIDC profile

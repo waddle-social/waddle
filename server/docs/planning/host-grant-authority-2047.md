@@ -2938,14 +2938,98 @@ A home never issues the JID of a retired account to a new holder
   the ledger insert, the deletes of the account's rows (the delete of its
   `users` row cascades to its identity-provider links and its sessions; one
   delete for each row of the account, usually one native row and one
-  account row) and two reads of the account rows that carry no lookup key:
-  five statements for a usual account, so a login can be held up for 2 s of
-  waiting plus up to 25 s, and is in practice for milliseconds. An account
+  account row), two reads of the account rows that carry no lookup key,
+  the delete of the account's offline store (`pending_delivery`), taken
+  after the advisory lock every insert into that store takes for the
+  account's canonical JID, a read of the store's recipients that start
+  with the account's localpart, compared without letter case, and a
+  delete for each other spelling of the account's JID among them (a
+  U-label domain, a row written before recipients were prepared), and the
+  three deletes of what remote senders left for it: eleven statements for
+  a usual account, so a login can be held up for 2 s of waiting plus up to
+  55 s, and is in practice for milliseconds. The read of the recipients
+  scans the store. From the commit on the store refuses every row for the
+  account (`InsertOutcome::RecipientRetired`), whichever producer offers
+  it: an insert that held the lock first commits before the delete reads
+  the store, and one that waits for it reads the ledger the retirement
+  wrote. The message is discarded and no sender is answered. An account
   whose delete does not finish within the statement bound is not retired;
   nothing splits that delete.
-- **Not done by retirement:** it does not end the account's open streams,
-  and it does not revoke the account's grants in any room, here or on
-  another deployment. The [retirement runbook](../../../docs/operations/account-retirement.md)
+- **Ending the account's open sessions** (`auth/session_endings.rs`,
+  `server/account_session_endings.rs`,
+  `server/routes/websocket/account_retirement.rs`, migration 2015, both
+  engines). `retire_account` leaves them; the operator command takes the
+  second step once the retirement committed. It records a request naming
+  the canonical JID. Every serving replica holds a lease row it registers
+  when it starts serving and renews every 5 s for 15 s, on a task of its
+  own. Every second a replica reads, in a read-only transaction, the
+  requests of the last day whose JID the ledger holds and that it has not
+  completed; it holds every requested account in its in-memory set of
+  retired accounts first, then for each request records that it observed
+  it, ends what it holds of the account and records the request as
+  completed with what it ended. While nobody is retired that is one
+  single-row update every 5 s and one select a second per serving process;
+  the lease's expiry carries no index, so on PostgreSQL the update is
+  heap-only:
+  - every live stream it hosts is force-detached for the account's
+    retirement (`ForceDetachOrigin::AccountRetirement`): the connection
+    ends its binding as terminally as a replacing bind does (the session
+    is closed, not detached), with `<not-authorized/>` instead of
+    `<conflict/>`. No binding takes the full JID over, so the end is no
+    transfer: a connection whose pumps are not seen to stop within the
+    transfer join deadline does not take the node's terminal failure
+    path, as a transfer's does. The origin is local to the replica that
+    hosts the stream and is never relayed. The connection's teardown
+    broadcasts the unavailable presence to local contacts, leaves local
+    rooms (which fan the departure out to remote occupants) and remote
+    rooms, and retires the binding. A stream counts as closed once the
+    registry no longer holds its binding;
+  - every stream-management session of the account that waits for a
+    resume is ended: those held in memory through the invalidation and
+    the displaced promotion a replacing bind uses, those of the durable
+    authority under their claim. Both run the terminal path of an
+    invalidated detached session (room leaves, unavailable presence). The
+    promotion settles the session's acknowledgement windows, reads the
+    ledger before any sink, so that what the session held for the client
+    is discarded rather than redelivered or stored, ends the ingress
+    custody of what it held as `Tombstoned` (the recovery of orphaned
+    custody reads the ledger the same way and ends it so too), and
+    deletes its durable rows and releases its claim under the captured
+    fence. A session whose promotion fails is kept for a retry, and one
+    whose claim another replica holds is left to it; the request stays
+    incomplete until none is left. A live stream whose connection already
+    has another detach queued ends by that detach; if that one keeps the
+    session for a resume, the session is ended as a detached one in the
+    same pass or the next poll, and a resume of it is refused meanwhile;
+  - once no stream and no detached session is left, the pass checks that
+    the account's offline store is empty;
+  - from the moment the account is in the set, a binding or resume of it is
+    refused before it is published (`<not-authorized/>`). For a minute after
+    taking a request up the replica also closes any stream of the account
+    it finds again, which covers a binding that checked the set just before
+    the account was added.
+
+  The command waits (default 30 s, at most 600 s) until every replica
+  whose lease counts has completed or has stopped renewing its lease,
+  judged by whether it saw the lease renewed within the lease's lifetime
+  and a 2 s grace (17 s), on its own clock; the default wait is checked
+  at compile time to exceed that. It reports each replica as
+  `completed`, `lapsed` or `pending` and exits 3 when one is `pending`;
+  a lapsed replica no longer serves the account's sessions and does not
+  keep the command from exiting 0. A
+  replica that starts within the day takes the request up too: it ends the
+  detached sessions an earlier process left and refuses the account's
+  bindings. The runtime role inserts and updates the lease and
+  acknowledgement rows and reads requests; the command, as the owner,
+  removes leases ended more than a day ago and requests older than two
+  days. A holder of the runtime credential can write an acknowledgement
+  with its own SQL and so report sessions ended that were not; the ledger
+  and the account rows are unaffected.
+- **Not done by retirement:** it does not revoke the account's grants in
+  any room, here or on another deployment, and the account's contacts on
+  other deployments are sent no final unavailable presence: the S2S router
+  refuses everything a retired account sends. The
+  [retirement runbook](../../../docs/operations/account-retirement.md)
   orders those steps. Other homes cannot be required to keep such a ledger;
   ADR-0020 D8 states what a reassigned JID may inherit there.
 
@@ -3009,7 +3093,8 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
   the same hand-over, on the subscription's recorded evidence
   ([Spaces](s2s-routing-2047.md#spaces-w7a)); a revoke's acknowledgement
   does not cover it, as it does not cover a local subscriber's.
-- Ending a retired or revoked account's open streams.
+- Ending a revoked account's open streams. A retired account's are ended by
+  the retirement command ([D8](#non-reuse-of-retired-account-jids-d8)).
 - A replica whose lease lapsed keeps its seats until it registers again.
   Removing them on the lapse would need the grants it cannot read.
 - The relayed record of a remote membership (`RemoteMucMemberships`) is not

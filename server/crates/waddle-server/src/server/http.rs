@@ -1892,6 +1892,7 @@ async fn create_websocket_state(
                 pending_local_muc_departures: Arc::new(
                     PendingLocalMucDepartures::default(),
                 ),
+                retired_accounts: Arc::default(),
                 resolver_affiliation_syncs: Arc::new(
                     ResolverAffiliationSyncScheduler::default(),
                 ),
@@ -2071,6 +2072,8 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_room_effect_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
+    // Ends the sessions of accounts the owner's command retired.
+    crate::server::account_session_endings::spawn_account_session_endings(websocket_state);
     crate::auth::directory::spawn_account_key_backfill(
         websocket_state.deps.app_state.db_pool.global_actor(),
         ACCOUNT_KEY_BACKFILL_INTERVAL,

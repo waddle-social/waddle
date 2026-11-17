@@ -41,6 +41,11 @@
 //! fails without having changed anything; it can be run again. Holding the
 //! lock it runs a few statements, each bounded at 5 s; the transaction has
 //! no deadline of its own beyond those.
+//!
+//! The account's open streams and detached stream-management sessions are
+//! held by the replicas that serve them, not by these tables. The operator
+//! command ends them in a second step once the retirement committed
+//! ([`super::session_endings`]); [`retire_account`] itself leaves them.
 
 use chrono::Utc;
 use jid::BareJid;
@@ -104,20 +109,23 @@ pub struct AccountRetirement {
     /// Account rows removed, with their identity-provider links and
     /// sessions.
     pub accounts: u64,
+    /// Messages removed from the account's offline store.
+    pub offline_messages: u64,
 }
 
 /// Retire the account `jid`: record its JID in the ledger and remove its
 /// native credentials, its account row, its identity-provider links, its
-/// sessions, and what remote senders left for it (recorded subscription
-/// requests, remote PubSub subscription records and offline admissions),
-/// in one transaction. A JID that holds no account is recorded as
+/// sessions, its offline store, and what remote senders left for it
+/// (recorded subscription requests, remote PubSub subscription records and
+/// offline admissions), in one transaction. A JID that holds no account is recorded as
 /// well, so that it is never issued. Retiring a retired JID removes whatever
 /// rows it still finds and changes nothing else.
 ///
 /// The caller's database role must be able to delete from both account
 /// tables: the schema owner, or a runtime that owns its schema. It does not
-/// end the account's live streams and does not touch the account's grants
-/// in any room; see the retirement runbook.
+/// end the account's live streams, which the operator command asks every
+/// replica to do after this commits ([`super::session_endings`]), and does
+/// not touch the account's grants in any room; see the retirement runbook.
 pub async fn retire_account(
     db: &Database,
     jid: &BareJid,
@@ -248,11 +256,34 @@ async fn retire_in(
             .await?;
     }
 
+    // The account's offline store: no session of the account will ever
+    // flush it, and a row left would wait for the JID's next holder, which
+    // the ledger never lets exist. From this commit on the store refuses
+    // every row for the account (`crate::pending_delivery`'s retired
+    // recipients), whichever producer offers it. An insert serialises with
+    // this delete on the advisory lock keyed by the account's canonical
+    // JID, which it takes whatever spelling of the JID its row names: one
+    // that holds it commits first and its row is removed here, and one that
+    // waits for it reads the ledger this transaction wrote.
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(?))",
+            crate::db_params![canonical.as_str()],
+        )
+        .await?;
+    }
+    let offline_messages = tx
+        .execute(
+            "DELETE FROM pending_delivery WHERE recipient_jid = ?",
+            crate::db_params![canonical.as_str()],
+        )
+        .await?
+        + delete_offline_spellings(tx, canonical, key).await?;
+
     // What remote senders left for the account (gate G18): their recorded
     // subscription requests, the account's records of remote PubSub
-    // subscriptions, and the offline admissions of strangers' messages.
-    // Rows are keyed by the account's JID as stanzas name it, which is its
-    // canonical form.
+    // subscriptions, and the offline admissions of strangers' messages,
+    // keyed by the account's canonical JID.
     for statement in [
         "DELETE FROM s2s_pending_subscriptions WHERE account_jid = ?",
         "DELETE FROM s2s_remote_pubsub_subscriptions WHERE account_jid = ?",
@@ -267,7 +298,66 @@ async fn retire_in(
         newly_retired: recorded > 0,
         native_accounts,
         accounts,
+        offline_messages,
     })
+}
+
+/// Remove the rows of the account's offline store kept under a spelling of
+/// its JID other than `canonical`: every row whose recipient has the
+/// ledger key `key`, the key under which the store refuses an insert for
+/// the account. A row names its recipient as the `jid` parser prepared it,
+/// which keeps a domain's U-labels, and a row written before recipients
+/// were prepared may differ in letter case as well. Every such spelling has
+/// the canonical localpart, so the candidates are the recipients that start
+/// with it, compared without letter case, and the key decides. The read
+/// scans the store's recipients under the retirement's statement bound.
+async fn delete_offline_spellings(
+    tx: &mut Transaction<'_>,
+    canonical: &BareJid,
+    key: &str,
+) -> Result<u64, DatabaseError> {
+    let Some(localpart) = canonical.node() else {
+        return Ok(0);
+    };
+    let mut pattern = String::new();
+    for character in localpart.as_str().chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push_str("@%");
+    let mut spellings = Vec::new();
+    let mut rows = tx
+        .query(
+            "SELECT DISTINCT recipient_jid FROM pending_delivery \
+             WHERE lower(recipient_jid) LIKE ? ESCAPE '\\'",
+            crate::db_params![pattern],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let stored: String = row.get(0)?;
+        let same_account = stored != canonical.as_str()
+            && stored
+                .parse::<BareJid>()
+                .ok()
+                .and_then(|stored| retirement_key_of(&stored))
+                .is_some_and(|stored| stored == key);
+        if same_account {
+            spellings.push(stored);
+        }
+    }
+    drop(rows);
+    let mut removed = 0;
+    for stored in spellings {
+        removed += tx
+            .execute(
+                "DELETE FROM pending_delivery WHERE recipient_jid = ?",
+                crate::db_params![stored],
+            )
+            .await?;
+    }
+    Ok(removed)
 }
 
 /// Whether the ledger holds `jid`. A JID without a canonical form names no

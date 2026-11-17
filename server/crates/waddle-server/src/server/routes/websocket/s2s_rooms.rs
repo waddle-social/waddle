@@ -82,7 +82,7 @@ use super::interpret_loop::build_interpret_deps;
 use super::WebSocketState;
 use crate::auth::Session;
 use crate::ingress::{
-    ImmediateSink, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
+    ImmediateSink, IngressPrincipal, IngressStreamIdentity, IngressSubmission, RemoteIngressTarget,
     RemoteOccupantPrincipal,
 };
 use crate::notification_activity::NotificationPresenceShow;
@@ -1224,6 +1224,7 @@ impl Asked<'_> {
         let submission = IngressSubmission {
             identity: IngressStreamIdentity::Remote {
                 account: self.account.clone(),
+                target: RemoteIngressTarget::Room,
             },
             principal: IngressPrincipal::Remote(RemoteOccupantPrincipal {
                 account: self.account.clone(),

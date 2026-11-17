@@ -1399,6 +1399,109 @@ text, and no anchor's text changed.
   with a comment.
 - The raw scan still holds 1639 records, each token's count unchanged.
 
+The thirtieth to thirty-third refreshes were made on the branch of the
+remote direct messages and account retirement slice (W6d) before it was
+merged, each from the one before it on that branch and the first from the
+twenty-fourth; their commits are that branch's. They are numbered here after
+the Spaces refreshes above, which were made on the integration branch
+meanwhile.
+
+The selected evidence was refreshed a thirtieth time, through
+`ec108dd8dd950a97996cdcfb7890e73800d81513`, after reviewing the delta of the reviewed files since the
+twenty-fourth refresh. `auth/retirement.rs`, `ingress/principal.rs`,
+`ingress_uow/mod.rs`, `server/http.rs` and
+`server/routes/websocket/s2s_rooms.rs` changed. No grant writer or storage
+plane of the host-grant authority was added, no producer of stream evidence
+changed, and no decision of standing moved.
+
+- The remote principal's acceptance (`remote-acceptance-principal` moved)
+  now has two arms, chosen by the stream identity's target. The room arm
+  (`RemoteIngressTarget::Room`, which the room host `s2s-room-host`,
+  `s2s-room-placement` and `s2s-unseated-removal` moved, sets) is
+  unchanged. The account arm (`RemoteIngressTarget::Account`) admits a
+  remote sender's direct message to a local account, with no room
+  execution: it decides the sender's domain from the S2S admission policy
+  of the replica that built the submission, and reads the recipient's
+  account row (`FOR SHARE` on PostgreSQL) and the ledger of retired JIDs
+  in the acceptance transaction (`ingress_uow/remote_recipients.rs`, a new
+  read-only repository registered in `ingress_uow/mod.rs`). It honours no
+  grant: the message reaches only the recipient account's archive, inbox,
+  resources and offline store, and the plan is refused before commit when
+  any effect acts elsewhere (`classify_remote_direct_plan`).
+- Retirement (`account-retire` moved) is unchanged; its documentation
+  names the second step the operator command runs after it commits, which
+  `server/http.rs` starts on every serving replica
+  (`spawn_account_session_endings`): it ends the retired account's
+  streams and detached sessions and refuses its bindings. It reads the
+  ledger and writes only its own lease and acknowledgement tables
+  (migration 2015); it writes no grant and decides no standing.
+- The raw scan holds 1636 records, 3 more than before: the account arm's
+  and the account side's uses of `RemoteOccupantPrincipal`. Other records
+  in the changed files moved because those files gained lines.
+
+The selected evidence was refreshed a thirty-first time, through
+`00c79c85b1e719823720dc11face5244e02933ee`, after reviewing the delta of the reviewed files since the
+thirtieth refresh. `auth/retirement.rs` and `ingress/principal.rs`
+changed. No grant writer or storage plane of the host-grant authority was
+added, no producer of stream evidence changed, and no decision of standing
+moved.
+
+- The account arm of the remote principal's acceptance
+  (`remote-acceptance-principal`, its anchor unchanged) passes the served
+  account domains of the admission policy to the recipient assertion,
+  which now refuses a recipient at a domain the policy does not serve and
+  finds the account by the lookup keys every existence check reads
+  (`auth::directory::account_lookup_keys`: `users.localpart_key`,
+  `native_users.jid_key`), locking the row `FOR KEY SHARE` on PostgreSQL.
+  The D1 check is described as made against the snapshot captured when
+  the submission was built; what it decides is unchanged. The classifier
+  of the planned message (`classify_remote_direct_plan`, outside the
+  reviewed files) now classifies every intent as well as every effect.
+- Retirement (`account-retire` moved) also deletes the account's offline
+  store (`pending_delivery`) in its transaction. It writes no grant and
+  decides no standing.
+- The raw scan holds 1636 records, unchanged in content; records in the
+  changed files moved because those files gained lines.
+
+The selected evidence was refreshed a thirty-second time, through
+`9d55985c1890dfe12686551cbf273d35c6c915c0`, after reviewing the delta of the reviewed files since the
+thirty-first refresh. `auth/retirement.rs`,
+`websocket/handlers/message/muc_invite.rs` and
+`websocket/handlers/message/group_dm_invite.rs` changed. No grant writer or
+storage plane of the host-grant authority was added, no producer of stream
+evidence changed, and no decision of standing moved.
+
+- Retirement (`account-retire`, its anchor unchanged) takes the advisory
+  lock every insert into the offline store takes for the account's
+  canonical JID before it deletes the account's offline store; from its
+  commit on the store refuses every row for the account
+  (`pending_delivery/database/retired.rs`, outside the reviewed files). It
+  writes no grant and decides no standing.
+- A mediated or group DM invitation to a retired account, which the
+  offline store refuses, fails as one beyond the store's quota does
+  (`MucUserDeliveryError::RecipientRetired`): the group DM invitation
+  rolls its member grant back through the same path
+  (`hg-group-dm-rollback` moved) and answers the inviter
+  `service-unavailable`; a mediated invitation rolls back as for any
+  delivery failure.
+- The raw scan holds 1636 records, unchanged in content; records in the
+  changed files, and in `pending_delivery/tests.rs`, whose quota race case
+  names the new refusal, moved because those files gained lines.
+
+The selected evidence was refreshed a thirty-third time, through
+`42240e113bc1c879fd631e706542fc157e3aedda`, after reviewing the delta of the reviewed files since the
+thirty-second refresh. `auth/retirement.rs` changed. No grant writer or
+storage plane of the host-grant authority was added, no producer of stream
+evidence changed, and no decision of standing moved.
+
+- Retirement (`account-retire`, its anchor unchanged) also deletes the
+  account's offline rows kept under another spelling of its JID: it reads
+  the store's recipients that start with the account's localpart, compared
+  without letter case, and deletes those whose ledger key is the
+  account's, under the same advisory lock. It writes no grant and decides
+  no standing.
+- The raw scan holds 1636 records, unchanged in content and place.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

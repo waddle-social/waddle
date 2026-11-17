@@ -485,6 +485,7 @@ where
                     pending_local_muc_departures: Arc::new(
                         super::PendingLocalMucDepartures::default(),
                     ),
+                    retired_accounts: Arc::new(super::RetiredAccounts::default()),
                     resolver_affiliation_syncs: Arc::new(
                         super::ResolverAffiliationSyncScheduler::default(),
                     ),

@@ -10,9 +10,11 @@
 //! account domain, so both configurations name `peer_scope = "public"`;
 //! the listeners and endpoints are still loopback addresses. The router's
 //! correlation table and remote room occupancies are in an in-memory
-//! SQLite database of their own; the account side's stores are in the
-//! test state's database. No PostgreSQL, SpiceDB or second process is
-//! involved.
+//! SQLite database of their own; the account side's stores, the archive,
+//! the inbox, the notification candidates and the offline store are in the
+//! test state's database, as the ingress authority that writes them in its
+//! acceptance transaction requires. No PostgreSQL, SpiceDB or second
+//! process is involved.
 
 #[path = "../s2s_routing_support/mod.rs"]
 pub mod routing;
@@ -30,8 +32,9 @@ use waddle_server::s2s::route::{
     LocalDelivery, LocalDeliveryOutcome, LocalOrigin, RouterLimits, RouterOptions, S2sRouter,
     SqlIqCorrelations, SqlRemoteRoomStore,
 };
+use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::test_support::{
-    host_spaces_for_remote_principals, websocket_state_with_federation,
+    attach_pending_startup, host_spaces_for_remote_principals, websocket_state_with_federation,
     websocket_state_with_federation_and_database_pubsub, WebSocketLocalAccounts,
     WebSocketLocalDelivery,
 };
@@ -155,6 +158,17 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
     } else {
         websocket_state_with_federation(&effect_config).await
     };
+    // The offline store is the one startup attaches: rows in the test
+    // state's database, where the ingress acceptance of a remote sender's
+    // message stores them in its transaction, and where the account's next
+    // session and the D1 purge read them.
+    let global = state.deps.app_state.db_pool.global().clone();
+    let pending = attach_pending_startup(
+        &ResolvedXmppDatabaseUrl::InheritedGlobal(global.database_url().to_owned()),
+        &global,
+    )
+    .await
+    .expect("the offline store in the test state's database");
     let database = routing::correlation_database(&unique("s2s-account")).await;
     let router = S2sRouter::new(RouterOptions {
         config: Arc::clone(&config),
@@ -164,12 +178,14 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
         limits: adjust.limits,
         stop: None,
     });
-    // The remote route is set before anything holds the state weakly.
+    // The remote route and the offline store are set before anything holds
+    // the state weakly.
     let route: Arc<dyn RemoteRoute> = Arc::new(router.clone());
-    Arc::get_mut(&mut state)
+    let deps = &mut Arc::get_mut(&mut state)
         .expect("an unshared test state")
-        .deps
-        .remote_route = route;
+        .deps;
+    deps.remote_route = route;
+    deps.protocol.pending_delivery_storage = Arc::new(pending);
     let loopback = ws::Loopback::serve(state).await;
     assert!(router.attach_local(Arc::new(WebSocketLocalDelivery::new(&loopback.state))));
     assert!(router.attach_accounts(Arc::new(WebSocketLocalAccounts::new(&loopback.state))));
@@ -584,6 +600,7 @@ impl Federated {
             {
                 InsertOutcome::Inserted => {}
                 InsertOutcome::QuotaExceeded => return stored,
+                InsertOutcome::RecipientRetired => panic!("{account} is not a retired account"),
             }
         }
         panic!("the offline store of the fixture has a quota");
@@ -902,4 +919,103 @@ pub async fn wait_for_item(
     routing::wait_for_async(ARRIVES, || roster_item(federated, account, contact))
         .await
         .unwrap_or_else(|| panic!("{account} holds a roster item for {contact}"))
+}
+
+/// The message with the wire id `id` in `archive`'s XEP-0313 archive, if
+/// it holds one.
+pub async fn archived(
+    federated: &Federated,
+    archive: &str,
+    id: &str,
+) -> Option<waddle_xmpp::mam::ArchivedMessage> {
+    use waddle_xmpp::mam::MamStorage;
+    let archive: jid::BareJid = archive.parse().expect("an archive JID");
+    federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_message_id(&archive, id)
+        .await
+        .expect("the archive is readable")
+}
+
+/// Wait until `archive`'s XEP-0313 archive holds the message with the wire
+/// id `id`, and return it.
+pub async fn wait_for_archived(
+    federated: &Federated,
+    archive: &str,
+    id: &str,
+) -> waddle_xmpp::mam::ArchivedMessage {
+    routing::wait_for_async(ARRIVES, || archived(federated, archive, id))
+        .await
+        .unwrap_or_else(|| panic!("{archive}'s archive holds `{id}`"))
+}
+
+/// Every message of the personal XEP-0313 archive of `archive`.
+pub async fn archive_messages(
+    federated: &Federated,
+    archive: &str,
+) -> Vec<waddle_xmpp::mam::ArchivedMessage> {
+    use waddle_xmpp::mam::{MamArchiveKind, MamQuery, MamStorage};
+    let archive: jid::BareJid = archive.parse().expect("an archive JID");
+    federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&archive, MamArchiveKind::Personal, &MamQuery::default())
+        .await
+        .expect("the archive is readable")
+        .messages
+}
+
+/// How many copies of the message with the wire id `id` the archive of
+/// `archive` holds.
+pub async fn archived_copies(federated: &Federated, archive: &str, id: &str) -> usize {
+    archive_messages(federated, archive)
+        .await
+        .iter()
+        .filter(|archived| {
+            archived
+                .stanza_id
+                .as_ref()
+                .is_some_and(|wire| wire.id == id)
+        })
+        .count()
+}
+
+/// The rows of `account`'s offline store, in their order.
+pub async fn offline_rows(
+    federated: &Federated,
+    account: &str,
+) -> Vec<waddle_xmpp::pending_delivery::PendingRow> {
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    let account: jid::BareJid = account.parse().expect("an account JID");
+    federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&account)
+        .await
+        .expect("the offline store is readable")
+}
+
+/// The XEP-0359 `<stanza-id/>` elements among `payloads`, as their `by`
+/// and `id`.
+pub fn stanza_ids<'a>(payloads: impl IntoIterator<Item = &'a Element>) -> Vec<(String, String)> {
+    payloads
+        .into_iter()
+        .filter(|payload| payload.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID))
+        .filter_map(|payload| {
+            Some((
+                payload.attr("by")?.to_owned(),
+                payload.attr("id")?.to_owned(),
+            ))
+        })
+        .collect()
 }

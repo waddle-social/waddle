@@ -848,6 +848,28 @@ Groupchat messages and MUC presence from the room are delivered to the
 occupant's full JID; none is archived in the account's archive,
 carbon-copied or projected into the inbox.
 
+**Payloads.** Before a message from the room is delivered, and so before
+the recipient pass archives a private message, the router removes what a
+client would read as this server's statement about its own account, as
+the account side does for a remote account's message
+(`crate::s2s::remote_content`): every `urn:waddle:*` payload, the
+`urn:xmpp:inbox:1` elements, XEP-0280 carbon wrappers, XEP-0511 link cards
+and link-preview requests, and every XEP-0359 `<stanza-id/>` whose `by`
+names a domain this deployment serves or cannot be read; the room's own
+`<stanza-id/>`, in its bare JID's name, is kept. A XEP-0313 `<result/>` is
+kept only on a message from the room's bare JID that is no groupchat, as
+the archive a query from the resource names answers (below; XEP-0313
+§4.2). XEP-0313 §8.2 has a client check a result's `from` against the
+entity it queried as well as its `queryid`, but Waddle's client checks the
+`queryid` alone (`MamResultCollector::collect` in `waddle-xmpp-client`), so
+the router keeps a result only where its address is the archive's. What a
+kept payload nests is cleaned of the same elements, and a message nested
+in one (the one an archive result forwards) loses every `urn:waddle:*`
+payload directly inside it, as the room's own message does; a deeper
+`urn:waddle:*` payload is left to what carries it. Presence from the room
+is delivered as it comes: a client reads none of these payloads from
+presence.
+
 A message a local resource sends to a remote room goes to the S2S router
 without entering the ingress authority, so it is not archived by the
 sender's server (the room archives groupchat; XEP-0313 §5). Once the
@@ -876,11 +898,18 @@ treats as a timeout.
 
 **XEP-0313 queries.** A query to a room is an IQ request: routed,
 correlated and answered with its `<fin/>`. Its result messages come from
-the room's bare JID and are admitted as room traffic while the resource
-is joining or joined; a query to a room it has not joined receives its
-`<fin/>` but none of the results. The `<fin/>` is an IQ response and is
-delivered outside the room's queue, so it can reach the client before the
-last results.
+the room's bare JID and are admitted as room traffic only to a resource
+the router's occupancy record (W6b) holds as joining or joined in that
+room: the record is what lets a result through, so a resource without an
+occupancy of the room never receives one. That covers a query sent before
+joining or after leaving, and another resource of the same account that
+did not join. Without an occupancy a result message is account traffic
+(W6c): it is cleaned as a remote account's message is, losing its
+`<result/>`, and is then handled as a message from a remote sender
+without a resource, so a resource still bound receives it with nothing
+that answers a query. The client receives the query's `<fin/>` and none
+of its results. The `<fin/>` is an IQ response and is delivered outside
+the room's queue, so it can reach the client before the last results.
 
 **When a join is not answered.** A join the room has not answered within
 60 seconds of being sent ends: any replica's sweep removes the occupancy
@@ -2807,10 +2836,11 @@ runbook (G24):
   refusals are replaced once the account side is attached, inbound
   requests to local resources are registered for correlation, and the
   router refuses a message carrying a DM pin marker for a remote peer.
-  Remote senders' messages no resource takes are stored offline outside
-  the ingress commit, without archive, inbox or push; the ingress receipt
-  for a remote target, needed for those and for archiving local accounts'
-  messages to remote contacts, remains with a remote ingress producer.
+  Remote senders' direct messages are accepted through the ingress
+  authority as the recipient's half of a local direct message, with the
+  recipient's archive, inbox, push and carbons (G18-14); archiving local
+  accounts' messages to remote contacts, with S2S egress as transport
+  custody, remains.
 - Remote principals at protected effects, done for the Spaces service: its
   host decides D1 with `PrincipalPolicy::witness` at each request and
   passes the principal's evidence to the host-grant decision of every room

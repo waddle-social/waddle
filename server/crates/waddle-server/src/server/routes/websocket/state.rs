@@ -1731,6 +1731,10 @@ pub struct ProtocolServices {
     pub extension_bot_rooms: BotRoomLocks,
     /// Local departures retained until the owning room actor can project them.
     pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
+    /// The retired accounts whose requests to end their sessions this
+    /// replica has taken up: a binding of one is refused, and a live stream
+    /// of one is closed with `<not-authorized/>`.
+    pub retired_accounts: Arc<super::RetiredAccounts>,
     /// At most one detached resolver-affiliation repair per room/member pair.
     /// Rejected joins coalesce here instead of spawning unbounded retry tasks.
     pub resolver_affiliation_syncs: Arc<ResolverAffiliationSyncScheduler>,

@@ -2,16 +2,24 @@
 //! (ADR-0020 D7; gate G18; RFC 6121 §8.5.2.2.1): a `chat` or `normal`
 //! message no resource of the local account takes is stored for the
 //! account's next session, from a contact and a stranger alike, and
-//! nothing answers its sender. A stranger is held to bounds per sender,
-//! sender domain and account; a message beyond them is dropped silently,
-//! and a contact is not held to them. A detached XEP-0198 session hands
-//! what it holds to the offline store when its resume window closes, so a
-//! stranger's message to one, by full JID or bare JID, is held only within
-//! the same bounds, and what the store would not keep (a chat state alone,
-//! a `headline` other than an event notification the account asked for,
-//! an `error`, directed presence) reaches it only from a contact. A stored message whose sender's domain is no longer admitted
-//! (ADR-0020 D1) is deleted before the store is flushed, unless a flush
-//! claimed it after it was read. Through the
+//! nothing answers its sender. A message from a sender with a resource is
+//! accepted through the ingress authority as the recipient's half of a
+//! local direct message: its stored row refers to the copy in the
+//! recipient's archive (its push notification is
+//! `xep0357_s2s_account_push_ws.rs`); one from a bare JID is stored whole,
+//! outside the archive. A
+//! stranger is held to bounds per sender, sender domain and account; a
+//! message beyond them is dropped silently, and a contact is not held to
+//! them. A detached XEP-0198 session hands what it holds to
+//! the offline store when its resume window closes, so a stranger's
+//! message to one, by full JID or bare JID, is held only within the same
+//! bounds, and what the store would not keep (a chat state alone, a
+//! `headline` other than an event notification the account asked for, an
+//! `error`, directed presence) reaches it only from a contact. A stored
+//! message whose sender's domain is no longer admitted (ADR-0020 D1),
+//! whether its row holds it whole or refers to the archive, is deleted
+//! before the store is flushed, unless a flush claimed it after it was
+//! read; an archived copy stays in the account's archive. Through the
 //! production `/ws` router, the real S2S router and a loopback peer,
 //! `home-b.test`.
 #![cfg(feature = "test-support")]
@@ -21,7 +29,10 @@
 #[path = "s2s_account_support/mod.rs"]
 mod support;
 
-use support::{contact, federated, holds, message, presence, Pki, BOB, BOB_PHONE, MALLORY};
+use jid::Jid;
+use minidom::Element;
+use support::{contact, federated, holds, jid, message, presence, Pki, BOB, BOB_PHONE, MALLORY};
+use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::chatstates::ChatState;
 use xmpp_parsers::message::{Id, Message, MessageType};
 use xmpp_parsers::presence::Type as PresenceType;
@@ -256,6 +267,132 @@ async fn a_stored_message_whose_senders_domain_is_no_longer_admitted_is_never_de
         .is_some(),
         "the offline store is empty"
     );
+}
+
+#[tokio::test]
+async fn a_message_from_a_sender_without_a_resource_is_stored_whole_outside_the_archive() {
+    use waddle_xmpp::pending_delivery::PendingPayload;
+
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    let mark = federated.peer_mark();
+
+    // An ingress acceptance names a full sender, so a message from a bare
+    // JID is stored as it arrived, without an archived copy.
+    federated
+        .peer_sends(message(
+            BOB,
+            ALICE,
+            MessageType::Chat,
+            "bare-sender",
+            "from no resource",
+        ))
+        .await;
+    let barrier = federated.peer_barrier(BOB, ALICE).await;
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
+
+    let rows = support::offline_rows(&federated, ALICE).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let PendingPayload::Transient(stored) = &rows[0].payload else {
+        panic!("the message is stored whole: {rows:?}");
+    };
+    assert_eq!(stored.from, Some(jid(BOB)));
+    assert!(support::archived(&federated, ALICE, "bare-sender")
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn an_archived_message_whose_senders_domain_is_no_longer_admitted_is_never_delivered() {
+    use waddle_xmpp::mam::{ArchivedMessage, StoreOutcome};
+    use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
+
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    let alice = federated.account("alice").await;
+    // Bob's message is stored the way the ingress acceptance stores it.
+    federated
+        .peer_sends(message(
+            BOB_PHONE,
+            ALICE,
+            MessageType::Chat,
+            "kept-archived",
+            "hi",
+        ))
+        .await;
+    federated.peer_barrier(BOB_PHONE, ALICE).await;
+    assert_eq!(support::offline_count(&federated, ALICE).await, 1);
+
+    // A message archived and stored, as a reference to the archive, while
+    // its sender's domain was admitted, which the snapshot the replica runs
+    // no longer admits.
+    let stale_sender = "eve@unlisted.test/desk";
+    let stamp = StanzaId::new("stale-archive-id", Jid::from(alice.clone()));
+    let mut stale = message(
+        stale_sender,
+        ALICE,
+        MessageType::Chat,
+        "stale-archived",
+        "hi",
+    );
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut stale, &stamp);
+    let mut copy = ArchivedMessage::for_test(jid(stale_sender), jid(ALICE));
+    copy.id = stamp.id.clone();
+    copy.body = Some("hi".to_owned());
+    copy.stanza_id = Some(StanzaId::new("stale-archived", Jid::from(alice.clone())));
+    copy.message_type = MessageType::Chat;
+    copy.stanza_xml = Some(String::from(&Element::from(stale)));
+    let archive = &federated.loopback.state.deps.protocol.mam_storage;
+    match archive
+        .store_message(&alice, &copy)
+        .await
+        .expect("the archive is writable")
+    {
+        StoreOutcome::Stored { stanza_id, .. } => assert_eq!(stanza_id, stamp.id),
+        other => panic!("the stale message is archived: {other:?}"),
+    }
+    let inserted = federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: alice.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Archived(stamp.clone()),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("the offline store is writable");
+    assert_eq!(inserted, InsertOutcome::Inserted);
+    assert_eq!(support::offline_count(&federated, ALICE).await, 2);
+
+    let mut phone = federated.online("alice", "phone", 5).await;
+    let frames = support::receive_messages(&mut phone, &["kept-archived"]).await;
+    let settled = federated.client_settle(&mut phone).await;
+
+    assert!(!holds(&frames, "message", "stale-archived"), "{frames:?}");
+    assert!(!holds(&settled, "message", "stale-archived"), "{settled:?}");
+    // Neither row is left: one was delivered, the other deleted.
+    assert!(
+        support::routing::wait_for_async(support::ARRIVES, || async {
+            (support::offline_count(&federated, ALICE).await == 0).then_some(())
+        })
+        .await
+        .is_some(),
+        "the offline store is empty"
+    );
+    // The archived copy stays; only its delivery is withheld.
+    let kept = archive
+        .get_message_by_archive_or_stanza_id(&alice, &stamp.id)
+        .await
+        .expect("the archive is readable")
+        .expect("the archive keeps the stale message");
+    assert_eq!(kept.from, jid(stale_sender));
 }
 
 #[tokio::test]

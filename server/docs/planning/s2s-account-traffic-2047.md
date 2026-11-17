@@ -10,12 +10,18 @@ server rules each one follows for a remote sender, and the matching
 outbound traffic of local accounts (D7). It replaces the interim refusal
 that [the routing design](s2s-routing-2047.md#account-traffic-in-the-interim-d7)
 records, in both directions, for the handlers reviewed here, and leaves it
-in force for everything else.
+in force for everything else. A remote sender's `chat` or `normal` message
+is accepted through the ingress authority as the recipient's half of a
+local direct message (owner decision, 2026-11-17; "Accepting a remote
+sender's direct message" below).
 
 The rules were read against the pinned sources in `xeps/`: RFC 6121 (from
 the RFC Editor) and the XSF sources at
 `4132c531487fe9450ae90b905b8df950d0d478b2`: XEP-0060 1.30.0, XEP-0115
-1.6.0, XEP-0191 1.3, XEP-0199 2.0.1, XEP-0280 1.0.1 and XEP-0313 1.1.3.
+1.6.0, XEP-0191 1.3, XEP-0199 2.0.1, XEP-0280 1.0.1, XEP-0313 1.1.3 and
+XEP-0359 0.7.0; XEP-0424 0.5.0, XEP-0357 0.4.1, XEP-0308 1.2.1, XEP-0353
+0.8.0 and XEP-0511 0.1.1, which `xeps/` does not hold, were read at the
+same commit of the XSF repository.
 
 Nothing here is executed evidence. The evidence is written and compiled but
 not run until verification (D9):
@@ -40,13 +46,20 @@ not run until verification (D9):
   promotion chain every expiry path runs;
 - `crates/waddle-server/tests/xep0160_s2s_account_offline_ws.rs`: offline
   storage of remote senders' messages and the strangers' bounds, at the
-  store and at a real detached session reached by full JID, and a stored
-  message whose sender's domain is no longer admitted at the flush;
+  store and at a real detached session reached by full JID, a stored
+  message whose sender's domain is no longer admitted at the flush (one
+  stored whole and one referring to the archive), a stored message
+  referring to the archive with the push notification candidate a local
+  direct message raises, and a sender without a resource stored whole;
 - `crates/waddle-server/tests/account_jid_retirement.rs` (edited):
   retirement removes the account's rows of migrations 2010 and 2011;
 - `crates/waddle-server/tests/xep0280_s2s_account_carbons_ws.rs`:
   received and sent carbons of messages exchanged with remote accounts,
-  and carbon wrappers removed from remote messages;
+  a remote message to the bare or a full JID copied to the account's
+  other resources only, and carbon wrappers removed from remote messages;
+- `crates/waddle-server/tests/s2s_account_inbox_ws.rs`: the recipient's
+  inbox projection of a remote message to an online and an offline
+  account, and nothing kept for the remote account;
 - `crates/waddle-server/tests/xep0359_s2s_account_stanza_ids_ws.rs`:
   stanza ids in the deployment's name removed from remote messages before
   delivery and before storage, and a remote sender's own id kept;
@@ -60,8 +73,10 @@ not run until verification (D9):
 - `crates/waddle-server/tests/xep0199_s2s_account_ping_ws.rs`,
   `xep0115_s2s_account_caps_ws.rs` and `xep0313_s2s_account_archive_ws.rs`:
   pings between clients, capabilities in probe answers and their queries,
-  and the recipient's archive, archive result wrappers removed from remote
-  messages;
+  and the recipient's archive (a message delivered, held by a detached
+  session or stored offline is archived once and only there, a chat
+  state alone is not, a retraction is honoured only for the sender's own
+  message), archive result wrappers removed from remote messages;
 - `crates/waddle-server/tests/xep0410_s2s_self_ping.rs` (edited): a
   remote room's self-ping reflection reaching the occupant once an account
   side is attached;
@@ -78,6 +93,13 @@ stanza on the pair) and inspects every stanza received since. The ping of
 the client's own server alone is no barrier for deliveries: the connection
 reads and answers it before it writes a delivery still waiting on its
 queue.
+
+The ingress acceptance of a remote sender's direct message is in
+`crates/waddle-server/src/server/routes/interpret/remote_direct_plan.rs`
+(its plan and the check that it acts on the recipient's account only),
+the account-target arm of `ingress/principal.rs` and
+`ingress_uow/remote_recipients.rs` (the recipient and the ledger read in
+the acceptance transaction), and `receive_direct` in `s2s_accounts.rs`.
 
 The implementation is the router's account path in
 `crates/waddle-server/src/s2s/route/` (`accounts.rs`, `router/accounts.rs`
@@ -121,7 +143,7 @@ rows applies.
 | Account bare JID | IQ `result`/`error` | Dropped | Reviewed |
 | Account full JID | IQ `get`/`set` | Router, correlation table, local delivery to that resource | Reviewed: only for a requester the account shares presence with, or a remote room the resource occupies |
 | Account full JID | IQ `result`/`error` | Completes the resource's own request (routing design) | Unchanged |
-| Account bare or full JID | Message `chat`, `normal` | Account side, then the recipient pass of the selected resource (blocking, XEP-0359 id, XEP-0313 archive, inbox, XEP-0280 received carbons); a detached resource's session holds it raw and runs that pass when it resumes; with no resource, the account's offline store | Reviewed |
+| Account bare or full JID | Message `chat`, `normal` | Account side, then the ingress acceptance of the recipient's half of a direct message: the recipient pass of the selected resource (blocking, XEP-0359 id, XEP-0313 archive, inbox, XEP-0280 received carbons), then its delivery, a detached session's queue or, with no resource, the account's offline store and the push notification of a local direct message. From a sender without a resource: the recipient pass of the resource's connection, or the offline store holding the message whole | Reviewed |
 | Account bare or full JID | Message `headline` without an event | Account side, then the recipient pass | Reviewed |
 | Account bare or full JID | Message carrying a XEP-0060 event | Account side, gated before anything else (an `error` included) on a subscription the account made to every node it names | Reviewed |
 | Account bare or full JID | Message `groupchat` | Account side: `service-unavailable`, whatever the account | Reviewed (room traffic is decided first, by the outbound MUC rules) |
@@ -181,10 +203,22 @@ the protocols, not of this server:
 
 Existence is checked first on every path, against the account tables and
 the ledger of retired JIDs (`auth/retirement.rs`), before any roster row,
-blocking list or resource is read. Retirement does not end an account's
-open streams or remove every row keyed by its JID (host-grant design,
+blocking list or resource is read. Both checks find an account by the
+same lookup keys (`auth::directory::account_lookup_keys`: the localpart
+against `users.localpart_key`, the bare JID against
+`native_users.jid_key`), so they agree on every row. The ingress
+acceptance of a direct message checks it again in its transaction, with
+the account row locked `FOR KEY SHARE` against a concurrent retirement's
+delete, and refuses a retired or nonexistent recipient, or one at a domain
+the deployment does not serve, as it refuses a sender whose domain is no
+longer admitted: nothing is committed and nothing answers the sender. The
+domain's admission is checked there against the S2S snapshot captured
+when the submission was built, before the commit, not one read in the
+transaction. Retirement does not
+remove every row keyed by its JID, and the account's open streams end
+only once each replica takes the retirement up (host-grant design,
 "Non-reuse of retired account JIDs"); a retired JID is nonexistent here
-even while such rows or a resource remain. Retirement does remove, in its
+from the ledger's commit on, even while such rows or a resource remain. Retirement does remove, in its
 transaction, the rows of migrations 2010 and 2011 for the account: its
 recorded subscription requests, its remote PubSub subscription records
 and the offline admissions of strangers' messages.
@@ -200,13 +234,13 @@ and the offline admissions of strangers' messages.
   yet, as local delivery to the bare JID does (RFC 6121 §8.5.2.1 speaks of
   an available or connected resource). A resource that is available with
   a negative priority never receives one (§8.5.2.1.1).
-  Delivering to one resource lets its recipient pass archive the message
-  once, project it into the inbox once and copy it as a `<received/>`
-  carbon to the account's other Carbons-enabled resources (XEP-0280 §6),
-  which delivering to several would each do again. With no live
-  candidate, a detached stream-management resource that is available is
-  used; its session holds the message raw until it resumes, and the
-  recipient pass (archive, inbox, carbons) runs on its replay. A `headline`
+  The recipient pass of the selected resource runs once, in the plan of
+  the message's ingress acceptance: it archives the message once,
+  projects it into the inbox once and copies it as a `<received/>` carbon
+  to the account's other Carbons-enabled resources (XEP-0280 §6). With no
+  live candidate, a detached stream-management resource that is available
+  is used; its session holds the processed message, archived at the
+  acceptance, until it resumes. A `headline`
   goes to every available resource with non-negative priority (§8.5.2.1.1)
   and is not archived or projected.
 - **Full JID.** A message to a full JID that is bound, live or detached,
@@ -230,10 +264,13 @@ and the offline admissions of strangers' messages.
   admitted, so that one the store would not keep never uses a stranger's
   share. A message beyond a bound or the quota, or one the store refuses,
   is dropped and nothing answers it. The
-  stored message is a row of its own (`Transient`): it is not written to
-  the account's archive or inbox and raises no push notification, because
-  those are written only through the ingress authority's commit, which has
-  no producer for a remote sender in this slice (follow-ups).
+  message is archived in the account's archive, projected into its inbox,
+  and stored as a row that refers to the archived copy, with the push
+  notification a local direct message to an offline account raises
+  (XEP-0357 settings and the account's do-not-disturb state apply; the
+  notification carries what a local direct message's carries). A message
+  from a sender without a resource is stored whole (`Transient`), without
+  archive, inbox or push: the ingress acceptance names a full sender.
 - **Session expiry.** A detached stream-management session that holds a
   remote sender's message when its resume window closes hands it to the
   alternate resources and then the offline store as for any sender
@@ -272,10 +309,22 @@ and the offline admissions of strangers' messages.
   dropped.
 - **Payloads.** Before delivery or storage the server removes from a
   remote message the payloads only this server may originate for a local
-  account: the Waddle inbox elements (`urn:xmpp:inbox:1` and the Waddle
-  inbox namespace), the DM pin marker (`urn:waddle:pin:0`), the XEP-0280
+  account (`crate::s2s::remote_content`, the one function every path from
+  another server to a local account uses: this account side, a remote
+  room's traffic and remote PubSub event notifications): every payload in
+  a namespace this deployment defines (`urn:waddle:*`, the Waddle inbox
+  element, the DM pin marker and the extension framework's envelope
+  among them), the inbox elements of `urn:xmpp:inbox:1`, the XEP-0280
   `<sent/>` and `<received/>` wrappers of carbon copies and the XEP-0313
-  `<result/>` wrapper of archive results. A carbon or an archive result
+  `<result/>` wrapper of archive results. What the message keeps is
+  cleaned too, at every depth: the items of an event notification, and
+  anything a payload nests, lose a link card, a link-preview request, an
+  inbox element, a pin marker, an extension envelope, a carbon or archive
+  wrapper and a `<stanza-id/>` this deployment could have assigned. A
+  message nested in what is kept (one a XEP-0297 `<forwarded/>` carries)
+  is read by a client as a message in its own right and loses every
+  `urn:waddle:*` payload directly inside it as well; a deeper
+  `urn:waddle:*` payload, such as an event item's own, is kept. A carbon or an archive result
   names the account's own traffic; one from a remote sender is a forgery
   a client could take for its own (XEP-0280 §11). Every XEP-0359
   `<stanza-id/>` this deployment could have assigned is removed too: one
@@ -285,7 +334,109 @@ and the offline admissions of strangers' messages.
   set (XEP-0359 §3). It is removed here, before delivery and before
   storage, rather than left to the recipient pass, which replaces only an
   id in the name it stamps itself. One a remote entity assigned in its own
-  name is left, as a routing entity leaves it (§3).
+  name is left, as a routing entity leaves it (§3). XEP-0511 link
+  metadata and Waddle link-preview requests (`urn:waddle:link-preview:0`)
+  are removed as well, as they are from a local client's message before
+  this server stamps its own card: a client trusts a card as the server's
+  (it plays an inline video only from a URL a card names). No card is
+  stamped for a remote sender, whose request token this server could not
+  have issued.
+
+### Accepting a remote sender's direct message
+
+A `chat` or `normal` message from a sender with a resource is accepted
+through the ingress authority as the recipient's half of a local direct
+message, so that the recipient's archive, inbox, push notifications and
+carbons treat it as they treat a local one (owner decision, 2026-11-17).
+The sender's half (its archive, its inbox, its sent carbons, its blocking
+list, the early handlers of a local session) is its own server's: nothing
+is kept here for the remote account, which appears in the recipient's
+inbox and archive only as the conversation's peer.
+
+- **Plan.** The account side selects the resource as above and plans the
+  route to it, or to the bare JID with none, through the planner local
+  direct messages use (`plan_remote_direct_message`): the recipient pass
+  of the selected resource, the received carbons of the others, the
+  delivery or the detached session's queue, or the offline row and its
+  push notification. The message keeps its own `to`. Its digest names
+  the recipient's archive as the one authority of this deployment that
+  stamps it. A selected resource is routed by its full JID. With no live
+  resource and no detached session that was available, the plan routes
+  to the bare JID and selects as for a local sender: a detached session
+  that was unavailable or had a negative priority holds the message too,
+  and only an account with no session at all stores it offline.
+- **Only the recipient's account.** The plan is committed only when every
+  effect and every recorded intent acts on the recipient's account: its
+  archive and inbox, its resources, its detached sessions, its offline
+  store, its notification and link-preview state, and the state of its
+  own conversation with the sender (the call state of the pair, with the
+  recipient's projection only; the removal from its sessions' replay of
+  a message the sender wrote). The classifier matches every intent and
+  every effect exhaustively, so a new kind refuses nothing silently: it
+  does not compile until it is classified. A plan that fails, refuses the message, answers
+  its sender (an error reply, the bounce of a blocking list read in the
+  recipient pass, the RFC 6121 §8.5.1 bounce of an account that vanished
+  meanwhile) or acts on anybody else is not committed, and nothing
+  answers the sender. A plan with nothing to do (a chat state alone to an
+  account with no resource) is not committed either. Chat states and
+  markers follow the classifier of local direct messages: they reach a
+  live resource and are neither archived, projected nor stored.
+- **Bounds.** A stranger's message whose plan hands it to a detached
+  session or the offline store is admitted within the strangers' bounds
+  after the plan is classified and before it is committed, as before; one
+  beyond them, or one the store would not keep, is dropped unanswered.
+  The plan decides, not the resource selected before it: a resource that
+  left meanwhile sends the message to the store, within the bounds.
+- **Retractions and corrections.** The recipient pass replaces the
+  message a XEP-0424 retraction names in the recipient's archive with a
+  tombstone, and keys a XEP-0308 correction's state under the message it
+  replaces; for a local sender its own server checks first that the
+  sender wrote it (XEP-0424 0.5.0, Business Rules: a retraction is
+  processed only when it and the original message come from the same
+  bare JID; XEP-0308 1.2.1, Business Rules: in a direct conversation the
+  correction's bare JID must match the original's). For a remote sender
+  the account side checks it,
+  by the lookup the tombstone resolves its target with: a retraction or
+  correction naming an archived message another sender wrote, or whose
+  target cannot be read, is dropped unanswered. The link-preview
+  references a retraction clears are the resolved row's alone, never
+  those another sender's message keeps under the same wire id, and a
+  correction's references are keyed under the replaced message only when
+  the corrector wrote it.
+- **Call threads (XEP-0353).** A remote sender's `propose` records a
+  pending call offer only within bounds: eight pending offers per remote
+  initiator; 32 per local account from remote initiators together, and
+  16 of those from the initiators of any one remote domain; and 64 from
+  the initiators of one remote domain to all accounts together. The
+  process's table of pending offers is shared by every account and, once
+  full, prunes the oldest offer of the initiator that holds the most, so
+  a stranger's flood crowds out only its own; the bounds per domain keep
+  a server that mints strangers from crowding out the callers of other
+  servers, which that pruning, fair between initiators, does not. A `finish` ends
+  the call thread in the local account's inbox only; the remote peer's
+  inbox is its own server's. An offer beyond the bounds leaves the
+  message as it is: it is archived and delivered, and only its call
+  thread is not projected.
+- **Acceptance (D1 at the effect).** The acceptance arm of the remote
+  principal for an account target checks, in the acceptance transaction,
+  the sender's domain against the S2S admission policy the replica ran
+  when it built the submission (captured then, before the commit; the
+  transaction reads no newer snapshot), and reads that the recipient is
+  an account at a served domain (`users` by its lookup key, read `FOR KEY
+  SHARE` on PostgreSQL, or `native_users`) whose JID the ledger of retired
+  JIDs does not hold. A refusal commits nothing and is the same failed
+  assertion whatever was refused.
+- **Receipt.** The acceptance has no stream-management position and no
+  socket to answer: the frames its execution produces for the sender are
+  never sent, and their obligations are recorded as answered. The
+  router's queue was the only custody of the stanza; once the acceptance
+  is committed its effects belong to the ingress authority, which
+  recovers an effect that did not finish.
+- **A sender without a resource** has no place in an acceptance, which
+  names a full sender. Its message is delivered through the recipient's
+  connection, whose recipient pass archives it, projects it into the
+  inbox and copies it, and with no resource it is stored whole, without
+  archive, inbox or push.
 
 ### Presence (RFC 6121 §4, §8.5.2.1.2, §8.5.3.1)
 
@@ -632,7 +783,7 @@ store. This is the slice's rollout part (G24).
 | G18-2 | No enumeration: for a non-contact, every class has one remote-visible result whatever the account's state (table above). Existence, retirement included, is checked first. | RFC 6121 §8.5.1 error for nonexistent accounts and offline storage for existing ones (rejected: distinguishes them). |
 | G18-3 | IQ requests to the bare JID are answered `service-unavailable`; no namespace is answered on an account's behalf for remote requesters. | Enabling vCard, PEP and account discovery (deferred: each needs its own access review). |
 | G18-4 | IQ requests to a full JID reach the resource for a requester with `from` or `both`, or a remote room the resource occupies, registered as `inbound` correlation rows. | Directed-presence admission (not tracked). |
-| G18-5 | Messages go to one most available resource; with none, the message is stored offline, from a contact and a stranger alike, and nothing ever answers a remote sender's message (owner decision, 2026-11-16). Strangers are held to bounds per sender, sender domain and account, at a detached session as at the store; beyond a bound or the quota a message is dropped silently. The minimal producer writes a `Transient` offline row; archive, inbox and push wait for the remote ingress producer. | `service-unavailable` to contacts and dropping strangers' messages (replaced: a contact could tell an offline account from an online one); erroring to everybody (rejected: presence leak). |
+| G18-5 | Messages go to one most available resource; with none, the message is stored offline, from a contact and a stranger alike, and nothing ever answers a remote sender's message (owner decision, 2026-11-16). Strangers are held to bounds per sender, sender domain and account, at a detached session as at the store; beyond a bound or the quota a message is dropped silently. A message from a sender with a resource is accepted through the ingress authority (G18-14). | `service-unavailable` to contacts and dropping strangers' messages (replaced: a contact could tell an offline account from an online one); erroring to everybody (rejected: presence leak). |
 | G18-6 | Broadcast presence is accepted only from contacts the account is subscribed to; probes are answered only for contacts with `from` or `both`, and otherwise ignored. | §8.5.2.1.2 delivery from anyone; `unsubscribed` to every unauthorised prober. |
 | G18-7 | Subscriptions: the account's own roster half only; inbound requests recorded durably, bounded, delivered at each new session; pre-approval supported. | The client path's in-memory pending queue (rejected: per replica, lost on restart, unbounded across requesters). |
 | G18-8 | Event notifications only for a node the account subscribed to, recorded when the request leaves, or from the PEP service of a contact the account is subscribed to. | Recording on the service's result (rejected: the `<subscription/>` element is optional and pending subscriptions would be missed). |
@@ -640,14 +791,60 @@ store. This is the slice's rollout part (G24).
 | G18-10 | Remote contacts stay in rosters with S2S off, dormant; the roster set may still refuse a new one while it is off (owner decision, 2026-11-16). | Pruning them at every start with S2S off (replaced: a deployment that turns S2S off for a while lost its users' remote contacts). |
 | G18-11 | No path answers a remote sender's message: the account side, the expiry of a detached session and the ingress quota bounce all drop instead of bouncing a sender at a domain the deployment does not serve. | Bouncing on quota as for local senders (rejected: tells the sender the account is offline). |
 | G18-12 | The router abandons account work at its deadline and the account side then applies nothing more; roster read-modify-write runs under a per-account lock; a change is announced only once stored. | Letting abandoned work run to its end (replaced: its effects could land after the sender's next stanza's). |
-| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check; retirement removes the account's rows of migrations 2010 and 2011. | Ending the stream at retirement (out of scope: retirement does not end streams); refusing account traffic only (replaced: requests and room traffic still left). |
+| G18-14 | A remote sender's `chat` or `normal` message is accepted through the ingress authority as the recipient's half of a local direct message: the recipient's archive, inbox, received carbons, offline row and push notification, nothing of the sender's; an account-target acceptance arm checks D1 against the snapshot captured when the submission was built, and reads the recipient's existence, the ledger included, in the transaction; a plan that would answer the sender or act beyond the recipient's account is not committed; the acceptance's frames are never sent (owner decision, 2026-11-17). | A `Transient` offline row outside the ingress commit, without archive, inbox or push (replaced); `IngressPrincipal::Remote`'s room arm (rejected: it admits only a room's bare JID, decided on the room's witness). |
+| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check, until the replica that holds it ends it; retirement removes the account's rows of migrations 2010 and 2011. | Relying on the end of the stream alone (rejected: each replica ends it only when it takes the retirement up, and the router's check covers the time before); refusing account traffic only (replaced: requests and room traffic still left). |
 
 ## Restrictions and risks
 
-- **Offline messages from remote senders are stored outside the archive.**
-  They reach the account's next session but are not in its archive or
-  inbox and raise no push notification; a stranger's message beyond its
-  bounds, or any beyond the store's quota, is lost without notice.
+- **A message is lost without notice** when it is a stranger's beyond its
+  bounds; one beyond the offline store's quota is still in the account's
+  archive and inbox, as for a local sender, and its sender is not told.
+- **A remote message whose acceptance does not commit is lost.** An
+  acceptance that times out, exhausts its retries or cannot tell whether
+  it committed is answered nothing and leaves nothing to retry: S2S has
+  no retransmission of a stanza the receiving server took, so neither the
+  sender nor the recipient learns of it (owner decision, accepted). One
+  that committed after all is the ingress authority's recovery's to
+  finish. `waddle.s2s.account_traffic.direct_failed` counts them, apart
+  from the rule refusals `direct_refused` counts.
+- **The stream does not deduplicate.** A remote server that sends a
+  stanza again (after a stream failure, for example) has it accepted
+  again unless the ingress authority finds it is the same message: its
+  alias of sender, recipient and XEP-0359 `<origin-id/>` resolves a
+  message resent with the same origin-id to the earlier acceptance, which
+  commits nothing new. A message without an origin-id is accepted again,
+  and archived and delivered twice.
+- **Messages from senders without a resource** keep the earlier producer:
+  delivered through the recipient's connection and, with no resource,
+  stored whole outside the archive, without inbox or push.
+- **A de-admitted domain's archived messages stay in the archive.** The
+  purge before a flush deletes the offline row of a sender whose domain
+  is no longer admitted, so it is not delivered, but the copy the
+  acceptance archived stays in the account's archive and inbox. The purge
+  reads the archived message of every row that refers to the archive, one
+  read per row at each flush while S2S is enabled, a local sender's row
+  included: an offline row that refers to the archive names no sender,
+  and only the read tells a remote sender's row from a local one. A row
+  that holds its message whole is classified without a read.
+- **A remote message's rich payloads are archived as they come**
+  (corrections, replies, reactions), as a local one's are. Nothing is
+  fetched for it: a XEP-0511 link card or a link-preview request it
+  carries is removed before anything else, since a client trusts a card
+  as this server's, and no card is stamped in its place, so a remote
+  sender's message reaches the recipient without a preview. No
+  link-preview reference is recorded or cleared for it: it never names
+  this deployment's upload slots, and its wire ids, which it chooses,
+  never name another message's references. A retraction's and a
+  correction's target is checked for a remote sender: one that names a
+  message of the recipient's archive another sender wrote is dropped
+  unanswered. A reply's or a reaction's target is not checked.
+- **A stranger's messages to a live resource are unbounded** beyond the
+  router's queues: each is archived and projected, as it was by the
+  recipient pass of the resource's connection.
+- **A stranger's share is spent before the acceptance.** It is counted
+  once the plan is classified; an acceptance that then refuses the
+  message (the account retired or the domain dropped meanwhile) or an
+  offline store over its quota at execution leaves it spent.
 - **Strangers' bounds are a rate.** They count admissions of the last
   day, not the messages still stored; the store's quota bounds those.
 - **A detached session's queue has no bound per sender.** Strangers
@@ -662,6 +859,10 @@ store. This is the slice's rollout part (G24).
 - **Outbound messages are not archived** in the sender's archive or
   projected into the sender's inbox; the sender's other devices see them
   only as carbons while online.
+- **Carbons to detached sessions.** A message to a live resource is copied
+  as a received carbon to the account's Carbons-enabled detached
+  sessions as well, as for a local sender; such a copy is not held to the
+  strangers' bounds.
 - **The account lock is per replica.** Inbound and outbound subscription
   handling for one account and the client's own roster set, on two
   replicas, can still interleave their read-modify-write of one item; the
@@ -701,28 +902,14 @@ store. This is the slice's rollout part (G24).
 
 ## Follow-ups
 
-- A remote ingress producer for direct messages, so that messages from
-  remote senders are stored offline through the ingress commit, with the
-  recipient's archive, inbox and push notification, and outbound messages
-  archived and projected, with S2S egress recorded as transport custody
-  only. Inbound MUC's `IngressPrincipal::Remote` does not serve it as it
-  stands, so the account side's `Transient` producer (`store_offline` in
-  `s2s_accounts.rs`) stays: the principal's acceptance
-  (`ingress::principal::assert_admission`) admits only a message to a
-  room's bare JID, decided on the room's host-grant witness, and its one
-  plan (`plan_remote_occupant_groupchat`) is a room's acceptance, in which
-  the room is the only authority that stamps the message. A direct
-  message needs a plan of its own in which the recipient account is that
-  authority and no archive of the sender's is written (it is kept by the
-  sender's server), an acceptance arm for an account target that decides
-  the D1 admission and the strangers' bounds inside the commit, and the
-  ingress receipt for a remote sender, none of which exists yet. When it
-  does, the producer keeps the account side's rules: the strangers'
-  bounds, the silent drop, and no bounce to a remote sender
-  (`sm_promotion::is_remote_sender`, which already guards the ingress
-  quota bounce in `offline_delivery.rs`). A message a live resource takes
-  already passes the recipient pass, which archives it and projects it
-  into the recipient's inbox; only a stored one misses those.
+- Outbound messages to remote JIDs archived in the sender's archive and
+  projected into its inbox, with S2S egress recorded as transport custody
+  only.
+- The strangers' bounds decided inside the acceptance transaction, with
+  the admission row committed with the message, instead of before it; and
+  a bound on a stranger's messages to live resources.
+- A sender without a resource accepted through the ingress authority,
+  once an acceptance can name a bare sender.
 - Remote access to vCard-temp, PEP items, account discovery and last
   activity, each with its own review, and PEP notifications from local
   accounts to remote contacts subscribed to them.
@@ -732,6 +919,13 @@ store. This is the slice's rollout part (G24).
 
 ## Decisions
 
+- **Remote direct messages through the ingress authority (owner,
+  2026-11-17).** Remote direct messages get the same archive (XEP-0313,
+  the recipient's archive only), inbox, push and carbons treatment as
+  local direct messages; the strangers' bounds, the silent drop and the
+  guard against answering a remote sender stay; nothing is kept for the
+  remote account beyond its place as the recipient's conversation peer
+  (G18-14).
 - **Offline storage for remote senders (owner, 2026-11-16).** Messages from
   remote senders to an offline account are stored, from contacts and
   strangers alike, with no difference observable to the sender and no
@@ -746,10 +940,18 @@ store. This is the slice's rollout part (G24).
   enumeration").
 - **A retired account's still-open session** sends nothing to remote
   JIDs, refused at the router for every stanza it sends and failing closed
-  (G18-13). A local room's stanzas for remote occupants leave from the
-  room's address, through the seats of inbound MUC, not through that
-  check: a retired account's messages never reach them, since retiring
-  the account deletes its sessions with it and the room's ingress then
-  refuses the session's principal, but its presence in a local room it
-  still occupies, which the room handles without the ingress commit,
-  reaches the room's remote occupants until its session ends.
+  (G18-13), until the replica that holds it ends it, which each serving
+  replica does within a tick of the retirement request (the retirement
+  runbook, `docs/operations/account-retirement.md`). A local room's
+  stanzas for remote occupants leave from the room's address, through the
+  seats of inbound MUC, not through that check: a retired account's
+  messages never reach them, since retiring the account deletes its
+  sessions with it and the room's ingress then refuses the session's
+  principal, but its presence in a local room it still occupies, which
+  the room handles without the ingress commit, reaches the room's remote
+  occupants until its session ends. Ending the session leaves its rooms:
+  the room's remote occupants see it leave, and the remote rooms it
+  joined are left by the router's own presence. Its remote contacts are
+  sent no final `unavailable`, since the router refuses what the retired
+  account sends, and keep its last presence: a probe of a retired account
+  is not answered (no enumeration).

@@ -113,6 +113,7 @@ impl RecoveryWork {
                 .served_domains(self.state.deps.auth_state.xmpp_domain.as_str())
                 .as_ref(),
             storage,
+            &protocol.mam_storage,
             &self.recipient,
         )
         .await;
