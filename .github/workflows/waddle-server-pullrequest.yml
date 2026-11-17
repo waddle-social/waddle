@@ -10,6 +10,8 @@ on:
     - .github/workflows/hestia-cache-gc.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
+    - .github/workflows/waddle-ci-runner-benchmark.yml
+    - .github/workflows/waddle-ci-runner-benchmark.yml/**
     - .github/workflows/waddle-integration.yml
     - .github/workflows/waddle-integration.yml/**
     - .github/workflows/waddle-server-authzidcodec.yml
@@ -50,6 +52,7 @@ on:
     - ci/contributors/cuenv.cue/**
     - ci/contributors/nix.cue
     - ci/contributors/nix.cue/**
+    - ci/runner-benchmark/**
     - ci/rust-tests/**
     - cue.mod/**
     - cue.mod/module.cue
@@ -87,6 +90,8 @@ on:
     - scripts/integration-ci.ts/**
     - scripts/sync-cache-benchmark.sh
     - scripts/sync-cache-benchmark.sh/**
+    - scripts/sync-runner-benchmark.sh
+    - scripts/sync-runner-benchmark.sh/**
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
     - scripts/test-ci-cache-benchmark.py

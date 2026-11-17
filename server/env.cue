@@ -555,6 +555,9 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					if ! bash scripts/sync-runner-benchmark.sh --check; then
+					  overall_status=1
+					fi
 					if ! bun scripts/integration-ci.ts --check; then
 					  overall_status=1
 					fi
@@ -608,6 +611,9 @@ schema.#Project & {
 					"scripts/sync-cache-benchmark.sh",
 					"scripts/test-ci-cache-benchmark.py",
 					".github/workflows/waddle-ci-cache-benchmark.yml",
+					"ci/runner-benchmark/**",
+					"scripts/sync-runner-benchmark.sh",
+					".github/workflows/waddle-ci-runner-benchmark.yml",
 					".github/workflows/waddle-server-authzidcodec.yml",
 					".github/workflows/waddle-server-default.yml",
 					".github/workflows/waddle-server-federationgrantfence.yml",

@@ -1,0 +1,148 @@
+# Generated from ci/runner-benchmark/workflow.cue; do not edit manually.
+# Regenerate with: bash scripts/sync-runner-benchmark.sh
+
+name: waddle-ci-runner-benchmark
+"on":
+  push:
+    branches:
+      - ci-benchmark/**
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: Comma-separated variants to run; empty runs all
+        type: string
+        default: ""
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions: {}
+jobs:
+  contracts:
+    name: runner-benchmark/contracts
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Validate measurement contracts
+        run: python3 scripts/test-ci-machine-usage.py
+      - name: Select variants
+        id: select
+        shell: bash
+        env:
+          ALL_VARIANTS: '[{"variant":"32x64","lane":"32x64","vcpu":32,"memory":64},{"variant":"32x64-j16","lane":"32x64-j16","vcpu":32,"memory":64},{"variant":"16x32","lane":"16x32","vcpu":16,"memory":32},{"variant":"16x32-j8","lane":"16x32-j8","vcpu":16,"memory":32},{"variant":"8x32","lane":"8x32","vcpu":8,"memory":32}]'
+          SELECTION: ${{ inputs.variants && format('variants={0}', inputs.variants) || github.event.head_commit.message }}
+        run: |-
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, re
+          variants = json.loads(os.environ["ALL_VARIANTS"])
+          names = [item["variant"] for item in variants]
+          chosen = re.search(r"variants=([0-9a-z,-]+)", os.environ.get("SELECTION", ""))
+          wanted = chosen.group(1).split(",") if chosen else names
+          unknown = sorted(set(wanted) - set(names))
+          if unknown:
+              raise SystemExit(f"unknown variants: {unknown}")
+          print("matrix=" + json.dumps({"include": [item for item in variants if item["variant"] in wanted]}))
+          PY
+  lane:
+    name: runner-benchmark/${{ matrix.variant }}
+    needs:
+      - contracts
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-${{ matrix.vcpu }}x${{ matrix.memory }}-with-features
+      - namespace-features:container.privileged=true
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.contracts.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - name: Start machine usage sampler
+        shell: bash
+        run: nohup python3 scripts/ci-machine-usage.py sample --output "$RUNNER_TEMP/samples.jsonl" >/dev/null 2>&1 &
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          upstream-cache-filter: "true"
+          drain-timeout: "900"
+      - name: Compile and run four isolated test shards
+        id: lane
+        shell: bash
+        working-directory: server
+        env:
+          WADDLE_NEXTEST_BENCHMARK_LANE: ${{ matrix.lane }}
+        run: |-
+          set -euo pipefail
+          started=$(date +%s)
+          status=0
+          timeout --kill-after=2m 55m bash scripts/run-nextest-shards.sh 2>&1 |
+            python3 ../scripts/ci-machine-usage.py tee --log "$RUNNER_TEMP/lane.log" || status=$?
+          echo "$(($(date +%s) - started))" > "$RUNNER_TEMP/lane-seconds"
+          exit "$status"
+      - name: Report machine usage
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+          VCPU: ${{ matrix.vcpu }}
+          MEMORY: ${{ matrix.memory }}
+          OUTCOME: ${{ steps.lane.outcome }}
+        run: |-
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/report"
+          touch "$RUNNER_TEMP/samples.jsonl" "$RUNNER_TEMP/lane.log"
+          python3 scripts/ci-machine-usage.py report --samples "$RUNNER_TEMP/samples.jsonl" --log "$RUNNER_TEMP/lane.log" \
+            --variant "$VARIANT" --vcpu "$VCPU" --memory-gib "$MEMORY" --outcome "${OUTCOME:-skipped}" \
+            --lane-seconds "$(cat "$RUNNER_TEMP/lane-seconds" 2>/dev/null || echo 0)" \
+            | tee "$RUNNER_TEMP/report/$VARIANT.json"
+          grep -h 'WADDLE_CI_METRIC' "$RUNNER_TEMP/lane.log" | grep -v 'phase=linker_verified' \
+            > "$RUNNER_TEMP/report/$VARIANT.metrics.txt" || true
+          cp "$RUNNER_TEMP/samples.jsonl" "$RUNNER_TEMP/report/$VARIANT.samples.jsonl"
+          python3 scripts/ci-machine-usage.py summarize "$RUNNER_TEMP/report" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: runner-benchmark-${{ matrix.variant }}
+          path: ${{ runner.temp }}/report
+          if-no-files-found: error
+  summary:
+    name: runner-benchmark/summary
+    needs:
+      - lane
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Download measurements
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: runner-benchmark-*
+          path: measurements
+          merge-multiple: true
+      - name: Compare runner shapes
+        run: python3 scripts/ci-machine-usage.py summarize measurements | tee -a "$GITHUB_STEP_SUMMARY"
