@@ -49,7 +49,7 @@
 //! is unreadable would refuse the unmanaged rooms too.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
 use jid::BareJid;
@@ -301,7 +301,7 @@ impl EnrolledScopes {
         *self
             .last_load
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Wait until the first load has succeeded, for at most `limit`.
@@ -453,7 +453,9 @@ async fn load_into(
 ) -> Result<(), HostGrantError> {
     let started = LoadStart::now();
     let read = store.enrolled_set().await?;
-    let mut last = last_load.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut last = last_load
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     if last.is_some_and(|installed| installed.instant > started.instant) {
         return Ok(());
     }
@@ -521,7 +523,7 @@ async fn refresh_until_dropped(
         // nothing; `waddle.host_grant.enrolled_set.load_started` covers it.
         let age = last_load
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .map(|start| start.instant.elapsed());
         if let Some(age) = age {
             waddle_xmpp::gauge_record!(

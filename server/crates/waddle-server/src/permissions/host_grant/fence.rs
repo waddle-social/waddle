@@ -54,7 +54,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, PoisonError, RwLock, Weak};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use super::boot_clock::{suspend_counted, BootInstant};
@@ -506,12 +506,19 @@ struct Shared {
 }
 
 impl Shared {
+    // A poisoned fence state may hold a half-applied transition, and a
+    // managed-room decision made from it could outlive a revocation: the
+    // process stops instead of reading it.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, FenceState> {
-        self.state.read().unwrap_or_else(PoisonError::into_inner)
+        self.state
+            .read()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, FenceState> {
-        self.state.write().unwrap_or_else(PoisonError::into_inner)
+        self.state
+            .write()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Whether this replica decides for managed rooms at all: its bound
@@ -613,7 +620,7 @@ impl Shared {
         let held = self
             .held_renewal
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .take();
         if let Some(held) = held {
             let _ = held.await;
@@ -747,12 +754,13 @@ impl Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        // A poisoned state is not read: its lease is left to lapse at its
+        // expiry, as a stopped replica's does.
         let lease = self
             .state
             .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .lease
-            .take();
+            .ok()
+            .and_then(|state| state.lease.take());
         let (Some(lease), Ok(runtime)) = (lease, tokio::runtime::Handle::try_current()) else {
             return;
         };
@@ -939,7 +947,7 @@ impl ReplicaFence {
             .shared
             .held_renewal
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(held);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(held);
         release
     }
 }

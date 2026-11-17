@@ -351,7 +351,7 @@ impl FenceMemory {
     pub fn refused_rooms(&self) -> Option<Arc<BTreeSet<String>>> {
         self.refused_rooms
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone()
     }
 
@@ -359,7 +359,7 @@ impl FenceMemory {
         *self
             .refused_rooms
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(rooms));
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(Arc::new(rooms));
     }
 
     /// The regression this replica latched, if any.
@@ -367,14 +367,14 @@ impl FenceMemory {
         *self
             .latch
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn set_latch(&self, latch: Option<PositionLatch>) {
         *self
             .latch
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = latch;
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = latch;
     }
 }
 

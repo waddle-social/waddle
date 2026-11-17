@@ -110,11 +110,11 @@ impl Shared {
     }
 
     fn lock_open(&self) -> std::sync::MutexGuard<'_, bool> {
-        // A bool is always usable, so a poisoned lock is too.
-        match self.open.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // Nothing fails while the lock is held; a poisoned lock is not read
+        // past.
+        self.open
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Spawn `task` on the tracker unless shutdown has begun; `false` when

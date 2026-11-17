@@ -42,12 +42,11 @@ impl ConnectionAdmission {
     }
 
     fn lock(&self) -> MutexGuard<'_, Claim> {
-        // The value is replaced whole, so a poisoned lock holds a usable
-        // value.
-        match self.claim.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // The value is replaced whole and nothing fails while the lock is
+        // held; a poisoned lock is not read past.
+        self.claim
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// What the stream headers claimed so far.

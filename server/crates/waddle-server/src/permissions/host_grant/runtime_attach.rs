@@ -956,22 +956,25 @@ impl HostGrantAttachmentGate {
         }
     }
 
+    // A poisoned lock may hold a half-applied attachment state, and a
+    // decision made from it could admit what the authority refuses: the
+    // process stops instead of reading it.
     fn room_reads(&self) -> std::sync::MutexGuard<'_, HashMap<String, (bool, i64)>> {
         self.room_reads
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, GateInner> {
         self.inner
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, GateInner> {
         self.inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 }
 
