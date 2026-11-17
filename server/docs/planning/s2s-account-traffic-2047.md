@@ -314,7 +314,13 @@ and the offline admissions of strangers' messages.
   set (XEP-0359 §3). It is removed here, before delivery and before
   storage, rather than left to the recipient pass, which replaces only an
   id in the name it stamps itself. One a remote entity assigned in its own
-  name is left, as a routing entity leaves it (§3).
+  name is left, as a routing entity leaves it (§3). XEP-0511 link
+  metadata and Waddle link-preview requests (`urn:waddle:link-preview:0`)
+  are removed as well, as they are from a local client's message before
+  this server stamps its own card: a client trusts a card as the server's
+  (it plays an inline video only from a URL a card names). No card is
+  stamped for a remote sender, whose request token this server could not
+  have issued.
 
 ### Accepting a remote sender's direct message
 
@@ -753,11 +759,13 @@ store. This is the slice's rollout part (G24).
   acceptance archived stays in the account's archive and inbox. The purge
   reads the archived message of every row that refers to the archive, one
   read per row at each flush while S2S is enabled.
-- **The recipient pass trusts what a remote message carries** as it does a
-  local one's: link previews of the URLs in its body are fetched and
-  referenced for the recipient, and its rich payloads (corrections,
-  replies, reactions) are archived. Only a retraction's author is checked
-  for a remote sender.
+- **A remote message's rich payloads are archived as they come**
+  (corrections, replies, reactions), as a local one's are. Nothing is
+  fetched for it: a XEP-0511 link card or a link-preview request it
+  carries is removed before anything else, since a client trusts a card
+  as this server's, and no card is stamped in its place, so a remote
+  sender's message reaches the recipient without a preview. Only a
+  retraction's author is checked for a remote sender.
 - **A stranger's messages to a live resource are unbounded** beyond the
   router's queues: each is archived and projected, as it was by the
   recipient pass of the resource's connection.

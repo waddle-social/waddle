@@ -596,12 +596,20 @@ fn refuse_message(state: &WebSocketState, message: &Message) -> Vec<Stanza> {
 /// Remove from a remote message the payloads only this server originates
 /// for its own accounts: the inbox elements, the DM pin marker, the
 /// XEP-0280 `<received/>` and `<sent/>` wrappers of carbon copies and the
-/// XEP-0313 `<result/>` wrapper of archive results, and the stanza ids it
-/// could have assigned ([`strip_local_stanza_ids`]). A carbon or an archive
+/// XEP-0313 `<result/>` wrapper of archive results, the stanza ids it
+/// could have assigned ([`strip_local_stanza_ids`]), and the XEP-0511 link
+/// metadata and link-preview requests a local sender's message has
+/// stripped before this server stamps its own card. A carbon or an archive
 /// result names the account's own traffic; one from a remote sender is a
-/// forgery a client could take for its own (XEP-0280 §11).
+/// forgery a client could take for its own (XEP-0280 §11). A client trusts
+/// a link card as this server's (it promotes an inline video to a player
+/// only for a URL a card names), so a remote sender's card is removed as a
+/// local client's is, and no card is stamped in its place: this server
+/// resolves no preview for a remote sender.
 fn strip_private_payloads(message: &mut Message, served: Option<&ServedDomains>) {
     strip_local_stanza_ids(message, served);
+    waddle_xmpp::xep::strip_link_preview_requests(message);
+    waddle_xmpp::xep::strip_link_metadata(message);
     message.payloads.retain(|payload| {
         let namespace = payload.ns();
         namespace != NS_INBOX
