@@ -17,8 +17,9 @@ replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
 placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
-the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `0ee8556e2eea373a6d7820b525b96f3e2188e540` (see the last refresh below); the original
+the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
+through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
+`62c322f48601d00994d2fa6bc9ee85f7e3655782` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1398,6 +1399,38 @@ text, and no anchor's text changed.
   reduces what is sent; no grant decision changed. `parent-retract` moved
   with a comment.
 - The raw scan still holds 1639 records, each token's count unchanged.
+
+The selected evidence was refreshed a thirtieth time, through
+`62c322f48601d00994d2fa6bc9ee85f7e3655782`, after reviewing the delta of the reviewed files since the
+twenty-ninth refresh. Two reviewed files changed (the room host
+`s2s_rooms.rs` and the Spaces host `s2s_spaces.rs`), one file was added to
+the reviewed set (`handlers/iq/disco_items.rs`), four anchors were added,
+fifteen anchors moved without a change to their text, and no anchor's text
+changed.
+
+- The MUC service's `disco#items` (`s2s-room-listing` added) lists rooms to
+  a remote principal, and the `disco#items` of a Space node
+  (`s2s-space-children` added) lists the rooms the Space holds through the
+  Spaces host's existing child-room rule (`s2s-space-room-visible` moved).
+  Both read and write nothing else. The session handler `disco_items.rs`
+  now reads grants for listings: a room an enrolled scope manages is listed
+  by the MUC service only to a subject whose canonical grants allow `view`,
+  read by the channel binding the enrolled set named, with the request's
+  stream evidence for a remote principal (`hg-muc-listing` added), and a
+  Space node's listing for a session withholds such a room from any other
+  subject and refuses an enrolled Space node (`hg-space-children-listing`
+  added). No writer changed and no grant is issued; only what is disclosed
+  changed, from never listing a managed room to listing it where its own
+  `disco#info` already describes it. The moved anchors in the two hosts
+  (`s2s-room-host`, `s2s-room-archive`, `s2s-room-message`,
+  `s2s-room-federated`, `s2s-room-admin`, `s2s-room-owner`,
+  `s2s-room-placement`, `s2s-unseated-removal`, `s2s-space-host`,
+  `s2s-space-open`, `s2s-space-honoured`, `s2s-space-change`,
+  `s2s-space-notify` and `s2s-space-federated-setting`) moved with the
+  lines added above them.
+- The raw scan holds 1640 records: one more `space_enrolled`, the Space
+  node listing's refusal of an enrolled node in `disco_items.rs`; every
+  other token's count is unchanged.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
