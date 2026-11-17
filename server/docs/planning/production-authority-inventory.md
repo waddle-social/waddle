@@ -19,7 +19,7 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`1a0c240e12010553eb24db524c23b8631b6032af` (see the last refresh below); the original
+`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1691,6 +1691,14 @@ asker that waited for a read which ran out of another asker's time asks
 again. It decides each managed room as before. `hg-muc-listing` and
 `hg-space-children-listing` moved with the lines added above them, no
 anchor's text changed, and the raw scan still holds 1640 records.
+
+The selected evidence was refreshed a forty-third time, through
+`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, the merge of the forty-second refresh's change into the
+integration branch. The one reviewed file it changed
+(`handlers/iq/disco_items.rs`) is the same on both sides of the merge;
+`hg-muc-listing` and `hg-space-children-listing` moved as in the
+forty-second refresh, and the raw scan still holds 1643 records, each
+unchanged in content.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
