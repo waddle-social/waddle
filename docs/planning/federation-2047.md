@@ -110,7 +110,7 @@ otherwise.
 | W5d | P2 | Revocation: acknowledged fence; non-reuse of retired JIDs on Waddle homes; the operator procedure after a reported third-party reassignment (D8); the #2056 Space-fanout negative control becomes a passing fence test. Its focused set runs on completion (D9) | `permissions/`, Space fanout | W5c |
 | W5e | P2 | Effect-boundary admission for remote principals (G17): the admission witness binds the remote domain, its authentication strength, the current D1 admission decision (including a denylisted parent domain) and the D8 trusted-home status; work from a domain no longer admitted is rejected; privileged authority and room moderation are honored only for a trusted home on a `pkix` stream, and a grant that is not honored contributes nothing, including no member-level permission derived from it; host policy can require `pkix`; the trusted-home list from W4c's configuration feeds issuance, bootstrap, repair and admission | `permissions/`, admission witness | W5a, W5c |
 | W5r | P2 | Restore incarnation, host-grant B7 (G13): an authority-incarnation transition that survives PostgreSQL rollback, invalidation of old credentials and work, verified reconstruction before admission. Its rollout part of G24 is the restore runbook `docs/operations/authz-host-grant-restore.md` | `permissions/`, startup, new migration | W5b |
-| W6a | P3 | Inbound MUC: remote occupants join local rooms whose `federated` setting is on (XEP-0045; off for existing rooms and by default for new ones), presence and message fanout over S2S with the standard message extensions (XEP-0085, XEP-0115, XEP-0308, XEP-0333, XEP-0359, XEP-0424, XEP-0444, XEP-0461), host-authorized MAM (XEP-0313), disco#info, disco#items and ping for remote askers; the moderator role and room administration (`muc#admin`, `muc#owner`, XEP-0425) for remote occupants only as D8 allows; a request for a room another replica holds carried there with its stream evidence | MUC handlers, XEP-0045 and XEP-0313 paths, cluster relay | W5a, W5d, W5e |
+| W6a | P3 | Inbound MUC: remote occupants join local rooms whose `federated` setting is on (XEP-0045; off for existing rooms and by default for new ones), presence and message fanout over S2S with the standard message extensions (XEP-0085, XEP-0115, XEP-0308, XEP-0333, XEP-0359, XEP-0424, XEP-0444, XEP-0461), host-authorized MAM (XEP-0313), disco#info, disco#items and ping of the MUC service and its rooms for remote askers; the moderator role and room administration (`muc#admin`, `muc#owner`, XEP-0425) for remote occupants only as D8 allows; a request for a room another replica holds carried there with its stream evidence | MUC handlers, XEP-0045 and XEP-0313 paths, cluster relay | W5a, W5d, W5e |
 | W6b | P3 | Outbound MUC: local users join remote rooms through C2S-to-S2S presence; traffic from a joined remote room to the occupant's full JID is admitted, and a local account's messages and presence for a remote room it occupies or is joining are exempt from D7's outbound refusal; self-ping (XEP-0410); occupant cleanup on S2S loss | `route_to_connection`, presence routing | W5a |
 | W6c | P3 | Account traffic across S2S (D7, G18): inventory of every local-account handler a remote sender can reach; RFC 6121 server rules for remote messages, presence, subscription requests and probes, and IQs to accounts; PubSub event notifications from remote services to local accounts; local accounts' presence, direct messages and subscriptions to remote contacts; Carbons (XEP-0280) for those messages; replaces W5a's refusal for reviewed handlers and rewrites W5a's outbound refusal cases for the traffic it enables | presence, message, roster and IQ handlers | W5a, W5c, W5d, W5e |
 | W7a | P4 | Spaces over S2S: XEP-0503 0.3.0 PubSub on remote service JIDs; subscription is not a room grant; no invented inheritance; module header corrected to 0.3.0; the third-party XEP-0503 survey repeated before acceptance is fixed | `xep0503.rs`, PubSub service | W5c, W5d, W6a, W6c |
@@ -119,13 +119,14 @@ otherwise.
 | W10 | P5 | Harness: two native Waddle processes, `home-a.test` and `home-b.test`, with separate PostgreSQL, SpiceDB and secrets, each listing the other as a trusted home; the third-party moderation flows list the peer's domain as a trusted home, and the untrusted-home cases run with it unlisted; pinned Prosody (`prosody.test`) and ejabberd 25.08 or later (`ejabberd.test`, `s2s_use_starttls: required`) through Nix, with accounts for presence and direct-message flows, and ejabberd also clustered with `max_s2s_connections` above one, against Waddle's one stream per directional pair; the `.test` CA configured as each domain's private-CA profile, including serverAuth-only leaves; loopback configured endpoints; a stanza from each peer whose `to` domain is in mixed case, which Waddle accepts with the domain mapped to lowercase; records whether each peer sends a pre-TLS `from`, whether either sends whitespace before a stream header (which Waddle refuses), and ejabberd's effective STARTTLS setting | new `server/experiments/federation-interop/` (its own Cargo workspace), `flake.nix` | W4c; written during implementation, run in verification |
 | W11 | — | Capability advertisement (G21): add only what verification demonstrated, per client and per release; runtime advertisement, such as disco features, only in a deployment where S2S is enabled; delta review | `capabilities.toml`, disco | Verification and close-out review |
 | W12 | — | D1 default change from `allowlist` to `open` with a denylist, once G20's evidence has passed; delta review; #2047 does not close before it | `s2s/config.rs` | Verification and close-out review |
-| W13 | — | Rollout runbook (D11, G24): one runbook for merging every slice into main together, in the window the owner names when giving the explicit go-ahead: order, S2S left off, old-binary retirement, W1's empty-store cutover, W2's mixed-version routing, W3's client-state handling, W5i's existing-account handling, W5o's schema transition, and the migrations and startup checks of W5b–W5d and W5r; written as those slices land and reviewed in the close-out. At close-out, W13 also refreshes the status text of ADR-0020 and the design documents from the evidence log | new `docs/operations/federation-2047-rollout.md`; status sections of ADR-0020 and the design documents | W1, W2, W3, W5i, W5o, W5b, W5c, W5d, W5r |
+| W13 | — | Rollout runbook (D11, G24): one runbook for merging every slice into main together, in the window the owner names when giving the explicit go-ahead: order, S2S left off, old-binary retirement, W1's empty-store cutover, W2's mixed-version routing, W3's client-state handling, W5i's existing-account handling, W5o's schema transition, and the migrations and startup checks of W5b–W5d and W5r; written as those slices land and reviewed in the close-out. At close-out, W13 also refreshes the status text of ADR-0020 and the design documents from the evidence log | [`docs/operations/federation-2047-rollout.md`](../operations/federation-2047-rollout.md); status sections of ADR-0020 and the design documents | W1, W2, W3, W5i, W5o, W5b, W5c, W5d, W5r |
 
-The dependency graph is acyclic. Two chains meet at W5e. The grant-fence
-chain is W0 and W1, then W5i and W5o, then W5b, which also needs #2046's role
-and transaction cutover, then W5c and W5d. The transport chain is W1 and W5i,
-then W4b (beside W4a), W4c and W5a. W5e needs W5a and W5c; W6a and W6c need it
-and W5d. After them, W7a, W7b and W8 finish P3 and P4. W5d is on the
+The dependency graph is acyclic. The grant-fence chain is W0 and W1, then
+W5i and W5o, then W5b, which also needs #2046's role and transaction cutover,
+then W5c, then W5d. The transport chain is W1 and W5i, then W4b (beside W4a),
+W4c and W5a. The two chains meet at W5e, which needs W5a from the transport
+chain and W5c from the grant-fence chain; W6a and W6c need W5e and W5d.
+After them, W7a, W7b and W8 finish P3 and P4. W5d is on the
 critical path: W6a, W6c and W7a wait for its focused set, so its gate is not
 vacuous. W1–W3 and W4a do not wait for #2046.
 
@@ -263,7 +264,7 @@ creates them. Step numbers refer to the verification phase below.
 | G21 Advertisement | W11 | W11's change | — | Steps 6 to 9, then W11's delta review in step 10 |
 | G22 Activation | Separate owner decision | Activation runbook | — | Its runbook, including a check of the public-WebPKI profile against a real public peer and the statement that listing a trusted home delegates privileged authority and room moderation to that home's operator and to whoever later controls the domain |
 | G23 Remote reachability of local services | W5a | `server/docs/planning/s2s-routing-2047.md` | W5a merge; each later change that enables a service or operation for remote senders | Step 2 (W5a reachability suite), steps 6 and 7 |
-| G24 Rollout of changes that alter behavior while S2S is off | W13, with rollout parts from W1, W2, W3, W5i, W5o, W5b–W5d and W5r; the owner's explicit go-ahead with a named window | `docs/operations/federation-2047-rollout.md` | W13 merge; reviewed again in step 9 | Step 4 (W5o mixed-version schema case, W5r restore schedule), step 9, then the owner's go-ahead and step 11 |
+| G24 Rollout of changes that alter behavior while S2S is off | W13, with rollout parts from W1, W2, W3, W5i, W5o, W5b–W5d and W5r; the owner's explicit go-ahead with a named window | [Rollout runbook](../operations/federation-2047-rollout.md) | W13 merge; reviewed again in step 9 | Step 4 (W5o mixed-version schema case, W5r restore schedule), step 9, then the owner's go-ahead and step 11 |
 
 Gate status, the evidence for it and every skipped prerequisite are recorded
 in the evidence log in `docs/evidence/2047/`. The design documents and
@@ -322,7 +323,8 @@ unverified, never as passed.
 11. **Rollout:** once the owner has given an explicit go-ahead with a named
     window (G24), the branches are pushed, hosted CI runs on them and its
     results are recorded in the evidence log, and every slice, W11 and W12
-    included, merges into main together under W13's runbook (D11). The merge
+    included, merges into main together under W13's
+    [runbook](../operations/federation-2047-rollout.md) (D11). The merge
     proceeds only when the hosted checks pass at the exact head being merged.
     S2S stays off; activation is G22.
 
@@ -405,9 +407,8 @@ journeys' ordered and deduplicated delivery wording or non-web clients.
 - **Interoperability of strict choices.** Requiring a pre-TLS `from`, refusing
   multiplexed dialback domains, refusing A/AAAA fallback after a failed SRV
   lookup, refusing IP-address and single-label domains and never following
-  `see-other-host` are
-  stricter than RFC 6120 and XEP-0220 require; the harness records whether
-  Prosody and ejabberd connect under them.
+  `see-other-host` are stricter than RFC 6120 and XEP-0220 require; the
+  harness records whether Prosody and ejabberd connect under them.
 - **Third-party Spaces.** No Prosody or ejabberd XEP-0503 module exists, so
   third-party Spaces acceptance rests on plain PubSub and the MUC fallback
   (ADR-0020 D4). [The survey W7a repeated](xep0503-survey-2047.md) on

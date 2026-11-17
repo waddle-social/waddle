@@ -587,12 +587,13 @@ S2S.
 | Stored privileged grant for a remote principal: trusted home on `pkix` and on dialback-only streams; home removed from the list; home never listed, grant stored outside the canonical path | Honored only for a listed home on `pkix`; otherwise ignored, whatever is stored. | W5e (steps 4, 6 and 7) |
 | Room moderation by a remote principal: trusted home on `pkix` and on dialback-only streams; home not on the list, on `pkix`; a message author's own edit and delete | Moderation honored only for a listed home on `pkix`; the author's own edit and delete are not moderation and are not restricted by it. | W5e (steps 4, 6 and 7) |
 | Former admin of a home removed from the trusted-home list, holding no separate member-level grant | Cannot moderate or read through that grant: an unhonored grant contributes no permission. | W5e (steps 4, 6 and 7) |
+| Admin of a trusted home on a dialback-only stream, holding no separate member-level grant | Cannot moderate or read through that grant on that stream: an unhonored grant contributes no permission. | W5e (steps 4, 6 and 7) |
 | Work from a remote domain decided after it stopped being admitted (removed from the allowlist, a parent domain denylisted, `closed` mode, S2S off), including work queued before the change | Refused at the decision; its grants contribute nothing, member-level grants included. | W5e (steps 4, 6 and 7) |
 | Remote member on a dialback stream, with host policy requiring `pkix` | Its member-level grant contributes nothing; on `pkix` it is honoured. | W5e (steps 4, 6 and 7) |
 | Trusted home whose snapshot requires a private-CA profile, on a public-profile `pkix` stream and on a dialback stream whose certificate verified under the private CA | Privileged grant honoured only on the private-CA `pkix` stream. | W5e (steps 4, 6 and 7) |
 | Remote initiator of an affiliation change: trusted home on `pkix` and on weaker streams, home removed from the list | Acts with its honoured standing only on the trusted home's `pkix` stream while the home is listed. | W5e (steps 4, 6 and 7) |
 | Issuance, bootstrap and repair under the S2S snapshot the replica runs | Privileged grants issued to accounts of its trusted homes; none while S2S is off; a trusted home that is a service domain refused. | W5e (step 4) |
-| Outcast on every action the SQL policy protects, including channel `moderate`, `manage` and `delete` and an outcast author's own message `edit` and `delete` | The SQL policy evaluates outcast for every action it protects, and outcast wins each at this slice's admission. | W5b |
+| Outcast on every action the SQL policy protects, including channel `moderate`, `manage` and `delete` and an outcast author's own correction and retraction, which the policy decides as a send | The SQL policy evaluates outcast for every action it protects, and outcast wins each at this slice's admission. The schema's message `edit` and `delete` permissions, and outcast's precedence over them, are W5o's (step 2). | W5b |
 | Acknowledged revoke across two replicas with queued work at joins, protected reads, PubSub and stream-management fanout and room administration | No new protected admission under the revoked grant after the fence, on any replica. | W5d |
 | Retired account JID on a Waddle home | Never issued to a new holder through any provisioning path. | W5d |
 | Groupchat planned by the room planner for a revoked member, a member of the parent Space without a room grant, and a seated account without a grant | The acceptance is reduced to the admitted audience: none of them is routed, projected, pushed or notified anything, nothing is recorded for a later replay to deliver, and the admitted members receive the message. | W5b |
@@ -1696,7 +1697,9 @@ With no scope enrolled, these changes alter behaviour for every room:
 
 A binary built before this slice decides managed rooms from the legacy
 stores on these surfaces. Retiring such binaries before any scope is
-enrolled is part of the rollout and activation runbooks (G24, G22).
+enrolled is part of the
+[rollout runbook](../../../docs/operations/federation-2047-rollout.md#old-binaries-and-mixed-versions)
+and the activation runbook (G24, G22).
 
 Enrolling a scope (owner phase). A replica decides the scope's rooms as
 unmanaged until a load of the enrolled set that started after the enrollment
@@ -3106,8 +3109,10 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
   revoke does not wait for it, and it admits from decisions it does not
   check. Enrollment therefore requires every serving replica of the
   deployment on this slice's binary, as it already requires the writer
-  fence's: W13's rollout runbook enrolls no scope until every replica runs
-  it, and no replica of an older binary joins while a scope is enrolled.
+  fence's: the
+  [rollout runbook](../../../docs/operations/federation-2047-rollout.md#old-binaries-and-mixed-versions)
+  enrolls no scope, and no scope is enrolled until every replica runs it;
+  no replica of an older binary joins while a scope is enrolled.
 
 ### What stays open
 

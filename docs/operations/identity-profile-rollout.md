@@ -7,7 +7,8 @@ provisioning and account lookup no longer fold a spelling onto another
 account, and configured domains must be canonical. It is the identity
 profile's part of the rollout gate G24 of
 [ADR-0020](../../server/docs/adrs/0020-independent-community-federation.md);
-the federation rollout runbook collects it with the other parts. The
+the [federation rollout runbook](federation-2047-rollout.md) collects it
+with the other parts. The
 [authorization ID codec cutover](authz-codec-cutover.md) ships in the same
 rollout and narrows the codec's user subjects to the same canonical form.
 
