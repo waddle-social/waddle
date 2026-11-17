@@ -377,6 +377,32 @@ async fn delete_offline_spellings(
     Ok(removed)
 }
 
+/// Why a server refuses to start: its database role cannot read the
+/// ledger of retired account JIDs.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the runtime database role cannot read retired_account_jids, the ledger of retired account \
+     JIDs; the owner phase grants it SELECT, and every account provisioning, session creation \
+     and offline-store write reads it: {0}"
+)]
+pub struct RetiredLedgerUnreadable(#[source] DatabaseError);
+
+/// Read the ledger once, as the role the server runs under, so that a role
+/// without `SELECT` on it stops startup with an error that names the
+/// ledger, rather than failing every account provisioning, session creation
+/// and offline-store write that reads it later.
+pub async fn verify_ledger_readable(db: &Database) -> Result<(), RetiredLedgerUnreadable> {
+    let read = async {
+        let guard = db.guard().await?;
+        let mut rows = guard
+            .query("SELECT 1 FROM retired_account_jids LIMIT 1", ())
+            .await?;
+        rows.next().await?;
+        Ok::<_, DatabaseError>(())
+    };
+    read.await.map_err(RetiredLedgerUnreadable)
+}
+
 /// Whether the ledger holds `jid`. A JID without a canonical form names no
 /// account and is not retired.
 pub async fn jid_is_retired(db: &Database, jid: &BareJid) -> Result<bool, DatabaseError> {

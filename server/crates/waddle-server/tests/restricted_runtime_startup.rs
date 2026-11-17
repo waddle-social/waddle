@@ -631,6 +631,36 @@ async fn restricted_runtime_refuses_instead_of_creating_a_missing_relation() {
     prepared.cleanup().await;
 }
 
+/// Every account provisioning, session creation and offline-store write
+/// reads the ledger of retired account JIDs. A runtime role that cannot
+/// read it is refused at startup, with an error that names the ledger,
+/// rather than on each of those writes later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_runtime_refuses_a_role_that_cannot_read_the_retired_jid_ledger() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    execute(
+        &prepared.admin,
+        &format!(
+            "REVOKE SELECT ON {SCHEMA}.retired_account_jids FROM {}",
+            prepared.roles.runtime
+        ),
+    )
+    .await;
+    let (output, listener_published) = prepared.refused_startup(&[]).await;
+    assert!(
+        output.contains("cannot read retired_account_jids"),
+        "a role that cannot read the ledger must be refused by name: {output}"
+    );
+    assert!(
+        !listener_published,
+        "a refused startup published a listener"
+    );
+    prepared.cleanup().await;
+}
+
 fn ingress_config() -> IngressConfig {
     IngressConfig {
         pool_size: POOL_LIMITS.ingress_connections,

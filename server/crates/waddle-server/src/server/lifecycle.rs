@@ -190,6 +190,10 @@ pub async fn start_with_config_and_owner_outbox(
 
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
+    // Every account provisioning, session creation and offline-store write
+    // reads the ledger of retired JIDs; a role that cannot is refused here,
+    // by name, before any of them runs.
+    crate::auth::retirement::verify_ledger_readable(db_pool.global()).await?;
     if db_pool.global().uses_attested_postgres_pool() {
         crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(
             db_pool.global().clone(),
