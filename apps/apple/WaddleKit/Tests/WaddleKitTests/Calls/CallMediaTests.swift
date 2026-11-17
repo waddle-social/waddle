@@ -133,6 +133,40 @@ import Testing
         store.clear()
     }
 
+    @Test func aChoiceMadeWhileACallIsBeingPlacedSurvivesUntilItConnects() async {
+        let port = FakePort()
+        let media = RecordingCallMedia()
+        var sids = ["c-2", "c-1"]
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media, newSid: { sids.popLast() ?? "c-x" })
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        // Muted on the system's call screen while it rings there.
+        let afterPlacing = media.captureChoiceResets
+        #expect(afterPlacing == 1)
+        store.handle(CallEvent(from: callPeer, sid: "c-1", kind: .ringing))
+        store.handle(CallEvent(from: callPeer, sid: "c-1", kind: .proceed))
+        store.handle(CallEvent(from: callPeer, sid: "c-1", kind: .sessionAccept(join: callJoin, media: callAudio)))
+        await eventually { media.calls.count == 1 }
+        #expect(media.captureChoiceResets == afterPlacing)
+        // The next call we place is another call.
+        await store.hangUp()
+        #expect(await store.startCall(to: callPeer.bare, media: callAudio))
+        #expect(media.captureChoiceResets == afterPlacing + 1)
+        store.clear()
+    }
+
+    @Test func anAcceptThatFailsDoesNotForgetTheCallsChoices() async {
+        let port = FakePort()
+        let media = RecordingCallMedia()
+        let store = CallStore(port: port, ownJID: { callOwn }, ownBareJID: callOwn.bare, media: media)
+        store.handle(CallEvent(from: callPeer, sid: "c-1", kind: .propose(callAudio)))
+        let atRing = media.captureChoiceResets
+        #expect(atRing == 1)
+        port.callResults["proceed"] = false
+        #expect(await !store.acceptIncoming())
+        #expect(media.captureChoiceResets == atRing)
+        store.clear()
+    }
+
     @Test func choicesSurviveAMigrationWhoseOldSessionEndedOnTheWay() async {
         let port = FakePort()
         let media = RecordingCallMedia()

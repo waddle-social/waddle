@@ -9,6 +9,8 @@
     private var revision = 0
     private var connectionTask: Task<Void, Never>?
     private var disconnectTask: Task<Void, Never>?
+    /// The call the microphone and camera choices were last reset for.
+    private var choicesSid: String?
 
     init(
         media: any CallMediaController,
@@ -22,14 +24,7 @@
 
     func update(_ state: CallState) {
         let active = state.mediaSession
-        // Choices are dropped where a new call begins, not where one ends:
-        // a replaced session can pass through `.ended` on its way to an
-        // already-accepted invitation, and that is still the same call.
-        switch state {
-        case .outgoing, .joiningGroup: media.forgetCaptureChoices()
-        case .incoming(let call) where !call.isAccepting: media.forgetCaptureChoices()
-        case .idle, .incoming, .active, .inGroup, .ended: break
-        }
+        forgetChoicesIfANewCallBegins(state)
         if let active, targetSid == active.sid { return }
 
         revision += 1
@@ -79,6 +74,29 @@
                 endCall(call.sid, reason: .gone, revision: expectedRevision)
             }
         }
+    }
+
+    /// Choices are dropped where a new call begins, not where one ends: a
+    /// replaced session can pass through `.ended` on its way to an
+    /// already-accepted invitation, and that is still the same call. Nor
+    /// are they dropped again while that call is still being placed or is
+    /// still ringing: it can be muted on the system's call screen by then.
+    private func forgetChoicesIfANewCallBegins(_ state: CallState) {
+        let beginning: String
+        switch state {
+        case .outgoing(let call): beginning = call.sid
+        case .joiningGroup(let call): beginning = call.sid
+        case .incoming(let call) where !call.isAccepting: beginning = call.sid
+        case .idle:
+            // The slot is free: whatever comes next is a new call, even
+            // one that happens to reuse a session id.
+            choicesSid = nil
+            return
+        case .incoming, .active, .inGroup, .ended: return
+        }
+        guard beginning != choicesSid else { return }
+        choicesSid = beginning
+        media.forgetCaptureChoices()
     }
 
     /// Runs in its own task: the hang-up changes the slot, and must not
