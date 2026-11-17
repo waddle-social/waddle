@@ -757,20 +757,31 @@ const MUC_DISCO_ITEMS_FETCH_BOUND: usize = 10_000;
 /// listing whose read filled it tells no count.
 const REMOTE_LISTING_FETCH_BOUND: usize = 4_096;
 
-/// Longest a session's listing of the MUC service, or of a Space's rooms,
-/// takes, the rooms read and the session's grants decided. A room not
-/// decided by then is left out, and the session is answered with
-/// `internal-server-error` (type `wait`) rather than with the rest.
+/// Longest a session's listing of a Space's rooms takes, the items read and
+/// the session's grants decided. When a room is not decided by then the
+/// session is answered with `internal-server-error` (type `wait`) rather
+/// than with the rest.
 const LISTING_LIMIT: Duration = Duration::from_millis(2_500);
 
-/// Longest the rooms a listing may name are read for, before any asker's
-/// grants: the channel catalog, the live rooms and their actors.
+/// Longest an account at another server waits for the rooms its listing
+/// may name, before its grants: the channel catalog, the live rooms and
+/// their actors.
 const CANDIDATES_LIMIT: Duration = Duration::from_millis(1_500);
 
 /// Longest one build of the rooms the MUC service may list
 /// ([`RoomCandidates`]) takes. It is below [`CANDIDATES_LIMIT`], so the
 /// asker whose request started the build is answered from it.
 const CANDIDATES_BUILD_LIMIT: Duration = Duration::from_millis(1_200);
+
+/// Longest a session waits for the rooms its listing of the MUC service
+/// names: a build that started before its request arrived, which it may not
+/// be answered from, and then a whole build of its own
+/// ([`CANDIDATES_BUILD_LIMIT`] each, with room to spare).
+const SESSION_CANDIDATES_WAIT: Duration = Duration::from_millis(2_700);
+
+/// Longest a session's listing of the MUC service decides the managed
+/// rooms' grants for, once the rooms are read.
+const SESSION_DECISIONS_LIMIT: Duration = Duration::from_millis(1_000);
 
 /// How long after a build started accounts at other servers are answered
 /// from it: what the catalog and the rooms' actors said of a room when the
@@ -1346,21 +1357,26 @@ async fn rooms_listed_to(
 }
 
 /// XEP-0045 §6.3 for a session: the rooms of the MUC service listed to it,
-/// sorted by room JID, read and decided within [`LISTING_LIMIT`], with what
-/// the listing left out. The rooms are read from a build that started once
-/// the request arrived ([`RoomCandidates`]), so a change the session made
-/// before it asked is in its answer.
+/// sorted by room JID, with what the listing left out. The rooms are read
+/// from a build that started once the request arrived ([`RoomCandidates`]),
+/// so a change the session made before it asked is in its answer, within
+/// [`SESSION_CANDIDATES_WAIT`]; the managed rooms' grants are then decided
+/// within [`SESSION_DECISIONS_LIMIT`].
 async fn muc_rooms_for_session(
     state: &WebSocketState,
     requester: Option<&BareJid>,
 ) -> Result<(Vec<DiscoItem>, Omission), RoomListingError> {
     let arrived = Instant::now();
-    let deadline = arrived + LISTING_LIMIT;
     let candidates = state
         .room_listings
         .session
-        .rooms(state, Fresh::Since(arrived), arrived + CANDIDATES_LIMIT)
+        .rooms(
+            state,
+            Fresh::Since(arrived),
+            arrived + SESSION_CANDIDATES_WAIT,
+        )
         .await?;
+    let deadline = Instant::now() + SESSION_DECISIONS_LIMIT;
     let decided = rooms_listed_to(
         state,
         &candidates.rooms,
@@ -1566,16 +1582,21 @@ impl RoomCandidates {
                 NextStep::Wait { mut told, takes } => {
                     let ended =
                         tokio::time::timeout_at(deadline, told.wait_for(Option::is_some)).await;
-                    match ended {
-                        Ok(Ok(built)) if takes => {
-                            if let Some(built) = built.clone() {
-                                return built;
-                            }
-                        }
+                    let built = match ended {
+                        Ok(Ok(built)) => (*built).clone(),
+                        // The asker that ran the build stopped.
+                        Ok(Err(_)) => None,
+                        Err(_) => return Err(RoomListingError::Deadline),
+                    };
+                    match built {
+                        // A build that ran out of the time of the asker
+                        // that started it says nothing of this asker's,
+                        // which asks again.
+                        Some(Err(RoomListingError::Deadline)) => {}
+                        Some(built) if takes => return built,
                         // The build ended without this asker taking it, or
                         // the asker that ran it stopped: ask again.
-                        Ok(_) => {}
-                        Err(_) => return Err(RoomListingError::Deadline),
+                        Some(_) | None => {}
                     }
                 }
                 NextStep::Build {

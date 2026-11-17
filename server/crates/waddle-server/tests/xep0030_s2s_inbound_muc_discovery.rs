@@ -623,6 +623,38 @@ async fn rooms_a_remote_asker_may_not_reach_take_no_place_in_its_read() {
     assert_eq!(set.count, Some(2), "{set:?}");
 }
 
+/// A room with a catalog row is listed from its row, never from its
+/// actor's configuration: live rooms whose actors say they are public and
+/// open to other servers are not listed to a remote asker when their
+/// catalog rows say hidden or closed to other servers, though the read for
+/// remote askers names neither row. A session is still told of the closed
+/// room its catalog row lists, and not of the hidden one.
+#[tokio::test]
+async fn a_live_room_whose_catalog_row_a_remote_asker_may_not_reach_is_not_listed() {
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    let mut alice = hosted.room_creator("alice", "desk").await;
+    // Both rooms are live, public and open to other servers by their
+    // actors' configuration.
+    local_join(&mut alice, ROOM, "alice").await;
+    local_join(&mut alice, &room("lobby"), "alice").await;
+    // Their catalog rows: `lounge` (ROOM) hidden, `lobby` closed to other
+    // servers.
+    hosted.catalogued_room("lounge", false, true, "text").await;
+    hosted.catalogued_room("lobby", true, false, "text").await;
+    hosted.catalogued_room("open", true, true, "text").await;
+
+    hosted
+        .peer_sends(remote_get(BOB, MUC, "l1", paged(10, None)))
+        .await;
+    let listed = listing(&hosted.answered("l1").await);
+    assert_eq!(jids(&listed), [room("open")]);
+    let set = listed.rsm.expect("the asked <set/>");
+    assert_eq!(set.count, Some(1), "{set:?}");
+
+    let local = listing(&local_items(&mut alice, MUC, "l2").await);
+    assert_eq!(jids(&local), [room("lobby"), room("open")]);
+}
+
 /// A listing for accounts at other servers whose catalog read filled its
 /// bound (4,096 rows) may have left rooms out: it is answered with the
 /// rooms it read, paged, and tells no count, asked for paging or not.
