@@ -1,6 +1,6 @@
 use super::{
-    Element, NotificationOutboxJob, NotificationOutboxStore, STATUS_FAILED, STATUS_IN_PROGRESS,
-    STATUS_PUBLISHED,
+    DrainScope, Element, NotificationOutboxJob, NotificationOutboxStore, STATUS_FAILED,
+    STATUS_IN_PROGRESS, STATUS_PUBLISHED,
 };
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress, MessageEnvelope};
@@ -135,7 +135,7 @@ async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixtur
         .await
         .expect("later neighbor");
     assert!(store
-        .claim_due_outbox_jobs(3)
+        .claim_due_outbox_jobs(DrainScope::All, 3)
         .await
         .expect("quarantine full prefix")
         .is_empty());
@@ -166,7 +166,7 @@ async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixtur
         "unknown malformed quarantine must not settle any custody"
     );
     let next = store
-        .claim_due_outbox_jobs(3)
+        .claim_due_outbox_jobs(DrainScope::All, 3)
         .await
         .expect("valid neighbor progresses");
     assert_eq!(next.len(), 1);
@@ -370,7 +370,8 @@ async fn malformed_snapshot_cannot_overwrite_concurrent_repair_or_claim(
         .expect("value");
     drop(rows);
     let claim_store = store.clone();
-    let claims = tokio::spawn(async move { claim_store.claim_due_outbox_jobs(1).await });
+    let claims =
+        tokio::spawn(async move { claim_store.claim_due_outbox_jobs(DrainScope::All, 1).await });
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let conn = fixture.db.guard().await.expect("lock observer");
@@ -401,7 +402,7 @@ async fn malformed_snapshot_cannot_overwrite_concurrent_repair_or_claim(
         );
         assert_eq!(
             store
-                .claim_due_outbox_jobs(1)
+                .claim_due_outbox_jobs(DrainScope::All, 1)
                 .await
                 .expect("repaired job progresses")
                 .len(),
@@ -415,7 +416,7 @@ async fn malformed_snapshot_cannot_overwrite_concurrent_repair_or_claim(
         assert!(row.get::<Option<i64>>(2).expect("lease").is_some());
         drop(rows);
         assert!(store
-            .claim_due_outbox_jobs(1)
+            .claim_due_outbox_jobs(DrainScope::All, 1)
             .await
             .expect("fresh malformed lease is not due")
             .is_empty());

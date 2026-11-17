@@ -419,6 +419,9 @@ async fn prepare_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> PreparedOfflineNotification {
+    if waddle_xmpp::xep::xep0353::is_bodyless_jmi_signal(original_message) {
+        return PreparedOfflineNotification::Suppressed;
+    }
     let candidate = match crate::notification_outbox::direct_candidate_from_envelope(
         original_message,
         recipient,

@@ -6,6 +6,7 @@ use crate::db::DatabaseDriver;
 use crate::db::Rows;
 use crate::db::Transaction;
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 use jid::BareJid;
 use waddle_xmpp::inbox::storage::InboxStorage;
@@ -28,6 +29,7 @@ use super::secrets::PushSecretCipher;
 
 #[derive(Clone)]
 pub struct DatabasePushServiceStore {
+    publish_job_wake: Arc<Notify>,
     pub(super) db: Database,
     /// Shared unread projection used to refresh the APNs app badge at send
     /// time, so queued retries do not replay a stale absolute count.
@@ -107,6 +109,10 @@ pub(super) fn test_secret_key() -> &'static [u8] {
 }
 
 impl DatabasePushServiceStore {
+    pub(crate) fn publish_job_wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.publish_job_wake)
+    }
+
     #[cfg(test)]
     pub async fn try_new(db: Database) -> Result<Self, XmppError> {
         Self::new_with_secret_key(db, test_secret_key()).await
@@ -142,6 +148,7 @@ impl DatabasePushServiceStore {
         pubsub_boundary: Option<PushServicePubSubBoundary>,
     ) -> Self {
         Self {
+            publish_job_wake: Arc::new(Notify::new()),
             db,
             inbox_storage: None,
             secrets: Arc::new(PushSecretCipher::new(secret_key)),

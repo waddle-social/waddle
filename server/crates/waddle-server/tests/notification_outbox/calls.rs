@@ -6,8 +6,8 @@ use crate::support::{
 };
 use jid::{BareJid, Jid};
 use waddle_server::notification_outbox::{
-    DndReader, DndState, NotificationCall, NotificationCandidate, NotificationClass,
-    NotificationMessageHints, NotificationOutboxError, WADDLE_PUSH_CONTEXT_NS,
+    DndReader, DndState, DrainBatch, DrainScope, NotificationCall, NotificationCandidate,
+    NotificationClass, NotificationMessageHints, NotificationOutboxError, WADDLE_PUSH_CONTEXT_NS,
 };
 use waddle_server::notification_settings_projection::{
     ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
@@ -143,7 +143,10 @@ async fn calls_respect_never_dnd_blocking_and_pass_on_mention() {
                 &settings,
                 drain_deps_with_noop_activity(&room_policy, &FixedDnd(dnd), noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16,
+                },
             )
             .await
             .expect("drain");
@@ -228,4 +231,172 @@ fn direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call() {
             NotificationClass::DirectMessage
         );
     }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn offline_call_signals_preserve_pending_delivery_without_generic_alerts() {
+    use minidom::Element;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
+    use waddle_server::ingress::commit::commit_submission;
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{
+        plan_message_dispatch, ImmediateSink, IngressDecisionClass, RecoveryEnvironment,
+    };
+    use waddle_server::test_support::{seed_local_account, websocket_state_with_ingress};
+    use waddle_xmpp::ingress::{
+        DigestContext, DigestInput, IngressEffectIntent, NotificationActivityMutation,
+    };
+    use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
+    use waddle_xmpp::xep::xep0334::{add_hint, Hint};
+    use waddle_xmpp::xep::xep0353::{build_propose, build_retract, CallOffer, NS_JINGLE_MESSAGE};
+
+    let fixture = crate::ingress_support::IngressFixture::sqlite().await;
+    let pool = Arc::new(
+        DatabasePool::try_new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared database pool"),
+    );
+    let state = websocket_state_with_ingress(pool, Arc::new(fixture.authority().await)).await;
+    seed_local_account(&state, "romeo").await;
+    seed_local_account(&state, "juliet").await;
+    assert_eq!(
+        fixture
+            .count("sessions WHERE user_jid = 'juliet@example.com'")
+            .await,
+        0,
+        "recipient account has no session"
+    );
+    let deps = state.recovery_deps();
+    let sid = SessionId("offline-session".into());
+    for (origin, payload, body, expected_candidates) in [
+        (
+            "offline-retract",
+            build_retract(sid.clone()).into(),
+            false,
+            0,
+        ),
+        (
+            "offline-audio-propose",
+            build_propose(sid.clone(), CallOffer::audio_only()),
+            false,
+            1,
+        ),
+        (
+            "offline-retract-with-body",
+            build_retract(sid).into(),
+            true,
+            2,
+        ),
+        (
+            "offline-future-signal",
+            Element::builder("future-signal", NS_JINGLE_MESSAGE).build(),
+            false,
+            3,
+        ),
+    ] {
+        let mut submission = fixture.submission(Some(origin), "call ended");
+        let mut message = submission.plan.sanitized_message.clone();
+        if !body {
+            message.bodies.clear();
+        }
+        message.payloads.push(payload);
+        add_hint(&mut message, Hint::Store);
+        submission.digest_input = DigestInput::from_parsed(
+            &message,
+            &DigestContext {
+                target: submission.target.clone(),
+                server_authorities: vec![fixture.principal.bare_jid().clone()],
+                stanza_lang: None,
+            },
+        )
+        .expect("digest");
+        let mut dispatcher = StanzaDispatcher::new();
+        waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
+        let mut machine = XmppStateMachine::new("example.com", dispatcher);
+        machine.transition_to_ready(submission.sender.clone(), false);
+        submission.plan = plan_message_dispatch(&mut machine, message, &deps).await;
+        assert!(
+            submission.plan.failure.is_none(),
+            "{origin}: {:?}",
+            submission.plan.failure
+        );
+        assert!(
+            submission.plan.rejection.is_none(),
+            "{origin}: {:?}",
+            submission.plan.rejection
+        );
+        let notification_intents = submission
+            .plan
+            .intents
+            .iter()
+            .filter(|intent| {
+                matches!(
+                    intent,
+                    IngressEffectIntent::NotificationActivityPreview {
+                        mutation: NotificationActivityMutation::NotificationCandidate { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            notification_intents,
+            usize::from(expected_candidates > 0),
+            "{origin}"
+        );
+        assert!(
+            submission.plan.intents.iter().any(|intent| matches!(
+                intent,
+                IngressEffectIntent::NotificationActivityPreview {
+                    mutation: NotificationActivityMutation::OfflineDelivery { .. },
+                    ..
+                }
+            )),
+            "{origin}: offline delivery marker retained"
+        );
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("commit");
+        assert_eq!(decision.class, IngressDecisionClass::Accepted);
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            fixture.count("notification_candidates").await,
+            expected_candidates,
+            "{origin}"
+        );
+    }
+    assert_eq!(fixture.count("pending_delivery").await, 4);
+    assert_eq!(
+        fixture.count("mam_messages").await,
+        8,
+        "both personal archives retained"
+    );
+    assert_eq!(
+        fixture
+            .count("notification_candidates WHERE class = 'call'")
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .count("notification_candidates WHERE class = 'dm'")
+            .await,
+        2
+    );
+    drop(state);
+    fixture.close().await;
 }

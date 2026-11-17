@@ -26,6 +26,7 @@ use minidom::Element;
 use p256::pkcs8::EncodePrivateKey;
 use waddle_server::db::{Database, IntoParams, Rows};
 use waddle_server::db_params;
+use waddle_server::notification_outbox::{DrainBatch, DrainScope};
 use waddle_server::push_service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
@@ -1208,14 +1209,17 @@ async fn offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_to
                 &settings,
                 NotificationDrainDeps::new(&NoopRoomPolicy, &NoopDndReader, &NoopActivityReader),
                 &service,
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain call candidate"),
         1
     );
     let jobs = outbox
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim call jobs");
     assert_eq!(jobs.len(), 2, "one job for each registered node");
@@ -1274,14 +1278,17 @@ async fn offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_to
                 &settings,
                 NotificationDrainDeps::new(&NoopRoomPolicy, &NoopDndReader, &NoopActivityReader),
                 &service,
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain DM candidate"),
         1
     );
     for job in outbox
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim DM jobs")
     {
@@ -1503,4 +1510,403 @@ async fn voip_node_skips_non_apns_devices_without_retry_or_disable() {
         .await
         .expect("terminal jobs stay idle");
     assert_eq!(sender.calls_for(TOKEN_A).len(), 1);
+}
+
+#[cfg(feature = "test-support")]
+async fn notification_wake_state(
+    fixture: &ingress_support::IngressFixture,
+    sender: Arc<dyn ApnsSender>,
+) -> Arc<waddle_server::test_support::WebSocketState> {
+    use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
+    use waddle_server::test_support::{seed_local_account, websocket_state_with_ingress};
+
+    let pool = Arc::new(
+        DatabasePool::try_new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared database pool"),
+    );
+    let mut state = websocket_state_with_ingress(pool, Arc::new(fixture.authority().await)).await;
+    seed_local_account(&state, "juliet").await;
+    let push = state
+        .deps
+        .protocol
+        .push_service
+        .as_ref()
+        .clone()
+        .with_inbox_storage(state.deps.protocol.inbox_storage.clone())
+        .with_apns_provider(
+            counting_tokens(),
+            sender,
+            ApnsTopic::parse(BUNDLE_ID).expect("bundle topic"),
+        )
+        .expect("APNs topics");
+    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
+    let node = push
+        .ensure_node(&recipient, "p4x.waddle.social.voip")
+        .await
+        .expect("VoIP node");
+    register_apple_device(&push, &recipient, node.node(), "phone", "prod", TOKEN_A).await;
+    push.register_first_party_node_for_owner(&recipient, PUSH_SERVICE_JID, node.node(), None)
+        .await
+        .expect("enable VoIP push");
+    Arc::get_mut(&mut state)
+        .expect("unshared test state")
+        .deps
+        .protocol
+        .push_service = Arc::new(push);
+    state
+}
+
+#[cfg(feature = "test-support")]
+async fn wait_for_provider_sends(sender: &FakeApnsSender, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while sender.calls().len() < expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("call reaches the provider without a timer tick");
+}
+
+#[cfg(feature = "test-support")]
+async fn stop_notification_wake_state(
+    state: Arc<waddle_server::test_support::WebSocketState>,
+    loops: [tokio::task::JoinHandle<()>; 2],
+) {
+    for task in loops {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        state
+            .deps
+            .protocol
+            .ingress
+            .drain_and_join(Duration::from_secs(15))
+            .await
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn committed_call_wakes_both_notification_loops_with_stored_permit() {
+    use waddle_server::test_support::spawn_notification_loops;
+    use waddle_xmpp::xep::xep0353::CallOffer;
+
+    let fixture = ingress_support::IngressFixture::sqlite().await;
+    let sender = FakeApnsSender::default();
+    let state = notification_wake_state(&fixture, Arc::new(sender.clone())).await;
+    let dm = offline_submission(&fixture, "dm-pending-during-call-wake", None);
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &dm,
+        1,
+    )
+    .await;
+    let call = offline_submission(
+        &fixture,
+        "wake-call-before-start",
+        Some(CallOffer::audio_only()),
+    );
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &call,
+        2,
+    )
+    .await;
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .pending_candidates(16)
+            .await
+            .expect("durably committed candidate")
+            .len(),
+        2
+    );
+    assert_eq!(fixture.count("push_publish_jobs").await, 0);
+
+    // Both first ticks are discarded; only the permit stored by commit can
+    // start this chain with timers set well beyond the assertion deadline.
+    let loops = spawn_notification_loops(&state, Duration::from_secs(3_600));
+    wait_for_provider_sends(&sender, 1).await;
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].push_type, ApnsPushType::Voip);
+    assert_eq!(calls[0].payload["waddle"]["item"], "wake-call-before-start");
+    assert_eq!(fixture.count("notification_outbox").await, 1);
+    assert_eq!(fixture.count("push_publish_jobs").await, 1);
+    let pending = state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_candidates(16)
+        .await
+        .expect("DM remains pending after call wake");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].archive_stanza_id().id,
+        "dm-pending-during-call-wake"
+    );
+
+    // Re-arm with a short timer after consuming the stored call wake. With
+    // no new commits or wakes, only a timed sweep can drain the remaining DM.
+    for task in loops {
+        task.abort();
+        let _ = task.await;
+    }
+    let loops = spawn_notification_loops(&state, Duration::from_millis(25));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !state
+            .deps
+            .protocol
+            .notification_outbox
+            .pending_candidates(16)
+            .await
+            .expect("pending candidates after timer")
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("next timed sweep drains the DM");
+    stop_notification_wake_state(state, loops).await;
+    fixture.close().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn committed_dm_does_not_wake_notification_outbox_loop() {
+    use waddle_server::test_support::spawn_notification_loops;
+
+    let fixture = ingress_support::IngressFixture::sqlite().await;
+    let sender = FakeApnsSender::default();
+    let state = notification_wake_state(&fixture, Arc::new(sender.clone())).await;
+    let loops = spawn_notification_loops(&state, Duration::from_secs(3_600));
+    let dm = offline_submission(&fixture, "dm-waits-for-timer", None);
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &dm,
+        1,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .pending_candidates(16)
+            .await
+            .expect("pending DM")
+            .len(),
+        1,
+        "ordinary alert batching waits for the timer"
+    );
+    assert_eq!(fixture.count("notification_outbox").await, 0);
+    assert_eq!(fixture.count("push_publish_jobs").await, 0);
+    assert!(sender.calls().is_empty());
+    stop_notification_wake_state(state, loops).await;
+    fixture.close().await;
+}
+
+#[cfg(feature = "test-support")]
+struct GatedApnsSender {
+    inner: FakeApnsSender,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    gated: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "test-support")]
+impl ApnsSender for GatedApnsSender {
+    fn send(
+        &self,
+        request: ApnsRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = ApnsOutcome> + Send + '_>> {
+        let outcome = self.inner.send(request);
+        Box::pin(async move {
+            if !self.gated.swap(true, Ordering::SeqCst) {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            outcome.await
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn call_wake_during_provider_sweep_is_not_lost() {
+    use waddle_server::test_support::spawn_notification_loops;
+    use waddle_xmpp::xep::xep0353::CallOffer;
+
+    let fixture = ingress_support::IngressFixture::sqlite().await;
+    let captured = FakeApnsSender::default();
+    let sender = Arc::new(GatedApnsSender {
+        inner: captured.clone(),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        gated: std::sync::atomic::AtomicBool::new(false),
+    });
+    let state = notification_wake_state(&fixture, sender.clone()).await;
+    let loops = spawn_notification_loops(&state, Duration::from_secs(3_600));
+    let first = offline_submission(&fixture, "first-wake-call", Some(CallOffer::audio_only()));
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &first,
+        1,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), sender.started.notified())
+        .await
+        .expect("first provider sweep enters gated send");
+
+    let second = offline_submission(&fixture, "second-wake-call", Some(CallOffer::audio_only()));
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &second,
+        2,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        // Publication bookkeeping follows notify_one, so this also proves the
+        // second wake happened while the first provider sweep was blocked.
+        while fixture
+            .count("notification_outbox WHERE status = 'published'")
+            .await
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second call handed to provider queue while first sweep is busy");
+    assert_eq!(
+        captured.calls().len(),
+        1,
+        "first send still awaiting provider outcome"
+    );
+    sender.release.notify_one();
+    wait_for_provider_sends(&captured, 2).await;
+    let items: Vec<_> = captured
+        .calls()
+        .into_iter()
+        .map(|request| request.payload["waddle"]["item"].clone())
+        .collect();
+    assert!(items.contains(&serde_json::json!("first-wake-call")));
+    assert!(items.contains(&serde_json::json!("second-wake-call")));
+    stop_notification_wake_state(state, loops).await;
+    fixture.close().await;
+}
+
+#[cfg(feature = "test-support")]
+struct GatedBlockingStorage {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    gated: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for GatedBlockingStorage {
+    async fn list_blocked_jids(
+        &self,
+        _user: &BareJid,
+    ) -> Result<Vec<BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        if !self.gated.swap(true, Ordering::SeqCst) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn call_wake_during_outbox_sweep_is_not_lost() {
+    use waddle_server::test_support::spawn_notification_loops;
+    use waddle_xmpp::xep::xep0353::CallOffer;
+
+    let fixture = ingress_support::IngressFixture::sqlite().await;
+    let sender = FakeApnsSender::default();
+    let mut state = notification_wake_state(&fixture, Arc::new(sender.clone())).await;
+    let blocking = Arc::new(GatedBlockingStorage {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        gated: std::sync::atomic::AtomicBool::new(false),
+    });
+    Arc::get_mut(&mut state)
+        .expect("unshared test state")
+        .deps
+        .protocol
+        .blocking_storage = blocking.clone();
+    let loops = spawn_notification_loops(&state, Duration::from_secs(3_600));
+    let first = offline_submission(&fixture, "first-outbox-wake", Some(CallOffer::audio_only()));
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &first,
+        1,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), blocking.started.notified())
+        .await
+        .expect("outbox sweep reaches policy read after taking its candidate snapshot");
+
+    // The second commit arrives after the first sweep's candidate snapshot.
+    // Its stored permit must cause a second sweep, without another timer tick.
+    let second = offline_submission(
+        &fixture,
+        "second-outbox-wake",
+        Some(CallOffer::audio_only()),
+    );
+    execute_offline_notification(
+        &fixture,
+        &state.deps.protocol.ingress,
+        state.as_ref(),
+        &second,
+        2,
+    )
+    .await;
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .pending_candidates(16)
+            .await
+            .expect("both candidates committed while sweep is blocked")
+            .len(),
+        2
+    );
+    assert_eq!(fixture.count("push_publish_jobs").await, 0);
+    blocking.release.notify_one();
+    wait_for_provider_sends(&sender, 2).await;
+    assert!(state
+        .deps
+        .protocol
+        .notification_outbox
+        .pending_candidates(16)
+        .await
+        .expect("candidate drain")
+        .is_empty());
+    stop_notification_wake_state(state, loops).await;
+    fixture.close().await;
 }

@@ -1,4 +1,6 @@
-use super::{NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore};
+use super::{
+    DrainScope, NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::notification_outbox::test_support::{candidate, enqueue_jobs_for_test, target};
 
@@ -8,7 +10,7 @@ async fn claimed(fixture: &IngressFixture) -> (NotificationOutboxStore, Notifica
         .expect("store");
     enqueue_jobs_for_test(&store, &candidate("acceptance-fence"), &[target()]).await;
     let job = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -28,7 +30,7 @@ async fn reclaim(
         .await
         .expect("stale claim");
     assert!(store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("schedule expired claim backoff")
         .is_empty());
@@ -40,7 +42,7 @@ async fn reclaim(
         .await
         .expect("advance retry deadline");
     store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("reclaim")
         .remove(0)
@@ -180,7 +182,7 @@ async fn cancelled_boundary_retains_uncertainty_without_a_local_queue(fixture: I
     );
     assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1);
     assert!(store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("parked jobs stay unclaimed")
         .is_empty());

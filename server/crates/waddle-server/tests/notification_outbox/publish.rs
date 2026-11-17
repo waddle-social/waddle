@@ -2,6 +2,7 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
+use crate::calls::call_candidate;
 use crate::support::{
     bare, candidate, enqueue_jobs_for_test, failed_outbox_jobs_count, groupchat_candidate_for,
     inbox_with_unread, store, target, target_named, FailingBlockingStorage, TestStore,
@@ -12,11 +13,78 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
-    NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
-    NotificationOutboxStatus, NotificationOutboxStore, NotificationOutboxTarget,
-    PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
+    DrainBatch, DrainScope, NotificationClass, NotificationOutboxJob,
+    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
+    NotificationOutboxTarget, PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
 };
 use waddle_xmpp::push::PushSubscriptionStore;
+
+#[tokio::test]
+async fn calls_only_claim_skips_older_queued_and_stale_dm_jobs() {
+    let store = store().await;
+    let target = target();
+    enqueue_jobs_for_test(
+        &store,
+        &candidate("older-dm"),
+        std::slice::from_ref(&target),
+    )
+    .await;
+    store
+        .execute("UPDATE notification_outbox SET created_at_ms = 1", ())
+        .await
+        .expect("make the DM older than the call");
+    enqueue_jobs_for_test(
+        &store,
+        &call_candidate("newer-call", "session", false),
+        &[target],
+    )
+    .await;
+
+    let calls = store
+        .claim_due_outbox_jobs(DrainScope::CallsOnly, 1)
+        .await
+        .expect("claim due calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].class(), NotificationClass::Call);
+
+    let jobs = store.pending_outbox_jobs().await.expect("pending jobs");
+    let dm = jobs
+        .iter()
+        .find(|job| job.class() == NotificationClass::DirectMessage)
+        .expect("older DM still present");
+    assert_eq!(dm.status(), NotificationOutboxStatus::Queued);
+    assert!(dm.claim_token().is_none());
+
+    let jobs = store
+        .claim_due_outbox_jobs(DrainScope::All, 1)
+        .await
+        .expect("claim due jobs");
+    assert_eq!(jobs.len(), 1);
+    let dm_claim = &jobs[0];
+    assert_eq!(dm_claim.job_id(), dm.job_id());
+    assert_eq!(dm_claim.status(), NotificationOutboxStatus::InProgress);
+    store
+        .execute(
+            "UPDATE notification_outbox SET claimed_at_ms = 1 WHERE job_id = ?",
+            waddle_server::db_params![dm_claim.job_id().as_str()],
+        )
+        .await
+        .expect("expire the DM claim");
+
+    assert!(store
+        .claim_due_outbox_jobs(DrainScope::CallsOnly, 1)
+        .await
+        .expect("check for due calls")
+        .is_empty());
+    let jobs = store.pending_outbox_jobs().await.expect("pending jobs");
+    let dm = jobs
+        .iter()
+        .find(|job| job.job_id() == dm_claim.job_id())
+        .expect("stale DM still present");
+    assert_eq!(dm.status(), NotificationOutboxStatus::InProgress);
+    assert_eq!(dm.claim_token(), dm_claim.claim_token());
+    assert_eq!(dm.attempt_count(), dm_claim.attempt_count());
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn notification_publish_attempt_exports_identity_outcome_and_parent() {
@@ -47,7 +115,10 @@ async fn notification_publish_attempt_exports_identity_outcome_and_parent() {
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            1,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
         )
         .instrument(parent)
         .await
@@ -84,7 +155,7 @@ fn foreign_target() -> NotificationOutboxTarget {
 
 async fn reclaim_stale_job(store: &TestStore) -> (NotificationOutboxJob, NotificationOutboxJob) {
     let stale_claim = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -99,7 +170,7 @@ async fn reclaim_stale_job(store: &TestStore) -> (NotificationOutboxJob, Notific
         .await
         .expect("advance retry deadline");
     let fresh_claim = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("reclaim")
         .into_iter()
@@ -126,7 +197,7 @@ async fn expire_claim_into_backoff(
         .expect("expire claim");
     let before = waddle_server::time::now_ms();
     assert!(store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("schedule expired claim retry")
         .is_empty());
@@ -150,7 +221,7 @@ async fn expire_claim_into_backoff(
     assert!(row.get::<Option<i64>>(4).expect("claim time").is_none());
     drop(rows);
     assert!(store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("backoff prevents early claim")
         .is_empty());
@@ -206,7 +277,10 @@ async fn claimed_outbox_job_builds_stable_xep0357_pubsub_item() {
     let candidate = candidate("archive-1");
     enqueue_jobs_for_test(&store, &candidate, &[target]).await;
 
-    let jobs = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let jobs = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status(), NotificationOutboxStatus::InProgress);
     let item = jobs[0].to_xep0357_pubsub_item();
@@ -254,7 +328,7 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
     )
     .await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .remove(0);
@@ -279,7 +353,10 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
         .await
         .expect("lost reply");
     enqueue_jobs_for_test(&store, &candidate("archive-second"), &[target]).await;
-    let mut jobs = store.claim_due_outbox_jobs(16).await.expect("reclaim");
+    let mut jobs = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("reclaim");
     assert_eq!(
         jobs.len(),
         2,
@@ -366,7 +443,10 @@ async fn coalesced_job_context_names_latest_stanza_id() {
     .await;
     enqueue_jobs_for_test(&store, &candidate("archive-second"), &[target]).await;
 
-    let jobs = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let jobs = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].message_count(), 2, "coalesced into one job");
     let payload = jobs[0].to_xep0357_pubsub_item().payload.expect("payload");
@@ -393,7 +473,10 @@ async fn claim_due_outbox_jobs_fails_malformed_sender_set_before_publish() {
         .await
         .expect("make queued job malformed");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -421,7 +504,10 @@ async fn claim_due_outbox_jobs_fails_empty_sender_without_conversation_fallback(
         .await
         .expect("make queued job sender provenance empty");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -449,7 +535,10 @@ async fn claim_due_outbox_jobs_fails_malformed_sender_jids_json_before_publish()
         .await
         .expect("make queued job sender_jids malformed");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -477,7 +566,10 @@ async fn claim_due_outbox_jobs_fails_sender_set_missing_scalar_before_publish() 
         .await
         .expect("make queued job sender_jids omit scalar sender");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -508,7 +600,10 @@ async fn claim_due_outbox_jobs_fails_semantically_invalid_sender_jids_before_pub
         .await
         .expect("make queued job sender_jids semantically invalid");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -536,7 +631,10 @@ async fn claim_due_outbox_jobs_fails_mismatched_scalar_sender_before_publish() {
         .await
         .expect("make queued job scalar sender invalid");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -564,7 +662,10 @@ async fn claim_due_outbox_jobs_fails_malformed_context_before_publish() {
         .await
         .expect("make queued job context malformed");
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
 
     assert!(claimed.is_empty());
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
@@ -582,10 +683,13 @@ async fn stale_in_progress_outbox_job_is_claimable_again() {
     let candidate = candidate("archive-1");
     enqueue_jobs_for_test(&store, &candidate, &[target]).await;
 
-    let first_claim = store.claim_due_outbox_jobs(16).await.expect("first claim");
+    let first_claim = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("first claim");
     assert_eq!(first_claim.len(), 1);
     let immediate_claim = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("immediate claim");
     assert!(immediate_claim.is_empty());
@@ -599,7 +703,10 @@ async fn stale_in_progress_outbox_job_is_claimable_again() {
         .await
         .expect("advance retry deadline");
 
-    let reclaimed = store.claim_due_outbox_jobs(16).await.expect("reclaim");
+    let reclaimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("reclaim");
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].job_id(), first_claim[0].job_id());
     assert_eq!(reclaimed[0].status(), NotificationOutboxStatus::InProgress);
@@ -798,7 +905,7 @@ async fn unread_zero_job_is_suppressed_not_published() {
     let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
     enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target]).await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -860,7 +967,7 @@ async fn unread_zero_does_not_suppress_call_job() {
     )
     .await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -921,7 +1028,7 @@ async fn missing_inbox_entry_still_publishes() {
     let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
     enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target]).await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -976,7 +1083,7 @@ async fn read_channel_mention_job_is_suppressed() {
     );
     enqueue_jobs_for_test(&store, &candidate, &[target]).await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -1022,7 +1129,7 @@ async fn unread_nonzero_job_still_publishes() {
     let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
     enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target]).await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -1068,7 +1175,10 @@ async fn new_candidate_after_claim_creates_fresh_queued_job() {
     )
     .await;
 
-    let claimed = store.claim_due_outbox_jobs(16).await.expect("claim");
+    let claimed = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].message_count(), 1);
     enqueue_jobs_for_test(&store, &candidate("archive-2"), &[target]).await;
@@ -1142,7 +1252,7 @@ async fn coalesce_retry_creates_fresh_job_when_queued_job_is_claimed_after_selec
             .expect("sender resource")]
     );
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim replacement job");
     assert_eq!(claimed.len(), 1);
@@ -1167,7 +1277,7 @@ async fn coalescing_new_candidate_clears_retry_backoff() {
     )
     .await;
     let claimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -1182,7 +1292,7 @@ async fn coalescing_new_candidate_clears_retry_backoff() {
     );
     assert!(
         store
-            .claim_due_outbox_jobs(16)
+            .claim_due_outbox_jobs(DrainScope::All, 16)
             .await
             .expect("backoff claim")
             .is_empty(),
@@ -1192,7 +1302,7 @@ async fn coalescing_new_candidate_clears_retry_backoff() {
     enqueue_jobs_for_test(&store, &candidate("archive-2"), &[target]).await;
 
     let reclaimed = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim after coalesce");
     assert_eq!(reclaimed.len(), 1);
@@ -1226,7 +1336,10 @@ async fn publish_rejects_non_first_party_outbox_target() {
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain outbox");
@@ -1281,7 +1394,10 @@ async fn push_registration_lookup_error_retries_each_claimed_outbox_job() {
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain");
@@ -1316,7 +1432,7 @@ async fn prune_completed_removes_only_finished_jobs_and_outboxed_candidates() {
     let store = store().await;
     enqueue_jobs_for_test(&store, &candidate("archive-old"), &[target()]).await;
     let old_job = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim old job")
         .into_iter()
@@ -1494,7 +1610,7 @@ async fn repeated_expired_outbox_claims_park_uncertain_work_at_the_budget() {
     let store = store().await;
     enqueue_jobs_for_test(&store, &candidate("expired-budget"), &[target()]).await;
     let mut job = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("initial claim")
         .remove(0);
@@ -1523,7 +1639,10 @@ async fn repeated_expired_outbox_claims_park_uncertain_work_at_the_budget() {
             )
             .await
             .expect("advance retry deadline");
-        let mut claimed = store.claim_due_outbox_jobs(1).await.expect("recover claim");
+        let mut claimed = store
+            .claim_due_outbox_jobs(DrainScope::All, 1)
+            .await
+            .expect("recover claim");
         assert_eq!(claimed.len(), 1);
         assert_ne!(claimed[0].claim_token(), job.claim_token());
         job = claimed.remove(0);
@@ -1537,13 +1656,13 @@ async fn repeated_expired_outbox_claims_park_uncertain_work_at_the_budget() {
         .await
         .expect("expire final claim");
     assert!(store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("exhausted recovery")
         .is_empty());
     for _ in 0..3 {
         assert!(store
-            .claim_due_outbox_jobs(1)
+            .claim_due_outbox_jobs(DrainScope::All, 1)
             .await
             .expect("parked recovery")
             .is_empty());
@@ -1603,7 +1722,10 @@ async fn persistent_outbox_policy_failures_stop_at_the_budget() {
                 &inbox,
                 &FailingBlockingStorage,
                 &bare("push.example.com"),
-                1,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 1,
+                },
             )
             .await
             .expect("policy failure");
@@ -1627,7 +1749,10 @@ async fn persistent_outbox_policy_failures_stop_at_the_budget() {
             &inbox,
             &FailingBlockingStorage,
             &bare("push.example.com"),
-            1
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1
+            },
         )
         .await
         .expect("exhausted policy")
@@ -1663,7 +1788,7 @@ async fn parked_outbox_reconciles_revocation_from_a_separate_push_database() {
     )
     .await;
     let job = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -1700,7 +1825,10 @@ async fn parked_outbox_reconciles_revocation_from_a_separate_push_database() {
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            1
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1
+            },
         )
         .await
         .expect("parked drain")
@@ -1736,7 +1864,10 @@ async fn parked_outbox_reconciles_revocation_from_a_separate_push_database() {
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            1,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
         )
         .await
         .expect("terminal-only reconciliation");
@@ -1804,7 +1935,7 @@ async fn bounded_parked_probes_rotate_past_unresolved_owners_across_restarts() {
     )
     .await;
     let terminal = store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -1846,7 +1977,10 @@ async fn bounded_parked_probes_rotate_past_unresolved_owners_across_restarts() {
                     &inbox,
                     &blocking,
                     &bare("push.example.com"),
-                    1
+                    DrainBatch {
+                        scope: DrainScope::All,
+                        batch_size: 1
+                    },
                 )
                 .await
                 .expect("bounded unresolved probe")
@@ -1865,7 +1999,10 @@ async fn bounded_parked_probes_rotate_past_unresolved_owners_across_restarts() {
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            1,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
         )
         .await
         .expect("later terminal probe");

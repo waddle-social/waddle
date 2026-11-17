@@ -10,8 +10,9 @@ use crate::support::{
 use jid::Jid;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
-    NoopDndReader, NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
-    NotificationOutboxStatus, NotificationOutboxTarget, PushServiceNodeName,
+    DrainBatch, DrainScope, NoopDndReader, NotificationClass, NotificationOutboxJob,
+    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxTarget,
+    PushServiceNodeName,
 };
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
@@ -108,7 +109,10 @@ async fn drain_dm_outbox_with_sender_jid(
             &inbox,
             blocking,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain outbox");
@@ -163,7 +167,10 @@ async fn candidate_worker_filters_full_jid_block_before_bare_conversation_coales
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -210,7 +217,10 @@ async fn candidate_worker_applies_xep0191_to_groupchat_notifications() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -294,7 +304,10 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -323,7 +336,10 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
             &inbox,
             &blocking,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain outbox");

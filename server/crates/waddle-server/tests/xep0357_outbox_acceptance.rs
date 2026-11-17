@@ -7,8 +7,8 @@ use minidom::Element;
 use std::sync::Arc;
 use uuid::Uuid;
 use waddle_server::notification_outbox::{
-    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
-    WADDLE_PUSH_CONTEXT_NS,
+    DrainBatch, DrainScope, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStore, WADDLE_PUSH_CONTEXT_NS,
 };
 use waddle_server::push_service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
@@ -155,7 +155,7 @@ impl Fixture {
             )
             .await;
         self.outbox
-            .claim_due_outbox_jobs(1)
+            .claim_due_outbox_jobs(DrainScope::All, 1)
             .await
             .expect("claim")
             .remove(0)
@@ -351,7 +351,7 @@ async fn inactive_node_fails_once_and_disables_registration(fixture: Fixture) {
     assert_eq!(fixture.push_db.count("push_publish_jobs").await, 0);
     assert!(fixture
         .outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("gone job stays terminal")
         .is_empty());
@@ -580,7 +580,10 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
                     &fixture.inbox,
                     &InMemoryBlockingStorage::new(),
                     &fixture.service,
-                    1,
+                    DrainBatch {
+                        scope: DrainScope::All,
+                        batch_size: 1
+                    },
                 )
                 .await
                 .expect("parked drain after service recovery")
@@ -843,7 +846,7 @@ async fn explicit_revocation_retires_accepted_outbox_after_crash_gap(
     assert_eq!(fixture.push_db.count("push_delivery_attempts").await, 0);
     assert!(fixture
         .outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("terminal owner")
         .is_empty());
@@ -1010,7 +1013,7 @@ async fn generic_failed_acceptance_is_not_revocation_proof(fixture: Fixture) {
     );
     assert!(fixture
         .outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("parked custody does not retry")
         .is_empty());

@@ -2,6 +2,7 @@
 
 use super::routes;
 use super::run_ingress_custody_sweep;
+use crate::notification_outbox::{DrainBatch, DrainScope};
 
 #[cfg(feature = "clustering")]
 use super::error;
@@ -3705,17 +3706,36 @@ pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSo
         .and_then(|s| s.parse::<usize>().ok())
         .map(|v| v.clamp(1, 1_000))
         .unwrap_or(128);
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let Some(state) = weak_state.upgrade() else {
-                break;
-            };
-            run_push_service_publish_job_sweep(&state, batch_size).await;
+    tokio::spawn(run_push_service_publish_job_loop(
+        weak_state,
+        Duration::from_secs(interval_secs),
+        websocket_state
+            .deps
+            .protocol
+            .push_service
+            .publish_job_wake(),
+        batch_size,
+    ));
+}
+
+pub(crate) async fn run_push_service_publish_job_loop(
+    weak_state: std::sync::Weak<WebSocketState>,
+    interval: Duration,
+    wake: Arc<tokio::sync::Notify>,
+    batch_size: usize,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {},
+            _ = wake.notified() => {},
         }
-    });
+        let Some(state) = weak_state.upgrade() else {
+            break;
+        };
+        run_push_service_publish_job_sweep(&state, batch_size).await;
+    }
 }
 
 pub(in crate::server::session_janitors) async fn run_push_service_publish_job_sweep(
@@ -3792,16 +3812,41 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
         crate::notification_outbox::MIN_ACTIVE_MENTION_TTL_SECONDS,
         crate::notification_outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
     );
-    tokio::spawn(async move {
-        let mut pending_notification_cursor =
-            routes::interpret::PendingNotificationRecoveryCursor::default();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let Some(state) = weak_state.upgrade() else {
-                break;
-            };
+    tokio::spawn(run_notification_outbox_loop(
+        weak_state,
+        Duration::from_secs(interval_secs),
+        websocket_state
+            .deps
+            .protocol
+            .ingress
+            .notification_outbox_wake(),
+        batch_size,
+        retention_days,
+        prune_batch_size,
+    ));
+}
+
+pub(crate) async fn run_notification_outbox_loop(
+    weak_state: std::sync::Weak<WebSocketState>,
+    interval: Duration,
+    wake: Arc<tokio::sync::Notify>,
+    batch_size: usize,
+    retention_days: u32,
+    prune_batch_size: usize,
+) {
+    let mut pending_notification_cursor =
+        routes::interpret::PendingNotificationRecoveryCursor::default();
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await;
+    loop {
+        let timed = tokio::select! {
+            _ = ticker.tick() => true,
+            _ = wake.notified() => false,
+        };
+        let Some(state) = weak_state.upgrade() else {
+            break;
+        };
+        if timed {
             super::run_notification_outbox_sweep(
                 &state,
                 batch_size,
@@ -3810,8 +3855,18 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
                 &mut pending_notification_cursor,
             )
             .await;
+        } else {
+            run_notification_outbox_sweep_inner(
+                &state,
+                batch_size,
+                retention_days,
+                prune_batch_size,
+                &mut pending_notification_cursor,
+                false,
+            )
+            .await;
         }
-    });
+    }
 }
 
 pub(crate) fn spawn_call_teardown_outbox_janitor(websocket_state: &Arc<WebSocketState>) {
@@ -4046,13 +4101,34 @@ pub(crate) async fn run_notification_outbox_sweep(
     prune_batch_size: usize,
     pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
 ) {
+    run_notification_outbox_sweep_inner(
+        state,
+        batch_size,
+        retention_days,
+        prune_batch_size,
+        pending_notification_cursor,
+        true,
+    )
+    .await;
+}
+
+async fn run_notification_outbox_sweep_inner(
+    state: &WebSocketState,
+    batch_size: usize,
+    retention_days: u32,
+    prune_batch_size: usize,
+    pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
+    timed: bool,
+) {
     async {
         let mut sweep_failed = false;
-        match state.deps.protocol.notification_outbox.queue_observation().await {
-            Ok(snapshot) => snapshot.record(),
-            Err(error) => {
-                sweep_failed = true;
-                warn!(%error, "Push outbox queue snapshot failed");
+        if timed {
+            match state.deps.protocol.notification_outbox.queue_observation().await {
+                Ok(snapshot) => snapshot.record(),
+                Err(error) => {
+                    sweep_failed = true;
+                    warn!(%error, "Push outbox queue snapshot failed");
+                }
             }
         }
         let first_party_service_jid = match state.deps.service_domains.push.parse() {
@@ -4070,30 +4146,37 @@ pub(crate) async fn run_notification_outbox_sweep(
                 return;
             }
         };
-        let recovered =
-            routes::interpret::reconcile_xep0357_notification_candidates_for_sweep(
-                state, batch_size, pending_notification_cursor,
-            )
-            .await;
-        sweep_failed |= recovered.had_failure;
-        if recovered.completed > 0 {
-            debug!(
-                recovered = recovered.completed,
-                "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
-            );
+        if timed {
+            let recovered =
+                routes::interpret::reconcile_xep0357_notification_candidates_for_sweep(
+                    state, batch_size, pending_notification_cursor,
+                )
+                .await;
+            sweep_failed |= recovered.had_failure;
+            if recovered.completed > 0 {
+                debug!(
+                    recovered = recovered.completed,
+                    "Notification outbox janitor recovered XEP-0357 candidates from pending_delivery"
+                );
+            }
+            let recovered_groupchat =
+                routes::interpret::reconcile_groupchat_notification_candidates_for_sweep(
+                    state, batch_size,
+                )
+                .await;
+            sweep_failed |= recovered_groupchat.had_failure;
+            if recovered_groupchat.completed > 0 {
+                debug!(
+                    recovered = recovered_groupchat.completed,
+                    "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
+                );
+            }
         }
-        let recovered_groupchat =
-            routes::interpret::reconcile_groupchat_notification_candidates_for_sweep(
-                state, batch_size,
-            )
-            .await;
-        sweep_failed |= recovered_groupchat.had_failure;
-        if recovered_groupchat.completed > 0 {
-            debug!(
-                recovered = recovered_groupchat.completed,
-                "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
-            );
-        }
+        let scope = if timed {
+            DrainScope::All
+        } else {
+            DrainScope::CallsOnly
+        };
         let room_policy = RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
         let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
         let activity_reader = state.deps.protocol.notification_activity.as_ref();
@@ -4116,7 +4199,7 @@ pub(crate) async fn run_notification_outbox_sweep(
                     .as_ref(),
                 deps,
                 &first_party_service_jid,
-                batch_size,
+                DrainBatch { scope, batch_size },
             )
             .await
         {
@@ -4145,7 +4228,7 @@ pub(crate) async fn run_notification_outbox_sweep(
                 state.deps.protocol.inbox_storage.as_ref(),
                 state.deps.protocol.blocking_storage.as_ref(),
                 &first_party_service_jid,
-                batch_size,
+                DrainBatch { scope, batch_size },
             )
             .await
         {
@@ -4164,51 +4247,53 @@ pub(crate) async fn run_notification_outbox_sweep(
                 );
             }
         }
-        let cutoff_ms = crate::time::now_ms()
-            .saturating_sub(i64::from(retention_days) * 24 * 60 * 60 * 1_000);
-        match state
-            .deps
-            .protocol
-            .notification_outbox
-            .prune_completed_before(cutoff_ms, prune_batch_size)
-            .await
-        {
-            Ok(outcome) if outcome.total_deleted() > 0 => {
-                debug!(
-                    candidates_deleted = outcome.candidates_deleted,
-                    jobs_deleted = outcome.jobs_deleted,
-                    "Notification outbox janitor pruned completed rows"
-                );
+        if timed {
+            let cutoff_ms = crate::time::now_ms()
+                .saturating_sub(i64::from(retention_days) * 24 * 60 * 60 * 1_000);
+            match state
+                .deps
+                .protocol
+                .notification_outbox
+                .prune_completed_before(cutoff_ms, prune_batch_size)
+                .await
+            {
+                Ok(outcome) if outcome.total_deleted() > 0 => {
+                    debug!(
+                        candidates_deleted = outcome.candidates_deleted,
+                        jobs_deleted = outcome.jobs_deleted,
+                        "Notification outbox janitor pruned completed rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    sweep_failed = true;
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor prune failed; completed rows remain durable"
+                    );
+                }
             }
-            Ok(_) => {}
-            Err(error) => {
-                sweep_failed = true;
-                warn!(
-                    error = %error,
-                    "Notification outbox janitor prune failed; completed rows remain durable"
-                );
-            }
-        }
-        match state
-            .deps
-            .protocol
-            .inbox_storage
-            .prune_completed_groupchat_notification_recoveries(cutoff_ms, prune_batch_size)
-            .await
-        {
-            Ok(deleted) if deleted > 0 => {
-                debug!(
-                    deleted,
-                    "Notification outbox janitor pruned completed groupchat notification recovery rows"
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                sweep_failed = true;
-                warn!(
-                    error = %error,
-                    "Notification outbox janitor failed to prune completed groupchat notification recovery rows"
-                );
+            match state
+                .deps
+                .protocol
+                .inbox_storage
+                .prune_completed_groupchat_notification_recoveries(cutoff_ms, prune_batch_size)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => {
+                    debug!(
+                        deleted,
+                        "Notification outbox janitor pruned completed groupchat notification recovery rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    sweep_failed = true;
+                    warn!(
+                        error = %error,
+                        "Notification outbox janitor failed to prune completed groupchat notification recovery rows"
+                    );
+                }
             }
         }
         waddle_xmpp::telemetry::reliability::record_janitor_sweep(

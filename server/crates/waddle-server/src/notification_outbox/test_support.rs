@@ -3,11 +3,11 @@
 use super::candidate_persistence::{enqueue_outbox_job_tx, mark_candidate_outboxed_tx};
 use super::publish::OUTBOX_CLAIM_TIMEOUT_MS;
 use super::{
-    build_waddle_context, BareJid, DndReader, DndState, InboxStorage, Jid, NotificationActivity,
-    NotificationActivityError, NotificationActivityReader, NotificationCandidate,
-    NotificationClass, NotificationOutboxError, NotificationOutboxJob, NotificationOutboxStore,
-    NotificationOutboxTarget, NotificationThreadId, PushEvalDeps, PushServiceNodeName, RichSummary,
-    RoomPolicyCacheEntry, RoomPolicyStore, StanzaId,
+    build_waddle_context, BareJid, DndReader, DndState, DrainScope, InboxStorage, Jid,
+    NotificationActivity, NotificationActivityError, NotificationActivityReader,
+    NotificationCandidate, NotificationClass, NotificationOutboxError, NotificationOutboxJob,
+    NotificationOutboxStore, NotificationOutboxTarget, NotificationThreadId, PushEvalDeps,
+    PushServiceNodeName, RichSummary, RoomPolicyCacheEntry, RoomPolicyStore, StanzaId,
 };
 use crate::db::Database;
 use crate::ingress_substrate::EnteredTransaction;
@@ -433,7 +433,7 @@ pub(super) async fn reclaim_stale_job(
     store: &NotificationOutboxStore,
 ) -> (NotificationOutboxJob, NotificationOutboxJob) {
     let stale_claim = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("claim")
         .into_iter()
@@ -450,7 +450,7 @@ pub(super) async fn reclaim_stale_job(
         .await
         .expect("make claim stale");
     assert!(store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("schedule expired claim backoff")
         .is_empty());
@@ -462,7 +462,7 @@ pub(super) async fn reclaim_stale_job(
         .await
         .expect("advance retry deadline");
     let fresh_claim = store
-        .claim_due_outbox_jobs(16)
+        .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
         .expect("reclaim")
         .into_iter()

@@ -8,7 +8,7 @@ use crate::ingress::test_support::IngressFixture;
 use crate::notification_outbox::test_support::{
     candidate, enqueue_jobs_for_test, inbox_with_unread, target_named,
 };
-use crate::notification_outbox::NotificationCandidate;
+use crate::notification_outbox::{DrainBatch, DrainScope, NotificationCandidate};
 use crate::push_registrations::DatabasePushRegistrationStore;
 use crate::push_service::test_support::{fcm_registration, FCM_TEST_APP_ID};
 use crate::push_service::DatabasePushServiceStore;
@@ -126,7 +126,10 @@ async fn deleted_node_disables_only_its_registration(fixture: IngressFixture) {
         &[target_named(deleted.node()), target_named(healthy.node())],
     )
     .await;
-    let claims = outbox.claim_due_outbox_jobs(2).await.expect("claims");
+    let claims = outbox
+        .claim_due_outbox_jobs(DrainScope::All, 2)
+        .await
+        .expect("claims");
     let gone = claims
         .iter()
         .find(|job| job.node.as_str() == deleted.node())
@@ -236,7 +239,7 @@ async fn gone_registration_preserves_prior_provider_custody(
         .expect("registration");
     enqueue_jobs_for_test(&outbox, &notification, &[target_named(node.node())]).await;
     let claim = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("first claim")
         .remove(0);
@@ -270,7 +273,7 @@ async fn gone_registration_preserves_prior_provider_custody(
             .await;
     }
     let retry = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("uncertain claim")
         .remove(0);
@@ -328,7 +331,17 @@ async fn gone_registration_preserves_prior_provider_custody(
         0
     );
     assert!(outbox
-        .drain_due_outbox_jobs(&push, &registrations, &inbox, &blocking, &service, 16)
+        .drain_due_outbox_jobs(
+            &push,
+            &registrations,
+            &inbox,
+            &blocking,
+            &service,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16
+            },
+        )
         .await
         .expect("parked jobs only reconcile")
         .is_empty());
@@ -423,7 +436,7 @@ async fn postgres_xep0357_delayed_gone_outcome_preserves_later_reenable() {
         .await;
     enqueue_jobs_for_test(&outbox, &notification, &[target_named(node.node())]).await;
     let claim = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -503,7 +516,7 @@ async fn postgres_xep0357_delayed_gone_outcome_preserves_later_reenable() {
     let fresh_notification = candidate("after-reenable");
     enqueue_jobs_for_test(&outbox, &fresh_notification, &[target_named(node.node())]).await;
     let fresh = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("fresh claim")
         .remove(0);

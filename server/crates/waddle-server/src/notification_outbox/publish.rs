@@ -5,10 +5,10 @@
 use super::publisher_persistence::retire_registration_outbox_tx;
 use super::publisher_persistence::{current_unread_count_for_job, PublisherTransition};
 use super::{
-    xep0191_blocks_notification_job, BareJid, BlockingStorage, Element, Error, InboxStorage,
-    NotificationOutboxError, NotificationOutboxJob, NotificationOutboxPublishOutcome,
-    NotificationOutboxStatus, NotificationOutboxStore, PubSubItem, PushSubscriptionStore,
-    SuppressedReason,
+    xep0191_blocks_notification_job, BareJid, BlockingStorage, DrainBatch, DrainScope, Element,
+    Error, InboxStorage, NotificationOutboxError, NotificationOutboxJob,
+    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
+    PubSubItem, PushSubscriptionStore, SuppressedReason,
 };
 #[cfg(test)]
 use super::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
@@ -152,13 +152,14 @@ pub(super) fn record_failure_transition(
 impl NotificationOutboxStore {
     pub async fn claim_due_outbox_jobs(
         &self,
+        scope: DrainScope,
         batch_size: usize,
     ) -> Result<Vec<NotificationOutboxJob>, NotificationOutboxError> {
         let batch_size = batch_size.clamp(1, 1_000);
         let now_ms = crate::time::now_ms();
         let stale_claimed_before_ms = now_ms.saturating_sub(OUTBOX_CLAIM_TIMEOUT_MS);
         let selected = self
-            .persist_due_outbox_selection(batch_size, now_ms, stale_claimed_before_ms)
+            .persist_due_outbox_selection(scope, batch_size, now_ms, stale_claimed_before_ms)
             .await?;
 
         let mut claimed = Vec::new();
@@ -198,9 +199,10 @@ impl NotificationOutboxStore {
         inbox_storage: &dyn InboxStorage,
         blocking_storage: &dyn BlockingStorage,
         first_party_service_jid: &BareJid,
-        batch_size: usize,
+        batch: DrainBatch,
     ) -> Result<Vec<NotificationOutboxPublishOutcome>, NotificationOutboxError> {
-        let jobs = self.claim_due_outbox_jobs(batch_size).await?;
+        let DrainBatch { scope, batch_size } = batch;
+        let jobs = self.claim_due_outbox_jobs(scope, batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
             let span = tracing::info_span!(
@@ -493,6 +495,10 @@ impl NotificationOutboxStore {
             .await
         {
             Ok(result) => {
+                // Queue acceptance is durable even if upstream bookkeeping fails.
+                if job.class() == super::NotificationClass::Call && result.queued() {
+                    push_service.publish_job_wake().notify_one();
+                }
                 if !self.mark_job_published(job).await? {
                     return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                         job_id: job.job_id.clone(),
@@ -939,6 +945,7 @@ mod tests {
     use crate::notification_outbox::test_support::{
         bare, candidate, enqueue_jobs_for_test, inbox_with_unread, reclaim_stale_job, store, target,
     };
+    use crate::notification_outbox::DrainScope;
 
     // #1126: exponential backoff carries ±25% jitter so retries after
     // an outage do not drain in synchronized waves.
@@ -983,7 +990,7 @@ mod tests {
         let conversation = bare("bob@example.com");
         enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target()]).await;
         let claimed = store
-            .claim_due_outbox_jobs(16)
+            .claim_due_outbox_jobs(DrainScope::All, 16)
             .await
             .expect("claim")
             .into_iter()
