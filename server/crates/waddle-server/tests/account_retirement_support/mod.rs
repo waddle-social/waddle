@@ -15,8 +15,10 @@ use waddle_server::auth::session_endings::{request_session_ending, SessionEnding
 use waddle_server::auth::{NativeUserStore, RegisterRequest};
 use waddle_server::db::Database;
 use waddle_server::server::account_session_endings::{ReplicaLease, RequestedEndings};
+use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::test_support::{
-    make_deployment_owner, router, seed_local_account, websocket_state, WebSocketState,
+    attach_pending_startup, make_deployment_owner, router, seed_local_account, websocket_state,
+    websocket_state_without_durable_sm, WebSocketState,
 };
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::WsXmppClient;
@@ -49,7 +51,31 @@ impl Drop for Server {
 
 impl Server {
     pub async fn start() -> Self {
-        let state = websocket_state().await;
+        Self::serve(websocket_state().await).await
+    }
+
+    /// A server on a state whose session registry keeps detached sessions
+    /// and their ingress custody itself (no durable stream-management
+    /// authority), with the offline store startup attaches: rows in the
+    /// state's database, which also holds the ledger of retired JIDs.
+    pub async fn start_with_registry_sessions() -> Self {
+        let mut state = websocket_state_without_durable_sm().await;
+        let global = state.deps.app_state.db_pool.global().clone();
+        let pending = attach_pending_startup(
+            &ResolvedXmppDatabaseUrl::InheritedGlobal(global.database_url().to_owned()),
+            &global,
+        )
+        .await
+        .expect("the offline store in the test state's database");
+        Arc::get_mut(&mut state)
+            .expect("an unshared test state")
+            .deps
+            .protocol
+            .pending_delivery_storage = Arc::new(pending);
+        Self::serve(state).await
+    }
+
+    async fn serve(state: Arc<WebSocketState>) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");
