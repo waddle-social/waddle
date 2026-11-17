@@ -12,9 +12,12 @@
 //! transaction-scoped advisory lock keyed by the account's canonical JID,
 //! which an insert takes whatever spelling of the JID its row names: an
 //! insert that took it first commits before the retirement's delete reads
-//! the store, which removes the account's rows under every spelling, and
-//! one that waits for it reads the ledger the retirement committed. SQLite
-//! runs one writing transaction at a time.
+//! the store, and one that waits for it reads the ledger the retirement
+//! committed. SQLite runs one writing transaction at a time. The
+//! retirement's transaction removes the rows under the canonical JID; the
+//! rows stored before it under another spelling are removed after its
+//! commit by `crate::auth::retirement::sweep_offline_spellings`, and none
+//! comes back, since this refusal reads the ledger by the canonical key.
 //!
 //! The ledger lives in the global database, which the offline store shares
 //! in every deployment (startup refuses a split store). A store opened on a

@@ -1150,17 +1150,23 @@ projected subject are that canonical text.
 - Every startup reads `retired_account_jids` once as the runtime role,
   before the first account provisioning, and refuses to start when it
   cannot, naming the table.
-- An account's retirement reads every recipient of the offline store for
-  the rows kept under another spelling of its JID, inside its transaction
-  and under its 5 s statement bound, while it holds the account tables'
-  lock. No index serves that read: the restricted ingress profile pins
+- An account's retirement removes its offline store under the canonical
+  JID inside its transaction. The rows kept under another spelling of the
+  JID are found only by reading every recipient of the offline store, and
+  no index serves that read: the restricted ingress profile pins
   `pending_delivery`'s exact structure, indexes included, to a manifest
   built from the schema baseline, so an index added by a later migration
-  needs a new version of that manifest first. On a large offline store
-  the retirement can therefore run out of its bound and has to be run
-  again; moving the sweep of other spellings out of the locked
-  transaction, or a manifest version that covers later migrations, would
-  remove the limit.
+  needs a new version of that manifest first. That read therefore runs
+  after the retirement committed, outside the account tables' lock, in a
+  sweep of its own (`sweep_offline_spellings`) with a 30 s statement
+  bound; it holds up no login. The store refuses every row for the
+  account from the commit on, under any spelling, so the sweep removes
+  only rows stored before and a second sweep removes nothing. A sweep
+  that fails or runs out of its bound changes nothing; the operator
+  command reports it with exit code 1 and runs the sweep again on its
+  next run. Until a sweep completes, rows under other spellings stay in
+  the store: no session of the account flushes them, and no other account
+  can hold the JID.
 - The schema tooling that compares a history-built database with a
   baseline-built one (`scripts/schema_history.py`) does not yet account for
   relations added after the baseline.
@@ -2970,22 +2976,33 @@ A home never issues the JID of a retired account to a new holder
   `users` row cascades to its identity-provider links and its sessions; one
   delete for each row of the account, usually one native row and one
   account row), two reads of the account rows that carry no lookup key,
-  the delete of the account's offline store (`pending_delivery`), taken
-  after the advisory lock every insert into that store takes for the
-  account's canonical JID, a read of the store's recipients that start
-  with the account's localpart, compared without letter case, and a
-  delete for each other spelling of the account's JID among them (a
-  U-label domain, a row written before recipients were prepared), and the
-  three deletes of what remote senders left for it: eleven statements for
-  a usual account, so a login can be held up for 2 s of waiting plus up to
-  55 s, and is in practice for milliseconds. The read of the recipients
-  scans the store. From the commit on the store refuses every row for the
-  account (`InsertOutcome::RecipientRetired`), whichever producer offers
-  it: an insert that held the lock first commits before the delete reads
-  the store, and one that waits for it reads the ledger the retirement
-  wrote. The message is discarded and no sender is answered. An account
-  whose delete does not finish within the statement bound is not retired;
-  nothing splits that delete.
+  the delete of the account's offline store (`pending_delivery`) under its
+  canonical JID, taken after the advisory lock every insert into that
+  store takes for the account's canonical JID, and the three deletes of
+  what remote senders left for it: ten statements for a usual account, so
+  a login can be held up for 2 s of waiting plus up to 50 s, and is in
+  practice for milliseconds. From the commit on the store refuses every
+  row for the account (`InsertOutcome::RecipientRetired`), whichever
+  producer offers it and whichever spelling of the JID it names: an insert
+  that held the lock first commits before the delete reads the store, and
+  one that waits for it reads the ledger the retirement wrote. The message
+  is discarded and no sender is answered. An account whose delete does not
+  finish within the statement bound is not retired; nothing splits that
+  delete.
+- **Other spellings in the offline store** (`sweep_offline_spellings`).
+  Rows an insert stored before the retirement under another spelling of
+  the JID (a U-label domain, a row written before recipients were
+  prepared) stay after the commit. Finding them reads every recipient of
+  the store that starts with the account's localpart, compared without
+  letter case, and no index serves that read, so it is not made while the
+  account tables are locked. The operator command runs it after the
+  commit, in a transaction of its own that takes no lock on the account
+  tables, with a 30 s statement bound: it reads the ledger, refuses a JID
+  the ledger does not hold, and deletes each other spelling of the
+  account's JID among the recipients. Since the store refuses the
+  account's rows under every spelling from the commit on, the sweep
+  removes only rows stored before and is idempotent; one that fails
+  changes nothing, and the command runs it on every run.
 - **Ending the account's open sessions** (`auth/session_endings.rs`,
   `server/account_session_endings.rs`,
   `server/routes/websocket/account_retirement.rs`, migration 2014, both

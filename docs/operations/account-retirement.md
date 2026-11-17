@@ -21,15 +21,22 @@ One transaction:
 - removes its account row (`users`) and, with it, its identity-provider
   links and its sessions;
 - removes the messages its offline store holds for its next session
-  (`pending_delivery`), under any spelling of its JID: the account has no
-  next session. From the
-  commit on the store refuses every message for the account, whoever
-  offers it: a sender, the end of one of its sessions, or the recovery of
-  messages a session was holding. Such a message is discarded and its
-  sender is not answered.
+  (`pending_delivery`) under the canonical JID: the account has no next
+  session. From the commit on the store refuses every message for the
+  account, under any spelling of its JID, whoever offers it: a sender, the
+  end of one of its sessions, or the recovery of messages a session was
+  holding. Such a message is discarded and its sender is not answered.
 
-Then, in the same command, every serving server ends the account's open
-sessions. The command records a request; each server reads it within about
+Then, in the same command, after the commit:
+
+- the messages the offline store kept from before the retirement under
+  another spelling of the JID (a domain written with U-labels, a message
+  stored before recipients were prepared) are removed. Finding them reads
+  every recipient of the store, which no index serves, so this runs in a
+  transaction of its own that locks no account table and holds up no
+  login, with a 30 s bound on each statement. It removes nothing for a JID
+  the ledger does not hold, and running it again removes nothing more;
+- every serving server ends the account's open sessions. The command records a request; each server reads it within about
 a second, and from then on:
 
 - closes every live stream of the account it hosts. The client is sent the
@@ -110,7 +117,10 @@ It does not:
 
    The command prints what it did as JSON: the canonical JID, whether this
    run recorded it (`newly_retired`), how many native and account rows it
-   removed, and under `sessions` the request it recorded (`request`),
+   removed, how many offline messages it removed under the canonical JID
+   (`offline_messages_removed`) and under other spellings
+   (`offline_spellings_removed`, `null` when that sweep did not complete),
+   and under `sessions` the request it recorded (`request`),
    whether every serving server confirmed (`confirmed`) and one entry per
    server (`replicas`):
 
@@ -142,16 +152,19 @@ It does not:
    detached sessions and refuses its bindings.
 
    Repeating the command is safe: it reports the JID as already retired,
-   removes whatever account rows it still finds and records a new request,
-   which every serving server takes up again.
+   removes whatever account rows and offline messages it still finds and
+   records a new request, which every serving server takes up again.
 
    Exit codes:
 
    - 0: retired, and no serving server is `pending` (`lapsed` servers are
      listed);
    - 1: the database returned an error. If the JSON was printed, the account
-     is retired and its sessions' end was not requested or not read: run
-     the command again;
+     is retired, and either the offline messages under other spellings of
+     its JID were not all removed (`offline_spellings_removed` is `null`;
+     the sweep failed or ran out of its 30 s bound and changed nothing) or
+     its sessions' end was not requested or not read: run the command
+     again;
    - 2: the JID names no account address or the database was not named;
    - 3: retired, and a serving server has not confirmed ending the
      account's sessions (`pending`). Run the command again; a server that
@@ -165,13 +178,13 @@ It does not:
    for the lock; if a long-running transaction holds the tables it exits
    with code 1 without having changed anything, and logins that queued
    behind it proceed. Run it again. Once it holds the lock, the transaction
-   is a handful of statements (nine for a usual account) and usually takes
+   is a handful of statements (ten for a usual account) and usually takes
    milliseconds; it has no deadline of its own, and each statement runs at
    most 5 s. The delete of the account row removes the account's
    identity-provider links and sessions with it, and an account with so
    many of them that the delete does not finish is reported with exit code
-   1 and nothing changed. The request and the wait that follow lock
-   nothing.
+   1 and nothing changed. The sweep of other spellings, the request and
+   the wait that follow lock no account table.
 
 3. **Check the report.** The command sees only the servers that hold a
    lease, so first check that `replicas` lists every server that serves

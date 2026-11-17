@@ -31,7 +31,9 @@ use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
 use serde_json::json;
 use waddle_server::auth::identity::IdentityService;
-use waddle_server::auth::retirement::{jid_is_retired, retire_account, RetireAccountError};
+use waddle_server::auth::retirement::{
+    jid_is_retired, retire_account, sweep_offline_spellings, OfflineSweepError, RetireAccountError,
+};
 use waddle_server::auth::{
     AuthError, AuthProviderConfig, AuthProviderKind, AuthProviderTokenEndpointAuthMethod,
     IdentityClaims, NativeUserStore, RegisterRequest, Session, SessionManager,
@@ -620,6 +622,7 @@ async fn the_operator_subcommand_retires_an_account_on_sqlite() {
     assert_eq!(printed["jid"], "heidi@example.com");
     assert_eq!(printed["newly_retired"], true);
     assert_eq!(printed["native_accounts_removed"], 1);
+    assert_eq!(printed["offline_spellings_removed"], 0);
     assert!(matches!(
         native.register(register("heidi")).await,
         Err(AuthError::JidRetired)
@@ -634,6 +637,7 @@ async fn the_operator_subcommand_retires_an_account_on_sqlite() {
     .await;
     assert_eq!(code, 0);
     assert_eq!(printed["newly_retired"], false);
+    assert_eq!(printed["offline_spellings_removed"], 0);
     let (code, _, _) =
         account_retire(&["--jid", "example.com", "--sqlite-database", &file], &[]).await;
     assert_eq!(code, 2);
@@ -685,6 +689,7 @@ async fn the_operator_subcommand_retires_an_account_on_postgres() {
     assert_eq!(printed["jid"], "judy@example.com");
     assert_eq!(printed["newly_retired"], true);
     assert_eq!(printed["native_accounts_removed"], 1);
+    assert_eq!(printed["offline_spellings_removed"], 0);
     assert!(matches!(
         native.register(register("judy")).await,
         Err(AuthError::JidRetired)
@@ -800,6 +805,9 @@ async fn retirement_removes_what_remote_senders_left_for_the_account() {
     }
 }
 
+/// The retirement's transaction empties the offline store under the
+/// account's canonical JID; the sweep that follows its commit, outside the
+/// lock on the account tables, removes the rows under every other spelling.
 #[tokio::test]
 async fn retirement_empties_the_offline_store_under_every_spelling_of_the_account() {
     use waddle_server::db::actor::DbExecute;
@@ -807,7 +815,9 @@ async fn retirement_empties_the_offline_store_under_every_spelling_of_the_accoun
     use waddle_server::server::ResolvedXmppDatabaseUrl;
     use waddle_server::test_support::attach_pending_startup;
     use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+    use waddle_xmpp::pending_delivery::{
+        InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
+    };
     use xmpp_parsers::message::{Lang, Message};
 
     /// A message from Bob that the offline store keeps whole for `to`.
@@ -876,13 +886,68 @@ async fn retirement_empties_the_offline_store_under_every_spelling_of_the_accoun
             .expect("a legacy spelling");
         assert_eq!(rewritten, 1, "{engine}");
 
+        // The sweep removes only a retired account's rows: before the
+        // retirement it refuses the JID and removes nothing.
+        assert!(
+            matches!(
+                sweep_offline_spellings(&store.db, &canonical).await,
+                Err(OfflineSweepError::NotRetired)
+            ),
+            "{engine}"
+        );
+        for kept in [unicode.as_str(), legacy] {
+            assert_eq!(store.count(COUNT, kept).await, 1, "{engine}: {kept}");
+        }
+
         let retirement = retire_account(&store.db, &canonical)
             .await
             .expect("retirement");
-        assert_eq!(retirement.offline_messages, 3, "{engine}");
+        // The transaction removes the row under the canonical JID and leaves
+        // the other spellings to the sweep.
+        assert_eq!(retirement.offline_messages, 1, "{engine}");
+        assert_eq!(store.count(COUNT, canonical.as_str()).await, 0, "{engine}");
+        for left in [unicode.as_str(), legacy] {
+            assert_eq!(store.count(COUNT, left).await, 1, "{engine}: {left}");
+        }
+
+        let swept = sweep_offline_spellings(&store.db, &canonical)
+            .await
+            .expect("the sweep of other spellings");
+        assert_eq!(swept, 2, "{engine}");
+        assert_eq!(retirement.offline_messages + swept, 3, "{engine}");
         for gone in [canonical.as_str(), unicode.as_str(), legacy] {
             assert_eq!(store.count(COUNT, gone).await, 0, "{engine}: {gone}");
         }
+        for kept in [lookalike.as_str(), elsewhere.as_str()] {
+            assert_eq!(store.count(COUNT, kept).await, 1, "{engine}: {kept}");
+        }
+
+        // The store refuses the account's rows from the retirement on, under
+        // any spelling, so a second sweep finds nothing, and one named by
+        // another spelling of the JID sweeps the same account.
+        assert_eq!(
+            offline
+                .insert(row(&unicode))
+                .await
+                .expect("an insert the store refuses"),
+            InsertOutcome::RecipientRetired,
+            "{engine}"
+        );
+        assert_eq!(store.count(COUNT, unicode.as_str()).await, 0, "{engine}");
+        assert_eq!(
+            sweep_offline_spellings(&store.db, &canonical)
+                .await
+                .expect("a second sweep"),
+            0,
+            "{engine}"
+        );
+        assert_eq!(
+            sweep_offline_spellings(&store.db, &unicode)
+                .await
+                .expect("a sweep named by another spelling"),
+            0,
+            "{engine}"
+        );
         for kept in [lookalike.as_str(), elsewhere.as_str()] {
             assert_eq!(store.count(COUNT, kept).await, 1, "{engine}: {kept}");
         }

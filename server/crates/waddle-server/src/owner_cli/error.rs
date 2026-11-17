@@ -103,6 +103,13 @@ pub enum OwnerCliError {
     RevokeAccountIncomplete { failed: usize },
     #[error("the account was not retired")]
     Retirement(#[source] crate::auth::retirement::RetireAccountError),
+    /// The account is retired; the messages its offline store keeps under
+    /// other spellings of its JID were not all removed.
+    #[error(
+        "the account is retired, and the messages its offline store keeps under other \
+         spellings of its JID were not all removed: run the command again"
+    )]
+    OfflineSweep(#[source] crate::auth::retirement::OfflineSweepError),
     /// The account is retired; ending its open sessions could not be
     /// requested, or the replicas' acknowledgements could not be read.
     #[error(
@@ -129,6 +136,7 @@ impl OwnerCliError {
             | Self::Connect(_)
             | Self::FenceUnacknowledged
             | Self::RevokeAccountIncomplete { .. }
+            | Self::OfflineSweep(_)
             | Self::SessionEnding(_) => ExitStatus::Failed,
             Self::RevokesRefused { .. } => ExitStatus::Refused,
             Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {

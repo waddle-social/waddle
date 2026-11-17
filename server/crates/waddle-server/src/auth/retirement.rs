@@ -42,6 +42,17 @@
 //! lock it runs a few statements, each bounded at 5 s; the transaction has
 //! no deadline of its own beyond those.
 //!
+//! The transaction removes the account's offline store under the account's
+//! canonical JID only. Rows a producer stored under another spelling of the
+//! JID (a domain's U-labels, a row written before recipients were prepared)
+//! are found only by reading every recipient of the store, which no index
+//! serves; [`sweep_offline_spellings`] removes them after the commit,
+//! outside the lock on the account tables, under its own statement bound.
+//! From the commit on the store refuses every row for the account under any
+//! spelling, so the sweep removes what was stored before and nothing comes
+//! back: running it again removes nothing, and the operator command runs it
+//! on every run, so a run that did not complete it is repeated.
+//!
 //! The account's open streams and detached stream-management sessions are
 //! held by the replicas that serve them, not by these tables. The operator
 //! command ends them in a second step once the retirement committed
@@ -84,6 +95,10 @@ pub(crate) fn retirement_key_of(jid: &BareJid) -> Option<String> {
 const RETIREMENT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Longest any one statement of a retirement runs.
 const RETIREMENT_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest any one statement of the sweep of other spellings runs. Its read
+/// scans the offline store's recipients; it holds no lock on the account
+/// tables, so a longer bound than the retirement's holds up no login.
+const OFFLINE_SWEEP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why an account could not be retired.
 #[derive(Debug, thiserror::Error)]
@@ -109,17 +124,34 @@ pub struct AccountRetirement {
     /// Account rows removed, with their identity-provider links and
     /// sessions.
     pub accounts: u64,
-    /// Messages removed from the account's offline store.
+    /// Messages removed from the account's offline store under its
+    /// canonical JID. Those kept under other spellings of the JID are
+    /// removed by [`sweep_offline_spellings`].
     pub offline_messages: u64,
+}
+
+/// Why the sweep of a retired account's offline store did not complete.
+#[derive(Debug, thiserror::Error)]
+pub enum OfflineSweepError {
+    #[error("the JID names no account: it needs a localpart and a canonical form")]
+    NotAnAccountJid,
+    #[error("the ledger of retired JIDs does not hold the JID; only a retired account is swept")]
+    NotRetired,
+    #[error("the sweep's lock and statement bounds could not be installed")]
+    BoundsUnproven,
+    #[error("a statement of the sweep failed")]
+    Database(#[from] DatabaseError),
 }
 
 /// Retire the account `jid`: record its JID in the ledger and remove its
 /// native credentials, its account row, its identity-provider links, its
-/// sessions, its offline store, and what remote senders left for it
-/// (recorded subscription requests, remote PubSub subscription records and
-/// offline admissions), in one transaction. A JID that holds no account is recorded as
-/// well, so that it is never issued. Retiring a retired JID removes whatever
-/// rows it still finds and changes nothing else.
+/// sessions, its offline store under its canonical JID, and what remote
+/// senders left for it (recorded subscription requests, remote PubSub
+/// subscription records and offline admissions), in one transaction. A JID
+/// that holds no account is recorded as well, so that it is never issued.
+/// Retiring a retired JID removes whatever rows it still finds and changes
+/// nothing else. The offline store's rows under other spellings of the JID
+/// are left to [`sweep_offline_spellings`], which runs after this commits.
 ///
 /// The caller's database role must be able to delete from both account
 /// tables: the schema owner, or a runtime that owns its schema. It does not
@@ -256,15 +288,20 @@ async fn retire_in(
             .await?;
     }
 
-    // The account's offline store: no session of the account will ever
-    // flush it, and a row left would wait for the JID's next holder, which
-    // the ledger never lets exist. From this commit on the store refuses
-    // every row for the account (`crate::pending_delivery`'s retired
-    // recipients), whichever producer offers it. An insert serialises with
-    // this delete on the advisory lock keyed by the account's canonical
-    // JID, which it takes whatever spelling of the JID its row names: one
-    // that holds it commits first and its row is removed here, and one that
-    // waits for it reads the ledger this transaction wrote.
+    // The account's offline store under its canonical JID: no session of
+    // the account will ever flush it, and a row left would wait for the
+    // JID's next holder, which the ledger never lets exist. From this
+    // commit on the store refuses every row for the account
+    // (`crate::pending_delivery`'s retired recipients), whichever producer
+    // offers it and whichever spelling of the JID its row names. An insert
+    // serialises with this delete on the advisory lock keyed by the
+    // account's canonical JID, which it takes whatever spelling its row
+    // names: one that holds it commits first, and one that waits for it
+    // reads the ledger this transaction wrote. A row under another spelling
+    // that committed first stays until `sweep_offline_spellings` removes it
+    // after this commit: finding it means reading every recipient of the
+    // store, which this transaction must not do while it holds the lock on
+    // the account tables.
     if tx.driver() == DatabaseDriver::Postgres {
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtext(?))",
@@ -277,8 +314,7 @@ async fn retire_in(
             "DELETE FROM pending_delivery WHERE recipient_jid = ?",
             crate::db_params![canonical.as_str()],
         )
-        .await?
-        + delete_offline_spellings(tx, canonical, key).await?;
+        .await?;
 
     // What remote senders left for the account (gate G18): their recorded
     // subscription requests, the account's records of remote PubSub
@@ -302,6 +338,79 @@ async fn retire_in(
     })
 }
 
+/// Remove the messages the offline store keeps for the retired account
+/// `jid` under a spelling of its JID other than the canonical one, and
+/// answer how many it removed.
+///
+/// It runs after [`retire_account`] committed, in a transaction of its own
+/// that takes no lock on the account tables: its read scans every
+/// recipient of the store, which no index serves, under a statement bound
+/// of 30 s. The store refuses every row for a retired account from the
+/// retirement's commit on, so the rows it finds were stored before, and
+/// none comes back once removed: a second run removes nothing. A run that
+/// fails or runs out of its bound changes nothing and is run again; the
+/// operator command runs it on every run.
+///
+/// It refuses a JID the ledger does not hold, read in its own transaction,
+/// so that it never removes the store of an account that is not retired.
+pub async fn sweep_offline_spellings(
+    db: &Database,
+    jid: &BareJid,
+) -> Result<u64, OfflineSweepError> {
+    let node = jid.node().ok_or(OfflineSweepError::NotAnAccountJid)?;
+    let canonical = canonical_account_jid(node.as_str(), jid.domain().as_str())
+        .ok_or(OfflineSweepError::NotAnAccountJid)?;
+    let key = canonical.to_string();
+
+    let mut tx = match db.driver() {
+        DatabaseDriver::Postgres => {
+            let mut tx = db.begin().await?;
+            if !set_local_transaction_timeouts(
+                &mut tx,
+                RETIREMENT_LOCK_TIMEOUT,
+                OFFLINE_SWEEP_STATEMENT_TIMEOUT,
+            )
+            .await?
+            {
+                return Err(OfflineSweepError::BoundsUnproven);
+            }
+            tx
+        }
+        DatabaseDriver::Sqlite => db.begin_immediate().await?,
+    };
+    let outcome = sweep_in(&mut tx, &canonical, &key).await;
+    match outcome {
+        Ok(removed) => {
+            tx.commit().await?;
+            Ok(removed)
+        }
+        Err(error) => {
+            // The rollback's own failure changes nothing that was written.
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+async fn sweep_in(
+    tx: &mut Transaction<'_>,
+    canonical: &BareJid,
+    key: &str,
+) -> Result<u64, OfflineSweepError> {
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM retired_account_jids WHERE jid_key = ?",
+            crate::db_params![key],
+        )
+        .await?;
+    let retired = rows.next().await?.is_some();
+    drop(rows);
+    if !retired {
+        return Err(OfflineSweepError::NotRetired);
+    }
+    Ok(delete_offline_spellings(tx, canonical, key).await?)
+}
+
 /// Remove the rows of the account's offline store kept under a spelling of
 /// its JID other than `canonical`: every row whose recipient has the
 /// ledger key `key`, the key under which the store refuses an insert for
@@ -310,7 +419,7 @@ async fn retire_in(
 /// were prepared may differ in letter case as well. Every such spelling has
 /// the canonical localpart, so the candidates are the recipients that start
 /// with it, compared without letter case, and the key decides. The read
-/// scans the store's recipients under the retirement's statement bound.
+/// scans the store's recipients under the sweep's statement bound.
 async fn delete_offline_spellings(
     tx: &mut Transaction<'_>,
     canonical: &BareJid,

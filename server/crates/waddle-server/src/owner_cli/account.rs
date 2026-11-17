@@ -7,18 +7,21 @@
 //! the restricted runtime role may neither write the ledger nor delete an
 //! account. A deployment on SQLite names its database file instead.
 //!
-//! Once the retirement committed it asks every serving replica to end the
-//! account's open sessions and waits for their acknowledgements
-//! (`auth::session_endings`). The retirement stands whatever the replicas
-//! answer: a run that is not confirmed by every serving replica exits as
-//! pending, and running it again asks again.
+//! Once the retirement committed it removes the messages the account's
+//! offline store keeps under other spellings of its JID, outside the
+//! retirement's lock (`auth::retirement::sweep_offline_spellings`), then
+//! asks every serving replica to end the account's open sessions and waits
+//! for their acknowledgements (`auth::session_endings`). The retirement
+//! stands whatever follows: a run whose sweep did not complete exits as
+//! failed, one that is not confirmed by every serving replica exits as
+//! pending, and running it again does both again.
 
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::auth::retirement::retire_account;
+use crate::auth::retirement::{retire_account, sweep_offline_spellings};
 use crate::auth::session_endings::{
     await_session_endings, prune_session_endings, request_session_ending, ReplicaEnding,
     SessionEndingError, SessionEndingReport,
@@ -86,6 +89,7 @@ pub(super) async fn run(args: AccountArgs) -> Result<(), OwnerCliError> {
                 .map_err(OwnerCliError::Retirement)?;
             // From here on the retirement stands: what follows is printed
             // with it, whatever the outcome.
+            let spellings = sweep_offline_spellings(&database, &jid).await;
             let sessions = end_sessions(&database, &jid, Duration::from_secs(session_wait)).await;
             println!(
                 "{}",
@@ -95,6 +99,7 @@ pub(super) async fn run(args: AccountArgs) -> Result<(), OwnerCliError> {
                     "native_accounts_removed": retirement.native_accounts,
                     "accounts_removed": retirement.accounts,
                     "offline_messages_removed": retirement.offline_messages,
+                    "offline_spellings_removed": spellings.as_ref().ok(),
                     "sessions": sessions_json(sessions.as_ref().ok()),
                 })
             );
@@ -103,6 +108,7 @@ pub(super) async fn run(args: AccountArgs) -> Result<(), OwnerCliError> {
             } else {
                 eprintln!("the JID was already retired");
             }
+            spellings.map_err(OwnerCliError::OfflineSweep)?;
             let report = sessions.map_err(OwnerCliError::SessionEnding)?;
             let pending = report
                 .replicas
