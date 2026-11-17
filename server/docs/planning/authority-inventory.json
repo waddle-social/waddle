@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "72e120b689f7e9e9830b1d5453d1c692345a24ab",
+  "baseline_commit": "0ee8556e2eea373a6d7820b525b96f3e2188e540",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -229,7 +229,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs",
-      "sha256": "8887d41711f2bea1cbbcc2d115c73fbe549c9b72c983b2b5c6ddad05b2dd7314"
+      "sha256": "3cb5dc99d92ed8dd1b055a7d98e0e65b05589ceb1eab78a7855f3f0a81b24d97"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/message/group_dm_invite.rs",
@@ -333,7 +333,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "sha256": "f0c47f35c6e9cce91897cb6672cc9a023bc5484ed67261fd7e12aebb0f3fbdf3"
+      "sha256": "8100c562aa936376f620374aaa13d79031813d36d75379cefdda5140febce8b1"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_remote.rs",
@@ -341,7 +341,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/db/s2s_spaces.rs",
-      "sha256": "fec26964ba2927ab161960fdd1d37e4b32d70fc34fddc2cfd62aff38d8447de2"
+      "sha256": "435713699c3be970b941bbc0230d1b12b2d26d20ab2f3b63094a68d8cdaa8782"
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/spaces.rs",
@@ -521,7 +521,7 @@
     },
     "parent-retract": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs",
-      "line": 26,
+      "line": 27,
       "text": "pub(super) async fn handle_spaces_retract("
     },
     "backfill": {
@@ -1101,7 +1101,7 @@
     },
     "s2s-space-host": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1327,
+      "line": 1329,
       "text": "impl LocalSpaces for WebSocketLocalSpaces {"
     },
     "s2s-space-open": {
@@ -1121,12 +1121,12 @@
     },
     "s2s-space-change": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1288,
+      "line": 1290,
       "text": "async fn change(&self, request: PubSubRequest) -> Vec<Stanza> {"
     },
     "s2s-space-notify": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_spaces.rs",
-      "line": 1504,
+      "line": 1506,
       "text": "async fn notify_remote_subscribers("
     },
     "s2s-space-federated-setting": {
@@ -1141,7 +1141,7 @@
     },
     "s2s-space-subscription-record": {
       "path": "server/crates/waddle-server/src/db/s2s_spaces.rs",
-      "line": 702,
+      "line": 703,
       "text": "pub async fn record("
     },
     "s2s-space-event-egress": {
@@ -1207,7 +1207,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "a2f883fa7a9a5a84786225a7ddb9fec4de19a821394182882dde5040decabd26",
+    "sha256": "1c364d61faca7bc677356f79997a5e120ad9b46bc1aed1b62f042541af406e82",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,

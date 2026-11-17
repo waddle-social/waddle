@@ -18,7 +18,7 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `72e120b689f7e9e9830b1d5453d1c692345a24ab` (see the last refresh below); the original
+through `0ee8556e2eea373a6d7820b525b96f3e2188e540` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1382,6 +1382,22 @@ changed.
   link are as before the notification.
 - The raw scan still holds 1639 records, each token's count unchanged; the
   records in the changed files moved with the lines.
+
+The selected evidence was refreshed a twenty-ninth time, through
+`0ee8556e2eea373a6d7820b525b96f3e2188e540`, after reviewing the delta of the reviewed files since the
+twenty-eighth refresh. Three reviewed files changed (`spaces_retract.rs`,
+the Spaces host `s2s_spaces.rs` and the store `db/s2s_spaces.rs`), no file
+was added to the reviewed set, five anchors moved without a change to their
+text, and no anchor's text changed.
+
+- `s2s_space_subscriptions` (`s2s-space-subscription-record` moved) no
+  longer reads the subscriber's ban inside its transaction; the Spaces host
+  (`s2s-space-host`, `s2s-space-change` and `s2s-space-notify` moved) reads
+  it once the row is committed and removes the row for a ban it finds. The
+  ban's own removal of the row still takes the Space's lock. This only
+  reduces what is sent; no grant decision changed. `parent-retract` moved
+  with a comment.
+- The raw scan still holds 1639 records, each token's count unchanged.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
