@@ -55,11 +55,11 @@ pub const LOCAL: &str = ws::DOMAIN;
 pub const SPACES: &str = "spaces.example.com";
 /// The peer deployment's domain.
 pub const PEER: &str = "home-b.test";
-/// A remote account at the peer.
 /// The state of a durable stream-management session that is detached
 /// and waits for a resumption.
 const DURABLE_DETACHED: i64 = 2;
 
+/// A remote account at the peer.
 pub const BOB: &str = "bob@home-b.test";
 /// A resource of [`BOB`].
 pub const BOB_PHONE: &str = "bob@home-b.test/phone";
