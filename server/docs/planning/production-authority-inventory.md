@@ -18,8 +18,9 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
-through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb` (see the last refresh below); the original
+through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings through
+`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, and the joined-spaces node's gates through
+`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1780,6 +1781,27 @@ producer of stream evidence changed, and no decision of standing moved.
 - The raw scan's records are unchanged in content; those in
   `pubsub_authz.rs` (its unit tests) moved down by nineteen lines and the
   two `set_affiliation` records of `pubsub_admin.rs` by twenty-eight.
+
+The selected evidence was refreshed a forty-eighth time, through
+`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, the merge of the joined-spaces slice (W8) into the
+integration branch, after reviewing what the merge changed in the reviewed
+files beyond either side. The manifest is the union of both sides': the
+slice added no file or anchor, and the MUC fallback's reviewed file
+(`handlers/iq/disco_items.rs`) and its four anchors stay. No reviewed file
+changed on both sides. The five the slice changed (`pubsub/node.rs`,
+`pubsub_authz.rs`, `pubsub_admin.rs`, `pubsub_dispatch.rs` and
+`pubsub_fanout/implementation.rs`) are as on its branch, and the
+integration branch's (among them `s2s_rooms.rs`, `s2s_spaces.rs` and
+`disco_items.rs`) as on it. `pubsub-admin` and `d8-space-affiliations`
+moved as in the forty-fourth to forty-seventh refreshes, fifty lines in
+all; the integration branch's anchors are where it put them. No grant
+writer or storage plane of the host-grant authority was added by the
+merge, no producer of stream evidence changed, and no decision of standing
+moved.
+
+- The raw scan holds 1643 records: the 1643 of the forty-third refresh,
+  each unchanged in content; those in `pubsub_authz.rs` (its unit tests)
+  and `pubsub_admin.rs` moved as on the slice's branch.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
