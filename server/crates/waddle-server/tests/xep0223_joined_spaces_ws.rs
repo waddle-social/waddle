@@ -87,6 +87,14 @@ fn publish_iq(id: &str, to: Option<&str>, item_id: Option<&str>, payload: &str) 
     )
 }
 
+/// The serialized `<field/>` of a configure form with this `var`, or "".
+fn form_field<'a>(form: &'a str, var: &str) -> &'a str {
+    form.split(var)
+        .nth(1)
+        .and_then(|rest| rest.split("</field>").next())
+        .unwrap_or_default()
+}
+
 async fn send_and_wait(client: &mut WsXmppClient, xml: &str, id: &str) -> String {
     client.send(xml).await.expect("send");
     client
@@ -227,8 +235,12 @@ async fn owner_configure_cannot_open_the_node() {
     )
     .await;
     assert!(
-        read_back.contains("whitelist"),
+        form_field(&read_back, "pubsub#access_model").contains(">whitelist<"),
         "the joined-spaces node must stay whitelist: {read_back}"
+    );
+    assert!(
+        !form_field(&read_back, "pubsub#max_items").contains(">1<"),
+        "the joined-spaces node must keep more than one item: {read_back}"
     );
 
     publish_space(&mut alice, "pub-after-config", OPS_ITEM, "ops").await;
