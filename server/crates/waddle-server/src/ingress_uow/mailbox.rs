@@ -1399,9 +1399,13 @@ impl MailboxRepository {
         let mut rows = tx
             .query(
                 &format!(
-                    "SELECT {ENTRY_COLUMNS} FROM {} \
+                    // `ENTRY_COLUMNS` returns `sequence::text` under the name
+                    // `sequence`, and ORDER BY prefers an output column over
+                    // a table column. The qualified name orders numerically;
+                    // the bare name would put 10 before 9.
+                    "SELECT {ENTRY_COLUMNS} FROM {} AS entry \
                      WHERE lane_id = ?::uuid AND sequence > ?::numeric \
-                     ORDER BY sequence LIMIT ?",
+                     ORDER BY entry.sequence LIMIT ?",
                     relations.entries
                 ),
                 crate::db_params![
