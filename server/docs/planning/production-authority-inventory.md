@@ -1574,6 +1574,16 @@ producer of stream evidence changed, and no decision of standing moved.
   `pubsub_authz.rs` (its unit tests) and `pubsub_admin.rs` moved with the
   lines added above them.
 
+The selected evidence was refreshed a thirty-eighth time, through
+`ff48b18cb72a97ef7680604e539966c12f13c40a`, after reviewing the delta of the reviewed files since the
+thirty-seventh refresh. Only `pubsub_admin.rs` changed: the refusal of an
+owner affiliations set on `urn:waddle:joined-spaces:0` now reads each
+named entity's stored affiliation and returns them in the error, as
+XEP-0060 §8.9.2.4 requires. It still writes nothing; no grant writer,
+storage plane or decision of standing changed. `pubsub-admin` and
+`d8-space-affiliations` moved down by fourteen lines, their text
+unchanged, and the raw scan's records are unchanged in content.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

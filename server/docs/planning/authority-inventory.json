@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "387e4ac3dcdda9285403f14bf7f442eed3e2ca4d",
+  "baseline_commit": "ff48b18cb72a97ef7680604e539966c12f13c40a",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -205,7 +205,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
-      "sha256": "045c22ec662f1dd7a847931a3b37f3420097e861cc2465b7aaab5cbd40002313"
+      "sha256": "76248f33bc45b12c07b78c99c6e949a083931114c941ebf9c01292f32d44e139"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_dispatch.rs",
@@ -501,7 +501,7 @@
     },
     "pubsub-admin": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
-      "line": 633,
+      "line": 647,
       "text": ".set_affiliation(target_jid, &node, entity, *aff)"
     },
     "parent-publish": {
@@ -1096,7 +1096,7 @@
     },
     "d8-space-affiliations": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
-      "line": 620,
+      "line": 634,
       "text": "space_affiliation_is_privileged(*affiliation)"
     },
     "s2s-space-host": {
@@ -1207,7 +1207,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "890f470068cd7bc460fc035144ee0d0b40f395084c1224920f41bfa0dff9d581",
+    "sha256": "a189208b2462443df871ab69e00e11209082154d6ec842ee2ee3ca48dbb51187",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,
