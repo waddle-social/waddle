@@ -1,5 +1,6 @@
 import { nextTick, watch, type Ref } from "vue";
-import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
+import { captureOlderPageScroll } from "@/lib/pinned-edge-scroll";
+import type { ScrollDirectionMode } from "@/lib/scroll-direction";
 
 interface OlderLoadSnapshot {
   element: HTMLElement;
@@ -46,7 +47,7 @@ export function useThreadOlderLoadRestore(input: {
       if (!wasLoading || !olderLoadSnapshot) return;
       const snapshot = olderLoadSnapshot;
       olderLoadSnapshot = null;
-      const { scrollHeight, scrollTop } = snapshot.element;
+      const restore = captureOlderPageScroll(snapshot.element, snapshot.mode);
       void nextTick(() => {
         const el = input.scrollContainer.value;
         if (
@@ -54,10 +55,8 @@ export function useThreadOlderLoadRestore(input: {
           && snapshot.token === olderLoadRestoreToken
           && el === snapshot.element
           && input.activeThreadId() === snapshot.threadId
-          && input.mode() === snapshot.mode
-          && !isTopPinnedScrollDirection(input.mode())
         ) {
-          el.scrollTop = scrollTop + (el.scrollHeight - scrollHeight);
+          restore?.(el, input.mode());
         }
         input.afterRestore();
       });

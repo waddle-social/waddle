@@ -1,14 +1,12 @@
-import { nextTick, ref, type Ref } from "vue";
+import { ref, type Ref } from "vue";
 import type { BrowserXmppClient, DmConversationScope, LiveDmMessage } from "@/lib/xmpp-client";
 import { dmConversationIdentityKey } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { TimelineLoadResult } from "@/lib/timeline-load-result";
 import { findMessageById } from "@/lib/message-ids";
-import {
-  isTopPinnedScrollDirection,
-  type ScrollDirectionMode,
-} from "@/lib/scroll-direction";
+import { preserveScrollOnPrepend } from "@/lib/pinned-edge-scroll";
+import type { ScrollDirectionMode } from "@/lib/scroll-direction";
 import { buildDmTimelineFromMamResults } from "@/dms/message-timeline-state";
 import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import {
@@ -271,10 +269,6 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     try {
       const page = await client.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "before", before }, scopeForPeer(peerJid));
       if (!isCurrentRequest()) return;
-      const el = timelineEl.value;
-      const previousHeight = el?.scrollHeight ?? 0;
-      const previousTop = el?.scrollTop ?? 0;
-      const mode = scrollDirection.value;
       const advanced = advanceCursorWithBeforePage({
         prior: { oldestArchiveId, hasOlderMessages: hasOlderMessages.value },
         page,
@@ -282,16 +276,11 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       oldestArchiveId = advanced.next.oldestArchiveId;
       hasOlderMessages.value = advanced.next.hasOlderMessages;
       const withoutQueued = stripQueuedSelfMessages(messages.value);
-      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), peerJid);
-      // Include removal of the leading loading row in the final page's height.
-      if (!hasOlderMessages.value) isLoadingOlderMessages.value = false;
-      await nextTick();
-      if (
-        el && el === timelineEl.value && isCurrentRequest()
-        && mode === scrollDirection.value && !isTopPinnedScrollDirection(mode)
-      ) {
-        el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
-      }
+      await preserveScrollOnPrepend(timelineEl, scrollDirection, isCurrentRequest, () => {
+        messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), peerJid);
+        // Include removal of the loading row in the final page's height.
+        if (!hasOlderMessages.value) isLoadingOlderMessages.value = false;
+      });
     } catch (e) {
       const classified = classifyMamError(e);
       if (isMamCursorNotFound(classified)) {

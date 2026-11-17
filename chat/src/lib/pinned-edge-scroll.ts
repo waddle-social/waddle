@@ -27,6 +27,28 @@ function computeIsPinned(el: HTMLElement, mode: ScrollDirectionMode): boolean {
   return distanceFromBottom <= PINNED_EDGE_TOLERANCE_PX;
 }
 
+export function captureOlderPageScroll(element: HTMLElement | null, mode: ScrollDirectionMode) {
+  if (!element || isTopPinnedScrollDirection(mode)) return;
+  const { scrollHeight, scrollTop } = element;
+  return (currentElement: HTMLElement | null, currentMode: ScrollDirectionMode) => {
+    if (currentElement === element && currentMode === mode) {
+      element.scrollTop = scrollTop + (element.scrollHeight - scrollHeight);
+    }
+  };
+}
+
+export async function preserveScrollOnPrepend(
+  element: Ref<HTMLElement | null>,
+  mode: Ref<ScrollDirectionMode>,
+  isCurrent: () => boolean,
+  prepend: () => void,
+) {
+  const restore = captureOlderPageScroll(element.value, mode.value);
+  prepend();
+  await nextTick();
+  if (isCurrent()) restore?.(element.value, mode.value);
+}
+
 export function createPinnedEdgeScroller(options: {
   element: Ref<HTMLElement | null>;
   mode: Ref<ScrollDirectionMode>;
