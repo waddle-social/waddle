@@ -350,6 +350,92 @@ async fn a_remote_occupant_changes_the_subject_only_where_the_room_lets_occupant
     );
 }
 
+/// The text of the room's own refusal of a message its sender's account
+/// may not have archived now, among the `<error/>` children of `stanza`.
+fn error_text(stanza: &Element) -> String {
+    stanza
+        .children()
+        .filter(|child| child.name() == "error")
+        .flat_map(|error| error.children())
+        .filter(|child| child.name() == "text")
+        .map(|text| text.text())
+        .collect()
+}
+
+/// Under the router's default limits, a remote account that keeps sending
+/// to a room at a rate the router takes (ten messages a second, its
+/// default per-account rate) reaches the archive's own bound of five a
+/// second once the archive's burst of 30 is spent: the bound on what one
+/// remote account has archived is the one that refuses, not one of the
+/// router's, so it is reachable as deployed.
+#[tokio::test]
+async fn a_remote_account_reaches_the_archive_bound_under_the_default_limits() {
+    let (hosted, _alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    let refused = |stanza: &Element| {
+        stanza.name() == "message"
+            && stanza.attr("type") == Some("error")
+            && stanza.attr("to") == Some(BOB)
+    };
+    // Ten messages each second: within the router's per-account rate (10)
+    // and burst (40), its domain's rate (50) and a room's share of the
+    // queues (32), and twice the archive's rate. The archive's burst is
+    // spent after about six seconds; give it twice that.
+    let mut sent = 0;
+    for _ in 0..12 {
+        for _ in 0..10 {
+            hosted
+                .peer_sends(remote_groupchat(
+                    BOB,
+                    ROOM,
+                    &format!("steady-{sent}"),
+                    "steady",
+                ))
+                .await;
+            sent += 1;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if hosted.count_at_peer(refused) > 0 {
+            break;
+        }
+    }
+    let first = hosted
+        .at_peer(refused)
+        .await
+        .expect("a refusal once the archive's allowance is spent");
+    // The archive's refusal, and no other bound's before it.
+    assert_eq!(
+        error_condition(&first).as_deref(),
+        Some("resource-constraint"),
+        "{first:?}"
+    );
+    assert_eq!(
+        error_text(&first),
+        "Too many messages; try again later.",
+        "{first:?}"
+    );
+    let refusals: Vec<Element> = hosted
+        .captured
+        .stanzas()
+        .into_iter()
+        .filter(|stanza| refused(stanza))
+        .collect();
+    assert!(
+        refusals
+            .iter()
+            .all(|stanza| error_text(stanza) == "Too many messages; try again later."),
+        "{refusals:?}"
+    );
+    // Reached at a sustained rate, beyond the archive's burst.
+    let first_id = first.attr("id").unwrap_or_default();
+    let index: usize = first_id
+        .strip_prefix("steady-")
+        .and_then(|index| index.parse().ok())
+        .expect("a refused message of this case");
+    assert!(index >= 30, "refused after {index} of {sent} messages");
+    assert!(hosted.seat(ROOM, BOB).is_some());
+}
+
 #[tokio::test]
 async fn a_remote_accounts_archived_messages_are_bounded() {
     // The router's own bounds on one account's requests and on one room's
@@ -384,14 +470,11 @@ async fn a_remote_accounts_archived_messages_are_bounded() {
         .expect("a refusal once the allowance is spent");
     assert_eq!(limited.attr("to"), Some(BOB));
     // The archive's refusal, not one of the router's.
-    let text: String = limited
-        .children()
-        .filter(|child| child.name() == "error")
-        .flat_map(|error| error.children())
-        .filter(|child| child.name() == "text")
-        .map(|text| text.text())
-        .collect();
-    assert_eq!(text, "Too many messages; try again later.", "{limited:?}");
+    assert_eq!(
+        error_text(&limited),
+        "Too many messages; try again later.",
+        "{limited:?}"
+    );
     tokio::time::sleep(QUIET).await;
     let reflected = hosted.count_at_peer(|stanza| {
         stanza.name() == "message"
