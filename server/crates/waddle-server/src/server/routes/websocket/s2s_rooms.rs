@@ -62,7 +62,7 @@ use waddle_xmpp::xep::xep0428::NS_FALLBACK;
 use waddle_xmpp::xep::xep0444::NS_REACTIONS;
 use waddle_xmpp::xep::xep0461::NS_REPLY;
 use waddle_xmpp::Stanza;
-use xmpp_parsers::disco::{DiscoInfoResult, DiscoItemsResult};
+use xmpp_parsers::disco::{DiscoInfoResult, DiscoItemsQuery, DiscoItemsResult};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
@@ -72,6 +72,7 @@ use super::cleanup::{get_room_actor_result, is_muc_room_jid, sweep_abandoned_roo
 use super::frame::{ResponseBatch, ResponseFrame};
 use super::handlers::iq::{
     muc_admin_for_remote, muc_disco_info_for_remote, muc_owner_or_moderation_for_remote,
+    muc_rooms_for_remote, page_listing,
 };
 use super::handlers::presence::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
@@ -104,6 +105,10 @@ const STATUS_SELF: &str = "110";
 /// time is answered for, as "cannot be told", before the router gives the
 /// request up.
 const ROOM_ASK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The most rooms one `disco#items` answer of the MUC service lists to an
+/// account at another server; the rest are reached by paging (XEP-0059).
+const MAX_LISTED_ROOMS: usize = 256;
 
 /// Longest the effects of one accepted room message may take.
 const MESSAGE_EFFECTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -344,6 +349,15 @@ fn internal() -> StanzaError {
         ErrorType::Wait,
         DefinedCondition::InternalServerError,
         "The room could not answer now; try again later.",
+    )
+}
+
+/// A request that is not well formed, answered alike whatever it names.
+fn bad_request() -> StanzaError {
+    error(
+        ErrorType::Modify,
+        DefinedCondition::BadRequest,
+        "The request is not well formed.",
     )
 }
 
@@ -699,20 +713,46 @@ impl Asked<'_> {
         RoomReplies::of(vec![result(iq, Some(Element::from(described)))])
     }
 
-    /// Neither the service's rooms nor a room's occupants are listed to
-    /// remote askers: an empty list is the answer XEP-0045 §6.3 and §6.5
-    /// allow.
-    fn disco_items(&self, iq: &Iq) -> RoomReplies {
+    /// XEP-0045 §6.3: the service lists the rooms an account at another
+    /// server may reach and be told of ([`muc_rooms_for_remote`]): public,
+    /// open to other servers, no group conversation, and, for a room an
+    /// enrolled host-grant scope manages, one its grants admit the asker to
+    /// view on its stream's evidence. A client without Spaces finds a
+    /// Space's rooms here by their plain JIDs. At most
+    /// [`MAX_LISTED_ROOMS`] are listed in one answer, paged with XEP-0059.
+    ///
+    /// A room's occupants are not listed (§6.5): its answer is an empty
+    /// list, the same for every room address, so it tells nothing of the
+    /// room.
+    async fn disco_items(&self, iq: &Iq) -> RoomReplies {
         let Iq::Get { payload, .. } = iq else {
             return self.refuse(unavailable());
         };
-        if payload.attr("node").is_some() || self.to.resource().is_some() {
+        let Ok(query) = DiscoItemsQuery::try_from(payload.clone()) else {
+            return self.refuse(bad_request());
+        };
+        if query.node.is_some() || self.to.resource().is_some() {
             return self.refuse(no_such_room());
         }
-        let listed = DiscoItemsResult {
-            node: None,
-            items: Vec::new(),
-            rsm: None,
+        let listed = if self.to.node().is_some() {
+            DiscoItemsResult {
+                node: None,
+                items: Vec::new(),
+                rsm: None,
+            }
+        } else {
+            let Ok(rooms) = muc_rooms_for_remote(self.state, &self.account, &self.evidence).await
+            else {
+                return self.refuse(internal());
+            };
+            let (items, rsm) = page_listing(rooms, query.rsm.as_ref(), MAX_LISTED_ROOMS, |item| {
+                item.jid.as_str()
+            });
+            DiscoItemsResult {
+                node: None,
+                items,
+                rsm,
+            }
         };
         RoomReplies::of(vec![result(iq, Some(Element::from(listed)))])
     }
@@ -1327,7 +1367,7 @@ impl LocalRooms for WebSocketLocalRooms {
         }
         match (request.operation, &request.stanza) {
             (RoomOperation::DiscoInfo, Stanza::Iq(iq)) => asked.disco_info(iq).await,
-            (RoomOperation::DiscoItems, Stanza::Iq(iq)) => asked.disco_items(iq),
+            (RoomOperation::DiscoItems, Stanza::Iq(iq)) => asked.disco_items(iq).await,
             (RoomOperation::Ping, Stanza::Iq(iq)) => asked.ping(iq).await,
             (RoomOperation::Archive, Stanza::Iq(iq)) => asked.archive(iq).await,
             (RoomOperation::Presence, Stanza::Presence(presence)) => asked.presence(presence).await,

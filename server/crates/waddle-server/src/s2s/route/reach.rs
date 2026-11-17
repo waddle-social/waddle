@@ -102,7 +102,8 @@ pub struct Reachable {
 pub enum SpaceOperation {
     /// XEP-0030 `disco#info` of the service or of a Space node.
     DiscoInfo,
-    /// XEP-0030 `disco#items` of the service: the Spaces it hosts.
+    /// XEP-0030 `disco#items` of the service, the Spaces it hosts, or of a
+    /// Space node, the rooms it lists.
     DiscoItems,
     /// XEP-0199 ping of the service.
     Ping,
@@ -124,7 +125,7 @@ pub enum SpaceOperation {
 pub enum RoomOperation {
     /// XEP-0030 `disco#info` of the service, a room or its nodes.
     DiscoInfo,
-    /// XEP-0030 `disco#items` of the service or a room.
+    /// XEP-0030 `disco#items` of the service, its rooms, or of a room.
     DiscoItems,
     /// XEP-0199 ping of the service or a room, and the XEP-0410 self-ping
     /// of an occupant JID.

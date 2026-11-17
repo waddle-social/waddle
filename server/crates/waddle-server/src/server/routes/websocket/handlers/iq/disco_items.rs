@@ -9,10 +9,15 @@ use super::{
     Relation, RoomArchiveAccess, RsmRequest, RsmResponse, Subject, SubjectType, WebSocketState,
     XmppChannelRecord, NODE_COMMANDS, PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
 };
+use crate::permissions::host_grant::{HostGrantAction, PrincipalEvidence, RoomBinding, RoomGate};
 use crate::permissions::ListSubjects;
+use crate::server::xmpp_channels::list_federated_public_xmpp_channels;
 use std::collections::HashSet;
 use waddle_xmpp::xep::xep0059::{build_rsm_response_element, extract_rsm_request};
+use waddle_xmpp::xep::xep0402::NS_BOOKMARKS2;
 use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
+use xmpp_parsers::disco::Item;
+use xmpp_parsers::rsm::{First, SetQuery, SetResult};
 
 /// Snapshot-ask deadline for the instant-room scan: a wedged room
 /// actor must not stall service discovery.
@@ -304,31 +309,27 @@ pub(super) async fn handle_disco_items_iq(
                     )];
                 }
             };
-            let (mut items, channel_backed) =
-                match canonical_channel_disco_items(state, muc_domain, MUC_DISCO_ITEMS_FETCH_BOUND)
-                    .await
-                {
-                    Ok(listing) => listing,
-                    Err(_) => {
-                        return vec![build_iq_error_xml_typed(
-                            id,
-                            None,
-                            None,
-                            internal_server_error_iq_error("Failed to list MUC rooms."),
-                        )];
-                    }
-                };
-            // XEP-0045 §6.3 (#1265 item 11): public live instant rooms
-            // are part of the service's item list too, not only
-            // channel-backed persistent rooms.
-            items.extend(live_public_instant_room_items(state, muc_domain, &channel_backed).await);
-            items.sort_by(|a, b| a.jid.cmp(&b.jid));
-            items.dedup_by(|a, b| a.jid == b.jid);
+            let requester = phase.bound_jid().map(|jid| jid.to_bare());
+            let Ok(items) = muc_service_rooms(
+                state,
+                muc_domain,
+                RoomListingFor::Session(requester.as_ref()),
+            )
+            .await
+            else {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    internal_server_error_iq_error("Failed to list MUC rooms."),
+                )];
+            };
             let Some(rsm_request) = rsm_request else {
                 let response = build_disco_items_response(request_iq, &items, None);
                 return vec![iq_to_xml(response)];
             };
-            let (page, rsm_response) = page_disco_items(&items, &rsm_request);
+            let (page, rsm_response) =
+                page_disco_items(&items, &rsm_request, |item| item.jid.as_str());
             let mut response = build_disco_items_response(request_iq, page, None);
             if let xmpp_parsers::iq::Iq::Result {
                 payload: Some(query),
@@ -493,6 +494,54 @@ pub(super) async fn handle_disco_items_iq(
         }
 
         if target_to == Some(spaces_domain) {
+            if let Some(node) = query.node.as_deref() {
+                let requester = phase.bound_jid().map(|jid| jid.to_bare());
+                let items = match space_children_for_session(
+                    state,
+                    spaces_domain,
+                    node,
+                    requester.as_ref(),
+                )
+                .await
+                {
+                    Ok(items) => items,
+                    Err(refusal) => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            refusal.error(),
+                        )];
+                    }
+                };
+                let rsm_request = match rsm_request_from_iq(request_iq) {
+                    Ok(rsm_request) => rsm_request,
+                    Err(_) => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            bad_request_iq_error("Malformed RSM <set/> element."),
+                        )];
+                    }
+                };
+                let Some(rsm_request) = rsm_request else {
+                    let response = build_disco_items_response(request_iq, &items, Some(node));
+                    return vec![iq_to_xml(response)];
+                };
+                let (page, rsm_response) = page_disco_items(&items, &rsm_request, |item| {
+                    item.name.as_deref().unwrap_or_default()
+                });
+                let mut response = build_disco_items_response(request_iq, page, Some(node));
+                if let xmpp_parsers::iq::Iq::Result {
+                    payload: Some(query),
+                    ..
+                } = &mut response
+                {
+                    query.append_child(build_rsm_response_element(&rsm_response));
+                }
+                return vec![iq_to_xml(response)];
+            }
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(_) => vec![],
                 None => match spaces_service_bare_jid(spaces_domain) {
@@ -690,6 +739,11 @@ pub(super) async fn handle_disco_items_iq(
 /// DB read.
 const MUC_DISCO_ITEMS_FETCH_BOUND: usize = 10_000;
 
+/// Catalog rows read for one listing of the MUC service to an account at
+/// another server: only rows of rooms that are listed and open to other
+/// servers are read, and a room beyond the bound is not listed to them.
+const REMOTE_LISTING_FETCH_BOUND: usize = 4_096;
+
 /// Extract an optional XEP-0059 `<set/>` from a disco#items query.
 fn rsm_request_from_iq(iq: &xmpp_parsers::iq::Iq) -> Result<Option<RsmRequest>, ()> {
     let xmpp_parsers::iq::Iq::Get { payload, .. } = iq else {
@@ -702,56 +756,334 @@ fn rsm_request_from_iq(iq: &xmpp_parsers::iq::Iq) -> Result<Option<RsmRequest>, 
     }
 }
 
-/// XEP-0059 paging over the sorted room list, keyed by item JID.
+/// The bounds `start..end` of one XEP-0059 page of at most `max` items
+/// over `items`, which are sorted by `key`.
 ///
-/// Supports `max`, `after`, `index`, and both `<before/>` forms (a JID
-/// for backward paging, empty for the last page).
-///
-/// The item list is sorted by JID (a stable UID ordering per XEP-0059
-/// §2.2), so an `after`/`before` anchor that has vanished between
-/// pages (room destroyed mid-pagination) resolves to its ordered
-/// insertion point via `partition_point` — the client seamlessly
-/// continues with no items skipped, instead of getting a silent empty
-/// page or a hard <item-not-found/> restart.
-fn page_disco_items<'a>(
-    items: &'a [DiscoItem],
-    request: &RsmRequest,
-) -> (&'a [DiscoItem], RsmResponse) {
+/// Supports `after`, `index`, and both `<before/>` forms (a key for
+/// backward paging, empty for the last page). An `after` or `before`
+/// anchor that has vanished between pages (a room destroyed
+/// mid-pagination) resolves to its ordered insertion point, so the client
+/// continues with no items skipped, instead of getting a silent empty page
+/// or a hard <item-not-found/> restart; an anchor is never looked up, so
+/// a page tells nothing of an item the asker is not listed.
+fn page_window<T>(
+    items: &[T],
+    key: impl Fn(&T) -> &str,
+    max: usize,
+    before: Option<&str>,
+    after: Option<&str>,
+    index: Option<usize>,
+) -> (usize, usize) {
     let total = items.len();
-    let max = request.max.map(|max| max as usize).unwrap_or(total);
-    let (start, end) = match (&request.before, &request.after, request.index) {
-        (Some(before), _, _) if before.is_empty() => (total.saturating_sub(max), total),
+    match (before, after, index) {
+        (Some(""), _, _) => (total.saturating_sub(max), total),
         (Some(before), _, _) => {
-            let end = items.partition_point(|item| item.jid.as_str() < before.as_str());
+            let end = items.partition_point(|item| key(item) < before);
             (end.saturating_sub(max), end)
         }
         (None, Some(after), _) => {
-            let start = items.partition_point(|item| item.jid.as_str() <= after.as_str());
-            (start, (start + max).min(total))
+            let start = items.partition_point(|item| key(item) <= after);
+            (start, start.saturating_add(max).min(total))
         }
         (None, None, Some(index)) => {
-            let start = (index as usize).min(total);
-            (start, (start + max).min(total))
+            let start = index.min(total);
+            (start, start.saturating_add(max).min(total))
         }
         (None, None, None) => (0, max.min(total)),
-    };
+    }
+}
+
+/// XEP-0059 paging over a disco#items list sorted by `key` (a stable UID
+/// ordering per XEP-0059 §2.2): the room JID for the MUC service, the item
+/// ID for a Space's children.
+fn page_disco_items<'a>(
+    items: &'a [DiscoItem],
+    request: &RsmRequest,
+    key: fn(&DiscoItem) -> &str,
+) -> (&'a [DiscoItem], RsmResponse) {
+    let total = items.len();
+    let max = request.max.map(|max| max as usize).unwrap_or(total);
+    let (start, end) = page_window(
+        items,
+        key,
+        max,
+        request.before.as_deref(),
+        request.after.as_deref(),
+        request.index.map(|index| index as usize),
+    );
     let page = &items[start..end];
     let mut response = RsmResponse::new().with_count(u32::try_from(total).unwrap_or(u32::MAX));
     if let (Some(first), Some(last)) = (page.first(), page.last()) {
         response = response
-            .with_first(first.jid.clone(), u32::try_from(start).ok())
-            .with_last(last.jid.clone());
+            .with_first(key(first).to_owned(), u32::try_from(start).ok())
+            .with_last(key(last).to_owned());
     }
     (page, response)
 }
 
+/// One page of a listing for an account at another server: at most `most`
+/// of `items`, which are sorted by `key`, whatever the request asks. The
+/// `<set/>` that places the page is told when the request asked for
+/// paging, or when the listing did not fit in one answer: a responder that
+/// returns a limited result set says so (XEP-0059 §1, XEP-0045 §6.3). Its
+/// count and index are of the listing as built for this asker.
+pub(crate) fn page_listing(
+    items: Vec<Item>,
+    rsm: Option<&SetQuery>,
+    most: usize,
+    key: fn(&Item) -> &str,
+) -> (Vec<Item>, Option<SetResult>) {
+    let total = items.len();
+    let max = rsm.and_then(|rsm| rsm.max).unwrap_or(most).min(most);
+    let (start, end) = page_window(
+        &items,
+        key,
+        max,
+        rsm.and_then(|rsm| rsm.before.as_deref()),
+        rsm.and_then(|rsm| rsm.after.as_deref()),
+        rsm.and_then(|rsm| rsm.index),
+    );
+    let partial = end - start < total;
+    let page: Vec<Item> = items.into_iter().skip(start).take(end - start).collect();
+    if rsm.is_none() && !partial {
+        return (page, None);
+    }
+    let set = SetResult {
+        first: page.first().map(|first| First {
+            index: Some(start),
+            item: key(first).to_owned(),
+        }),
+        last: page.last().map(|last| key(last).to_owned()),
+        count: Some(total),
+    };
+    (page, Some(set))
+}
+
+/// Whom a listing of the MUC service's rooms is built for.
+#[derive(Clone, Copy)]
+enum RoomListingFor<'a> {
+    /// A session of this deployment, by its bound account when it has one.
+    Session(Option<&'a BareJid>),
+    /// An account at another server, decided on the evidence of the stream
+    /// that carried its request.
+    Remote {
+        account: &'a BareJid,
+        evidence: &'a PrincipalEvidence,
+    },
+}
+
+impl RoomListingFor<'_> {
+    fn is_remote(self) -> bool {
+        matches!(self, Self::Remote { .. })
+    }
+}
+
+/// XEP-0045 §6.3: the rooms of the MUC service listed to `audience`,
+/// sorted by room JID.
+///
+/// A room is listed when it is public (not hidden) and no group
+/// conversation. For an account at another server it must also be open to
+/// other servers (its `federated` setting), read from the catalog for a
+/// catalog-backed room and from the room's actor for an instant one; the
+/// room's Space, if it has one, adds and removes nothing (ADR-0020 D4). A
+/// room an enrolled host-grant scope manages is listed only to an account
+/// whose canonical grants allow it `view`, on the evidence of the stream
+/// that carried the request for an account at another server. A room whose
+/// grants cannot be read now is left out.
+async fn muc_service_rooms(
+    state: &WebSocketState,
+    muc_domain: &str,
+    audience: RoomListingFor<'_>,
+) -> Result<Vec<DiscoItem>, String> {
+    let (mut items, channel_backed) =
+        canonical_channel_disco_items(state, muc_domain, audience).await?;
+    // XEP-0045 §6.3 (#1265 item 11): public live instant rooms are part of
+    // the service's item list too, not only channel-backed persistent
+    // rooms.
+    items.extend(
+        live_public_instant_room_items(state, muc_domain, &channel_backed, audience.is_remote())
+            .await,
+    );
+    items.sort_by(|a, b| a.jid.cmp(&b.jid));
+    items.dedup_by(|a, b| a.jid == b.jid);
+    Ok(items)
+}
+
+/// XEP-0045 §6.3 for an account at another server: the rooms
+/// [`muc_service_rooms`] lists to it, sorted by room JID. `Err` when the
+/// listing cannot be built now.
+pub(crate) async fn muc_rooms_for_remote(
+    state: &WebSocketState,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+) -> Result<Vec<Item>, ()> {
+    let muc_domain = state.deps.service_domains.muc.clone();
+    let items = muc_service_rooms(
+        state,
+        &muc_domain,
+        RoomListingFor::Remote { account, evidence },
+    )
+    .await
+    .map_err(|_| ())?;
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            Some(Item {
+                jid: item.jid.parse::<Jid>().ok()?,
+                node: None,
+                name: item.name,
+            })
+        })
+        .collect())
+}
+
+/// Whether the room of the channel `channel_id`, which an enrolled
+/// host-grant scope manages, is listed to `audience`: its canonical grants
+/// allow `view`, read by the channel, the key the enrolled check used. A
+/// session without a bound account, and a room whose grants cannot be read
+/// now, is not listed.
+async fn managed_room_listed(
+    state: &WebSocketState,
+    channel_id: &str,
+    audience: RoomListingFor<'_>,
+) -> bool {
+    let (subject, evidence) = match audience {
+        RoomListingFor::Session(Some(requester)) => (requester, PrincipalEvidence::NoStream),
+        RoomListingFor::Session(None) => return false,
+        RoomListingFor::Remote { account, evidence } => (account, *evidence),
+    };
+    matches!(
+        state
+            .deps
+            .app_state
+            .host_grants
+            .allows_as(
+                RoomBinding::Channel(channel_id),
+                subject,
+                &evidence,
+                HostGrantAction::View,
+            )
+            .await,
+        RoomGate::Managed(true)
+    )
+}
+
+/// Why a Space's children are not listed to a session.
+enum SpaceListingRefusal {
+    /// The node is not a Space this session may read: one answer for a node
+    /// that does not exist, one it may not read, and the Space of an
+    /// enrolled host-grant scope.
+    NotFound,
+    /// What the session may read cannot be told now.
+    Unavailable,
+}
+
+impl SpaceListingRefusal {
+    fn error(&self) -> xmpp_parsers::stanza_error::StanzaError {
+        match self {
+            Self::NotFound => item_not_found_iq_error("Requested item not found."),
+            Self::Unavailable => internal_server_error_iq_error("Internal server error."),
+        }
+    }
+}
+
+/// XEP-0503, "Advertising space membership": the rooms a Space lists, as
+/// the `disco#items` of its node, for a session that may read the Space.
+/// Each is listed as XEP-0060 §5.5 lists a published item, with the
+/// service's address and the item ID (the room's JID) as its name, so a
+/// client verifies that a room it was told of is part of the Space.
+///
+/// Only bookmarks of rooms are listed. A room of this deployment that an
+/// enrolled host-grant scope manages is listed only where its canonical
+/// grants allow the session `view`; every other bookmark is listed as the
+/// Space's items show it. Unlike a read of the items, the listing writes
+/// nothing.
+async fn space_children_for_session(
+    state: &WebSocketState,
+    spaces_domain: &str,
+    node: &str,
+    requester: Option<&BareJid>,
+) -> Result<Vec<DiscoItem>, SpaceListingRefusal> {
+    let Some(requester) = requester else {
+        return Err(SpaceListingRefusal::NotFound);
+    };
+    let spaces_jid =
+        spaces_service_bare_jid(spaces_domain).map_err(|_| SpaceListingRefusal::Unavailable)?;
+    // The Space node of an enrolled host-grant scope is served to nobody.
+    match state.deps.app_state.host_grants.space_enrolled(node).await {
+        Ok(false) => {}
+        Ok(true) => return Err(SpaceListingRefusal::NotFound),
+        Err(_) => return Err(SpaceListingRefusal::Unavailable),
+    }
+    let storage = &state.deps.protocol.pubsub_storage;
+    match crate::pubsub_authz::can_subscribe(storage, &spaces_jid, node, requester, false).await {
+        Ok(true) => {}
+        Ok(false) => return Err(SpaceListingRefusal::NotFound),
+        Err(error) => {
+            warn!(node, requester = %requester, error = %error, "Failed to authorize a Space's listing");
+            return Err(SpaceListingRefusal::Unavailable);
+        }
+    }
+    let stored = storage
+        .get_items(&spaces_jid, node, None, &[])
+        .await
+        .map_err(|error| {
+            warn!(node, error = %error, "Failed to read a Space's items for its listing");
+            SpaceListingRefusal::Unavailable
+        })?;
+    let muc_domain = state.deps.service_domains.muc.as_str();
+    let mut items = Vec::new();
+    for item in &stored {
+        let item = item.to_pubsub_item();
+        let Some(id) = item.id.as_deref() else {
+            continue;
+        };
+        if item
+            .payload
+            .as_ref()
+            .is_some_and(|payload| !payload.is("conference", NS_BOOKMARKS2))
+        {
+            continue;
+        }
+        let Some(room) = id
+            .parse::<BareJid>()
+            .ok()
+            .filter(|room| room.node().is_some())
+        else {
+            continue;
+        };
+        if room.domain().as_str() == muc_domain {
+            let gate = state
+                .deps
+                .app_state
+                .host_grants
+                .allows_as(
+                    RoomBinding::Room(&room),
+                    requester,
+                    &PrincipalEvidence::NoStream,
+                    HostGrantAction::View,
+                )
+                .await;
+            if !matches!(gate, RoomGate::Unmanaged | RoomGate::Managed(true)) {
+                continue;
+            }
+        }
+        items.push(DiscoItem::new(spaces_domain, Some(id), None));
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    items.dedup_by(|a, b| a.name == b.name);
+    Ok(items)
+}
+
 /// Live rooms created ad hoc through the MUC protocol (no managed
-/// channel record) that are public and not group DMs. Channel-backed
+/// channel record) that are public and not group DMs, and, for an account
+/// at another server (`remote`), open to other servers. Channel-backed
 /// rooms are already listed from the database.
 async fn live_public_instant_room_items(
     state: &WebSocketState,
     muc_domain: &str,
     channel_backed: &ChannelBackedRooms,
+    remote: bool,
 ) -> Vec<DiscoItem> {
     let room_jids =
         match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -819,7 +1151,7 @@ async fn live_public_instant_room_items(
             continue;
         };
         let config = &snapshot.room.config;
-        if !config.public_room || config.group_dm {
+        if !config.public_room || config.group_dm || (remote && !config.federated) {
             continue;
         }
         let name = if config.name.trim().is_empty() {
@@ -848,64 +1180,78 @@ fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -
         .collect()
 }
 
-/// The publicly-listable channel disco items PLUS the JID set of EVERY
-/// catalog-backed room (public or not) so the instant-room scan can
+/// The channel disco items listed to `audience` PLUS the JID set of the
+/// catalog-backed rooms this request read, so the instant-room scan can
 /// classify channel-backed rooms in memory without per-room DB reads.
+///
+/// A session's request reads every catalog row (public or not), within
+/// [`MUC_DISCO_ITEMS_FETCH_BOUND`]. A request of an account at another
+/// server reads only the rows of rooms that are public and open to other
+/// servers, within [`REMOTE_LISTING_FETCH_BOUND`]; the set is then
+/// incomplete, and the instant-room scan checks its candidates against the
+/// catalog.
 async fn canonical_channel_disco_items(
     state: &WebSocketState,
     muc_domain: &str,
-    limit: usize,
+    audience: RoomListingFor<'_>,
 ) -> Result<(Vec<DiscoItem>, ChannelBackedRooms), String> {
-    match list_xmpp_channels(
-        state.deps.app_state.db_pool.global_actor().clone(),
-        limit,
-        0,
-    )
-    .await
-    {
-        Ok(mut channels) => {
-            // A room an enrolled host-grant scope manages is members-only
-            // and is never listed by the service: only its grant holders
-            // learn of it.
-            let listed: Vec<&str> = channels
-                .iter()
-                .filter(|channel| channel.public_room)
-                .map(|channel| channel.id.as_str())
-                .collect();
-            let enrolled = state
-                .deps
-                .app_state
-                .host_grants
-                .enrolled_channels(&listed)
-                .await
-                .map_err(|error| error.to_string())?;
-            for channel in &mut channels {
-                if enrolled.contains(&channel.id) {
-                    channel.public_room = false;
-                }
-            }
-            let channel_backed = ChannelBackedRooms {
-                jids: channels
-                    .iter()
-                    .filter_map(|channel| {
-                        waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok()
-                    })
-                    .collect(),
-                // When the fetch filled the bound, rows beyond it exist
-                // and the set is incomplete — membership misses must
-                // fall back to a per-room catalog check.
-                truncated: channels.len() >= limit,
-            };
-            Ok((
-                channels_to_disco_items(channels, muc_domain),
-                channel_backed,
-            ))
-        }
-        Err(error) => {
-            warn!(error = %error, "Failed to list canonical channels for MUC discovery");
-            Err(error)
+    let db = state.deps.app_state.db_pool.global_actor().clone();
+    let (fetched, complete) = if audience.is_remote() {
+        let channels = list_federated_public_xmpp_channels(db, REMOTE_LISTING_FETCH_BOUND).await;
+        (channels, false)
+    } else {
+        let channels = list_xmpp_channels(db, MUC_DISCO_ITEMS_FETCH_BOUND, 0).await;
+        let complete = channels
+            .as_ref()
+            .is_ok_and(|channels| channels.len() < MUC_DISCO_ITEMS_FETCH_BOUND);
+        (channels, complete)
+    };
+    let mut channels = fetched.map_err(|error| {
+        warn!(error = %error, "Failed to list canonical channels for MUC discovery");
+        error
+    })?;
+    if audience.is_remote() {
+        // The query reads only these; a row is checked again here so the
+        // listing never rests on the query alone.
+        for channel in &mut channels {
+            channel.public_room &= channel.federated;
         }
     }
+    // A room an enrolled host-grant scope manages is members-only and is
+    // listed only to an account its canonical grants allow `view`.
+    let listed: Vec<&str> = channels
+        .iter()
+        .filter(|channel| channel.public_room)
+        .map(|channel| channel.id.as_str())
+        .collect();
+    let enrolled = state
+        .deps
+        .app_state
+        .host_grants
+        .enrolled_channels(&listed)
+        .await
+        .map_err(|error| error.to_string())?;
+    for channel in &mut channels {
+        if enrolled.contains(&channel.id)
+            && !managed_room_listed(state, &channel.id, audience).await
+        {
+            channel.public_room = false;
+        }
+    }
+    let channel_backed = ChannelBackedRooms {
+        jids: channels
+            .iter()
+            .filter_map(|channel| waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok())
+            .collect(),
+        // When the fetch filled the bound, or read only some rows, rows
+        // beyond it exist and the set is incomplete — membership misses
+        // must fall back to a per-room catalog check.
+        truncated: !complete,
+    };
+    Ok((
+        channels_to_disco_items(channels, muc_domain),
+        channel_backed,
+    ))
 }
 
 /// The catalog-backed room JIDs known to this request, plus whether the
