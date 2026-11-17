@@ -147,6 +147,15 @@ fn item_names(reply: &xmpp_parsers::iq::Iq) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether a disco#items result tells the count of its listing
+/// (XEP-0059): `None` when it carries no `<set/>`.
+fn tells_count(reply: &xmpp_parsers::iq::Iq) -> Option<bool> {
+    let set = result_payload(reply)?
+        .children()
+        .find(|child| child.is("set", "http://jabber.org/protocol/rsm"))?;
+    Some(set.children().any(|child| child.name() == "count"))
+}
+
 /// The Space node no scope enrolls, public, holding a bookmark of the
 /// managed room and an item without a payload at the address of another
 /// room, which is no room of the Space.
@@ -692,6 +701,8 @@ async fn a_managed_room_whose_grants_cannot_be_read_is_left_out_of_the_listings(
         listed.contains(&format!("plain-room@{MUC}")),
         "an unmanaged public room was not listed: {reply:?}"
     );
+    // The listing left a room out: it carries its `<set/>` and no count.
+    assert_eq!(tells_count(&reply), Some(false), "{reply:?}");
 
     let reply = round_trip(&mut romeo, get("children", SPACES, plain_space_items())).await;
     assert!(is_result(&reply), "Space node disco#items: {reply:?}");
@@ -699,6 +710,7 @@ async fn a_managed_room_whose_grants_cannot_be_read_is_left_out_of_the_listings(
         item_names(&reply).is_empty(),
         "a room whose grants cannot be read was listed: {reply:?}"
     );
+    assert_eq!(tells_count(&reply), Some(false), "{reply:?}");
     fixture.close().await;
 }
 

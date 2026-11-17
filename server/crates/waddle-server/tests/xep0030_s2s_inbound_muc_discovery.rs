@@ -32,6 +32,8 @@
 #[allow(dead_code, unused_imports)]
 mod s2s_inbound_muc_support;
 
+use std::time::Duration;
+
 use jid::BareJid;
 use minidom::Element;
 use s2s_inbound_muc_support::{
@@ -41,6 +43,8 @@ use s2s_inbound_muc_support::{
 };
 use waddle_server::s2s::route::RouterLimits;
 use waddle_ws_test_support::WsXmppClient;
+use waddle_xmpp::muc::room_actor::RoomActor;
+use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
 use xmpp_parsers::disco::{DiscoItemsQuery, DiscoItemsResult};
@@ -125,6 +129,81 @@ async fn local_items(client: &mut WsXmppClient, to: &str, id: &str) -> Element {
     })
     .await
     .expect("the answer to the request")
+}
+
+/// Insert `count` catalog rows `{prefix}-{n}` in one statement, each with
+/// whether service discovery lists it (`public_room`), whether it is open
+/// to other servers (`federated`) and its `channel_type`, all created
+/// before any room [`Hosted::catalogued_room`] inserts, so they come first
+/// in the catalog's order.
+async fn catalogued_rows(
+    hosted: &Hosted,
+    prefix: &str,
+    count: usize,
+    public_room: bool,
+    federated: bool,
+    channel_type: &str,
+) {
+    hosted
+        .state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(waddle_server::db::actor::DbExecute {
+            sql: "INSERT INTO channels (id, name, description, channel_type, position, \
+                  is_default, pin_permission, members_only, public_room, federated, \
+                  created_at, updated_at) \
+                  WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?) \
+                  SELECT ? || '-' || printf('%05d', i), ? || '-' || printf('%05d', i), NULL, ?, \
+                  0, ?, 'anyone', ?, ?, ?, '2000-01-01T00:00:00+00:00', \
+                  '2000-01-01T00:00:00+00:00' FROM n"
+                .to_owned(),
+            params: vec![
+                i64::try_from(count).expect("a row count").into(),
+                prefix.into(),
+                prefix.into(),
+                channel_type.into(),
+                false.into(),
+                false.into(),
+                public_room.into(),
+                federated.into(),
+            ],
+        })
+        .await
+        .expect("channel catalog rows");
+}
+
+/// Hold `room`'s actor until the returned sender is dropped or sent on:
+/// every ask of the room waits behind it, as behind a wedged actor.
+async fn wedge_room(hosted: &Hosted, room: &str) -> tokio::sync::oneshot::Sender<()> {
+    let registry = RoomRegistry::wrap(hosted.state.deps.protocol.room_registry.clone());
+    let actor = registry
+        .get_room(room.parse().expect("a room JID"))
+        .await
+        .expect("the room registry answers")
+        .expect("the room's actor");
+    let (release, wedged) = tokio::sync::oneshot::channel();
+    actor
+        .tell(Wedge(wedged))
+        .await
+        .expect("the wedge is queued");
+    release
+}
+
+/// Holds a room's actor until its sender is dropped or sent on.
+struct Wedge(tokio::sync::oneshot::Receiver<()>);
+
+impl kameo::message::Message<Wedge> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        wedge: Wedge,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = wedge.0.await;
+    }
 }
 
 /// The `(category, type)` identities and the features of a `disco#info`
@@ -518,6 +597,131 @@ async fn a_room_list_beyond_one_answer_carries_its_set_unasked() {
         .await;
     let rest = listing(&hosted.answered("c2").await);
     assert_eq!(jids(&rest), [room(&ids[256])]);
+}
+
+/// The listing for accounts at other servers reads only the catalog rows it
+/// may list: rows of hidden rooms, of rooms closed to other servers and of
+/// group conversations take none of its read's places, however many come
+/// first in the catalog's order, and a listing that left nothing out tells
+/// its count.
+#[tokio::test]
+async fn rooms_a_remote_asker_may_not_reach_take_no_place_in_its_read() {
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    // More rows ahead of the open rooms than any listing reads.
+    catalogued_rows(&hosted, "hidden", 4_000, false, true, "text").await;
+    catalogued_rows(&hosted, "closed", 4_000, true, false, "text").await;
+    catalogued_rows(&hosted, "conversation", 4_000, true, true, "group-dm").await;
+    hosted.catalogued_room("open-a", true, true, "text").await;
+    hosted.catalogued_room("open-b", true, true, "text").await;
+
+    hosted
+        .peer_sends(remote_get(BOB, MUC, "r1", paged(10, None)))
+        .await;
+    let listed = listing(&hosted.answered("r1").await);
+    assert_eq!(jids(&listed), [room("open-a"), room("open-b")]);
+    let set = listed.rsm.expect("the asked <set/>");
+    assert_eq!(set.count, Some(2), "{set:?}");
+}
+
+/// A listing for accounts at other servers whose catalog read filled its
+/// bound (4,096 rows) may have left rooms out: it is answered with the
+/// rooms it read, paged, and tells no count, asked for paging or not.
+#[tokio::test]
+async fn a_room_list_beyond_its_read_tells_no_count() {
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    catalogued_rows(&hosted, "open", 4_097, true, true, "text").await;
+
+    hosted.peer_sends(remote_get(BOB, MUC, "b1", items())).await;
+    let first = listing(&hosted.answered("b1").await);
+    assert_eq!(first.items.len(), 256);
+    let set = first.rsm.expect("the <set/> of a partial answer");
+    assert_eq!(set.count, None, "{set:?}");
+    assert_eq!(set.last, Some(room("open-00255")));
+
+    hosted
+        .peer_sends(remote_get(
+            BOB,
+            MUC,
+            "b2",
+            paged(10, Some(&room("open-04090"))),
+        ))
+        .await;
+    let last = listing(&hosted.answered("b2").await);
+    // Of the 4,097 rows, the 4,096 the read holds are listed.
+    assert_eq!(
+        jids(&last),
+        (4_091..4_096)
+            .map(|index| room(&format!("open-{index:05}")))
+            .collect::<Vec<_>>()
+    );
+    let set = last.rsm.expect("the asked <set/>");
+    assert_eq!(set.count, None, "{set:?}");
+}
+
+/// A live instant room whose actor does not answer within the listing's
+/// reading time is left out. An account at another server is answered
+/// with the rest and told no count; a session, which takes a listing as
+/// the whole of the service's rooms, is answered with
+/// `internal-server-error` (type `wait`) instead. Two remote listings asked
+/// at once are built from one read of the rooms; once the actor answers
+/// again, a listing read after the reuse time names the room again, and
+/// a session's listing, read once its request arrived, names it at once.
+#[tokio::test]
+async fn a_room_not_read_in_time_leaves_a_remote_listing_without_count_and_fails_a_session() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    hosted.catalogued_room("open", true, true, "text").await;
+    let mut alice = hosted.room_creator("alice", "desk").await;
+    local_join(&mut alice, ROOM, "alice").await;
+    let release = wedge_room(&hosted, ROOM).await;
+
+    for id in ["t1", "t2"] {
+        hosted
+            .peer_sends(remote_get(BOB, MUC, id, paged(10, None)))
+            .await;
+    }
+    for id in ["t1", "t2"] {
+        let listed = listing(&hosted.answered(id).await);
+        assert_eq!(jids(&listed), [room("open")], "{id}");
+        let set = listed.rsm.expect("the asked <set/>");
+        assert_eq!(set.count, None, "{id}: {set:?}");
+    }
+    assert_eq!(
+        metrics.counter_sum("waddle.muc.room_listings.remote_builds", &[]),
+        Some(1),
+        "two listings asked at once read the rooms once"
+    );
+
+    let refused = local_items(&mut alice, MUC, "t3").await;
+    assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
+    assert_eq!(
+        error_condition(&refused).as_deref(),
+        Some("internal-server-error"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        error_of(&refused).and_then(|error| error.attr("type").map(str::to_owned)),
+        Some("wait".to_owned()),
+        "{refused:?}"
+    );
+
+    let _ = release.send(());
+    let local = listing(&local_items(&mut alice, MUC, "t4").await);
+    assert_eq!(jids(&local), [ROOM.to_owned(), room("open")]);
+
+    // The remote listings' read is reused for 2 s after it started.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    hosted
+        .peer_sends(remote_get(BOB, MUC, "t5", paged(10, None)))
+        .await;
+    let listed = listing(&hosted.answered("t5").await);
+    assert_eq!(jids(&listed), [ROOM.to_owned(), room("open")]);
+    let set = listed.rsm.expect("the asked <set/>");
+    assert_eq!(set.count, Some(2), "{set:?}");
+    assert_eq!(
+        metrics.counter_sum("waddle.muc.room_listings.remote_builds", &[]),
+        Some(2)
+    );
 }
 
 /// The MUC fallback of XEP-0503: a client that does not use Spaces walks
