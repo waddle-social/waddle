@@ -2999,7 +2999,20 @@ runbook (G24):
   seats](#inbound-muc-w6a)); a local response that completes nothing still
   occupies its pair's queue until then, although it is never dialled for;
   and one unresponsive remote domain can hold at most 1,024 of a replica's
-  4,096 pending requests for their lifetime.
+  4,096 pending requests for their lifetime. Account traffic (gate G18)
+  shares the same capacity: a local account's messages and presence for a
+  remote JID, and what the server sends on its behalf, open their pair's
+  queue within the 64 and take places on it beside room traffic and
+  replies (one account at most 32 of a pair's 64,
+  [account traffic](s2s-account-traffic-2047.md)), and the errors the
+  router itself returns for remote senders' account stanzas are replies
+  within the 32. A
+  domain whose stream cannot be established holds its pair's queue and
+  the places on it until they are answered. The open-admission evidence
+  must therefore include account traffic together with room traffic,
+  Space notifications and replies: how many pairs and places the accounts
+  of this deployment and of admitted domains take, and that room traffic
+  and replies still find a queue while they do.
 - **Spaces: a subscription's evidence ages.** A subscription records what
   the stream that made it proved, and keeps that evidence for as long as it
   stands. A home that later authenticates only by dialback, or under
