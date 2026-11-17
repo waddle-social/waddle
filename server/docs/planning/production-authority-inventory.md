@@ -21,7 +21,7 @@ the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab75
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings through
 `fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, the joined-spaces node's gates through
 `ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, and the fixes before verification through
-`7a098688335c2264c6023e6136439e7cd6564fdc` (see the last refresh below); the original
+`9d3a6b9442e6fe4aef3acd28de8e5d1788e8d4e8` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1805,7 +1805,7 @@ moved.
   and `pubsub_admin.rs` moved as on the slice's branch.
 
 The selected evidence was refreshed a forty-ninth time, through
-`7a098688335c2264c6023e6136439e7cd6564fdc`, the fixes made before verification and their merge
+`9d3a6b9442e6fe4aef3acd28de8e5d1788e8d4e8`, the fixes made before verification and their merge
 with the integration branch at `3ef273961`. Sixteen reviewed files changed;
 what changed in each, for the authority this inventory maps:
 
@@ -1842,8 +1842,7 @@ what changed in each, for the authority this inventory maps:
   state's lease to lapse.
 - `auth/retirement.rs`, `server/lifecycle.rs`: startup reads
   `retired_account_jids` once as the runtime role and refuses to start when
-  it cannot; retirement reads an account's other spellings in the offline
-  store through an index range.
+  it cannot.
 - `db/s2s_spaces.rs`: the migration numbers in its module documentation.
 
 Thirty-six anchors moved with the lines added above them; no anchor's text

@@ -22,9 +22,7 @@ One transaction:
   links and its sessions;
 - removes the messages its offline store holds for its next session
   (`pending_delivery`), under any spelling of its JID: the account has no
-  next session. The other spellings are found through an index of the
-  store's recipients by their lower-case spelling (migration 2014), not by
-  reading every recipient. From the
+  next session. From the
   commit on the store refuses every message for the account, whoever
   offers it: a sender, the end of one of its sessions, or the recovery of
   messages a session was holding. Such a message is discarded and its
