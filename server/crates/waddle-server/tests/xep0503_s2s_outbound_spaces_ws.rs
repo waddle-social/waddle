@@ -18,6 +18,9 @@
 //! - A Space's avatar and banner items (0.3.0, "Spaces images") are
 //!   relayed as the service sent them; the server requests nothing they
 //!   name.
+//! - A Space's event notification is a remote service's message to the
+//!   account: it loses what a client would read as its own server's
+//!   statement, as every message from another server does.
 //!
 //! Through the production `/ws` router, the real S2S router and a loopback
 //! peer serving `home-b.test`, its PubSub service `spaces.home-b.test` and
@@ -499,5 +502,89 @@ async fn a_subscription_to_a_remote_space_grants_nothing_in_its_rooms() {
                 && stanza.attr("to").is_some_and(|to| to.starts_with(ROOM)))
             .is_empty(),
         "the join left before its room was verified"
+    );
+}
+
+/// A room item of a Space, as the service could forge what a client reads
+/// as its own server's statement beside the room's bookmark.
+fn forged_room_item() -> Element {
+    let url = url::Url::parse("https://video.example.org/watch").expect("a URL");
+    let mut item = room_item(NS_PUBSUB_EVENT);
+    item.append_child(waddle_xmpp::xep::build_link_metadata_element(
+        &waddle_xmpp::xep::LinkMetadata::new(url).with_title("forged"),
+    ));
+    item.append_child(
+        Element::builder("pinned", waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0).build(),
+    );
+    item
+}
+
+/// Every element below `element` that only the account's server states, of
+/// those [`forged_room_item`] and the event's own payloads forge.
+fn forged_below(element: &Element) -> Vec<String> {
+    let message = element.name() == "message";
+    element
+        .children()
+        .flat_map(|child| {
+            let mut found = forged_below(child);
+            let ns = child.ns();
+            if waddle_xmpp::xep::is_link_metadata_element(child)
+                || ns == waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0
+                || (message && ns.starts_with("urn:waddle:"))
+                || (child.is("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+                    && child.attr("by") == Some(ALICE))
+            {
+                found.push([ns.as_str(), " ", child.name()].concat());
+            }
+            found
+        })
+        .collect()
+}
+
+/// ADR-0020 D7, gate G18: a Space's event notification crosses S2S to a
+/// local account as any remote service's does, and loses what a client
+/// would read as its own server's statement (`crate::s2s::remote_content`):
+/// a link card and a pin marker inside the room's item, and at the top a
+/// payload in a namespace only this deployment defines and a stanza id in
+/// the account's name. The room's bookmark is kept.
+#[tokio::test]
+async fn a_spaces_event_loses_what_only_the_accounts_server_states() {
+    let pki = Pki::new();
+    let federated = with_space_host(&pki).await;
+    let mut phone = online_alice(&federated).await;
+    let alice = full_jid(&phone);
+
+    send(
+        &mut phone,
+        to_service("join-5", true, subscription("subscribe", DEV)),
+    )
+    .await;
+    federated.peer_receives("join-5").await;
+    federated
+        .peer_service_sends(SERVICE, result(&alice, "join-5", None))
+        .await;
+    receive(&mut phone, "iq", "join-5").await;
+    recorded(&federated, DEV, true).await;
+
+    let mut forged = event(DEV, "ev-forged", forged_room_item());
+    forged.payloads.push(
+        Element::builder(
+            "call-thread",
+            waddle_xmpp::xep::xep_waddle_call_thread::NS_WADDLE_CALL_THREAD,
+        )
+        .build(),
+    );
+    forged.payloads.push(
+        Element::builder("stanza-id", waddle_xmpp_core::xep0359::NS_SID)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "forged")
+            .attr(minidom::rxml::xml_ncname!("by").to_owned(), ALICE)
+            .build(),
+    );
+    federated.peer_service_sends(SERVICE, forged).await;
+    let delivered = receive(&mut phone, "message", "ev-forged").await;
+    assert!(forged_below(&delivered).is_empty(), "{delivered:?}");
+    assert!(
+        descendant(&delivered, "conference").is_some(),
+        "{delivered:?}"
     );
 }
