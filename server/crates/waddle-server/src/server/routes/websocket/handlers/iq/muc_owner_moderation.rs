@@ -300,14 +300,6 @@ async fn wipe_destroyed_room_durable_state(
                         member = %member,
                         "Failed to retract group-DM bookmark for destroyed room"
                     );
-                } else {
-                    // The member's resources are told, so that a client
-                    // leaves the destroyed room (XEP-0402).
-                    state
-                        .deps
-                        .app_state
-                        .notify_bookmark_retracted(member, room_jid.as_str())
-                        .await;
                 }
             }
         }

@@ -2448,12 +2448,6 @@ async fn run_group_dm_leave(
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
     }
-    // The bookmark's retraction stands: the account's other resources are
-    // told, so that a client leaves the room (XEP-0402).
-    let room_item = args.room_jid.to_string();
-    state
-        .notify_bookmark_retracted(&caller_bare, &room_item)
-        .await;
     {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
