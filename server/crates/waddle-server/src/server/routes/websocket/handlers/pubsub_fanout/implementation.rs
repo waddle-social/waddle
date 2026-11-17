@@ -509,8 +509,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
 ///
 /// Delegates to `pubsub_authz::can_subscribe_with_config` — the same
 /// decision arm as the subscribe/read gate — so the fan-out
-/// entitlement can never diverge from it: the XEP-0402 bookmarks
-/// owner-only carve-out and the Authorize arm apply identically here.
+/// entitlement can never diverge from it: the owner-only carve-out of the
+/// bookmarks and joined-spaces nodes and the Authorize arm apply here too.
 /// This matters because an XEP-0060 §8.8 owner subscriptions-set
 /// writes subscription rows WITHOUT a can_subscribe check — a row's
 /// existence is not authorization. The node config fetched once at the

@@ -18,8 +18,9 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
-through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb` (see the last refresh below); the original
+through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings through
+`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, and the joined-spaces node's gates through
+`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1699,6 +1700,108 @@ integration branch. The one reviewed file it changed
 `hg-muc-listing` and `hg-space-children-listing` moved as in the
 forty-second refresh, and the raw scan still holds 1643 records, each
 unchanged in content.
+The forty-fourth to forty-seventh refreshes were made on the branch of the
+joined-spaces slice (W8) before it was merged, each from the one before it
+on that branch and the first from the thirty-fifth; their commits are that
+branch's. They are numbered here after the refreshes above, which were made
+on the integration branch meanwhile.
+
+The selected evidence was refreshed a forty-fourth time, through
+`d26e75636b5a6408c5dfd539abd3e8dd5a12ff41`, after reviewing the delta of the reviewed files since the
+thirty-fifth refresh. `pubsub/node.rs` and `pubsub_dispatch.rs` changed. No
+grant writer or storage plane of the host-grant authority was added, no
+producer of stream evidence changed, and no decision of standing moved.
+
+- The configure clamp of PEP nodes (`bounded_node_config` in
+  `pubsub/node.rs`) also normalizes `urn:waddle:joined-spaces:0`: whitelist
+  access, publishers only, a bounded multi-item cap, persistent items and
+  no last-item delivery, whatever an owner submits. It only narrows who may
+  read the owner's own node.
+- The publish path reconciles that node's stored configuration to its
+  well-known defaults before a publish (`pubsub_dispatch.rs`), as it does
+  for the DND node. The anchors of both files are unchanged.
+- The raw scan holds 1642 records, unchanged in content and place.
+
+The selected evidence was refreshed a forty-fifth time, through
+`387e4ac3dcdda9285403f14bf7f442eed3e2ca4d`, after reviewing the delta of the reviewed files since the
+forty-fourth refresh. `pubsub_authz.rs`, `pubsub_admin.rs`,
+`pubsub_dispatch.rs` and `pubsub_fanout/implementation.rs` changed. No
+grant writer or storage plane of the host-grant authority was added, no
+producer of stream evidence changed, and no decision of standing moved.
+
+- The read gate of PubSub (`can_subscribe_with_config` in
+  `pubsub_authz.rs`, shared by items, subscribe and the fan-out
+  entitlement) answers `urn:waddle:joined-spaces:0` as it answers the
+  XEP-0402 bookmarks node: the account alone, whatever its access model
+  or affiliation rows. It only narrows who may read the owner's own node.
+- An owner affiliations set on that node (`pubsub_admin.rs`) is refused
+  whole, with `not-allowed`, when it would make another entity a member,
+  publisher, publish-only entity or owner, or the account an outcast of
+  its own node; it writes nothing then. `pubsub-admin` and
+  `d8-space-affiliations` moved down by eight lines, their text
+  unchanged.
+- The publish-time reconcile (`pubsub_dispatch.rs`) rewrites that node's
+  stored configuration only when its normalization changes it, and then
+  to the normalized configuration rather than the defaults, so an owner's
+  bounded `max_items` survives. A doc comment of the fan-out changed.
+- The raw scan holds 1642 records, unchanged in content; those in
+  `pubsub_authz.rs` (its unit tests) and `pubsub_admin.rs` moved with the
+  lines added above them.
+
+The selected evidence was refreshed a forty-sixth time, through
+`ff48b18cb72a97ef7680604e539966c12f13c40a`, after reviewing the delta of the reviewed files since the
+forty-fifth refresh. Only `pubsub_admin.rs` changed: the refusal of an
+owner affiliations set on `urn:waddle:joined-spaces:0` now reads each
+named entity's stored affiliation and returns them in the error, as
+XEP-0060 §8.9.2.4 requires. It still writes nothing; no grant writer,
+storage plane or decision of standing changed. `pubsub-admin` and
+`d8-space-affiliations` moved down by fourteen lines, their text
+unchanged, and the raw scan's records are unchanged in content.
+
+The selected evidence was refreshed a forty-seventh time, through
+`34b1631c5b136ac5f3630b52be30046231d83410`, after reviewing the delta of the reviewed files since the
+forty-sixth refresh. `pubsub_authz.rs` and `pubsub_admin.rs` changed. No
+grant writer or storage plane of the host-grant authority was added, no
+producer of stream evidence changed, and no decision of standing moved.
+
+- `can_publish` and `can_administer` (`pubsub_authz.rs`) answer
+  `urn:waddle:joined-spaces:0` for the account alone, before reading any
+  affiliation row or the publish model, as the read gate already did. They
+  only narrow who may publish to or administer the owner's own node.
+- An owner affiliations set on that node (`pubsub_admin.rs`) now applies
+  its permitted changes (`none` or `outcast` for another entity, `owner`
+  or `none` for the account) through the same `set_affiliation` loop as
+  every other PubSub node, and answers the unsupported ones with
+  `not-acceptable` (type `modify`), carrying only those entities with
+  their effective affiliation, as XEP-0060 §8.9.2.4 describes; a request
+  naming an entity twice is refused with `bad-request` before any of it
+  is applied. It writes no affiliation another node could not already
+  receive. `pubsub-admin` and `d8-space-affiliations` moved down by
+  twenty-eight lines, their text unchanged.
+- The raw scan's records are unchanged in content; those in
+  `pubsub_authz.rs` (its unit tests) moved down by nineteen lines and the
+  two `set_affiliation` records of `pubsub_admin.rs` by twenty-eight.
+
+The selected evidence was refreshed a forty-eighth time, through
+`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, the merge of the joined-spaces slice (W8) into the
+integration branch, after reviewing what the merge changed in the reviewed
+files beyond either side. The manifest is the union of both sides': the
+slice added no file or anchor, and the MUC fallback's reviewed file
+(`handlers/iq/disco_items.rs`) and its four anchors stay. No reviewed file
+changed on both sides. The five the slice changed (`pubsub/node.rs`,
+`pubsub_authz.rs`, `pubsub_admin.rs`, `pubsub_dispatch.rs` and
+`pubsub_fanout/implementation.rs`) are as on its branch, and the
+integration branch's (among them `s2s_rooms.rs`, `s2s_spaces.rs` and
+`disco_items.rs`) as on it. `pubsub-admin` and `d8-space-affiliations`
+moved as in the forty-fifth to forty-seventh refreshes, fifty lines in
+all; the integration branch's anchors are where it put them. No grant
+writer or storage plane of the host-grant authority was added by the
+merge, no producer of stream evidence changed, and no decision of standing
+moved.
+
+- The raw scan holds 1643 records: the 1643 of the forty-third refresh,
+  each unchanged in content; those in `pubsub_authz.rs` (its unit tests)
+  and `pubsub_admin.rs` moved as on the slice's branch.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.

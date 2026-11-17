@@ -28,6 +28,8 @@ export function useChatShellState() {
   const showEditChannel = ref(false);
   const showWaddleSettings = ref(false);
   const showMembers = ref(false);
+  /** Look up, join and follow communities hosted on other servers. */
+  const showRemoteCommunities = ref(false);
   /** #414: pinned-messages right-rail panel toggle. Synced with `?pinned=1`. */
   const showPinnedPanel = ref(false);
   const confirmDeleteWaddle = ref(false);
@@ -63,6 +65,7 @@ export function useChatShellState() {
     showEditChannel,
     showWaddleSettings,
     showMembers,
+    showRemoteCommunities,
     showPinnedPanel,
     confirmDeleteWaddle,
     showNewDm,

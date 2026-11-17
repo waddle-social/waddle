@@ -1,4 +1,4 @@
-import type { Ref } from "vue";
+import { watch, type Ref } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useWaddleDirectory } from "@/waddles/directory";
 import type { useWaddleMembers } from "@/waddles/members";
@@ -6,6 +6,8 @@ import type { ChatShellState } from "@/shell/state";
 import type { connectionStore as ConnectionStore } from "@/lib/connection-store";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import { jidDomainOrEmpty } from "@/lib/xmpp/jid";
+import { memberIdentityLabel } from "@/waddles/remote-community-presentation";
 
 interface WorkspaceDialogsDeps {
   ui: ChatShellState;
@@ -22,6 +24,12 @@ interface WorkspaceDialogsDeps {
  */
 export function useWorkspaceDialogs(deps: WorkspaceDialogsDeps) {
   const { ui, connectionStore, waddles, messaging, members, activeExtensionRouteKey } = deps;
+
+  // The room's federation setting lives in its owner form, which is read
+  // only when the owner opens the room's settings.
+  watch(ui.showEditChannel, (open) => {
+    if (open) void waddles.loadChannelFederation();
+  });
 
   let setupPromptShown = false;
 
@@ -127,7 +135,10 @@ export function useWorkspaceDialogs(deps: WorkspaceDialogsDeps) {
 
   function handleRemoveMember(member: MemberSummary) {
     pendingRemoveMember = member;
-    ui.confirmRemoveMember.value = member.username;
+    ui.confirmRemoveMember.value = memberIdentityLabel(
+      member,
+      jidDomainOrEmpty(connectionStore.session?.jid ?? ""),
+    );
   }
 
   async function confirmRemoveMember() {

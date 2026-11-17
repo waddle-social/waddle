@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { mentionDirectoryKey } from "@/shell/controllers/use-mention-directory";
+import { remoteMediaPolicyKey, remoteMediaSource } from "@/lib/remote-media";
 import { useStore } from "@nanostores/vue";
 import {
   $mucCallMedia,
@@ -84,6 +85,17 @@ const controller = props.controller;
 // Room composers (main, thread, call chat) report their `@query` here so
 // people without room presence can be mentioned via the user directory.
 provide(mentionDirectoryKey, controller.mentionDirectory);
+// Media in messages from other servers waits for the user to load it.
+provide(remoteMediaPolicyKey, (message) => {
+  const accountDomain = controller.selfDomain.value;
+  if (!accountDomain) return null;
+  return remoteMediaSource(message, {
+    accountDomain,
+    mucService: controller.waddles.homeMucService.value,
+    spacesService: controller.waddles.spacesServiceJid.value,
+    components: controller.waddles.homeComponents.value,
+  });
+});
 
 const {
   connectionStore,
@@ -954,7 +966,7 @@ async function recoverSupersededFromShell() {
               :is-loading-older-messages="activeIsLoadingOlderMessages"
               :has-older-messages="activeHasOlderMessages"
               :is-sending="activeIsSending"
-              :can-manage-channels="waddles.canManageChannels.value"
+              :can-manage-channels="waddles.canManageCurrentChannel.value"
               :member-count="displayedMemberCount"
               :member-state="displayedMemberState"
               :typing-users="activeTypingUsers"

@@ -596,6 +596,56 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
+            // XEP-0060 §8.9.2.4 (Multiple Simultaneous Modifications): the
+            // joined-spaces node enforces affiliation rules stricter than the
+            // state chart. A change it does not support is not applied and
+            // comes back in a `not-acceptable` error with the entity's
+            // existing affiliation. Any change left out of that error counts
+            // as a successful modification, so every permitted change of the
+            // same request is applied as usual. A request naming an entity
+            // twice, which the section answers with `bad-request`, is refused
+            // before any of it is applied: one of its changes could otherwise
+            // be applied while the other is reported as not made.
+            let (changes, refused) = if is_pep
+                && node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
+            {
+                let mut named = std::collections::HashSet::with_capacity(changes.len());
+                if !changes.iter().all(|(entity, _)| named.insert(entity)) {
+                    return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
+                }
+                let (permitted, unsupported): (Vec<_>, Vec<_>) =
+                    changes.into_iter().partition(|(entity, affiliation)| {
+                        joined_spaces_affiliation_allowed(target_jid, entity, *affiliation)
+                    });
+                let mut refused = Vec::with_capacity(unsupported.len());
+                for (entity, _) in unsupported {
+                    // The account's own ownership of its PEP node is derived
+                    // (XEP-0163 §1), not stored, so the existing affiliation
+                    // is the effective one.
+                    match crate::pubsub_authz::effective_affiliation(
+                        &state.deps.protocol.pubsub_storage,
+                        target_jid,
+                        &node,
+                        &entity,
+                        is_pep,
+                    )
+                    .await
+                    {
+                        Ok(stored) => refused.push((entity, stored)),
+                        Err(error) => {
+                            warn!(
+                                node = %node,
+                                error = %error,
+                                "Failed to read a refused joined-spaces affiliation"
+                            );
+                            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
+                        }
+                    }
+                }
+                (permitted, refused)
+            } else {
+                (changes, Vec::new())
+            };
             // ADR-0020 D8 at issuance: on the Spaces service an Owner
             // administers the Space and a publisher places rooms in it, so
             // either is written only for an account of this deployment or
@@ -639,6 +689,9 @@ pub(super) async fn handle_pubsub_admin_request(
                 {
                     return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
+            }
+            if !refused.is_empty() {
+                return vec![joined_spaces_affiliation_refused(iq, &node, &refused)];
             }
             vec![build_pubsub_success(iq)]
         }
@@ -888,6 +941,64 @@ fn privileged_affiliation_refused(iq: &xmpp_parsers::iq::Iq) -> xmpp_parsers::iq
             "en",
             "Owner and publisher affiliations are granted to accounts of this deployment and of \
              its trusted servers only.",
+        ),
+    }
+}
+
+/// Whether an owner may write `affiliation` for `entity` on the
+/// joined-spaces node of `account`.
+///
+/// The node is the account's private data (XEP-0223): the account alone
+/// reads and publishes it, so it supports no affiliation that would share
+/// it. Another entity may be removed (`none`) or banned (`outcast`), never
+/// made a member, publisher, publish-only entity or second owner (which
+/// would let it configure, purge or delete the account's list). The
+/// account's own JID may only be confirmed as owner or cleared; an
+/// `outcast` row for it would override its derived ownership and lock it
+/// out of its own node.
+fn joined_spaces_affiliation_allowed(
+    account: &BareJid,
+    entity: &BareJid,
+    affiliation: waddle_xmpp::pubsub::Affiliation,
+) -> bool {
+    use waddle_xmpp::pubsub::Affiliation;
+    if entity == account {
+        matches!(affiliation, Affiliation::Owner | Affiliation::None)
+    } else {
+        matches!(affiliation, Affiliation::None | Affiliation::Outcast)
+    }
+}
+
+/// The answer to an owner affiliations set on the joined-spaces node that
+/// holds changes the node does not support (XEP-0060 §8.9.2.4, Multiple
+/// Simultaneous Modifications).
+///
+/// The section lets a service enforce rules stricter than its state chart
+/// and says the error SHOULD be `not-acceptable` (type `modify`). It carries
+/// only the `<affiliation/>` elements that caused it, each with the entity's
+/// existing affiliation: `refused` holds the unsupported changes alone,
+/// since the requester treats every entity left out as modified.
+fn joined_spaces_affiliation_refused(
+    iq: &xmpp_parsers::iq::Iq,
+    node: &str,
+    refused: &[(BareJid, waddle_xmpp::pubsub::Affiliation)],
+) -> xmpp_parsers::iq::Iq {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    let payload = match build_pubsub_affiliations_result(iq, node, refused) {
+        xmpp_parsers::iq::Iq::Result { payload, .. } => payload,
+        _ => None,
+    };
+    xmpp_parsers::iq::Iq::Error {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_owned(),
+        payload,
+        error: StanzaError::new(
+            ErrorType::Modify,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "The joined-spaces node is private to its account: only none and outcast \
+             affiliations are written for another entity.",
         ),
     }
 }

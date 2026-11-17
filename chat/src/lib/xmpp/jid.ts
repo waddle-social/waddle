@@ -67,7 +67,9 @@ export function fullJidIdentityKey(fullJid?: string | null): string {
  * carry the original case, so byte comparison silently misses.
  */
 export function bareJidKey(jid: string): string {
-  return barePeerJid(jid).trim().toLowerCase();
+  const bare = barePeerJid(jid).trim().toLowerCase();
+  // RFC 7622 §3.2: a domain with one trailing dot is the same domain.
+  return bare.endsWith(".") && !bare.endsWith("..") ? bare.slice(0, -1) : bare;
 }
 
 /**
@@ -92,10 +94,16 @@ export function parseManagedRoomBareJid(
   };
 }
 
+/**
+ * Room address for a local channel id. A home room's id is its localpart on
+ * the conventional MUC service; a room on any other service is identified
+ * by its bare JID, which is returned as it is.
+ */
 export function roomBareJidFor(
   session: WaddleSession,
   channelId: string,
 ): string {
+  if (channelId.includes("@")) return barePeerJid(channelId);
   return roomBareJidForAccountJid(session.jid, channelId);
 }
 

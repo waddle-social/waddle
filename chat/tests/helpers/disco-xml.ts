@@ -53,7 +53,7 @@ export async function withFakeXmlDocument(run: () => Promise<void>): Promise<voi
       createDocument: (_namespace: string, rootName: string) => new FakeStructuredXmlDocument(rootName),
     },
   } as unknown as Document;
-  globalThis.XMLSerializer = FakeXmlSerializer as typeof XMLSerializer;
+  globalThis.XMLSerializer = FakeXmlSerializer as unknown as typeof XMLSerializer;
   try {
     await run();
   } finally {
@@ -76,7 +76,7 @@ class FakeXmlElement {
   constructor(
     readonly localName: string,
     readonly namespaceURI: string | null,
-    private readonly attrs: Record<string, string>,
+    readonly attrs: Record<string, string>,
   ) {}
 
   get textContent(): string {
@@ -169,7 +169,9 @@ class FakeStructuredXmlDocument {
 
 class FakeStructuredXmlElement {
   readonly attrs: Record<string, string> = {};
-  readonly children: Array<FakeStructuredXmlElement | FakeStructuredXmlText> = [];
+  // A parsed element appended here models the DOM adopting an element of
+  // a response document into a request (see `src/lib/xmpp/xml-stanza.ts`).
+  readonly children: Array<FakeStructuredXmlElement | FakeStructuredXmlText | FakeXmlElement> = [];
 
   constructor(
     readonly localName: string,
@@ -181,8 +183,8 @@ class FakeStructuredXmlElement {
   }
 
   appendChild(
-    child: FakeStructuredXmlElement | FakeStructuredXmlText,
-  ): FakeStructuredXmlElement | FakeStructuredXmlText {
+    child: FakeStructuredXmlElement | FakeStructuredXmlText | FakeXmlElement,
+  ): FakeStructuredXmlElement | FakeStructuredXmlText | FakeXmlElement {
     this.children.push(child);
     return child;
   }
@@ -198,19 +200,22 @@ class FakeXmlSerializer {
   }
 }
 
-function serializeFakeXmlElement(node: FakeStructuredXmlElement, parentNamespace: string | null): string {
+function serializeFakeXmlElement(node: FakeStructuredXmlElement | FakeXmlElement, parentNamespace: string | null): string {
   const namespaceAttr = node.namespaceURI && node.namespaceURI !== parentNamespace
     ? ` xmlns="${escapeTestXml(node.namespaceURI)}"`
     : "";
   const attrs = Object.entries(node.attrs)
+    .filter(([name]) => name !== "xmlns" && !name.startsWith("xmlns:"))
     .map(([name, value]) => ` ${name}="${escapeTestXml(value)}"`)
     .join("");
-  const children = node.children.map((child) =>
+  const text = node instanceof FakeXmlElement ? escapeTestXml(node.text) : "";
+  const children: Array<FakeStructuredXmlElement | FakeStructuredXmlText | FakeXmlElement> = node.children;
+  const serializedChildren = children.map((child) =>
     child instanceof FakeStructuredXmlText
       ? escapeTestXml(child.textContent)
       : serializeFakeXmlElement(child, node.namespaceURI),
   ).join("");
-  return `<${node.localName}${namespaceAttr}${attrs}>${children}</${node.localName}>`;
+  return `<${node.localName}${namespaceAttr}${attrs}>${text}${serializedChildren}</${node.localName}>`;
 }
 
 function escapeTestXml(value: string): string {

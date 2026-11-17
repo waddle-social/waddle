@@ -62,6 +62,7 @@ const {
   openCreateChannelDialog,
   handleNewGroupDm,
   handleAddPeopleToDm,
+  remoteCommunities,
 } = props.controller;
 
 const callParticipantAvatarJid = useCallParticipantAvatarJid();
@@ -85,6 +86,11 @@ interface RoomTile {
 
 function roomKey(jid: string | undefined | null): string {
   return jid ? barePeerJid(jid).toLowerCase() : "";
+}
+
+/** Forget a bookmarked room on another server while the home server does not federate. */
+async function forgetUnavailableRoom(roomJid: string) {
+  await remoteCommunities.forgetRoom(roomJid);
 }
 
 const tiles = computed<RoomTile[]>(() => {
@@ -116,19 +122,23 @@ const tiles = computed<RoomTile[]>(() => {
       const hereCount = isActive ? hereCountForActiveRoom : null;
       const hasActivity = !!channel.jid && activeKeys.has(roomKey(channel.jid));
       const live = callCount > 0;
+      // A room on another server says where it is: two servers can each
+      // have a room of the same name.
+      const host = channel.remoteHost ?? null;
+      const place = host ? `Room on ${host}` : "Room";
       let kicker: string;
       if (live) {
         kicker = `${media?.video ? "Video" : "Voice"} huddle · ${callCount} in`;
       } else if (hereCount !== null) {
-        kicker = `Room · ${hereCount} here`;
+        kicker = `${place} · ${hereCount} here`;
       } else if (activity.mentions > 0) {
-        kicker = `Room · ${activity.mentions} mention${activity.mentions === 1 ? "" : "s"}`;
+        kicker = `${place} · ${activity.mentions} mention${activity.mentions === 1 ? "" : "s"}`;
       } else if (activity.unread > 0) {
-        kicker = `Room · ${activity.unread} unread`;
+        kicker = `${place} · ${activity.unread} unread`;
       } else if (hasActivity) {
-        kicker = "Room · active";
+        kicker = `${place} · active`;
       } else {
-        kicker = "Room · quiet";
+        kicker = `${place} · quiet`;
       }
       return {
         channel,
@@ -229,14 +239,25 @@ function selectCommunitySurface(surface: "feed" | "events") {
           <p class="community-page__lead">Sorted by what is happening: huddles first, then mentions and unread.</p>
         </div>
       </div>
-      <button
-        v-if="waddles.canManageChannels.value"
-        type="button"
-        class="community-pill"
-        @click="openCreateChannelDialog()"
-      >
-        New room
-      </button>
+      <div class="flex flex-wrap gap-2">
+        <!-- Offered only while the home server federates with other servers. -->
+        <button
+          v-if="waddles.federationAvailable.value"
+          type="button"
+          class="community-pill"
+          @click="ui.showRemoteCommunities.value = true"
+        >
+          Join from another server
+        </button>
+        <button
+          v-if="waddles.canManageChannels.value"
+          type="button"
+          class="community-pill"
+          @click="openCreateChannelDialog()"
+        >
+          New room
+        </button>
+      </div>
     </header>
 
     <div class="community-page__body">
@@ -301,6 +322,37 @@ function selectCommunitySurface(surface: "feed" | "events") {
             </div>
           </article>
         </div>
+      </section>
+
+      <!-- Rooms on other servers the user bookmarked, while this server
+           does not federate: nothing joins them, and only Forget is offered. -->
+      <section
+        v-if="waddles.unavailableRemoteRooms.value.length > 0"
+        class="community-section"
+        aria-label="Rooms on other servers, unavailable"
+      >
+        <h2 class="community-section__title">Rooms on other servers — unavailable</h2>
+        <p class="type-caption text-muted-foreground">
+          Your server doesn't connect to other servers right now, so these rooms can't be opened.
+        </p>
+        <ul class="grid gap-1">
+          <li
+            v-for="room in waddles.unavailableRemoteRooms.value"
+            :key="room.roomJid"
+            class="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-1.5"
+          >
+            <div class="min-w-0 flex-1">
+              <div class="type-control truncate">{{ room.name ?? room.roomJid }}</div>
+              <div class="type-meta text-muted-foreground truncate">{{ room.roomJid }}</div>
+            </div>
+            <button
+              type="button"
+              class="chat-action-button type-control text-destructive-text hover:bg-destructive/10"
+              title="Remove the room's bookmark on every device. Your access to the room is not changed."
+              @click="forgetUnavailableRoom(room.roomJid)"
+            >Forget</button>
+          </li>
+        </ul>
       </section>
 
       <section class="community-section" aria-label="Browse all rooms">

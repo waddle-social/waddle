@@ -32,7 +32,11 @@ the room host's answers to requests it did not decide in time) merged at
 `3039aff56`, with one test fix merged again at `dcb6964dc`; the run10 logs
 ran at `dcb6964dc`. The session listing's read budget and one discovery
 case merged at `fe6123acd`, and the run10 head logs ran at `e559ebd57`; a
-row citing a run10 head log describes that tree. A
+row citing a run10 head log describes that tree. W8 (the web pilot: the
+joined-spaces node and the web client's communities on other servers)
+merged at `ace94a3dd`, after its last fixes on its branch; the run11 logs
+ran at `7eeda217e`, the merge's inventory pin, and a row citing a run11
+log describes that tree. A
 target lists every slice that touched it,
 the first being the slice that created it; "integration" is a commit made on
 the integration branch itself.
@@ -102,6 +106,9 @@ the integration branch itself.
 | `integration-run10-hostgrant.log` | the run9 host-grant selection (21 binaries) at `dcb6964dc`, `--run-ignored all`, PostgreSQL required, a fresh PostgreSQL-backed SpiceDB 1.56.1 on 127.0.0.1:50064 (database `w2047_int_spicedb`, created and dropped by the run), `--profile ci`: 287 of 287, `host_grant_remote_principals`'s stale `view` decision and the fence sink's listing that tells no count included. |
 | `integration-run10-gates-head.log`, `integration-run10-s2s-head.log`, `integration-run10-clustering-head.log`, `integration-run10-hostgrant-head.log` | the gates and the three selections of the run10 logs at `e559ebd57`, after a session's listing of the MUC service was given a whole read of its own after one it may not take (`1a0c240e1`), a discovery case for live rooms whose catalog rows close them to remote askers (`fa2e908c9`), their merge (`fe6123acd`) and the inventory pins: every gate passed (the inventory matched `fe6123acd`; `check-poison-recovery.py` with the same findings as `4adf451d2`; the same three dead-code warnings under `cargo check`); `waddle-xmpp` 136 of 136; `waddle-server` 1212 of 1212 across 88 binaries, the same 7 skipped; clustering 61 of 61; host-grant 287 of 287. |
 | `integration-run10-repeat1.log` to `integration-run10-repeat3.log` | `xep0030_s2s_inbound_muc_discovery` and `xep0045_s2s_inbound_muc_router`, whose W7b cases depend on timers, three more times at `e559ebd57`, PostgreSQL required: 51 of 51 each time. |
+| `integration-run11-gates.log` | the gates at `7eeda217e`, after the W8 merge (`ace94a3dd`) and its inventory pin: fmt; clippy with `-D warnings` of every target of `waddle-xmpp-core`, `waddle-xmpp`, `waddle-xmpp-client` and `waddle-xmpp-client-wasm`; clippy `waddle-server` lib with and without `clustering`; `cargo check` with `test-support` of `xep0223_joined_spaces_ws`, `xep0060_pubsub_ws`, `xep0163_pep_ws` and `xep0223_story_reads_ws`; the structure, typed-entry, PostgreSQL-environment and authority-inventory scripts (the inventory matched `ace94a3dd`); `check-poison-recovery.py` with the same findings as `dafeff804`; `git diff --check` from `dafeff804`; the chat lint (`knip`, after the wasm build and Panda codegen), `wrangler types` and `astro check` (0 errors, 0 warnings), with the two `server/wasm-pkg` files the lint rewrites restored afterwards. All passed. |
+| `integration-run11-chat.log` | `bun test` over `chat/tests` at `7eeda217e` (Bun 1.3.13), with a JUnit report (`integration-run11-chat.junit.xml`) that gives the per-file counts below: 4,662 of 4,665 cases across 375 files. The three failures fail the same way at `dafeff804` (`integration-run11-chat-baseline.log`, a temporary worktree there after the wasm build and Panda codegen: 4,443 of 4,446, the same three), so none is W8's: two `scroll-direction.test.ts` cases expect the room's stored last-seen message to be the newest visible one (`room-2`) and read `room-1` or nothing, also when the file runs alone, and `startup-loading-fallback` reads build output under `chat/dist`, which no gate builds. Before its last fixes the W8 branch failed 33 more: the message body's notice for held media ("Images and files from {{ host }} …") compiles to text that the component-render helpers' import rewrite took for an import, failing every test that renders the message body (`d0e5916de` and `9e7abf98b` match only whitespace-free module specifiers), and a send-readiness case restored a home MUC room through persistence without placing it at home, which the client now parks until discovery (`d0e5916de` places it as the other retry cases do). |
+| `integration-run11-pep.log` | nextest `--profile ci` at `7eeda217e`, with `WADDLE_TEST_POSTGRES_URL` naming a database of its own on the shared cluster (`w2047_int_run11_pep`, created and dropped by the run) and `WADDLE_TEST_REQUIRE_POSTGRES=1`; none of the selected binaries reads PostgreSQL (they run the TestServer on SQLite or the in-memory stores), so the setting proves nothing about them. The local PEP and PubSub suites whose production paths W8 changed (the joined-spaces node's configuration clamp, publish reconcile, read, publish and administer gates and owner affiliations): `waddle-server` 79 of 79 across 9 binaries (`xep0223_joined_spaces_ws` 10, `xep0223_story_reads_ws` 5, `xep0060_pubsub_ws` 13, `xep0163_pep_ws` 18, `xep0060_spaces_owner_ws` 8, `waddle_dnd_pep_push_gating_ws` 5, `waddle_status_preference_pep_sync_ws` 11, `pep_feed_bridge_ws` 2, `ws_pubsub_service_dispatch` 7); `waddle-xmpp` 28 of 28 (`xep0163_pep` 13, `xep0402_pep_native_bookmarks` 15); the `waddle-xmpp-core` library's `pubsub::` unit tests 51 of 51 (`pubsub/node.rs`'s 22 among them); the `waddle-xmpp-client` library's `messaging::presence::` unit tests 28 of 28, the two `<destroy/>` cases (`room_destruction_is_surfaced`, `ordinary_unavailable_presence_is_not_a_destruction`) among them. No case skipped. |
 | `server/docs/planning/host-grant-authority-2047.md` | Records the first slice's set passing 110 of 110 on 2026-11-14 (two consecutive runs; an earlier run of that revision failed one admission case with an ingress substrate timeout, which passed alone and in both later runs; cause unconfirmed) and again on 2026-11-15 at `ef5205cf2`, and the writer fence's set passing 64 of 64 on 2026-11-15 at `ef5205cf2`. PostgreSQL 17.11 and SpiceDB 1.56.1 with the memory datastore. |
 
 The two host-grant logs do not record the commit they ran at or the
@@ -120,8 +127,9 @@ stops at each stage) and `xep0045_host_grant_revocation` (a replica that
 stops running its fence), and the cases of `host_grant_revocation_fence` and
 `account_jid_retirement` that run the `waddle-server` binary's operator
 subcommands, ran in run6; no run covers Prosody, ejabberd,
-the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
-`clustering` feature.
+or the Rust library unit tests of `waddle-server`; the `clustering`
+feature ran from the run7 logs on, and `bun test` for `chat` in the run11
+chat log.
 
 ## Integration test targets
 
@@ -136,7 +144,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `identity_profile` (19) | W5i | none (loopback address checks only) | Not run |
 | `xep0503_remote_metadata` (3) | W7a | none | Run 3/3, run10 head S2S log |
 | `xep0313_mam` (edited, 11) | W5c | none; two cases need PostgreSQL and skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
-| `xep0402_pep_native_bookmarks` (edited, 15) | W5i | none | Not run |
+| `xep0402_pep_native_bookmarks` (edited, 15) | W5i | none | Run 15/15, run11 PEP log |
 | `xep0513_mentions` (edited, 20) | W5c | none | Not run |
 
 ### waddle-server, S2S and destination routing (`server/crates/waddle-server/tests/`)
@@ -248,6 +256,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Run 1/1, run10 head S2S log |
 | `xep0492_dm_bookmarks_ws` (edited, 6) | W5i | none | Not run |
 | `xep0503_spaces_ws` (edited, 14) | W5i, W7a, W7b | TestServer process | Run 14/14, run10 head S2S log |
+| `xep0223_joined_spaces_ws` (10) | W8 | TestServer process | Run 10/10, run11 PEP log |
 
 ### waddle-client-session
 
@@ -294,6 +303,11 @@ deployment that hosts its Spaces from the database-backed PubSub store a
 deployment runs (`websocket_state_with_federation_and_database_pubsub`);
 without `hosts_spaces` it builds what it built before.
 
+W8 added typed helpers to `waddle-ws-test-support` (`src/iq.rs`: an IQ to
+the account's own JID; `src/stanza.rs`: frames and the owner affiliations
+form), which `xep0223_joined_spaces_ws` uses; the crate adds no cases, and
+every target the run11 gates checked compiles with it.
+
 ## Library unit test modules edited on the branch
 
 These files hold existing cases that the branch edited, and one, the
@@ -331,6 +345,8 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | `waddle-xmpp/src/muc/room_registry_actor/tests.rs` | W5c | none | Not run |
 | `waddle-xmpp/src/protocol/frame/tests.rs` | W5i | none | Not run |
 | `waddle-xmpp/src/protocol/wire_trace_l4_room_tests.rs` | W5c | none | Not run |
+| `waddle-xmpp-core/src/pubsub/node.rs` (`tests`: four cases added for the joined-spaces node's configuration, its normalization and the reconcile of well-known nodes) | W8 | none | Run 22/22, run11 PEP log |
+| `waddle-xmpp-client/src/messaging/presence.rs` (`tests`: two cases added for a room's `<destroy/>`) | W8 | none | Run 28/28, run11 PEP log |
 
 The writer fence's design records two of these as the library cases that
 cover its pin and unpin paths (`ingress/room_pin_tests.rs`) and the join's
@@ -340,17 +356,51 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `qualified-identity.test.ts` (9 cases) | W3 | Bun | Not run |
-| `room-id-quarantine.test.ts` (edited, 15) | W3 | Bun | Not run |
+| `qualified-identity.test.ts` (9 cases) | W3 | Bun | Run 9/9, run11 chat log |
+| `room-id-quarantine.test.ts` (edited, 16) | W3 | Bun | Run 16/16, run11 chat log |
+| `channel-reload.test.ts` (edited, 24) | W8 | Bun | Run 24/24, run11 chat log |
+| `client-discovery-cache.test.ts` (edited, 10) | W8 | Bun | Run 10/10, run11 chat log |
+| `client-presence.test.ts` (edited, 21) | W8 | Bun | Run 21/21, run11 chat log |
+| `client-send-readiness.test.ts` (edited, 108) | W8 | Bun | Run 108/108, run11 chat log |
+| `discovery-remote-rooms.test.ts` (12) | W8 | Bun | Run 12/12, run11 chat log |
+| `federated-settings.test.ts` (9) | W8 | Bun | Run 9/9, run11 chat log |
+| `joined-spaces.test.ts` (17) | W8 | Bun | Run 17/17, run11 chat log |
+| `message-body-attachment-url-sanitization.test.ts` (edited, 7) | W8 | Bun | Run 7/7, run11 chat log |
+| `message-body-link-previews.test.ts` (edited, 7) | W8 | Bun | Run 7/7, run11 chat log |
+| `protocol-helpers.test.ts` (edited, 2) | W8 | Bun | Run 2/2, run11 chat log |
+| `remote-address.test.ts` (19) | W8 | Bun | Run 19/19, run11 chat log |
+| `remote-communities-state.test.ts` (44) | W8 | Bun | Run 44/44, run11 chat log |
+| `remote-community-presentation.test.ts` (9) | W8 | Bun | Run 9/9, run11 chat log |
+| `remote-community.test.ts` (14) | W8 | Bun | Run 14/14, run11 chat log |
+| `remote-media.test.ts` (6) | W8 | Bun | Run 6/6, run11 chat log |
+| `remote-membership.test.ts` (13) | W8 | Bun | Run 13/13, run11 chat log |
+| `remote-outcome.test.ts` (11) | W8 | Bun | Run 11/11, run11 chat log |
+| `remote-room-join.test.ts` (45) | W8 | Bun | Run 45/45, run11 chat log |
+| `resume-persistence.test.ts` (edited, 91) | W8 | Bun | Run 91/91, run11 chat log |
+| `room-bookmarks.test.ts` (14) | W8 | Bun | Run 14/14, run11 chat log |
 | `helpers/mock-browser-storage.ts` (shared helper, not a target) | W3 | n/a | n/a |
+| `helpers/disco-xml.ts`, `helpers/render-vue-sfc.ts` (shared helpers, edited, not targets) | W8 | n/a | n/a |
 
 ## Summary
 
 | | Count |
 | --- | --- |
-| Test targets listed | 133 (105 integration targets, 26 library test modules, 2 chat test files) |
-| Run, with a cited log | 85 targets, 1,201 cases, all passed in their latest cited run |
-| Not run | 48 targets (26 of them library modules) |
+| Test targets listed | 156 (106 integration targets, 28 library test modules, 22 chat test files) |
+| Run, with a cited log | 111 targets, 1,784 cases, all passed in their latest cited run |
+| Not run | 45 targets (26 of them library modules) |
+
+W8 added `xep0223_joined_spaces_ws`, cases in two library modules
+(`waddle-xmpp-core`'s `pubsub/node.rs` and `waddle-xmpp-client`'s
+`messaging/presence.rs`) and twelve chat test files, and edited eight more
+chat test files; each ran in the run11 logs, with the two W3 chat files and
+`xep0402_pep_native_bookmarks`, which had not run before. It changed the
+production paths of PEP and PubSub on the joined-spaces node (the
+configure clamp, the publish-time reconcile, which also covers the DND
+node, the read, publish and administer gates, and owner affiliations sets),
+so the local PEP and PubSub suites ran again in the run11 PEP log; none of
+them had a row here. The run11 chat log is the first run of `bun test` on
+the branch: its 4,665 cases include every chat test, not only the 22
+listed, and its three failures are the baseline's (see the log's row).
 
 W7b (the MUC fallback) changed eight targets that had run, and each ran
 again in the run10 and run10 head logs: `xep0030_s2s_inbound_muc_discovery`,

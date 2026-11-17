@@ -4,6 +4,7 @@ import { useSessionAuth } from "@/auth/session";
 import { subscribeSessionChanges } from "@/auth/redirect-session";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { createXmppBootstrapCoordinator } from "@/lib/xmpp/bootstrap-coordinator";
+import { clearMissingRemoteRooms } from "@/lib/xmpp/resume-persistence";
 import { connectionStore } from "@/lib/connection-store";
 import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
 import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
@@ -98,9 +99,14 @@ connectionStore.invalidateProviders = () => {
 };
 
 connectionStore.logout = async () => {
+  const signedOutJid = auth.session.value?.jid ?? null;
   // Logical ownership releases before the first await in `dispose`; retain
   // best-effort physical close without letting a stalled socket delay logout.
   bootstrapCoordinator.detach();
+  // After the client's storage is released, so its teardown cannot record
+  // a room again: the next person on this browser must not learn which
+  // rooms elsewhere this account found missing.
+  if (signedOutJid) clearMissingRemoteRooms(signedOutJid);
   connectionStore.selfFullJid = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);
   await auth.logout();

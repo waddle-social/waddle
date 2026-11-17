@@ -758,6 +758,11 @@ pub struct WaddlePresence {
     /// presence carries none, so the chat side sees `undefined`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muc_status_codes: Vec<u16>,
+    /// The room was destroyed (XEP-0045 §10.9 `<destroy/>`); this
+    /// unavailable presence ends the recipient's own occupancy. Omitted
+    /// when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub muc_destroyed: bool,
     /// Legacy vCard avatar hash advertised on presence, including an empty hash for removal.
     pub vcard_avatar: Option<String>,
     /// XEP-0272 Muji `<muji xmlns='urn:xmpp:jingle:muji:0'/>`

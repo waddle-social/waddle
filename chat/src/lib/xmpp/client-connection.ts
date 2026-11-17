@@ -464,6 +464,8 @@ export class ResumeStateStore {
     this.persistence.clearSm();
     this.persistence.clearJoinedRooms();
     this.persistence.clearAutoJoinBlocks?.();
+    // The missing-room record is the account's, not this session's: it is
+    // kept, so a later sign-in does not create those rooms again.
   }
 
   /**
