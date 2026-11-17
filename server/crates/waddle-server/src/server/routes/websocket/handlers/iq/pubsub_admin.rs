@@ -596,6 +596,14 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
             }
+            if is_pep
+                && node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
+                && changes.iter().any(|(entity, affiliation)| {
+                    !joined_spaces_affiliation_allowed(target_jid, entity, *affiliation)
+                })
+            {
+                return vec![joined_spaces_affiliation_refused(iq)];
+            }
             // ADR-0020 D8 at issuance: on the Spaces service an Owner
             // administers the Space and a publisher places rooms in it, so
             // either is written only for an account of this deployment or
@@ -888,6 +896,53 @@ fn privileged_affiliation_refused(iq: &xmpp_parsers::iq::Iq) -> xmpp_parsers::iq
             "en",
             "Owner and publisher affiliations are granted to accounts of this deployment and of \
              its trusted servers only.",
+        ),
+    }
+}
+
+/// Whether an owner may write `affiliation` for `entity` on the
+/// joined-spaces node of `account`.
+///
+/// The node is the account's private data (XEP-0223): the account alone
+/// reads and publishes it, so it supports no affiliation that would share
+/// it. Another entity may be removed (`none`) or banned (`outcast`), never
+/// made a member, publisher, publish-only entity or second owner (which
+/// would let it configure, purge or delete the account's list). The
+/// account's own JID may only be confirmed as owner or cleared; an
+/// `outcast` row for it would override its derived ownership and lock it
+/// out of its own node.
+fn joined_spaces_affiliation_allowed(
+    account: &BareJid,
+    entity: &BareJid,
+    affiliation: waddle_xmpp::pubsub::Affiliation,
+) -> bool {
+    use waddle_xmpp::pubsub::Affiliation;
+    if entity == account {
+        matches!(affiliation, Affiliation::Owner | Affiliation::None)
+    } else {
+        matches!(affiliation, Affiliation::None | Affiliation::Outcast)
+    }
+}
+
+/// The answer to an affiliation change the joined-spaces node does not
+/// support. XEP-0060 §8.9.2.4 lets a service enforce affiliation rules
+/// stricter than its state chart; the whole request is refused before any
+/// of it is applied, with `not-allowed`: no requester may make the change,
+/// which `forbidden` (§8.9.2.3, a requester that is not an owner) would not
+/// say.
+fn joined_spaces_affiliation_refused(iq: &xmpp_parsers::iq::Iq) -> xmpp_parsers::iq::Iq {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    xmpp_parsers::iq::Iq::Error {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_owned(),
+        payload: None,
+        error: StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::NotAllowed,
+            "en",
+            "The joined-spaces node is private to its account: only none and outcast \
+             affiliations are written for another entity.",
         ),
     }
 }

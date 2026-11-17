@@ -84,7 +84,10 @@ pub fn can_subscribe_with_config(
     if aff.is_outcast() {
         return false;
     }
-    if is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE {
+    // The XEP-0402 bookmarks node and the joined-spaces node are the
+    // account's private data (XEP-0223): only the account reads them,
+    // whatever access model or affiliation rows the node carries.
+    if is_pep && is_owner_only_pep_node(node) {
         return derive_pep_owner(target, entity);
     }
     match node_cfg.access_model {
@@ -98,6 +101,14 @@ pub fn can_subscribe_with_config(
         }
         AccessModel::Authorize => matches!(aff, Affiliation::Owner),
     }
+}
+
+/// Whether a PEP node is readable by its account alone, so that neither
+/// its access model nor an affiliation extends reads, subscriptions or
+/// event delivery to another entity.
+pub fn is_owner_only_pep_node(node: &str) -> bool {
+    node == waddle_xmpp::xep::xep0402::PEP_NODE
+        || node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
 }
 
 /// Whether `entity` is permitted to publish to a node (XEP-0060 §7.1.3).
