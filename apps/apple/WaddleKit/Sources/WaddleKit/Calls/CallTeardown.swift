@@ -79,3 +79,36 @@ extension CallStore {
         return sent
     }
 }
+
+/// Answer and End from outside the dock (the system's call screen, a
+/// notification) name the call they were shown for.
+extension CallStore {
+    /// Answers the ringing call `sid`. True when its answer has gone out,
+    /// by this or by an earlier answer; false when that call is not
+    /// ringing here or the answer could not be sent.
+    public func answer(sid: String) async -> Bool {
+        switch state {
+        case .incoming(let call) where call.sid == sid:
+            guard call.isAccepting else { return await acceptIncoming() }
+            // Someone already answered it here. If that answer is still
+            // on its way, it is not answered until it has gone out.
+            guard let pending = acceptInFlight, pending.sid == sid else { return true }
+            return await pending.outcome.wait(timeout: .seconds(60)) ?? false
+        case .active(let call) where call.sid == sid:
+            return true
+        case .idle, .incoming, .outgoing, .active, .joiningGroup, .inGroup, .ended:
+            return false
+        }
+    }
+
+    /// Ends the call `sid` if the slot still holds it live: a ringing call
+    /// is declined, any other is hung up.
+    public func end(sid: String) async {
+        guard state.sid == sid, state.isLive else { return }
+        if case .incoming(let call) = state, !call.isAccepting {
+            _ = await declineIncoming()
+        } else {
+            await hangUp()
+        }
+    }
+}

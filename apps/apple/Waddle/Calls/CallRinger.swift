@@ -29,9 +29,10 @@ final class CallRinger {
     /// Whether Waddle is in front. A ring that starts in front and is then
     /// left behind still gets its notification.
     ///
-    /// On an iPhone or iPad the scene says so. On a Mac the application
-    /// does, and only with a window to show the call in: its windows can
-    /// be closed, minimised or behind another app's while it still runs.
+    /// Only a Mac asks: there the application says so, and only with a
+    /// window to show the call in, since its windows can be closed,
+    /// minimised or behind another app's while it still runs. An iPhone
+    /// or iPad rings through the system's call screen wherever the app is.
     var isAppActive = true {
         didSet { if isAppActive != oldValue { refresh() } }
     }
@@ -83,7 +84,7 @@ final class CallRinger {
     }
 
     private func refresh() {
-        let plan = CallRingPlan(alert: request?.alert, isAppActive: isAppActive, ringsInBackground: Self.ringsInBackground)
+        let plan = CallRingPlan(alert: request?.alert, isAppActive: isAppActive, systemRings: Self.systemRings)
         if let tone = plan.tone { tones.play(tone) } else { tones.stop() }
         var ring: CallAlert.IncomingRing?
         if plan.notifies, case .ring(let incoming) = request?.alert { ring = incoming }
@@ -97,8 +98,9 @@ final class CallRinger {
         }
     }
 
-    private static var ringsInBackground: Bool {
-        #if os(macOS)
+    /// An iPhone or iPad rings through its call screen (`SystemCallCenter`).
+    private static var systemRings: Bool {
+        #if os(iOS)
         true
         #else
         false

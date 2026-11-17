@@ -55,7 +55,7 @@ targets:
       path: Waddle/Platform/Waddle-iOS-Info.plist
       properties:
         # A call keeps its audio when the app goes to the background.
-        # CallKit, which also rings a closed app, is tracked separately.
+        # Ringing a closed app needs a VoIP push, tracked separately.
         UIBackgroundModes: [audio]
         # XcodeGen would write 1.0 and 1; Xcode Cloud sets the build number.
         CFBundleShortVersionString: $(MARKETING_VERSION)

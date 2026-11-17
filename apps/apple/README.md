@@ -120,13 +120,29 @@ ended. It derives what to show from the call slot and the media phase
 (`CallStage` in WaddleKit); `CallDockView` draws each stage without a session,
 so the snapshot tests cover them all.
 
-Outside the dock a 1:1 call is heard and, when Waddle is not in front, seen.
-`CallAlert` in WaddleKit says what the call slot asks for: a ring for a call
-coming in (silenced by Do Not Disturb), ringback for a placed call while the
-other side is ringing. `Calls/CallRinger.swift` plays the tones, which
-`CallTone` synthesises, and posts a notification with Accept and Decline while
-the app is not active. This only works while the app is running; CallKit and
-VoIP push are not there yet.
+Outside the dock a call is heard and seen through the platform. `CallAlert`
+in WaddleKit says what the call slot asks for: a ring for a call coming in
+(silenced by Do Not Disturb), ringback for a placed call while the other side
+is ringing; `CallRingPlan` says how that reaches the person.
+
+On a Mac `Calls/CallRinger.swift` plays the tones, which `CallTone`
+synthesises, and posts a notification with Accept and Decline while Waddle is
+not in front.
+
+On an iPhone or iPad calls go through CallKit. `SystemCallTracker` in WaddleKit
+turns the call slot into what the system's call screen is told, each thing
+once; `Calls/SystemCallCenter.swift` tells it and carries Answer, End and Mute
+back to the slot. A mute made in the dock is told to the system too, and a
+call whose session the other side replaces stays the same system call. The system owns the audio session of a call it manages:
+`Calls/SystemCallAudio.swift` starts the media engine when CallKit activates
+the session and stops it when CallKit takes it back. A call the system does
+not manage (it arrived under Do Not Disturb, or the system refused it) keeps
+the media engine's own session handling, and shows in the dock without a ring.
+A room's call is reported too, as a call placed to the room. Only ringback is
+played by the app.
+
+All of this needs the app to be running; ringing a closed or suspended app
+needs a VoIP push, which is not there yet.
 
 A room's call (XEP-0272) shows in the same dock as `GroupCallDockView`, staged
 by `GroupCallStage`: the room, the people in it from `GroupCallRoster` (the

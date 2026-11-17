@@ -165,6 +165,7 @@
 		51B0D3FFD1215C50E2D6B697 /* TimelineFeedLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D6A2286FEDA8D46D8F81698 /* TimelineFeedLayout.swift */; };
 		51DBC5AF31A3C5B81B7D6EF9 /* MessageRowHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76ACA60CC9A88E920924472E /* MessageRowHeader.swift */; };
 		51E5B7B1E698EC550FEA0F1E /* ComposerAttachmentPickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91522280F469CB96697C8D7 /* ComposerAttachmentPickers.swift */; };
+		52087692197C98C49F7D607F /* SystemCallAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5EC347101FBA7770FE125C8 /* SystemCallAudio.swift */; };
 		522D1B3B49D89C4BBBB78A65 /* MessageSafetyScoresButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB3CC66C2E14BDDAD64BBC5 /* MessageSafetyScoresButton.swift */; };
 		526E665FAD488A3AD4B454AA /* ComposerEmojiButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B43F1415E0FF5F7685033CE /* ComposerEmojiButton.swift */; };
 		54CD31F69B304A1D9F09D689 /* FFIEventListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF317440D44D33577F844A73 /* FFIEventListener.swift */; };
@@ -299,6 +300,7 @@
 		917E836AF50843622AD8D72B /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E556D95DAF8FB92C14A348 /* Motion.swift */; };
 		919E10854A423BCBAAC746D6 /* RoomSymbolTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10DF6D38D25636949B8CF01E /* RoomSymbolTile.swift */; };
 		91C49D272ABEDDC691CE86C1 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB28E8396182DE8CD3D32A87 /* Components.swift */; };
+		950A69E0AE5EFCAED7CA3AD9 /* SystemCallAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5EC347101FBA7770FE125C8 /* SystemCallAudio.swift */; };
 		955D596DC4A7ED456D4B00F3 /* ComposerTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB21941A20189E780D173236 /* ComposerTextSelection.swift */; };
 		95C278879BAE43004DA127F6 /* SplitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23892C2B3A078BA52981F443 /* SplitShell.swift */; };
 		95CE93BC36F8321BEBCF160F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
@@ -451,6 +453,7 @@
 		E2C4285D8BD4B6DF81EDB605 /* ConversationHeaderText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0C820EA40536B55023B88C /* ConversationHeaderText.swift */; };
 		E39BF0B606B89ACA08E342C1 /* GifPickerGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = E417A2A5665077C9C97D173D /* GifPickerGrid.swift */; };
 		E4142D4130E2A3F00DA44546 /* ConversationLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C1A66EF7C85EE90AD2B579 /* ConversationLabels.swift */; };
+		E453DDFA09545FF932E71CA1 /* SystemCallCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C748DA8180DA1AC9EFAEDB72 /* SystemCallCenter.swift */; };
 		E490A989924A46B877848234 /* ConversationDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BC3620DC7095A2FBB42549 /* ConversationDetailsView.swift */; };
 		E51AA7C4D8A0CC93EE2D224B /* ComposerSendButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 776055A920EB7EA45F8E929E /* ComposerSendButton.swift */; };
 		E533EBC4E73C8E2BE5C5532F /* RoomHeaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 433E995F4C4BBEEC367DF685 /* RoomHeaderSection.swift */; };
@@ -487,6 +490,7 @@
 		F572DAAEC97276090A62E160 /* ComposerNoticeLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB6F36130E53C59998BEE582 /* ComposerNoticeLine.swift */; };
 		F5835B9A761EFA3E995EE8A8 /* InboxRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFDFEB1DCF16FE1667D8DFC4 /* InboxRows.swift */; };
 		F764BAF21FF32BEA75470931 /* GifPickerGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = E417A2A5665077C9C97D173D /* GifPickerGrid.swift */; };
+		F80707B38991FBC2B350589C /* SystemCallCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C748DA8180DA1AC9EFAEDB72 /* SystemCallCenter.swift */; };
 		F8143E40002A2ACF87D0DC47 /* MessageSafetyScoresSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BF52D49E9087D0B27F5A109 /* MessageSafetyScoresSheet.swift */; };
 		F9AA9EAB1CD94201BA23FF9E /* FFIInbound+MessageParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F3FAA96C326A287596EF89C /* FFIInbound+MessageParts.swift */; };
 		F9F76261551A058EAF6FC23B /* MessageActionDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88CA08725E4A0901005E896 /* MessageActionDialogs.swift */; };
@@ -662,6 +666,7 @@
 		A0C3E2364E067CC95BB2F1DA /* NewChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewChannelSheet.swift; sourceTree = "<group>"; };
 		A2F0CFB8B8A9EF99839CFEE4 /* ProfileMoodEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileMoodEditor.swift; sourceTree = "<group>"; };
 		A42C60CA405BA040310F11F0 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
+		A5EC347101FBA7770FE125C8 /* SystemCallAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemCallAudio.swift; sourceTree = "<group>"; };
 		A681AA1E99DFA6786DF6F7BF /* Surfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Surfaces.swift; sourceTree = "<group>"; };
 		A68A7084A9D1741E90F3447B /* HuddleSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddleSnapshot.swift; sourceTree = "<group>"; };
 		A699C3988283081BA15B97DD /* ProfileStatusSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStatusSection.swift; sourceTree = "<group>"; };
@@ -700,6 +705,7 @@
 		C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAttachmentKind.swift; sourceTree = "<group>"; };
 		C47CB426A26582C047EB9477 /* ConversationComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposer.swift; sourceTree = "<group>"; };
 		C6A084A6FE3A66B392B132BE /* FFIXmppPort+Upload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Upload.swift"; sourceTree = "<group>"; };
+		C748DA8180DA1AC9EFAEDB72 /* SystemCallCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemCallCenter.swift; sourceTree = "<group>"; };
 		C89279F6B76B61FE072ACE59 /* Waddle-iOS-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Waddle-iOS-Info.plist"; sourceTree = "<group>"; };
 		C8BDF2333452BD5C877BE946 /* RichTextModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTextModel.swift; sourceTree = "<group>"; };
 		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -962,6 +968,8 @@
 				D6249154B3A2973B96B79CEA /* CallRinger.swift */,
 				11B35AA012A5570BDC2F1FD5 /* CallTonePlayer.swift */,
 				75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */,
+				A5EC347101FBA7770FE125C8 /* SystemCallAudio.swift */,
+				C748DA8180DA1AC9EFAEDB72 /* SystemCallCenter.swift */,
 			);
 			path = Calls;
 			sourceTree = "<group>";
@@ -1938,6 +1946,8 @@
 				7DC7E8ABC4788D51F0627BFB /* SpacePickerMenu.swift in Sources */,
 				95C278879BAE43004DA127F6 /* SplitShell.swift in Sources */,
 				39A334574173EF578C4E2D45 /* Surfaces.swift in Sources */,
+				52087692197C98C49F7D607F /* SystemCallAudio.swift in Sources */,
+				F80707B38991FBC2B350589C /* SystemCallCenter.swift in Sources */,
 				4E55ADD0479162600DC23327 /* Theme.swift in Sources */,
 				C66EABE79654CE25384DBFDA /* ThreadScreen.swift in Sources */,
 				36E9C0282D19E679ACB15680 /* TimelineDayLabel.swift in Sources */,
@@ -2183,6 +2193,8 @@
 				DE0E50CA2F16941703651C5C /* SpacePickerMenu.swift in Sources */,
 				89F7DC5EE24626C9FC914750 /* SplitShell.swift in Sources */,
 				2ACE151A20DFA5EB64A7E415 /* Surfaces.swift in Sources */,
+				950A69E0AE5EFCAED7CA3AD9 /* SystemCallAudio.swift in Sources */,
+				E453DDFA09545FF932E71CA1 /* SystemCallCenter.swift in Sources */,
 				7869CA33877C16E2041AA076 /* Theme.swift in Sources */,
 				63D308DA73DBE137966A82F5 /* ThreadScreen.swift in Sources */,
 				CBB1F2A8C5C6B5D8B3944AD1 /* TimelineDayLabel.swift in Sources */,

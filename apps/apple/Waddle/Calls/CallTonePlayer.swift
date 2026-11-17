@@ -4,10 +4,15 @@ import WaddleKit
 /// Plays one call tone on a loop until told to stop.
 ///
 /// The system can stop or refuse playback without telling the player's
-/// owner: an app in the background, Siri, a phone call, or the media
-/// engine of a call that just ended releasing the audio session. So while
-/// a tone is wanted, the player is checked every second and started again
-/// if it has gone quiet.
+/// owner: an app in the background, Siri, a phone call, or an audio
+/// session that is not active yet. So while a tone is wanted, the player
+/// is checked every second and started again if it has gone quiet.
+///
+/// It never touches the audio session. On a Mac there is none. On an
+/// iPhone or iPad the only tone is ringback: for a call the system's call
+/// screen manages the session is the system's, and for one it does not
+/// the tone plays under the app's default category, which obeys the
+/// silent switch.
 @MainActor
 final class CallTonePlayer {
     private var player: AVAudioPlayer?
@@ -37,15 +42,7 @@ final class CallTonePlayer {
     }
 
     private func startIfQuiet() {
-        guard let player, let tone, !player.isPlaying else { return }
-        #if os(iOS)
-        // A ring obeys the silent switch like any other ring. Ringback is
-        // the sound of a call the person placed themselves, so it does not.
-        // Set before every start: a call that just ended can leave its own
-        // category behind, and the media engine sets its own again when
-        // the next call connects.
-        try? AVAudioSession.sharedInstance().setCategory(tone == .ring ? .soloAmbient : .playback)
-        #endif
+        guard let player, !player.isPlaying else { return }
         player.play()
     }
 
@@ -56,10 +53,5 @@ final class CallTonePlayer {
         player.stop()
         self.player = nil
         tone = nil
-        #if os(iOS)
-        // Hands the speaker back to whatever the tone interrupted. A call
-        // that follows activates the session again when its media starts.
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
     }
 }

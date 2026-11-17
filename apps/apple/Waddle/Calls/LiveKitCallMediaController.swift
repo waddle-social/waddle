@@ -26,6 +26,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// the room, so a reconnect or a replacement session does not unmute
     /// them or turn their camera back on.
     @ObservationIgnored private var captureChoices: [AVMediaType: Bool] = [:]
+    /// The person chose to mute in this call, whether or not the microphone
+    /// is publishing yet. What the system's call screen shows as muted.
+    private(set) var isMicrophoneMutedByChoice = false
     private var remoteTrack: VideoTrack?
     private var localTrack: VideoTrack?
 
@@ -88,10 +91,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     func forgetCaptureChoices() {
         captureChoices = [:]
+        if isMicrophoneMutedByChoice { isMicrophoneMutedByChoice = false }
     }
 
     func setMicrophone(_ on: Bool) async {
         captureChoices[.audio] = on
+        if isMicrophoneMutedByChoice == on { isMicrophoneMutedByChoice = !on }
         guard let room else { return }
         await setSource(.audio, enabled: on, in: room)
     }

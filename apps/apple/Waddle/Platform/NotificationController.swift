@@ -64,9 +64,8 @@ final class NotificationController: NSObject {
         ])
     }
 
-    /// Posts the ring for a call. On an iPhone or iPad the notification
-    /// rings too, since the app cannot from the background; a Mac app
-    /// plays its own ring.
+    /// Posts the ring for a call on a Mac, which plays its own ring. An
+    /// iPhone or iPad rings through the system's call screen instead.
     func postIncomingCall(sid: String, callerName: String, isVideo: Bool, for account: BareJID) {
         let content = UNMutableNotificationContent()
         content.title = callerName
@@ -74,9 +73,6 @@ final class NotificationController: NSObject {
         content.categoryIdentifier = Identifier.callCategory
         content.userInfo = [Identifier.accountKey: account.description, Identifier.callKey: sid]
         content.interruptionLevel = .timeSensitive
-        #if os(iOS)
-        content.sound = .defaultRingtone
-        #endif
         center.add(UNNotificationRequest(identifier: Self.callIdentifier(sid), content: content, trigger: nil))
     }
 
