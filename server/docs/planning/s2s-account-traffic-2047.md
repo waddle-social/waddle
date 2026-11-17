@@ -320,7 +320,11 @@ and the offline admissions of strangers' messages.
   cleaned too, at every depth: the items of an event notification, and
   anything a payload nests, lose a link card, a link-preview request, an
   inbox element, a pin marker, an extension envelope, a carbon or archive
-  wrapper and a `<stanza-id/>` this deployment could have assigned. A carbon or an archive result
+  wrapper and a `<stanza-id/>` this deployment could have assigned. A
+  message nested in what is kept (one a XEP-0297 `<forwarded/>` carries)
+  is read by a client as a message in its own right and loses every
+  `urn:waddle:*` payload directly inside it as well; a deeper
+  `urn:waddle:*` payload, such as an event item's own, is kept. A carbon or an archive result
   names the account's own traffic; one from a remote sender is a forgery
   a client could take for its own (XEP-0280 §11). Every XEP-0359
   `<stanza-id/>` this deployment could have assigned is removed too: one

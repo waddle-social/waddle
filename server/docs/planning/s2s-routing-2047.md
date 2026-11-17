@@ -810,10 +810,17 @@ and link-preview requests, and every XEP-0359 `<stanza-id/>` whose `by`
 names a domain this deployment serves or cannot be read; the room's own
 `<stanza-id/>`, in its bare JID's name, is kept. A XEP-0313 `<result/>` is
 kept only on a message from the room's bare JID that is no groupchat, as
-the archive a query from the resource names answers (below; XEP-0313 §4.2,
-and a client takes it only for a query it has open with that address,
-§8.2); what it forwards is cleaned as anything a payload nests is. Presence from the room is delivered as it comes: a
-client reads none of these payloads from presence.
+the archive a query from the resource names answers (below; XEP-0313
+§4.2). XEP-0313 §8.2 has a client check a result's `from` against the
+entity it queried as well as its `queryid`, but Waddle's client checks the
+`queryid` alone (`MamResultCollector::collect` in `waddle-xmpp-client`), so
+the router keeps a result only where its address is the archive's. What a
+kept payload nests is cleaned of the same elements, and a message nested
+in one (the one an archive result forwards) loses every `urn:waddle:*`
+payload directly inside it, as the room's own message does; a deeper
+`urn:waddle:*` payload is left to what carries it. Presence from the room
+is delivered as it comes: a client reads none of these payloads from
+presence.
 
 A message a local resource sends to a remote room goes to the S2S router
 without entering the ingress authority, so it is not archived by the
@@ -843,11 +850,18 @@ treats as a timeout.
 
 **XEP-0313 queries.** A query to a room is an IQ request: routed,
 correlated and answered with its `<fin/>`. Its result messages come from
-the room's bare JID and are admitted as room traffic while the resource
-is joining or joined; a query to a room it has not joined receives its
-`<fin/>` but none of the results. The `<fin/>` is an IQ response and is
-delivered outside the room's queue, so it can reach the client before the
-last results.
+the room's bare JID and are admitted as room traffic only to a resource
+the router's occupancy record (W6b) holds as joining or joined in that
+room: the record is what lets a result through, so a resource without an
+occupancy of the room never receives one. That covers a query sent before
+joining or after leaving, and another resource of the same account that
+did not join. Without an occupancy a result message is account traffic
+(W6c): it is cleaned as a remote account's message is, losing its
+`<result/>`, and is then handled as a message from a remote sender
+without a resource, so a resource still bound receives it with nothing
+that answers a query. The client receives the query's `<fin/>` and none
+of its results. The `<fin/>` is an IQ response and is delivered outside
+the room's queue, so it can reach the client before the last results.
 
 **When a join is not answered.** A join the room has not answered within
 60 seconds of being sent ends: any replica's sweep removes the occupancy
