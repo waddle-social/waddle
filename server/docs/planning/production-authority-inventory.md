@@ -1198,6 +1198,39 @@ was added, and no decision of standing moved.
 - The raw scan holds 1633 records, unchanged in content. 4 records in
   that file moved because it gained lines.
 
+The selected evidence was refreshed a twenty-fifth time, through
+`ec108dd8dd950a97996cdcfb7890e73800d81513`, after reviewing the delta of the reviewed files since the
+twenty-fourth refresh. `auth/retirement.rs`, `ingress/principal.rs`,
+`ingress_uow/mod.rs`, `server/http.rs` and
+`server/routes/websocket/s2s_rooms.rs` changed. No grant writer or storage
+plane of the host-grant authority was added, no producer of stream evidence
+changed, and no decision of standing moved.
+
+- The remote principal's acceptance (`remote-acceptance-principal` moved)
+  now has two arms, chosen by the stream identity's target. The room arm
+  (`RemoteIngressTarget::Room`, which the room host `s2s-room-host`,
+  `s2s-room-placement` and `s2s-unseated-removal` moved, sets) is
+  unchanged. The account arm (`RemoteIngressTarget::Account`) admits a
+  remote sender's direct message to a local account, with no room
+  execution: it decides the sender's domain from the S2S admission policy
+  of the replica that built the submission, and reads the recipient's
+  account row (`FOR SHARE` on PostgreSQL) and the ledger of retired JIDs
+  in the acceptance transaction (`ingress_uow/remote_recipients.rs`, a new
+  read-only repository registered in `ingress_uow/mod.rs`). It honours no
+  grant: the message reaches only the recipient account's archive, inbox,
+  resources and offline store, and the plan is refused before commit when
+  any effect acts elsewhere (`classify_remote_direct_plan`).
+- Retirement (`account-retire` moved) is unchanged; its documentation
+  names the second step the operator command runs after it commits, which
+  `server/http.rs` starts on every serving replica
+  (`spawn_account_session_endings`): it ends the retired account's
+  streams and detached sessions and refuses its bindings. It reads the
+  ledger and writes only its own lease and acknowledgement tables
+  (migration 2015); it writes no grant and decides no standing.
+- The raw scan holds 1636 records, 3 more than before: the account arm's
+  and the account side's uses of `RemoteOccupantPrincipal`. Other records
+  in the changed files moved because those files gained lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 

@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "4fceb7ea55331c5b46b5fd60e636f91348e4b211",
+  "baseline_commit": "ec108dd8dd950a97996cdcfb7890e73800d81513",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "sha256": "9401d9f14084b124593d5974a9fbd6550075628f0f15c5a2b0067e0e7e8a12a0"
+      "sha256": "88b30a16442489546fdbe69b1df4c9b7243d1534c3123004a432ad53d7a80c83"
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
@@ -33,7 +33,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/ingress/principal.rs",
-      "sha256": "20d5f922c54e73edf7e7c1843fd35a5503c4b30dc8a419c40901144e2ebb6787"
+      "sha256": "26bbd9cc69cc43d9023e1069816aec5d9deca8fad5df7121a1b1f0e742e58318"
     },
     {
       "path": "server/crates/waddle-server/src/ingress/room_manifest_replay.rs",
@@ -45,7 +45,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/ingress_uow/mod.rs",
-      "sha256": "e4220b012761ca150e8829d4c3fd5c8954f7bc939da56927b48e488b0f16ae31"
+      "sha256": "68d347660a259f85237032ca5e3e3bd3db71518ed517c96ac2d10bfb50b81f66"
     },
     {
       "path": "server/crates/waddle-server/src/ingress_uow/tests.rs",
@@ -145,7 +145,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/http.rs",
-      "sha256": "3ea78b35d5f0574b015fe9f154fd863de8980ef32c7e0b8ce66a63c0862025f5"
+      "sha256": "d7f1eb2fab32cea6690032b0f1976954211bae1275208293b17ea2e86b660292"
     },
     {
       "path": "server/crates/waddle-server/src/server/lifecycle.rs",
@@ -253,7 +253,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "sha256": "2c1715e2a6c8efb4798798aa4bdffbc76fb8ab815ce59a9773a22eff582a8da2"
+      "sha256": "b34923379660a7fab2b2229c158b0442150b2e4df40a0a398e4eded5c43367ae"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/tests/iq.rs",
@@ -920,7 +920,7 @@
     },
     "account-retire": {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "line": 121,
+      "line": 127,
       "text": "pub async fn retire_account("
     },
     "account-retired-native": {
@@ -930,7 +930,7 @@
     },
     "s2s-room-host": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1301,
+      "line": 1302,
       "text": "impl LocalRooms for WebSocketLocalRooms {"
     },
     "s2s-room-archive": {
@@ -955,7 +955,7 @@
     },
     "remote-acceptance-principal": {
       "path": "server/crates/waddle-server/src/ingress/principal.rs",
-      "line": 25,
+      "line": 26,
       "text": "pub struct RemoteOccupantPrincipal"
     },
     "hg-seat-evidence": {
@@ -985,7 +985,7 @@
     },
     "s2s-room-placement": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1374,
+      "line": 1375,
       "text": "async fn place(&self, principal: &RemotePrincipal, stanza: &Stanza) -> RoomPlacement {"
     },
     "s2s-remote-admin": {
@@ -1060,7 +1060,7 @@
     },
     "s2s-unseated-removal": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/s2s_rooms.rs",
-      "line": 1404,
+      "line": 1405,
       "text": "async fn remove_unseated("
     }
   },
@@ -1121,7 +1121,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "33f4864aacc8962a9f41af62d37d8b8433f125ed2ab5447693d6d08b20fc2118",
+    "sha256": "152ed53afaec3846eafa14a4307fcccd98e5dd85e91f756908305e86596e4e9e",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,
@@ -1172,7 +1172,7 @@
       "host_grant_reseating": 2,
       "with_members_only_binding": 3,
       "offer_foreign": 7,
-      "RemoteOccupantPrincipal": 5,
+      "RemoteOccupantPrincipal": 8,
       "carried_room_request": 7,
       "muc_admin_for_remote": 4,
       "muc_owner_or_moderation_for_remote": 4,
