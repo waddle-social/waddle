@@ -6,8 +6,10 @@
 //! those and a client takes one in its account's name for its archive's
 //! (§3: an entity that assigns stanza ids deletes one whose `by` it would
 //! set). A `<stanza-id/>` a remote entity assigned in its own name is
-//! left, as a routing entity leaves it (§3). Through the production `/ws`
-//! router, the real S2S router and a loopback peer.
+//! left, as a routing entity leaves it (§3). A stored message is the
+//! recipient's archived copy, which carries the one id in the account's
+//! name that this deployment assigned: its archive's. Through the
+//! production `/ws` router, the real S2S router and a loopback peer.
 #![cfg(feature = "test-support")]
 
 // Each suite uses a different part of the shared fixture.
@@ -15,9 +17,13 @@
 #[path = "s2s_account_support/mod.rs"]
 mod support;
 
+use std::sync::Arc;
+
 use minidom::Element;
-use support::{federated, message, receive, Federated, Pki, BOB, BOB_PHONE};
+use support::{federated, jid, message, receive, Federated, Pki, BOB, BOB_PHONE};
+use waddle_server::pending_delivery::{ArchiveResolver, MamArchiveResolver};
 use waddle_xmpp::pending_delivery::PendingPayload;
+use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::{Message, MessageType};
 
 const ALICE: &str = "alice@example.com";
@@ -51,23 +57,29 @@ fn ids<'a>(payloads: impl Iterator<Item = &'a Element>) -> Vec<String> {
         .collect()
 }
 
-async fn stored(federated: &Federated) -> Vec<Message> {
-    let account: jid::BareJid = ALICE.parse().expect("an account JID");
-    federated
-        .loopback
-        .state
-        .deps
-        .protocol
-        .pending_delivery_storage
-        .list(&account)
-        .await
-        .expect("the offline store is readable")
-        .into_iter()
-        .filter_map(|row| match row.payload {
-            PendingPayload::Transient(message) => Some(*message),
-            _ => None,
-        })
-        .collect()
+/// The messages Alice's offline store holds, as her next session receives
+/// them: a row that holds its message whole as it is, and a row that refers
+/// to her archive as the archive holds the message, with the archive's id
+/// the row names.
+async fn stored(federated: &Federated) -> Vec<(Option<StanzaId>, Message)> {
+    let resolver = MamArchiveResolver {
+        mam_storage: Arc::clone(&federated.loopback.state.deps.protocol.mam_storage),
+    };
+    let mut messages = Vec::new();
+    for row in support::offline_rows(federated, ALICE).await {
+        match row.payload {
+            PendingPayload::Transient(message) => messages.push((None, *message)),
+            PendingPayload::Archived(stamp) => {
+                let archived = resolver
+                    .resolve(&stamp)
+                    .await
+                    .expect("the archive is readable")
+                    .unwrap_or_else(|| panic!("the archive holds the stored message {stamp:?}"));
+                messages.push((Some(stamp), archived));
+            }
+        }
+    }
+    messages
 }
 
 #[tokio::test]
@@ -108,9 +120,19 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_storage() {
     .await
     .expect("the message is stored for Alice's next session");
     assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(
-        ids(held[0].payloads.iter()),
-        vec!["bobs-archive".to_owned()],
-        "{held:?}"
-    );
+    let (stamp, message) = &held[0];
+    let stamp = stamp
+        .as_ref()
+        .expect("the stored row refers to Alice's archive");
+    assert_eq!(stamp.by, jid(ALICE));
+    // Of the ids in the deployment's name only the one Alice's archive
+    // assigned is left, and Bob's own archive's id is kept.
+    let mut stamps = support::stanza_ids(message.payloads.iter());
+    stamps.sort();
+    let mut expected = vec![
+        (ALICE.to_owned(), stamp.id.clone()),
+        (BOB.to_owned(), "bobs-archive".to_owned()),
+    ];
+    expected.sort();
+    assert_eq!(stamps, expected, "{message:?}");
 }
