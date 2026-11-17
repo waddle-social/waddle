@@ -2465,8 +2465,9 @@ of the MUC service's rooms is not bounded per answer. XEP-0059 is read at
 the same pinned commit. A `<set/>` that is not well formed is
 `bad-request`.
 
-**Evidence.** Written, compiled and run at `e559ebd57`, every case passing
-(the run10 head logs of the [verification checklist](../../../docs/evidence/2047/unrun-tests.md)):
+**Evidence.** Written, compiled and run at `096cd3d30`, every case passing
+(the prever rerun1 logs of the [verification checklist](../../../docs/evidence/2047/unrun-tests.md);
+the cases unchanged since ran at `e559ebd57` in the run10 head logs too):
 
 - `crates/waddle-server/tests/xep0030_s2s_inbound_muc_discovery.rs`: the
   service lists its open rooms and a room no occupants; no room a remote
