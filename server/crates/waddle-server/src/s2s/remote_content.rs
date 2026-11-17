@@ -16,12 +16,22 @@
 //! remote sender, whose request token it could not have issued.
 //!
 //! A remote room's archive answers a query the local resource sent it with
-//! `<result/>` messages from the room's bare JID (XEP-0313 §4.2), which a
-//! client accepts only as answers to a query it has open with that entity,
-//! matching the stanza's `from` and the `queryid` (§8.2); they are kept, and
-//! what they forward is cleaned as any nested content is. A result message
-//! is no groupchat, so a `<result/>` on the room's groupchat (its subject,
-//! say), or from any other address, is removed.
+//! `<result/>` messages from the room's bare JID (XEP-0313 §4.2). XEP-0313
+//! §8.2 has a client check both the stanza's `from` against the entity it
+//! queried and the `queryid` against a query it has open, but Waddle's
+//! client checks the `queryid` alone (`MamResultCollector::collect` in
+//! `waddle-xmpp-client`'s `mam` module), so this server keeps a `<result/>`
+//! only where the address is the archive's: on a message from the room's
+//! bare JID that is no groupchat. A `<result/>` on the room's groupchat (its
+//! subject, say), or from any other address, is removed. What a kept result
+//! forwards is cleaned as any nested content is.
+//!
+//! A message nested in what is kept (the one a `<forwarded/>` of an archive
+//! result carries, say) is read by a client as a message in its own right,
+//! so every `urn:waddle:*` payload directly inside it is removed as one at
+//! the top level is. Deeper payloads, such as a PubSub item's, are cleaned
+//! only of what [`private`] names: a remote service's items may carry a
+//! `urn:waddle:*` payload of their own.
 //!
 //! Presence and IQ payloads are not cleaned here: a client reads none of
 //! these payloads from them.
@@ -74,11 +84,23 @@ pub(crate) fn sanitize_message(
         if payload.is("result", MAM_NS) {
             return archive_results;
         }
-        !payload.ns().starts_with(WADDLE_NAMESPACE_PREFIX) && !private(payload, served)
+        !waddle_namespaced(payload) && !private(payload, served)
     });
     for payload in &mut message.payloads {
         sanitize_children(payload, served);
     }
+}
+
+/// Whether `element` is in a namespace this deployment defines.
+fn waddle_namespaced(element: &Element) -> bool {
+    element.ns().starts_with(WADDLE_NAMESPACE_PREFIX)
+}
+
+/// Whether `element` is a message nested in another stanza's payload. It
+/// is told by its name alone, as a client finds the message a
+/// `<forwarded/>` carries, whatever its namespace.
+fn nested_message(element: &Element) -> bool {
+    element.name() == "message"
 }
 
 /// Whether `element`, wherever it is in a remote message, is a payload a
@@ -98,12 +120,14 @@ fn private(element: &Element, served: Option<&ServedDomains>) -> bool {
 }
 
 /// Remove from the children of `element`, at every depth, what [`private`]
-/// names. The S2S codec bounds the depth of a stanza.
+/// names, and from a nested message's own payloads every `urn:waddle:*`
+/// one as well. The S2S codec bounds the depth of a stanza.
 fn sanitize_children(element: &mut Element, served: Option<&ServedDomains>) {
+    let message = nested_message(element);
     for node in element.take_nodes() {
         match node {
             Node::Element(mut child) => {
-                if private(&child, served) {
+                if private(&child, served) || (message && waddle_namespaced(&child)) {
                     continue;
                 }
                 sanitize_children(&mut child, served);
