@@ -257,12 +257,13 @@ impl Registry {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        // Every update leaves the maps consistent, so a poisoned lock still
-        // holds a usable state.
-        match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // Nothing fails while the lock is held. A poisoned lock means the
+        // maps may no longer match the streams they hold, and a registry
+        // that miscounts would route to or admit the wrong stream: the
+        // process stops instead.
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Count one more stream negotiating with `remote` in `direction`. An

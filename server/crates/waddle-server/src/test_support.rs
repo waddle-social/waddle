@@ -292,6 +292,29 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// [`websocket_state`] whose stream-management session registry keeps its
+/// sessions and their ingress custody in `persistence`, which the caller
+/// keeps to seed and read them.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_sm_persistence(
+    persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            sm_session_registry: Some(Arc::new(
+                waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+                    .with_persistence(persistence),
+            )),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// Run one pass of the recovery of ingress custody whose stream-management
 /// session is gone, as the session janitor does: a payload the store takes
 /// is handed to the recipient's offline store. Returns whether every
@@ -361,6 +384,31 @@ pub fn permission_actor_as_startup_builds(
 pub async fn spaces_publications_settled(router: &crate::s2s::route::S2sRouter) {
     router.spaces_publications_settled().await;
 }
+
+/// Have admin commands run against the application state of `state`
+/// notify the subscribers of what they take out of a node, as startup
+/// binds it once the WebSocket state exists. The state is held weakly, so
+/// call it once nothing needs the state unshared any more.
+#[cfg(feature = "test-support")]
+pub fn bind_admin_notifications(state: &Arc<WebSocketState>) {
+    state.deps.app_state.bind_notifications(state);
+}
+
+/// Hold the next subscription of the remote `account` to the Space `node`
+/// just after its record committed and before its ban is read again, so a
+/// suite can write a ban there as a concurrent request would.
+#[cfg(feature = "test-support")]
+pub fn hold_space_subscription_after_record(
+    node: &str,
+    account: jid::BareJid,
+) -> Arc<SpaceSubscriptionGate> {
+    crate::server::routes::websocket::s2s_spaces::subscription_gates::hold_after_record(
+        node, account,
+    )
+}
+
+#[cfg(feature = "test-support")]
+pub use crate::server::routes::websocket::s2s_spaces::subscription_gates::SubscriptionGate as SpaceSubscriptionGate;
 
 /// Have `router` serve the Spaces of `state` to remote principals, as
 /// startup does for a replica with S2S enabled: the router hands what
@@ -588,6 +636,11 @@ pub async fn websocket_state_with_federation_and_database_pubsub(
         config,
     ));
     app_state.pubsub_storage = pubsub.clone();
+    // The Spaces service the state's service domains name, which admin
+    // commands address as startup has them address it.
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("the Spaces service JID");
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides {

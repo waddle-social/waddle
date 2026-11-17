@@ -282,7 +282,7 @@ pub(super) async fn handle_spaces_publish(
                 };
             // A placement moves the channel: every other Space stops being
             // its parent, whether or not that Space listed a bookmark of it.
-            if let Err(error) = cleanup_stale_space_bookmarks(
+            let moved_from = match cleanup_stale_space_bookmarks(
                 state,
                 &spaces_jid,
                 &channel_id,
@@ -292,38 +292,41 @@ pub(super) async fn handle_spaces_publish(
             )
             .await
             {
-                warn!(
-                    channel_id = %channel_id,
-                    node,
-                    item_id,
-                    error = %error,
-                    "Published Spaces item but failed to clean stale prior Space bookmarks"
-                );
-                if let Err(rollback_error) = rollback_spaces_publish(
-                    state,
-                    SpacesPublishRollback {
-                        spaces_jid: &spaces_jid,
-                        node,
-                        item_id: &result.item_id,
-                        previous_item: previous_item.as_ref(),
-                        channel_id: &channel_id,
-                        channel_jid: &bookmark.jid,
-                        previous_link: previous_link.as_ref(),
-                        parent_tuple_created,
-                    },
-                )
-                .await
-                {
+                Ok(moved_from) => moved_from,
+                Err(error) => {
                     warn!(
                         channel_id = %channel_id,
                         node,
                         item_id,
-                        error = %rollback_error,
-                        "Failed to roll back Spaces publish after stale cleanup failure"
+                        error = %error,
+                        "Published Spaces item but failed to clean stale prior Space bookmarks"
                     );
+                    if let Err(rollback_error) = rollback_spaces_publish(
+                        state,
+                        SpacesPublishRollback {
+                            spaces_jid: &spaces_jid,
+                            node,
+                            item_id: &result.item_id,
+                            previous_item: previous_item.as_ref(),
+                            channel_id: &channel_id,
+                            channel_jid: &bookmark.jid,
+                            previous_link: previous_link.as_ref(),
+                            parent_tuple_created,
+                        },
+                    )
+                    .await
+                    {
+                        warn!(
+                            channel_id = %channel_id,
+                            node,
+                            item_id,
+                            error = %rollback_error,
+                            "Failed to roll back Spaces publish after stale cleanup failure"
+                        );
+                    }
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
-                return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
-            }
+            };
             // Fan-out only after the parent-tuple write succeeds: the
             // compensating-retract path above must NOT emit events for
             // a publish that gets rolled back.
@@ -345,6 +348,20 @@ pub(super) async fn handle_spaces_publish(
                 },
             )
             .await;
+            // The Spaces the room moved out of tell their subscribers it
+            // left them, as a retract of its bookmark there would.
+            for stale in &moved_from {
+                pubsub_fanout::fan_out_service_retract(
+                    state,
+                    pubsub_fanout::FanOutRetractRequest {
+                        owner: &spaces_jid,
+                        node: stale,
+                        item_id,
+                    },
+                    false,
+                )
+                .await;
+            }
             vec![build_pubsub_publish_result(iq, node, &result.item_id)]
         }
         Err(error) => {

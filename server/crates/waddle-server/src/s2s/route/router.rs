@@ -1166,12 +1166,11 @@ fn duration_ms(duration: Duration) -> i64 {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Every update leaves the maps consistent, so a poisoned lock still
-    // holds usable state.
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+    // Nothing fails while the lock is held. A poisoned lock means the maps
+    // may no longer match what they track: the process stops instead.
+    mutex
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 /// `stanza` as an element qualified by `jabber:client`; the stream maps it

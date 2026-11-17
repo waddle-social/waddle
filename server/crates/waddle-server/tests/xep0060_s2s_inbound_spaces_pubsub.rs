@@ -44,7 +44,7 @@ use s2s_spaces_support::{
     federated_space, field, form_value, hosting, hosting_with, is_event, item_ids, items, jid,
     of_node, owner_of, owner_subscription, owner_subscription_as, publish, pubsub, request,
     retract, room, rows, space, spaces, subscription, Adjust, Federated, Pki, BOB, BOB_PHONE,
-    FIELD_FEDERATED, MALLORY, NS_DISCO_ITEMS, NS_PUBSUB_OWNER, PEER, SPACES,
+    FIELD_FEDERATED, LOCAL, MALLORY, NS_DISCO_ITEMS, NS_PUBSUB_OWNER, PEER, SPACES,
 };
 use waddle_server::db::actor::DbExecute;
 use waddle_server::db::s2s_spaces::{
@@ -61,7 +61,9 @@ use waddle_server::s2s::route::RouterLimits;
 use waddle_server::s2s::verify::TrustProfileKind;
 use waddle_server::space_identity::SpaceNode;
 use waddle_server::spaces_metadata::SpaceMetadata;
-use waddle_server::test_support::spaces_publications_settled;
+use waddle_server::test_support::{
+    hold_space_subscription_after_record, spaces_publications_settled,
+};
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::stanza::{is_error, is_result, set};
 use waddle_ws_test_support::WsXmppClient;
@@ -1439,9 +1441,9 @@ async fn two_deletions_of_one_space_at_once_delete_it_once() {
 
 /// A banned account's subscription is refused and leaves no row: in a
 /// public Space with `forbidden`, and in a private one as a node that does
-/// not exist. A ban written while a subscription is being recorded is read
-/// once the row is committed, and the row is then removed; that order is
-/// not reproduced here.
+/// not exist. A ban written while a subscription is being recorded is
+/// covered by
+/// [`a_ban_written_while_a_subscription_is_recorded_removes_its_row`].
 #[tokio::test]
 async fn a_banned_accounts_subscription_is_refused_and_leaves_no_row() {
     let pki = Pki::new();
@@ -1628,4 +1630,266 @@ async fn sweeps_of_the_whole_store_read_every_remote_domain_in_turn() {
     assert_eq!(removed, ["zz-gone.test"]);
     assert_eq!(second.removed.len(), 8);
     assert_eq!(rows(&federated, "s2s_space_subscriptions").await, bound - 7);
+}
+
+/// A ban written while a remote account's subscription is being recorded,
+/// after the Space was read for the request and before the row committed,
+/// is read again once the row is committed: the subscription is refused as
+/// it is when the ban was there first, and the row and the service's own
+/// subscription are gone, in a public Space and in a private one.
+#[tokio::test]
+async fn a_ban_written_while_a_subscription_is_recorded_removes_its_row() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    space(&federated, "inner", NodeConfig::spaces_private()).await;
+    federate(&federated, "inner").await;
+    affiliate(&federated, "inner", BOB, Affiliation::Member).await;
+    let bob = jid(BOB).to_bare();
+
+    for (node, condition) in [(DEV, "forbidden"), ("inner", "item-not-found")] {
+        let gate = hold_space_subscription_after_record(node, bob.clone());
+        let id = format!("ban-race-{node}");
+        let (answer, ()) = tokio::join!(
+            ask(
+                &federated,
+                request(BOB_PHONE, &id, true, subscription("subscribe", node, BOB)),
+            ),
+            async {
+                gate.wait_until_reached().await;
+                // The row committed before the ban was written.
+                assert_eq!(rows(&federated, "s2s_space_subscriptions").await, 1);
+                affiliate(&federated, node, BOB, Affiliation::Outcast).await;
+                gate.release();
+            }
+        );
+        assert_eq!(
+            error_condition(&answer).as_deref(),
+            Some(condition),
+            "{node}: {answer:?}"
+        );
+        assert_eq!(
+            rows(&federated, "s2s_space_subscriptions").await,
+            0,
+            "{node}"
+        );
+        assert!(
+            service_subscribers(&federated, node).await.is_empty(),
+            "{node}"
+        );
+    }
+}
+
+/// Subscribe the local account `localpart` to the Space `node` from a
+/// session of its own, which then receives the Space's notifications.
+async fn local_subscriber(federated: &Federated, localpart: &str, node: &str) -> WsXmppClient {
+    let account = federated.account(localpart).await;
+    let mut client = federated.loopback.client(localpart, "desk").await;
+    let subscribed = round_trip(
+        &mut client,
+        set(
+            "local-sub",
+            SPACES,
+            subscription("subscribe", node, account.as_str()),
+        ),
+    )
+    .await;
+    assert!(is_result(&subscribed), "{subscribed:?}");
+    client
+}
+
+/// The ids of the items a `retract` notification of `node` names among
+/// `received`.
+fn retracted(received: &[Element], node: &str) -> Vec<String> {
+    received
+        .iter()
+        .filter(|stanza| stanza.name() == "message" && stanza.attr("from") == Some(SPACES))
+        .flat_map(Element::children)
+        .filter(|child| child.is("event", s2s_spaces_support::NS_PUBSUB_EVENT))
+        .flat_map(Element::children)
+        .filter(|items| items.name() == "items" && items.attr("node") == Some(node))
+        .flat_map(Element::children)
+        .filter(|child| child.name() == "retract")
+        .filter_map(|retract| retract.attr("id").map(ToOwned::to_owned))
+        .collect()
+}
+
+/// A room that leaves a Space is told to the Space's subscribers here and
+/// at other servers (XEP-0060 §7.2.2.1; a Space node's
+/// `pubsub#notify_retract` is on, XEP-0503): when its bookmark is
+/// retracted, and when a publish places it in another Space, which moves
+/// it out of this one.
+#[tokio::test]
+async fn a_room_leaving_a_space_is_told_to_its_subscribers_here_and_at_other_servers() {
+    const OPS: &str = "ops";
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    federated_space(&federated, OPS).await;
+    affiliate(&federated, OPS, VICTOR, Affiliation::Owner).await;
+    s2s_spaces_support::relate(
+        &federated,
+        Object::new(ObjectType::Space, OPS),
+        "owner",
+        VICTOR,
+    )
+    .await;
+    let subscribed = subscribe(&federated, "leave-sub", BOB_PHONE, BOB).await;
+    assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
+    let mut walter = local_subscriber(&federated, "walter", DEV).await;
+    let lounge = room("lounge").to_string();
+
+    // A retract of the room's bookmark.
+    for (id, payload) in [
+        ("leave-pub-1", publish(DEV, "lounge")),
+        ("leave-ret-1", retract(DEV, "lounge")),
+    ] {
+        let answer = round_trip(&mut victor, set(id, SPACES, payload)).await;
+        assert!(is_result(&answer), "{id}: {answer:?}");
+    }
+    let here = federated.client_settle(&mut walter).await;
+    assert_eq!(
+        retracted(&here, DEV),
+        std::slice::from_ref(&lounge),
+        "{here:?}"
+    );
+    let received = settled(&federated, "leave-barrier-1").await;
+    assert_eq!(
+        retracted(&events_for(&received, BOB), DEV),
+        std::slice::from_ref(&lounge),
+        "{received:?}"
+    );
+
+    // A publish that places the room in another Space moves it out of this
+    // one.
+    let mark = federated.peer_received(|_| true).len();
+    for (id, payload) in [
+        ("leave-pub-2", publish(DEV, "lounge")),
+        ("leave-pub-3", publish(OPS, "lounge")),
+    ] {
+        let answer = round_trip(&mut victor, set(id, SPACES, payload)).await;
+        assert!(is_result(&answer), "{id}: {answer:?}");
+    }
+    let here = federated.client_settle(&mut walter).await;
+    assert_eq!(
+        retracted(&here, DEV),
+        std::slice::from_ref(&lounge),
+        "{here:?}"
+    );
+    let received = settled(&federated, "leave-barrier-2").await;
+    let since: Vec<Element> = received.into_iter().skip(mark).collect();
+    assert_eq!(
+        retracted(&events_for(&since, BOB), DEV),
+        [lounge],
+        "{since:?}"
+    );
+}
+
+/// The admin command that deletes a channel tells the subscribers of each
+/// Space it took the room out of, as a retract of the room's bookmark
+/// there would. A subscriber at another server is not told of a deleted
+/// room: whether the room was open to other servers can no longer be read
+/// when its notification is decided.
+#[tokio::test]
+async fn deleting_a_channel_tells_the_spaces_local_subscribers_it_left() {
+    const NODE_CHANNELS_DELETE: &str = "urn:waddle:admin:channels:delete:0";
+    const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+    const NS_DATA: &str = "jabber:x:data";
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    let state = &federated.loopback.state;
+    waddle_server::admin::channels::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(state),
+        std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+        std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
+        None,
+    )
+    .await;
+    let mut walter = local_subscriber(&federated, "walter", DEV).await;
+    let published = round_trip(&mut victor, set("del-pub", SPACES, publish(DEV, "lounge"))).await;
+    assert!(is_result(&published), "{published:?}");
+    let lounge = room("lounge").to_string();
+
+    let form_field = |var: &str, value: &str| {
+        Element::builder("field", NS_DATA)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+            .append(Element::builder("value", NS_DATA).append(value).build())
+            .build()
+    };
+    let command = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NODE_CHANNELS_DELETE,
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(
+            Element::builder("x", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(form_field("FORM_TYPE", NODE_CHANNELS_DELETE))
+                .append(form_field("channel_jid", &lounge))
+                .append(form_field("confirm", "yes"))
+                .build(),
+        )
+        .build();
+    let deleted = round_trip(&mut victor, set("del-run", LOCAL, command)).await;
+    assert!(is_result(&deleted), "{deleted:?}");
+
+    let here = federated.client_settle(&mut walter).await;
+    assert_eq!(retracted(&here, DEV), [lounge], "{here:?}");
+}
+
+/// The admin command that deletes a Space tells the Space's subscribers
+/// here of each room it takes out, before the Space's node is deleted, as
+/// a retract of each room's bookmark would.
+#[tokio::test]
+async fn deleting_a_space_tells_its_local_subscribers_of_each_room_it_took_out() {
+    const NODE_SPACES_DELETE: &str = "urn:waddle:admin:spaces:delete:0";
+    const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+    const NS_DATA: &str = "jabber:x:data";
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    let state = &federated.loopback.state;
+    waddle_server::admin::spaces::register(
+        &state.deps.protocol.command_registry,
+        std::sync::Arc::clone(&state.deps.app_state),
+    )
+    .await;
+    let mut walter = local_subscriber(&federated, "walter", DEV).await;
+    let published = round_trip(&mut victor, set("sdel-pub", SPACES, publish(DEV, "lounge"))).await;
+    assert!(is_result(&published), "{published:?}");
+    let lounge = room("lounge").to_string();
+    let space_jid =
+        waddle_server::space_identity::space_jid_for_node(&spaces(), &SpaceNode::from(DEV))
+            .expect("the Space's JID");
+
+    let form_field = |var: &str, value: &str| {
+        Element::builder("field", NS_DATA)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+            .append(Element::builder("value", NS_DATA).append(value).build())
+            .build()
+    };
+    let command = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NODE_SPACES_DELETE,
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(
+            Element::builder("x", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(form_field("FORM_TYPE", NODE_SPACES_DELETE))
+                .append(form_field("space_jid", space_jid.as_str()))
+                .append(form_field("confirm", "yes"))
+                .build(),
+        )
+        .build();
+    let deleted = round_trip(&mut victor, set("sdel-run", LOCAL, command)).await;
+    assert!(is_result(&deleted), "{deleted:?}");
+
+    let here = federated.client_settle(&mut walter).await;
+    assert_eq!(retracted(&here, DEV), [lounge], "{here:?}");
 }

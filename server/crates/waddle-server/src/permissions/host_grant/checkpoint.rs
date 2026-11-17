@@ -41,7 +41,7 @@ pub use gates::{pause_at, CheckpointGate};
 #[cfg(feature = "test-support")]
 mod gates {
     use std::collections::HashMap;
-    use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use jid::BareJid;
     use tokio::sync::Notify;
@@ -78,7 +78,7 @@ mod gates {
         let gate = Arc::new(CheckpointGate::default());
         GATES
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .insert((point, room), Arc::clone(&gate));
         gate
     }
@@ -86,7 +86,7 @@ mod gates {
     pub(super) async fn wait(point: DecisionCheckpoint, room: &BareJid) {
         let gate = GATES
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .remove(&(point, room.clone()));
         if let Some(gate) = gate {
             gate.reached.notify_one();

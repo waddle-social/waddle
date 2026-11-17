@@ -295,7 +295,9 @@ async fn the_gate_reads_the_attachment_its_attachment_gate_holds() {
         HostGrantGate::with_enrolled_scopes(fixture.store.clone(), loaded(&fixture.store).await);
     let replica = fixture.ingress.authority().await;
     assert!(gate.bind_attachment(replica.host_grant_gate()));
+    // Offering the bound gate again binds nothing and is no conflict.
     assert!(!gate.bind_attachment(replica.host_grant_gate()));
+    assert!(!gate.attachment_conflicts());
     assert!(gate.attachment().is_none());
     assert!(matches!(
         gate.room(RoomBinding::Room(&scope.room)).await,
@@ -318,6 +320,7 @@ async fn the_gate_reads_the_attachment_its_attachment_gate_holds() {
     // unable to tell which speaks for the replica: it refuses every managed
     // room from then on.
     assert!(!gate.bind_attachment(Arc::default()));
+    assert!(gate.attachment_conflicts());
     assert!(gate.attachment().is_none());
     assert!(matches!(
         gate.room(RoomBinding::Room(&scope.room)).await,

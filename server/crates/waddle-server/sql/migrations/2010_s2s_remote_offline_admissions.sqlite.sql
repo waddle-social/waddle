@@ -13,7 +13,7 @@
 --
 -- The stored message itself is an ordinary row of the offline store;
 -- nothing here refers to it. In `s2s_pending_subscriptions` (migration
--- 2010) `contact_domain` holds the same domain key.
+-- 2009) `contact_domain` holds the same domain key.
 CREATE TABLE s2s_remote_offline_admissions (
     id TEXT NOT NULL PRIMARY KEY,
     account_jid TEXT NOT NULL,

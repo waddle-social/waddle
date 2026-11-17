@@ -299,12 +299,13 @@ pub(super) struct RoomQueues {
 }
 
 fn lock(shard: &Mutex<Shard>) -> std::sync::MutexGuard<'_, Shard> {
-    // Every update leaves the shard consistent, so a poisoned lock still
-    // holds usable state.
-    match shard.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+    // Nothing fails while the lock is held. A poisoned lock means the
+    // shard's counts may no longer match its queues, and a shard that
+    // miscounts would hold back or admit without bound: the process stops
+    // instead.
+    shard
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 /// Whether a stanza that waited for a place found one.

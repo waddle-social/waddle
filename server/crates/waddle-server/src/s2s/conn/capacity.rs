@@ -158,12 +158,13 @@ impl Capacity {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        // Every update leaves the counters consistent, so a poisoned lock
-        // still holds a usable state.
-        match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // Nothing fails while the lock is held. A poisoned lock means the
+        // counters may no longer match the sockets they count, and a limit
+        // that miscounts would refuse or admit without bound: the process
+        // stops instead.
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Admit a new inbound socket from `address`, or name the limit that

@@ -46,24 +46,24 @@ pub const CHANNEL_FEDERATED_VERSION: i64 = 2008;
 /// Version of the migration that creates the stores of S2S account
 /// traffic: pending subscription requests from remote senders and the
 /// remote PubSub nodes local accounts subscribed to.
-pub const S2S_ACCOUNT_TRAFFIC_VERSION: i64 = 2010;
+pub const S2S_ACCOUNT_TRAFFIC_VERSION: i64 = 2009;
 
 /// Version of the migration that creates the offline admissions of
 /// messages from remote senders that are not the account's contacts.
-pub const S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION: i64 = 2011;
+pub const S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION: i64 = 2010;
 
 /// Version of the migration that creates the table of the Spaces open to
 /// accounts at other servers.
-pub const S2S_FEDERATED_SPACES_VERSION: i64 = 2012;
+pub const S2S_FEDERATED_SPACES_VERSION: i64 = 2011;
 
 /// Version of the migration that creates the table of the subscriptions
 /// remote accounts hold to local Spaces.
-pub const S2S_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2013;
+pub const S2S_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2012;
 
 /// Version of the migration that creates the requests to end a retired
 /// account's open sessions, the replicas' leases and their
 /// acknowledgements.
-pub const ACCOUNT_SESSION_ENDINGS_VERSION: i64 = 2015;
+pub const ACCOUNT_SESSION_ENDINGS_VERSION: i64 = 2013;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -145,49 +145,49 @@ pub fn all() -> Vec<Migration> {
         Migration {
             version: S2S_ACCOUNT_TRAFFIC_VERSION,
             description: "s2s account traffic".to_string(),
-            sql_sqlite: include_str!("../../../sql/migrations/2010_s2s_account_traffic.sqlite.sql"),
+            sql_sqlite: include_str!("../../../sql/migrations/2009_s2s_account_traffic.sqlite.sql"),
             sql_postgres: include_str!(
-                "../../../sql/migrations/2010_s2s_account_traffic.postgres.sql"
+                "../../../sql/migrations/2009_s2s_account_traffic.postgres.sql"
             ),
         },
         Migration {
             version: S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
             description: "s2s remote offline admissions".to_string(),
             sql_sqlite: include_str!(
-                "../../../sql/migrations/2011_s2s_remote_offline_admissions.sqlite.sql"
+                "../../../sql/migrations/2010_s2s_remote_offline_admissions.sqlite.sql"
             ),
             sql_postgres: include_str!(
-                "../../../sql/migrations/2011_s2s_remote_offline_admissions.postgres.sql"
+                "../../../sql/migrations/2010_s2s_remote_offline_admissions.postgres.sql"
             ),
         },
         Migration {
             version: S2S_FEDERATED_SPACES_VERSION,
             description: "s2s federated spaces".to_string(),
             sql_sqlite: include_str!(
-                "../../../sql/migrations/2012_s2s_federated_spaces.sqlite.sql"
+                "../../../sql/migrations/2011_s2s_federated_spaces.sqlite.sql"
             ),
             sql_postgres: include_str!(
-                "../../../sql/migrations/2012_s2s_federated_spaces.postgres.sql"
+                "../../../sql/migrations/2011_s2s_federated_spaces.postgres.sql"
             ),
         },
         Migration {
             version: S2S_SPACE_SUBSCRIPTIONS_VERSION,
             description: "s2s space subscriptions".to_string(),
             sql_sqlite: include_str!(
-                "../../../sql/migrations/2013_s2s_space_subscriptions.sqlite.sql"
+                "../../../sql/migrations/2012_s2s_space_subscriptions.sqlite.sql"
             ),
             sql_postgres: include_str!(
-                "../../../sql/migrations/2013_s2s_space_subscriptions.postgres.sql"
+                "../../../sql/migrations/2012_s2s_space_subscriptions.postgres.sql"
             ),
         },
         Migration {
             version: ACCOUNT_SESSION_ENDINGS_VERSION,
             description: "account session endings".to_string(),
             sql_sqlite: include_str!(
-                "../../../sql/migrations/2015_account_session_endings.sqlite.sql"
+                "../../../sql/migrations/2013_account_session_endings.sqlite.sql"
             ),
             sql_postgres: include_str!(
-                "../../../sql/migrations/2015_account_session_endings.postgres.sql"
+                "../../../sql/migrations/2013_account_session_endings.postgres.sql"
             ),
         },
     ]
@@ -210,6 +210,12 @@ mod tests {
         let versions: Vec<i64> = all().iter().map(|migration| migration.version).collect();
         assert!(versions.iter().all(|version| *version > BASELINE_VERSION));
         assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
+        // The runner refuses a database that recorded a later version but
+        // not an earlier one (`VersionGap`), so a skipped number could never
+        // be used once a later migration has shipped: the versions follow
+        // the baseline without a gap.
+        assert_eq!(versions.first(), Some(&(BASELINE_VERSION + 1)));
+        assert!(versions.windows(2).all(|pair| pair[1] == pair[0] + 1));
         assert_eq!(
             versions,
             vec![

@@ -1911,6 +1911,12 @@ async fn create_websocket_state(
             shutdown: shutdown_handle,
         },
     });
+    // Admin commands notify the subscribers of what they take out of a
+    // node through the state that serves those subscribers.
+    websocket_state
+        .deps
+        .app_state
+        .bind_notifications(&websocket_state);
     websocket_state
         .deps
         .protocol

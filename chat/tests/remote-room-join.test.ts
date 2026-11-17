@@ -537,6 +537,26 @@ describe("a bookmarked room on another server that does not exist", () => {
     expect(storage.stored.missingRemoteRooms).toEqual([]);
   });
 
+  test("a user's own navigation to it joins it again, where a restored route is refused", async () => {
+    const storage = sharedStorage({ missingRemoteRooms: [REMOTE_ROOM] });
+    const { client, joined, deliver } = homeDeployment({ persistence: storage.persistence, bookmarks });
+    client.rememberRoomJidForChannel("dev", REMOTE_ROOM);
+    // A restored route or another automatic switch: refused without a
+    // request, and the record stands.
+    await expect(client.switchRoom("", "dev")).rejects.toBeInstanceOf(RoomJoinError);
+    expect(joined()).toEqual([]);
+    expect(storage.stored.missingRemoteRooms).toEqual([REMOTE_ROOM]);
+    // A sidebar click loads the room as an explicit navigation, which asks
+    // for its access again: the join is sent, and finding the room ends
+    // the record.
+    const navigation = client.retryRoomAccess("", "dev");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(joined()).toEqual([REMOTE_ROOM]);
+    deliver({ from: `${REMOTE_ROOM}/alice`, presence_type: "available", muc_status_codes: [110] });
+    await navigation;
+    expect(storage.stored.missingRemoteRooms).toEqual([]);
+  });
+
   test("a bookmark whose autojoin was turned off is not joined at sign-in", async () => {
     const { discover, joined } = homeDeployment({ bookmarks: [{ id: REMOTE_ROOM, name: "Dev", autojoin: false }] });
     await discover();

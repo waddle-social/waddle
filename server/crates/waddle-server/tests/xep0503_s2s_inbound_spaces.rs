@@ -589,6 +589,95 @@ async fn a_spaces_listing_beyond_its_read_tells_no_count() {
     );
 }
 
+/// Holds a room's actor until its sender is dropped or sent on.
+struct Wedge(tokio::sync::oneshot::Receiver<()>);
+
+impl kameo::message::Message<Wedge> for waddle_xmpp::muc::room_actor::RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        wedge: Wedge,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = wedge.0.await;
+    }
+}
+
+/// A room whose openness to other servers cannot be read now (its live
+/// actor does not answer) is left out of a Space's listing for an account
+/// at another server, and the listing tells no count, since it does not
+/// know whether it left a room out. Once the actor answers, the room is
+/// listed and the count told.
+#[tokio::test]
+async fn a_spaces_listing_that_could_not_read_a_room_tells_no_count() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    for id in ["alpha", "lounge"] {
+        channel(&federated, id, true).await;
+        list_in(&federated, DEV, id, None).await;
+    }
+    // The lounge's actor is live on this replica, which then reads the
+    // room's openness from it rather than from the catalog, and every ask
+    // of it waits behind a wedge.
+    let registry = waddle_xmpp::muc::RoomRegistry::wrap(
+        federated.loopback.state.deps.protocol.room_registry.clone(),
+    );
+    let actor = registry
+        .get_or_create_room(
+            room("lounge"),
+            "lounge".to_owned(),
+            "lounge".to_owned(),
+            waddle_xmpp::muc::RoomConfig {
+                public_room: true,
+                federated: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the room registry answers")
+        .actor_ref;
+    let (release, wedged) = tokio::sync::oneshot::channel();
+    actor
+        .tell(Wedge(wedged))
+        .await
+        .expect("the wedge is queued");
+
+    let listed = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "undecided-1",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
+    assert_eq!(listed_children(&listed), [room("alpha").to_string()]);
+    let set = descendant(&listed, "set").expect("the unasked <set/>");
+    assert!(set.get_child("count", NS_RSM).is_none(), "{listed:?}");
+
+    let _ = release.send(());
+    let listed = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "undecided-2",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(
+        listed_children(&listed),
+        [room("alpha").to_string(), room("lounge").to_string()]
+    );
+    // A complete listing asked for no page carries no `<set/>`.
+    assert!(descendant(&listed, "set").is_none(), "{listed:?}");
+}
+
 /// An account banned from a public Space is refused its node's listing,
 /// as a read of its items is.
 #[tokio::test]

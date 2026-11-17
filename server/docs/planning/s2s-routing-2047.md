@@ -142,7 +142,7 @@ the room host `server/routes/websocket/s2s_rooms.rs`, the delivery hook of
 `route/router/spaces.rs`, the Spaces host
 `server/routes/websocket/s2s_spaces.rs` with
 `handlers/iq/spaces_remote.rs`, the hook in the PubSub fan-out, the stores
-in `db/s2s_spaces.rs` and migrations 2012 (`s2s_federated_spaces`) and 2013
+in `db/s2s_spaces.rs` and migrations 2011 (`s2s_federated_spaces`) and 2012
 (`s2s_space_subscriptions`).
 
 ## The router
@@ -1865,7 +1865,7 @@ that existed before it did and for every new one; there is no deployment
 default that turns it on. A Space's owner reads and sets it in the node's
 configuration form (`urn:waddle:spaces:federated`, a boolean field of the
 `pubsub#owner` configure form on the Spaces service). It is stored apart
-from the PubSub node (`s2s_federated_spaces`, migration 2012), as a row
+from the PubSub node (`s2s_federated_spaces`, migration 2011), as a row
 that exists while the setting is on and names the creation time of the node
 it was turned on for: a Space deleted and created again under the same name
 is not federated, whatever row its predecessor left. Deleting a Space
@@ -2120,6 +2120,26 @@ other servers is read once for a publication; what is decided for each
 subscriber is its standing and, for a managed room, its grants. The pair's worker checks once more before it
 writes: peer admission must admit the remote domain then.
 
+A room leaves a Space in other ways than a retract of its bookmark, and
+each notifies the Space's subscribers, here and at other servers, once the
+bookmark's retraction stands, as the retract does: a publish that places
+the room in another Space (the Spaces it moved out of), and the admin
+commands that delete a channel, update one (which takes its bookmark out
+of every Space other than the one it is linked to), and delete a Space
+(its rooms, before its node is deleted). Admin
+commands reach the fan-out through the WebSocket state that startup binds
+to the application state (`AppState::notify_space_retracted`). Three
+gaps remain: the retraction of a group conversation's bookmark from a
+member's XEP-0402 node, when the member leaves or the conversation is
+destroyed, tells none of the member's resources, although XEP-0402 asks a
+client to leave a room whose bookmark is retracted; a subscriber at another server is not told that a deleted
+room left a Space, because when its notification is decided the room is
+gone and whether it was open to other servers can no longer be read, so
+its client finds the room gone when it joins it; and an admin command that
+places a room in a Space (`channels:create`, `channels:update`) notifies
+nobody, so subscribers learn of that room at their next read of the
+Space's items.
+
 A subscription outlives the stream that made it, so its row records what
 that stream proved (authentication strength, trust profile and the snapshot
 it was admitted under), as a seat does. Peer admission and trusted-home
@@ -2336,17 +2356,23 @@ answered with `internal-server-error` (type `wait`).
 **What a listing left out.** A listing that left a room out tells no
 count (XEP-0059 §1), whatever the reason: a read that filled its bound, a
 scan beyond its 1,000 candidates, a managed room whose grants could not be
-read, or a room not read or decided in time. Such a listing carries its
-`<set/>` even when the request had none. A remote asker is answered with
-the rooms that were listed. A session is answered with
-`internal-server-error` (type `wait`) when a room was not read or decided
-in time, the live rooms included, rather than with a listing that lacks
-it: the first-party client takes a listing as the whole of the service's
-rooms and reads no `<set/>` (`chat/src/lib/xmpp/discovery.ts`), while it
-takes an error as a listing it may not rely on and keeps the rooms it
-knows. A session's listing left short by a bound or by grants that could
-not be read is answered with the rest and no count; the first-party
-client, which reads no `<set/>`, still takes such a listing as complete.
+read, a live room not read in time (the scan of the live rooms, an instant
+room's actor or the catalog check of a live room), or a managed room not
+decided in time. Such a listing carries its `<set/>` even when the request
+had none. A remote asker is answered with the rooms that were listed. A
+session is answered with `internal-server-error` (type `wait`) only when a
+managed room was not decided or confirmed in time, rather than with a
+listing that lacks it: the first-party client takes a listing as the whole
+of the service's rooms and reads no `<set/>`
+(`chat/src/lib/xmpp/discovery.ts`), while it takes an error as a listing
+it may not rely on and keeps the rooms it knows. A live room whose actor
+did not answer in time is left out of a session's listing, which is
+answered with the rest and no count, so that one slow room's actor costs
+its own place in the listing and never the listing. A session's listing
+left short that way, by a bound or by grants that could not be read is
+answered with the rest and no count; the first-party client, which reads
+no `<set/>`, still takes such a listing as complete, so a slow instant
+room is missing from that client's list until a later listing reads it.
 
 **Shared reads.** What the catalog and the rooms' actors say of the rooms
 (not who manages them, and not anyone's grants) is read at most once at a
@@ -2415,7 +2441,9 @@ left out.
   Space's 256 most recently published items are read, as a read of its
   items reads them: a room among older items of a Space that holds more is
   not listed to accounts at other servers, and such a listing carries its
-  `<set/>` with no count, since what the read left out is not known. The
+  `<set/>` with no count, since what the read left out is not known. A
+  room whose openness to other servers or whose grants cannot be read now
+  is left out, and that listing tells no count either. The
   Spaces service's own listing tells no count either when more than 256
   Spaces are open to other servers, or when a Space could not be decided
   now and was left out.
@@ -2437,8 +2465,9 @@ of the MUC service's rooms is not bounded per answer. XEP-0059 is read at
 the same pinned commit. A `<set/>` that is not well formed is
 `bad-request`.
 
-**Evidence.** Written, compiled and run at `e559ebd57`, every case passing
-(the run10 head logs of the [verification checklist](../../../docs/evidence/2047/unrun-tests.md)):
+**Evidence.** Written, compiled and run at `096cd3d30`, every case passing
+(the prever rerun1 logs of the [verification checklist](../../../docs/evidence/2047/unrun-tests.md);
+the cases unchanged since ran at `e559ebd57` in the run10 head logs too):
 
 - `crates/waddle-server/tests/xep0030_s2s_inbound_muc_discovery.rs`: the
   service lists its open rooms and a room no occupants; no room a remote
@@ -2451,10 +2480,9 @@ the same pinned commit. A `<set/>` that is not well formed is
   rooms closed to other servers and group conversations that take no place
   in the remote read; a remote read that filled its 4,096 rows told no
   count; a live room whose actor does not answer in time left out of a
-  remote listing that tells no count, two remote listings asked at once
-  built from one read, a session's listing refused with
-  `internal-server-error` (type `wait`) and naming the room once the actor
-  answers; live rooms whose catalog rows are hidden or closed to other
+  remote listing and of a session's listing that both tell no count, two
+  remote listings asked at once built from one read, and both naming the
+  room once the actor answers; live rooms whose catalog rows are hidden or closed to other
   servers not listed to a remote asker, though their actors say open; and
   a client that walks from the server's items to the service's, finds a
   Space's room and enters it by its plain JID while the Space is not open
@@ -2475,8 +2503,9 @@ the same pinned commit. A `<set/>` that is not well formed is
   of a slow room answered (scripted host);
 - `crates/waddle-server/tests/xep0503_s2s_inbound_spaces.rs`: a Space's
   node lists the rooms a remote asker may be told of, in pages, refuses
-  a banned account, and tells no count once the Space holds more than the
-  256 items read;
+  a banned account, tells no count once the Space holds more than the
+  256 items read, and tells no count while a room's openness to other
+  servers cannot be read;
 - `crates/waddle-server/tests/xep0503_s2s_inbound_spaces_host_grant.rs`: a
   managed room in a Space's node listing only for the member (PostgreSQL);
 - `crates/waddle-server/tests/xep0503_spaces_ws.rs`: a Space's node lists
@@ -2515,10 +2544,10 @@ not S2S is on, and are listed below with the others.
 
 Spaces change nothing for remote senders while S2S is disabled: no router
 exists, so no Spaces host is attached, the pass that notifies subscribers
-at other servers returns before it reads anything, and migrations 2012 and
-2013 create two tables that stay empty unless an owner turns a Space's
+at other servers returns before it reads anything, and migrations 2011 and
+2012 create two tables that stay empty unless an owner turns a Space's
 `federated` setting on. The
-setting can be set while S2S is off and takes effect once it is on. Two of
+setting can be set while S2S is off and takes effect once it is on. Three of
 its changes apply whether or not S2S is on, and are listed below.
 
 The MUC fallback changes nothing for remote senders while S2S is
@@ -2544,16 +2573,14 @@ runbook (G24):
   is answered with `internal-server-error`, as it was.
 - A session's listing of the MUC service asks the actors of live instant
   rooms sixteen at a time within one read of 1.2 s, where it asked them
-  one after another with 5 s each. When a room is not read or decided in
-  time (an instant room whose actor is slower, a managed room whose grants
-  are not decided within 1 s of the read) the session is answered with
-  `internal-server-error` (type `wait`); before, it was answered with the
-  rest of the rooms. One live instant room whose actor answers slower than
-  that fails every session's listing on the replica that holds it, until
-  the actor answers again; the first-party client then keeps the rooms it
-  knows and joins none it does not. A
-  listing left short by a bound, or by a managed room whose grants could
-  not be read, tells no count where it told the count of what it listed.
+  one after another with 5 s each. An instant room whose actor is slower
+  is left out, as before, and the listing tells no count. When a managed
+  room's grants are not decided within 1 s of the read the session is
+  answered with `internal-server-error` (type `wait`); before, it was
+  answered with the rest of the rooms. A
+  listing left short by a bound, by a live room not read in time, or by a
+  managed room whose grants could not be read, tells no count where it
+  told the count of what it listed.
   When the catalog read fills its bound, an instant-room candidate whose
   address names a channel and that the catalog check cannot clear is left
   out; before, it was kept and listed from its actor's configuration.
@@ -2569,6 +2596,11 @@ runbook (G24):
   First-party clients read a Space's rooms through `<items/>`, which is
   unchanged.
 
+- A room that leaves a Space by a path other than a retract of its
+  bookmark (a session's publish that places it in another Space, and the
+  admin commands that delete a channel, update one or delete a Space) is
+  notified to the Space's local subscribers as a retract, where nobody was
+  told before; the retract itself already notified them.
 - A Space owner's configuration form on the Spaces service carries one
   more field, `urn:waddle:spaces:federated`, off by default.
 - A privileged standing on a Space is no longer written for an account at
@@ -2747,9 +2779,11 @@ behaviour of the chat app, for the same runbook):
 - A join of a room on another domain that the room's host answers by
   creating the room (status 201) is left at once, recorded in the browser
   as a missing room that nothing joins on its own again (a join the user
-  starts from the communities dialog is still sent and ends the record, as
-  does any seated join; a restored route, the focused room after a
-  reconnect, a retained room and a retry are refused without a request),
+  starts is still sent and ends the record, as does any seated join: from
+  the communities dialog, or by opening the room themselves with a sidebar
+  click, a link, or back or forward; a route restored at load, the focused
+  room after a reconnect, a retained room and a retry are refused without
+  a request),
   and the user's bookmark of it, if it joins at sign-in, is rewritten with
   `autojoin` off, once the stream is back if it was down. The record is the
   account's in that browser, shared by its tabs and kept across reconnects
@@ -3112,7 +3146,20 @@ behaviour of the chat app, for the same runbook):
   seats](#inbound-muc-w6a)); a local response that completes nothing still
   occupies its pair's queue until then, although it is never dialled for;
   and one unresponsive remote domain can hold at most 1,024 of a replica's
-  4,096 pending requests for their lifetime.
+  4,096 pending requests for their lifetime. Account traffic (gate G18)
+  shares the same capacity: a local account's messages and presence for a
+  remote JID, and what the server sends on its behalf, open their pair's
+  queue within the 64 and take places on it beside room traffic and
+  replies (one account at most 32 of a pair's 64,
+  [account traffic](s2s-account-traffic-2047.md)), and the errors the
+  router itself returns for remote senders' account stanzas are replies
+  within the 32. A
+  domain whose stream cannot be established holds its pair's queue and
+  the places on it until they are answered. The open-admission evidence
+  must therefore include account traffic together with room traffic,
+  Space notifications and replies: how many pairs and places the accounts
+  of this deployment and of admitted domains take, and that room traffic
+  and replies still find a queue while they do.
 - **Spaces: a subscription's evidence ages.** A subscription records what
   the stream that made it proved, and keeps that evidence for as long as it
   stands. A home that later authenticates only by dialback, or under
@@ -3134,14 +3181,16 @@ behaviour of the chat app, for the same runbook):
   Neither read is cached. The `disco#items` of a Space's node reads up to
   256 items and, for each room, whether it is open to other servers and,
   for a managed room, its grants, as `<items/>` does.
-- **MUC fallback: one slow room fails a session's listing.** A live
-  instant room whose actor does not answer within one read (1.2 s) makes
-  every session's listing of the MUC service on its replica an
-  `internal-server-error` until it answers again, where it was left out
-  before. A session's listing left short by a bound (10,000 catalog rows,
-  1,000 live rooms) or by a managed room whose grants cannot be read tells
-  no count, but the first-party client reads no `<set/>` and takes it as
-  complete.
+- **MUC fallback: a session's listing that left a room out looks
+  complete to the first-party client.** A live instant room whose actor
+  does not answer within one read (1.2 s) is left out of every session's
+  listing of the MUC service on its replica until it answers again, and a
+  session's listing left short by a bound (10,000 catalog rows, 1,000 live
+  rooms) or by a managed room whose grants cannot be read is answered the
+  same way. Each such listing tells no count, but the first-party client
+  reads no `<set/>` and takes it as complete, so it shows none of the
+  rooms left out. Only a managed room not decided in time fails a
+  session's listing, with `internal-server-error` (type `wait`).
 - **MUC fallback: what one listing reads.** The MUC service's `disco#items`
   for a remote asker reads, at most once at a time on a replica and reused
   for 2 s, up to 4,096 catalog rows in one query and the actor of each live
@@ -3223,8 +3272,6 @@ behaviour of the chat app, for the same runbook):
   service's listing, page through a listing that does not fit in one
   answer, and take one that tells no count as incomplete
   (`chat/src/lib/xmpp/discovery.ts` reads only the items).
-- MUC fallback, a remote Space node listing: tell no count when a room's
-  openness or grants could not be read, as the MUC service's listing does.
 - Spaces, a federated setting for single peers: the setting opens a Space
   to every admitted domain.
 - Spaces, the web client: offer the `federated` field in a Space's

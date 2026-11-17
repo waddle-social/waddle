@@ -298,6 +298,13 @@ impl HostGrantGate {
         }
     }
 
+    /// Whether a gate other than the bound one was offered to
+    /// [`Self::bind_attachment`], which leaves this gate refusing every
+    /// managed room.
+    pub fn attachment_conflicts(&self) -> bool {
+        self.conflicting.load(Ordering::Acquire)
+    }
+
     /// Hold `attachment` in the bound attachment gate, binding a gate of
     /// this gate's own when none is bound. The first attachment stays; the
     /// answer is whether this call set it. For suites that decide rooms

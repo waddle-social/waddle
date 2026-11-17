@@ -174,12 +174,11 @@ impl PeerVerifier {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        // The guarded value is replaced whole, so a poisoned lock still
-        // holds a consistent state.
-        match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        // The guarded value is replaced whole and nothing fails while the
+        // lock is held; a poisoned lock is not read past.
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn fail(&self, failure: VerifyError) -> rustls::Error {

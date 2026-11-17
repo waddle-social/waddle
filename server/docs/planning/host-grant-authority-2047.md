@@ -1132,6 +1132,30 @@ projected subject are that canonical text.
   version it does not know. The owner phase therefore runs with the new
   image before any new server starts, and old and new servers do not share
   the database across it. On SQLite the migration creates nothing.
+- The migrations after the baseline are numbered 2001 to 2013 without a
+  gap. The runner refuses a database that recorded a later version but not
+  an earlier one, so a skipped number could never be used once a later
+  migration ships; the catalog's own test requires every version to follow
+  the one before. Before the first release that carries them, the account
+  traffic, Spaces and session-ending migrations were renumbered from 2010
+  to 2013 and 2015 to 2009 to 2013. A database that a build from before
+  that renumbering migrated (a development or test database; none shipped)
+  records versions that now name other migrations, with other checksums,
+  and every later startup refuses it: recreate it.
+- Every startup reads `retired_account_jids` once as the runtime role,
+  before the first account provisioning, and refuses to start when it
+  cannot, naming the table.
+- An account's retirement reads every recipient of the offline store for
+  the rows kept under another spelling of its JID, inside its transaction
+  and under its 5 s statement bound, while it holds the account tables'
+  lock. No index serves that read: the restricted ingress profile pins
+  `pending_delivery`'s exact structure, indexes included, to a manifest
+  built from the schema baseline, so an index added by a later migration
+  needs a new version of that manifest first. On a large offline store
+  the retirement can therefore run out of its bound and has to be run
+  again; moving the sweep of other spellings out of the locked
+  transaction, or a manifest version that covers later migrations, would
+  remove the limit.
 - The schema tooling that compares a history-built database with a
   baseline-built one (`scripts/schema_history.py`) does not yet account for
   relations added after the baseline.
@@ -2957,7 +2981,7 @@ A home never issues the JID of a retired account to a new holder
   nothing splits that delete.
 - **Ending the account's open sessions** (`auth/session_endings.rs`,
   `server/account_session_endings.rs`,
-  `server/routes/websocket/account_retirement.rs`, migration 2015, both
+  `server/routes/websocket/account_retirement.rs`, migration 2013, both
   engines). `retire_account` leaves them; the operator command takes the
   second step once the retirement committed. It records a request naming
   the canonical JID. Every serving replica holds a lease row it registers

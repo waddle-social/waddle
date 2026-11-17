@@ -691,15 +691,15 @@ async fn a_room_list_beyond_its_read_tells_no_count() {
 }
 
 /// A live instant room whose actor does not answer within the listing's
-/// reading time is left out. An account at another server is answered
-/// with the rest and told no count; a session, which takes a listing as
-/// the whole of the service's rooms, is answered with
-/// `internal-server-error` (type `wait`) instead. Two remote listings asked
-/// at once are built from one read of the rooms; once the actor answers
-/// again, a listing read after the reuse time names the room again, and
-/// a session's listing, read once its request arrived, names it at once.
+/// reading time is left out, and only that room: an account at another
+/// server and a session alike are answered with the rest and told no
+/// count, so one slow room never fails every session's listing. Two remote
+/// listings asked at once are built from one read of the rooms; once the
+/// actor answers again, a listing read after the reuse time names the room
+/// again, and a session's listing, read once its request arrived, names it
+/// at once.
 #[tokio::test]
-async fn a_room_not_read_in_time_leaves_a_remote_listing_without_count_and_fails_a_session() {
+async fn a_room_not_read_in_time_is_left_out_of_listings_that_tell_no_count() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let hosted = Hosted::start(RouterLimits::default(), no_change).await;
     hosted.catalogued_room("open", true, true, "text").await;
@@ -724,18 +724,14 @@ async fn a_room_not_read_in_time_leaves_a_remote_listing_without_count_and_fails
         "two listings asked at once read the rooms once"
     );
 
-    let refused = local_items(&mut alice, MUC, "t3").await;
-    assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
-    assert_eq!(
-        error_condition(&refused).as_deref(),
-        Some("internal-server-error"),
-        "{refused:?}"
-    );
-    assert_eq!(
-        error_of(&refused).and_then(|error| error.attr("type").map(str::to_owned)),
-        Some("wait".to_owned()),
-        "{refused:?}"
-    );
+    // The session's request asked for no page; the answer carries a
+    // `<set/>` all the same, without a count.
+    let short = local_items(&mut alice, MUC, "t3").await;
+    assert_eq!(short.attr("type"), Some("result"), "{short:?}");
+    let short = listing(&short);
+    assert_eq!(jids(&short), [room("open")]);
+    let set = short.rsm.expect("the unasked <set/>");
+    assert_eq!(set.count, None, "{set:?}");
 
     let _ = release.send(());
     let local = listing(&local_items(&mut alice, MUC, "t4").await);

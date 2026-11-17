@@ -204,13 +204,16 @@ It does not:
 its canonical localpart and when it was retired. Rows are never updated or
 deleted. Under the restricted runtime role the server can read the ledger and
 nothing else, so a server can neither retire a JID nor make one available
-again. Keep the ledger in every backup and restore it with the account
+again. A server whose database role cannot read the ledger refuses to start,
+with an error that names `retired_account_jids`: every account provisioning,
+session creation and offline-store write reads it, and the owner phase grants
+the runtime role `SELECT` on it. Keep the ledger in every backup and restore it with the account
 tables: a database restored to before a retirement holds the account again
 and no ledger row, and the retirement has to be repeated.
 
 ## Ending sessions
 
-Three tables, on both engines (migration 2015), carry the second step:
+Three tables, on both engines (migration 2013), carry the second step:
 
 - `account_session_ending_replicas`: one lease per serving server process,
   registered when it starts serving, renewed every 5 s for 15 s, and ended

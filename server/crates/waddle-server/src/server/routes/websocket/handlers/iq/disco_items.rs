@@ -331,8 +331,10 @@ pub(super) async fn handle_disco_items_iq(
                 }
             };
             // A client takes the listing as the whole of the service's
-            // rooms: one that lacks a room not read or decided in time is
-            // not answered.
+            // rooms: one that lacks a managed room not decided in time is
+            // not answered. A live room whose actor was not read in time
+            // is left out of an answer that tells no count, so that one
+            // slow room never fails every session's listing.
             if omission == Omission::Late {
                 return vec![build_iq_error_xml_typed(
                     id,
@@ -831,12 +833,17 @@ pub(crate) enum Omission {
     /// read that filled its bound, live rooms beyond the scan's bound, or a
     /// managed room whose grants are unavailable.
     Bounded,
-    /// Rooms that were not read or decided in time, or whose reading failed
-    /// for now: the live rooms, a room's actor, the catalog check of a live
-    /// room, a managed room's grants or their confirmation. A session is
-    /// answered with `internal-server-error` (type `wait`) rather than with
-    /// a listing that lacks them; an account at another server gets the
-    /// rest without a count.
+    /// Live rooms that were not read in time, or whose reading failed for
+    /// now: the scan of the live rooms, an instant room's actor, or the
+    /// catalog check of a live room. Every asker is answered with the rest
+    /// and no count, so that one slow room's actor costs its own place in
+    /// a listing and never the listing.
+    Unread,
+    /// Managed rooms that were not decided in time: their grants, or the
+    /// confirmation of a decision, not read by the listing's deadline. A
+    /// session is answered with `internal-server-error` (type `wait`)
+    /// rather than with a listing that lacks them; an account at another
+    /// server gets the rest without a count.
     Late,
 }
 
@@ -1783,9 +1790,9 @@ async fn instant_room_candidates(
         Ok(Ok(room_jids)) => room_jids,
         Ok(Err(error)) => {
             warn!(error = %error, "Failed to list live MUC rooms for disco#items");
-            return (Vec::new(), Omission::Late);
+            return (Vec::new(), Omission::Unread);
         }
-        Err(_) => return (Vec::new(), Omission::Late),
+        Err(_) => return (Vec::new(), Omission::Unread),
     };
     // Order of operations: (1) the free in-memory filter, and the catalog
     // check when the catalog read was bounded, set every catalog-backed
@@ -1804,7 +1811,7 @@ async fn instant_room_candidates(
         .drop_unlisted_channel_rooms(state, &mut candidates, deadline)
         .await
     {
-        omission = Omission::Late;
+        omission = Omission::Unread;
     }
     if candidates.len() > MAX_INSTANT_ROOM_SCAN {
         candidates.truncate(MAX_INSTANT_ROOM_SCAN);
@@ -1820,10 +1827,10 @@ async fn instant_room_candidates(
         match tokio::time::timeout_at(deadline, asks.next()).await {
             Ok(Some(InstantRoom::Listed(room))) => rooms.push(room),
             Ok(Some(InstantRoom::NotListed)) => {}
-            Ok(Some(InstantRoom::Unknown)) => omission = omission.and(Omission::Late),
+            Ok(Some(InstantRoom::Unknown)) => omission = omission.and(Omission::Unread),
             Ok(None) => break,
             Err(_) => {
-                omission = omission.and(Omission::Late);
+                omission = omission.and(Omission::Unread);
                 break;
             }
         }

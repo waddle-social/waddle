@@ -20,6 +20,7 @@
 #[path = "account_retirement_support/mod.rs"]
 mod support;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jid::FullJid;
@@ -30,8 +31,17 @@ use support::{
 };
 use waddle_server::auth::session_endings::{await_session_endings, EndedSessions, ReplicaEnding};
 use waddle_server::test_support::run_ingress_custody_sweep;
-use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
-use waddle_xmpp::stream_management::SM_NS;
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::pending_delivery::{
+    InsertOutcome, PendingPayload, PendingRow, PendingRowId, SmSessionId,
+};
+use waddle_xmpp::stream_management::persistence::{
+    InMemorySmPersistence, IngressCustodyDisposition, PersistedIngressAppend, PersistedSession,
+    SmPersistenceStorage,
+};
+use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind, SM_NS};
+use waddle_xmpp::Stanza;
+use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
@@ -268,5 +278,115 @@ async fn a_retired_accounts_ingress_custody_is_discarded_and_never_reaches_its_o
         .await
         .expect("the offline store is writable");
     assert_eq!(inserted, InsertOutcome::RecipientRetired);
+    assert_eq!(server.offline_messages(&alice).await, 0);
+}
+
+/// The stream-management session of `resource` that `stream` names, as the
+/// session registry keeps it while it waits for a resumption.
+fn detached_session(stream: &SmSessionId, resource: &FullJid) -> PersistedSession {
+    PersistedSession {
+        stream_id: stream.clone(),
+        user_id: resource
+            .node()
+            .map(|node| node.to_string())
+            .unwrap_or_default(),
+        jid: resource.clone(),
+        occupancy_session: OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 1,
+        last_acked: 0,
+        replay_gap_through: None,
+        max_resume_time: Some(60),
+        detached_at: chrono::Utc::now(),
+        max_resume_duration: Duration::from_secs(60),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+    }
+}
+
+/// Ingress custody the session registry still holds when the account it is
+/// for is retired, of a stream whose session is gone, is ended without
+/// delivery by the recovery of such custody: the offline store refuses the
+/// payload for the retired account (`CustodyInsertOutcome::RecipientRetired`
+/// in the custody transfer), the promotion discards it, and the custody is
+/// completed as `Tombstoned`, as a retraction's scrub ends it, so that no
+/// later recovery hands the payload on. The registry here is the one that
+/// keeps custody outside the durable stream-management authority.
+#[tokio::test]
+async fn custody_of_a_retired_accounts_stanza_is_tombstoned_by_the_recovery() {
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let server = Server::start_with_offline_store_and_sm(persistence.clone()).await;
+    let alice = server.account("alice").await;
+    server.account("bob").await;
+    let resource: FullJid = alice.with_resource_str("phone").expect("full JID");
+
+    // Bob's message was accepted for Alice's resource on a stream whose
+    // session then ended: the custody is pending, and no session protects
+    // its stream.
+    let stream = SmSessionId::new(format!("retired-custody-{}", uuid::Uuid::new_v4()));
+    let mut message = direct_message(&resource, "held-legacy");
+    message.from = Some(
+        "bob@example.com/desk"
+            .parse::<jid::Jid>()
+            .expect("Bob's resource"),
+    );
+    let receipt = chrono::Utc::now();
+    let append = PersistedIngressAppend {
+        key: SmIngressAppendKey {
+            message_key: MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: resource.clone(),
+        },
+        accepting_stream: stream.clone(),
+        sequence: 1,
+        payload: Stanza::Message(message),
+        original_receipt_at: receipt,
+        disposition: IngressCustodyDisposition::Pending,
+        appended_at: receipt,
+    };
+    persistence
+        .store_session_atomic_with_ingress_append(
+            detached_session(&stream, &resource),
+            Vec::new(),
+            append.clone(),
+        )
+        .await
+        .expect("the custody is recorded");
+    persistence
+        .delete_session(&stream)
+        .await
+        .expect("the session ends");
+    assert_eq!(pending_custody(&server, &resource).await, 1);
+
+    // The account is retired; its sessions' ending is not run here, so the
+    // custody is still pending when the recovery reads it.
+    server.retire(&alice).await;
+
+    assert!(
+        run_ingress_custody_sweep(&server.state).await,
+        "the recovery settles every candidate"
+    );
+    let ended = server
+        .state
+        .deps
+        .protocol
+        .sm_session_registry
+        .get_ingress_append(&append.key)
+        .await
+        .expect("the custody is readable")
+        .expect("the custody is kept as proof");
+    assert_eq!(ended.disposition, IngressCustodyDisposition::Tombstoned);
+    assert_eq!(pending_custody(&server, &resource).await, 0);
+    assert_eq!(server.offline_messages(&alice).await, 0);
+
+    // A later recovery finds nothing of the account's to hand on.
+    assert!(run_ingress_custody_sweep(&server.state).await);
     assert_eq!(server.offline_messages(&alice).await, 0);
 }

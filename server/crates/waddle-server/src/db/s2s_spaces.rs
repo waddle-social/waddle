@@ -1,5 +1,5 @@
 //! Stores of the Spaces accounts at other servers use over S2S (ADR-0020
-//! D10; XEP-0503 over XEP-0060; migrations 2012 and 2013):
+//! D10; XEP-0503 over XEP-0060; migrations 2011 and 2012):
 //!
 //! - which Spaces are open to other servers ([`FederatedSpaces`]): a row
 //!   for each Space whose `federated` setting is on, bound to the PubSub

@@ -52,7 +52,7 @@ not run until verification (D9):
   referring to the archive with the push notification candidate a local
   direct message raises, and a sender without a resource stored whole;
 - `crates/waddle-server/tests/account_jid_retirement.rs` (edited):
-  retirement removes the account's rows of migrations 2010 and 2011;
+  retirement removes the account's rows of migrations 2009 and 2010;
 - `crates/waddle-server/tests/xep0280_s2s_account_carbons_ws.rs`:
   received and sent carbons of messages exchanged with remote accounts,
   a remote message to the bare or a full JID copied to the account's
@@ -105,7 +105,7 @@ The implementation is the router's account path in
 `crates/waddle-server/src/s2s/route/` (`accounts.rs`, `router/accounts.rs`
 and the hooks in `router.rs`, `room_delivery.rs` and `reach.rs`), the
 stores in `crates/waddle-server/src/db/s2s_accounts.rs` with migrations
-2010 and 2011, the account side in
+2009 and 2010, the account side in
 `crates/waddle-server/src/server/routes/websocket/s2s_accounts.rs` and
 `handlers/presence/remote.rs`, the outbound changes in
 `handlers/unserved_route.rs`, `handlers/iq/destination_route.rs`, the
@@ -219,7 +219,7 @@ remove every row keyed by its JID, and the account's open streams end
 only once each replica takes the retirement up (host-grant design,
 "Non-reuse of retired account JIDs"); a retired JID is nonexistent here
 from the ledger's commit on, even while such rows or a resource remain. Retirement does remove, in its
-transaction, the rows of migrations 2010 and 2011 for the account: its
+transaction, the rows of migrations 2009 and 2010 for the account: its
 recorded subscription requests, its remote PubSub subscription records
 and the offline admissions of strangers' messages.
 
@@ -259,7 +259,7 @@ and the offline admissions of strangers' messages.
   messages are admitted within bounds per day: 32 from one sender, 128
   from one sender domain (the domain of the sender's JID, an IP literal as
   written) and 512 from all strangers together per account
-  (`s2s_remote_offline_admissions`, migration 2011); a contact is held
+  (`s2s_remote_offline_admissions`, migration 2010); a contact is held
   only to the store's own quota. A message is classified before it is
   admitted, so that one the store would not keep never uses a stranger's
   share. A message beyond a bound or the quota, or one the store refuses,
@@ -490,7 +490,7 @@ change is stored; when the store fails nothing is announced.
   pre-approval is cleared, the account's interested resources receive a
   roster push, the sender receives `subscribed` and then the current
   presence of each available resource (§3.1.5). Otherwise the request is
-  recorded in `s2s_pending_subscriptions` (migration 2010), one per sender
+  recorded in `s2s_pending_subscriptions` (migration 2009), one per sender
   and account, replacing an earlier one (§3.1.3 rule 4), and delivered to
   every available resource. A recorded request is delivered again on the
   first available presence of every new session until the account
@@ -591,7 +591,7 @@ delivered, under the headline rules above, only when one of these holds:
 - the account subscribed to every node the message's events name, of that
   service: a bound resource of the account sent the service an IQ `set`
   with a `<subscribe/>` for each node, and the WebSocket layer recorded it
-  in `s2s_remote_pubsub_subscriptions` (migration 2010) once the router
+  in `s2s_remote_pubsub_subscriptions` (migration 2009) once the router
   took the request; an `<unsubscribe/>` the router takes removes the
   record. An event child that names no node, or a message naming more
   than 8 nodes, never passes this way;
@@ -768,8 +768,8 @@ account from a stream. Behaviour visible while S2S is disabled:
   domains that the prune used to remove stay until their owner removes
   them.
 
-Migration 2010 creates `s2s_pending_subscriptions` and
-`s2s_remote_pubsub_subscriptions`, and migration 2011
+Migration 2009 creates `s2s_pending_subscriptions` and
+`s2s_remote_pubsub_subscriptions`, and migration 2010
 `s2s_remote_offline_admissions`, on both engines; the owner phase grants
 the runtime `SELECT, INSERT, UPDATE, DELETE` on all three. They stay
 empty while S2S is off. They belong to no restricted same-pool runtime
@@ -792,7 +792,7 @@ store. This is the slice's rollout part (G24).
 | G18-11 | No path answers a remote sender's message: the account side, the expiry of a detached session and the ingress quota bounce all drop instead of bouncing a sender at a domain the deployment does not serve. | Bouncing on quota as for local senders (rejected: tells the sender the account is offline). |
 | G18-12 | The router abandons account work at its deadline and the account side then applies nothing more; roster read-modify-write runs under a per-account lock; a change is announced only once stored. | Letting abandoned work run to its end (replaced: its effects could land after the sender's next stanza's). |
 | G18-14 | A remote sender's `chat` or `normal` message is accepted through the ingress authority as the recipient's half of a local direct message: the recipient's archive, inbox, received carbons, offline row and push notification, nothing of the sender's; an account-target acceptance arm checks D1 against the snapshot captured when the submission was built, and reads the recipient's existence, the ledger included, in the transaction; a plan that would answer the sender or act beyond the recipient's account is not committed; the acceptance's frames are never sent (owner decision, 2026-11-17). | A `Transient` offline row outside the ingress commit, without archive, inbox or push (replaced); `IngressPrincipal::Remote`'s room arm (rejected: it admits only a room's bare JID, decided on the room's witness). |
-| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check, until the replica that holds it ends it; retirement removes the account's rows of migrations 2010 and 2011. | Relying on the end of the stream alone (rejected: each replica ends it only when it takes the retirement up, and the router's check covers the time before); refusing account traffic only (replaced: requests and room traffic still left). |
+| G18-13 | A retired account's open stream sends nothing to remote JIDs, account traffic, IQ requests and responses and room traffic alike, refused at the router with a fail-closed check, until the replica that holds it ends it; retirement removes the account's rows of migrations 2009 and 2010. | Relying on the end of the stream alone (rejected: each replica ends it only when it takes the retirement up, and the router's check covers the time before); refusing account traffic only (replaced: requests and room traffic still left). |
 
 ## Restrictions and risks
 

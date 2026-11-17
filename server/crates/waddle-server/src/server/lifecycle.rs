@@ -212,6 +212,10 @@ pub async fn start_with_config_and_owner_outbox(
             anyhow::anyhow!("failed to initialize MUC destroy completion outbox: {error}")
         })?;
     }
+    // Every account provisioning, session creation and offline-store write
+    // reads the ledger of retired JIDs; a role that cannot is refused here,
+    // by name, before any of them runs.
+    crate::auth::retirement::verify_ledger_readable(db_pool.global()).await?;
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
     let permission_actor_impl = if server_config.spicedb.is_none() && fixed_test_account_enabled() {
