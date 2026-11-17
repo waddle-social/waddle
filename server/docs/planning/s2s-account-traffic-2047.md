@@ -353,9 +353,14 @@ inbox and archive only as the conversation's peer.
   that was unavailable or had a negative priority holds the message too,
   and only an account with no session at all stores it offline.
 - **Only the recipient's account.** The plan is committed only when every
-  effect acts on the recipient's account: its archive and inbox, its
-  resources, its detached sessions, its offline store and its
-  notification state. A plan that fails, refuses the message, answers
+  effect and every recorded intent acts on the recipient's account: its
+  archive and inbox, its resources, its detached sessions, its offline
+  store, its notification and link-preview state, and the state of its
+  own conversation with the sender (the call state of the pair, with the
+  recipient's projection only; the removal from its sessions' replay of
+  a message the sender wrote). The classifier matches every intent and
+  every effect exhaustively, so a new kind refuses nothing silently: it
+  does not compile until it is classified. A plan that fails, refuses the message, answers
   its sender (an error reply, the bounce of a blocking list read in the
   recipient pass, the RFC 6121 §8.5.1 bounce of an account that vanished
   meanwhile) or acts on anybody else is not committed, and nothing
@@ -369,22 +374,39 @@ inbox and archive only as the conversation's peer.
   beyond them, or one the store would not keep, is dropped unanswered.
   The plan decides, not the resource selected before it: a resource that
   left meanwhile sends the message to the store, within the bounds.
-- **Retractions.** The recipient pass replaces the message a XEP-0424
-  retraction names in the recipient's archive with a tombstone; for a
-  local sender its own server checks first that the sender wrote it
-  (XEP-0424 0.5.0, Business Rules: a retraction is processed only when it
-  and the original message come from the same bare JID). For a remote
-  sender the account side checks it: a retraction naming an
-  archived message another sender wrote, or whose target cannot be read,
-  is dropped unanswered. A correction (XEP-0308) names its target by the
-  sender and its origin id, and needs no such check.
+- **Retractions and corrections.** The recipient pass replaces the
+  message a XEP-0424 retraction names in the recipient's archive with a
+  tombstone, and keys a XEP-0308 correction's state under the message it
+  replaces; for a local sender its own server checks first that the
+  sender wrote it (XEP-0424 0.5.0, Business Rules: a retraction is
+  processed only when it and the original message come from the same
+  bare JID; XEP-0308 §5). For a remote sender the account side checks it,
+  by the lookup the tombstone resolves its target with: a retraction or
+  correction naming an archived message another sender wrote, or whose
+  target cannot be read, is dropped unanswered. The link-preview
+  references a retraction clears are the resolved row's alone, never
+  those another sender's message keeps under the same wire id, and a
+  correction's references are keyed under the replaced message only when
+  the corrector wrote it.
+- **Call threads (XEP-0353).** A remote sender's `propose` records a
+  pending call offer only within bounds: eight pending offers per remote
+  initiator, and 32 per local account from remote initiators together.
+  The process's table of pending offers is shared by every account and,
+  once full, prunes the oldest offer of the initiator that holds the
+  most, so a stranger's flood crowds out only its own. A `finish` ends
+  the call thread in the local account's inbox only; the remote peer's
+  inbox is its own server's. An offer beyond the bounds leaves the
+  message as it is: it is archived and delivered, and only its call
+  thread is not projected.
 - **Acceptance (D1 at the effect).** The acceptance arm of the remote
-  principal for an account target decides, in the acceptance
-  transaction, the sender's domain under the S2S admission policy the
-  replica ran when it built the submission, and that the recipient is an
-  account (`users`, read `FOR SHARE` on PostgreSQL, or `native_users`)
-  whose JID the ledger of retired JIDs does not hold. A refusal commits
-  nothing and is the same failed assertion whatever was refused.
+  principal for an account target checks, in the acceptance transaction,
+  the sender's domain against the S2S admission policy the replica ran
+  when it built the submission (captured then, before the commit; the
+  transaction reads no newer snapshot), and reads that the recipient is
+  an account at a served domain (`users` by its lookup key, read `FOR KEY
+  SHARE` on PostgreSQL, or `native_users`) whose JID the ledger of retired
+  JIDs does not hold. A refusal commits nothing and is the same failed
+  assertion whatever was refused.
 - **Receipt.** The acceptance has no stream-management position and no
   socket to answer: the frames its execution produces for the sender are
   never sent, and their obligations are recorded as answered. The
@@ -755,8 +777,17 @@ store. This is the slice's rollout part (G24).
   acceptance that times out, exhausts its retries or cannot tell whether
   it committed is answered nothing and leaves nothing to retry: S2S has
   no retransmission of a stanza the receiving server took, so neither the
-  sender nor the recipient learns of it. One that committed after all is
-  the ingress authority's recovery's to finish.
+  sender nor the recipient learns of it (owner decision, accepted). One
+  that committed after all is the ingress authority's recovery's to
+  finish. `waddle.s2s.account_traffic.direct_failed` counts them, apart
+  from the rule refusals `direct_refused` counts.
+- **The stream does not deduplicate.** A remote server that sends a
+  stanza again (after a stream failure, for example) has it accepted
+  again unless the ingress authority finds it is the same message: its
+  alias of sender, recipient and XEP-0359 `<origin-id/>` resolves a
+  message resent with the same origin-id to the earlier acceptance, which
+  commits nothing new. A message without an origin-id is accepted again,
+  and archived and delivered twice.
 - **Messages from senders without a resource** keep the earlier producer:
   delivered through the recipient's connection and, with no resource,
   stored whole outside the archive, without inbox or push.
@@ -771,8 +802,13 @@ store. This is the slice's rollout part (G24).
   fetched for it: a XEP-0511 link card or a link-preview request it
   carries is removed before anything else, since a client trusts a card
   as this server's, and no card is stamped in its place, so a remote
-  sender's message reaches the recipient without a preview. Only a
-  retraction's author is checked for a remote sender.
+  sender's message reaches the recipient without a preview. No
+  link-preview reference is recorded or cleared for it: it never names
+  this deployment's upload slots, and its wire ids, which it chooses,
+  never name another message's references. A retraction's and a
+  correction's target is checked for a remote sender: one that names a
+  message of the recipient's archive another sender wrote is dropped
+  unanswered. A reply's or a reaction's target is not checked.
 - **A stranger's messages to a live resource are unbounded** beyond the
   router's queues: each is archived and projected, as it was by the
   recipient pass of the resource's connection.

@@ -12,7 +12,11 @@
 //! state of this deployment belongs to the sender.
 
 use jid::{BareJid, Jid};
-use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{
+    InboxProjectionMutation, IngressEffectIntent, PendingDeliveryMutation, PlannedDmCallState,
+    TombstoneReplayTarget,
+};
+use waddle_xmpp::tombstone::TombstoneTarget;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
@@ -74,34 +78,43 @@ pub(crate) enum RemoteDirectPlan {
     Refused,
 }
 
-/// Classify a plan for a remote sender's direct message to `recipient`.
+/// Classify a plan for a remote `sender`'s direct message to `recipient`.
 ///
-/// Only effects on the recipient's own account are accepted: its archive
-/// and inbox, deliveries to its resources, its detached sessions and its
-/// offline store, received carbons to its resources and its notification
-/// and link-preview state. Anything addressed to the sender (an error
-/// reply, a bounce, a frame) or to anybody else refuses the whole plan, so
-/// that no path answers a remote sender and no state of the sender's
-/// account is kept here.
+/// Only work on the recipient's own account is accepted: its archive and
+/// inbox, deliveries to its resources, its detached sessions and its
+/// offline store, received carbons to its resources, its notification and
+/// link-preview state, and the state of its own conversation with the
+/// sender (a call thread between the two, the removal of the sender's
+/// retracted message from what the recipient's sessions would replay).
+/// Every intent and every effect is classified, and each match is
+/// exhaustive, so a new variant does not compile until it is classified.
+/// Anything addressed to the sender (an error reply, a bounce, a frame), to
+/// anybody else, or that this function does not classify refuses the whole
+/// plan, so that no path answers a remote sender and no state of the
+/// sender's account, or of a third account, is kept or changed here.
 pub(crate) fn classify_remote_direct_plan(
     plan: &IngressPlan,
     recipient: &BareJid,
+    sender: &BareJid,
 ) -> RemoteDirectPlan {
     if plan.failure.is_some()
         || plan.rejection.is_some()
         || plan.error_reply.is_some()
         || !matches!(plan.room_execution, RoomExecutionPath::None)
-        || plan
-            .intents
-            .iter()
-            .any(|intent| matches!(intent, IngressEffectIntent::ErrorReply { .. }))
+    {
+        return RemoteDirectPlan::Refused;
+    }
+    if !plan
+        .intents
+        .iter()
+        .all(|intent| recipient_intent(intent, recipient, sender))
     {
         return RemoteDirectPlan::Refused;
     }
     if !plan
         .plan
         .iter()
-        .all(|planned| recipient_effect(&planned.effect, recipient))
+        .all(|planned| recipient_effect(&planned.effect, recipient, sender))
     {
         return RemoteDirectPlan::Refused;
     }
@@ -120,8 +133,114 @@ pub(crate) fn classify_remote_direct_plan(
     RemoteDirectPlan::Recipient { held }
 }
 
-/// Whether `effect` acts on `recipient`'s account only.
-fn recipient_effect(effect: &Effect, recipient: &BareJid) -> bool {
+/// Whether `intent`, as the acceptance would record it, names `recipient`'s
+/// account only, or the conversation between `recipient` and `sender`.
+fn recipient_intent(intent: &IngressEffectIntent, recipient: &BareJid, sender: &BareJid) -> bool {
+    match intent {
+        IngressEffectIntent::ArchiveAuthoritative { archive, by, .. } => {
+            archive == recipient && by == recipient
+        }
+        IngressEffectIntent::RouteDirect {
+            recipient: routed,
+            fanout,
+            ..
+        } => routed == recipient && fanout.iter().all(|resource| resource.to_bare() == *recipient),
+        IngressEffectIntent::Carbons {
+            carbon_recipients,
+            excluded_source,
+            ..
+        } => {
+            excluded_source.to_bare() == *recipient
+                && carbon_recipients
+                    .iter()
+                    .all(|resource| resource.to_bare() == *recipient)
+        }
+        IngressEffectIntent::RelayCarbons { owner, exclude, .. } => {
+            owner == recipient && exclude.iter().all(|resource| resource.to_bare() == *recipient)
+        }
+        IngressEffectIntent::InboxProject { owner, mutation } => {
+            owner == recipient
+                && match mutation {
+                    InboxProjectionMutation::Direct { .. }
+                    | InboxProjectionMutation::DirectCallThreadAnchor { .. }
+                    | InboxProjectionMutation::DirectCallThreadEnded { .. } => true,
+                    InboxProjectionMutation::GroupchatChannel { .. }
+                    | InboxProjectionMutation::GroupchatThread { .. }
+                    | InboxProjectionMutation::GroupchatChannelRead { .. }
+                    | InboxProjectionMutation::GroupchatThreadRead { .. }
+                    | InboxProjectionMutation::GroupchatChannelAndThread { .. } => false,
+                }
+        }
+        IngressEffectIntent::NotificationActivityPreview { owner, .. } => owner == recipient,
+        IngressEffectIntent::PendingDelivery { mutation } => match mutation {
+            PendingDeliveryMutation::Archived {
+                recipient: stored, ..
+            }
+            | PendingDeliveryMutation::Transient {
+                recipient: stored, ..
+            } => stored == recipient,
+        },
+        IngressEffectIntent::LinkPreviewMediaRef { mutation } => mutation.archive == *recipient,
+        IngressEffectIntent::RetractionTombstone { mutation } => mutation.archive == *recipient,
+        IngressEffectIntent::TombstoneReplayDeletion { target, .. } => match target {
+            TombstoneReplayTarget::Direct {
+                author, archive, ..
+            } => archive == recipient && author == sender,
+            TombstoneReplayTarget::Groupchat { .. } => false,
+        },
+        IngressEffectIntent::DmCallThreadState { state, .. } => {
+            conversation_call_state(state, recipient, sender)
+        }
+        // A remote sender's direct message does nothing else here: no room,
+        // no other account's state, no pin or invitation, and no answer.
+        IngressEffectIntent::SystemMessageArchive { .. }
+        | IngressEffectIntent::RouteMucGroupchat { .. }
+        | IngressEffectIntent::RouteMucSystemBroadcast { .. }
+        | IngressEffectIntent::RouteOccupantPm { .. }
+        | IngressEffectIntent::DispatchToRoomRemote { .. }
+        | IngressEffectIntent::GroupchatNotificationRecovery { .. }
+        | IngressEffectIntent::DmPinMutation { .. }
+        | IngressEffectIntent::MucInviteMembershipGrant { .. }
+        | IngressEffectIntent::MucInviteLedger { .. }
+        | IngressEffectIntent::GroupDmMembershipGrant { .. }
+        | IngressEffectIntent::GroupDmInviteLedger { .. }
+        | IngressEffectIntent::RoomSubjectMutation { .. }
+        | IngressEffectIntent::CallSignal { .. }
+        | IngressEffectIntent::Pin { .. }
+        | IngressEffectIntent::RoomObserver { .. }
+        | IngressEffectIntent::Extension { .. }
+        | IngressEffectIntent::ErrorReply { .. } => false,
+    }
+}
+
+/// Whether `state` is the call state of the conversation between
+/// `recipient` and `sender` that only the recipient's side has projected:
+/// the sender's call-thread projection is its own server's.
+fn conversation_call_state(
+    state: &PlannedDmCallState,
+    recipient: &BareJid,
+    sender: &BareJid,
+) -> bool {
+    let key = &state.key;
+    let pair = (&key.low_peer == recipient && &key.high_peer == sender)
+        || (&key.low_peer == sender && &key.high_peer == recipient);
+    pair && state.projected.iter().all(|owner| owner == recipient)
+}
+
+/// Whether `target` names a message `sender` wrote in `recipient`'s
+/// archive.
+fn sender_tombstone(target: &TombstoneTarget, recipient: &BareJid, sender: &BareJid) -> bool {
+    match target {
+        TombstoneTarget::Direct {
+            author, archive, ..
+        } => archive == recipient && author == sender,
+        TombstoneTarget::Groupchat { .. } => false,
+    }
+}
+
+/// Whether `effect` acts on `recipient`'s account only, or on its
+/// conversation with `sender`.
+fn recipient_effect(effect: &Effect, recipient: &BareJid, sender: &BareJid) -> bool {
     match effect {
         Effect::Durable(DurableEffect::Direct(direct)) => match direct {
             DurableDirectEffect::ArchiveDirect { archive, .. }
@@ -156,10 +275,16 @@ fn recipient_effect(effect: &Effect, recipient: &BareJid) -> bool {
         Effect::External(ExternalEffect::Direct(direct)) => match direct {
             ExternalDirectEffect::NotificationActivity { owner, .. }
             | ExternalDirectEffect::PushInboxUpdate { owner, .. } => owner == recipient,
-            ExternalDirectEffect::LinkPreviewRefs { .. }
-            | ExternalDirectEffect::ClearLinkPreviewRefs { .. }
-            | ExternalDirectEffect::DmCallThreadState { .. }
-            | ExternalDirectEffect::ScrubReplayForTombstone { .. } => true,
+            ExternalDirectEffect::LinkPreviewRefs { mutations }
+            | ExternalDirectEffect::ClearLinkPreviewRefs { mutations } => mutations
+                .iter()
+                .all(|mutation| mutation.archive == *recipient),
+            ExternalDirectEffect::DmCallThreadState { state, .. } => {
+                conversation_call_state(state, recipient, sender)
+            }
+            ExternalDirectEffect::ScrubReplayForTombstone { target } => {
+                sender_tombstone(target, recipient, sender)
+            }
         },
         Effect::Durable(DurableEffect::Room(_))
         | Effect::External(

@@ -16,7 +16,9 @@
 #[path = "s2s_account_support/mod.rs"]
 mod support;
 
-use support::{federated, holds, message, receive, Federated, Pki, BOB_PHONE, MALLORY};
+use support::{
+    federated, full_jid, holds, message, receive, send, Federated, Pki, BOB_PHONE, MALLORY,
+};
 use waddle_xmpp::xep::xep0424::build_retract_element;
 use xmpp_parsers::message::{Message, MessageType};
 
@@ -80,6 +82,51 @@ async fn a_remote_retraction_of_another_senders_message_is_dropped_unanswered() 
     assert_eq!(after.id, before.id);
     assert_eq!(after.body.as_deref(), Some("keep this"));
     assert_eq!(after.stanza_xml, before.stanza_xml);
+}
+
+#[tokio::test]
+async fn a_remote_retraction_of_the_local_accounts_message_is_dropped_unanswered() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    federated.account("alice").await;
+    federated.account("carol").await;
+    let mut phone = federated.online("alice", "phone", 5).await;
+    // Alice's own message, to another local account, is in her archive.
+    let from = full_jid(&phone).to_string();
+    send(
+        &mut phone,
+        message(
+            &from,
+            "carol@example.com",
+            MessageType::Chat,
+            "alices-message",
+            "alice wrote this",
+        ),
+    )
+    .await;
+    let before = support::wait_for_archived(&federated, ALICE, "alices-message").await;
+    let mark = federated.peer_mark();
+
+    // Bob names Alice's message by its id.
+    federated
+        .from_peer(retraction(
+            BOB_PHONE,
+            ALICE,
+            "bob-retracts-alices",
+            "alices-message",
+        ))
+        .await;
+    let barrier = federated.peer_barrier(BOB_PHONE, ALICE).await;
+
+    assert!(federated.peer_received_besides(mark, &barrier).is_empty());
+    let seen = federated.client_settle(&mut phone).await;
+    assert!(!holds(&seen, "message", "bob-retracts-alices"), "{seen:?}");
+    assert!(!tombstoned(&federated, ALICE, "alices-message").await);
+    let after = support::archived(&federated, ALICE, "alices-message")
+        .await
+        .expect("Alice's message is still archived");
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.body.as_deref(), Some("alice wrote this"));
 }
 
 #[tokio::test]

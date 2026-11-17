@@ -444,6 +444,11 @@ pub(in crate::server::routes::interpret) fn prune_dm_call_thread_state(
     prune_orphan_dm_call_thread_projections(state);
 }
 
+/// Bring the process's pending call offers back to
+/// [`DM_CALL_STATE_MAX_KEYS`], fairly between accounts: each offer removed
+/// is the oldest of the initiator that holds the most, so that one
+/// initiator's offers, a stranger's flood among them, crowd out only its
+/// own.
 pub(in crate::server::routes::interpret::direct_archive) fn prune_oldest_pending_dm_call_offers(
     state: &WebSocketState,
 ) {
@@ -451,15 +456,36 @@ pub(in crate::server::routes::interpret::direct_archive) fn prune_oldest_pending
     if len <= super::DM_CALL_STATE_MAX_KEYS {
         return;
     }
-    let mut offers = state
-        .deps
-        .protocol
-        .pending_dm_call_offers
-        .iter()
-        .map(|entry| (entry.key().clone(), entry.value().started))
-        .collect::<Vec<_>>();
-    offers.sort_by_key(|(_, started)| *started);
-    for (key, _) in offers.into_iter().take(len - DM_CALL_STATE_MAX_KEYS) {
+    let mut by_initiator: std::collections::HashMap<
+        BareJid,
+        Vec<(DmCallThreadKey, chrono::DateTime<chrono::Utc>)>,
+    > = std::collections::HashMap::new();
+    for entry in state.deps.protocol.pending_dm_call_offers.iter() {
+        by_initiator
+            .entry(entry.value().initiator.clone())
+            .or_default()
+            .push((entry.key().clone(), entry.value().started));
+    }
+    // Newest last, so that each initiator's oldest is at the front.
+    for offers in by_initiator.values_mut() {
+        offers.sort_by_key(|(_, started)| std::cmp::Reverse(*started));
+    }
+    for _ in 0..len - DM_CALL_STATE_MAX_KEYS {
+        // The initiator with the most offers; between equals, the one whose
+        // oldest offer is older.
+        let Some(offers) = by_initiator.values_mut().max_by(|left, right| {
+            left.len().cmp(&right.len()).then_with(|| {
+                let oldest = |offers: &Vec<(DmCallThreadKey, chrono::DateTime<chrono::Utc>)>| {
+                    offers.last().map(|(_, started)| *started)
+                };
+                oldest(right).cmp(&oldest(left))
+            })
+        }) else {
+            return;
+        };
+        let Some((key, _)) = offers.pop() else {
+            return;
+        };
         state.deps.protocol.pending_dm_call_offers.remove(&key);
     }
 }
@@ -596,10 +622,18 @@ pub(in crate::server::routes::interpret::direct_archive) async fn update_direct_
     let Some(state) = deps.web_socket_state else {
         return;
     };
+    // A sender at another server never references this deployment's
+    // upload slots: a cached preview is stamped only on a local sender's
+    // message, and a remote one's card is removed on arrival. Nothing is
+    // recorded or cleared for its message, so that its ids, which it
+    // chooses, never name another message's references either.
+    if !deps.serves(sender) {
+        return;
+    }
     let global_db_actor = state.deps.app_state.db_pool.global_actor();
     let correction_target_message_id =
         if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
-            match super::resolve_direct_correction_target_message_id(
+            match correction_target_or_own_message(
                 deps,
                 archive_jid,
                 sender,
@@ -607,8 +641,7 @@ pub(in crate::server::routes::interpret::direct_archive) async fn update_direct_
             )
             .await
             {
-                Ok(target) => target
-                    .or_else(|| waddle_xmpp::mam::RichMessageId::try_new(correction.replaces_id)),
+                Ok(target) => target,
                 Err(error) => {
                     warn!(%archive_jid, %error, "correction preview target lookup failed");
                     deps.effects
@@ -650,6 +683,36 @@ pub(in crate::server::routes::interpret::direct_archive) async fn update_direct_
     {
         deps.capture_intent(intent);
     }
+}
+
+/// The id a correction's preview references are kept under: the archive id
+/// of the message `sender` wrote whose origin id it replaces, or else the
+/// wire id it replaces when `archive` holds a message under that wire id
+/// that `sender` wrote. `None` when neither holds: a correction never keys
+/// its references under a message another sender wrote, and its own wire
+/// id is used instead.
+async fn correction_target_or_own_message(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    sender: &BareJid,
+    replaces_id: &str,
+) -> Result<Option<waddle_xmpp::mam::RichMessageId>, waddle_xmpp::mam::MamStorageError> {
+    if let Some(target) =
+        super::resolve_direct_correction_target_message_id(deps, archive_jid, sender, replaces_id)
+            .await?
+    {
+        return Ok(Some(target));
+    }
+    let Some(mam_storage) = deps.mam_storage else {
+        return Ok(None);
+    };
+    let authored = mam_storage
+        .get_message_by_message_id(archive_jid, replaces_id)
+        .await?
+        .is_some_and(|row| row.from.to_bare() == *sender);
+    Ok(authored
+        .then(|| waddle_xmpp::mam::RichMessageId::try_new(replaces_id.to_owned()))
+        .flatten())
 }
 
 pub(in crate::server::routes::interpret) async fn resolve_direct_correction_target_message_id(
@@ -706,24 +769,37 @@ pub(in crate::server::routes::interpret::direct_archive) async fn apply_direct_r
                     deps.capture_intent(IngressEffectIntent::RetractionTombstone {
                         mutation: RetractionTombstoneMutation {
                             archive: archive_jid.clone(),
-                            target_stanza_id,
+                            target_stanza_id: target_stanza_id.clone(),
                             retraction_stanza_id,
                         },
                     });
                 }
+                // The references cleared are the resolved row's, not every
+                // reference kept under the retracted wire id: another
+                // sender's message can carry the same wire id.
+                let author = message.from.as_ref().map(|from| from.to_bare());
                 if deps.effects.is_planning() {
-                    if let Some(message_id) =
-                        waddle_xmpp::mam::RichMessageId::try_new(retraction.retracts_id.clone())
-                    {
-                        super::super::preview_plan::clear(deps, archive_jid, &message_id).await;
+                    if let (Some(message_id), Some(author)) = (
+                        waddle_xmpp::mam::RichMessageId::try_new(retraction.retracts_id.clone()),
+                        author.as_ref(),
+                    ) {
+                        super::super::preview_plan::clear_resolved(
+                            deps,
+                            archive_jid,
+                            &message_id,
+                            &target_stanza_id,
+                            author,
+                        )
+                        .await;
                     }
                     return;
                 }
                 if let Some(state) = deps.web_socket_state {
-                    for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                    for intent in crate::server::routes::websocket::link_preview_refs::clear_resolved_message_preview_refs(
                         state.deps.app_state.db_pool.global_actor(),
                         archive_jid,
                         &retraction.retracts_id,
+                        &target_stanza_id.id,
                     )
                     .await {
                         deps.capture_intent(intent);

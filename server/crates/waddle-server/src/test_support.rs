@@ -388,6 +388,35 @@ pub fn undone_join_recipients(
     )
 }
 
+/// Record in `state`'s call state an active XEP-0353 call under `key`,
+/// which `initiator` proposed and the other peer accepted, whose call
+/// thread the peers in `projected` have projected into their inboxes: the
+/// state a replica holds once a `proceed` was accepted.
+#[cfg(feature = "test-support")]
+pub fn seed_active_dm_call(
+    state: &WebSocketState,
+    key: waddle_xmpp::ingress::DmCallThreadKey,
+    initiator: jid::BareJid,
+    projected: &[jid::BareJid],
+) {
+    let protocol = &state.deps.protocol;
+    for owner in projected {
+        protocol
+            .dm_call_thread_projections
+            .insert((owner.clone(), key.clone()));
+    }
+    protocol.dm_call_threads.insert(
+        key.clone(),
+        crate::server::routes::websocket::ActiveCallThread {
+            anchor_origin_id: String::new(),
+            initiator,
+            media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            started: chrono::Utc::now(),
+            thread_id: key.sid.0,
+        },
+    );
+}
+
 /// Make the account `localpart` of the state's domain an owner of the
 /// deployment in the legacy permission store: the standing that lets an
 /// account create a room no channel backs.

@@ -1250,7 +1250,7 @@ where
     // committed can still bind or resume; once this replica has taken the
     // retirement up, nothing of the account is published.
     if state.deps.protocol.retired_accounts.holds(&jid.to_bare()) {
-        info!(jid = %jid, "binding refused: the account is retired");
+        info!("binding refused: the account is retired");
         return RegistrationAfterFrame::AccountRetired;
     }
 

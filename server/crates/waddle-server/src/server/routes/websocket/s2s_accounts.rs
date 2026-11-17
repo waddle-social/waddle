@@ -866,35 +866,43 @@ async fn select_direct_route(
     Some(DirectRoute::Offline)
 }
 
-/// Whether a XEP-0424 retraction in `message`, from the remote `sender`,
-/// names a message of `account`'s archive that the sender wrote. The
-/// recipient pass tombstones the archived message the retraction names by
-/// its id; for a local sender its own server checked the author first, and
-/// for a remote one this does. A message that retracts nothing passes; one
-/// whose target another sender wrote, or whose target cannot be read, does
-/// not, and is dropped unanswered.
-async fn retracts_own_message(
+/// Whether a XEP-0424 retraction or a XEP-0308 correction in `message`,
+/// from the remote `sender`, names a message of `account`'s archive that
+/// the sender wrote. The recipient pass tombstones the archived message a
+/// retraction names by its id, and keys a correction's state under the
+/// message it replaces; for a local sender its own server checked the
+/// author first (XEP-0424 Business Rules, XEP-0308 §5), and for a remote
+/// one this does, by the same lookup the tombstone resolves its target
+/// with. A message that retracts and corrects nothing, or names a message
+/// the archive does not hold, passes; one whose target another sender
+/// wrote, or whose target cannot be read, does not, and is dropped
+/// unanswered.
+async fn targets_own_message(
     state: &WebSocketState,
     account: &BareJid,
     sender: &BareJid,
     message: &Message,
 ) -> bool {
-    let Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) =
-        waddle_xmpp::xep::xep0424::extract_retraction_from_message(message)
-    else {
-        return true;
+    let target = match waddle_xmpp::xep::xep0424::extract_retraction_from_message(message) {
+        Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) => {
+            retraction.retracts_id
+        }
+        _ => match waddle_xmpp::xep::extract_correction_from_message(message) {
+            Some(correction) => correction.replaces_id,
+            None => return true,
+        },
     };
     match state
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(account, &retraction.retracts_id)
+        .get_message_by_message_id(account, &target)
         .await
     {
         Ok(None) => true,
         Ok(Some(archived)) => archived.from.to_bare() == *sender,
         Err(error) => {
-            warn!(%error, "reading the target of a remote sender's retraction failed");
+            warn!(%error, "reading the target of a remote sender's retraction or correction failed");
             false
         }
     }
@@ -952,7 +960,7 @@ async fn receive_direct(
     let Some(route) = select_direct_route(state, account, full, &message).await else {
         return;
     };
-    if !retracts_own_message(state, account, &sender, &message).await {
+    if !targets_own_message(state, account, &sender, &message).await {
         telemetry::direct_refused();
         return;
     }
@@ -981,7 +989,7 @@ async fn receive_direct(
     };
     let deps = build_interpret_deps(state, None);
     let plan = plan_remote_direct_message(&deps, route.address(account), message.clone()).await;
-    let held = match classify_remote_direct_plan(&plan, account) {
+    let held = match classify_remote_direct_plan(&plan, account, &sender) {
         RemoteDirectPlan::Recipient { held } => held,
         RemoteDirectPlan::Empty => return,
         RemoteDirectPlan::Refused => {
@@ -1020,7 +1028,16 @@ async fn receive_direct(
     let authority = &state.deps.protocol.ingress;
     let decision = authority.commit(&submission).await;
     if !decision.class.advances() {
-        telemetry::direct_refused();
+        // The acceptance's assertions refuse a domain no longer admitted
+        // and a recipient that does not exist; anything else that did not
+        // commit is a failure, and the message is lost (S2S has no
+        // retransmission of a stanza the receiving server took).
+        if decision.class == waddle_xmpp::telemetry::attributes::IngressDecisionClass::PrincipalMissing
+        {
+            telemetry::direct_refused();
+        } else {
+            telemetry::direct_failed();
+        }
         return;
     }
     telemetry::direct_accepted();
@@ -1490,16 +1507,29 @@ pub(crate) mod telemetry {
         );
     }
 
-    /// A remote sender's direct message was dropped unanswered before or at
-    /// its acceptance: its plan would have answered the sender or acted
-    /// beyond the recipient's account, its retraction named another
-    /// sender's message, it could not be read as offered, or the acceptance
-    /// refused it.
+    /// A remote sender's direct message was refused unanswered before or
+    /// at its acceptance, by a rule: its plan would have answered the
+    /// sender or acted beyond the recipient's account, its retraction or
+    /// correction named another sender's message, it could not be read as
+    /// offered, or the acceptance's assertions refused its domain or its
+    /// recipient.
     pub(crate) fn direct_refused() {
         counter_add!(
             "waddle.s2s.account_traffic.direct_refused",
             "{stanza}",
-            "Direct messages from remote senders dropped unanswered before or at their ingress acceptance.",
+            "Direct messages from remote senders refused unanswered by a rule before or at their ingress acceptance.",
+            1,
+        );
+    }
+
+    /// A remote sender's direct message whose ingress acceptance failed to
+    /// commit (a timeout, an exhausted retry, an unknown outcome, a storage
+    /// failure): it is lost unanswered.
+    pub(crate) fn direct_failed() {
+        counter_add!(
+            "waddle.s2s.account_traffic.direct_failed",
+            "{stanza}",
+            "Direct messages from remote senders whose ingress acceptance did not commit, lost unanswered.",
             1,
         );
     }
