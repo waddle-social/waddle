@@ -22,8 +22,8 @@ through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings th
 `fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, the joined-spaces node's gates through
 `ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, the fixes before verification through
 `478f0f4292e53afb47e5d738f6acadcce1c48a7a`, and the merge of `main` with the first
-verification step's fixes through `fe3d6dd7f3b1ba51fc18b5c186eb08440f7235c4` (see the
-last refresh below); the original baseline and its limits remain unchanged.
+verification step's fixes through `60dd0aea40b014d8cc6b3cfe917ae40e78b3cb06` (see the
+last refreshes below); the original baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
 runtime behavior, authorization gate, schema, migration, CI job or activation.
@@ -1903,6 +1903,14 @@ added, and no producer of stream evidence changed.
   the workspace handlers' tests and the private event discovery test, and
   `publish_item` in the destroy completion's test and the PubSub storage
   tests.
+
+The selected evidence was refreshed a fifty-first time, through
+`60dd0aea40b014d8cc6b3cfe917ae40e78b3cb06`. One reviewed file changed: `auth/retirement.rs`, the
+documentation of `sweep_offline_spellings` (its read is one statement, so a
+store too large to read within its bound fails every run). The operator
+command now ends the account's sessions before it sweeps; that file is not
+in the inventory. No anchor moved, and the raw scan holds the same 1665
+records.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
