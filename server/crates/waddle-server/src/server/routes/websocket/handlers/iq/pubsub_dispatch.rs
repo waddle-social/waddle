@@ -485,8 +485,11 @@ pub(super) async fn handle_pubsub_iq(
                         state,
                         muc_domain,
                         spaces_domain,
-                        &node,
-                        &item_id,
+                        super::SpacesRetract {
+                            node: &node,
+                            item_id: &item_id,
+                            notify,
+                        },
                         authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await

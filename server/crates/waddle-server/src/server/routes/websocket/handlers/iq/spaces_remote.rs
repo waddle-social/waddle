@@ -13,7 +13,8 @@ use xmpp_parsers::iq::Iq;
 
 use super::pubsub_admin::handle_pubsub_admin_request;
 use super::{
-    handle_spaces_publish, handle_spaces_retract, spaces_service_bare_jid, WebSocketState,
+    handle_spaces_publish, handle_spaces_retract, spaces_service_bare_jid, SpacesRetract,
+    WebSocketState,
 };
 use crate::auth::Session;
 use crate::server::routes::websocket::ResolvedPrincipal;
@@ -62,14 +63,21 @@ pub(crate) async fn spaces_change_for_remote(
             )
             .await
         }
-        PubSubRequest::Retract { node, item_id, .. } => {
+        PubSubRequest::Retract {
+            node,
+            item_id,
+            notify,
+        } => {
             handle_spaces_retract(
                 iq,
                 state,
                 &domains.muc,
                 &domains.spaces,
-                &node,
-                &item_id,
+                SpacesRetract {
+                    node: &node,
+                    item_id: &item_id,
+                    notify,
+                },
                 Some(ResolvedPrincipal::from_authenticated_session(&named)),
             )
             .await

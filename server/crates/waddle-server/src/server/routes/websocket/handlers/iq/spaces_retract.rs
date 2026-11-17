@@ -4,8 +4,17 @@ use super::{
     spaces_service_bare_jid, warn, BareJid, PubSubError, WebSocketState, XmppError,
 };
 use crate::channel_space_links::ChannelSpaceLink;
+use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::identity::CanonicalBareJid;
+
+/// A retract of one item of a Space node: the node, the item and whether
+/// the request asked for subscribers to be notified (XEP-0060 §7.2.2.1).
+pub(super) struct SpacesRetract<'a> {
+    pub(super) node: &'a str,
+    pub(super) item_id: &'a str,
+    pub(super) notify: bool,
+}
 
 /// The channel whose parent grant on the Space node, and whose channel-space
 /// link to it, a retract removes.
@@ -19,10 +28,14 @@ pub(super) async fn handle_spaces_retract(
     state: &WebSocketState,
     muc_domain: &str,
     spaces_domain: &str,
-    node: &str,
-    item_id: &str,
+    retract: SpacesRetract<'_>,
     principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<xmpp_parsers::iq::Iq> {
+    let SpacesRetract {
+        node,
+        item_id,
+        notify,
+    } = retract;
     match spaces_node_mutation_allowed(state, principal, node).await {
         Ok(true) => {}
         Ok(false) => return vec![build_pubsub_error(iq, PubSubError::Forbidden)],
@@ -155,11 +168,31 @@ pub(super) async fn handle_spaces_retract(
         .await
     {
         Ok(true) => {
+            // Subscribers are notified once the retract stands, as for a
+            // publish: a Space node's `pubsub#notify_retract` is on
+            // (XEP-0503 node configuration), and a request may ask for it
+            // (XEP-0060 §7.2.2.1). Subscribers at other servers are queued
+            // from the fan-out like a publication.
+            let notified = || {
+                pubsub_fanout::fan_out_service_retract(
+                    state,
+                    pubsub_fanout::FanOutRetractRequest {
+                        owner: &spaces_jid,
+                        node,
+                        item_id,
+                    },
+                    notify,
+                )
+            };
             let Some(grant) = grant.as_ref() else {
+                notified().await;
                 return vec![build_pubsub_success(iq)];
             };
             match delete_channel_parent_tuple(state, &grant.channel_id, node).await {
-                Ok(_) => vec![build_pubsub_success(iq)],
+                Ok(_) => {
+                    notified().await;
+                    vec![build_pubsub_success(iq)]
+                }
                 Err(error) => {
                     if let Err(restore_error) = state
                         .deps

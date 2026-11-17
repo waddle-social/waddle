@@ -563,6 +563,17 @@ pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'
     fan_out_retract_with_options(state, req, None, false, false).await;
 }
 
+/// Service-node retractions with the request's `notify` (XEP-0060
+/// §7.2.2.1): subscribers are notified when the node's
+/// `pubsub#notify_retract` is on or the request asked for it.
+pub async fn fan_out_service_retract(
+    state: &WebSocketState,
+    req: FanOutRetractRequest<'_>,
+    notify: bool,
+) {
+    fan_out_retract_with_options(state, req, None, false, notify).await;
+}
+
 /// PEP retractions also reach roster contacts and the owner's other resources.
 pub async fn fan_out_pep_retract(
     state: &WebSocketState,

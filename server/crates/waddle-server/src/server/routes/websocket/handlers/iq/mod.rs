@@ -182,7 +182,7 @@ use spaces_discovery::{
 };
 use spaces_items::handle_spaces_items;
 use spaces_publish::handle_spaces_publish;
-use spaces_retract::handle_spaces_retract;
+use spaces_retract::{handle_spaces_retract, SpacesRetract};
 #[cfg(test)]
 pub use test_helpers::handle_iq;
 // Re-exported via `pub(super)` so submodules that wildcard-import the
