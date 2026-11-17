@@ -42,7 +42,11 @@
 //! cluster, and each empties the SpiceDB store first.
 #![cfg(feature = "test-support")]
 
+// The shared host-grant and ingress fixtures serve several suites; this one
+// uses a subset of each.
+#[allow(dead_code)]
 mod host_grant_support;
+#[allow(dead_code)]
 mod ingress_support;
 #[path = "host_grant_support/live_spicedb.rs"]
 mod live_spicedb;
