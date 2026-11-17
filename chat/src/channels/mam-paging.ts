@@ -365,13 +365,14 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       (activeSpaceId.value ?? "") === spaceId &&
       activeChannelId.value === channelId;
 
-    const el = timelineEl.value;
-    const previousHeight = el?.scrollHeight ?? 0;
-    const previousTop = el?.scrollTop ?? 0;
     isLoadingOlderMessages.value = true;
     try {
       const page = await client.queryMamPage(spaceId, channelId, PAGE_SIZE, { type: "before", before });
       if (!isCurrentRequest()) return;
+      const el = timelineEl.value;
+      const previousHeight = el?.scrollHeight ?? 0;
+      const previousTop = el?.scrollTop ?? 0;
+      const mode = scrollDirection.value;
       const advanced = advanceCursorWithBeforePage({
         prior: { oldestArchiveId, hasOlderMessages: hasOlderMessages.value },
         page,
@@ -382,8 +383,13 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       const roomJid = roomJidForChannel(channelId);
       if (!roomJid) return;
       messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomJid);
+      // Include removal of the leading loading row in the final page's height.
+      if (!hasOlderMessages.value) isLoadingOlderMessages.value = false;
       await nextTick();
-      if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
+      if (
+        el && el === timelineEl.value && isCurrentRequest()
+        && mode === scrollDirection.value && !isTopPinnedScrollDirection(mode)
+      ) {
         el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
       }
     } catch (e) {

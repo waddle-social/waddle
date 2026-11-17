@@ -3,19 +3,15 @@ import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scro
 
 interface OlderLoadSnapshot {
   element: HTMLElement;
-  height: number;
   mode: ScrollDirectionMode;
   threadId: string | null;
-  top: number;
   token: number;
 }
 
 /**
- * Keeps the reader's place while older replies paginate in: snapshot the
- * scroll position when loading starts and, once it finishes, offset by the
- * grown scroll height — but only if the container, thread, and scroll mode
- * are still the ones we snapshotted (bottom-pinned mode only; top-pinned
- * prepends below the viewport so no correction is needed).
+ * Keeps the reader's place when older replies arrive. Record which thread
+ * started loading, then read the current scroll position before Vue updates
+ * the rows. Only bottom-pinned mode prepends above the viewport.
  */
 export function useThreadOlderLoadRestore(input: {
   isLoadingOlderReplies: () => boolean | undefined;
@@ -40,10 +36,8 @@ export function useThreadOlderLoadRestore(input: {
         olderLoadSnapshot = el
           ? {
               element: el,
-              height: el.scrollHeight,
               mode: input.mode(),
               threadId: input.activeThreadId(),
-              top: el.scrollTop,
               token: olderLoadRestoreToken,
             }
           : null;
@@ -52,6 +46,7 @@ export function useThreadOlderLoadRestore(input: {
       if (!wasLoading || !olderLoadSnapshot) return;
       const snapshot = olderLoadSnapshot;
       olderLoadSnapshot = null;
+      const { scrollHeight, scrollTop } = snapshot.element;
       void nextTick(() => {
         const el = input.scrollContainer.value;
         if (
@@ -62,7 +57,7 @@ export function useThreadOlderLoadRestore(input: {
           && input.mode() === snapshot.mode
           && !isTopPinnedScrollDirection(input.mode())
         ) {
-          el.scrollTop = snapshot.top + (el.scrollHeight - snapshot.height);
+          el.scrollTop = scrollTop + (el.scrollHeight - scrollHeight);
         }
         input.afterRestore();
       });
