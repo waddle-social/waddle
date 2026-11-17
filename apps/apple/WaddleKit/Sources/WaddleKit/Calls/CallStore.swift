@@ -81,9 +81,6 @@ import Observation
             ringTimer?.cancel()
             ringTimer = nil
         }
-        if case .incoming(let call) = state, !(before.isIncoming && before.sid == call.sid) {
-            scheduleUnansweredTimeout(sid: call.sid)
-        }
         guard !isSelfOriginated else { return }
         let epoch = generation
         if case .propose = event.kind, case .incoming(let call) = state, call.sid == event.sid,
@@ -132,6 +129,9 @@ import Observation
             if case .incoming(var current) = state, current.sid == target.sid {
                 current.isAccepting = false
                 state = .incoming(current)
+                // The ring is back, and its first timer may have come due
+                // while the answer was on its way.
+                scheduleUnansweredTimeout(sid: current.sid)
             }
             lastError = "call proceed failed"
         }
@@ -187,7 +187,13 @@ import Observation
                 cancelTimers()
             }
             lastError = nil
+            let previous = state
             state = next
+            // Every way a call starts ringing here bounds the ring: a
+            // proposal, a tie-break won, a slot taken over.
+            if case .incoming(let call) = next, !call.isAccepting, !(previous.isIncoming && previous.sid == call.sid) {
+                scheduleUnansweredTimeout(sid: call.sid)
+            }
         }
     }
 
@@ -249,7 +255,7 @@ import Observation
             guard !Task.isCancelled, let self, self.generation == epoch,
                 case .incoming(let current) = self.state, current.sid == sid, !current.isAccepting
             else { return }
-            self.state = .ended(sid: sid, reason: .timeout)
+            self.state = .ended(sid: sid, reason: .missed)
         }
     }
 

@@ -30,8 +30,8 @@ final class CallRinger {
     /// left behind still gets its notification.
     ///
     /// On an iPhone or iPad the scene says so. On a Mac the application
-    /// does: its windows can be closed, or behind another app's, while it
-    /// still runs.
+    /// does, and only with a window to show the call in: its windows can
+    /// be closed, minimised or behind another app's while it still runs.
     var isAppActive = true {
         didSet { if isAppActive != oldValue { refresh() } }
     }
@@ -39,20 +39,39 @@ final class CallRinger {
     init(notifications: NotificationController) {
         self.notifications = notifications
         #if os(macOS)
-        isAppActive = NSApplication.shared.isActive
-        let center = NotificationCenter.default
-        for (name, active) in [(NSApplication.didBecomeActiveNotification, true), (NSApplication.didResignActiveNotification, false)] {
-            activity.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.isAppActive = active }
+        isAppActive = Self.isInFront
+        // Read afresh on each change, so the order these arrive in cannot
+        // leave a stale answer behind.
+        let changes = [
+            NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
+            NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+            NSWindow.didBecomeMainNotification, NSWindow.willCloseNotification,
+        ]
+        for name in changes {
+            activity.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // After this turn: a closing window still counts as visible
+                // while its notification is being delivered.
+                Task { @MainActor in self?.isAppActive = Self.isInFront }
             })
         }
         #endif
     }
 
+    #if os(macOS)
+    private static var isInFront: Bool {
+        NSApplication.shared.isActive
+            && NSApplication.shared.windows.contains { $0.isVisible && !$0.isMiniaturized && $0.canBecomeMain }
+    }
+    #endif
+
     /// What the session's call slot asks for now; nil for silence.
     func show(_ next: Request?) {
         guard request != next else { return }
         request = next
+        #if os(macOS)
+        // A window can go without a notification this listens for.
+        isAppActive = Self.isInFront
+        #endif
         refresh()
     }
 

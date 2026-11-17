@@ -48,7 +48,7 @@ import Testing
         let f = CallFixture(unansweredTimeout: .milliseconds(40))
         f.store.handle(f.event(.propose(callAudio)))
         #expect(f.store.state.isLive)
-        await eventually { f.store.state == .ended(sid: "c1", reason: .timeout) }
+        await eventually { f.store.state == .ended(sid: "c1", reason: .missed) }
         // There is nobody to tell.
         #expect(!f.port.callSends.contains { if case .reject = $0 { true } else { false } })
         f.store.clear()
@@ -70,8 +70,39 @@ import Testing
         f.store.handle(f.event(.propose(callAudio), sid: "c2"))
         try? await Task.sleep(for: .milliseconds(40))
         #expect(f.store.state.sid == "c2" && f.store.state.isLive)
-        await eventually { f.store.state == .ended(sid: "c2", reason: .timeout) }
+        await eventually { f.store.state == .ended(sid: "c2", reason: .missed) }
         f.store.clear()
+    }
+}
+
+extension UnansweredCallTests {
+    @Test func aCallThatWonATieBreakAlsoStopsRingingByItself() async {
+        let f = CallFixture(sid: { "c-zz" }, unansweredTimeout: .milliseconds(60))
+        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+        f.store.handle(f.event(.propose(callAudio), sid: "c-aa"))
+        await eventually { f.store.state.isIncoming }
+        await eventually { f.store.state == .ended(sid: "c-aa", reason: .missed) }
+        f.store.clear()
+    }
+
+    @Test func anAcceptThatFailsLateStillLeavesTheRingBounded() async {
+        let f = CallFixture(unansweredTimeout: .milliseconds(60))
+        f.store.handle(f.event(.propose(callAudio)))
+        // The proceed is still on its way when the ring would have run out.
+        f.port.heldCallVerbs = ["proceed"]
+        f.port.callResults["proceed"] = false
+        let accepting = Task { await f.store.acceptIncoming() }
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(f.store.state.isLive)
+        f.port.heldCallVerbs = []
+        f.port.releaseCallSends()
+        #expect(await !accepting.value)
+        await eventually { f.store.state == .ended(sid: "c1", reason: .missed) }
+        f.store.clear()
+    }
+
+    @Test func aMissedCallSaysSo() {
+        #expect(CallEndReason.missed.summary == "Missed call")
     }
 }
 

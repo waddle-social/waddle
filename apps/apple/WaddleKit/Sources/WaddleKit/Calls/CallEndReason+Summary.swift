@@ -7,6 +7,7 @@ public extension CallEndReason {
         case .retracted: "Call cancelled"
         case .expired: "Answered on another device"
         case .timeout: "No answer"
+        case .missed: "Missed call"
         case .error: "Call could not connect"
         case .finished(let reason): Self.summary(of: reason)
         }
