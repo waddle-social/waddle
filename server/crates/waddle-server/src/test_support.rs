@@ -292,6 +292,29 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// [`websocket_state`] whose stream-management session registry keeps its
+/// sessions and their ingress custody in `persistence`, which the caller
+/// keeps to seed and read them.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_sm_persistence(
+    persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            sm_session_registry: Some(Arc::new(
+                waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+                    .with_persistence(persistence),
+            )),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// Run one pass of the recovery of ingress custody whose stream-management
 /// session is gone, as the session janitor does: a payload the store takes
 /// is handed to the recipient's offline store. Returns whether every
