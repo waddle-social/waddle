@@ -576,6 +576,23 @@ crates for about 8 minutes to run 18 doctests; the Nix check takes its
 dependencies from the shared artifact and is a cache hit when a pull request
 already checked the same tree.
 
+The namespace `test` task sets `CARGO_INCREMENTAL=0`. Its build is bounded by
+one compiler process: `waddle-server` compiled with its unit tests takes about
+7 minutes on a 4 vCPU runner and runs to the end of the build, after the plain
+library (4.4 minutes) and about 3 minutes of third-party crates. All
+integration test binaries together take under a minute, so the linker does not
+matter. Measured on GitHub runners with `cargo test --no-run`, compared on the
+same CPU model because runner speed varies more than the setting:
+
+| CPU | Incremental on | Incremental off |
+| --- | --- | --- |
+| Xeon 6975P-C | 11m13s, 11m21s | 9m43s, 9m57s |
+| EPYC 9V74 | 16m08s | 14m37s, 14m44s, 15m20s |
+| EPYC 7763 | 18m28s, 18m29s | not sampled |
+
+The target directory shrinks from 51 GB to 41 GB. mold on top of this showed
+no gain in three runs.
+
 The short pull-request checks share one job, as `mainChecks` does on `main`:
 `pullRequestChecks` runs `checkCiDrift`, `checkSwitchableAlternativeProgram`,
 `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` and
