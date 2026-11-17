@@ -1129,7 +1129,7 @@ export class BrowserXmppClient {
         condition: terminalAuthorizationCondition,
       });
       this.resumedSessionRoomKeys.delete(key);
-      if (this.retainedJoinedRoomJids.delete(key)) this.persistRetainedJoinedRooms();
+      this.forgetRetainedRoom(key);
     }
     this.events.emitSafe("roomJoinFailed", key, rejection);
     this.emitError({
@@ -1921,8 +1921,17 @@ export class BrowserXmppClient {
     const normalized = roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
     if (!normalized) return;
     const sizeBefore = this.retainedJoinedRoomJids.size;
+    // Joined now, so no longer waiting for discovery to place it.
+    const wasParked = this.parkedRetainedRoomJids.delete(normalized);
     this.retainedJoinedRoomJids.add(normalized);
-    if (this.retainedJoinedRoomJids.size !== sizeBefore) this.persistRetainedJoinedRooms();
+    if (wasParked || this.retainedJoinedRoomJids.size !== sizeBefore) this.persistRetainedJoinedRooms();
+  }
+
+  /** Stop carrying a room into later sessions, whether retained or parked. */
+  private forgetRetainedRoom(key: string): void {
+    const retained = this.retainedJoinedRoomJids.delete(key);
+    const parked = this.parkedRetainedRoomJids.delete(key);
+    if (retained || parked) this.persistRetainedJoinedRooms();
   }
 
   private persistRetainedJoinedRooms(): void {
@@ -2093,7 +2102,7 @@ export class BrowserXmppClient {
     this.autoJoinRoomJids = this.autoJoinRoomJids.filter((candidate) => this.roomJoinKey(candidate) !== key);
     this.autoJoinAttemptedRoomKeys.add(key);
     this.resumedSessionRoomKeys.delete(key);
-    if (this.retainedJoinedRoomJids.delete(key)) this.persistRetainedJoinedRooms();
+    this.forgetRetainedRoom(key);
   }
 
   async retryRoomAccess(spaceId: string, channelId: string): Promise<void> {
