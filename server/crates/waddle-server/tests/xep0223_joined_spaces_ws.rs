@@ -16,7 +16,8 @@
 //! - no affiliation shares it: granting `member`, `publisher`,
 //!   `publish-only` or `owner` is answered with `not-acceptable`, which
 //!   returns only those entities with their existing affiliation, while
-//!   the permitted changes of the same request are applied (XEP-0060
+//!   the permitted changes of the same request are applied, and a request
+//!   naming an entity twice is refused whole with `bad-request` (XEP-0060
 //!   §8.9.2.4);
 //! - only the owner publishes to it or administers it, even against an
 //!   affiliation row or an open publish model, and every item names its
@@ -740,6 +741,19 @@ async fn owner_cannot_share_the_node_through_affiliations() {
         refused_affiliations(&mixed),
         vec![row(&bob_bare, "none")],
         "only the refused entity may be returned: {mixed:?}"
+    );
+
+    // XEP-0060 §8.9.2.4: a request naming an entity twice is a
+    // `bad-request`, and none of it is applied.
+    let duplicate = owner_set_affiliations(
+        &mut alice,
+        "aff-duplicate",
+        &[(bob_jid.as_str(), "outcast"), (bob_jid.as_str(), "member")],
+    )
+    .await;
+    assert!(
+        is_error(&duplicate, DefinedCondition::BadRequest),
+        "a request naming an entity twice must be refused: {duplicate:?}"
     );
 
     // The account cannot make itself an outcast of its own node; its
