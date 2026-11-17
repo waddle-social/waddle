@@ -1028,3 +1028,229 @@ async fn a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one() {
     let _ = plain.close().await;
     let _ = admin.close().await;
 }
+
+const NS_RSM: &str = "http://jabber.org/protocol/rsm";
+const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+
+/// A `disco#items` query of `node` asking for at most `max` items, after
+/// `after` when given (XEP-0059 §2.2).
+fn paged_disco_items(node: &str, max: usize, after: Option<&str>) -> Element {
+    let mut set = Element::builder("set", NS_RSM).append(
+        Element::builder("max", NS_RSM)
+            .append(max.to_string())
+            .build(),
+    );
+    if let Some(after) = after {
+        set = set.append(Element::builder("after", NS_RSM).append(after).build());
+    }
+    Element::builder("query", NS_DISCO_ITEMS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .append(set.build())
+        .build()
+}
+
+/// The `<set/>` of a `disco#items` answer: its count, its first item's
+/// index and its first and last items.
+fn disco_items_set(
+    frame: &str,
+) -> Option<(
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
+    let response: Element = frame.parse().expect("disco#items response XML");
+    let set = response
+        .get_child("query", NS_DISCO_ITEMS)?
+        .get_child("set", NS_RSM)?;
+    let text = |name: &str| set.get_child(name, NS_RSM).map(Element::text);
+    let index = set
+        .get_child("first", NS_RSM)
+        .and_then(|first| first.attr("index").map(str::to_owned));
+    Some((text("count"), index, text("first"), text("last")))
+}
+
+/// The `<error/>` of an answer, and the address it came from.
+fn error_and_sender(frame: &str) -> (Option<String>, Option<Element>) {
+    let response: Element = frame.parse().expect("response XML");
+    (
+        response.attr("from").map(str::to_owned),
+        response
+            .children()
+            .find(|child| child.name() == "error")
+            .cloned(),
+    )
+}
+
+/// A Space owner's configuration of `node` as a private Space: only its
+/// members may read it (`whitelist`).
+fn private_space(node: &str) -> Element {
+    let field = Element::builder("field", NS_XDATA)
+        .attr(
+            minidom::rxml::xml_ncname!("var").to_owned(),
+            "pubsub#access_model",
+        )
+        .append(
+            Element::builder("value", NS_XDATA)
+                .append("whitelist")
+                .build(),
+        )
+        .build();
+    Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(
+            Element::builder("configure", NS_PUBSUB_OWNER)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(
+                    Element::builder("x", NS_XDATA)
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                        .append(field)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// The `disco#items` of a Space node a session may not read is answered
+/// exactly as that of a node that does not exist: the same error, from the
+/// same address, so the answer tells nothing of the Space. Its owner is
+/// still told its rooms.
+#[tokio::test]
+async fn a_space_node_a_session_may_not_read_is_listed_as_one_that_does_not_exist() {
+    let _serial = TEST_SERIAL.lock().await;
+    let carol_password = format!("carol-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("carol", &carol_password)]);
+    let mut admin = admin_client(&server, "xep0503-private-children").await;
+    space_holding_a_new_room(&mut admin, "private", "vault").await;
+    let configured = iq_set_to(
+        &mut admin,
+        "private-whitelist",
+        "spaces.localhost",
+        private_space("private"),
+    )
+    .await;
+    assert!(is_result(&configured), "{configured}");
+    let owned = iq_get_to(
+        &mut admin,
+        "private-owner-children",
+        "spaces.localhost",
+        disco_items(Some("private")),
+    )
+    .await;
+    assert_eq!(
+        disco_item_pairs(&owned),
+        vec![(
+            "spaces.localhost".to_owned(),
+            Some(format!("vault@muc.{DOMAIN}"))
+        )]
+    );
+
+    let mut carol = ws_common::WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "carol",
+        &carol_password,
+        "xep0503-private-carol",
+    )
+    .await
+    .expect("carol connect");
+    let unreadable = iq_get_to(
+        &mut carol,
+        "private-children",
+        "spaces.localhost",
+        disco_items(Some("private")),
+    )
+    .await;
+    let missing = iq_get_to(
+        &mut carol,
+        "missing-children",
+        "spaces.localhost",
+        disco_items(Some("nowhere")),
+    )
+    .await;
+    assert!(
+        unreadable.contains("item-not-found"),
+        "a Space the session may not read must not be listed: {unreadable}"
+    );
+    assert_eq!(error_and_sender(&unreadable), error_and_sender(&missing));
+    let _ = carol.close().await;
+    let _ = admin.close().await;
+}
+
+/// A session pages a Space node's rooms with XEP-0059, by item ID: the
+/// count is of the rooms listed to it, and a page continues from its last
+/// item.
+#[tokio::test]
+async fn a_session_pages_a_space_nodes_rooms() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-paged-children").await;
+    space_holding_a_new_room(&mut admin, "paged", "one").await;
+    create_room(&mut admin, "two").await;
+    let two = format!("two@muc.{DOMAIN}");
+    let placed = iq_set_to(
+        &mut admin,
+        "place-two",
+        "spaces.localhost",
+        space_publish("paged", &two),
+    )
+    .await;
+    assert!(is_result(&placed), "{placed}");
+    let one = format!("one@muc.{DOMAIN}");
+
+    let first = iq_get_to(
+        &mut admin,
+        "paged-first",
+        "spaces.localhost",
+        paged_disco_items("paged", 1, None),
+    )
+    .await;
+    assert!(is_result(&first), "{first}");
+    assert_eq!(
+        disco_item_pairs(&first),
+        vec![("spaces.localhost".to_owned(), Some(one.clone()))]
+    );
+    assert_eq!(
+        disco_items_set(&first),
+        Some((
+            Some("2".to_owned()),
+            Some("0".to_owned()),
+            Some(one.clone()),
+            Some(one.clone())
+        ))
+    );
+
+    let second = iq_get_to(
+        &mut admin,
+        "paged-second",
+        "spaces.localhost",
+        paged_disco_items("paged", 1, Some(&one)),
+    )
+    .await;
+    assert_eq!(
+        disco_item_pairs(&second),
+        vec![("spaces.localhost".to_owned(), Some(two.clone()))]
+    );
+    assert_eq!(
+        disco_items_set(&second),
+        Some((
+            Some("2".to_owned()),
+            Some("1".to_owned()),
+            Some(two.clone()),
+            Some(two)
+        ))
+    );
+
+    // Without a request for paging, a listing that fits in one answer
+    // carries no `<set/>`.
+    let whole = iq_get_to(
+        &mut admin,
+        "paged-whole",
+        "spaces.localhost",
+        disco_items(Some("paged")),
+    )
+    .await;
+    assert_eq!(disco_item_pairs(&whole).len(), 2, "{whole}");
+    assert_eq!(disco_items_set(&whole), None, "{whole}");
+    let _ = admin.close().await;
+}

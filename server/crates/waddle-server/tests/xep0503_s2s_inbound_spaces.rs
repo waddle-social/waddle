@@ -550,6 +550,45 @@ async fn a_spaces_rooms_are_listed_in_pages() {
     );
 }
 
+/// A Space's node lists, to accounts at other servers, the rooms among its
+/// 256 most recently published items; a Space that holds more answers with
+/// a `<set/>` though none was asked for, and tells no count, since what the
+/// bounded read left out is not known.
+#[tokio::test]
+async fn a_spaces_listing_beyond_its_read_tells_no_count() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    let ids: Vec<String> = (0..257).map(|index| format!("room-{index:03}")).collect();
+    for id in &ids {
+        channel(&federated, id, true).await;
+        list_in(&federated, DEV, id, None).await;
+    }
+    let listed = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "beyond-1",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
+    let children = listed_children(&listed);
+    assert_eq!(children.len(), 256);
+    // The oldest item is the one the read left out.
+    assert!(!children.contains(&room(&ids[0]).to_string()));
+    assert!(children.contains(&room(&ids[256]).to_string()));
+    let set = descendant(&listed, "set").expect("the unasked <set/>");
+    assert!(set.get_child("count", NS_RSM).is_none(), "{listed:?}");
+    assert_eq!(
+        set.get_child("first", NS_RSM)
+            .and_then(|first| first.attr("index").map(ToOwned::to_owned)),
+        Some("0".to_owned())
+    );
+}
+
 /// An account banned from a public Space is refused its node's listing,
 /// as a read of its items is.
 #[tokio::test]

@@ -27,9 +27,10 @@ use waddle_ws_test_support::stanza::{
 };
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
-use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
+use waddle_xmpp::pubsub::{Affiliation, NodeConfig, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
 use waddle_xmpp::xep::xep0272::{Muji, NS_MUJI};
+use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
 use waddle_xmpp::xep::xep0424::NS_MESSAGE_RETRACT;
 use waddle_xmpp::xep::xep0425::NS_MESSAGE_MODERATE;
 use waddle_xmpp::xep::xep0433::{build_search_request, parse_search_results, SearchRequest};
@@ -131,6 +132,56 @@ fn item_jids(reply: &xmpp_parsers::iq::Iq) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The `name` attributes of a disco#items result's items: the item IDs,
+/// the rooms' JIDs, of a Space node's listing.
+fn item_names(reply: &xmpp_parsers::iq::Iq) -> Vec<String> {
+    result_payload(reply)
+        .map(|query| {
+            query
+                .children()
+                .filter_map(|item| item.attr("name").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The Space node no scope enrolls, public, holding a bookmark of the
+/// managed room and an item without a payload at the address of another
+/// room, which is no room of the Space.
+async fn plain_space_holding_the_managed_room(fixture: &ManagedRoom) {
+    let room = fixture.room().clone();
+    let spaces: BareJid = SPACES.parse().expect("Spaces service");
+    let storage = &fixture.server.state.deps.protocol.pubsub_storage;
+    storage
+        .get_or_create_node(&spaces, PLAIN_SPACE)
+        .await
+        .expect("Space node");
+    storage
+        .update_node_config(&spaces, PLAIN_SPACE, &NodeConfig::spaces_public())
+        .await
+        .expect("Space configuration");
+    let bookmark = PubSubItem::new(
+        Some(room.to_string()),
+        Some(build_bookmark_element(&Bookmark::new(room))),
+    );
+    storage
+        .publish_item(&spaces, PLAIN_SPACE, &bookmark, None, false)
+        .await
+        .expect("the managed room's bookmark");
+    let bare_item = PubSubItem::new(Some(format!("bare@{MUC}")), None);
+    storage
+        .publish_item(&spaces, PLAIN_SPACE, &bare_item, None, false)
+        .await
+        .expect("an item without a payload");
+}
+
+/// The `disco#items` query of the Space node no scope enrolls.
+fn plain_space_items() -> Element {
+    Element::builder("query", NS_DISCO_ITEMS)
+        .attr(attribute("node"), PLAIN_SPACE)
+        .build()
 }
 
 /// The `node` attributes of a disco#items result's items.
@@ -504,7 +555,7 @@ async fn channel_search_finds_a_managed_room_only_for_an_account_that_may_view_i
 /// `view` and to nobody else (XEP-0045 §6.3); the scope's Space node is
 /// described and listed to nobody, its node's `disco#items` included.
 #[tokio::test]
-async fn the_enrolled_space_and_the_managed_room_are_not_described_by_the_services() {
+async fn the_enrolled_space_is_not_described_and_the_managed_room_is_listed_only_to_a_member() {
     let Some(fixture) = ManagedRoom::start("hg_sink_disco").await else {
         return;
     };
@@ -574,6 +625,79 @@ async fn the_enrolled_space_and_the_managed_room_are_not_described_by_the_servic
     assert!(
         nodes.contains(&PLAIN_SPACE.to_owned()),
         "an unenrolled public Space was not listed: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+/// XEP-0503, "Advertising space membership", for a session: a Space no
+/// scope enrolls lists a managed room it holds only to an account whose
+/// canonical grants allow `view`, decided without stream evidence; an
+/// account whose grants do not is not told of it, whatever legacy
+/// relationship it holds. An item without a payload is no room of the
+/// Space.
+#[tokio::test]
+async fn a_plain_spaces_listing_names_a_managed_room_only_to_a_member() {
+    let Some(fixture) = ManagedRoom::start("hg_sink_space_children").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    plain_space_holding_the_managed_room(&fixture).await;
+
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+    let reply = round_trip(
+        &mut romeo,
+        get("romeo-children", SPACES, plain_space_items()),
+    )
+    .await;
+    assert!(is_result(&reply), "Space node disco#items: {reply:?}");
+    assert_eq!(item_names(&reply), [room.to_string()], "{reply:?}");
+
+    fixture.legacy_grants(CAROL).await;
+    let mut carol = fixture.server.client("carol", "phone").await;
+    let reply = round_trip(
+        &mut carol,
+        get("carol-children", SPACES, plain_space_items()),
+    )
+    .await;
+    assert!(is_result(&reply), "Space node disco#items: {reply:?}");
+    assert!(
+        item_names(&reply).is_empty(),
+        "the managed room was listed to an ungranted account: {reply:?}"
+    );
+    fixture.close().await;
+}
+
+/// A managed room whose grants cannot be read now (the replica holds no
+/// attachment to the store) is left out of the MUC service's listing and of
+/// a Space node's, even for its member; both listings are still answered,
+/// and every other room is listed.
+#[tokio::test]
+async fn a_managed_room_whose_grants_cannot_be_read_is_left_out_of_the_listings() {
+    let Some(fixture) = ManagedRoom::start_unattached("hg_sink_listing_unread").await else {
+        return;
+    };
+    let room = fixture.room().clone();
+    fixture.server.channel("plain-room", false).await;
+    plain_space_holding_the_managed_room(&fixture).await;
+    let mut romeo = fixture.server.client("romeo", "phone").await;
+
+    let reply = round_trip(&mut romeo, get("rooms", MUC, disco_items())).await;
+    assert!(is_result(&reply), "MUC disco#items: {reply:?}");
+    let listed = item_jids(&reply);
+    assert!(
+        !listed.contains(&room.to_string()),
+        "a room whose grants cannot be read was listed: {reply:?}"
+    );
+    assert!(
+        listed.contains(&format!("plain-room@{MUC}")),
+        "an unmanaged public room was not listed: {reply:?}"
+    );
+
+    let reply = round_trip(&mut romeo, get("children", SPACES, plain_space_items())).await;
+    assert!(is_result(&reply), "Space node disco#items: {reply:?}");
+    assert!(
+        item_names(&reply).is_empty(),
+        "a room whose grants cannot be read was listed: {reply:?}"
     );
     fixture.close().await;
 }

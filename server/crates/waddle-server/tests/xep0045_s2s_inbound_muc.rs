@@ -1422,8 +1422,8 @@ fn listed_rooms(answer: &Element) -> Vec<String> {
 /// member whose canonical grants admit it to view the room, on the
 /// evidence of its stream, and to no stranger, for whom it is as absent as
 /// a room that does not exist; nor to anybody once the room is closed to
-/// other servers. A client without Spaces finds the room there by its
-/// plain JID.
+/// other servers and the replica's reuse of its rooms has passed. A client
+/// without Spaces finds the room there by its plain JID.
 #[tokio::test]
 async fn a_managed_room_is_listed_only_to_a_remote_principal_its_grants_admit() {
     let Some(managed) = Managed::start("s2s_in_listing", no_change).await else {
@@ -1450,12 +1450,24 @@ async fn a_managed_room_is_listed_only_to_a_remote_principal_its_grants_admit() 
     managed.deployment.replicas[0]
         .federate(&managed.deployment.grants.scope.channel_id, false)
         .await;
-    managed
-        .hosted
-        .peer_sends(remote_get(GUEST_PHONE, MUC, "list-closed", items()))
-        .await;
-    let closed = managed.hosted.answered("list-closed").await;
-    assert_eq!(closed.attr("type"), Some("result"), "{closed:?}");
+    // The replica answers remote listings from what it read of its rooms a
+    // moment ago (at most two seconds), so the closed room leaves the
+    // listing once that has passed.
+    let mut attempt = 0;
+    let closed = loop {
+        let id = format!("list-closed-{attempt}");
+        managed
+            .hosted
+            .peer_sends(remote_get(GUEST_PHONE, MUC, &id, items()))
+            .await;
+        let answer = managed.hosted.answered(&id).await;
+        assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
+        if !listed_rooms(&answer).contains(&room) || attempt == 10 {
+            break answer;
+        }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
     assert!(!listed_rooms(&closed).contains(&room), "{closed:?}");
     managed.deployment.close().await;
 }

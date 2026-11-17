@@ -15,7 +15,9 @@
 //! it once (§7.4); one account cannot spend its domain's request rate; and
 //! chat states are dropped before a seat ends. A room whose actor is slow
 //! holds no stream and ends no seat: what its share of the queues does not
-//! hold is answered at once. A join beyond its account's share of presence
+//! hold is answered at once, and what it took and did not decide in time is
+//! answered as its kind is. A request for the service's room list is built
+//! apart from the room shards and is always answered. A join beyond its account's share of presence
 //! is answered while the account's allowance of answers lasts, and neither
 //! one account's joins nor its leaves delay another account of the same
 //! domain, whose first leave for a seat is taken beyond its allowance. A
@@ -45,8 +47,9 @@ use std::time::Duration;
 use minidom::Element;
 use s2s_inbound_muc_support::routing::wait_for_async;
 use s2s_inbound_muc_support::{
-    body, error_condition, jid, presence_between, remote_get, remote_groupchat, remote_join,
-    remote_leave, statuses, wait_for, ARRIVES, BOB, BOB_OCCUPANT, DOMAIN, HOME_B, MUC, QUIET, ROOM,
+    body, error_condition, error_of, jid, presence_between, remote_get, remote_groupchat,
+    remote_join, remote_leave, statuses, wait_for, ARRIVES, BOB, BOB_OCCUPANT, DOMAIN, HOME_B, MUC,
+    QUIET, ROOM,
 };
 use scripted::{bare, full, own_unavailable, Scripted, ScriptedRooms, CAROL, GREETING};
 use waddle_server::destination::{RemoteRoute, SeatAdoption};
@@ -908,24 +911,18 @@ async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
     }
     // What the room's share of the queues does not hold is answered at
     // once, while the room still answers nothing: the stream that carried
-    // it was not held for the room.
-    let refused = wait_for(ARRIVES, || {
-        let refused: Vec<Element> = ids
+    // it was not held for the room. (A request the room took and did not
+    // decide in time is answered too, later and otherwise.)
+    wait_for(ARRIVES, || {
+        let refused = ids
             .iter()
             .filter_map(|id| hosted.home_b.captured.with_id(id).into_iter().next())
-            .filter(|stanza| stanza.attr("type") == Some("error"))
-            .collect();
-        (refused.len() >= 3).then_some(refused)
+            .filter(|stanza| error_condition(stanza).as_deref() == Some("resource-constraint"))
+            .count();
+        (refused >= 3).then_some(())
     })
     .await
     .expect("the requests beyond the room's share are answered");
-    for stanza in &refused {
-        assert_eq!(
-            error_condition(stanza).as_deref(),
-            Some("resource-constraint"),
-            "{stanza:?}"
-        );
-    }
     // Each request the room does not answer costs the worker its budget
     // and no more: the ones the room's share held reach the host in turn.
     wait_for(ARRIVES, || {
@@ -944,6 +941,24 @@ async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
     .await
     .expect("every request the room's share held reaches the host");
     hosted.host.release();
+    // No request is left unanswered: one the room took and did not decide
+    // within the budget is answered with `internal-server-error`, type
+    // `wait`, as an IQ refused before it was taken is answered.
+    let answers = wait_for(ARRIVES, || {
+        ids.iter()
+            .map(|id| hosted.home_b.captured.with_id(id).into_iter().next())
+            .collect::<Option<Vec<Element>>>()
+    })
+    .await
+    .expect("every request is answered");
+    assert!(
+        answers.iter().any(|stanza| {
+            error_condition(stanza).as_deref() == Some("internal-server-error")
+                && error_of(stanza).and_then(|error| error.attr("type").map(str::to_owned))
+                    == Some("wait".to_owned())
+        }),
+        "{answers:?}"
+    );
     // The stream still carries, no seat of the pair was lost, and the
     // seat stands.
     hosted
@@ -952,6 +967,112 @@ async fn a_slow_room_holds_no_stream_and_ends_no_seat() {
         .await;
     let answered = hosted.home_b.answered("after-slow").await;
     assert_eq!(answered.attr("type"), Some("result"), "{answered:?}");
+    assert_eq!(
+        hosted.seat(ROOM, BOB).map(|held| held.session),
+        Some(seat.session)
+    );
+    assert!(hosted.host.ends_of(BOB).is_empty());
+}
+
+/// XEP-0045 §6.3 across S2S: a request for the MUC service's room list is
+/// built apart from the room shards, so a room's own requests do not wait
+/// behind it, and it is never left unanswered. A list the host does not
+/// answer within the per-item budget is answered with
+/// `internal-server-error` (type `wait`), and one beyond the lists a
+/// replica builds at once with `resource-constraint`. A request the host
+/// does not decide in time is answered as its kind is: an IQ with
+/// `internal-server-error`, a seated occupant's change of presence not at
+/// all, and its seat stands.
+#[tokio::test]
+async fn a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answered() {
+    let limits = RouterLimits {
+        // One worker for every room, and a short budget for each item.
+        room_request_workers: 1,
+        room_request_timeout: Duration::from_secs(1),
+        ..RouterLimits::default()
+    };
+    let hosted = Scripted::start("inbound-router-listing", limits).await;
+    let seat = with_bob(&hosted).await;
+    // The host answers nothing from now on.
+    hosted.host.hold().await;
+    let items = || Element::builder("query", "http://jabber.org/protocol/disco#items").build();
+    let lists: Vec<String> = (0..5).map(|index| format!("list-{index}")).collect();
+    for id in &lists {
+        hosted.home_b.send(remote_get(BOB, MUC, id, items())).await;
+    }
+    // The room's request reaches the host at once: the one worker is not
+    // held by the lists, each of which waits in the host for its budget.
+    hosted
+        .home_b
+        .send(remote_get(BOB, ROOM, "held-ping", ping()))
+        .await;
+    wait_for(Duration::from_millis(800), || {
+        (!hosted.host.handled_with("held-ping").is_empty()).then_some(())
+    })
+    .await
+    .expect("the room's request was not held behind the room lists");
+
+    let answers = wait_for(ARRIVES, || {
+        lists
+            .iter()
+            .map(|id| hosted.home_b.captured.with_id(id).into_iter().next())
+            .collect::<Option<Vec<Element>>>()
+    })
+    .await
+    .expect("every room list is answered");
+    let condition_and_type = |stanza: &Element| {
+        (
+            error_condition(stanza),
+            error_of(stanza).and_then(|error| error.attr("type").map(str::to_owned)),
+        )
+    };
+    let busy = answers
+        .iter()
+        .filter(|stanza| error_condition(stanza).as_deref() == Some("resource-constraint"))
+        .count();
+    assert_eq!(busy, 1, "{answers:?}");
+    let undecided = answers
+        .iter()
+        .filter(|stanza| {
+            condition_and_type(stanza)
+                == (
+                    Some("internal-server-error".to_owned()),
+                    Some("wait".to_owned()),
+                )
+        })
+        .count();
+    assert_eq!(undecided, 4, "{answers:?}");
+
+    // The room's IQ, which the host did not decide in time, is answered.
+    let ping_answer = hosted.home_b.answered("held-ping").await;
+    assert_eq!(
+        condition_and_type(&ping_answer),
+        (
+            Some("internal-server-error".to_owned()),
+            Some("wait".to_owned()),
+        ),
+        "{ping_answer:?}"
+    );
+
+    // A seated occupant's change of presence is not answered, though the
+    // host did not decide it in time.
+    let mut away = Presence::new(PresenceType::None);
+    away.from = Some(jid(BOB));
+    away.to = Some(jid(BOB_OCCUPANT));
+    away.id = Some("held-presence".to_owned());
+    away.show = Some(xmpp_parsers::presence::Show::Away);
+    hosted.home_b.send(away).await;
+    wait_for(ARRIVES, || {
+        (!hosted.host.handled_with("held-presence").is_empty()).then_some(())
+    })
+    .await
+    .expect("the change of presence reaches the host");
+    tokio::time::sleep(Duration::from_secs(1) + QUIET).await;
+    assert!(
+        hosted.home_b.captured.with_id("held-presence").is_empty(),
+        "a seated occupant's change of presence was answered"
+    );
+    hosted.host.release();
     assert_eq!(
         hosted.seat(ROOM, BOB).map(|held| held.session),
         Some(seat.session)

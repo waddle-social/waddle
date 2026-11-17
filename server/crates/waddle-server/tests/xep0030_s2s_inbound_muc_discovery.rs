@@ -70,14 +70,19 @@ fn ping() -> Element {
 /// A `disco#items` query that asks for at most `max` items after `after`
 /// (XEP-0059 §2.2).
 fn paged(max: usize, after: Option<&str>) -> Element {
+    set_query(SetQuery {
+        max: Some(max),
+        after: after.map(str::to_owned),
+        before: None,
+        index: None,
+    })
+}
+
+/// A `disco#items` query carrying the XEP-0059 request `set`.
+fn set_query(set: SetQuery) -> Element {
     Element::from(DiscoItemsQuery {
         node: None,
-        rsm: Some(SetQuery {
-            max: Some(max),
-            after: after.map(str::to_owned),
-            before: None,
-            index: None,
-        }),
+        rsm: Some(set),
     })
 }
 
@@ -356,6 +361,163 @@ async fn the_room_list_is_paged_for_a_remote_asker() {
         .await;
     let refused = hosted.answered("p4").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("bad-request"));
+}
+
+/// XEP-0059 §2.3 and §2.5 for a remote asker: `before` pages backward,
+/// from an anchor or, empty, from the end of the listing, and `index`
+/// starts a page at its place in the listing built for the asker.
+#[tokio::test]
+async fn the_room_list_pages_backward_and_from_an_index_for_a_remote_asker() {
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    for id in ["alpha", "bravo", "charlie"] {
+        hosted.catalogued_room(id, true, true, "text").await;
+    }
+    hosted
+        .peer_sends(remote_get(
+            BOB,
+            MUC,
+            "b1",
+            set_query(SetQuery {
+                max: Some(2),
+                after: None,
+                before: Some(String::new()),
+                index: None,
+            }),
+        ))
+        .await;
+    let last = listing(&hosted.answered("b1").await);
+    assert_eq!(jids(&last), [room("bravo"), room("charlie")]);
+    let set = last.rsm.expect("the page's <set/>");
+    assert_eq!(set.count, Some(3));
+    assert_eq!(set.first.and_then(|first| first.index), Some(1));
+
+    hosted
+        .peer_sends(remote_get(
+            BOB,
+            MUC,
+            "b2",
+            set_query(SetQuery {
+                max: Some(1),
+                after: None,
+                before: Some(room("bravo")),
+                index: None,
+            }),
+        ))
+        .await;
+    let before = listing(&hosted.answered("b2").await);
+    assert_eq!(jids(&before), [room("alpha")]);
+
+    hosted
+        .peer_sends(remote_get(
+            BOB,
+            MUC,
+            "b3",
+            set_query(SetQuery {
+                max: Some(2),
+                after: None,
+                before: None,
+                index: Some(2),
+            }),
+        ))
+        .await;
+    let indexed = listing(&hosted.answered("b3").await);
+    assert_eq!(jids(&indexed), [room("charlie")]);
+    let set = indexed.rsm.expect("the page's <set/>");
+    assert_eq!(set.first.and_then(|first| first.index), Some(2));
+}
+
+/// An anchor that names a room the asker is not listed (a hidden room, or
+/// one not open to other servers) is answered exactly as an anchor at the
+/// same place that names no room at all: paging tells nothing of a room
+/// that is not listed.
+#[tokio::test]
+async fn an_anchor_naming_an_unlisted_room_is_answered_as_one_naming_no_room() {
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    hosted.catalogued_room("alpha", true, true, "text").await;
+    hosted.catalogued_room("delta", true, true, "text").await;
+    hosted.catalogued_room("charlie", false, true, "text").await;
+    hosted
+        .catalogued_room("charlie-closed", true, false, "text")
+        .await;
+    let mut answers = Vec::new();
+    for (index, anchor) in ["charlie", "charlie-closed", "charlie-none"]
+        .into_iter()
+        .enumerate()
+    {
+        for (direction, set) in [
+            (
+                "after",
+                SetQuery {
+                    max: Some(5),
+                    after: Some(room(anchor)),
+                    before: None,
+                    index: None,
+                },
+            ),
+            (
+                "before",
+                SetQuery {
+                    max: Some(5),
+                    after: None,
+                    before: Some(room(anchor)),
+                    index: None,
+                },
+            ),
+        ] {
+            let id = format!("anchor-{direction}-{index}");
+            hosted
+                .peer_sends(remote_get(BOB, MUC, &id, set_query(set)))
+                .await;
+            answers.push((direction, listing(&hosted.answered(&id).await)));
+        }
+    }
+    for direction in ["after", "before"] {
+        let pages: Vec<&DiscoItemsResult> = answers
+            .iter()
+            .filter(|(asked, _)| *asked == direction)
+            .map(|(_, page)| page)
+            .collect();
+        assert_eq!(pages.len(), 3);
+        for page in &pages[1..] {
+            assert_eq!(**page, *pages[0], "{direction}: {pages:?}");
+        }
+    }
+    let after = &answers[0].1;
+    assert_eq!(jids(after), [room("delta")]);
+    let before = &answers[1].1;
+    assert_eq!(jids(before), [room("alpha")]);
+}
+
+/// A remote asker gets at most 256 rooms in one answer, whatever `max`
+/// asks; a listing that does not fit carries its `<set/>` though the
+/// request had none (XEP-0059 §1, XEP-0045 §6.3), and the rest is reached
+/// by paging from its last item.
+#[tokio::test]
+async fn a_room_list_beyond_one_answer_carries_its_set_unasked() {
+    let hosted = Hosted::start(RouterLimits::default(), no_change).await;
+    let ids: Vec<String> = (0..257).map(|index| format!("room-{index:03}")).collect();
+    for id in &ids {
+        hosted.catalogued_room(id, true, true, "text").await;
+    }
+    hosted.peer_sends(remote_get(BOB, MUC, "c1", items())).await;
+    let first = listing(&hosted.answered("c1").await);
+    assert_eq!(first.items.len(), 256);
+    let set = first.rsm.expect("the unasked <set/> of a partial answer");
+    assert_eq!(set.count, Some(257));
+    let head = set.first.expect("the page's first item");
+    assert_eq!((head.index, head.item), (Some(0), room(&ids[0])));
+    assert_eq!(set.last, Some(room(&ids[255])));
+
+    hosted
+        .peer_sends(remote_get(
+            BOB,
+            MUC,
+            "c2",
+            paged(1_000, Some(&room(&ids[255]))),
+        ))
+        .await;
+    let rest = listing(&hosted.answered("c2").await);
+    assert_eq!(jids(&rest), [room(&ids[256])]);
 }
 
 /// The MUC fallback of XEP-0503: a client that does not use Spaces walks
