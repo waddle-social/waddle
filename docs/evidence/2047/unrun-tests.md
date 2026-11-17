@@ -35,7 +35,9 @@ case merged at `fe6123acd`, and the run10 head logs ran at `e559ebd57`; a
 row citing a run10 head log describes that tree. The fixes made before
 verification (branch `claude/2047-prever`, from `dafeff804`, merged with
 the integration branch at `3ef273961`) ran in the prever rerun1 logs at
-`096cd3d30`; a row citing a prever log describes that tree. W8 (the web pilot: the
+`096cd3d30`; a row citing a prever log describes that tree. The removal
+of the group conversation bookmark notifications after them (`478f0f429`)
+ran in `prever-run-rerun2-focused.log` at `3837a26c7`. W8 (the web pilot: the
 joined-spaces node and the web client's communities on other servers)
 merged at `ace94a3dd`, after its last fixes on its branch; the run11 logs
 ran at `7eeda217e`, the merge's inventory pin, and a row citing a run11
@@ -123,6 +125,7 @@ the integration branch itself.
 | `prever-run-migrations.log`, `prever-run-migrations-base.log` | the library's `db::migrations` cases (`--lib -E 'test(/^db::migrations::/)'`, PostgreSQL required) at `3a2c4a10c`: 38 of 42, `after_baseline`'s ordering case among those that passed. The four failures fail the same way at `dafeff804` (the base log, a temporary worktree there); see the `db/migrations/tests.rs` row below. |
 | `prever-run-gates-rerun1.log`, `prever-run-s2s-rerun1.log`, `prever-run-clustering-rerun1.log`, `prever-run-hostgrant-rerun1.log` | the same gates and selections at `096cd3d30`: every gate passed (the inventory matched `9d3a6b944`; `check-poison-recovery.py` with no finding); `waddle-xmpp` 136 of 136; `waddle-server` 1303 of 1303 across 93 binaries, the same 7 skipped; clustering 61 of 61; host-grant 288 of 288 with a fresh PostgreSQL-backed SpiceDB. |
 | `prever-run-repeat.log` | at `096cd3d30`: `xep0045_s2s_inbound_muc`, `xep0030_s2s_inbound_muc_discovery`, `xep0503_s2s_inbound_spaces` and `xep0060_s2s_inbound_spaces_pubsub`, whose new cases depend on timers or on a wedged room actor, three more times on one database, 91 of 91 each time; then `xep0198_durable_cross_node_resume` alone three times, 7 of 9 each time. `prever-run-crossnode.log` (alone, twice, each on a fresh database) and `prever-run-crossnode-base.log` (alone at `dafeff804`, a temporary worktree, fresh database) fail the same two cases, `messages_to_a_session_detached_on_another_node_replay_once_in_order` and `racing_resumes_on_two_nodes_leave_exactly_one_owner`, which miss the live message sent after a resumption: the binary passes only beside the other clustering binaries, before this pass as after it. Not traced further. |
+| `prever-run-rerun2-focused.log` | at `3837a26c7`, after the group conversation paths stopped sending their bookmark retraction through the PEP fan-out (`478f0f429`): clippy with `-D warnings` of `xep0060_s2s_inbound_spaces_pubsub`, `group_dm_ws` and `admin_channels_ws`, and nextest of those and `xep0503_spaces_ws`, `admin_spaces_ws`, `admin_channel_space_link_ws`, `xep0045_s2s_inbound_muc` and `xep0503_s2s_inbound_spaces`, PostgreSQL required: 159 of 159 across 8 binaries. Clippy of the `waddle-server` library with and without `clustering` passed on that tree. |
 | `prever-run-chat.log`, `prever-run-chat-test.log` | `chat` at `adb5c67f6`'s source: `bun run lint` (wasm build, Panda codegen, knip) exit 0; `astro check` the same two errors as before the pass (`cloudflare:workers` has no type declarations without `wrangler types`); `bun test` 4,663 of 4,666 across 375 files, the three known failures (two scroll-direction cases and the startup loading fallback, which needs `chat/dist`). The wasm build rewrote the committed `server/wasm-pkg` files with other generated text; they were restored. |
 | `server/docs/planning/host-grant-authority-2047.md` | Records the first slice's set passing 110 of 110 on 2026-11-14 (two consecutive runs; an earlier run of that revision failed one admission case with an ingress substrate timeout, which passed alone and in both later runs; cause unconfirmed) and again on 2026-11-15 at `ef5205cf2`, and the writer fence's set passing 64 of 64 on 2026-11-15 at `ef5205cf2`. PostgreSQL 17.11 and SpiceDB 1.56.1 with the memory datastore. |
 
@@ -939,7 +942,9 @@ implemented unless the text says so.
     structure, indexes included, to a manifest built from the schema
     baseline (`restricted_ingress_manifest_v3.json`), and an index a later
     migration added made `physical_attestation`'s restricted-profile cases
-    refuse the database (`prever-run-s2s.log`). Either a manifest version
+    refuse the database (`prever-run-s2s.log`). Only the physical
+    attestation lab and `test_support` reach that profile today; server
+    startup does not (`restricted_runtime_startup` passed with the index). Either a manifest version
     that covers later migrations, or a sweep of the other spellings after
     the retirement commits and outside its lock, would remove the limit.
   - The SM enable-hold seam (`characterization_seams.rs`) writes its files
