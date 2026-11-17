@@ -994,7 +994,10 @@ async fn a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one() {
         disco_item_pairs(&rooms).iter().any(|(jid, _)| jid == &room),
         "the Space's room must be listed by the MUC service: {rooms}"
     );
-    let occupant = format!("{room}/plain");
+    // Waddle locks a nickname to its account, so the second session enters
+    // under the account's nickname (XEP-0045 §7.2, a second session of one
+    // occupant).
+    let occupant = format!("{room}/{USERNAME}");
     let join = Element::builder("presence", "jabber:client")
         .attr(
             minidom::rxml::xml_ncname!("to").to_owned(),
@@ -1006,7 +1009,12 @@ async fn a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one() {
     let entered = plain
         .recv_matching(|frame| {
             frame.parse::<Element>().is_ok_and(|element| {
-                element.name() == "presence" && element.attr("from") == Some(occupant.as_str())
+                element.name() == "presence"
+                    && element.attr("from") == Some(occupant.as_str())
+                    && (element.attr("type") == Some("error")
+                        || element.children().flat_map(Element::children).any(|child| {
+                            child.name() == "status" && child.attr("code") == Some("110")
+                        }))
             })
         })
         .await
