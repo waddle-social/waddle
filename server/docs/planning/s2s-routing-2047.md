@@ -2962,7 +2962,8 @@ runbook (G24):
 - **Metrics.** The router counts dropped unusable presence, dropped room
   traffic and abandoned room deliveries, and for hosted rooms the requests
   that waited, were given up or timed out at the host, were not taken for
-  an account's spent share, were carried to another replica or could not
+  an account's spent share, asked for the service's room list beyond the
+  lists built at once, were carried to another replica or could not
   be, whose holder did not answer in time, the stanzas refused at the
   effect boundary, the chat states and markers dropped, the presence for
   an earlier occupancy dropped, the joins refused for want of a queue, the
