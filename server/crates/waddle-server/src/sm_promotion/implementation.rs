@@ -12,7 +12,10 @@ use super::{build_online_resources, collect_live_targets};
 use super::{build_replay_stanza, MaterializedPayload, ReplayReason};
 use super::{classify_dm_intake, DmRouting, LiveDecision, OnlineResources, PendingDecision};
 use super::{debug, instrument};
-use super::{insert_pending, promote_as_transient, DeliveryHandles, PromotionOrigin};
+use super::{
+    discarded_for_retired_recipient, insert_pending, promote_as_transient, DeliveryHandles,
+    PromotionOrigin,
+};
 use super::{parse_stanza, promote_iq, promote_presence};
 use super::{ConnectionRegistry, SendResult, UserRegistryActor};
 use super::{DateTime, Utc};
@@ -220,6 +223,7 @@ pub(in crate::sm_promotion) async fn promote_session_unacked_with_policy(
         not_promotable = summary.not_promotable,
         unparseable = summary.unparseable,
         scrubbed = summary.scrubbed,
+        discarded = summary.discarded,
         storage_failed = summary.storage_failed,
         "Q6 promotion: session summary"
     );
@@ -1206,6 +1210,7 @@ pub(crate) async fn promote_guarded_sessions(
             not_promotable = summary.not_promotable,
             unparseable = summary.unparseable,
             scrubbed = summary.scrubbed,
+            discarded = summary.discarded,
             "displaced SM session: Q6 promotion completed"
         );
     }
@@ -1267,7 +1272,7 @@ pub(in crate::sm_promotion) async fn promote_one(
     if let Some(recipient) = message.to.as_ref().map(jid::Jid::to_bare) {
         match ctx.pending_storage.recipient_retired(&recipient).await {
             Ok(false) => {}
-            Ok(true) => return PromotedOutcome::Discarded,
+            Ok(true) => return discarded_for_retired_recipient(),
             Err(error) => {
                 tracing::warn!(%error, sequence, "Q6 promotion: the ledger of retired accounts could not be read; retaining the stanza for retry");
                 return PromotedOutcome::StorageFailure(PromotionFailureReason::PendingStorage);

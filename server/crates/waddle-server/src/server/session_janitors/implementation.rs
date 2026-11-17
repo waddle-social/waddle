@@ -4827,6 +4827,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     dropped = summary.dropped,
                     unparseable = summary.unparseable,
                     scrubbed = summary.scrubbed,
+                    discarded = summary.discarded,
                     storage_failed = summary.storage_failed,
                     first_failure = ?summary.first_failure,
                     "Graceful shutdown: Q6 promotion completed for session"

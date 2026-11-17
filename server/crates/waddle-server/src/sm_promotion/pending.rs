@@ -11,6 +11,20 @@ use waddle_xmpp::Stanza;
 
 use super::{PromotedOutcome, PromotionFailureReason};
 
+/// The outcome of a stanza discarded because its recipient's account was
+/// retired (ADR-0020 D8), counted as it is decided: every path a promotion
+/// takes to [`PromotedOutcome::Discarded`] comes through here, the
+/// recovery of orphaned ingress custody included, which keeps no summary.
+pub(super) fn discarded_for_retired_recipient() -> PromotedOutcome {
+    waddle_xmpp::counter_add!(
+        "waddle.account_retirement.promotion_discarded",
+        "{stanza}",
+        "Stanzas a XEP-0198 promotion discarded because their recipient's account was retired",
+        1,
+    );
+    PromotedOutcome::Discarded
+}
+
 /// Bundled delivery handles for pending-storage promotion (ADR-0017 Phase 3
 /// Slice 9): the DashMap send surface plus the actor-authoritative registry
 /// used for bare-JID resource enumeration. Grouped into one type so
@@ -104,7 +118,9 @@ pub(super) async fn insert_pending(
                 }
                 // The store ended the custody without delivery in the same
                 // transaction.
-                Ok(CustodyInsertOutcome::RecipientRetired) => return PromotedOutcome::Discarded,
+                Ok(CustodyInsertOutcome::RecipientRetired) => {
+                    return discarded_for_retired_recipient()
+                }
                 // A quota error sent to an in-memory socket is not a durable
                 // replacement for the retained original payload.
                 Ok(CustodyInsertOutcome::QuotaExceeded) => {
@@ -120,7 +136,7 @@ pub(super) async fn insert_pending(
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
         // The recipient's account was retired: its store keeps nothing, and
         // no sender is answered for it.
-        Ok(InsertOutcome::RecipientRetired) => PromotedOutcome::Discarded,
+        Ok(InsertOutcome::RecipientRetired) => discarded_for_retired_recipient(),
         Ok(InsertOutcome::QuotaExceeded) => {
             if original_message.from.is_none() {
                 // No peer return target exists. Retire this nonbounceable
@@ -258,7 +274,7 @@ async fn return_quota_bounce(
     {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Bounced,
         // The sender's own account was retired: nobody is left to answer.
-        Ok(InsertOutcome::RecipientRetired) => PromotedOutcome::Discarded,
+        Ok(InsertOutcome::RecipientRetired) => discarded_for_retired_recipient(),
         Ok(InsertOutcome::QuotaExceeded) => {
             PromotedOutcome::StorageFailure(if delivery.allow_unfenced_effects {
                 PromotionFailureReason::QuotaBounceUnavailable
