@@ -2259,9 +2259,20 @@ export class BrowserXmppClient {
     this.forgetRetainedRoom(key);
   }
 
+  /**
+   * The user navigated to a room themselves (a sidebar click, a link,
+   * back or forward): a room denied to the account is asked again, and a
+   * room recorded as missing on its server is joined again, the user's own
+   * join ending the record (`ensureJoined`). Any other room is left to the
+   * ordinary switch, as a restored route, a reconnect and a retained room
+   * are, so none of those ends the record.
+   */
   async retryRoomAccess(spaceId: string, channelId: string): Promise<void> {
     const roomJid = this.roomJidForChannel(channelId);
-    if (!this.roomIsTerminallyDenied(roomJid)) return;
+    if (
+      !this.roomIsTerminallyDenied(roomJid)
+      && !this.missingRemoteRooms.has(this.roomJoinKey(roomJid))
+    ) return;
     await this.switchRoomForIntent(spaceId, channelId, "explicit-navigation");
   }
 

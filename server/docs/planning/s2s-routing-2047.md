@@ -2753,9 +2753,11 @@ behaviour of the chat app, for the same runbook):
 - A join of a room on another domain that the room's host answers by
   creating the room (status 201) is left at once, recorded in the browser
   as a missing room that nothing joins on its own again (a join the user
-  starts from the communities dialog is still sent and ends the record, as
-  does any seated join; a restored route, the focused room after a
-  reconnect, a retained room and a retry are refused without a request),
+  starts is still sent and ends the record, as does any seated join: from
+  the communities dialog, or by opening the room themselves with a sidebar
+  click, a link, or back or forward; a route restored at load, the focused
+  room after a reconnect, a retained room and a retry are refused without
+  a request),
   and the user's bookmark of it, if it joins at sign-in, is rewritten with
   `autojoin` off, once the stream is back if it was down. The record is the
   account's in that browser, shared by its tabs and kept across reconnects
