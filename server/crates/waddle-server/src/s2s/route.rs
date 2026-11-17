@@ -29,6 +29,12 @@
 //!   occupants hold, with the stream evidence each was admitted under.
 //!   Without a room host attached the MUC service refuses remote senders.
 //!
+//! - [`LocalSpaces`]: the Spaces of this deployment as accounts at other
+//!   servers reach them (ADR-0020 D10; XEP-0503 over XEP-0060), and the
+//!   event notifications of those Spaces for remote subscribers
+//!   ([`S2sRouter::offer_space_event`]). Without a Spaces host attached the
+//!   Spaces service refuses remote senders.
+//!
 //! The decisions, the handoff contract and the reachability inventory are
 //! recorded in `server/docs/planning/s2s-routing-2047.md`, and those of
 //! account traffic in `server/docs/planning/s2s-account-traffic-2047.md`.
@@ -37,6 +43,7 @@ mod accounts;
 mod correlation;
 mod local;
 mod local_rooms;
+mod local_spaces;
 mod occupancy;
 mod placement;
 mod principal;
@@ -62,12 +69,15 @@ pub use local_rooms::{
     CarriedRoomOutcome, CarriedRoomRequest, LocalRooms, RoomPlacement, RoomReplies, RoomRequest,
     SeatChange, SeatEnd, HOLDER_ASK_LIMIT,
 };
+pub use local_spaces::{LocalSpaces, SpacePublication, SpaceRequest, MAX_SPACE_REPLIES};
 pub use occupancy::{
     InsertOutcome, Occupancy, OccupancyPhase, RemoteRoomStore, RoomLimits, RoomStoreError,
     RoomVerdict, SqlRemoteRoomStore, MAX_JOIN_ID_BYTES, MAX_OCCUPANCY_ADDRESS_BYTES,
 };
 pub use principal::{CarriedPrincipal, PrincipalError, RemotePrincipal};
-pub use reach::{reach, InboundReach, LocalTarget, Reachable, Refusal, RoomOperation};
+pub use reach::{
+    reach, InboundReach, LocalTarget, Reachable, Refusal, RoomOperation, SpaceOperation,
+};
 pub use router::{is_unanswered_message, RouterLimits, RouterOptions, S2sRouter};
 pub use seats::{
     Deferred, Holding, JoinAnswer, Seat, SeatIndex, SeatInsert, SeatLimits, SeatStore,

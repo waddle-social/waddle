@@ -699,3 +699,215 @@ async fn spaces_delete_does_not_destroy_a_room_only_a_non_canonical_item_names()
     let _ = admin.close().await;
     pool.close().await;
 }
+
+// ---------------------------------------------------------------------------
+// A session's Space and channel on a server as startup builds it, and what
+// `spaces:delete` destroys.
+//
+// `TestServer` runs the server binary, whose startup builds the permission
+// actor deciding issuance of the privileged relations (ADR-0020 D8,
+// `with_replica_privileged_issuance`): the channel and Space owner
+// relations, among others, are written only for accounts of the served
+// domain and of trusted homes.
+// ---------------------------------------------------------------------------
+
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+const NS_XDATA: &str = "jabber:x:data";
+
+/// How many relationships `object_type:object_id#relation@subject_type:subject_id`
+/// the deployment's store holds.
+async fn relationships(
+    pool: &SqlitePool,
+    object: (&str, &str),
+    relation: &str,
+    subject: (&str, &str),
+) -> i64 {
+    sqlx::query(
+        "SELECT COUNT(*) FROM permission_tuples \
+         WHERE object_type = ? AND object_id = ? AND relation = ? \
+           AND subject_type = ? AND subject_id = ?",
+    )
+    .bind(object.0)
+    .bind(object.1)
+    .bind(relation)
+    .bind(subject.0)
+    .bind(subject.1)
+    .fetch_one(pool)
+    .await
+    .expect("count relationships")
+    .get(0)
+}
+
+async fn catalog_channels(pool: &SqlitePool, id: &str) -> i64 {
+    sqlx::query("SELECT COUNT(*) FROM channels WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("count channels")
+        .get(0)
+}
+
+/// The admin creates the room `id` by joining it, and configures it, which
+/// makes it a channel of the catalog whose owner the admin is (XEP-0045
+/// §10.1).
+async fn create_room(admin: &mut WsXmppClient, id: &str) {
+    let room = format!("{id}@muc.{DOMAIN}");
+    let join = Element::builder("presence", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/{USERNAME}"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .build();
+    admin.send(&String::from(&join)).await.expect("send join");
+    admin
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("the join is answered");
+    let form = Element::builder("x", NS_XDATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                .append(
+                    Element::builder("value", NS_XDATA)
+                        .append("http://jabber.org/protocol/muc#roomconfig")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let configured = iq_set_to(
+        admin,
+        &format!("configure-{id}"),
+        &room,
+        Element::builder("query", NS_MUC_OWNER).append(form).build(),
+    )
+    .await;
+    assert!(
+        is_result(&configured),
+        "configuring the new room {room} must succeed: {configured}"
+    );
+}
+
+/// The Space `node` created by the admin's session, holding the room `id`
+/// the session created and placed in it.
+async fn space_holding_a_new_room(admin: &mut WsXmppClient, node: &str, id: &str) {
+    create_space_node(admin, node).await;
+    create_room(admin, id).await;
+    let room = format!("{id}@muc.{DOMAIN}");
+    let placed = iq_set_to(
+        admin,
+        &format!("place-{id}"),
+        "spaces.localhost",
+        space_publish(node, &room),
+    )
+    .await;
+    assert!(
+        is_result(&placed),
+        "placing {room} in Space {node} must succeed: {placed}"
+    );
+}
+
+/// A session creates a Space and a channel, and places the channel in the
+/// Space, on a server whose permission actor startup built: the actor
+/// writes the Space's owner relation and the channel's for the creator, an
+/// account of the served domain, and the channel's parent grant on the
+/// Space.
+#[tokio::test]
+async fn a_session_creates_a_space_and_a_channel_under_the_startup_issuance_policy() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-startup-issuance").await;
+    let creator = format!("{USERNAME}@{DOMAIN}");
+
+    space_holding_a_new_room(&mut admin, "made", "lab").await;
+
+    assert_eq!(
+        relationships(&pool, ("space", "made"), "owner", ("user", &creator)).await,
+        1,
+        "the Space's creator owns it"
+    );
+    assert_eq!(
+        relationships(&pool, ("channel", "lab"), "owner", ("user", &creator)).await,
+        1,
+        "the channel's creator owns it"
+    );
+    assert_eq!(
+        relationships(&pool, ("channel", "lab"), "parent", ("space", "made")).await,
+        1,
+        "the channel's parent is the Space"
+    );
+    assert_eq!(catalog_channels(&pool, "lab").await, 1);
+    let items = space_items(&mut admin, "made-items", "made").await;
+    assert_eq!(item_ids(&items), vec![format!("lab@muc.{DOMAIN}")]);
+    let _ = admin.close().await;
+    pool.close().await;
+}
+
+/// `spaces:delete` destroys the rooms the Space was the parent of, and only
+/// those: a room a canonical item of the Space names, whose parent grant is
+/// on another Space and which no link places here, loses the item and
+/// stays.
+#[tokio::test]
+async fn spaces_delete_destroys_only_the_rooms_whose_parent_the_space_is() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-delete-parented").await;
+    space_holding_a_new_room(&mut admin, "made", "lab").await;
+    // `chat` is the seeded `general` Space's room. An item under its
+    // canonical id is stored on `made` without a publish, so `made` is not
+    // its parent, and no link places it anywhere.
+    seed_space_item(&pool, "made", "chat@muc.localhost").await;
+    sqlx::query("DELETE FROM channel_space_links WHERE channel_jid = 'chat@muc.localhost'")
+        .execute(&pool)
+        .await
+        .expect("remove chat's link");
+
+    let delete = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:waddle:admin:spaces:delete:0",
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(
+            DataForm::new(FormType::Submit)
+                .add_field(Field::form_type("urn:waddle:admin:spaces:delete:0"))
+                .add_field(Field::text_single("space_jid", "made@spaces.localhost"))
+                .add_field(Field::text_single("confirm", "yes"))
+                .to_element(),
+        )
+        .build();
+    let response = iq_set_to(&mut admin, "delete-made", DOMAIN, delete).await;
+    assert!(
+        is_result(&response),
+        "spaces:delete must succeed: {response}"
+    );
+
+    assert_eq!(
+        catalog_channels(&pool, "lab").await,
+        0,
+        "the room the Space was the parent of is destroyed"
+    );
+    assert_eq!(
+        catalog_channels(&pool, "chat").await,
+        1,
+        "a room only an item named is not destroyed"
+    );
+    assert_eq!(chat_parent_tuples(&pool, "general").await, 1);
+    assert_eq!(
+        stored_space_items(&pool, "made", "chat@muc.localhost").await,
+        0
+    );
+    let general = space_items(&mut admin, "general-after-made", "general").await;
+    assert!(
+        item_ids(&general).contains(&"chat@muc.localhost".to_owned()),
+        "chat stays bookmarked in general: {general}"
+    );
+    let _ = admin.close().await;
+    pool.close().await;
+}

@@ -31,7 +31,7 @@ async fn a_contacts_ping_to_a_full_jid_reaches_the_resource_and_its_answer_leave
     contact(&federated, ALICE, BOB, "from").await;
 
     federated
-        .from_peer(get(BOB_PHONE, ALICE_PHONE, "ping-1", ping()))
+        .peer_sends(get(BOB_PHONE, ALICE_PHONE, "ping-1", ping()))
         .await;
     let request = receive(&mut phone, "iq", "ping-1").await;
     assert_eq!(request.attr("from"), Some(BOB_PHONE));
@@ -62,7 +62,7 @@ async fn a_ping_to_the_bare_jid_is_answered_on_the_accounts_behalf() {
     contact(&federated, ALICE, BOB, "both").await;
 
     federated
-        .from_peer(get(BOB_PHONE, ALICE, "ping-2", ping()))
+        .peer_sends(get(BOB_PHONE, ALICE, "ping-2", ping()))
         .await;
 
     let answered = federated.peer_receives("ping-2").await;
@@ -88,7 +88,7 @@ async fn a_strangers_ping_to_a_full_jid_is_answered_as_if_no_resource_matched() 
     let mut phone = federated.online("alice", "phone", 5).await;
 
     federated
-        .from_peer(get(MALLORY, ALICE_PHONE, "ping-3", ping()))
+        .peer_sends(get(MALLORY, ALICE_PHONE, "ping-3", ping()))
         .await;
 
     let answered = federated.peer_receives("ping-3").await;

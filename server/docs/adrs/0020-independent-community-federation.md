@@ -590,9 +590,9 @@ Waddle Spaces will conform to XEP-0503 version 0.3.0 (xsf/xeps
 `4132c531487fe9450ae90b905b8df950d0d478b2`). The namespace `urn:xmpp:spaces:0`
 is unchanged from 0.2.0, and the room disco field that 0.3.0 specifies,
 `muc#roomconfig_pubsub`, is the field the current code emits
-([`muc/roominfo.rs`](../../crates/waddle-xmpp/src/muc/roominfo.rs)); the
-[XEP-0503 module](../../crates/waddle-xmpp/src/xep/xep0503.rs) header still
-names 0.2.0.
+([`muc/roominfo.rs`](../../crates/waddle-xmpp/src/muc/roominfo.rs)). The
+[XEP-0503 module](../../crates/waddle-xmpp/src/xep/xep0503.rs) names
+version 0.3.0 in its header.
 
 - XEP-0503 is experimental. It deliberately defines no access control,
   membership or inheritance for a Space's children, and does not describe a
@@ -605,9 +605,14 @@ names 0.2.0.
 - A client without Spaces support reaches every accessible child room by its
   plain MUC JID.
 - When this decision was made, no Prosody or ejabberd XEP-0503 module was
-  found, and the independent implementations found were Movim (client) and
-  Slidge 0.4 beta (read-only gateway). That survey is unverified and is
-  repeated before Spaces acceptance is fixed. On that basis, Spaces
+  found, and the implementations found were Movim (client) and Slidge 0.4
+  beta (read-only gateway). That survey was unverified.
+  [It was repeated on 2026-11-16](../../../docs/planning/xep0503-survey-2047.md)
+  from primary sources and confirmed its basis: no server ships or claims
+  XEP-0503 support, stock Prosody and ejabberd PubSub can hold a node typed
+  `urn:xmpp:spaces:0`, and Movim and Slidge, both written by the
+  specification's authors and both declaring partial support of 0.2.0, are
+  the implementations registered at xmpp.org. On that basis, Spaces
   interoperability requires that a Waddle client uses a Space hosted on stock
   Prosody PubSub and on stock ejabberd PubSub over S2S; that a Prosody account
   and an ejabberd account read a Waddle Space with plain XEP-0060; and that

@@ -129,7 +129,7 @@ async fn a_notification_for_a_node_the_account_subscribed_to_is_delivered() {
     recorded(&federated, true).await;
 
     federated
-        .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-1"))
+        .peer_service_sends(SERVICE, event(SERVICE, ALICE, NODE, "ev-1"))
         .await;
     receive(&mut phone, "message", "ev-1").await;
 }
@@ -142,7 +142,7 @@ async fn a_notification_for_a_node_never_subscribed_to_is_dropped() {
 
     let mark = federated.peer_mark();
     federated
-        .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-2"))
+        .peer_service_sends(SERVICE, event(SERVICE, ALICE, NODE, "ev-2"))
         .await;
 
     let barrier = federated.peer_barrier(SERVICE, ALICE).await;
@@ -167,7 +167,7 @@ async fn a_notification_after_unsubscribing_is_dropped() {
     recorded(&federated, false).await;
 
     federated
-        .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-3"))
+        .peer_service_sends(SERVICE, event(SERVICE, ALICE, NODE, "ev-3"))
         .await;
     federated.peer_barrier(SERVICE, ALICE).await;
     assert!(!holds(
@@ -189,7 +189,7 @@ async fn an_error_carrying_an_event_is_dropped_even_for_a_subscribed_node() {
     // event is no notification the account asked for (§7.1).
     let mut error = event(SERVICE, "alice@example.com/phone", NODE, "ev-4");
     error.type_ = MessageType::Error;
-    federated.from_peer_service(SERVICE, error).await;
+    federated.peer_service_sends(SERVICE, error).await;
     federated.peer_barrier(SERVICE, ALICE).await;
     assert!(!holds(
         &federated.client_settle(&mut phone).await,
@@ -207,13 +207,13 @@ async fn a_notification_naming_any_node_not_subscribed_to_is_dropped_whole() {
     recorded(&federated, true).await;
 
     federated
-        .from_peer_service(
+        .peer_service_sends(
             SERVICE,
             event_about(SERVICE, ALICE, &[NODE, "other_node"], "ev-5"),
         )
         .await;
     federated
-        .from_peer_service(SERVICE, event(SERVICE, ALICE, NODE, "ev-5-control"))
+        .peer_service_sends(SERVICE, event(SERVICE, ALICE, NODE, "ev-5-control"))
         .await;
     // The control, decided after it, arrives; the mixed one never did.
     let frames = support::receive_until(&mut phone, |frame| {
@@ -231,13 +231,13 @@ async fn a_personal_eventing_notification_reaches_an_account_subscribed_to_its_o
     contact(&federated, ALICE, BOB, "to").await;
 
     federated
-        .from_peer(event(BOB, ALICE, "urn:xmpp:avatar:metadata", "pep-1"))
+        .peer_sends(event(BOB, ALICE, "urn:xmpp:avatar:metadata", "pep-1"))
         .await;
     receive(&mut phone, "message", "pep-1").await;
 
     // Mallory's personal eventing service is not one Alice subscribed to.
     federated
-        .from_peer(event(
+        .peer_sends(event(
             "mallory@home-b.test",
             ALICE,
             "urn:xmpp:avatar:metadata",

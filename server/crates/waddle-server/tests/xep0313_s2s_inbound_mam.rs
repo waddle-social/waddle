@@ -77,7 +77,7 @@ async fn a_remote_occupant_reads_the_rooms_archive_in_order_before_the_fin() {
         .await
         .expect("the sender's reflection");
     }
-    hosted.from_peer(query(BOB, ROOM, "q1", "page-1")).await;
+    hosted.peer_sends(query(BOB, ROOM, "q1", "page-1")).await;
     let fin = hosted.answered("q1").await;
     assert_eq!(fin.attr("type"), Some("result"), "{fin:?}");
     assert_eq!(fin.attr("from"), Some(ROOM));
@@ -115,7 +115,7 @@ async fn an_asker_that_may_enter_an_open_room_reads_its_archive_without_joining(
     .await
     .expect("the sender's reflection");
     // XEP-0313: an open room's archive is read by whoever may enter it.
-    hosted.from_peer(query(BOB, ROOM, "q2", "page-2")).await;
+    hosted.peer_sends(query(BOB, ROOM, "q2", "page-2")).await;
     let fin = hosted.answered("q2").await;
     assert_eq!(fin.attr("type"), Some("result"), "{fin:?}");
     assert!(hosted
@@ -131,14 +131,14 @@ async fn an_asker_that_may_enter_an_open_room_reads_its_archive_without_joining(
 async fn a_query_for_a_room_that_does_not_exist_or_an_occupant_jid_is_refused() {
     let hosted = Hosted::start(RouterLimits::default(), no_change).await;
     hosted
-        .from_peer(query(BOB, "nowhere@muc.example.com", "q3", "page-3"))
+        .peer_sends(query(BOB, "nowhere@muc.example.com", "q3", "page-3"))
         .await;
     let refused = hosted.answered("q3").await;
     assert_eq!(refused.attr("type"), Some("error"));
     assert_eq!(error_condition(&refused).as_deref(), Some("item-not-found"));
     // Only a room's bare JID serves an archive (XEP-0313 §3.2).
     hosted
-        .from_peer(query(BOB, "lounge@muc.example.com/alice", "q4", "page-4"))
+        .peer_sends(query(BOB, "lounge@muc.example.com/alice", "q4", "page-4"))
         .await;
     let refused = hosted.answered("q4").await;
     assert_eq!(refused.attr("type"), Some("error"));
@@ -166,10 +166,10 @@ async fn the_archive_of_a_room_that_is_not_federated_is_not_found() {
     .expect("the sender's reflection");
     // The room is open to any local account; its archive is refused to an
     // asker at another server as that of a room that does not exist.
-    hosted.from_peer(query(BOB, ROOM, "q5", "page-5")).await;
+    hosted.peer_sends(query(BOB, ROOM, "q5", "page-5")).await;
     let closed = hosted.answered("q5").await;
     hosted
-        .from_peer(query(BOB, "nowhere@muc.example.com", "q6", "page-6"))
+        .peer_sends(query(BOB, "nowhere@muc.example.com", "q6", "page-6"))
         .await;
     let absent = hosted.answered("q6").await;
     assert_eq!(closed.attr("type"), Some("error"), "{closed:?}");
@@ -202,7 +202,7 @@ async fn a_remote_member_reads_a_managed_rooms_archive_and_a_stranger_is_refused
     // stream that carried the query; it need not be joined.
     managed
         .hosted
-        .from_peer(query(GUEST_PHONE, room.as_str(), "q5", "page-5"))
+        .peer_sends(query(GUEST_PHONE, room.as_str(), "q5", "page-5"))
         .await;
     let fin = managed.hosted.answered("q5").await;
     assert_eq!(fin.attr("type"), Some("result"), "{fin:?}");
@@ -216,7 +216,7 @@ async fn a_remote_member_reads_a_managed_rooms_archive_and_a_stranger_is_refused
     // An account of the same admitted home without a grant reads nothing.
     managed
         .hosted
-        .from_peer(query(STRANGER_PHONE, room.as_str(), "q6", "page-6"))
+        .peer_sends(query(STRANGER_PHONE, room.as_str(), "q6", "page-6"))
         .await;
     let refused = managed.hosted.answered("q6").await;
     assert_eq!(refused.attr("type"), Some("error"));

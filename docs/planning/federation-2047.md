@@ -408,9 +408,14 @@ journeys' ordered and deduplicated delivery wording or non-web clients.
   `see-other-host` are
   stricter than RFC 6120 and XEP-0220 require; the harness records whether
   Prosody and ejabberd connect under them.
-- **Third-party Spaces.** No Prosody or ejabberd XEP-0503 module was found, so
+- **Third-party Spaces.** No Prosody or ejabberd XEP-0503 module exists, so
   third-party Spaces acceptance rests on plain PubSub and the MUC fallback
-  (ADR-0020 D4); W7a repeats that survey.
+  (ADR-0020 D4). [The survey W7a repeated](xep0503-survey-2047.md) on
+  2026-11-16 confirms it, and adds that the implementations found (Movim and
+  Slidge, by the specification's authors) declare version 0.2.0, that Movim's
+  Spaces need the `authorize` access model, which Waddle Spaces do not
+  implement, and that stock Prosody and ejabberd each leave one required
+  PubSub feature unadvertised.
 - **Lexical inventory.** The #2062 writer inventory is a token scan at an older
   baseline, not a call graph. W5c starts with a fresh sweep and manual review;
   an unfenced writer found later reopens W5d.

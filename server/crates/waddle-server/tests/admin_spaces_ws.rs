@@ -852,6 +852,73 @@ async fn spaces_set_role_round_trips_through_members() {
     let _ = admin.close().await;
 }
 
+/// ADR-0020 D8 at issuance: the owner and admin roles are the node's Owner
+/// and Publisher affiliations, written only for an account of this
+/// deployment or of a trusted home. With S2S off no home is trusted, so an
+/// account at another server is refused both and may still be a member.
+#[tokio::test]
+async fn spaces_set_role_refuses_a_privileged_role_for_an_account_at_another_server() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-spaces-role-remote").await;
+
+    let create_resp = send_command(
+        &mut admin,
+        NODE_SPACES_CREATE,
+        "spaces-remote-role-create",
+        &submit_form(NODE_SPACES_CREATE, &text_field("name", "RemoteRoleSpace")),
+    )
+    .await;
+    let space_jid = extract_field(&create_resp, "space_jid").expect("space_jid");
+    let set_role = |role: &str| {
+        format!(
+            "{}{}{}",
+            text_field("space_jid", &space_jid),
+            text_field("member_jid", "stranger@elsewhere.example"),
+            text_field("role", role),
+        )
+    };
+
+    for (role, id) in [
+        ("owner", "spaces-remote-owner"),
+        ("admin", "spaces-remote-admin"),
+    ] {
+        let resp = send_command(
+            &mut admin,
+            NODE_SPACES_SET_ROLE,
+            id,
+            &submit_form(NODE_SPACES_SET_ROLE, &set_role(role)),
+        )
+        .await;
+        assert!(is_error(&resp), "expected a refusal of {role}, got: {resp}");
+        assert!(
+            resp.contains("not-allowed"),
+            "expected <not-allowed/> for {role}, got: {resp}"
+        );
+    }
+    let list_resp = send_command(
+        &mut admin,
+        NODE_SPACES_MEMBERS,
+        "spaces-remote-role-list",
+        &submit_form(NODE_SPACES_MEMBERS, &text_field("space_jid", &space_jid)),
+    )
+    .await;
+    assert!(
+        !list_resp.contains("stranger@elsewhere.example"),
+        "a refused role must write nothing, got: {list_resp}"
+    );
+
+    let resp = send_command(
+        &mut admin,
+        NODE_SPACES_SET_ROLE,
+        "spaces-remote-member",
+        &submit_form(NODE_SPACES_SET_ROLE, &set_role("member")),
+    )
+    .await;
+    assert!(is_result(&resp), "expected the member role, got: {resp}");
+    let _ = admin.close().await;
+}
+
 #[tokio::test]
 async fn spaces_set_role_works_for_bootstrapped_general_space() {
     let _serial = TEST_SERIAL.lock().await;

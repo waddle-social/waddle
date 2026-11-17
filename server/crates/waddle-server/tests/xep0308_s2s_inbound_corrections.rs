@@ -33,7 +33,7 @@ async fn a_remote_occupant_corrects_its_own_message_and_no_other() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "own-1", "frist"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "own-1", "frist"))
         .await;
     local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("frist")
@@ -51,7 +51,7 @@ async fn a_remote_occupant_corrects_its_own_message_and_no_other() {
     meddling
         .payloads
         .push(naming("replace", NS_CORRECT, "theirs-1"));
-    hosted.from_peer(meddling).await;
+    hosted.peer_sends(meddling).await;
     let refused = hosted.answered("meddle-1").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
@@ -61,7 +61,7 @@ async fn a_remote_occupant_corrects_its_own_message_and_no_other() {
     correction
         .payloads
         .push(naming("replace", NS_CORRECT, "own-1"));
-    hosted.from_peer(correction).await;
+    hosted.peer_sends(correction).await;
     let corrected = local_receives_payload(&mut alice, BOB_OCCUPANT, "replace", NS_CORRECT)
         .await
         .expect("the correction for the local occupant");
@@ -73,7 +73,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_corrects_none_of_i
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "kept-1", "said by bob"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "kept-1", "said by bob"))
         .await;
     local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("said by bob")
@@ -81,7 +81,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_corrects_none_of_i
     .await
     .expect("the message for the local occupant");
     hosted
-        .from_peer(remote_leave(BOB, ROOM, "bob", "leave-1"))
+        .peer_sends(remote_leave(BOB, ROOM, "bob", "leave-1"))
         .await;
     assert!(hosted.unseated(ROOM, BOB).await);
 
@@ -89,7 +89,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_corrects_none_of_i
     // archived message carries.
     let mallory = "mallory@home-b.test/phone";
     hosted
-        .from_peer(remote_join(mallory, ROOM, "bob", "join-2"))
+        .peer_sends(remote_join(mallory, ROOM, "bob", "join-2"))
         .await;
     hosted
         .at_peer(|stanza| {
@@ -102,7 +102,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_corrects_none_of_i
     correction
         .payloads
         .push(naming("replace", NS_CORRECT, "kept-1"));
-    hosted.from_peer(correction).await;
+    hosted.peer_sends(correction).await;
     let refused = hosted.answered("take-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
     assert!(

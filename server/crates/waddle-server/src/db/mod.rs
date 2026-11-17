@@ -19,6 +19,7 @@ pub mod roster;
 pub mod runtime_startup;
 pub(crate) mod runtime_store_acl;
 pub mod s2s_accounts;
+pub mod s2s_spaces;
 mod schema;
 mod value;
 

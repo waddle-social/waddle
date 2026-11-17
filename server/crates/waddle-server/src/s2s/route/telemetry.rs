@@ -386,3 +386,48 @@ pub(super) fn account_share_full() {
         1,
     );
 }
+
+/// A request for the Spaces PubSub service was not taken: its account's
+/// share or its domain's allowance of requests was spent.
+pub(super) fn space_request_limited() {
+    counter_add!(
+        "waddle.s2s.spaces.requests.limited",
+        "{stanza}",
+        "Requests from S2S streams for the Spaces PubSub service that were not taken because their account's share or their domain's allowance of requests was spent, answered with resource-constraint or dropped.",
+        1,
+    );
+}
+
+/// The Spaces host did not decide a request within the router's bound: the
+/// worker moved on and the answer, if one comes, is dropped.
+pub(super) fn space_request_timed_out() {
+    counter_add!(
+        "waddle.s2s.spaces.requests.timed_out",
+        "{stanza}",
+        "Requests from S2S streams for the Spaces PubSub service that the Spaces host did not decide within the router's bound, so that no answer was sent.",
+        1,
+    );
+}
+
+/// An event notification of a local Space was queued for a subscriber at
+/// another server.
+pub(super) fn space_event_queued() {
+    counter_add!(
+        "waddle.s2s.spaces.events.queued",
+        "{stanza}",
+        "Event notifications of local Spaces queued for subscribers at other servers.",
+        1,
+    );
+}
+
+/// An event notification of a local Space for a subscriber at another
+/// server was dropped: its domain is not admitted now, its pair could open
+/// no queue, or the pair's share of event notifications was full.
+pub(super) fn space_event_dropped() {
+    counter_add!(
+        "waddle.s2s.spaces.events.dropped",
+        "{stanza}",
+        "Event notifications of local Spaces for subscribers at other servers dropped because the subscriber's domain is not admitted now, its domain pair could open no queue or held its share of queued notifications.",
+        1,
+    );
+}

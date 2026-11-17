@@ -109,7 +109,10 @@ pub(super) async fn handle_pubsub_iq(
                         item,
                         authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
-                    .await;
+                    .await
+                    .into_iter()
+                    .map(iq_to_xml)
+                    .collect();
                 }
                 if target_jid.to_string() == community_domain {
                     return handle_community_publish(
@@ -486,7 +489,10 @@ pub(super) async fn handle_pubsub_iq(
                         &item_id,
                         authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
-                    .await;
+                    .await
+                    .into_iter()
+                    .map(iq_to_xml)
+                    .collect();
                 }
 
                 if target_jid.to_string() == community_domain {
@@ -582,7 +588,10 @@ pub(super) async fn handle_pubsub_iq(
                     authenticated_session,
                     request,
                 )
-                .await;
+                .await
+                .into_iter()
+                .map(iq_to_xml)
+                .collect();
             }
         }
     }

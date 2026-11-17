@@ -102,7 +102,7 @@ async fn a_moderator_of_a_trusted_home_retracts_another_occupants_message() {
     let target = local_message(&hosted, &mut alice, "spam-1", "buy now").await;
 
     hosted
-        .from_peer(remote_set(BOB, ROOM, "moderate-1", moderate(&target)))
+        .peer_sends(remote_set(BOB, ROOM, "moderate-1", moderate(&target)))
         .await;
     let done = hosted.answered("moderate-1").await;
     assert_eq!(done.attr("type"), Some("result"), "{done:?}");
@@ -120,7 +120,7 @@ async fn an_occupant_without_the_moderator_role_moderates_nothing() {
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     let target = local_message(&hosted, &mut alice, "kept-1", "stays here").await;
     hosted
-        .from_peer(remote_set(BOB, ROOM, "moderate-2", moderate(&target)))
+        .peer_sends(remote_set(BOB, ROOM, "moderate-2", moderate(&target)))
         .await;
     let refused = hosted.answered("moderate-2").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
@@ -133,7 +133,7 @@ async fn an_occupant_without_the_moderator_role_moderates_nothing() {
     );
     // A moderation element that asks to retract nothing is answered too.
     hosted
-        .from_peer(remote_set(
+        .peer_sends(remote_set(
             BOB,
             ROOM,
             "moderate-3",

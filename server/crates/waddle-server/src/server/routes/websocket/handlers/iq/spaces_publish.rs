@@ -4,7 +4,7 @@ use super::permissions::{
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::{
-    build_pubsub_error, build_pubsub_publish_result, chrono, get_xmpp_channel, iq_to_xml,
+    build_pubsub_error, build_pubsub_publish_result, chrono, get_xmpp_channel,
     spaces_node_mutation_allowed, spaces_service_bare_jid, warn, BareJid, Object, ObjectType,
     Permission, PubSubError, PubSubItem, WebSocketState,
 };
@@ -22,17 +22,17 @@ pub(super) async fn handle_spaces_publish(
     node: &str,
     item: PubSubItem,
     principal: Option<ResolvedPrincipal<'_>>,
-) -> Vec<String> {
+) -> Vec<xmpp_parsers::iq::Iq> {
     match spaces_node_mutation_allowed(state, principal, node).await {
         Ok(true) => {}
-        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Ok(false) => return vec![build_pubsub_error(iq, PubSubError::Forbidden)],
         Err(error) => {
             warn!(node, error = %error, "Failed to authorize Spaces publish");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
         }
     }
     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
     match state
         .deps
@@ -42,42 +42,39 @@ pub(super) async fn handle_spaces_publish(
         .await
     {
         Ok(Some(_)) => {}
-        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Ok(None) => return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)],
         Err(error) => {
             warn!(node, error = %error, "Failed to resolve Spaces node for publish");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+            return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)];
         }
     }
 
     let Some(item_id) = item.id.as_deref() else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
     let Some(payload) = item.payload.as_ref() else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
     let bookmark = match waddle_xmpp::xep::xep0402::parse_bookmark(item_id, payload) {
         Ok(bookmark) => bookmark,
         Err(error) => {
             warn!(item_id, error = %error, "Invalid XEP-0402 Spaces item");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+            return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
         }
     };
     if bookmark.jid.domain().as_str() != muc_domain {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     }
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&bookmark.jid) else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
     match get_xmpp_channel(db_actor, &channel_id).await {
         Ok(Some(_)) => {}
-        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Ok(None) => return vec![build_pubsub_error(iq, PubSubError::ItemNotFound)],
         Err(error) => {
             warn!(channel_id = %channel_id, error = %error, "Failed to look up channel for Spaces bookmark");
-            return vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))];
+            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
         }
     }
     match channel_placement_allowed(
@@ -91,10 +88,10 @@ pub(super) async fn handle_spaces_publish(
     .await
     {
         Ok(true) => {}
-        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Ok(false) => return vec![build_pubsub_error(iq, PubSubError::Forbidden)],
         Err(error) => {
             warn!(error = %error, "Failed to authorize channel placement in a Space");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            return vec![build_pubsub_error(iq, PubSubError::Forbidden)];
         }
     }
 
@@ -114,10 +111,7 @@ pub(super) async fn handle_spaces_publish(
                 error = %error,
                 "Failed to enumerate prior Space nodes for room bookmark"
             );
-            return vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))];
+            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
         }
     };
     let previous_link = match state
@@ -130,10 +124,7 @@ pub(super) async fn handle_spaces_publish(
         Ok(link) => link,
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to read channel-space link before Spaces publish");
-            return vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))];
+            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
         }
     };
     let current_item_filter = [item_id.to_string()];
@@ -150,10 +141,7 @@ pub(super) async fn handle_spaces_publish(
             .map(|stored| stored.to_pubsub_item()),
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to read existing Spaces item before publish");
-            return vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))];
+            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
         }
     };
 
@@ -209,10 +197,7 @@ pub(super) async fn handle_spaces_publish(
                             "Failed to roll back Spaces publish after link projection failure"
                         );
                     }
-                    return vec![iq_to_xml(build_pubsub_error(
-                        iq,
-                        PubSubError::InternalServerError,
-                    ))];
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
             } else {
                 warn!(
@@ -256,10 +241,7 @@ pub(super) async fn handle_spaces_publish(
                             "Failed to roll back Spaces publish after link projection clear failure"
                         );
                     }
-                    return vec![iq_to_xml(build_pubsub_error(
-                        iq,
-                        PubSubError::InternalServerError,
-                    ))];
+                    return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                 }
             }
             let parent_tuple_created =
@@ -295,10 +277,7 @@ pub(super) async fn handle_spaces_publish(
                                 "Failed to roll back Spaces publish after parent tuple failure"
                             );
                         }
-                        return vec![iq_to_xml(build_pubsub_error(
-                            iq,
-                            PubSubError::InternalServerError,
-                        ))];
+                        return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
                     }
                 };
             // A placement moves the channel: every other Space stops being
@@ -343,10 +322,7 @@ pub(super) async fn handle_spaces_publish(
                         "Failed to roll back Spaces publish after stale cleanup failure"
                     );
                 }
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InternalServerError,
-                ))];
+                return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
             }
             // Fan-out only after the parent-tuple write succeeds: the
             // compensating-retract path above must NOT emit events for
@@ -369,18 +345,11 @@ pub(super) async fn handle_spaces_publish(
                 },
             )
             .await;
-            vec![iq_to_xml(build_pubsub_publish_result(
-                iq,
-                node,
-                &result.item_id,
-            ))]
+            vec![build_pubsub_publish_result(iq, node, &result.item_id)]
         }
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to publish Spaces item");
-            vec![iq_to_xml(build_pubsub_error(
-                iq,
-                PubSubError::InternalServerError,
-            ))]
+            vec![build_pubsub_error(iq, PubSubError::InternalServerError)]
         }
     }
 }

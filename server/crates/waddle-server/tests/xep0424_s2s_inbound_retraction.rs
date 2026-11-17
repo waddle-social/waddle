@@ -43,7 +43,7 @@ async fn a_remote_occupant_retracts_its_own_message_and_no_other() {
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "own-1", "said in haste"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "own-1", "said in haste"))
         .await;
     let said = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("said in haste")
@@ -59,12 +59,14 @@ async fn a_remote_occupant_retracts_its_own_message_and_no_other() {
         .expect("the remote occupant's copy");
     let theirs = stanza_id(&copy, ROOM).expect("the room's stanza-id");
 
-    hosted.from_peer(retraction(BOB, "meddle-1", &theirs)).await;
+    hosted
+        .peer_sends(retraction(BOB, "meddle-1", &theirs))
+        .await;
     let refused = hosted.answered("meddle-1").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
 
-    hosted.from_peer(retraction(BOB, "own-2", &own)).await;
+    hosted.peer_sends(retraction(BOB, "own-2", &own)).await;
     let retracted = local_receives_payload(&mut alice, BOB_OCCUPANT, "retract", NS_RETRACT).await;
     assert!(retracted.is_some(), "the retraction for the local occupant");
     assert!(hosted
@@ -79,7 +81,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_retracts_none_of_i
     let (hosted, mut alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "kept-1", "said by bob"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "kept-1", "said by bob"))
         .await;
     let said = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("said by bob")
@@ -88,7 +90,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_retracts_none_of_i
     .expect("the message for the local occupant");
     let kept = stanza_id(&said, ROOM).expect("the room's stanza-id");
     hosted
-        .from_peer(remote_leave(BOB, ROOM, "bob", "leave-1"))
+        .peer_sends(remote_leave(BOB, ROOM, "bob", "leave-1"))
         .await;
     assert!(hosted.unseated(ROOM, BOB).await);
 
@@ -97,7 +99,7 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_retracts_none_of_i
     // with the archived occupant address, which now matches.
     let mallory = "mallory@home-b.test/phone";
     hosted
-        .from_peer(remote_join(mallory, ROOM, "bob", "join-2"))
+        .peer_sends(remote_join(mallory, ROOM, "bob", "join-2"))
         .await;
     hosted
         .at_peer(|stanza| {
@@ -106,7 +108,9 @@ async fn an_occupant_that_takes_a_departed_occupants_nickname_retracts_none_of_i
         })
         .await
         .expect("the room's own presence for the second occupant");
-    hosted.from_peer(retraction(mallory, "take-1", &kept)).await;
+    hosted
+        .peer_sends(retraction(mallory, "take-1", &kept))
+        .await;
     let refused = hosted.answered("take-1").await;
     assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
     assert!(

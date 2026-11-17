@@ -387,6 +387,13 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // A remote stranger's message admitted to an account's offline store
     // is counted by an inserted row; rows older than a day are deleted.
     ("s2s_remote_offline_admissions", READ_WRITE),
+    // Spaces over S2S: a Space's `federated` setting is a row upserted when
+    // an owner turns it on and deleted when it is turned off; a remote
+    // account's subscription is upserted with the evidence of its stream
+    // and deleted when it unsubscribes, its Space is deleted or the
+    // setting is turned off.
+    ("s2s_federated_spaces", READ_WRITE),
+    ("s2s_space_subscriptions", READ_WRITE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

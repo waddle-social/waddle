@@ -102,6 +102,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, run7 S2S final log |
 | `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, run7 S2S final log |
 | `identity_profile` (19) | W5i | none (loopback address checks only) | Not run |
+| `xep0503_remote_metadata` (3) | W7a | none | Not run |
 | `xep0313_mam` (edited, 11) | W5c | none; two cases need PostgreSQL and skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0402_pep_native_bookmarks` (edited, 15) | W5i | none | Not run |
 | `xep0513_mentions` (edited, 20) | W5c | none | Not run |
@@ -116,7 +117,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run7 S2S final log |
 | `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run7 S2S final log |
 | `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run7 S2S final log |
-| `s2s_reachability` (8) | W5a, W6b, W6a, W6c | loopback | Run 8/8, run7 S2S final log |
+| `s2s_reachability` (9) | W5a, W6b, W6a, W6c, W7a | loopback | Not run since W7a edited it (one case added for the Spaces classes, one renamed, the `Reachable` literal of another extended); 8/8 before, run7 S2S final log |
 | `s2s_d7_refusal` (4) | W5a, W6c (header only) | none | Run 4/4, run7 S2S final log |
 | `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run7 S2S final log |
 | `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run7 S2S final log |
@@ -151,6 +152,12 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0115_s2s_account_caps_ws` (1) | W6c | as `s2s_account_traffic_ws` | Run 1/1, run7 S2S final log |
 | `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Run 3/3, run7 S2S final log |
 | `xep0313_s2s_account_archive_ws` (2) | W6c | as `s2s_account_traffic_ws` | Run 2/2, run7 S2S final log |
+| `xep0503_s2s_inbound_spaces` (9) | W7a | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Not run |
+| `xep0060_s2s_inbound_spaces_pubsub` (22) | W7a | as `xep0503_s2s_inbound_spaces` | Not run |
+| `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Not run |
+| `xep0503_s2s_outbound_spaces_ws` (3) | W7a | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Not run |
+| `spaces_privileged_issuance` (10) | W7a | none (in-memory SQLite, the local permission backend; one case loads an S2S snapshot through the production loader from temporary files) | Not run |
+| `admin_spaces_ws` (edited, 22) | W7a | TestServer process | Not run (one case added: a privileged role refused for an account at another server) |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Not run |
@@ -199,7 +206,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `rfc6121_roster_ws` (edited, 12) | W5i | TestServer process | Not run |
 | `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Not run |
 | `xep0492_dm_bookmarks_ws` (edited, 6) | W5i | none | Not run |
-| `xep0503_spaces_ws` (edited, 9) | W5i | TestServer process | Not run |
+| `xep0503_spaces_ws` (edited, 11) | W5i, W7a | TestServer process | Not run (W7a added two cases: a session's Space and channel under the startup issuance policy, and `spaces:delete` destroying only the rooms whose parent the Space is) |
 
 ### waddle-client-session
 
@@ -228,6 +235,18 @@ final logs with those changes. The submodules of `s2s_verifier`,
 `s2s_connection_manager`, `xep0220_s2s_dialback`, `xep0368_s2s_discovery` and
 `host_grant_fence_cases/sinks.rs` are counted under their parent targets.
 
+W7a adds `tests/s2s_spaces_support/mod.rs`, which builds on the
+account-traffic support, and changed two shared supports after the run7
+logs. `s2s_account_support` gained an option (`Adjust::hosts_spaces`, off
+by default) that adds `spaces.example.com` to the local deployment's S2S
+domains, has the peer admit and reach it, and attaches the production
+Spaces host; with the option off the fixture builds what it built before.
+`s2s_inbound_muc_support` gained a sender for another S2S domain of the
+deployment (`Hosted::peer_sends_to`). Every target that includes either
+support compiles with the change (the W7a targets, `xep0060_s2s_account_events_ws`
+and `xep0045_s2s_inbound_muc` were checked); none has run since, so their
+"Run" rows describe the supports as they were.
+
 ## Library unit test modules edited on the branch
 
 These files hold existing cases that the branch edited, and one, the
@@ -241,6 +260,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | --- | --- | --- | --- |
 | `waddle-server/src/admin/channel_inventory_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/admin/channels.rs` (`tests`) | W6a | none; one catalog record literal gained the `federated` field | Not run |
+| `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W7a | none; one call of `destroy_space_channel` gained the `SpaceService` argument (which now names the account domain, as `run_delete` does: `"localhost"` in the four calls), and `run_delete` there now also closes the Space to other servers, removes the service's subscription records of accounts at other servers and the Space's own relations, runs under the Space's deletion lock, and destroys a room only where its parent grant on the Space is found, which the cases' `link` writes | Not run; not compiled |
 | `waddle-server/src/server/xmpp_channels.rs` (`tests`) | W6a | none; the catalog row literal gained the `federated` column | Not run |
 | `waddle-xmpp/src/muc/owner/tests.rs` | W6a | none; two cases added (the `federated` field of the owner form, and a stored configuration without it) | Not run |
 | `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W5c | none | Not run |
@@ -276,9 +296,19 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 111 (89 integration targets, 20 library test modules, 2 chat test files) |
-| Run, with a cited log | 66 targets, 1,041 cases, all passed in their latest cited run |
-| Not run | 45 targets (20 of them library modules) |
+| Test targets listed | 119 (96 integration targets, 21 library test modules, 2 chat test files) |
+| Run, with a cited log | 65 targets, 1,033 cases, all passed in their latest cited run |
+| Not run | 54 targets (21 of them library modules) |
+
+W7a added six targets (45 cases), listed `admin_spaces_ws` for the case it
+added there, and edited `s2s_reachability`, which moved from run to not run
+with its eight cases and gained a ninth. It also renamed the send helpers of
+`s2s_account_support` and `s2s_inbound_muc_support` (`from_peer` became
+`peer_sends`, `from_peer_service` `peer_service_sends` and `from_sender`
+`send_from`) and named a type in the scripted room host, so that clippy
+accepts the 27 targets that include either support; the call sites changed
+by name only. Those targets compile and are clippy-clean with the rename and
+have not run since, so their "Run" rows describe the code before it.
 
 By log: the run7 S2S final log covers 44 targets (133 `waddle-xmpp` cases
 in 4, 621 `waddle-server` cases in 40); the run7 clustering final log
@@ -311,6 +341,33 @@ use carried stanzas, not a second kind of stream. The kept leaves'
 first-kept deadline, their per-account bound and the carrier's rule for
 an ask begun with less than the owner's windows have no case of their
 own.
+
+W7a's targets were compiled and not executed: `cargo check -p
+waddle-server --features test-support --test <target>` for each changed
+target, and `cargo clippy -p waddle-server --features test-support --locked
+--test <target> ... -- -D warnings` over the 27 targets that include the
+S2S account or inbound MUC support, `spaces_privileged_issuance`,
+`xep0060_spaces_owner_ws` and `admin_spaces_ws`, which passes. Before the
+helper rename above, clippy refused those 27 targets (`wrong_self_convention`
+on the `from_*` helpers, `type_complexity` in the scripted room host), so an
+earlier statement that clippy had passed on each W7a target was wrong.
+
+What they do not cover even when run: a stream of `dialback` strength (the
+fixtures' peer authenticates by certificate, so a dialback subscription is
+recorded through the store, and "not honoured" for a request is shown
+through the trusted-home list alone); concurrency on PostgreSQL (the
+advisory locks that make the bounds exact and close the race between a
+subscription and turning the setting off run only on the SQLite fixture,
+where one immediate transaction serialises every writer; on PostgreSQL the
+host-grant Spaces suite shows a sweep of the whole store passing over a
+row another transaction holds, and a Space's deletion lock holding off a
+second deletion of it, and no race between two writers); the router's
+per-pair share of queued notifications, a Space's allowance of notified
+publications and the queue of publications, which depend on timing; a
+request the Spaces host does not decide in time; two replicas serving one
+Space; and every third-party flow of the plan's interoperability matrix (a
+Space on stock Prosody or ejabberd PubSub, and a Prosody or ejabberd
+account reading a Waddle Space), which need the interoperability harness.
 
 ## Deferred hardening and follow-ups
 
@@ -440,9 +497,21 @@ implemented unless the text says so.
 
 ### Routing design (`s2s-routing-2047.md`)
 
-- Spaces (W7a): enable its handlers for remote principals in `reach`, the
-  inventory and the reachability suite, and list it in server-domain
-  `disco#items`.
+- Spaces (W7a), written and not run: the Spaces service is reached for the
+  operations reviewed for a remote principal, a Space only while its
+  `federated` setting is on, and event notifications leave for the
+  subscriptions remote accounts made themselves. Left open: serving an
+  enrolled scope's Space (it needs a PubSub admission identity), placing a
+  room in a Space from another server (no writer issues the Space `owner`
+  relationship to a remote account), the `authorize` access model, ending
+  a subscription on a delivery error (a subscription lapses after thirty
+  days without being made again), a `federated` setting for single peers,
+  the field in the web client, and advertising the further PubSub features
+  (W11). A trusted home's owner holds every owner power over a Space,
+  deletion included; a deletion through PubSub, by a session or a remote
+  owner, takes the Space's rooms out of it and destroys none, and only the
+  admin command `spaces:delete` destroys rooms. The recovery path is
+  `spaces:set-role`.
 - Inbound MUC (W6a), written and not run: a remote principal reaches only
   rooms whose `federated` setting is on, and the setting opens a room to
   every admitted domain, not to named ones; a request for a room another
@@ -571,13 +640,12 @@ implemented unless the text says so.
   admitted under, on the replica that holds the seat. Open there: a
   principal named on a replica that holds no seat for it is still decided
   without stream evidence (a trusted home's admin is then not counted as a
-  reader); a per-scope `require_pkix`; D8 issuance for the Spaces
-  relations (W7a), the one family of legacy privileged writers that does
-  not ask whether the subject's home is trusted;
-  an operation kind of its own for a dropped increase, which needs a
-  migration of the kind constraint; and the rollout window in which a
-  replica on an earlier snapshot can still activate an increase another
-  replica would drop. Not covered by a test: the call mixer's domain in the
+  reader); a per-scope `require_pkix`; an operation kind of its own for a
+  dropped increase, which needs a migration of the kind constraint; and the
+  rollout window in which a replica on an earlier snapshot can still
+  activate an increase another replica would drop. W7a decides D8 issuance
+  for the Spaces relations at their writers, and for the channel and Space
+  `owner` and `admin` relations at the permission actor as well. Not covered by a test: the call mixer's domain in the
   issuance policy and in startup's check of the trusted-home list.
 - Recreation of a scope, a room or a node under a new lifecycle.
 - A deployment-wide policy guard: the first slice's community generation

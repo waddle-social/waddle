@@ -117,6 +117,15 @@ pub enum PermissionError {
     /// the legacy write is refused rather than risk writing into one.
     #[error("the host-grant authority could not be read; the permission write is refused")]
     HostGrantAuthorityUnavailable,
+
+    /// A privileged or room-moderation relation was to be written for an
+    /// account whose home is neither a domain this deployment serves nor a
+    /// trusted home (ADR-0020 D8).
+    #[error(
+        "a privileged or moderator relation for a remote account requires its home to be a \
+         trusted home"
+    )]
+    UntrustedPrivilegedSubject,
 }
 
 impl From<DatabaseError> for PermissionError {

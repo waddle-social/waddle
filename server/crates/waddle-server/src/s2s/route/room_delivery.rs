@@ -7,7 +7,8 @@
 //! delivered by a few workers. Account traffic, which the account side
 //! decides against the account's roster and resources, takes the same
 //! queues, keyed by its sender's bare JID, so that one sender's stanzas are
-//! decided in order and under the same bounds. Each room bare JID always lands on the same
+//! decided in order and under the same bounds; so do the requests remote
+//! principals address to the Spaces PubSub service. Each room bare JID always lands on the same
 //! shard and is served in arrival order, so an occupant sees a room's
 //! presence and messages in the room's order, and the room's own presence
 //! moves the occupancy on before the room's next stanza is decided. Within
@@ -47,7 +48,7 @@ use waddle_xmpp::Stanza;
 use super::local_rooms::SeatEnd;
 use super::occupancy::Occupancy;
 use super::principal::RemotePrincipal;
-use super::reach::RoomOperation;
+use super::reach::{RoomOperation, SpaceOperation};
 use super::seats::Seat;
 use crate::s2s::conn::VerifiedPeerStream;
 use waddle_xmpp::identity::CanonicalDomain;
@@ -76,6 +77,18 @@ pub(super) enum RoomWork {
     /// Account traffic from a remote principal for a local account, which
     /// arrived on `stream` (gate G18).
     Account(Box<AccountTraffic>),
+    /// A request a remote principal addressed to the Spaces PubSub
+    /// service, which arrived on `stream`: decided by the Spaces host.
+    Space(Box<SpaceTraffic>),
+}
+
+/// A request for the Spaces PubSub service, as it arrived.
+#[derive(Debug)]
+pub(super) struct SpaceTraffic {
+    pub stream: VerifiedPeerStream,
+    pub principal: RemotePrincipal,
+    pub operation: SpaceOperation,
+    pub stanza: Stanza,
 }
 
 /// A stanza for a local room, as it arrived.

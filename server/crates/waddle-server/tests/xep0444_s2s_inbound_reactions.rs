@@ -44,7 +44,7 @@ async fn a_remote_occupant_reacts_to_a_message_of_the_room() {
             .build(),
     );
     hosted
-        .from_peer(remote_payload(BOB, ROOM, "react-1", reactions))
+        .peer_sends(remote_payload(BOB, ROOM, "react-1", reactions))
         .await;
     let received = local_receives_payload(&mut alice, BOB_OCCUPANT, "reactions", NS_REACTIONS)
         .await
@@ -68,7 +68,7 @@ async fn a_reaction_from_an_entity_that_holds_no_seat_is_refused() {
             .build(),
     );
     hosted
-        .from_peer(remote_payload(BOB, ROOM, "stranger-1", reactions))
+        .peer_sends(remote_payload(BOB, ROOM, "stranger-1", reactions))
         .await;
     // XEP-0045 §7.4: only an occupant sends to the room.
     let refused = hosted.answered("stranger-1").await;

@@ -250,6 +250,11 @@ pub async fn start_with_config_and_owner_outbox(
             .with_host_grant_authority(store.clone(), host_grants.enrolled().clone()),
         None => permission_actor_impl,
     };
+    let permission_actor_impl = with_replica_privileged_issuance(
+        permission_actor_impl,
+        &xmpp_config,
+        s2s_config.as_deref(),
+    );
     info!(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"
@@ -984,6 +989,49 @@ fn check_trusted_homes(
              deployment's services, or a service domain is not canonical"
         )
     })
+}
+
+/// `actor` deciding issuance of the privileged relations as this replica
+/// does: the channel and Space owner and admin, the channel manager and
+/// moderator, the Space moderator and the role manager are written only for
+/// accounts of the served domain and of the trusted homes of the S2S
+/// snapshot it runs (ADR-0020 D8). Startup builds the replica's actor with
+/// it, and so does the test-support seam that stands for startup.
+pub(crate) fn with_replica_privileged_issuance(
+    actor: crate::permissions::PermissionActor,
+    xmpp_config: &XmppConfig,
+    s2s_config: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::PermissionActor {
+    actor.with_privileged_issuance(replica_privileged_issuance(xmpp_config, s2s_config))
+}
+
+/// The accounts a privileged relation may be written for on this replica:
+/// those of its account domain and of the trusted homes of the S2S snapshot
+/// it runs, none while S2S is off (ADR-0020 D8). A deployment whose domains
+/// are not canonical gets a policy that admits no account, so such a
+/// relation is written for nobody rather than for anybody.
+fn replica_privileged_issuance(
+    xmpp_config: &XmppConfig,
+    s2s_config: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::host_grant::IssuancePolicy {
+    use crate::permissions::host_grant::{
+        FederationSnapshot, IssuancePolicy, PrincipalPolicy, ServedAccountDomains,
+    };
+    let Ok(account) = waddle_xmpp::identity::CanonicalDomain::parse_canonical(&xmpp_config.domain)
+    else {
+        return IssuancePolicy::default();
+    };
+    let principals = PrincipalPolicy::new(
+        ServedAccountDomains::new([account]),
+        s2s_config.map(FederationSnapshot::of),
+    );
+    crate::server::routes::websocket::XmppServiceDomains::new(
+        &xmpp_config.domain,
+        xmpp_config.muc_domain.as_str(),
+        xmpp_config.spaces_jid.domain().as_str(),
+    )
+    .host_grant_issuance_policy(&principals)
+    .unwrap_or_default()
 }
 
 /// The router's bounds under `config`: its defaults, with the pair queues

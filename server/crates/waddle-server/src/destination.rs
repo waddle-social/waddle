@@ -659,6 +659,29 @@ pub trait RemoteRoute: Send + Sync {
     /// state for it, such as the remote rooms it joined, records that this
     /// replica now holds it. By default nothing happens.
     async fn resource_resumed(&self, _resource: &FullJid) {}
+
+    /// Offer `stanza`, an event notification of the local Spaces service
+    /// `service` (XEP-0060 §7.1), for `subscriber` at another server. Like
+    /// [`Self::route`] it only queues and never waits for a peer; `false`
+    /// when the notification was not taken, and nothing is kept for it. A
+    /// route that serves no Spaces to remote principals takes none.
+    fn space_event(
+        &self,
+        _service: &jid::BareJid,
+        _subscriber: &jid::Jid,
+        _stanza: waddle_xmpp::Stanza,
+    ) -> bool {
+        false
+    }
+
+    /// Take `publication`, stored in a local Space, for the Space's
+    /// subscribers at other servers. It only queues, so the publisher's
+    /// request never waits for what is decided about them; `false` when it
+    /// was not taken. A route that serves no Spaces to remote principals
+    /// takes none.
+    fn space_published(&self, _publication: crate::s2s::route::SpacePublication) -> bool {
+        false
+    }
 }
 
 /// The remote route used while server-to-server transport is not enabled:

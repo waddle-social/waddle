@@ -31,7 +31,8 @@ use waddle_server::s2s::route::{
     SqlIqCorrelations, SqlRemoteRoomStore,
 };
 use waddle_server::test_support::{
-    websocket_state_with_federation, WebSocketLocalAccounts, WebSocketLocalDelivery,
+    host_spaces_for_remote_principals, websocket_state_with_federation, WebSocketLocalAccounts,
+    WebSocketLocalDelivery,
 };
 use waddle_ws_test_support::iq::bound_jid;
 use waddle_ws_test_support::WsXmppClient;
@@ -46,6 +47,8 @@ pub use routing::{error_condition, wait_for, ARRIVES, QUIET};
 
 /// The local deployment's account domain.
 pub const LOCAL: &str = ws::DOMAIN;
+/// The local deployment's Spaces PubSub service.
+pub const SPACES: &str = "spaces.example.com";
 /// The peer deployment's domain.
 pub const PEER: &str = "home-b.test";
 /// A remote account at the peer.
@@ -85,6 +88,11 @@ pub struct Adjust {
     /// Further domains the peer serves, such as a PubSub service, each
     /// admitted by the local deployment and reached at the peer's address.
     pub peer_services: &'static [&'static str],
+    /// Whether the local deployment serves its Spaces to remote
+    /// principals: its Spaces domain ([`SPACES`]) is then one of its S2S
+    /// domains, which the peer admits and reaches, and the production
+    /// Spaces host is attached to the router as startup attaches it.
+    pub hosts_spaces: bool,
 }
 
 impl Default for Adjust {
@@ -94,6 +102,7 @@ impl Default for Adjust {
             local: |_| {},
             effect_snapshot: None,
             peer_services: &[],
+            hosts_spaces: false,
         }
     }
 }
@@ -120,6 +129,9 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
         spec_local.allow.push(service);
         spec_local.private.push(service);
         spec_local.endpoints.push((service, address_peer));
+    }
+    if adjust.hosts_spaces {
+        spec_local.local.push(SPACES);
     }
     (adjust.local)(&mut spec_local);
     let config = Arc::new(spec_local.load(pki).await.expect("a valid configuration"));
@@ -155,6 +167,9 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
     let loopback = ws::Loopback::serve(state).await;
     assert!(router.attach_local(Arc::new(WebSocketLocalDelivery::new(&loopback.state))));
     assert!(router.attach_accounts(Arc::new(WebSocketLocalAccounts::new(&loopback.state))));
+    if adjust.hosts_spaces {
+        host_spaces_for_remote_principals(&loopback.state, &router);
+    }
     let service = S2sService::start(
         Arc::clone(&config),
         Some(listener_local),
@@ -171,6 +186,11 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
     spec_peer.local.extend(adjust.peer_services.iter().copied());
     spec_peer.top.push(public);
     spec_peer.endpoints = vec![(LOCAL, address_local)];
+    if adjust.hosts_spaces {
+        spec_peer.allow.push(SPACES);
+        spec_peer.private.push(SPACES);
+        spec_peer.endpoints.push((SPACES, address_local));
+    }
     let captured = Arc::new(routing::CapturingSink::default());
     let peer = routing::transport::start_with(
         pki,
@@ -197,13 +217,19 @@ pub async fn federated_with(pki: &Pki, adjust: Adjust) -> Federated {
 
 impl Federated {
     /// Send `stanza` from the peer to the local deployment.
-    pub async fn from_peer(&self, stanza: impl Into<Element>) {
+    pub async fn peer_sends(&self, stanza: impl Into<Element>) {
         routing::send(&self.peer, PEER, LOCAL, stanza).await;
+    }
+
+    /// Send `stanza` from the peer to the local deployment's Spaces
+    /// service, on the stream of that domain pair.
+    pub async fn to_spaces(&self, stanza: impl Into<Element>) {
+        routing::send(&self.peer, PEER, SPACES, stanza).await;
     }
 
     /// Send `stanza` from the peer's domain `service` to the local
     /// deployment, on that domain's own stream.
-    pub async fn from_peer_service(&self, service: &str, stanza: impl Into<Element>) {
+    pub async fn peer_service_sends(&self, service: &str, stanza: impl Into<Element>) {
         routing::send(&self.peer, service, LOCAL, stanza).await;
     }
 
@@ -294,7 +320,7 @@ impl Federated {
     /// The ids of the barrier's own answers.
     pub async fn peer_barrier(&self, sender: &str, account: &str) -> Vec<String> {
         let barrier = unique("barrier");
-        self.from_sender(
+        self.send_from(
             sender,
             message(sender, account, MessageType::Groupchat, &barrier, "barrier"),
         )
@@ -315,7 +341,7 @@ impl Federated {
     /// follows a quiet period. The id of its answer.
     pub async fn peer_ping_barrier(&self, sender: &str) -> String {
         let id = unique("ping-barrier");
-        self.from_sender(sender, get(sender, LOCAL, &id, ping()))
+        self.send_from(sender, get(sender, LOCAL, &id, ping()))
             .await;
         self.peer_receives(&id).await;
         id
@@ -323,7 +349,7 @@ impl Federated {
 
     /// Send `stanza` from the peer on the stream of `sender`'s domain, one
     /// the peer serves.
-    pub async fn from_sender(&self, sender: &str, stanza: impl Into<Element>) {
+    pub async fn send_from(&self, sender: &str, stanza: impl Into<Element>) {
         let domain = jid(sender).domain().as_str().to_owned();
         routing::send(&self.peer, &domain, LOCAL, stanza).await;
     }

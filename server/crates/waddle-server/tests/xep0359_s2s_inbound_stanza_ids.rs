@@ -41,7 +41,7 @@ async fn the_origin_id_is_carried_and_a_stanza_id_in_the_rooms_name_is_replaced(
             .attr(minidom::rxml::xml_ncname!("by").to_owned(), ROOM)
             .build(),
     );
-    hosted.from_peer(message).await;
+    hosted.peer_sends(message).await;
     let received = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("with identifiers")
     })

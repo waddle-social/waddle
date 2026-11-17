@@ -39,7 +39,7 @@ async fn a_message_to_an_account_with_no_resource_is_stored_unanswered_from_cont
     // Bob may see Alice's presence and Mallory may not; neither is told
     // anything (RFC 6121 §8.5.2.2.1: stored for later delivery).
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -48,7 +48,7 @@ async fn a_message_to_an_account_with_no_resource_is_stored_unanswered_from_cont
         ))
         .await;
     federated
-        .from_peer(message(
+        .peer_sends(message(
             MALLORY,
             ALICE,
             MessageType::Normal,
@@ -78,7 +78,7 @@ async fn a_strangers_messages_beyond_its_offline_bound_are_dropped_unanswered() 
     for index in 0..=bound {
         let id = ["flood-", &index.to_string()].concat();
         federated
-            .from_peer(message(MALLORY, ALICE, MessageType::Chat, &id, "hello"))
+            .peer_sends(message(MALLORY, ALICE, MessageType::Chat, &id, "hello"))
             .await;
     }
     let barrier = federated.peer_barrier(MALLORY, ALICE).await;
@@ -91,7 +91,7 @@ async fn a_strangers_messages_beyond_its_offline_bound_are_dropped_unanswered() 
     // A contact is not held to a stranger's bound.
     contact(&federated, ALICE, BOB, "from").await;
     federated
-        .from_peer(message(
+        .peer_sends(message(
             BOB_PHONE,
             ALICE,
             MessageType::Chat,
@@ -128,21 +128,23 @@ async fn a_strangers_messages_to_a_detached_full_jid_are_held_within_its_offline
 
     // What the offline store would not keep never reaches the detached
     // session from a stranger, and uses none of its share.
-    federated.from_peer(chat_state(MALLORY, &to, "state")).await;
     federated
-        .from_peer(message(MALLORY, &to, MessageType::Headline, "news", "hi"))
+        .peer_sends(chat_state(MALLORY, &to, "state"))
         .await;
     federated
-        .from_peer(message(MALLORY, &to, MessageType::Error, "oops", "hi"))
+        .peer_sends(message(MALLORY, &to, MessageType::Headline, "news", "hi"))
         .await;
     federated
-        .from_peer(presence(MALLORY, &to, PresenceType::None, "here"))
+        .peer_sends(message(MALLORY, &to, MessageType::Error, "oops", "hi"))
+        .await;
+    federated
+        .peer_sends(presence(MALLORY, &to, PresenceType::None, "here"))
         .await;
     // One more than its share by full JID: the last is dropped.
     for index in 0..=bound {
         let id = ["held-", &index.to_string()].concat();
         federated
-            .from_peer(message(MALLORY, &to, MessageType::Chat, &id, "hello"))
+            .peer_sends(message(MALLORY, &to, MessageType::Chat, &id, "hello"))
             .await;
     }
     let barrier = federated.peer_barrier(MALLORY, ALICE).await;
@@ -162,7 +164,7 @@ async fn a_strangers_messages_to_a_detached_full_jid_are_held_within_its_offline
 
     // The share is spent for the account's offline store too.
     federated
-        .from_peer(message(MALLORY, ALICE, MessageType::Chat, "bare", "hello"))
+        .peer_sends(message(MALLORY, ALICE, MessageType::Chat, "bare", "hello"))
         .await;
     federated.peer_barrier(MALLORY, ALICE).await;
     assert_eq!(federated.held_from(&phone, MALLORY).await.len(), bound);
@@ -180,12 +182,12 @@ async fn a_contacts_stanzas_reach_a_detached_full_jid_beyond_a_strangers_bound()
     let bound = waddle_server::db::s2s_accounts::MAX_OFFLINE_PER_SENDER;
 
     federated
-        .from_peer(chat_state(BOB_PHONE, &to, "state"))
+        .peer_sends(chat_state(BOB_PHONE, &to, "state"))
         .await;
     for index in 0..=bound {
         let id = ["contact-", &index.to_string()].concat();
         federated
-            .from_peer(message(BOB_PHONE, &to, MessageType::Chat, &id, "hello"))
+            .peer_sends(message(BOB_PHONE, &to, MessageType::Chat, &id, "hello"))
             .await;
     }
     federated.peer_barrier(BOB_PHONE, ALICE).await;
@@ -207,7 +209,7 @@ async fn a_stored_message_whose_senders_domain_is_no_longer_admitted_is_never_de
     let alice = federated.account("alice").await;
     // Mallory's message is stored the way the account side stores it.
     federated
-        .from_peer(message(MALLORY, ALICE, MessageType::Chat, "kept", "hi"))
+        .peer_sends(message(MALLORY, ALICE, MessageType::Chat, "kept", "hi"))
         .await;
     federated.peer_barrier(MALLORY, ALICE).await;
     assert_eq!(support::offline_count(&federated, ALICE).await, 1);

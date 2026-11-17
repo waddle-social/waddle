@@ -46,7 +46,7 @@ async fn a_remote_occupants_chat_state_reaches_the_room_and_records_no_activity(
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     for (id, state) in [("state-1", "composing"), ("state-2", "paused")] {
         hosted
-            .from_peer(remote_payload(
+            .peer_sends(remote_payload(
                 BOB,
                 ROOM,
                 id,
@@ -123,7 +123,7 @@ async fn a_remote_occupants_chat_states_count_against_its_accounts_share_and_are
     let ids: Vec<String> = (0..6).map(|index| format!("state-{index}")).collect();
     for id in &ids {
         hosted
-            .from_peer(remote_payload(
+            .peer_sends(remote_payload(
                 BOB,
                 ROOM,
                 id,
@@ -134,7 +134,7 @@ async fn a_remote_occupants_chat_states_count_against_its_accounts_share_and_are
     // The share is spent by chat states as by any stanza: a message that
     // follows at once is refused, and answered, since it carries a text.
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "text-1", "too soon"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "text-1", "too soon"))
         .await;
     let refused = hosted.answered("text-1").await;
     assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
@@ -182,13 +182,13 @@ async fn a_lone_chat_state_or_a_headline_is_never_answered_with_an_error() {
     private
         .payloads
         .push(Element::builder("composing", NS_CHATSTATES).build());
-    hosted.from_peer(private).await;
+    hosted.peer_sends(private).await;
     let mut headline = remote_groupchat(BOB, ROOM, "headline-1", "news");
     headline.type_ = MessageType::Headline;
-    hosted.from_peer(headline).await;
+    hosted.peer_sends(headline).await;
     // A message of the same room that follows is decided after both.
     hosted
-        .from_peer(remote_groupchat(BOB, ROOM, "after-1", "after"))
+        .peer_sends(remote_groupchat(BOB, ROOM, "after-1", "after"))
         .await;
     let after = local_receives(&mut alice, ARRIVES, |stanza| {
         body(stanza).as_deref() == Some("after")

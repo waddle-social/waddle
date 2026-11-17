@@ -1806,9 +1806,11 @@ yet uses two replicas; that is verification step 4.
 - Occupant ejection and presence after a revoke: decided by the revocation
   slice ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)).
 - A PubSub admission identity for serving an enrolled Space (needed before a
-  scope's Space is served; W7a depends on it), and with it what `view` of a
-  scope's Space means: until then its node is described and listed to
-  nobody.
+  scope's Space is served), and with it what `view` of a scope's Space
+  means: until then its node is described and listed to nobody. The Spaces
+  slice (W7a) did not build it: over S2S an enrolled scope's Space answers
+  as a node that does not exist, whatever its `federated` setting says
+  ([Spaces](s2s-routing-2047.md#spaces-w7a)).
 - Remote principals reaching these surfaces over S2S: the join, the
   archive read, discovery, self-ping, the room's acceptance and room
   administration (the `muc#admin` lists and changes, the `muc#owner`
@@ -3003,7 +3005,10 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
 
 - A PubSub admission identity for a scope's Space, and with it an
   acknowledged fence for PubSub: unenrolled Spaces have the hand-over read
-  only.
+  only. A notification for a subscriber at another server is decided at
+  the same hand-over, on the subscription's recorded evidence
+  ([Spaces](s2s-routing-2047.md#spaces-w7a)); a revoke's acknowledgement
+  does not cover it, as it does not cover a local subscriber's.
 - Ending a retired or revoked account's open streams.
 - A replica whose lease lapsed keeps its seats until it registers again.
   Removing them on the lapse would need the grants it cannot read.
@@ -3440,20 +3445,29 @@ like its grants, which needs a migration and an operation of its own.
   ([Seated occupants, roles and media](#seated-occupants-roles-and-media-g14)).
   The evidence is held by the replica that seats the occupant; a decision
   taken on another replica names it without one.
-- Rooms no scope manages keep their legacy checks. Where a remote
-  principal reaches one (the MUC service; the Spaces service is refused to
-  S2S senders until W7a), each effect is decided with
-  `PrincipalPolicy::witness`: D1 at every request, and D8 on whatever
-  standing the legacy checks give the principal
-  ([inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)). D8 issuance is
-  applied by the `muc#admin` writer of such a room and by the admin
-  command that sets a room affiliation (`channels:set-affiliation`). The
-  Spaces relations (`channel.manager`, `channel.moderator`,
-  `space.moderator` and `role.manager`) are still written without asking
-  whether the subject's home is a trusted home, until the Spaces slice
-  (W7a) reviews them; a standing they write for a remote account is not
-  honoured at the effect unless its home is trusted and its stream is
-  `pkix`.
+- Rooms and Spaces no scope manages keep their legacy checks. Where a
+  remote principal reaches one (the MUC service and the Spaces service),
+  each effect is decided with `PrincipalPolicy::witness`: D1 at every
+  request, and D8 on whatever standing the legacy checks give the
+  principal ([inbound MUC](s2s-routing-2047.md#inbound-muc-w6a),
+  [Spaces](s2s-routing-2047.md#spaces-w7a)). D8 issuance is applied by the
+  `muc#admin` writer of such a room, by the admin command that sets a room
+  affiliation (`channels:set-affiliation`), by the writers of a Space's
+  PubSub affiliations (`spaces:set-role` and the `<affiliations/>` change
+  on the Spaces service) and by the permission actor's write messages,
+  which refuse the channel and Space `owner` and `admin` relations and the
+  relations no writer names (`channel.manager`, `channel.moderator`,
+  `space.moderator` and `role.manager`) for an account whose home is
+  neither served nor trusted. A standing
+  stored for a remote account before that, or under an earlier
+  trusted-home list, is not honoured at the effect unless its home is
+  trusted and its stream is `pkix`.
+- The channel and Space `owner` and `admin` relations are checked by their
+  writers and again by the permission actor, so a writer added later that
+  names one of them for an account it does not check is refused at the
+  actor. A replica whose account domain is not canonical attaches a
+  policy that admits no account, and then writes those relations for
+  nobody.
 - A remote principal's administration of a managed room has no fence check
   beyond the ones a session's has: a moderation request (XEP-0425) and the
   role list read are decided once, on the grants as read, and an
@@ -3554,7 +3568,7 @@ evidence.
 | B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Gate G14; open. Decided per protected surface by W5b, W5c and W5e; W5d decides the actor's seats, roles and media after a revoke ([recorded](#seated-occupants-roles-and-media-g14)). Includes outcast precedence in every channel and message action, including an author's own edit and delete (W5o), and the D8 rules: privileged grants and room moderation for remote principals only from trusted homes and only on `pkix` streams, and a grant that is not honored contributing nothing. W5b's part is [recorded](#b2-policy-for-the-action-this-slice-protects-g14-part), W5c's [as well](#b2-policy-for-the-surfaces-this-slice-protects-g14-part), and W5e's for remote principals [too](#remote-principals-at-the-effect-boundary-g17). |
 | B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Gate G15; open. Off the first slice's safety path, which admits in SQL. W5b decides the marker protocol for the projection writes it makes ([recorded](#b3-marker-protocol-for-this-slices-projection-writes-g15-part)), W5c extends it to the writers it fences ([recorded](#b3-projection-of-the-writers-this-slice-fences-g15-part)), W5o decides the fenced schema transition and W5r bounded reconstruction ([recorded](#verified-reconstruction-g15-part)). Any admission that reads the projection needs B3 decided first; no slice in the plan adds one. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | D5 condition, gate G12; open. Decided by W5b ([recorded](#b4-lock-order-atomic-admission-cancellation-and-lost-commits-g12)) and extended by W5c for each surface it fences ([recorded](#b4-lock-order-of-the-surfaces-g12)) and by W5d with the queue in front of the guard ([recorded](#the-queue-in-front-of-the-guard-g12)). |
-| B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c ([recorded](#b5-sink-contracts-g16)); W5d defines what a revoke's acknowledgement means at each sink ([recorded](#sink-contracts-under-the-fence-g16)), and its focused set with the #2056 control is the evidence ([run](#running-the-revocation-slices-focused-set)). A PubSub admission identity for a scope's Space is still not built. |
+| B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Gate G16; open. Decided by W5c ([recorded](#b5-sink-contracts-g16)); W5d defines what a revoke's acknowledgement means at each sink ([recorded](#sink-contracts-under-the-fence-g16)), and its focused set with the #2056 control is the evidence ([run](#running-the-revocation-slices-focused-set)). A PubSub admission identity for a scope's Space is still not built: the Spaces slice (W7a) serves an enrolled scope's Space to nobody over S2S. |
 | B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | D5 condition, gate G10; open. W1 covers only the codec part; W5i decides the rest, including the canonical domain form, and W5a applies it at S2S ingress. |
 | B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | D5 condition, gate G13; open. Decided by W5r ([recorded](#restore-incarnation-decisions), with the limits it leaves open); its evidence runs in verification step 4. |
 

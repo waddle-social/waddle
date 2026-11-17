@@ -109,6 +109,7 @@ pub(in crate::server::routes::websocket::handlers) use muc_admin::persist_manage
 mod muc_occupant_disco;
 mod muc_remote_admin;
 pub(crate) use muc_remote_admin::{muc_admin_for_remote, muc_owner_or_moderation_for_remote};
+pub(crate) use spaces_remote::spaces_change_for_remote;
 mod muc_owner_config;
 pub(crate) mod muc_owner_moderation;
 mod muc_self_ping;
@@ -128,6 +129,7 @@ mod spaces_bookmark_cleanup;
 mod spaces_discovery;
 mod spaces_items;
 mod spaces_publish;
+mod spaces_remote;
 mod spaces_retract;
 mod story_attachments;
 #[cfg(test)]
