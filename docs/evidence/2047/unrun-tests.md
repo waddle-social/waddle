@@ -30,7 +30,9 @@ at `90ea03fb4` and, for the S2S selection, in the run9 head2 log at
 those trees, whose code is the same. W7b (the MUC fallback listings, and
 the room host's answers to requests it did not decide in time) merged at
 `3039aff56`, with one test fix merged again at `dcb6964dc`; the run10 logs
-ran at `dcb6964dc`, and a row citing a run10 log describes that tree. A
+ran at `dcb6964dc`. The session listing's read budget and one discovery
+case merged at `fe6123acd`, and the run10 head logs ran at `e559ebd57`; a
+row citing a run10 head log describes that tree. A
 target lists every slice that touched it,
 the first being the slice that created it; "integration" is a commit made on
 the integration branch itself.
@@ -98,6 +100,8 @@ the integration branch itself.
 | `integration-run10-gates.log` | the gates at `dcb6964dc`, after the W7b merge (`3039aff56`), its inventory pin (`333d81090`) and the merge of W7b's clippy fix: fmt; clippy `waddle-xmpp` all targets; clippy `waddle-server` lib with and without `clustering`; clippy with `-D warnings` of the W7b, W7a and W6d test targets and of the S2S account targets W6d changed; `cargo check` with `test-support` of the run9 S2S and host-grant targets, the W7b targets and `admin_channels_ws`, `group_dm_ws` and `xep0030_discovery_destination_ws`, and with `test-support,clustering` of the five clustering targets; the structure, typed-entry, PostgreSQL-environment and authority-inventory scripts (the inventory matched `3039aff56`); `check-poison-recovery.py` with the same findings as `4adf451d2`; `git diff --check` from `4adf451d2`. All passed. `cargo check` reports three dead-code warnings in `host_grant_restore`'s support modules, as in the run9 gates. |
 | `integration-run10-s2s.log`, `integration-run10-clustering.log` | nextest `--profile ci` at `dcb6964dc`, PostgreSQL required with a database of its own (`w2047_int_run10_s2s`): the run9 S2S selection, the W7b targets that need no SpiceDB, and the session suites whose production paths W7b changed (`admin_channels_ws`, `group_dm_ws`, `xep0030_discovery_destination_ws`): `waddle-xmpp` 136 of 136 across 5 binaries; `waddle-server` 1211 of 1211 across 88 binaries, the same 7 `#[ignore]` cases skipped; clustering 61 of 61 across 5 binaries (`xep0045_s2s_inbound_muc_router` 34 of 34 with `clustering`). `admin_channels_ws` ran 28 of 28 and `group_dm_ws` 19 of 19 there; neither is a row of this checklist. |
 | `integration-run10-hostgrant.log` | the run9 host-grant selection (21 binaries) at `dcb6964dc`, `--run-ignored all`, PostgreSQL required, a fresh PostgreSQL-backed SpiceDB 1.56.1 on 127.0.0.1:50064 (database `w2047_int_spicedb`, created and dropped by the run), `--profile ci`: 287 of 287, `host_grant_remote_principals`'s stale `view` decision and the fence sink's listing that tells no count included. |
+| `integration-run10-gates-head.log`, `integration-run10-s2s-head.log`, `integration-run10-clustering-head.log`, `integration-run10-hostgrant-head.log` | the gates and the three selections of the run10 logs at `e559ebd57`, after a session's listing of the MUC service was given a whole read of its own after one it may not take (`1a0c240e1`), a discovery case for live rooms whose catalog rows close them to remote askers (`fa2e908c9`), their merge (`fe6123acd`) and the inventory pins: every gate passed (the inventory matched `fe6123acd`; `check-poison-recovery.py` with the same findings as `4adf451d2`; the same three dead-code warnings under `cargo check`); `waddle-xmpp` 136 of 136; `waddle-server` 1212 of 1212 across 88 binaries, the same 7 skipped; clustering 61 of 61; host-grant 287 of 287. |
+| `integration-run10-repeat1.log` to `integration-run10-repeat3.log` | `xep0030_s2s_inbound_muc_discovery` and `xep0045_s2s_inbound_muc_router`, whose W7b cases depend on timers, three more times at `e559ebd57`, PostgreSQL required: 51 of 51 each time. |
 | `server/docs/planning/host-grant-authority-2047.md` | Records the first slice's set passing 110 of 110 on 2026-11-14 (two consecutive runs; an earlier run of that revision failed one admission case with an ingress substrate timeout, which passed alone and in both later runs; cause unconfirmed) and again on 2026-11-15 at `ef5205cf2`, and the writer fence's set passing 64 of 64 on 2026-11-15 at `ef5205cf2`. PostgreSQL 17.11 and SpiceDB 1.56.1 with the memory datastore. |
 
 The two host-grant logs do not record the commit they ran at or the
@@ -125,12 +129,12 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `s2s_codec` (54 cases) | W4a, W4c, W5a | none | Run 54/54, run10 S2S log |
-| `s2s_pre_authentication` (16) | W4c, W5a, W4d, integration | none | Run 16/16, run10 S2S log |
-| `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, run10 S2S log |
-| `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, run10 S2S log |
+| `s2s_codec` (54 cases) | W4a, W4c, W5a | none | Run 54/54, run10 head S2S log |
+| `s2s_pre_authentication` (16) | W4c, W5a, W4d, integration | none | Run 16/16, run10 head S2S log |
+| `s2s_stream_addresses` (16) | W4c, W5a, W4d, integration | none | Run 16/16, run10 head S2S log |
+| `xep0178_s2s_negotiation` (47) | W4a, W4c, W4d, W5a, integration | none | Run 47/47, run10 head S2S log |
 | `identity_profile` (19) | W5i | none (loopback address checks only) | Not run |
-| `xep0503_remote_metadata` (3) | W7a | none | Run 3/3, run10 S2S log |
+| `xep0503_remote_metadata` (3) | W7a | none | Run 3/3, run10 head S2S log |
 | `xep0313_mam` (edited, 11) | W5c | none; two cases need PostgreSQL and skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `xep0402_pep_native_bookmarks` (edited, 15) | W5i | none | Not run |
 | `xep0513_mentions` (edited, 20) | W5c | none | Not run |
@@ -139,63 +143,63 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, run10 S2S log |
-| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b, W6a | loopback | Run 54/54, run10 S2S log |
-| `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, run10 S2S log |
-| `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run10 S2S log |
-| `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run10 S2S log |
-| `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run10 S2S log |
-| `s2s_reachability` (9) | W5a, W6b, W6a, W6c, W7a | loopback | Run 9/9, run10 S2S log (W7a added one case for the Spaces classes, renamed one and extended the `Reachable` literal of another) |
-| `s2s_d7_refusal` (4) | W5a, W6c (header only) | none | Run 4/4, run10 S2S log |
-| `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run10 S2S log |
-| `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run10 S2S log |
-| `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run10 S2S log |
-| `xep0045_s2s_outbound_muc` (43) | W6b, integration, W6d (code under test: a remote room's messages are cleaned before delivery) | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 43/43, run10 S2S log |
-| `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Run 5/5, run10 S2S log |
-| `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run10 S2S log |
-| `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run10 S2S log |
-| `xep0045_s2s_inbound_muc` (33) | W6a, W7b | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and six cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration, the room listed only to its member) | Run 33/33, run10 S2S log |
-| `xep0045_s2s_inbound_muc_replicas` (9) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Three cases hand the holder stanzas with what a dialback stream, or a public-CA certificate, would have proved. Compiled with and without `clustering` | Run 9/9, run10 S2S log; 9/9 with `clustering`, run10 clustering log |
-| `xep0045_s2s_inbound_muc_router` (34) | W6a, W7b | loopback; the production S2S router and connection manager with a scripted room host, a seat table whose inserts a case can hold, and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4.5 s; two bound another account's answer at 2 s behind one account's flood; one waits up to 15 s for a kept leave to be placed again, and one runs 14 s to pass a sweep of 12 s. The case for the lifecycle's stop wires the router and connection manager to a stop token as the server does. W7b's cases hold the host for 1 s budgets: one asserts that a room's request reaches the host within 800 ms of five room lists, one that a message the host marked taken is still unanswered 1 s after its budget | Run 34/34, run10 S2S log; 34/34 with `clustering`, run10 clustering log |
-| `xep0313_s2s_inbound_mam` (5) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Run 5/5, run10 S2S log |
-| `xep0030_s2s_inbound_muc_discovery` (17) | W6a, W7b | loopback; in-memory SQLite; one case holds the process's metrics lock and reads the listing build counter, and wedges a room actor for about 3 s | Not run on this tree (W7b replaced `disco_items_lists_neither_rooms_nor_occupants_to_remote_askers` with `the_service_lists_its_open_rooms_and_a_room_lists_no_occupants` and added `the_service_lists_no_room_a_remote_asker_may_not_reach`, `the_room_list_is_paged_for_a_remote_asker`, `the_room_list_pages_backward_and_from_an_index_for_a_remote_asker`, `an_anchor_naming_an_unlisted_room_is_answered_as_one_naming_no_room`, `a_room_list_beyond_one_answer_carries_its_set_unasked` (257 catalog rows), `rooms_a_remote_asker_may_not_reach_take_no_place_in_its_read` (12,000 rows), `a_room_list_beyond_its_read_tells_no_count` (4,097 rows), `a_room_not_read_in_time_leaves_a_remote_listing_without_count_and_fails_a_session`, `a_live_room_whose_catalog_row_a_remote_asker_may_not_reach_is_not_listed` and `a_client_without_spaces_finds_a_spaces_room_and_enters_it_by_its_plain_jid`); the W6a cases ran 7/7 in the run8 S2S rerun2 log |
-| `xep0085_s2s_inbound_chat_states` (4) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Run 4/4, run10 S2S log |
-| `xep0115_s2s_inbound_caps` (1) | W6a | loopback; in-memory SQLite | Run 1/1, run10 S2S log |
-| `xep0308_s2s_inbound_corrections` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 S2S log |
-| `xep0333_s2s_inbound_markers` (2) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Run 2/2, run10 S2S log |
-| `xep0359_s2s_inbound_stanza_ids` (1) | W6a | loopback; in-memory SQLite | Run 1/1, run10 S2S log |
-| `xep0424_s2s_inbound_retraction` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 S2S log |
-| `xep0425_s2s_inbound_moderation` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 S2S log |
-| `xep0444_s2s_inbound_reactions` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 S2S log |
-| `xep0461_s2s_inbound_replies` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 S2S log |
-| `clustering_remote_room_request` (4) | W6a | none; builds with the `clustering` feature only (`--features test-support,clustering`); one case classifies the relay's typed failures through a test-support seam | Run 4/4 with `--features test-support,clustering`, run10 clustering log |
-| `s2s_account_router` (14) | W6c | loopback; in-memory SQLite | Run 14/14, run10 S2S log |
-| `s2s_account_traffic_ws` (39), the RFC 6121 account-traffic suite | W6c, W6d (fixture) | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Run 39/39, run10 S2S log |
-| `xep0160_s2s_account_offline_ws` (8) | W6c, W6d | as `s2s_account_traffic_ws` | Run 8/8, run10 S2S log |
-| `xep0198_s2s_account_expiry` (3) | W6c | none (in-memory offline store and registries) | Run 3/3, run10 S2S log |
-| `xep0280_s2s_account_carbons_ws` (7) | W6c, W6d | as `s2s_account_traffic_ws` | Run 7/7, run10 S2S log |
-| `xep0359_s2s_account_stanza_ids_ws` (2) | W6c, W6d | as `s2s_account_traffic_ws` | Run 2/2, run10 S2S log |
-| `xep0191_s2s_account_blocking_ws` (8) | W6c, W6d (fixture) | as `s2s_account_traffic_ws` | Run 8/8, run10 S2S log |
-| `xep0060_s2s_account_events_ws` (7) | W6c, W6d | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Run 7/7, run10 S2S log |
-| `xep0115_s2s_account_caps_ws` (1) | W6c, W6d (fixture) | as `s2s_account_traffic_ws` | Run 1/1, run10 S2S log |
-| `xep0199_s2s_account_ping_ws` (3) | W6c, W6d (fixture) | as `s2s_account_traffic_ws` | Run 3/3, run10 S2S log |
-| `xep0313_s2s_account_archive_ws` (6) | W6c, W6d | as `s2s_account_traffic_ws` | Run 6/6, run10 S2S log |
-| `s2s_account_inbox_ws` (2) | W6d | as `s2s_account_traffic_ws` | Run 2/2, run10 S2S log |
-| `xep0357_s2s_account_push_ws` (1) | W6d | as `s2s_account_traffic_ws` | Run 1/1, run10 S2S log |
-| `xep0424_s2s_account_retraction_ws` (3) | W6d | as `s2s_account_traffic_ws` | Run 3/3, run10 S2S log |
-| `xep0308_s2s_account_corrections_ws` (3) | W6d | as `s2s_account_traffic_ws` | Run 3/3, run10 S2S log |
-| `xep0353_s2s_account_call_threads_ws` (6) | W6d | as `s2s_account_traffic_ws`; five cases seed the replica's call state through test-support helpers, one of them to its capacity (4096 offers) | Run 6/6, run10 S2S log |
-| `xep0511_s2s_account_link_metadata_ws` (5) | W6d | as `s2s_account_traffic_ws` | Run 5/5, run10 S2S log |
-| `xep0503_s2s_inbound_spaces` (12) | W7a, W7b | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Run 12/12, run10 S2S log |
-| `xep0060_s2s_inbound_spaces_pubsub` (22) | W7a | as `xep0503_s2s_inbound_spaces` | Run 22/22, run10 S2S log |
-| `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a, W7b | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Run 4/4, run10 S2S log |
-| `xep0503_s2s_outbound_spaces_ws` (4) | W7a, integration | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Run 4/4, run10 S2S log (one case added after the W6d merge: a Space's event notification loses what only the account's server states, through the shared sanitizer) |
-| `spaces_privileged_issuance` (10) | W7a | none (in-memory SQLite, the local permission backend; one case loads an S2S snapshot through the production loader from temporary files) | Run 10/10, run10 S2S log |
-| `admin_spaces_ws` (edited, 22) | W7a | TestServer process | Run 22/22, run10 S2S log (one case added: a privileged role refused for an account at another server) |
-| `admin_channel_space_link_ws` (edited, 2) | integration | TestServer process | Run 2/2, run10 S2S log (the escaped-projection case submits the space JID in its canonical form, which the identity profile requires of admin command fields) |
+| `s2s_verifier` (162 cases in 11 modules) | W4b | none (in-memory rustls handshakes) | Run 162/162, run10 head S2S log |
+| `s2s_connection_manager` (54 in 3 modules) | W4c, W4d, W6b, W6a | loopback | Run 54/54, run10 head S2S log |
+| `xep0220_s2s_dialback` (39 in 4 modules) | W4d | loopback | Run 39/39, run10 head S2S log |
+| `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run10 head S2S log |
+| `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run10 head S2S log |
+| `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run10 head S2S log |
+| `s2s_reachability` (9) | W5a, W6b, W6a, W6c, W7a | loopback | Run 9/9, run10 head S2S log (W7a added one case for the Spaces classes, renamed one and extended the `Reachable` literal of another) |
+| `s2s_d7_refusal` (4) | W5a, W6c (header only) | none | Run 4/4, run10 head S2S log |
+| `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run10 head S2S log |
+| `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run10 head S2S log |
+| `destination_classifier` (24) | W2, W5i, W5a | loopback | Run 24/24, run10 head S2S log |
+| `xep0045_s2s_outbound_muc` (43) | W6b, integration, W6d (code under test: a remote room's messages are cleaned before delivery) | loopback; in-memory SQLite, and two cases on PostgreSQL that skip without `WADDLE_TEST_POSTGRES_URL` | Run 43/43, run10 head S2S log |
+| `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Run 5/5, run10 head S2S log |
+| `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run10 head S2S log |
+| `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run10 head S2S log |
+| `xep0045_s2s_inbound_muc` (33) | W6a, W7b | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and six cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration, the room listed only to its member) | Run 33/33, run10 head S2S log |
+| `xep0045_s2s_inbound_muc_replicas` (9) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Three cases hand the holder stanzas with what a dialback stream, or a public-CA certificate, would have proved. Compiled with and without `clustering` | Run 9/9, run10 head S2S log; 9/9 with `clustering`, run10 head clustering log |
+| `xep0045_s2s_inbound_muc_router` (34) | W6a, W7b | loopback; the production S2S router and connection manager with a scripted room host, a seat table whose inserts a case can hold, and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4.5 s; two bound another account's answer at 2 s behind one account's flood; one waits up to 15 s for a kept leave to be placed again, and one runs 14 s to pass a sweep of 12 s. The case for the lifecycle's stop wires the router and connection manager to a stop token as the server does. W7b's cases hold the host for 1 s budgets: one asserts that a room's request reaches the host within 800 ms of five room lists, one that a message the host marked taken is still unanswered 1 s after its budget | Run 34/34, run10 head S2S log; 34/34 with `clustering`, run10 head clustering log |
+| `xep0313_s2s_inbound_mam` (5) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Run 5/5, run10 head S2S log |
+| `xep0030_s2s_inbound_muc_discovery` (17) | W6a, W7b | loopback; in-memory SQLite; one case holds the process's metrics lock and reads the listing build counter, and wedges a room actor for about 3 s | Run 17/17, run10 head S2S log |
+| `xep0085_s2s_inbound_chat_states` (4) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Run 4/4, run10 head S2S log |
+| `xep0115_s2s_inbound_caps` (1) | W6a | loopback; in-memory SQLite | Run 1/1, run10 head S2S log |
+| `xep0308_s2s_inbound_corrections` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 head S2S log |
+| `xep0333_s2s_inbound_markers` (2) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Run 2/2, run10 head S2S log |
+| `xep0359_s2s_inbound_stanza_ids` (1) | W6a | loopback; in-memory SQLite | Run 1/1, run10 head S2S log |
+| `xep0424_s2s_inbound_retraction` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 head S2S log |
+| `xep0425_s2s_inbound_moderation` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 head S2S log |
+| `xep0444_s2s_inbound_reactions` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 head S2S log |
+| `xep0461_s2s_inbound_replies` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run10 head S2S log |
+| `clustering_remote_room_request` (4) | W6a | none; builds with the `clustering` feature only (`--features test-support,clustering`); one case classifies the relay's typed failures through a test-support seam | Run 4/4 with `--features test-support,clustering`, run10 head clustering log |
+| `s2s_account_router` (14) | W6c | loopback; in-memory SQLite | Run 14/14, run10 head S2S log |
+| `s2s_account_traffic_ws` (39), the RFC 6121 account-traffic suite | W6c, W6d (fixture) | loopback (production `/ws` router and the S2S router in process, a loopback peer); in-memory SQLite | Run 39/39, run10 head S2S log |
+| `xep0160_s2s_account_offline_ws` (8) | W6c, W6d | as `s2s_account_traffic_ws` | Run 8/8, run10 head S2S log |
+| `xep0198_s2s_account_expiry` (3) | W6c | none (in-memory offline store and registries) | Run 3/3, run10 head S2S log |
+| `xep0280_s2s_account_carbons_ws` (7) | W6c, W6d | as `s2s_account_traffic_ws` | Run 7/7, run10 head S2S log |
+| `xep0359_s2s_account_stanza_ids_ws` (2) | W6c, W6d | as `s2s_account_traffic_ws` | Run 2/2, run10 head S2S log |
+| `xep0191_s2s_account_blocking_ws` (8) | W6c, W6d (fixture) | as `s2s_account_traffic_ws` | Run 8/8, run10 head S2S log |
+| `xep0060_s2s_account_events_ws` (7) | W6c, W6d | as `s2s_account_traffic_ws`, the peer also serving `pubsub.home-b.test` | Run 7/7, run10 head S2S log |
+| `xep0115_s2s_account_caps_ws` (1) | W6c, W6d (fixture) | as `s2s_account_traffic_ws` | Run 1/1, run10 head S2S log |
+| `xep0199_s2s_account_ping_ws` (3) | W6c, W6d (fixture) | as `s2s_account_traffic_ws` | Run 3/3, run10 head S2S log |
+| `xep0313_s2s_account_archive_ws` (6) | W6c, W6d | as `s2s_account_traffic_ws` | Run 6/6, run10 head S2S log |
+| `s2s_account_inbox_ws` (2) | W6d | as `s2s_account_traffic_ws` | Run 2/2, run10 head S2S log |
+| `xep0357_s2s_account_push_ws` (1) | W6d | as `s2s_account_traffic_ws` | Run 1/1, run10 head S2S log |
+| `xep0424_s2s_account_retraction_ws` (3) | W6d | as `s2s_account_traffic_ws` | Run 3/3, run10 head S2S log |
+| `xep0308_s2s_account_corrections_ws` (3) | W6d | as `s2s_account_traffic_ws` | Run 3/3, run10 head S2S log |
+| `xep0353_s2s_account_call_threads_ws` (6) | W6d | as `s2s_account_traffic_ws`; five cases seed the replica's call state through test-support helpers, one of them to its capacity (4096 offers) | Run 6/6, run10 head S2S log |
+| `xep0511_s2s_account_link_metadata_ws` (5) | W6d | as `s2s_account_traffic_ws` | Run 5/5, run10 head S2S log |
+| `xep0503_s2s_inbound_spaces` (12) | W7a, W7b | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Run 12/12, run10 head S2S log |
+| `xep0060_s2s_inbound_spaces_pubsub` (22) | W7a | as `xep0503_s2s_inbound_spaces` | Run 22/22, run10 head S2S log |
+| `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a, W7b | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Run 4/4, run10 head S2S log |
+| `xep0503_s2s_outbound_spaces_ws` (4) | W7a, integration | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Run 4/4, run10 head S2S log (one case added after the W6d merge: a Space's event notification loses what only the account's server states, through the shared sanitizer) |
+| `spaces_privileged_issuance` (10) | W7a | none (in-memory SQLite, the local permission backend; one case loads an S2S snapshot through the production loader from temporary files) | Run 10/10, run10 head S2S log |
+| `admin_spaces_ws` (edited, 22) | W7a | TestServer process | Run 22/22, run10 head S2S log (one case added: a privileged role refused for an account at another server) |
+| `admin_channel_space_link_ws` (edited, 2) | integration | TestServer process | Run 2/2, run10 head S2S log (the escaped-projection case submits the space JID in its canonical form, which the identity profile requires of admin command fields) |
 | `rfc6120_destination_routing_ws` (7) | W2, W5a | TestServer process | Not run |
 | `rfc3921_session_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
-| `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Run 2/2, run10 S2S log |
+| `xep0030_discovery_destination_ws` (edited, 2) | W2 | TestServer process | Run 2/2, run10 head S2S log |
 | `xep0199_ping_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `xep0280_carbons_destination_ws` (edited, 1) | W2 | TestServer process | Not run |
 | `dm_pinned_messages_ws` (edited, 13) | W5a | TestServer process | Not run |
@@ -205,29 +209,29 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 
 | Target | Slice | Prerequisites | Status |
 | --- | --- | --- | --- |
-| `host_grant_authority` (21) | W5b, W5c, W5d, W5e | PostgreSQL 17 (superuser login; one case creates a role) | Run 21/21, run10 host-grant log |
-| `xep0045_host_grant_admission` (15) | W5b, W5c, W5e | PostgreSQL 17 | Run 15/15, run10 host-grant log |
-| `xep0045_host_grant_audience` (4) | W5b, W5c | PostgreSQL 17 | Run 4/4, run10 host-grant log |
-| `host_grant_projection` (11) | W5b, W5c, W5d | PostgreSQL 17 and SpiceDB; `live_spicedb_` cases are `#[ignore]`; one case runs replicas as separate processes | Run 11/11, run10 host-grant log |
-| `authz_schema_version` (24; 11 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 24/24, run10 host-grant log |
-| `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run10 host-grant log |
-| `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run10 host-grant log |
-| `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run10 host-grant log |
-| `xep0045_host_grant_fence` (31 in 2 modules) | W5c, integration, W5d, W7b | PostgreSQL 17; loopback | Run 31/31, run10 host-grant log |
-| `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run10 host-grant log |
-| `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run10 host-grant log |
-| `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run10 host-grant log |
-| `xep0060_extension_route_room_access` (3) | W5c | none (in-memory state, loopback) | Run 3/3, run10 host-grant log |
-| `host_grant_restore` (46; 28 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run10 host-grant log |
-| `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18, run10 host-grant log |
-| `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run10 host-grant log |
-| `xep0045_host_grant_revocation` (14) | W5d, integration, W6a | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 14/14, run10 host-grant log |
-| `account_jid_retirement` (12) | W5d, W6c, W6d (the retirement also empties the offline store, under every spelling of the account's JID; one case added for that) | PostgreSQL 17 | Run 12/12, run10 host-grant log |
-| `account_retirement_sessions` (10) | W6d | loopback (production `/ws` router in process, in-memory test state); SQLite files of their own; one case runs the `waddle-server` binary's operator subcommand against an SQLite file beside a replica simulated in process; one waits about 17 s for a lease to lapse; one attaches the offline store startup attaches to the test state's database | Run 10/10, run10 S2S log |
-| `xep0198_account_retirement_ws` (4) | W6d | loopback (production `/ws` router in process, in-memory test state); one case attaches the offline store startup attaches to the test state's database, reads the durable authority's retained frames and runs the recovery of ingress custody through a test-support helper | Run 4/4, run10 S2S log |
-| `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run10 host-grant log |
-| `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run10 host-grant log |
-| `host_grant_remote_principals` (17; 3 `#[ignore]`) | W5e, integration, W6a, W7b | PostgreSQL 17; SpiceDB for the ignored cases | Run 17/17, run10 host-grant log |
+| `host_grant_authority` (21) | W5b, W5c, W5d, W5e | PostgreSQL 17 (superuser login; one case creates a role) | Run 21/21, run10 head host-grant log |
+| `xep0045_host_grant_admission` (15) | W5b, W5c, W5e | PostgreSQL 17 | Run 15/15, run10 head host-grant log |
+| `xep0045_host_grant_audience` (4) | W5b, W5c | PostgreSQL 17 | Run 4/4, run10 head host-grant log |
+| `host_grant_projection` (11) | W5b, W5c, W5d | PostgreSQL 17 and SpiceDB; `live_spicedb_` cases are `#[ignore]`; one case runs replicas as separate processes | Run 11/11, run10 head host-grant log |
+| `authz_schema_version` (24; 11 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 24/24, run10 head host-grant log |
+| `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run10 head host-grant log |
+| `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run10 head host-grant log |
+| `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run10 head host-grant log |
+| `xep0045_host_grant_fence` (31 in 2 modules) | W5c, integration, W5d, W7b | PostgreSQL 17; loopback | Run 31/31, run10 head host-grant log |
+| `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run10 head host-grant log |
+| `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run10 head host-grant log |
+| `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run10 head host-grant log |
+| `xep0060_extension_route_room_access` (3) | W5c | none (in-memory state, loopback) | Run 3/3, run10 head host-grant log |
+| `host_grant_restore` (46; 28 `#[ignore]`) | W5r, W5d, W5e | PostgreSQL 17 and SpiceDB for the ignored cases | Run 46/46, run10 head host-grant log |
+| `restricted_runtime_startup` (18 in 3 modules; a fourth, `clustered`, builds with the `clustering` feature only) | W5r | PostgreSQL 17 (superuser login; the cases create roles, and one starts the server under the runtime login) | Run 18/18, run10 head host-grant log |
+| `host_grant_revocation_fence` (7) | W5d | PostgreSQL 17; one case runs the `waddle-server` binary's operator subcommands | Run 7/7, run10 head host-grant log |
+| `xep0045_host_grant_revocation` (14) | W5d, integration, W6a | PostgreSQL 17; loopback; one case runs a replica as a second process | Run 14/14, run10 head host-grant log |
+| `account_jid_retirement` (12) | W5d, W6c, W6d (the retirement also empties the offline store, under every spelling of the account's JID; one case added for that) | PostgreSQL 17 | Run 12/12, run10 head host-grant log |
+| `account_retirement_sessions` (10) | W6d | loopback (production `/ws` router in process, in-memory test state); SQLite files of their own; one case runs the `waddle-server` binary's operator subcommand against an SQLite file beside a replica simulated in process; one waits about 17 s for a lease to lapse; one attaches the offline store startup attaches to the test state's database | Run 10/10, run10 head S2S log |
+| `xep0198_account_retirement_ws` (4) | W6d | loopback (production `/ws` router in process, in-memory test state); one case attaches the offline store startup attaches to the test state's database, reads the durable authority's retained frames and runs the recovery of ingress custody through a test-support helper | Run 4/4, run10 head S2S log |
+| `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run10 head host-grant log |
+| `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run10 head host-grant log |
+| `host_grant_remote_principals` (17; 3 `#[ignore]`) | W5e, integration, W6a, W7b | PostgreSQL 17; SpiceDB for the ignored cases | Run 17/17, run10 head host-grant log |
 | `spicedb_architecture_guard` (edited, 4) | W5o | none (reads source; names SpiceDB variables only in messages) | Not run |
 | `ingress_relation_guard_lab` (edited, 8) | W5b | PostgreSQL (17 for the definer API pilot); skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `migration_owner_lab` (edited, 5) | W5b | PostgreSQL; skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
@@ -241,9 +245,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `identity_profile_ws` (7) | W5i | TestServer process | Not run |
 | `sasl1_identity_ws` (edited, 12) | W5i | loopback | Not run |
 | `rfc6121_roster_ws` (edited, 12) | W5i | TestServer process | Not run |
-| `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Run 1/1, run10 S2S log |
+| `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Run 1/1, run10 head S2S log |
 | `xep0492_dm_bookmarks_ws` (edited, 6) | W5i | none | Not run |
-| `xep0503_spaces_ws` (edited, 14) | W5i, W7a, W7b | TestServer process | Run 14/14, run10 S2S log |
+| `xep0503_spaces_ws` (edited, 14) | W5i, W7a, W7b | TestServer process | Run 14/14, run10 head S2S log |
 
 ### waddle-client-session
 
@@ -345,11 +349,11 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | | Count |
 | --- | --- |
 | Test targets listed | 133 (105 integration targets, 26 library test modules, 2 chat test files) |
-| Run, with a cited log | 85 targets, 1,200 cases, all passed in their latest cited run |
+| Run, with a cited log | 85 targets, 1,201 cases, all passed in their latest cited run |
 | Not run | 48 targets (26 of them library modules) |
 
 W7b (the MUC fallback) changed eight targets that had run, and each ran
-again in the run10 logs: `xep0030_s2s_inbound_muc_discovery`,
+again in the run10 and run10 head logs: `xep0030_s2s_inbound_muc_discovery`,
 `xep0045_s2s_inbound_muc`, `xep0045_s2s_inbound_muc_router`,
 `xep0503_s2s_inbound_spaces`, `xep0503_s2s_inbound_spaces_host_grant`,
 `xep0503_spaces_ws`, `xep0045_host_grant_fence` and
@@ -387,12 +391,14 @@ Every one of those targets ran in the run8 S2S rerun2 log, and the
 integration branch lists `admin_channel_space_link_ws` for the case it
 fixed there.
 
-By log: the run10 S2S log covers 93 targets (136 `waddle-xmpp` cases
-in 5, 1,211 `waddle-server` cases in 88, of which 7 are `#[ignore]` and
+By log: the run10 head S2S log covers 93 targets (136 `waddle-xmpp` cases
+in 5, 1,212 `waddle-server` cases in 88, of which 7 are `#[ignore]` and
 skipped: the 5 SpiceDB cases of `channel_outcast_precedence`, which run in
 the host-grant log, and two named under `integration-run9-s2s.log`); the
-run10 clustering log covers 5 clustering targets (61 cases); the run10
-host-grant log covers the 21 host-grant targets (287 cases). Before them,
+run10 head clustering log covers 5 clustering targets (61 cases); the run10
+head host-grant log covers the 21 host-grant targets (287 cases). The run10
+logs at `dcb6964dc` covered the same targets with one discovery case fewer.
+Before them,
 the run9 S2S head2 log covered 91 targets (136 `waddle-xmpp` cases in 5,
 1,162 `waddle-server` cases in 86, the same 7 skipped); the run9
 clustering final log covered 5 clustering targets (58 cases); the run9
@@ -643,7 +649,7 @@ implemented unless the text says so.
 
 ### Routing design (`s2s-routing-2047.md`)
 
-- MUC fallback (W7b), run in the run10 logs at `dcb6964dc`: the MUC service's
+- MUC fallback (W7b), run in the run10 head logs at `e559ebd57`: the MUC service's
   `disco#items` lists to remote askers the rooms that are public, open to
   other servers and no group conversation, and a managed room only to a
   principal its grants admit to view it; a Space node's `disco#items` lists
