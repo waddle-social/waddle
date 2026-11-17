@@ -18,7 +18,7 @@ placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `18e9f931904581aed7f848d0cd5458c0326b7226` (see the last refresh below); the original
+through `42cbdd9b127e9256dada6ea3a1ad19fe87226510` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1272,6 +1272,56 @@ text.
   check and the notification pass's `list_deliverable_subscribers` read.
   The other records are unchanged in content; those in the changed files
   moved with the lines added.
+
+The selected evidence was refreshed a twenty-sixth time, through
+`42cbdd9b127e9256dada6ea3a1ad19fe87226510`, after reviewing the delta of the reviewed files since the
+twenty-fifth refresh. Twelve reviewed files changed, no file was added to
+the reviewed set, twenty-nine anchors moved without a change to their
+text, and one anchor's text changed (`s2s-space-notify`, which is no longer
+`pub(crate)`).
+
+- A Space deleted through PubSub (`pubsub-admin` moved), by a session or by
+  a trusted home's owner through `s2s-space-remote-change`, now runs the
+  cascade of `spaces:delete` (`space-delete` moved; the cascade is shared
+  by `run_delete` and the PubSub entry `delete_space`, and works on the
+  PubSub store, Spaces address and MUC domain of the state that took the
+  request). The cascade closes the Space to other servers first, in one
+  transaction under the Space's lock, and removes the Space's own `owner`,
+  `admin`, `moderator` and `member` relations before the node goes (one
+  more raw `DeleteTuple` match). Purging a Space's items through PubSub
+  first takes the rooms they name out of the Space (parent tuple and
+  link), refusing a Space or room of an enrolled scope (two more raw
+  `refuse_host_grant_space` matches and one more `refuse_host_grant_room`,
+  all in `admin/spaces.rs`). No placement decision changed.
+- The permission actor's refusal (`d8-actor-privileged-issuance` moved)
+  now covers the channel and Space `owner` and `admin` relations as well as
+  the four relations no writer names; each writer keeps its own check.
+  Startup attaches the policy through `with_replica_privileged_issuance`
+  (`d8-actor-policy` and `startup-schema` moved), which the test-support
+  seam calls.
+- `s2s_space_subscriptions` (`s2s-space-subscription-record` moved) gains
+  a bound per domain in a Space, a Space advisory lock beside the domain's,
+  a re-read of the `federated` setting under that lock, removal of rows of
+  domains no longer admitted at a bound, and a thirty-day lapse. Turning
+  the setting off (`s2s-space-federated-setting` moved) removes the rows in
+  that locked transaction and then the PubSub service's records of remote
+  subscribers. An owner's removal of a subscription and a ban
+  (`d8-space-affiliations` moved) remove the account's row. None of these
+  is a grant store; each only reduces what is sent.
+- `s2s-space-notify` now runs on the Spaces host's own task, fed by a
+  bounded queue from the fan-out (`fanout`-side change in
+  `pubsub_fanout/implementation.rs`; `s2s-space-event-egress` unchanged),
+  and reads a room's `federated` setting through the room host's own
+  decision (`s2s_rooms.rs`; the `s2s-room-*` anchors and
+  `s2s-unseated-removal` moved up with the extracted function). The
+  Spaces handlers return typed IQs (`placement`, `parent-rollback`,
+  `hg-space-pubsub`, `local`, `hg-writer-fence`, `hg-reader-fence`,
+  `space-admin`, `d8-space-set-role`, `s2s-space-host`, `s2s-space-open`,
+  `s2s-space-honoured`, `s2s-space-room-visible` and `s2s-space-change`
+  moved).
+- The raw scan holds 1639 records, four more than before, all in
+  `admin/spaces.rs` and described above. The other records are unchanged in
+  content; those in the changed files moved with the lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
