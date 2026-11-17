@@ -43,13 +43,20 @@ not run until verification (D9):
   promotion chain every expiry path runs;
 - `crates/waddle-server/tests/xep0160_s2s_account_offline_ws.rs`: offline
   storage of remote senders' messages and the strangers' bounds, at the
-  store and at a real detached session reached by full JID, and a stored
-  message whose sender's domain is no longer admitted at the flush;
+  store and at a real detached session reached by full JID, a stored
+  message whose sender's domain is no longer admitted at the flush (one
+  stored whole and one referring to the archive), a stored message
+  referring to the archive with the push notification candidate a local
+  direct message raises, and a sender without a resource stored whole;
 - `crates/waddle-server/tests/account_jid_retirement.rs` (edited):
   retirement removes the account's rows of migrations 2010 and 2011;
 - `crates/waddle-server/tests/xep0280_s2s_account_carbons_ws.rs`:
   received and sent carbons of messages exchanged with remote accounts,
-  and carbon wrappers removed from remote messages;
+  a remote message to the bare or a full JID copied to the account's
+  other resources only, and carbon wrappers removed from remote messages;
+- `crates/waddle-server/tests/s2s_account_inbox_ws.rs`: the recipient's
+  inbox projection of a remote message to an online and an offline
+  account, and nothing kept for the remote account;
 - `crates/waddle-server/tests/xep0359_s2s_account_stanza_ids_ws.rs`:
   stanza ids in the deployment's name removed from remote messages before
   delivery and before storage, and a remote sender's own id kept;
@@ -63,8 +70,10 @@ not run until verification (D9):
 - `crates/waddle-server/tests/xep0199_s2s_account_ping_ws.rs`,
   `xep0115_s2s_account_caps_ws.rs` and `xep0313_s2s_account_archive_ws.rs`:
   pings between clients, capabilities in probe answers and their queries,
-  and the recipient's archive, archive result wrappers removed from remote
-  messages;
+  and the recipient's archive (a message delivered, held by a detached
+  session or stored offline is archived once and only there, a chat
+  state alone is not, a retraction is honoured only for the sender's own
+  message), archive result wrappers removed from remote messages;
 - `crates/waddle-server/tests/xep0410_s2s_self_ping.rs` (edited): a
   remote room's self-ping reflection reaching the occupant once an account
   side is attached;
@@ -322,7 +331,11 @@ inbox and archive only as the conversation's peer.
   delivery or the detached session's queue, or the offline row and its
   push notification. The message keeps its own `to`. Its digest names
   the recipient's archive as the one authority of this deployment that
-  stamps it.
+  stamps it. A selected resource is routed by its full JID. With no live
+  resource and no detached session that was available, the plan routes
+  to the bare JID and selects as for a local sender: a detached session
+  that was unavailable or had a negative priority holds the message too,
+  and only an account with no session at all stores it offline.
 - **Only the recipient's account.** The plan is committed only when every
   effect acts on the recipient's account: its archive and inbox, its
   resources, its detached sessions, its offline store and its
@@ -737,6 +750,10 @@ store. This is the slice's rollout part (G24).
 - **A stranger's messages to a live resource are unbounded** beyond the
   router's queues: each is archived and projected, as it was by the
   recipient pass of the resource's connection.
+- **A stranger's share is spent before the acceptance.** It is counted
+  once the plan is classified; an acceptance that then refuses the
+  message (the account retired or the domain dropped meanwhile) or an
+  offline store over its quota at execution leaves it spent.
 - **Strangers' bounds are a rate.** They count admissions of the last
   day, not the messages still stored; the store's quota bounds those.
 - **A detached session's queue has no bound per sender.** Strangers
