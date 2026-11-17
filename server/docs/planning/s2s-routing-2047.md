@@ -1986,7 +1986,8 @@ Space, and places no room in one: a publish is decided by the Space's
   `moderator`, `member`) are removed; the node is purged and deleted; its
   metadata is removed. A Space created again under the name inherits none
   of it. A failure part-way rolls back what `spaces:delete` rolls back and
-  answers `internal-server-error`; a failure after the node is gone is
+  answers `internal-server-error`, and leaves the Space closed to other
+  servers, which its owner turns on again in a session; a failure after the node is gone is
   completed by `spaces:delete`, since the PubSub request then answers
   `item-not-found`.
 - **Purging a Space's items** takes the rooms they name out of the Space

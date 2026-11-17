@@ -260,6 +260,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | --- | --- | --- | --- |
 | `waddle-server/src/admin/channel_inventory_tests.rs` | W5c | none | Not run |
 | `waddle-server/src/admin/channels.rs` (`tests`) | W6a | none; one catalog record literal gained the `federated` field | Not run |
+| `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W7a | none; one call of `destroy_space_channel` gained the `SpaceService` argument, and `run_delete` there now also closes the Space to other servers and removes the Space's own relations | Not run; not compiled |
 | `waddle-server/src/server/xmpp_channels.rs` (`tests`) | W6a | none; the catalog row literal gained the `federated` column | Not run |
 | `waddle-xmpp/src/muc/owner/tests.rs` | W6a | none; two cases added (the `federated` field of the owner form, and a stored configuration without it) | Not run |
 | `waddle-server/src/admin/space_catalog_cascade_tests.rs` | W5c | none | Not run |
@@ -295,9 +296,9 @@ parent repair from a link (`websocket/tests/muc.rs`).
 
 | | Count |
 | --- | --- |
-| Test targets listed | 118 (96 integration targets, 20 library test modules, 2 chat test files) |
+| Test targets listed | 119 (96 integration targets, 21 library test modules, 2 chat test files) |
 | Run, with a cited log | 65 targets, 1,033 cases, all passed in their latest cited run |
-| Not run | 53 targets (20 of them library modules) |
+| Not run | 54 targets (21 of them library modules) |
 
 W7a added six targets (45 cases), listed `admin_spaces_ws` for the case it
 added there, and edited `s2s_reachability`, which moved from run to not run
