@@ -131,3 +131,31 @@ async fn self_directed_dm_inserts_no_candidate_row() {
         "self-DM must not persist an outbox job"
     );
 }
+
+#[tokio::test]
+async fn call_candidate_round_trips_intrinsic_data_without_affecting_dm_identity() {
+    use waddle_server::notification_outbox::{
+        NotificationCall, NotificationClass, NotificationReason,
+    };
+    use xmpp_parsers::jingle::SessionId;
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let call = NotificationCandidate::call_with_hints(
+        recipient.clone(),
+        "bob@example.com/phone".parse().expect("sender"),
+        StanzaId::new("call-archive", Jid::from(recipient)),
+        NotificationCall {
+            session_id: SessionId("call-session".into()),
+            video: true,
+        },
+        NotificationMessageHints::none(),
+    )
+    .expect("call candidate");
+    assert_eq!(call.class(), NotificationClass::Call);
+    assert_eq!(call.reason(), NotificationReason::OfflineCall);
+    store.insert_candidate(&call).await.expect("persist call");
+    let pending = store.pending_candidates(16).await.expect("pending");
+    assert_eq!(pending[0].call(), call.call());
+    assert_eq!(pending[0].class(), NotificationClass::Call);
+    assert!(candidate("dm-archive").call().is_none());
+}

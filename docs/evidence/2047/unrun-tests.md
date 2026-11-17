@@ -66,6 +66,9 @@ the integration branch itself.
   from before the renumbering migrated records versions that now name
   other migrations, and startup refuses it: recreate it. Every log from the
   pre-verification logs on ran against databases created for the run.
+  Merging `main` renumbered them again, from 2001 to 2013 to 2002 to 2014,
+  after `main`'s offline call notification candidates took 2001; the logs
+  before that merge name the earlier numbers.
 - "TestServer process" means the case starts the `waddle-server` binary as a
   child process on loopback ports through `waddle-ws-test-support`. "Loopback"
   means in-process sockets on `127.0.0.1` with no external service.
@@ -346,7 +349,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | `waddle-server/src/auth/directory/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/auth/native/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/db/migrations/tests.rs` | W5b | PostgreSQL for the `postgres_` cases; they skip without `WADDLE_TEST_POSTGRES_URL` | Run with the library's other `db::migrations` cases (`prever-run-migrations.log`): 38 of 42 passed; the four failures (`a_complete_retired_sqlite_ledger_is_stamped_without_ddl`, `a_ledger_version_this_binary_does_not_know_is_refused`, `a_stamp_refuses_a_schema_the_history_did_not_build`, and `owner::ledger_preflight`'s `postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_and_boundary`) fail the same way at `dafeff804` (`prever-run-migrations-base.log`), so they predate this pass. Three read the schema or the ledger as if no migration followed the baseline (the newer-version case inserts version 2001, which migration 2001 holds, and the two stamp cases find the later migrations' tables and indexes); the preflight case's cause was not traced |
-| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2009 to 2013 in the version order, and every version after the baseline without a gap) | W6c, W7a, W6d, pre-verification | none | Run 1/1, `prever-run-migrations.log` |
+| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2001 to 2014 in the version order, and every version after the baseline without a gap) | W6c, W7a, W6d, pre-verification | none | Run 1/1, `prever-run-migrations.log` |
 | `waddle-server/src/pending_delivery/database/custody/tests.rs` (edited: the custody transfer takes the store's cache of whether the ledger of retired JIDs exists) | W6d | as before the edit | Not run |
 | `waddle-server/src/server/routes/websocket/connection.rs` (`tests`: three cases pass the force-detach close the stream error it now takes, `<conflict/>` as before) | W6d | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/retirement.rs` (edited: the retirement cause of a retired account's detach, not a transfer) | W6d | none | Not run |

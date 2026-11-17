@@ -70,14 +70,16 @@ describe("graph parity", () => {
     expect(workflow.jobs.integration.if).toBe("${{ always() }}");
     expect(workflow.jobs.integration.needs).toEqual(["plan", "example__build", "example__verify"]);
     expect(workflow.on.merge_group.types).toEqual(["checks_requested"]);
-    expect(workflow.on.pull_request).toEqual({});
+    expect(Object.keys(workflow.on).sort()).toEqual(["merge_group", "workflow_dispatch"]);
   });
   test("discovers all existing PR lanes, including experiment and native lanes", () => {
     const lanes = readLanes();
     const workflow = Bun.YAML.parse(generate(lanes)) as any;
-    for (const name of ["apple", "android", "chat", "federationgrantfence", "rusttests", "namespacerustchecks", "xmppservercompliance"]) {
+    for (const name of ["apple", "android", "chat", "federationgrantfence", "namespacerustchecks", "xmppcompliance"]) {
       expect(lanes.some(lane => lane.file.includes(name))).toBe(true);
     }
+    // The shard workflow is dispatch-only (no pull_request trigger), so it is not a lane.
+    expect(lanes.some(lane => lane.file.includes("rusttests"))).toBe(false);
     expect(Object.keys(workflow.jobs).sort()).toEqual(["plan", "integration", ...lanes.flatMap(jobIds)].sort());
     for (const lane of lanes) {
       for (const [id, source] of Object.entries(lane.workflow.jobs) as [string, any][]) {
@@ -257,7 +259,7 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
 });
 
 
-test("0.63.2 retains source-declared manual and tag FlakeHub triggers", () => {
+test("0.76.1 retains source-declared manual and tag FlakeHub triggers", () => {
   const workflow = Bun.YAML.parse(readFileSync(".github/workflows/waddle-server-publish-tags-to-flakehub.yml", "utf8")) as any;
   expect(workflow.on.push.tags).toEqual(["v?[0-9]+.[0-9]+.[0-9]+*"]);
   expect(workflow.on.workflow_dispatch.inputs.tag.required).toBe(true);

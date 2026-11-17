@@ -52,11 +52,12 @@ describe("useThreadOlderLoadRestore", () => {
     await nextTick();
     expect(h.cancelSettleLock).toHaveBeenCalledTimes(1);
 
-    // Older page inserted above: the scroll height grows by 400.
-    h.element.scrollHeight = 1400;
+    h.element.scrollTop = 180;
     h.isLoadingOlderReplies.value = false;
+    // Render the older page after the watcher reads the old DOM.
+    void nextTick(() => { h.element.scrollHeight = 1400; });
     await settle();
-    expect(h.element.scrollTop).toBe(500);
+    expect(h.element.scrollTop).toBe(580);
     expect(h.afterRestore).toHaveBeenCalledTimes(1);
     h.stop();
   });

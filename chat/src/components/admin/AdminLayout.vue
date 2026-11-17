@@ -1,26 +1,21 @@
 <script setup lang="ts">
-// Admin V2 — responsive shell. The left navigation is a pinned 16rem
-// column on `lg+` and slides in as a drawer from the left on `<lg`.
-// The hamburger toggle in the mobile header opens the drawer; tapping
-// the backdrop or selecting a panel closes it.
+// Admin shell (App-Admin / Mobile-Admin boards): one column with the
+// "Admin" heading, a per-panel caption, the panel's New action (teleported
+// into `#admin-header-actions` by the panel) and Users / Spaces / Channels
+// as one segmented switch, inside the sidebar shell. Below `md` a top bar
+// with a drawer (and Back to chat) replaces the heading and the switch.
 import { computed, ref } from "vue";
-import {
-  BellRing,
-  ChevronLeft,
-  FolderTree,
-  Hash,
-  Menu,
-  ScrollText,
-  Settings as SettingsIcon,
-  Users,
-  X,
-} from "lucide-vue-next";
+import { Menu, X } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { empty, iconbtn, seg } from "styled-system/recipes";
+import spotError from "@waddle/design/assets/spot-error.svg?url";
+import AppDrawer from "@/components/ui/AppDrawer.vue";
 import type { AdminMatch, AdminPanel } from "@/router";
 
 interface PanelDef {
   slug: AdminPanel;
   label: string;
-  icon: typeof Users;
+  caption: string;
   enabled: boolean;
 }
 
@@ -34,183 +29,141 @@ const emit = defineEmits<{
   back: [];
 }>();
 
+// Audit log, Push health and Settings are stubs: reachable by URL only,
+// left out of the switch (Admin product note).
 const PANELS: ReadonlyArray<PanelDef> = [
-  { slug: "users", label: "Users", icon: Users, enabled: true },
-  { slug: "spaces", label: "Spaces", icon: FolderTree, enabled: true },
-  { slug: "channels", label: "Channels", icon: Hash, enabled: true },
-  { slug: "audit", label: "Audit log", icon: ScrollText, enabled: false },
-  { slug: "push-health", label: "Push health", icon: BellRing, enabled: false },
-  { slug: "settings", label: "Settings", icon: SettingsIcon, enabled: false },
+  { slug: "users", label: "Users", caption: "Every account on this server.", enabled: true },
+  { slug: "spaces", label: "Spaces", caption: "Deleting a space also deletes its channels.", enabled: true },
+  { slug: "channels", label: "Channels", caption: "Open a channel to edit its settings, roles and occupants.", enabled: true },
+  { slug: "audit", label: "Audit log", caption: "Server activity, once it ships.", enabled: false },
+  { slug: "push-health", label: "Push health", caption: "Push delivery health, once it ships.", enabled: false },
+  { slug: "settings", label: "Settings", caption: "Server settings, once they ship.", enabled: false },
 ];
+const NAV = PANELS.filter((panel) => panel.enabled);
 
 const sidebarOpen = ref(false);
 
-function isActive(panel: PanelDef): boolean {
-  return panel.slug === props.activePanel;
-}
-
 function onPanelClick(panel: PanelDef): void {
-  if (!panel.enabled) return;
   sidebarOpen.value = false;
   emit("navigate", { id: "admin", params: { panel: panel.slug } });
 }
 
-const activeLabel = computed(() => {
-  const found = PANELS.find((p) => p.slug === props.activePanel);
-  return found ? found.label : "Admin";
-});
+const active = computed(() => PANELS.find((p) => p.slug === props.activePanel));
+const activeLabel = computed(() => active.value?.label ?? "Admin");
+const isStub = computed(() => !active.value || !active.value.enabled);
 
-const isStub = computed(() => {
-  const found = PANELS.find((p) => p.slug === props.activePanel);
-  return !found || !found.enabled;
+const rootClass = css({ flex: 1, minHeight: 0, overflowY: "auto", bg: "bg", color: "fg" });
+const topBarClass = css({
+  position: "sticky",
+  top: 0,
+  zIndex: "sticky",
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  padding: "2",
+  borderBottom: "1px solid {colors.border.soft}",
+  bg: "bg.rail",
+  color: "fg",
+  md: { display: "none" },
+  "& b": { flex: 1, minWidth: 0, font: "700 18px/1.3 {fonts.display}" },
 });
+const bigIconClass = cx(iconbtn(), css({ width: "44px", height: "44px" }));
+const mainClass = css({
+  width: "100%",
+  maxWidth: "1000px",
+  boxSizing: "border-box",
+  display: "flex",
+  flexDirection: "column",
+  gap: "4",
+  padding: "{spacing.4} {spacing.3} {spacing.8}",
+  md: { padding: "{spacing.8} {spacing.10}" },
+});
+const headClass = css({ display: "flex", alignItems: "flex-start", gap: "4" });
+const headTextClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1.5" });
+const titleClass = css({ display: "none", margin: 0, font: "700 30px/1.2 {fonts.display}", letterSpacing: "-0.01em", md: { display: "block" } });
+const captionClass = css({ margin: 0, fontSize: "15px", lineHeight: 1.5, color: "fg.muted" });
+const actionsClass = css({ display: "flex", gap: "2", flex: "none", "&:empty": { display: "none" } });
+const segClass = cx(seg(), css({ alignSelf: "flex-start", display: "none", md: { display: "inline-flex" } }));
+const drawerHeadClass = css({ display: "flex", alignItems: "center", padding: "{spacing.3} {spacing.3} {spacing.2} {spacing.5}", "& b": { flex: 1, font: "700 20px/1.3 {fonts.display}" } });
+const drawerNavClass = css({ display: "flex", flexDirection: "column", gap: "1", padding: "0 {spacing.3} {spacing.3}", minHeight: "calc(100dvh - 64px)", boxSizing: "border-box" });
+const drawerItemClass = css({
+  display: "flex",
+  alignItems: "center",
+  minHeight: "48px",
+  padding: "0 {spacing.3}",
+  border: 0,
+  borderRadius: "control",
+  bg: "transparent",
+  color: "fg",
+  font: "600 15px/1 {fonts.body}",
+  textAlign: "left",
+  cursor: "pointer",
+  _hover: { bg: "state.hover" },
+  _currentPage: { bg: "state.selected" },
+});
+const drawerBackClass = cx(drawerItemClass, css({ mt: "auto", color: "fg.muted" }));
+const stubClass = cx(empty(), css({ pt: "16", "& h2": { margin: 0, font: "700 24px/1.25 {fonts.display}" } }));
 </script>
 
 <template>
-  <div class="grid h-[100dvh] w-full grid-cols-1 lg:grid-cols-[16rem_1fr] bg-background text-foreground">
-    <!-- Mobile header with hamburger (visible <lg) -->
-    <header class="flex h-12 items-center gap-2 border-b border-border px-3 lg:hidden">
-      <button
-        type="button"
-        class="chat-icon-button hover:bg-muted"
-        aria-label="Open admin navigation"
-        @click="sidebarOpen = true"
-      >
-        <Menu class="h-5 w-5" />
+  <div :class="rootClass">
+    <header :class="topBarClass" data-theme="night">
+      <button type="button" :class="bigIconClass" aria-label="Open admin navigation" @click="sidebarOpen = true">
+        <Menu aria-hidden="true" />
       </button>
-      <span class="type-pane-title flex-1 truncate">{{ activeLabel }}</span>
-      <button
-        type="button"
-        class="chat-icon-button hover:bg-muted"
-        aria-label="Back to chat"
-        @click="emit('back')"
-      >
-        <ChevronLeft class="h-5 w-5" />
-      </button>
+      <b>{{ activeLabel }}</b>
     </header>
 
-    <!-- Sidebar: pinned on lg+, slide-from-left drawer on <lg -->
-    <aside
-      class="hidden flex-col gap-3 border-r border-border bg-card/50 p-3 lg:flex lg:row-span-2"
-      aria-label="Admin sections"
-    >
-      <div class="flex flex-col gap-1.5 px-2 pt-2">
-        <button
-          type="button"
-          class="inline-flex items-center gap-1 self-start type-caption text-muted-foreground hover:text-foreground"
-          aria-label="Back to chat"
-          @click="emit('back')"
-        >
-          <ChevronLeft class="h-4 w-4" />
-          <span>Back to chat</span>
+    <AppDrawer v-model:open="sidebarOpen" side="left" label="Admin navigation drawer" bare>
+      <div :class="drawerHeadClass">
+        <b>Admin</b>
+        <button type="button" :class="bigIconClass" aria-label="Close admin navigation" @click="sidebarOpen = false">
+          <X aria-hidden="true" />
         </button>
-        <h1 class="type-pane-title">Admin</h1>
       </div>
-      <nav>
-        <ul class="flex flex-col gap-0.5">
-          <li v-for="panel in PANELS" :key="panel.slug">
-            <button
-              type="button"
-              class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 type-control text-left transition-colors"
-              :class="[
-                isActive(panel) ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-muted',
-                !panel.enabled ? 'opacity-50 cursor-not-allowed' : '',
-              ]"
-              :aria-current="isActive(panel) ? 'page' : undefined"
-              :aria-disabled="!panel.enabled"
-              :disabled="!panel.enabled"
-              :title="!panel.enabled ? 'Coming soon' : undefined"
-              @click="onPanelClick(panel)"
-            >
-              <component :is="panel.icon" class="h-4 w-4 flex-shrink-0" aria-hidden="true" />
-              <span class="truncate flex-1">{{ panel.label }}</span>
-              <span v-if="!panel.enabled" class="rounded-full bg-muted px-2 py-0.5 type-caption">Soon</span>
-            </button>
-          </li>
-        </ul>
-      </nav>
-    </aside>
-
-    <!-- Mobile drawer overlay -->
-    <Teleport to="body">
-      <Transition name="drawer">
-        <div
-          v-if="sidebarOpen"
-          class="z-modal fixed inset-0 lg:hidden"
-          @keydown.esc="sidebarOpen = false"
+      <nav :class="drawerNavClass" aria-label="Admin sections">
+        <button
+          v-for="panel in NAV"
+          :key="panel.slug"
+          type="button"
+          :class="drawerItemClass"
+          :aria-current="panel.slug === activePanel ? 'page' : undefined"
+          @click="onPanelClick(panel)"
         >
-          <div
-            class="absolute inset-0 bg-background/60"
-            aria-hidden="true"
-            @click="sidebarOpen = false"
-          />
-          <aside
-            class="absolute left-0 top-0 h-[100dvh] w-[var(--chat-drawer-width)] glass-panel border-r border-border shadow-2xl flex flex-col"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Admin navigation drawer"
-            @click.stop
-          >
-            <div class="h-12 flex items-center justify-between px-3 border-b border-border">
-              <span class="type-pane-title">Admin</span>
-              <button
-                type="button"
-                class="chat-icon-button hover:bg-muted"
-                aria-label="Close admin navigation"
-                @click="sidebarOpen = false"
-              >
-                <X class="w-4 h-4" />
-              </button>
-            </div>
-            <nav class="flex-1 overflow-y-auto p-3">
-              <ul class="flex flex-col gap-0.5">
-                <li v-for="panel in PANELS" :key="panel.slug">
-                  <button
-                    type="button"
-                    class="flex w-full items-center gap-2 rounded-md px-2.5 py-2 type-control text-left transition-colors"
-                    :class="[
-                      isActive(panel) ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-muted',
-                      !panel.enabled ? 'opacity-50 cursor-not-allowed' : '',
-                    ]"
-                    :aria-current="isActive(panel) ? 'page' : undefined"
-                    :aria-disabled="!panel.enabled"
-                    :disabled="!panel.enabled"
-                    @click="onPanelClick(panel)"
-                  >
-                    <component :is="panel.icon" class="h-4 w-4 flex-shrink-0" aria-hidden="true" />
-                    <span class="truncate flex-1">{{ panel.label }}</span>
-                    <span v-if="!panel.enabled" class="rounded-full bg-muted px-2 py-0.5 type-caption">Soon</span>
-                  </button>
-                </li>
-              </ul>
-            </nav>
-          </aside>
-        </div>
-      </Transition>
-    </Teleport>
+          {{ panel.label }}
+        </button>
+        <button type="button" :class="drawerBackClass" @click="emit('back')">Back to chat</button>
+      </nav>
+    </AppDrawer>
 
-    <!-- Main panel mount -->
-    <main class="overflow-y-auto" role="main">
+    <main :class="mainClass">
+      <header :class="headClass">
+        <div :class="headTextClass">
+          <h1 :class="titleClass">Admin</h1>
+          <p :class="captionClass">{{ active?.caption }}</p>
+        </div>
+        <div id="admin-header-actions" :class="actionsClass" />
+      </header>
+      <nav aria-label="Admin sections" :class="segClass">
+        <button
+          v-for="panel in NAV"
+          :key="panel.slug"
+          type="button"
+          :aria-current="panel.slug === activePanel ? 'page' : undefined"
+          @click="onPanelClick(panel)"
+        >
+          {{ panel.label }}
+        </button>
+      </nav>
+
       <slot v-if="activePanel === 'users'" name="users" />
       <slot v-else-if="activePanel === 'spaces'" name="spaces" />
       <slot v-else-if="activePanel === 'channels'" name="channels" />
-      <div v-else-if="isStub" class="mx-auto max-w-md p-6 text-center" role="status">
-        <h2 class="type-pane-title mb-2">{{ activeLabel }}</h2>
-        <p class="type-caption text-muted-foreground">
-          This admin panel is in the IA but isn't implemented yet.
-        </p>
+      <div v-else-if="isStub" :class="stubClass" role="status">
+        <img :src="spotError" alt="" />
+        <h2>{{ activeLabel }} is coming</h2>
+        <p>This panel isn't built yet.</p>
       </div>
     </main>
   </div>
 </template>
-
-<style scoped>
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: opacity 150ms ease;
-}
-.drawer-enter-from,
-.drawer-leave-to {
-  opacity: 0;
-}
-</style>

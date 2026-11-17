@@ -7,3 +7,7 @@ spec:
   values:
     restrictedRuntime:
       enabled: true
+      handoff:
+        # Zero replicas instead of a failed render while no handoff has been
+        # published; a serving Deployment is never scaled down for this.
+        awaitOwnerJob: true

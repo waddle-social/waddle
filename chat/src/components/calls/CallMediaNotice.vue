@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive } from "vue";
 import { useStore } from "@nanostores/vue";
+import { css } from "styled-system/css";
+import { btn, iconbtn } from "styled-system/recipes";
 import { MonitorUp, MicOff, VideoOff, X } from "lucide-vue-next";
 import {
   $callMediaIssues,
@@ -79,20 +81,38 @@ async function retry(kind: MediaKind): Promise<void> {
 function dismiss(kind: MediaKind): void {
   clearMediaIssue(kind);
 }
+
+// HuddleStage notice strip: warning tint, recoverable (not the danger row).
+const rootClass = css({ display: "flex", flexDirection: "column", gap: "2", margin: "0 {spacing.4} {spacing.2.5}", _narrow: { mx: "3" } });
+const rowClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  flexWrap: "wrap",
+  padding: "{spacing.2.5} {spacing.3}",
+  borderRadius: "12px",
+  bg: "color-mix(in srgb, {colors.presence.away} 12%, transparent)",
+  border: "1px solid color-mix(in srgb, {colors.presence.away} 35%, transparent)",
+  color: "fg",
+});
+const iconClass = css({ width: "20px", height: "20px", flex: "none", color: "warning.text" });
+const textClass = css({ flex: "1 1 240px", minWidth: 0, fontSize: "13px", lineHeight: "1.4" });
+const actionClass = btn({ size: "sm" });
+const dismissClass = iconbtn({ size: "sm" });
 </script>
 
 <template>
-  <div v-if="rows.length" class="call-media-notice" role="status" aria-live="polite">
-    <div v-for="row in rows" :key="row.kind" class="call-media-notice__row">
+  <div v-if="rows.length" :class="rootClass" role="status" aria-live="polite">
+    <div v-for="row in rows" :key="row.kind" :class="rowClass">
       <component
         :is="row.kind === 'mic' ? MicOff : row.kind === 'cam' ? VideoOff : MonitorUp"
-        class="call-media-notice__icon"
+        :class="iconClass"
         aria-hidden="true"
       />
-      <span class="call-media-notice__text">{{ row.message }}</span>
+      <span :class="textClass">{{ row.message }}</span>
       <button
         type="button"
-        class="call-media-notice__action"
+        :class="actionClass"
         :disabled="retrying[row.kind]"
         @click="retry(row.kind)"
       >
@@ -100,93 +120,12 @@ function dismiss(kind: MediaKind): void {
       </button>
       <button
         type="button"
-        class="call-media-notice__dismiss"
+        :class="dismissClass"
         :aria-label="`Dismiss ${row.kind === 'mic' ? 'microphone' : row.kind === 'cam' ? 'camera' : 'screen sharing'} notice`"
         @click="dismiss(row.kind)"
       >
-        <X class="h-3.5 w-3.5" aria-hidden="true" />
+        <X aria-hidden="true" />
       </button>
     </div>
   </div>
 </template>
-
-<style scoped>
-.call-media-notice {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs, 0.25rem);
-  /* Info/warning tone — a recoverable limitation, not a hard error, so
-   * deliberately NOT the destructive red used by the error row. */
-  border-bottom: 1px solid color-mix(in oklab, var(--primary) 28%, transparent);
-  background: color-mix(in oklab, var(--primary) 8%, transparent);
-  padding: 0.5rem 0.75rem;
-}
-
-.call-media-notice__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs, 0.5rem);
-  min-width: 0;
-}
-
-.call-media-notice__icon {
-  width: 1rem;
-  height: 1rem;
-  flex-shrink: 0;
-  color: var(--muted-foreground);
-}
-
-.call-media-notice__text {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 0.8125rem;
-  line-height: 1.3;
-  color: var(--foreground);
-}
-
-.call-media-notice__action {
-  flex-shrink: 0;
-  border-radius: var(--radius-sm);
-  padding: 0.25rem 0.5rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  /* `--foreground` (not `--primary`) on the tinted fill to clear WCAG AA
-   * contrast in light mode; the tint + weight + hover still read as a
-   * button. */
-  color: var(--foreground);
-  background: color-mix(in oklab, var(--primary) 16%, transparent);
-  transition: background-color 0.18s ease;
-}
-
-.call-media-notice__action:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--primary) 26%, transparent);
-}
-
-.call-media-notice__action:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.call-media-notice__action:focus-visible,
-.call-media-notice__dismiss:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-
-.call-media-notice__dismiss {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: var(--radius-sm);
-  color: var(--muted-foreground);
-  transition: background-color 0.18s ease, color 0.18s ease;
-}
-
-.call-media-notice__dismiss:hover {
-  background: color-mix(in oklab, var(--foreground) 8%, transparent);
-  color: var(--foreground);
-}
-</style>

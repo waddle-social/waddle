@@ -50,7 +50,8 @@ pub async fn promote_session_unacked(
     server_domain: &str,
     recent_tombstones: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
 ) -> PromotionSummary {
-    promote_session_unacked_with_policy(
+    // Redelivery of a dead session's queue: this span is not the producer.
+    waddle_xmpp::telemetry::producer_trace::replaying(promote_session_unacked_with_policy(
         session,
         StreamPromotionDeps {
             registry,
@@ -61,7 +62,7 @@ pub async fn promote_session_unacked(
             recent_tombstones,
             allow_unfenced_effects: true,
         },
-    )
+    ))
     .await
 }
 

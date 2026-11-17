@@ -9,7 +9,12 @@ metadata:
   labels:
     {{- include "waddle-server.labels" . | nindent 4 }}
 spec:
+  {{- if include "waddle-server.restrictedHandoffPending" . }}
+  # No handoff yet: the server starts once the owner Job has published one.
+  replicas: 0
+  {{- else }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   strategy:
     {{- /*
       ADR-0017 Phase 0: Recreate while a ReadWriteOnce PVC is in use so a
@@ -45,7 +50,7 @@ spec:
         {{- if .Values.apnsSecretChecksum }}
         checksum/apns-secret-value: {{ .Values.apnsSecretChecksum | quote }}
         {{- end }}
-        {{- if .Values.restrictedRuntime.enabled }}
+        {{- if and .Values.restrictedRuntime.enabled (not (include "waddle-server.restrictedHandoffPending" .)) }}
         checksum/runtime-handoff: {{ include "waddle-server.restrictedHandoff" . | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}

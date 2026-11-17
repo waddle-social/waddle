@@ -1898,3 +1898,51 @@ pub async fn bind_live_resource(
         .expect("registered user resource");
     receiver
 }
+
+/// Exercise the production message-intrinsic classifier without starting a server.
+#[cfg(feature = "test-support")]
+pub fn direct_notification_candidate_from_envelope_for_test(
+    message: &xmpp_parsers::message::Message,
+    recipient: &jid::BareJid,
+    sender: &jid::Jid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+) -> Result<
+    crate::notification_outbox::NotificationCandidate,
+    crate::notification_outbox::NotificationOutboxError,
+> {
+    crate::notification_outbox::direct_candidate_from_envelope(
+        message,
+        recipient,
+        sender,
+        archive_stanza_id,
+    )
+}
+
+/// Run the production notification loops with an explicit timer for wake tests.
+/// The returned tasks can be aborted by the fixture when its assertions finish.
+#[cfg(feature = "test-support")]
+pub fn spawn_notification_loops(
+    state: &Arc<WebSocketState>,
+    interval: std::time::Duration,
+) -> [tokio::task::JoinHandle<()>; 2] {
+    [
+        tokio::spawn(
+            crate::server::session_janitors::run_notification_outbox_loop(
+                Arc::downgrade(state),
+                interval,
+                state.deps.protocol.ingress.notification_outbox_wake(),
+                128,
+                7,
+                128,
+            ),
+        ),
+        tokio::spawn(
+            crate::server::session_janitors::run_push_service_publish_job_loop(
+                Arc::downgrade(state),
+                interval,
+                state.deps.protocol.push_service.publish_job_wake(),
+                128,
+            ),
+        ),
+    ]
+}

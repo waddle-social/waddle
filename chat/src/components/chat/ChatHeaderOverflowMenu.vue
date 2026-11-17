@@ -2,6 +2,7 @@
 import { Menu } from "@ark-ui/vue/menu";
 import { Ellipsis, Phone, Pin, Settings, Video } from "lucide-vue-next";
 import AppMenu from "@/components/ui/AppMenu.vue";
+import { iconbtn } from "styled-system/recipes";
 import { menuClasses, menuItemIconClass } from "@/ui/menu-classes";
 
 /**
@@ -10,12 +11,14 @@ import { menuClasses, menuItemIconClass } from "@/ui/menu-classes";
  * notifications and channel settings live here so the title keeps its
  * width. The default slot takes extra rows (the notification submenu).
  */
-defineProps<{
+withDefaults(defineProps<{
   showCallItems: boolean;
+  /** Rooms say huddle, direct messages say call. */
+  callNoun?: "huddle" | "call";
   callBusy: boolean;
   pinnedOpen: boolean;
   showChannelSettings: boolean;
-}>();
+}>(), { callNoun: "call" });
 
 const emit = defineEmits<{
   voiceCall: [];
@@ -47,45 +50,44 @@ function onSelect(value: string) {
     tooltip="More actions"
     aria-label="Conversation actions"
     placement="bottom-end"
-    content-class="w-60 max-w-[calc(100vw-1rem)]"
     @select="onSelect"
   >
     <template #trigger>
       <button
-        class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground data-[state=open]:bg-muted data-[state=open]:text-foreground"
+        :class="iconbtn()"
         type="button"
         aria-label="More actions"
       >
-        <Ellipsis class="w-4 h-4" />
+        <Ellipsis aria-hidden="true" />
       </button>
     </template>
     <template v-if="showCallItems">
       <Menu.Item
         value="voice-call"
         :disabled="callBusy"
-        :class="[menuClasses.item, 'data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
+        :class="menuClasses.item"
       >
-        <span :class="menuItemIconClass" aria-hidden="true"><Phone class="h-4 w-4" /></span>
-        <Menu.ItemText>Voice call</Menu.ItemText>
+        <span :class="menuItemIconClass" aria-hidden="true"><Phone /></span>
+        <Menu.ItemText>Voice {{ callNoun }}</Menu.ItemText>
       </Menu.Item>
       <Menu.Item
         value="video-call"
         :disabled="callBusy"
-        :class="[menuClasses.item, 'data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
+        :class="menuClasses.item"
       >
-        <span :class="menuItemIconClass" aria-hidden="true"><Video class="h-4 w-4" /></span>
-        <Menu.ItemText>Video call</Menu.ItemText>
+        <span :class="menuItemIconClass" aria-hidden="true"><Video /></span>
+        <Menu.ItemText>Video {{ callNoun }}</Menu.ItemText>
       </Menu.Item>
       <Menu.Separator :class="menuClasses.separator" />
     </template>
     <Menu.Item value="pinned" :class="menuClasses.item">
-      <span :class="menuItemIconClass" aria-hidden="true"><Pin class="h-4 w-4" /></span>
+      <span :class="menuItemIconClass" aria-hidden="true"><Pin /></span>
       <Menu.ItemText>{{ pinnedOpen ? "Hide pinned messages" : "Pinned messages" }}</Menu.ItemText>
     </Menu.Item>
     <slot />
     <Menu.Item v-if="showChannelSettings" value="channel-settings" :class="menuClasses.item">
-      <span :class="menuItemIconClass" aria-hidden="true"><Settings class="h-4 w-4" /></span>
-      <Menu.ItemText>Channel settings</Menu.ItemText>
+      <span :class="menuItemIconClass" aria-hidden="true"><Settings /></span>
+      <Menu.ItemText>Room settings</Menu.ItemText>
     </Menu.Item>
   </AppMenu>
 </template>

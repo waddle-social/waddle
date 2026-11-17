@@ -5,11 +5,14 @@
 The Apple apps (`apps/apple/`, SwiftUI) are a thin UI over the same Rust XMPP
 core the web and Android clients use
 (`server/crates/waddle-xmpp-client-ffi`, UniFFI bindings generated into
-`Waddle/RustClient/Generated/`). Every protocol verb listed below already
-exists in the FFI; a gap on Apple is a Swift gap, not a protocol gap.
+`Waddle/RustClient/Generated/`). Unless a row's Notes say the core has no
+verb yet, the protocol verb already exists in the FFI and a gap on Apple is a
+Swift gap, not a protocol gap.
 
 The "Baseline" column records what `main` shipped on 2026-09-22 before the
-Apple rebuild; "Now" is the state after the rebuild (PR #1822).
+Apple rebuild; "Now" is the state after the rebuild (PR #1822). Rows added on
+2026-11-15 from the gap audit in #2418 have no baseline entry (—); their Notes
+name the issue that tracks them.
 
 ## Legend
 
@@ -49,12 +52,16 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Nick colors | 0392 | ❌ | ✅ | Shared Rust hue, HSL 55%/45% like web |
 | Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
 | Inbox / unread counts | 0430 | ❌ | ✅ | Server-authoritative with read-clear barrier; mention badges; app badge. Baseline: unread counts were hardcoded to 0 |
-| Unread overview (Activity) | 0430, 0313 | ❌ | 🟡 | iPhone Activity tab matches web `/unread`: rooms with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. iPad/Mac have no Activity surface yet |
+| Unread overview (Inbox) | 0430, 0313 | ❌ | ✅ | Matches web `/unread`: one card per room with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. A tab on iPhone, a sidebar destination on iPad and Mac |
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |
 | Slash commands | 0050, 0004 | ❌ | ✅ | Built-ins (`/me`, `/shrug`, `/giphy`, `/away`, `/active`, `/dnd`) plus server extension commands discovered over XEP-0050 at session start; popover completion, inline single-field execution, XEP-0004 form sheet for multi-step commands |
 | Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send. Hardware keyboard on iPad and iPhone: Return sends, Shift/Option-Return adds a line, Tab accepts a suggestion, Escape cancels, as on Mac |
 | Paste images / files / GIFs | 0363, 0447 | ❌ | ✅ | Pasted files, animated GIFs (bytes kept) and still images upload as attachments; text and rich-text selections paste as text. Mac: the field's own Paste (Edit menu or Cmd-V), an `NSTextView`, or the `+` menu's Paste. iOS: the field's own Paste (edit menu or Cmd-V), a `UITextView` so the paste is user-initiated and never shows the system paste prompt |
 | Drag and drop | 0363, 0447 | ❌ | ✅ | Files and pictures (image data from Photos or a browser, GIFs kept animated) dropped on the composer attach; a dashed "Drop to attach" target shows while dragging |
+| Leave, edit and delete a room | 0045 | — | ❌ | `leaveRoom` exists in `XmppPort` but no screen calls it; `fetch_room_config`, `submit_room_config` and `destroy_room` are never called (#2456) |
+| Room invites (members-only) | 0045 | — | ❌ | XEP-0045 mediated invites. The core has no verb yet: only the group-DM invite exists and inbound invites are not parsed (#2461) |
+| Forum rooms | 0045 | — | 🟡 | Forum rooms get their own icon. `forumPostKind` and `forumTitle` are parsed but never reach the UI; no way to create a forum or compose a post title (#2456) |
+| Private message to an occupant | 0045 | — | ❌ | Outbound messages hard-code `mucPm: false` (#2456) |
 | Message order ("social mode") | — | ❌ | ✅ | Settings › Message Order, like web's scroll direction: Chat (newest at bottom) or Social (composer on top, newest first, older history loads at the bottom, suggestions open downward). Threads follow it too, root last as on web |
 
 ## Presence & profile
@@ -65,6 +72,10 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Avatars | 0084 | 🟡 | ✅ | Fetch (revalidated with known ids, refreshed on +notify events), publish (≤512 px PNG) and remove. Baseline: fetch only |
 | vCard / profile | 0292 | ❌ | ❌ | Not in this PR |
 | Mood / activity / tune | 0107, 0108, 0118 | ❌ | 🟡 | Mood only (XEP-0107 vocabulary). Baseline: all publish verbs were empty stubs |
+| Auto-away | 0319 | — | ❌ | Presence is always sent with `idleSince: nil`; a peer's idle time is shown in DM details (#2457) |
+| Cross-device manual status | urn:waddle:status-preference:0 | — | ❌ | `fetch_status_preference` is never called and `statusPreferenceChanged` events are dropped (#2457) |
+| DND schedule | urn:waddle:dnd:0 | — | ❌ | No quiet-hours screen; only the `/dnd` presence command. The core has no verb yet (#2463) |
+| Blocking | 0191 | — | ❌ | No block or unblock. The core has no verb yet; server maturity is experimental (#2462) |
 
 ## Notifications
 
@@ -72,6 +83,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | --- | --- | --- | --- | --- |
 | Local notifications | — | ❌ | ✅ | Inline reply and mark-read actions, grouped per conversation. Baseline: in-app toast for broadcast mentions only |
 | Push (APNs) | 0357 + push.<domain> 0050 | ❌ | ✅ | Client registers with push.<domain>; the Push Service delivers a minimal alert (class-specific banner, badge, routing context; no sender or body) and a tap opens the conversation on the right account. Baseline: `enablePushNotifications` was an empty stub |
+| Push controls | 0357 | — | ❌ | No way to turn push off (`disable_push_notifications` is never called). The per-conversation opt-in to message content is stored and re-sent, but no screen sets it (#2459) |
 
 ## Media
 
@@ -88,10 +100,14 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
-| Voice/video calls | 0166, 0353, 0272 | ❌ | ❌ | Not in this PR. Baseline: call events logged and dropped |
+| Voice/video calls | 0166, 0353, 0272 | ❌ | 🟡 | 1:1 voice and video calls, placed from a DM toolbar and answered, declined and ended in the call dock above the shell, with mute and camera controls. Room calls (XEP-0272): start or join from a room's toolbar or the "Call in progress" banner, leave from the dock, which shows who is there, who is speaking, who is muted and raised hands; raise and lower your own hand. Only one remote camera at a time (no video grid). A placed call plays ringback once the other side is ringing. On a Mac an incoming call rings, and one that arrives while Waddle is not in front posts a notification with Accept and Decline. On an iPhone or iPad calls go through CallKit: the system's call screen rings and shows the call, with Answer, End and Mute. Do Not Disturb silences the ring. Only while the app is running: no ring for a closed or suspended app (#2500) |
 | Moderation | 0425 | ❌ | ✅ | Moderator-gated with confirmation |
 | Affiliations / roles | 0045 | ❌ | ✅ | XEP-0045 member lists, affiliation changes, kick, ban. Baseline: called `/v1/space/members`, which the server does not serve |
 | Hats | 0317 | 🟡 | ✅ | Shown as author and member badges. Extension bots wear the server-assigned bot hat only while posting, so they are not listed as people. A room's bots are what its `urn:waddle:room:bots:0` disco#items node declares: shown under "Bots" by name (no presence, no actions), and their messages carry a Bot badge. Loaded on opening the room; refetched when a bot-hatted presence names an unlisted JID |
+| Admin console | 0050 | — | ❌ | For community owners: users, spaces and rooms. None of the `admin_*` verbs or `is_community_owner` are called (#2460) |
+| Feed | 0472 | — | ❌ | Read, post, react. The core has no FFI verb yet; server maturity is experimental (#2464) |
+| Stories | 0501 | — | ❌ | Compose, view, read state. The core has no FFI verb yet; server maturity is experimental (#2464) |
+| Events | xCal | — | ❌ | Calendar, create and edit, recurrence, RSVP. The core has no FFI verb yet; draft PR #2450 adds them without recurrence authoring (#2465) |
 
 ## Platform
 
@@ -101,4 +117,5 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Session credential storage | — | ❌ | ✅ | Keychain, per server; random per-install XMPP resource. Baseline: session id stored in `UserDefaults`, not the Keychain |
 | Reconnect | — | 🟡 | ✅ | Jittered exponential backoff, 15 s connect budget, resume on foreground. Baseline: fixed 1.5 s retry, no backoff, no network awareness |
 | XMPP-native data plane | — | ❌ | ✅ | All HTTP data-plane calls removed. Baseline: called `/v1/space`, `/v1/channels`, `/v1/space/members`, `/api/users/search` over HTTP; none exist on the server |
-| Automated tests | — | ❌ | ✅ | WaddleKit Swift Testing suite in CI. Baseline: no test target |
+| Automated tests | — | ❌ | ✅ | WaddleKit Swift Testing suite and design-system snapshot tests (Night and Daylight, iOS and macOS) in CI. Baseline: no test target |
+| Design system | — | — | 🟡 | Polar Huddle tokens generated from `design/src/preset.ts`, bundled fonts, Night and Daylight themes, shared components (#2454). Restyled so far: the shell, sidebar, Home, DMs list and Inbox. Conversation, details and account screens keep their layouts and system text styles until the rest of #2455 |

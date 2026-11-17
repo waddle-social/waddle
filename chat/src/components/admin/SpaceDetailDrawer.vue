@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 // Admin V2 — slide-from-right drawer for editing a single space.
-// Three sections: editor, members, danger (delete).
+// Three sections: editor, members, danger (delete) (Admin-Spaces board).
 import { computed, onMounted, ref, watch } from "vue";
+import { btn } from "styled-system/recipes";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
+import { adminClasses as a } from "@/components/admin/admin-classes";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { BrowserXmppClient } from "@/lib/xmpp";
 import type {
@@ -243,120 +246,114 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
 </script>
 
 <template>
-  <AppDrawer v-model:open="openLocal" side="right" label="Space details" width-class="w-full max-w-md lg:max-w-lg">
+  <AppDrawer v-model:open="openLocal" side="right" label="Space details" :width-class="a.drawerWidth">
     <template #title>
-      <span class="type-pane-title truncate">{{ space.name }}</span>
+      <span :class="a.drawerTitle">{{ space.name }}</span>
     </template>
-    <div class="flex flex-col gap-6 p-4">
-      <!-- Editor -->
-      <section class="flex flex-col gap-3">
-        <h3 class="type-section-label text-muted-foreground">Edit</h3>
-        <label class="flex flex-col gap-1">
-          <span class="type-section-label text-muted-foreground">Name</span>
-          <input v-model="editName" type="text" maxlength="80" class="chat-field-control type-field" />
-        </label>
-        <label class="flex flex-col gap-1">
-          <span class="type-section-label text-muted-foreground">Description</span>
-          <textarea v-model="editDescription" rows="3" class="chat-field-control chat-textarea-control type-field" />
-        </label>
-        <label class="flex flex-col gap-1">
-          <span class="type-section-label text-muted-foreground">Icon URL</span>
-          <input v-model="editIconUrl" type="url" class="chat-field-control type-field" />
-        </label>
-        <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ editError }}</div>
-        <div class="flex justify-end">
-          <button
-            type="button"
-            class="chat-action-button chat-action-button--primary type-action disabled:opacity-30"
-            :disabled="editing || !editName.trim()"
-            @click="saveEdits"
-          >
-            {{ editing ? "Saving…" : "Save changes" }}
-          </button>
-        </div>
-      </section>
+    <div :class="a.drawerBody">
+      <label :class="a.field">
+        Name
+        <input v-model="editName" :class="a.input" type="text" maxlength="80" />
+      </label>
+      <label :class="a.field">
+        Description
+        <textarea v-model="editDescription" :class="a.textarea" rows="2" />
+      </label>
+      <label :class="a.field">
+        Icon URL
+        <input v-model="editIconUrl" :class="a.input" type="url" placeholder="https://…" />
+      </label>
+      <div v-if="editError" :class="a.alert" role="alert">{{ editError }}</div>
+      <button
+        type="button"
+        :class="[btn({ variant: 'primary' }), a.start]"
+        :disabled="editing || !editName.trim()"
+        @click="saveEdits"
+      >
+        {{ editing ? "Saving…" : "Save changes" }}
+      </button>
 
       <!-- Other servers: shown when the Space's configure form offers the setting -->
-      <section v-if="federated !== null || federatedError" class="flex flex-col gap-2 border-t border-border pt-4">
-        <h3 class="type-section-label text-muted-foreground">Other servers</h3>
-        <p v-if="federated === undefined" class="type-caption text-muted-foreground">Loading…</p>
-        <label v-else-if="federated !== null" class="flex items-start gap-2.5">
-          <input
-            :key="federatedRenderKey"
-            type="checkbox"
-            class="mt-1"
-            :checked="federated"
-            :disabled="federatedSaving"
-            aria-describedby="space-federated-help"
-            @change="changeFederated(($event.target as HTMLInputElement).checked)"
-          />
-          <span class="type-field">Open this Space to accounts on other servers</span>
-        </label>
-        <p id="space-federated-help" class="type-meta text-muted-foreground">
-          Off by default. When on, accounts on every server this one connects to can see the Space, follow
-          it and read which of its rooms are open to them. Following a Space gives no access to its rooms:
-          each room has its own setting and members. Turning it off closes the Space to other servers and ends
-          their subscriptions.
-        </p>
-        <div v-if="federatedError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ federatedError }}</div>
+      <section v-if="federated !== null || federatedError" :class="a.section">
+        <h3>Other servers</h3>
+        <div :class="a.checks">
+          <p v-if="federated === undefined">Loading…</p>
+          <label v-else-if="federated !== null">
+            <input
+              :key="federatedRenderKey"
+              type="checkbox"
+              :checked="federated"
+              :disabled="federatedSaving"
+              aria-describedby="space-federated-help"
+              @change="changeFederated(($event.target as HTMLInputElement).checked)"
+            />
+            <span>Open this Space to accounts on other servers</span>
+          </label>
+          <p id="space-federated-help">
+            Off by default. When on, accounts on every server this one connects to can see the Space, follow
+            it and read which of its rooms are open to them. Following a Space gives no access to its rooms:
+            each room has its own setting and members. Turning it off closes the Space to other servers and ends
+            their subscriptions.
+          </p>
+        </div>
+        <div v-if="federatedError" :class="a.alert" role="alert">{{ federatedError }}</div>
       </section>
 
-      <!-- Members -->
-      <section class="flex flex-col gap-3 border-t border-border pt-4">
-        <h3 class="type-section-label text-muted-foreground">Members</h3>
-        <div v-if="membersError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ membersError }}</div>
-        <div v-if="membersLoading" class="type-caption text-muted-foreground">Loading…</div>
-        <div v-else-if="members.length > 0" class="flex flex-col gap-2">
-          <ul class="flex flex-col gap-1.5" role="list">
-            <li v-for="m in members" :key="m.jid" class="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2">
-              <span class="flex-1 truncate font-mono type-caption">{{ m.jid }}</span>
-              <select
-                :value="m.role"
+      <section :class="a.section">
+        <h3>Members</h3>
+        <div v-if="membersError" :class="a.alert" role="alert">{{ membersError }}</div>
+        <p v-if="membersLoading" :class="a.sub">Loading…</p>
+        <template v-else-if="members.length > 0">
+          <ul :class="a.plain" role="list">
+            <li v-for="m in members" :key="m.jid" :class="a.subRow">
+              <span :class="[a.jid, a.grow]">{{ m.jid }}</span>
+              <AppSelect
+                :model-value="m.role"
+                :options="ROLES.map((r) => ({ value: r, label: r }))"
                 :disabled="memberMutating === m.jid || membersLoadingMore || membersLoading"
-                class="chat-field-control type-caption"
+                :class="a.smallSelect"
                 :aria-label="`Role for ${m.jid}`"
-                @change="changeMemberRole(m, ($event.target as HTMLSelectElement).value as Role)"
-              >
-                <option v-for="r in ROLES" :key="r" :value="r">{{ r }}</option>
-              </select>
+                @update:model-value="changeMemberRole(m, $event)"
+              />
             </li>
           </ul>
           <button
             v-if="hasMoreMembers"
             type="button"
-            class="chat-action-button type-action self-start disabled:opacity-30"
+            :class="[btn({ size: 'sm' }), a.start]"
             :disabled="membersLoadingMore || memberMutating !== null || membersLoading"
             @click="loadMoreMembers"
           >
             {{ membersLoadingMore ? "Loading…" : "Load more members" }}
           </button>
-        </div>
-        <p v-else class="type-caption text-muted-foreground">No members yet.</p>
+        </template>
+        <p v-else :class="a.sub">No members yet.</p>
       </section>
 
-      <!-- Danger -->
-      <section class="flex flex-col gap-3 border-t border-border pt-4">
-        <h3 class="type-section-label text-destructive-text">Danger zone</h3>
-        <p class="type-caption text-muted-foreground">
-          Deleting this space cascade-destroys
-          <strong>{{ space.channel_count }}</strong>
-          {{ space.channel_count === 1 ? "channel" : "channels" }} under it. This cannot be undone.
-        </p>
-        <div v-if="deleteError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ deleteError }}</div>
-        <button
-          type="button"
-          class="chat-action-button chat-action-button--destructive type-action"
-          @click="showDelete = true"
-        >
-          Delete space
-        </button>
+      <section :class="a.section">
+        <div :class="a.danger">
+          <h3>Delete space</h3>
+          <p>
+            This also deletes its
+            <strong>{{ space.channel_count }}</strong>
+            {{ space.channel_count === 1 ? "channel" : "channels" }}. This can't be undone.
+          </p>
+          <div v-if="deleteError" :class="a.alert" role="alert">{{ deleteError }}</div>
+          <button
+            type="button"
+            :class="[btn({ variant: 'danger', size: 'sm' }), a.start]"
+            @click="showDelete = true"
+          >
+            Delete space
+          </button>
+        </div>
       </section>
     </div>
 
     <ConfirmDialog
       v-model:open="showDelete"
       title="Delete space?"
-      :message="`This will delete '${space.name}' and ${space.channel_count} channel${space.channel_count === 1 ? '' : 's'} under it. This cannot be undone.`"
+      :message="`This deletes ${space.name} and its ${space.channel_count} channel${space.channel_count === 1 ? '' : 's'}. This can't be undone.`"
       confirm-label="Delete"
       destructive
       :loading="deleting"

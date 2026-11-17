@@ -289,7 +289,7 @@ either server release (see [Clients](#clients)).
       schema-version check reads it ([schema versions](authz-schema-versions.md)).
       Verify again that every definition reads empty.
 8. **Owner phase, restricted runtime only.** The owner phase of this
-   release's image must apply migrations 2001 to 2013 and grant the runtime
+   release's image must apply migrations 2002 to 2014 and grant the runtime
    role before any server of this release starts; servers of this release
    refuse a database whose ledger lacks them. Nothing in the chart sequences
    it for an upgrade; this step uses the chart's fresh-install path set up in
@@ -386,8 +386,8 @@ The production chart has no S2S port or setting. Confirm after step 9:
   `urn:waddle:s2s:0`; the web client therefore lists bookmarks of rooms on
   other servers under "Rooms on other servers — unavailable" and joins none.
   `server/capabilities.toml` shows only what W11's reviewed change added.
-- **Empty S2S tables.** The tables of migrations 2003, 2004, 2007 and 2009
-  to 2012 hold no row (`s2s_iq_correlations`, `s2s_iq_correlation_owners`,
+- **Empty S2S tables.** The tables of migrations 2004, 2005, 2008 and 2010
+  to 2013 hold no row (`s2s_iq_correlations`, `s2s_iq_correlation_owners`,
   `s2s_remote_room_occupancies`, `s2s_remote_room_verdicts`,
   `s2s_local_room_seats`, `s2s_pending_subscriptions`,
   `s2s_remote_pubsub_subscriptions`, `s2s_remote_offline_admissions`;
@@ -406,12 +406,12 @@ what a later rolling update has to respect.
 | --- | --- | --- |
 | Authorization ID codec | Its schema write would remove `waddle_authz_codec` and `waddle_authz_schema`, which hold relationships, so SpiceDB refuses it and its startup fails. A process that writes relationships without writing the schema (a tool with the preshared key) is not fenced and would write the old encoding | No pre-codec binary or tool runs against the marked store. Never delete the marker to get past a refusal ([codec cutover, Rollback](authz-codec-cutover.md#rollback)) |
 | Schema version 2 | The previous release has no version check of its own: its schema write would remove `waddle_authz_schema`, which holds the version marker, so SpiceDB refuses it and its startup fails. A versioned binary older than the store logs `authorization store schema is version N, newer than version M of this server` | A crash-looping old pod is a binary that was not retired; remove it ([schema versions](authz-schema-versions.md#rollout-within-2047)) |
-| Migration ledger | The previous release refuses a ledger that holds a version it does not know: `found unknown migration v2001 ...; this usually means an older binary is starting against a newer ledger` | Migrations are forward-only. See [Rollback](#rollback) |
+| Migration ledger | The previous release refuses a ledger that holds a version it does not know: `found unknown migration v2002 ...; this usually means an older binary is starting against a newer ledger` | Migrations are forward-only. See [Rollback](#rollback) |
 | Identity profile | A replica of the previous release folds inputs, accepts `ALICE` at sign-in and provisions Unicode OpenID Connect names | Every replica runs this release before any client relies on the refusals |
 | Destination routing | A replica of the previous release answers IQs to other domains per namespace (`not-allowed` for ping, Carbons, session and discovery; other namespaces reach local handlers), archives a message to another domain and drops it silently. The decision is taken by the replica that holds the client's connection and leaves no stored state, so a client on another replica sees the other behaviour | No migration is needed; the behaviour converges when the last old replica is gone |
 | Relay between replicas | The ordered relay's envelope and its id `waddle.clustering.relay.deliver_ordered.v16` are unchanged. One message id is new, `waddle.clustering.relay.remote_room_request.v1`, sent only for stanzas from S2S streams: nothing sends it with S2S off, and a replica that predates it answers `UnknownMessage`, which the sender turns into a retryable error | A rolling update is safe for the relay in either order |
 | Host-grant writer and revocation fences | A binary from before the fences decides managed rooms from the legacy stores, holds no fence lease, and so is neither waited for by a revoke nor bound by it | No scope is enrolled until every serving replica runs this release, and no older replica joins while a scope is enrolled (G11, G24) |
-| Session endings of a retired account | A replica without migration 2013's lease is not seen by `waddle-server account retire`, ends nothing, and keeps the account's streams open | Every serving replica runs this release before an account is retired ([account retirement, step 3](account-retirement.md#procedure)) |
+| Session endings of a retired account | A replica without migration 2014's lease is not seen by `waddle-server account retire`, ends nothing, and keeps the account's streams open | Every serving replica runs this release before an account is retired ([account retirement, step 3](account-retirement.md#procedure)) |
 | `[host_policy]` in the S2S snapshot | A binary that predates the table refuses a snapshot that holds it, `federate_new_rooms` included; the snapshot is not read while S2S is off | Before a snapshot uses the table, every replica runs this release; a rollback to an older binary removes the table first |
 | Web and native clients | A client older than the server sees the new refusals (see [What users see](#what-users-see-with-s2s-off)); a web client newer than the server, between the `chat` deployment and step 9, behaves as with S2S off | No client-side migration is needed; see [Clients](#clients) |
 
@@ -466,31 +466,32 @@ is no mixed-version period for this transition, because the codec cutover
 already stops every replica of the previous release
 ([schema versions, Rollout within #2047](authz-schema-versions.md#rollout-within-2047)).
 
-### PostgreSQL: migrations 2001 to 2013
+### PostgreSQL: migrations 2002 to 2014
 
-The migrations after the schema baseline (version 2000) are numbered 2001 to
-2013 without a gap. The runner refuses a database that records a later
-version but not an earlier one, a version it does not know, and a version
-whose description or checksum differs from its own. There is no down
-migration.
+The migrations after the schema baseline (version 2000) are numbered without
+a gap. Migration 2001 (offline call notification candidates) belongs to the
+previous release; this release adds 2002 to 2014. The runner refuses a
+database that records a later version but not an earlier one, a version it
+does not know, and a version whose description or checksum differs from its
+own. There is no down migration.
 
 | Version | Creates | Runtime role (restricted runtime) | With S2S off |
 | --- | --- | --- | --- |
-| 2001 | Host-grant authority: authority row, scope lifecycles, scopes, rooms, grants, operation journal | `SELECT` on the authority row, lifecycles and rooms; `SELECT, UPDATE` on scopes; `SELECT, INSERT, UPDATE` on grants; `SELECT, INSERT` on the journal | No scope; the authority row only |
-| 2002 | Restore incarnation: epoch, lineage binding, authority id, position acknowledgement, the `restored`, `reconstructed` and `fenced` states | Unchanged matrix | The first owner phase after it binds the authority to the database lineage and changes nothing else |
-| 2003 | `s2s_iq_correlations`, `s2s_iq_correlation_owners` | `SELECT, INSERT, DELETE`; `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2004 | `s2s_remote_room_occupancies`, `s2s_remote_room_verdicts` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2005 | `host_grant_fence_replicas`, `host_grant_fence_acks` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | Empty: no lease without an enrolled scope |
-| 2006 | `retired_account_jids` | `SELECT` only | Read at every startup, provisioning and session creation |
-| 2007 | `s2s_local_room_seats` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2008 | `channels.federated`, zero for every row | — | Every room is closed to other servers |
-| 2009 | `s2s_pending_subscriptions`, `s2s_remote_pubsub_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2010 | `s2s_remote_offline_admissions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2011 | `s2s_federated_spaces` | `SELECT, INSERT, UPDATE, DELETE` | Empty unless an owner turns a Space's `federated` setting on |
-| 2012 | `s2s_space_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2013 | `account_session_ending_replicas`, `account_session_ending_requests`, `account_session_ending_acks` | `SELECT, INSERT, UPDATE` on leases and acknowledgements; `SELECT` on requests | One lease row per serving process, renewed every 5 s |
+| 2002 | Host-grant authority: authority row, scope lifecycles, scopes, rooms, grants, operation journal | `SELECT` on the authority row, lifecycles and rooms; `SELECT, UPDATE` on scopes; `SELECT, INSERT, UPDATE` on grants; `SELECT, INSERT` on the journal | No scope; the authority row only |
+| 2003 | Restore incarnation: epoch, lineage binding, authority id, position acknowledgement, the `restored`, `reconstructed` and `fenced` states | Unchanged matrix | The first owner phase after it binds the authority to the database lineage and changes nothing else |
+| 2004 | `s2s_iq_correlations`, `s2s_iq_correlation_owners` | `SELECT, INSERT, DELETE`; `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2005 | `s2s_remote_room_occupancies`, `s2s_remote_room_verdicts` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2006 | `host_grant_fence_replicas`, `host_grant_fence_acks` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | Empty: no lease without an enrolled scope |
+| 2007 | `retired_account_jids` | `SELECT` only | Read at every startup, provisioning and session creation |
+| 2008 | `s2s_local_room_seats` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2009 | `channels.federated`, zero for every row | — | Every room is closed to other servers |
+| 2010 | `s2s_pending_subscriptions`, `s2s_remote_pubsub_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2011 | `s2s_remote_offline_admissions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2012 | `s2s_federated_spaces` | `SELECT, INSERT, UPDATE, DELETE` | Empty unless an owner turns a Space's `federated` setting on |
+| 2013 | `s2s_space_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2014 | `account_session_ending_replicas`, `account_session_ending_requests`, `account_session_ending_acks` | `SELECT, INSERT, UPDATE` on leases and acknowledgements; `SELECT` on requests | One lease row per serving process, renewed every 5 s |
 
-On SQLite, 2001, 2002 and 2005 create nothing. A development or test
+On SQLite, 2002, 2003 and 2006 create nothing. A development or test
 database that a build from before the final numbering migrated records
 versions that now name other migrations, with other checksums, and every
 later startup refuses it: recreate it. No such database shipped.
@@ -504,7 +505,7 @@ information and changes nothing, and it must move to the restricted runtime
 before any scope is enrolled.
 
 `WADDLE_HOST_GRANT_RESTORE_EPOCH` is new and defaults to `0`, the value
-migration 2002 records. Leave it unset; the owner phase and every server
+migration 2003 records. Leave it unset; the owner phase and every server
 must read the same value ([restore runbook](authz-host-grant-restore.md#configuring-the-epoch)).
 
 ### Startup checks
@@ -521,7 +522,7 @@ release runs these at startup:
 | Retired-account ledger readable as the runtime role, before the first provisioning | Startup fails: `the runtime database role cannot read retired_account_jids ...` | Passes |
 | Host-grant enrolled set loaded (PostgreSQL) | Retried every second for up to 30 s, then the process exits: `the host-grant enrolled set could not be loaded; refusing to serve until it is` | Loaded; reloaded every 5 s |
 | Host-grant runtime privileges and restore fence | Never stops the replica. With no scope enrolled a failure is logged as information and retried; readiness stays ready | Readiness ready: with a verified attachment the `/readyz` body has no `host_grants` field, without one it says `"host_grants": "unmanaged"` (always the case under a schema-owning login) |
-| Session-ending lease kept (migration 2013) | Never stops the replica: warning `the session-ending lease could not be kept; retrying`, and the replica is missing from retirement reports until it succeeds | Lease renewed every 5 s |
+| Session-ending lease kept (migration 2014) | Never stops the replica: warning `the session-ending lease could not be kept; retrying`, and the replica is missing from retirement reports until it succeeds | Lease renewed every 5 s |
 | Revocation fence clock skew | Recorded only while the replica holds a fence lease, which needs an enrolled scope | Absent |
 
 ## What users see with S2S off
@@ -659,7 +660,7 @@ Prefer roll-forward. What a step changed decides how far back is possible:
 The limits:
 
 - **Migrations are forward-only.** The previous release refuses a ledger that
-  holds 2001 or later, so it cannot start against the migrated database. No
+  holds 2002 or later, so it cannot start against the migrated database. No
   down migration exists. Going back means a PostgreSQL restore.
 - **The SpiceDB markers are a fence.** The previous release cannot start
   against a marked store, and must not: never delete `waddle_authz_codec` or
@@ -681,11 +682,11 @@ Record each result in the evidence log.
 
 1. Both replicas run the published digest and `WADDLE_GIT_SHA` of the merge
    commit, and are ready.
-2. The migration ledger holds every version from 2001 to 2013:
+2. The migration ledger holds every version from 2001 to 2014:
 
    ```sh
    psql_primary -Atc "SELECT string_agg(version::text, ',' ORDER BY version) FROM _migrations WHERE version > 2000"
-   # 2001,2002,2003,2004,2005,2006,2007,2008,2009,2010,2011,2012,2013
+   # 2001,2002,2003,2004,2005,2006,2007,2008,2009,2010,2011,2012,2013,2014
    psql_primary -Atc "SELECT count(*) FROM host_grant_scopes"
    # 0
    ```

@@ -7,8 +7,8 @@ use super::{
     decode_candidate, decode_sender_jids, encode_sender_jids, lock_outbox_ancestry_tx,
     policy_retry_delay_ms, require_full_sender_jid, require_full_sender_jid_set,
     require_sender_matches_conversation, require_sender_set_contains_scalar,
-    require_sender_set_matches_conversation, settle_outbox_if_unowned_tx, Element,
-    NotificationCandidate, NotificationOutboxError, NotificationOutboxJobId,
+    require_sender_set_matches_conversation, settle_outbox_if_unowned_tx, DrainScope, Element,
+    NotificationCandidate, NotificationClass, NotificationOutboxError, NotificationOutboxJobId,
     NotificationOutboxStore, NotificationOutboxTarget, RichSummary, Row, SuppressedReason,
     STATUS_FAILED, STATUS_QUEUED,
 };
@@ -41,20 +41,25 @@ impl NotificationOutboxStore {
         context: &Element,
         rich: &RichSummary,
         now_ms: i64,
-    ) -> Result<bool, NotificationOutboxError> {
+    ) -> Result<Option<Vec<NotificationOutboxJobId>>, NotificationOutboxError> {
         let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_candidate_ancestry_tx(&mut tx, candidate).await?;
         let claimed = mark_candidate_outboxed_tx(&mut tx, candidate, now_ms).await?;
         if claimed == 0 {
             tx.commit().await?;
-            return Ok(false);
+            return Ok(None);
         }
+        let mut job_ids = Vec::with_capacity(targets.len());
         for target in targets {
-            enqueue_outbox_job_tx(&mut tx, candidate, target, context, rich, now_ms).await?;
+            let job_id =
+                enqueue_outbox_job_tx(&mut tx, candidate, target, context, rich, now_ms).await?;
+            if !job_ids.contains(&job_id) {
+                job_ids.push(job_id);
+            }
         }
         settle_candidate_ancestry_tx(&mut tx, candidate).await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(job_ids))
     }
 
     pub(super) async fn persist_exhausted_candidate(
@@ -142,6 +147,19 @@ impl NotificationOutboxStore {
         &self,
         batch_size: usize,
     ) -> Result<Vec<NotificationCandidate>, NotificationOutboxError> {
+        Ok(self
+            .pending_candidate_rows(DrainScope::All, batch_size)
+            .await?
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect())
+    }
+
+    pub(super) async fn pending_candidate_rows(
+        &self,
+        scope: DrainScope,
+        batch_size: usize,
+    ) -> Result<Vec<(NotificationCandidate, i64)>, NotificationOutboxError> {
         let batch_size = batch_size.clamp(1, 1_000);
         let mut rows = self
             .query(
@@ -160,11 +178,15 @@ impl NotificationOutboxStore {
                        no_permanent_store,
                        last_message_body,
                        reaction,
-                       delivery_id
+                       delivery_id,
+                       call_sid,
+                       call_video,
+                       created_at_ms
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
                   AND quarantined_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
+                  AND (? = 1 OR class = ?)
                 ORDER BY created_at_ms ASC,
                          recipient_bare_jid ASC,
                          conversation_jid ASC,
@@ -175,13 +197,18 @@ impl NotificationOutboxStore {
                          class ASC
                 LIMIT ?
                 "#,
-                crate::db_params![crate::time::now_ms(), batch_size as i64],
+                crate::db_params![
+                    crate::time::now_ms(),
+                    scope == DrainScope::All,
+                    NotificationClass::Call.as_db_value(),
+                    batch_size as i64,
+                ],
             )
             .await?;
         let mut candidates = Vec::new();
         while let Some(row) = rows.next().await? {
             match decode_candidate(&row) {
-                Ok(candidate) => candidates.push(candidate),
+                Ok(candidate) => candidates.push((candidate, row.get::<i64>(17)?)),
                 Err(error) => {
                     self.mark_malformed_candidate_outboxed(&row, &error).await?;
                 }
@@ -253,19 +280,19 @@ pub(super) async fn enqueue_outbox_job_tx(
     context: &Element,
     rich: &RichSummary,
     now_ms: i64,
-) -> Result<(), NotificationOutboxError> {
+) -> Result<NotificationOutboxJobId, NotificationOutboxError> {
     // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
     lock_candidate_ancestry_tx(tx, candidate).await?;
     let context_xml = String::from(context);
     for _ in 0..8 {
-        let inserted =
-            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?;
-        if inserted > 0 {
-            return Ok(());
+        if let Some(job_id) =
+            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?
+        {
+            return Ok(job_id);
         }
         match merge_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?
         {
-            OutboxMergeOutcome::Merged => return Ok(()),
+            OutboxMergeOutcome::Merged(job_id) => return Ok(job_id),
             OutboxMergeOutcome::MalformedExistingJobFailed
             | OutboxMergeOutcome::QueuedJobNotFound
             | OutboxMergeOutcome::QueuedJobChanged => {}
@@ -281,7 +308,7 @@ async fn insert_outbox_job_tx(
     context_xml: &str,
     rich: &RichSummary,
     now_ms: i64,
-) -> Result<u64, NotificationOutboxError> {
+) -> Result<Option<NotificationOutboxJobId>, NotificationOutboxError> {
     let job_id = NotificationOutboxJobId::fresh();
     let sender_jids = encode_sender_jids(std::slice::from_ref(&candidate.sender_jid))?;
     let changed = tx
@@ -336,12 +363,13 @@ async fn insert_outbox_job_tx(
         .await?;
     if changed > 0 {
         copy_candidate_ancestry_tx(tx, candidate, job_id.as_str()).await?;
+        return Ok(Some(job_id));
     }
-    Ok(changed)
+    Ok(None)
 }
 
 enum OutboxMergeOutcome {
-    Merged,
+    Merged(NotificationOutboxJobId),
     MalformedExistingJobFailed,
     QueuedJobNotFound,
     QueuedJobChanged,
@@ -473,7 +501,7 @@ async fn merge_outbox_job_tx(
         return Ok(OutboxMergeOutcome::QueuedJobChanged);
     }
     copy_candidate_ancestry_tx(tx, candidate, &job_id_raw).await?;
-    Ok(OutboxMergeOutcome::Merged)
+    Ok(OutboxMergeOutcome::Merged(job_id_raw.into()))
 }
 
 async fn mark_malformed_outbox_job_failed_tx(

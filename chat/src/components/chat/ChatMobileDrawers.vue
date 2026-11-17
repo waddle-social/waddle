@@ -12,12 +12,14 @@ import {
   activeChannelRailCallCount,
   activeDmRailCallCount,
 } from "@/lib/calls/call-rail-counts";
-import PeopleRail from "@/components/community/PeopleRail.vue";
+import { ChevronRight, PencilLine, Users } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { floe, kicker } from "styled-system/recipes";
+import AppSidebar from "@/components/community/AppSidebar.vue";
 import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
-import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
+import { liveKicker } from "@/ui/part-classes";
 import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
-import { buildHref, type RouteMatch } from "@/router";
 import type { CallMedia } from "@/lib/calls/types";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -32,59 +34,17 @@ const props = defineProps<{
 }>();
 
 const {
-  connectionStore,
   ui,
   waddles,
-  channelUnread,
-  notifications,
-  version,
   memberCountLabel,
   channelExtensionRoutes,
   activeExtensionRouteKey,
   activeRightPanel,
-  openUserSettings,
-  openHome,
-  openRooms,
-  openMembers,
   openCommunitySurface,
-  handleLogout,
-  handleRequestNotifications,
-  handleToggleNotifications,
-  handleToggleMessageSounds,
   selectExtensionRoute,
   openChannelEdit,
-  openThreads,
+  openHome,
 } = props.controller;
-
-type DrawerNavId = "home" | "rooms" | "threads" | "events" | "members";
-
-/** Compact list of the five community destinations for the drawer. */
-const drawerNav: { id: DrawerNavId; label: string; href: string; go: () => void }[] = [
-  { id: "home", label: "Home", href: buildHref({ id: "home" } as RouteMatch), go: () => openHome() },
-  { id: "rooms", label: "Rooms", href: buildHref({ id: "rooms" } as RouteMatch), go: () => openRooms() },
-  { id: "threads", label: "Discussions", href: buildHref({ id: "threads" } as RouteMatch), go: () => openThreads() },
-  { id: "events", label: "Events", href: buildHref({ id: "events" } as RouteMatch), go: () => selectCommunitySurface("events") },
-  { id: "members", label: "Members", href: buildHref({ id: "members" } as RouteMatch), go: () => openMembers() },
-];
-
-const activeDrawerNav = computed<DrawerNavId | null>(() => {
-  if (ui.activeCommunitySurface.value === "events") return "events";
-  if (ui.activeCommunitySurface.value === "feed") return null;
-  switch (ui.activePage.value) {
-    case "dashboard":
-      return "home";
-    case "rooms":
-    case "chat":
-      return "rooms";
-    case "threads":
-    case "unread":
-      return "threads";
-    case "members":
-      return "members";
-    default:
-      return null;
-  }
-});
 
 function selectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);
@@ -137,6 +97,33 @@ const drawerExtensionRoutes = computed(() =>
   ),
 );
 
+const navWidthClass = css({ width: "min(88vw, 320px)" });
+const liveRowClass = cx(liveKicker, css({ display: "flex", alignItems: "center", gap: "2", padding: "{spacing.4} {spacing.3} {spacing.1}" }));
+const detailsClass = css({ display: "flex", flexDirection: "column", gap: "4", padding: "{spacing.2} {spacing.3} {spacing.8} {spacing.4}" });
+const spaceCardClass = cx(floe(), css({ "--pad": "14px", gap: "1", borderRadius: "14px", borderColor: "border.soft" }));
+const spaceNameClass = css({ font: "700 16px/1.3 {fonts.display}" });
+const captionClass = css({ textStyle: "caption", color: "fg.muted" });
+const listClass = css({ display: "flex", flexDirection: "column", gap: "0.5" });
+const rowClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  minHeight: "48px",
+  px: "3",
+  border: 0,
+  borderRadius: "control",
+  bg: "transparent",
+  color: "fg",
+  font: "600 15px/1.3 {fonts.body}",
+  textAlign: "left",
+  cursor: "pointer",
+  _hover: { bg: "state.hover" },
+  _currentPage: { bg: "state.selected" },
+  "& svg": { width: "20px", height: "20px", flex: "none", color: "fg.muted" },
+});
+const growClass = css({ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const sectionClass = cx(kicker(), css({ margin: 0, padding: "{spacing.1.5} {spacing.1} 0" }));
+
 function openExtensionRoute(route: DiscoveredExtensionRoute) {
   const channel = waddles.currentChannel.value;
   if (!channel) return;
@@ -146,111 +133,77 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
 </script>
 
 <template>
-    <!-- Mobile header (settings page only - chat pages render the consolidated header inside ContentArea) -->
+    <!-- Mobile header (settings page only - chat pages render the consolidated header inside ContentArea).
+         Phone-only, so its sidebar button goes back to the home screen, which is the sidebar. -->
     <SettingsMobileHeader
       v-if="ui.activePage.value === 'settings'"
-      @open-nav="ui.showMobileNav.value = true"
+      @open-nav="openHome()"
     />
 
-    <!-- Mobile nav drawer -->
-    <AppDrawer v-model:open="ui.showMobileNav.value" side="left" label="Navigation drawer">
-      <template #title>
-        <span class="type-pane-title">Navigation</span>
-      </template>
-      <div class="chat-mobile-nav-body">
-        <nav class="flex flex-col gap-0.5 border-b border-border p-2" aria-label="Community">
-          <a
-            v-for="item in drawerNav"
-            :key="item.id"
-            :href="item.href"
-            class="community-nav__pill"
-            :aria-current="activeDrawerNav === item.id ? 'page' : undefined"
-            @click.prevent="item.go()"
-          >
-            {{ item.label }}
-            <span
-              v-if="item.id === 'threads' && channelUnread.totalThreadUnreadCount.value > 0"
-              class="community-count text-live-text"
-              :aria-label="`${channelUnread.totalThreadUnreadCount.value} unread`"
-            >{{ channelUnread.totalThreadUnreadCount.value }}</span>
-          </a>
-          <span v-if="liveSummary" class="community-kicker community-kicker--live px-3 py-1.5">
-            <span class="community-ember" aria-hidden="true" />
-            {{ liveSummary }}
-          </span>
-        </nav>
-        <PeopleRail
-          :controller="controller"
-          :call-participants="visibleCallParticipants"
-        />
-        <ProfilePanel
-          v-if="connectionStore.session"
-          :session="connectionStore.session"
-          :notification-permission="notifications.permissionState.value"
-          :notifications-enabled="notifications.notificationsEnabled.value"
-          :message-sounds-enabled="notifications.messageSoundsEnabled.value"
-          :total-unread-count="channelUnread.totalUnreadCount.value"
-          :total-mention-count="channelUnread.totalMentionCount.value"
-          :web-commit-sha="version.webCommitSha.value"
-          :server-version="version.serverVersion.value"
-          @open-settings="openUserSettings"
-          @logout="handleLogout"
-          @request-notifications="handleRequestNotifications"
-          @toggle-notifications="handleToggleNotifications"
-          @toggle-message-sounds="handleToggleMessageSounds"
-        />
-      </div>
+    <!-- Mobile navigation: the sidebar itself (Mobile-Home board). -->
+    <AppDrawer
+      v-model:open="ui.showMobileNav.value"
+      side="left"
+      label="Navigation drawer"
+      :width-class="navWidthClass"
+      bare
+    >
+      <AppSidebar :controller="controller">
+        <template v-if="liveSummary" #live>
+          <span :class="liveRowClass"><span class="wd-live-dot" aria-hidden="true" />{{ liveSummary }}</span>
+        </template>
+      </AppSidebar>
     </AppDrawer>
 
-    <!-- Mobile details drawer -->
+    <!-- Mobile details drawer (Mobile-Details board) -->
     <AppDrawer v-model:open="ui.showMobileDetails.value" side="right" label="Details drawer">
-      <template #title>
-        <span class="type-pane-title">Details</span>
-      </template>
-      <div class="flex flex-col gap-4 p-4">
-        <div v-if="waddles.currentSpace.value" class="flex flex-col gap-1.5">
-          <h3 class="type-pane-title">{{ waddles.currentSpace.value.name }}</h3>
-          <p v-if="waddles.currentSpace.value.description" class="type-field text-muted-foreground">
+      <template #title>Details</template>
+      <div :class="detailsClass">
+        <div v-if="waddles.currentSpace.value" :class="spaceCardClass">
+          <span :class="kicker()">Space</span>
+          <b :class="spaceNameClass">{{ waddles.currentSpace.value.name }}</b>
+          <span v-if="waddles.currentSpace.value.description" :class="captionClass">
             {{ waddles.currentSpace.value.description }}
-          </p>
+          </span>
         </div>
 
-        <div class="flex flex-col gap-1.5">
+        <div :class="listClass">
           <button
             v-if="waddles.currentChannel.value && waddles.canManageCurrentChannel.value"
-            class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
+            :class="rowClass"
             type="button"
             @click="openChannelEdit(); ui.showMobileDetails.value = false"
           >
-            Edit channel
+            <PencilLine aria-hidden="true" />
+            <span>Edit room</span>
           </button>
           <button
-            class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
+            :class="rowClass"
             type="button"
             @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
           >
-            Members ({{ memberCountLabel }})
+            <Users aria-hidden="true" />
+            <span :class="growClass">Members ({{ memberCountLabel }})</span>
+            <ChevronRight aria-hidden="true" />
           </button>
         </div>
 
-        <div
-          v-if="drawerExtensionRoutes.length > 0"
-          class="flex flex-col gap-1.5 border-t border-border pt-4"
-        >
-          <h3 class="type-section-label text-muted-foreground">Extensions</h3>
-          <button
-            v-for="item in drawerExtensionRoutes"
-            :key="item.key"
-            type="button"
-            class="type-control flex h-9 w-full items-center gap-2 rounded-lg border border-border px-3 hover:bg-muted transition-colors"
-            :class="item.isActive ? 'border-primary/30 bg-primary/10 text-primary' : ''"
-            :aria-current="item.isActive ? 'page' : undefined"
-            @click="openExtensionRoute(item.route)"
-          >
-            <component :is="extensionRouteIconComponent(item.icon)" class="h-4 w-4" aria-hidden="true" />
-            <span class="truncate text-left">{{ item.label }}</span>
-          </button>
-        </div>
+        <template v-if="drawerExtensionRoutes.length > 0">
+          <h3 :class="sectionClass">Extensions</h3>
+          <div :class="listClass">
+            <button
+              v-for="item in drawerExtensionRoutes"
+              :key="item.key"
+              type="button"
+              :class="rowClass"
+              :aria-current="item.isActive ? 'page' : undefined"
+              @click="openExtensionRoute(item.route)"
+            >
+              <component :is="extensionRouteIconComponent(item.icon)" aria-hidden="true" />
+              <span :class="growClass">{{ item.label }}</span>
+            </button>
+          </div>
+        </template>
       </div>
     </AppDrawer>
 

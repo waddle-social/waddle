@@ -9,8 +9,8 @@ use crate::support::{
 };
 use jid::{BareJid, Jid};
 use waddle_server::notification_outbox::{
-    NoopDndReader, NotificationCandidateInsertOutcome, NotificationClass, NotificationOutboxError,
-    RoomPolicyStore,
+    DrainBatch, DrainScope, NoopDndReader, NotificationCandidateInsertOutcome, NotificationClass,
+    NotificationOutboxError, RoomPolicyStore,
 };
 use waddle_xmpp::push::PushSubscriptionStore;
 
@@ -119,7 +119,10 @@ async fn candidate_insert_is_idempotent_and_worker_coalesces_distinct_messages()
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -154,7 +157,10 @@ async fn candidate_without_first_party_registration_is_suppressed_and_observable
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidate without registration"),
@@ -269,7 +275,10 @@ async fn t1_drain_reevaluates_xep0492_when_projection_changes_after_insert() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -343,7 +352,10 @@ async fn candidate_worker_marks_malformed_bare_sender_candidate_terminal() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -413,7 +425,10 @@ async fn candidate_worker_marks_empty_sender_candidate_terminal_without_conversa
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -483,7 +498,10 @@ async fn candidate_worker_marks_mismatched_sender_candidate_terminal() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -548,7 +566,10 @@ async fn candidate_worker_marks_malformed_conversation_candidate_terminal_and_co
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -606,7 +627,10 @@ async fn candidate_worker_coalesces_distinct_sender_resources_into_one_bare_conv
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -657,7 +681,10 @@ async fn candidate_worker_fails_malformed_coalesced_job_before_requeueing_exact_
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain first candidate"),
@@ -689,7 +716,10 @@ async fn candidate_worker_fails_malformed_coalesced_job_before_requeueing_exact_
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain second candidate"),
@@ -733,7 +763,10 @@ async fn candidate_worker_fails_malformed_sender_jids_json_before_requeueing_exa
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain first candidate"),
@@ -764,7 +797,10 @@ async fn candidate_worker_fails_malformed_sender_jids_json_before_requeueing_exa
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain second candidate"),
@@ -808,7 +844,10 @@ async fn candidate_worker_fails_sender_set_missing_scalar_before_requeueing_exac
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain first candidate"),
@@ -839,7 +878,10 @@ async fn candidate_worker_fails_sender_set_missing_scalar_before_requeueing_exac
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain second candidate"),
@@ -883,7 +925,10 @@ async fn candidate_worker_fails_semantically_invalid_sender_jids_before_requeuei
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain first candidate"),
@@ -914,7 +959,10 @@ async fn candidate_worker_fails_semantically_invalid_sender_jids_before_requeuei
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain second candidate"),
@@ -958,7 +1006,10 @@ async fn candidate_worker_fails_mismatched_scalar_sender_before_requeueing_exact
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain first candidate"),
@@ -989,7 +1040,10 @@ async fn candidate_worker_fails_mismatched_scalar_sender_before_requeueing_exact
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain second candidate"),
@@ -1059,7 +1113,10 @@ async fn candidate_worker_skips_malformed_registration_and_continues_batch() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -1106,7 +1163,10 @@ async fn candidate_worker_defers_candidates_fail_closed_when_blocklist_load_fail
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -1153,7 +1213,10 @@ async fn candidate_worker_defers_candidates_fail_closed_when_blocklist_load_fail
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("retry drain candidates"),
@@ -1211,7 +1274,10 @@ async fn unknown_room_policy_defers_groupchat_candidate_at_t1() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain candidates"),
@@ -1296,7 +1362,10 @@ async fn policy_deferral_cap_dead_letters_candidate_and_unblocks_fresh_work() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain capped candidate"),
@@ -1357,7 +1426,10 @@ async fn policy_deferral_cap_dead_letters_candidate_and_unblocks_fresh_work() {
                 &projection,
                 drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16
+                },
             )
             .await
             .expect("drain fresh candidate"),
@@ -1409,7 +1481,10 @@ async fn room_policy_lookup_is_cached_within_drain_batch() {
             &projection,
             drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -1458,7 +1533,10 @@ async fn unknown_room_policy_lookup_is_cached_within_drain_batch() {
             &projection,
             drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");

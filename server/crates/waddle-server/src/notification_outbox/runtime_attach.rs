@@ -85,6 +85,8 @@ const CANDIDATE_COLUMNS: &[ColumnContract] = &[
     column("delivery_id", "text", false, ""),
     column("quarantined_at_ms", "bigint", false, ""),
     column("quarantined_suppressed_reason", "text", false, ""),
+    column("call_sid", "text", false, ""),
+    column("call_video", "integer", false, ""),
 ];
 
 const OUTBOX_COLUMNS: &[ColumnContract] = &[

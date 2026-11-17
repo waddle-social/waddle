@@ -20,10 +20,12 @@ struct ComposerCommandPresentations: ViewModifier {
                     onPick: onPickGIF,
                     onCancel: { gifSearch = nil }
                 )
+                .carryingCallDock()
                 .environment(session)
             }
             .sheet(item: formStage) { _ in
                 ExtensionCommandFormSheet(center: commands)
+                    .carryingCallDock()
                     .environment(session)
             }
             .alert("Add a link", isPresented: $linkPrompt.isPresented) {

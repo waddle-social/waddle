@@ -532,6 +532,43 @@ async fn histogram_buckets_form_pins_explicit_boundaries() {
 }
 
 #[tokio::test]
+async fn muc_seconds_histograms_export_seconds_scale_boundaries() {
+    let guard = test_support::acquire().await;
+
+    drop(crate::metrics::MucOccupancyHandlerTimer::start("join"));
+    crate::metrics::record_muc_projection_commit_duration("occupancy", 0.036);
+
+    for metric in [
+        "waddle.muc.occupancy.handler.duration",
+        "waddle.muc.projection.commit.duration",
+    ] {
+        assert_eq!(
+            guard.histogram_bounds(metric),
+            Some(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+            "{metric} must export seconds-scale boundaries",
+        );
+    }
+}
+
+#[tokio::test]
+async fn call_teardown_backlog_age_is_resolved_up_to_an_hour() {
+    let guard = test_support::acquire().await;
+
+    crate::telemetry::call::record_call_teardown_outbox_oldest_age(1800.0);
+
+    let bounds = guard
+        .histogram_bounds("waddle.call.teardown.outbox.oldest_age")
+        .expect("teardown age histogram");
+    assert_eq!(
+        bounds.last().copied(),
+        Some(3600.0),
+        "a backlog older than the top boundary reads as that boundary in a quantile"
+    );
+}
+
+#[tokio::test]
 async fn consecutive_guards_observe_only_their_own_increments() {
     {
         let _first = test_support::acquire().await;

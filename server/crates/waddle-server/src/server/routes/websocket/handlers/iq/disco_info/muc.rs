@@ -10,6 +10,69 @@ use super::{
 
 use waddle_xmpp::muc::roominfo::MucRoomInfo;
 
+/// Private event titles require the current owner's membership decision.
+async fn private_event_discovery_denial<'a>(
+    state: &WebSocketState,
+    req: &DiscoInfoRequest<'a>,
+    room: &BareJid,
+    expected_generation: Option<uuid::Uuid>,
+) -> Option<DiscoInfoResponse<'a>> {
+    if !room
+        .node()
+        .is_some_and(|node| node.as_str().starts_with("event-"))
+    {
+        return None;
+    }
+    let access = async {
+        let (Some(requester), Some(expected_generation)) = (req.requester, expected_generation)
+        else {
+            return Ok(false);
+        };
+        #[cfg(feature = "clustering")]
+        if crate::server::routes::interpret::extension_room_owner(state, room)
+            .await
+            .map_err(|_| ())?
+            .is_some()
+        {
+            return super::super::event_planning_access::remote_event_planning_access(
+                state, room, requester,
+            )
+            .await
+            .map(|access| {
+                access.is_some_and(|access| {
+                    access.affiliation >= Affiliation::Member
+                        && access.generation.0 == expected_generation
+                })
+            });
+        }
+        let Some(actor) = get_room_actor(state, room).await else {
+            return Ok(false);
+        };
+        super::super::event_planning_access::local_event_planning_access(&actor, requester)
+            .await
+            .map(|access| {
+                access.affiliation >= Affiliation::Member
+                    && access.generation.0 == expected_generation
+            })
+    }
+    .await;
+    match access {
+        Ok(true) => None,
+        Ok(false) => Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            item_not_found_iq_error("Requested item not found."),
+        )),
+        Err(()) => Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            internal_server_error_iq_error("Internal server error."),
+        )),
+    }
+}
+
 /// XEP-0045 §7.12 well-known disco node for reserved-nick discovery.
 const NODE_ROOMUSER_ITEM: &str = "x-roomuser-item";
 
@@ -473,7 +536,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
 
     if let Some(room_actor) = get_room_actor(state, &room_jid).await {
         let snapshot = match room_actor.ask(GetSnapshot).await {
-            Ok(snapshot) => snapshot.room,
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -488,6 +551,16 @@ pub(super) async fn handle_muc_disco_info<'a>(
                 ));
             }
         };
+        let generation = snapshot
+            .durable_coordinates
+            .map(|coordinates| coordinates.lifecycle.as_uuid())
+            .unwrap_or_else(|| snapshot.occupancy_incarnation.as_uuid());
+        if let Some(denial) =
+            private_event_discovery_denial(state, req, &room_jid, Some(generation)).await
+        {
+            return Some(denial);
+        }
+        let snapshot = snapshot.room;
         let managed_channel = get_managed_channel_for_room(state, &room_jid)
             .await
             .ok()
@@ -565,6 +638,11 @@ pub(super) async fn handle_muc_disco_info<'a>(
         }
     };
     if let Some(channel) = channel {
+        // A catalog row is not an exact room-generation snapshot. Event
+        // clients join before discovery; fail closed until the room is live.
+        if let Some(denial) = private_event_discovery_denial(state, req, &room_jid, None).await {
+            return Some(denial);
+        }
         let room_name = if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
             group_dm_shared_name(&channel.name)
         } else {
@@ -747,6 +825,99 @@ mod tests {
         assert_eq!(
             classify_muc_disco_target(None, MUC_DOMAIN),
             MucDiscoTarget::NotMuc
+        );
+    }
+    #[tokio::test]
+    async fn event_planning_disco_hides_private_room_metadata_from_nonmembers() {
+        use super::super::DiscoInfoRequest;
+        use super::{handle_muc_disco_info, private_event_discovery_denial};
+        use crate::server::routes::websocket::cleanup::get_or_create_room_actor;
+        use crate::server::routes::websocket::test_state::{
+            create_test_websocket_state_with_extension_manager, empty_extension_manager,
+            TestStateOverrides,
+        };
+        use jid::{BareJid, FullJid};
+        use waddle_xmpp::muc::room_actor::ChangeAffiliation;
+        use waddle_xmpp::muc::RoomConfig;
+        use waddle_xmpp::Affiliation;
+        let state = create_test_websocket_state_with_extension_manager(
+            empty_extension_manager().await,
+            TestStateOverrides::default(),
+        )
+        .await;
+        let room: BareJid = "event-london@muc.example.com".parse().expect("room");
+        let owner: FullJid = "alice@example.com/web".parse().expect("owner");
+        let outsider: FullJid = "bob@example.com/android".parse().expect("outsider");
+        let actor = get_or_create_room_actor(
+            &state,
+            &room,
+            RoomConfig {
+                name: "Private London meetup".into(),
+                description: Some("Secret trip details".into()),
+                members_only: true,
+                public_room: false,
+                persistent: true,
+                ..Default::default()
+            },
+            "default".into(),
+            "planning".into(),
+        )
+        .await
+        .expect("room")
+        .actor_ref;
+        actor
+            .ask(ChangeAffiliation {
+                jid: owner.to_bare(),
+                affiliation: Affiliation::Owner,
+            })
+            .await
+            .expect("owner affiliation");
+        let iq = xmpp_parsers::iq::Iq::Get {
+            from: Some(owner.clone().into()),
+            to: Some(room.clone().into()),
+            id: "private-event-disco".into(),
+            payload: minidom::Element::builder("query", waddle_xmpp::disco::DISCO_INFO_NS).build(),
+        };
+        let req = DiscoInfoRequest {
+            request_iq: &iq,
+            id: "private-event-disco",
+            node: None,
+            target_to: Some(room.as_str()),
+            requester: Some(&owner),
+            evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            domain: "example.com",
+            muc_domain: "muc.example.com",
+            upload_domain: "upload.example.com",
+            spaces_domain: "spaces.example.com",
+            community_domain: "community.example.com",
+            extensions_domain: "extensions.example.com",
+            push_domain: "push.example.com",
+            response_from: Some(room.as_str()),
+            response_to: Some(owner.as_str()),
+        };
+        let allowed = handle_muc_disco_info(&req, &state)
+            .await
+            .expect("response")
+            .into_xml();
+        assert!(allowed.contains("Private London meetup"), "{allowed}");
+        assert!(allowed.contains("Secret trip details"));
+        let outsider_req = DiscoInfoRequest {
+            requester: Some(&outsider),
+            response_to: Some(outsider.as_str()),
+            ..req
+        };
+        let denied = handle_muc_disco_info(&outsider_req, &state)
+            .await
+            .expect("response")
+            .into_xml();
+        assert!(denied.contains("item-not-found"), "{denied}");
+        assert!(!denied.contains("Private London meetup"));
+        assert!(!denied.contains("Secret trip details"));
+        assert!(
+            private_event_discovery_denial(&state, &req, &room, Some(uuid::Uuid::new_v4()))
+                .await
+                .is_some(),
+            "metadata from a replaced generation must not be disclosed"
         );
     }
 }

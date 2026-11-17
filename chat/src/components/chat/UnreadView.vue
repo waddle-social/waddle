@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Hash, ListTree, Menu, RefreshCw } from "lucide-vue-next";
-import { button, count } from "styled-system/recipes";
+import { Hash, ListTree, RefreshCw } from "lucide-vue-next";
+import spotStickers from "@waddle/design/assets/spot-stickers.svg?url";
+import { css } from "styled-system/css";
+import { badge, btn, waddle } from "styled-system/recipes";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { InboxState } from "@/services/inbox";
 import { useUnreadOverview } from "@/lib/unread-overview-state";
 import UnreadMessageRow from "@/components/chat/UnreadMessageRow.vue";
+import InboxTabs from "@/components/chat/InboxTabs.vue";
+import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
+import { pageClasses as pc } from "@/components/chat/inbox-classes";
 
 const props = defineProps<{
   channels: readonly ChannelSummary[];
@@ -18,6 +23,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openNav: [];
+  markRead: [roomJid: string, threadId?: string];
 }>();
 
 const { groups, isLoading, error, refresh } = useUnreadOverview({
@@ -27,12 +33,54 @@ const { groups, isLoading, error, refresh } = useUnreadOverview({
   inboxState: computed(() => props.inboxState),
 });
 
-const countClass = count();
-const refreshButtonClass = button({ variant: "quiet", size: "sm" });
+const countClass = badge();
+const smallButtonClass = btn({ size: "sm" });
+const loaderClass = waddle();
+const spinClass = css({ _motionSafe: { animation: "spin 1s linear infinite" } });
+
+// App-Unread board: one card per room, its new messages, then its threads.
+const cardClass = css({ borderRadius: "panel", border: "1px solid {colors.border.soft}", bg: "surface", overflow: "hidden" });
+const cardHeadClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  padding: "{spacing.2.5} {spacing.3} {spacing.2.5} {spacing.4}",
+  borderBottom: "1px solid {colors.border.soft}",
+  "& > svg": { width: "16px", height: "16px", flex: "none", color: "fg.soft" },
+});
+const cardTitleClass = css({ margin: 0, flex: 1, minWidth: 0, font: "700 15px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const messagesClass = css({ display: "flex", flexDirection: "column" });
+const previewStatusClass = css({ margin: 0, px: "4", py: "2", color: "fg.muted", fontSize: "sm" });
+const threadClass = css({ borderTop: "1px solid {colors.border.soft}" });
+const threadButtonClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2",
+  width: "100%",
+  minHeight: "40px",
+  padding: "{spacing.2} {spacing.4}",
+  border: 0,
+  bg: "transparent",
+  color: "action.text",
+  fontSize: "13px",
+  fontWeight: 600,
+  textAlign: "left",
+  cursor: "pointer",
+  transition: "background-color {durations.fast} {easings.out}",
+  _hover: { bg: "state.hover" },
+  _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "-3px" },
+  "& > svg": { width: "16px", height: "16px", flex: "none" },
+});
+const threadTitleClass = css({ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 
 const hasGroups = computed(() => groups.value.length > 0);
 const isRefreshingInbox = ref(false);
 const isRefreshBusy = computed(() => isLoading.value || isRefreshingInbox.value);
+
+function markRoomRead(group: (typeof groups.value)[number]) {
+  if (group.channelUnreadCount > 0) emit("markRead", group.roomJid);
+  for (const thread of group.threads) emit("markRead", group.roomJid, thread.threadId);
+}
 
 async function refreshUnread() {
   if (isRefreshBusy.value) return;
@@ -47,101 +95,105 @@ async function refreshUnread() {
 </script>
 
 <template>
-  <div class="chat-content-pane chat-pane-scroll bg-background">
-    <div class="mx-auto grid w-full max-w-3xl gap-5 px-[var(--chat-content-inline)] py-6">
-      <header class="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
-        >
-          <Menu class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <div class="min-w-0 flex-1">
-          <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">Unread</h1>
-          <p class="type-caption mt-1.5 text-muted-foreground">
-            Everything you haven't read yet, grouped by room and thread.
-          </p>
+  <SettingsMobileHeader title="Inbox" @open-nav="emit('openNav')" />
+  <div :class="pc.scroll">
+    <div :class="pc.page">
+      <header :class="pc.head">
+        <div :class="pc.headText">
+          <h1 :class="pc.title">Inbox</h1>
+          <InboxTabs current="unread" />
         </div>
         <button
           type="button"
-          :class="refreshButtonClass"
+          :class="smallButtonClass"
           :disabled="isRefreshBusy"
           aria-label="Refresh unread"
           @click="refreshUnread()"
         >
-          <RefreshCw class="h-3.5 w-3.5" :class="isRefreshBusy ? 'animate-spin' : ''" aria-hidden="true" />
+          <RefreshCw :class="isRefreshBusy ? spinClass : undefined" aria-hidden="true" />
           Refresh
         </button>
       </header>
 
-      <div v-if="isLoading && !hasGroups" class="type-caption text-muted-foreground" aria-busy="true">
+      <div v-if="isLoading && !hasGroups" :class="pc.status" role="status" aria-busy="true">
+        <span :class="loaderClass" aria-hidden="true"><i></i><i></i><i></i></span>
         Loading unread…
       </div>
 
-      <div v-else-if="error && !hasGroups" class="type-caption text-destructive-text">
+      <div v-else-if="error && !hasGroups" :class="pc.alert" role="alert">
         Couldn't load unread: {{ error }}
       </div>
 
-      <div v-else-if="!hasGroups" class="rounded-2xl border border-dashed border-border px-4 py-8 text-center">
-        <p class="font-display text-lg font-semibold text-foreground">All caught up.</p>
-        <p class="type-caption mt-1 text-muted-foreground">Nothing unread. The room is yours.</p>
+      <div v-else-if="!hasGroups" :class="pc.empty" role="status">
+        <img :src="spotStickers" alt="" />
+        <h2 :class="pc.emptyTitle">All caught up</h2>
+        <p>Nothing unread. The room is yours.</p>
       </div>
 
       <template v-else>
         <section
           v-for="group in groups"
           :key="group.roomJid"
-          class="overflow-hidden rounded-2xl border border-border bg-card"
+          :class="cardClass"
           :aria-label="group.channelName"
         >
-          <button
-            type="button"
-            class="flex w-full items-center gap-2 border-b border-border px-4 py-3 text-left transition-colors hover:bg-muted"
-            @click="props.onSelectChannel(group.channelId)"
-          >
-            <Hash class="h-4 w-4 flex-shrink-0 text-primary" aria-hidden="true" />
-            <span class="min-w-0 flex-1 truncate font-display text-[15px] font-semibold tracking-[-0.01em] text-foreground">{{ group.channelName }}</span>
+          <header :class="cardHeadClass">
+            <Hash aria-hidden="true" />
+            <h2 :class="cardTitleClass">{{ group.channelName }}</h2>
             <span
               v-if="group.channelUnreadCount > 0"
               :class="countClass"
               :aria-label="`${group.channelUnreadCount} unread`"
             >{{ group.channelUnreadCount }}</span>
-          </button>
+            <button
+              type="button"
+              :class="smallButtonClass"
+              :aria-label="`Open ${group.channelName}`"
+              @click="props.onSelectChannel(group.channelId)"
+            >Open</button>
+            <button
+              type="button"
+              :class="smallButtonClass"
+              :aria-label="`Mark ${group.channelName} as read`"
+              :disabled="isRefreshBusy"
+              @click="markRoomRead(group)"
+            >Mark as read</button>
+          </header>
 
-          <div v-if="group.channelMessages.length > 0" class="px-2 py-1">
+          <div v-if="group.channelMessages.length > 0" :class="messagesClass">
             <UnreadMessageRow
               v-for="message in group.channelMessages"
               :key="message.id"
               :message="message"
             />
           </div>
+          <p v-else-if="group.channelUnreadCount > 0" :class="previewStatusClass">Message previews unavailable.</p>
 
           <div
             v-for="thread in group.threads"
             :key="thread.threadId"
-            class="border-t border-border"
+            :class="threadClass"
           >
             <button
               type="button"
-              class="flex w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-muted"
+              :class="threadButtonClass"
               @click="props.onSelectThread(group.channelId, thread.threadId)"
             >
-              <ListTree class="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{{ thread.title }}</span>
+              <ListTree aria-hidden="true" />
+              <span :class="threadTitleClass">{{ thread.title }}</span>
               <span
                 :class="countClass"
                 :aria-label="`${thread.unreadCount} unread`"
               >{{ thread.unreadCount }}</span>
             </button>
-            <div class="px-2 pb-1">
+            <div v-if="thread.messages.length > 0" :class="messagesClass">
               <UnreadMessageRow
                 v-for="message in thread.messages"
                 :key="message.id"
                 :message="message"
               />
             </div>
+            <p v-else :class="previewStatusClass">Message previews unavailable.</p>
           </div>
         </section>
       </template>

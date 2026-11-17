@@ -2,6 +2,7 @@
 import { watch, onBeforeUnmount } from "vue";
 import { useEditor, EditorContent } from "@tiptap/vue-3";
 import type { JSONContent } from "@tiptap/core";
+import { css } from "styled-system/css";
 import { createChatEditorExtensions } from "@/lib/editor/chat-editor-extensions";
 
 const props = withDefaults(
@@ -98,56 +99,64 @@ defineExpose({
   getJSON: () => editor.value?.getJSON(),
   editor: editor,
 });
+
+const root = css({
+  display: "flex",
+  alignItems: "center",
+  minWidth: 0,
+  cursor: "text",
+  color: "fg",
+  font: "400 16px/1.5 {fonts.body}",
+  "& .ProseMirror": {
+    outline: "none",
+    minWidth: 0,
+    width: "100%",
+    minHeight: "24px",
+    maxHeight: "160px",
+    overflowY: "auto",
+    overflowWrap: "anywhere",
+    scrollbarWidth: "thin",
+  },
+  "& .ProseMirror p.is-editor-empty:first-child::before": {
+    content: "attr(data-placeholder)",
+    color: "fg.soft",
+    float: "left",
+    height: 0,
+  },
+});
+// Inside the composer field: the field draws the frame.
+const embeddedClass = css({ flex: 1, minHeight: "40px", px: "2", py: "2" });
+const compactClass = css({ minHeight: "36px", py: "1" });
+// Standalone (the inline edit form): its own field.
+const fullClass = css({ flex: 1, minHeight: "40px", py: "1.5" });
+const framedClass = css({
+  px: "3",
+  borderRadius: "control",
+  border: "1px solid {colors.border.strong}",
+  bg: "surface",
+  _focusWithin: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+});
+const disabledClass = css({ opacity: 0.4, pointerEvents: "none" });
+const contentClass = css({ width: "100%", minWidth: 0 });
 </script>
 
 <template>
+  <!-- `chat-editor` is the hook the shared prose styles (rich-text.css) use. -->
   <div
-    class="chat-editor type-chat-editor flex min-w-0 items-center transition-all duration-300 cursor-text"
     role="textbox"
     :aria-label="editorLabel"
     :class="[
-      embedded ? 'min-h-9 flex-1 px-2 py-1' : compact ? 'min-h-9 py-1' : 'min-h-10 flex-1 py-1.5',
-      embedded ? '' : 'rounded-lg bg-muted px-4 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]',
-      disabled ? 'opacity-40 pointer-events-none' : '',
+      'chat-editor',
+      root,
+      embedded ? embeddedClass : [framedClass, compact ? compactClass : fullClass],
+      disabled && disabledClass,
     ]"
     @click="editor?.commands.focus()"
   >
     <EditorContent
       v-if="editor"
       :editor="editor"
-      class="w-full min-w-0"
+      :class="contentClass"
     />
   </div>
 </template>
-
-<!--
-  Minimal ProseMirror styles that cannot be expressed as Tailwind utility classes
-  (pseudo-element placeholder, nested prose elements).
--->
-<style>
-.chat-editor .ProseMirror {
-  outline: none;
-  min-width: 0;
-  width: 100%;
-  min-height: 1.25rem;
-  max-height: 10rem;
-  line-height: var(--leading-message);
-  overflow-y: auto;
-  overflow-wrap: anywhere;
-}
-
-/* Placeholder */
-.chat-editor .ProseMirror p.is-editor-empty:first-child::before {
-  content: attr(data-placeholder);
-  color: var(--muted-foreground);
-  opacity: 0.4;
-  float: left;
-  height: 0;
-  pointer-events: none;
-}
-
-/* Compact mode — tighter max-height */
-.chat-editor:has(.ProseMirror) .ProseMirror {
-  scrollbar-width: thin;
-}
-</style>

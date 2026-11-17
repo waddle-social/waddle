@@ -1,15 +1,11 @@
 # Restricted PostgreSQL runtime, serving half (#2116).
 #
-# Not referenced by ../../kustomization.yaml. An operator adds
-#
-#   components:
-#     - restricted-runtime/prepare
-#     - restricted-runtime/serve
-#
-# only after the owner Job has succeeded and published the handoff, as the
-# cutover runbook (docs/runbooks/restricted-runtime-cutover.md) directs. From
-# then on the server connects as the runtime login and starts from the
-# handoff.
+# Listed under `components:` in ../../kustomization.yaml, after
+# restricted-runtime/prepare. The server connects as the runtime login and
+# starts from the handoff the owner Job published. Until that handoff exists
+# the chart keeps the Deployment at zero replicas (`handoff.awaitOwnerJob`),
+# so a fresh install renders the owner CronJob in the same release
+# (docs/runbooks/fresh-production-install.md).
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 patches:

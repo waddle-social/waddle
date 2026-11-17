@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// The "Direct messages" section. On the phone home list it shows the most
+/// The "Direct messages" section. On the phone's Home it shows the most
 /// recent few and links to the DMs tab for the rest.
 struct DirectListSection: View {
     @Environment(NavigationModel.self) private var navigation
@@ -12,29 +12,20 @@ struct DirectListSection: View {
     var limit: Int?
 
     var body: some View {
-        Section {
-            if directs.isEmpty && !isSearching {
-                Button {
-                    navigation.sheet = .newMessage
-                } label: {
-                    Label("New message", systemImage: "square.and.pencil")
-                }
-                .foregroundStyle(.secondary)
-            }
-            ForEach(visible) { direct in
-                DirectNavigationRow(direct: direct, style: style)
-            }
-            if hiddenCount > 0 {
-                Button {
-                    navigation.tab = .directMessages
-                } label: {
-                    Text("Show all \(directs.count)")
-                        .font(.subheadline)
-                }
-            }
-        } header: {
-            NavigationSectionHeader(title: "Direct messages", addLabel: "New message") {
+        NavigationSectionHeader(title: "Direct messages", addLabel: "New message") {
+            navigation.sheet = .newMessage
+        }
+        if directs.isEmpty && !isSearching {
+            NavigationEmptyAction(title: "New message", symbol: "square.and.pencil") {
                 navigation.sheet = .newMessage
+            }
+        }
+        ForEach(visible) { direct in
+            DirectNavigationRow(direct: direct, style: style, isCompact: true)
+        }
+        if hiddenCount > 0 {
+            NavigationEmptyAction(title: "Show all \(directs.count)", symbol: "ellipsis") {
+                navigation.tab = .directMessages
             }
         }
     }

@@ -285,6 +285,49 @@ async fn populated_inbox_streams_entry_per_conversation() {
     let _ = peer.close().await;
 }
 
+/// A message body longer than the XML parser's 8192-byte token limit must
+/// not reach the inbox row's `preview` attribute whole: the response would
+/// be unparseable, which used to take the server down.
+#[tokio::test]
+async fn long_message_body_yields_a_bounded_preview() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(PEER_USER, PEER_PASSWORD)]);
+    let mut primary = primary_client(&server, "ib-long").await;
+    let mut peer = peer_client(&server, "ib-long-peer").await;
+
+    let primary_bare = format!("{PRIMARY_USER}@{DOMAIN}");
+    let body = "long message ".repeat(700);
+    send_dm(&mut peer, &mut primary, &primary_bare, "msg-long-1", &body).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    primary
+        .send(&inbox_query_iq("ib-long-1", None, None, None))
+        .await
+        .expect("send inbox query");
+    let frames = collect_inbox_response(&mut primary, "ib-long-1").await;
+    assert_eq!(entries_from_response(&frames).len(), 1, "{frames:?}");
+
+    let preview = frames
+        .iter()
+        .filter_map(|frame| Element::from_str(frame).ok())
+        .find_map(|message| {
+            message
+                .children()
+                .find(|c| c.name() == "metadata")
+                .and_then(|metadata| metadata.attr("preview").map(ToOwned::to_owned))
+        })
+        .expect("metadata carries a preview");
+    assert_eq!(
+        preview.chars().count(),
+        256,
+        "preview is bounded: {preview}"
+    );
+    assert!(body.starts_with(preview.trim_end_matches('…')));
+
+    let _ = primary.close().await;
+    let _ = peer.close().await;
+}
+
 #[tokio::test]
 async fn unread_only_filters_zero_unread_rows() {
     let _guard = TEST_SERIAL.lock().await;

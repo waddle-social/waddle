@@ -15,6 +15,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.TestAppGraph
+import social.waddle.android.feature.rooms.RoomsScreen
+import social.waddle.android.feature.rooms.RoomsScreenTestTags
 import social.waddle.client.ffi.WaddleClientEvent
 
 /**
@@ -46,7 +48,7 @@ class CreateChannelDialogTest {
 
         composeRule.setContent {
             CompositionLocalProvider(LocalAppGraph provides harness.graph) {
-                HomeScreen(
+                RoomsScreen(
                     onOpenChannel = { roomJid, name -> openedChannels += roomJid to name },
                 )
             }
@@ -62,10 +64,10 @@ class CreateChannelDialogTest {
     fun creatingAChannelSubmitsTheTypedConfigThroughTheFake() {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodes(
-                androidx.compose.ui.test.hasTestTag(HomeScreenTestTags.CREATE_CHANNEL_ACTION),
+                androidx.compose.ui.test.hasTestTag(RoomsScreenTestTags.NEW_ROOM),
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithTag(HomeScreenTestTags.CREATE_CHANNEL_ACTION).performClick()
+        composeRule.onNodeWithTag(RoomsScreenTestTags.NEW_ROOM).performClick()
 
         composeRule.onNodeWithTag(CreateChannelDialogTestTags.NAME_FIELD)
             .performTextInput("Design Reviews")

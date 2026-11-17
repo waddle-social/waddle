@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Tooltip } from "@ark-ui/vue/tooltip";
+import { css } from "styled-system/css";
 
 type TooltipPlacement =
   | "top"
@@ -39,6 +40,19 @@ const props = withDefaults(
   { label: "", placement: "top", triggerId: undefined },
 );
 
+const contentClass = css({
+  zIndex: "tooltip",
+  pointerEvents: "none",
+  maxWidth: "280px",
+  padding: "{spacing.1.5} {spacing.2.5}",
+  borderRadius: "sm",
+  bg: "fg",
+  color: "bg",
+  font: "600 12px/1.35 {fonts.body}",
+  boxShadow: "elev.2",
+  animation: "wd-fade {durations.fast} {easings.out} backwards",
+});
+
 const positioning = computed(() => ({ placement: props.placement, gutter: 6 }));
 const disabled = computed(() => !props.label);
 const ids = computed(() => (props.triggerId ? { trigger: props.triggerId } : undefined));
@@ -59,9 +73,7 @@ const ids = computed(() => (props.triggerId ? { trigger: props.triggerId } : und
     </Tooltip.Trigger>
     <Teleport to="body">
       <Tooltip.Positioner>
-        <Tooltip.Content
-          class="app-tooltip z-[calc(var(--z-lightbox)+1)] pointer-events-none max-w-xs rounded-lg bg-foreground px-2.5 py-1.5 text-[12px] font-semibold leading-snug text-background shadow-[var(--shadow-floating)] data-[state=open]:animate-fade-in"
-        >
+        <Tooltip.Content :class="contentClass">
           {{ label }}
         </Tooltip.Content>
       </Tooltip.Positioner>

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { X } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { badge, iconbtn, tab, tabs } from "styled-system/recipes";
 import CallParticipantsPanel from "./CallParticipantsPanel.vue";
 import type { CallDockTab } from "@/lib/calls/call-dock-state";
 import type { CallRosterRow } from "@/lib/calls/call-roster";
@@ -48,17 +50,37 @@ function onTabKeydown(event: KeyboardEvent): void {
   const other = current.nextElementSibling ?? current.previousElementSibling;
   if (other instanceof HTMLElement) other.focus();
 }
+
+// HuddleStage board "Call dock": a floe on the dark stage.
+const rootClass = css({
+  flex: "0 0 320px",
+  minWidth: 0,
+  minHeight: 0,
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "panel",
+  bg: "surface",
+  border: "1px solid {colors.border.soft}",
+  overflow: "hidden",
+  color: "fg",
+  "@media (max-width: 760px)": { flexBasis: "auto", width: "100%", maxHeight: "18rem" },
+});
+const headerClass = css({ flex: "none", display: "flex", alignItems: "center", gap: "1", padding: "0 {spacing.2} 0 {spacing.1}", borderBottom: "1px solid {colors.border.soft}" });
+const tabsClass = css({ flex: 1, minWidth: 0, borderBottom: 0 });
+const bodyClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" });
+const countClass = badge({ variant: "quiet" });
+const unreadClass = badge();
 </script>
 
 <template>
-  <aside class="call-dock" role="region" aria-label="Call dock">
-    <header class="call-dock__header">
-      <div class="call-dock__tabs" role="tablist" aria-label="Dock">
+  <aside :class="rootClass" role="region" aria-label="Call dock">
+    <header :class="headerClass">
+      <div :class="[tabs(), tabsClass]" role="tablist" aria-label="Dock">
         <button
           id="call-dock-tab-participants"
           type="button"
           role="tab"
-          class="call-dock__tab"
+          :class="tab()"
           :aria-selected="activeTab === 'participants'"
           aria-controls="call-dock-participants"
           :tabindex="activeTab === 'participants' ? 0 : -1"
@@ -66,13 +88,13 @@ function onTabKeydown(event: KeyboardEvent): void {
           @keydown="onTabKeydown"
         >
           Participants
-          <span class="call-dock__count">{{ participantCount }}</span>
+          <span :class="countClass">{{ participantCount }}</span>
         </button>
         <button
           id="call-dock-tab-chat"
           type="button"
           role="tab"
-          class="call-dock__tab"
+          :class="tab()"
           :aria-selected="activeTab === 'chat'"
           aria-controls="call-dock-chat"
           :tabindex="activeTab === 'chat' ? 0 : -1"
@@ -82,24 +104,24 @@ function onTabKeydown(event: KeyboardEvent): void {
           Chat
           <span
             v-if="chatUnread > 0"
-            class="call-dock__unread"
+            :class="unreadClass"
             :aria-label="`${chatUnread} unread message${chatUnread === 1 ? '' : 's'}`"
           >{{ chatUnread }}</span>
         </button>
       </div>
       <button
         type="button"
-        class="call-dock__close chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="iconbtn({ size: 'sm' })"
         aria-label="Close dock"
         @click="emit('close')"
       >
-        <X class="w-4 h-4" />
+        <X aria-hidden="true" />
       </button>
     </header>
     <div
       id="call-dock-participants"
       v-show="activeTab === 'participants'"
-      class="call-dock__body"
+      :class="bodyClass"
       role="tabpanel"
       aria-labelledby="call-dock-tab-participants"
     >
@@ -112,7 +134,7 @@ function onTabKeydown(event: KeyboardEvent): void {
     <div
       id="call-dock-chat"
       v-show="activeTab === 'chat'"
-      class="call-dock__body"
+      :class="bodyClass"
       role="tabpanel"
       aria-labelledby="call-dock-tab-chat"
     >
@@ -120,98 +142,3 @@ function onTabKeydown(event: KeyboardEvent): void {
     </div>
   </aside>
 </template>
-
-<style scoped>
-.call-dock {
-  flex: 0 0 auto;
-  width: min(20rem, 34vw);
-  min-width: 15rem;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-left: 1px solid var(--border);
-  background: color-mix(in oklab, var(--muted) 20%, var(--background));
-}
-
-.call-dock__header {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.5rem 0.5rem 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.call-dock__tabs {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-  min-width: 0;
-}
-
-.call-dock__tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-sm);
-  color: var(--foreground);
-  font: inherit;
-  font-weight: 600;
-}
-
-.call-dock__tab[aria-selected="true"] {
-  background: var(--muted);
-}
-
-.call-dock__count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.25rem;
-  height: 1.25rem;
-  padding: 0 0.375rem;
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--foreground) 12%, transparent);
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-}
-
-/* The Chat tab's unread badge — a small accent pill so a new message is
- * noticeable even when the dock is parked on the Participants tab. */
-.call-dock__unread {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.25rem;
-  height: 1.25rem;
-  padding: 0 0.375rem;
-  border-radius: 9999px;
-  background: var(--primary);
-  color: var(--primary-foreground);
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.call-dock__close {
-  flex: 0 0 auto;
-}
-
-.call-dock__body {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-@media (max-width: 760px) {
-  .call-dock {
-    width: 100%;
-    min-width: 0;
-    max-height: 18rem;
-    border-left: 0;
-    border-top: 1px solid var(--border);
-  }
-}
-</style>

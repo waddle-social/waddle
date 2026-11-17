@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Camera, Image as ImageIcon, Paperclip, RefreshCw, Square, Trash2, Video, X } from "lucide-vue-next";
+import { Clock, Image as ImageIcon, Paperclip, RefreshCw, Trash2, Upload, Video } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, floe, input, seg } from "styled-system/recipes";
 
 type Mode = "attach" | "photo" | "record";
 type MediaKind = "image" | "video";
@@ -35,6 +37,81 @@ const VIDEO_MIME_CANDIDATES = [
 const VIDEO_BITS_PER_SECOND = 2_000_000;
 const RECORDING_MAX_MS = 20_000;
 const RECORDING_TICK_MS = 100;
+
+const ui = {
+  root: css({ display: "flex", flexDirection: "column", gap: "3" }),
+  card: cx(floe(), css({ "--pad": "16px", gap: "3" })),
+  modes: cx(seg(), css({ alignSelf: "flex-start" })),
+  alert: css({ margin: 0, padding: "{spacing.2.5} {spacing.3}", borderRadius: "10px", bg: "danger.subtle", border: "1px solid {colors.danger}", color: "danger.text", fontSize: "13px" }),
+  drop: css({
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "2",
+    minHeight: "180px",
+    borderRadius: "control",
+    border: "2px dashed {colors.border}",
+    "&:has(input:focus-visible) label": { outline: "{borderWidths.focus} solid {colors.focus}", outlineOffset: "2px" },
+  }),
+  srOnly: css({ srOnly: true }),
+  caption: css({ textStyle: "caption", color: "fg.muted" }),
+  stage: css({
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: "300px",
+    maxHeight: "60vh",
+    borderRadius: "control",
+    overflow: "hidden",
+    bgImage: "{gradients.sea}",
+    "& > video": { display: "block", width: "100%", height: "100%", objectFit: "cover" },
+    "&[data-blocked]": { opacity: 0.35 },
+  }),
+  preview: css({ bg: "sea.shallow", bgImage: "none", "& > img": { display: "block", height: "90%", maxWidth: "92%", objectFit: "contain" }, "& > video[controls]": { objectFit: "contain" } }),
+  round: css({
+    position: "absolute",
+    top: "10px",
+    right: "10px",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "44px",
+    height: "44px",
+    border: 0,
+    borderRadius: "pill",
+    bg: "material.media",
+    color: "fg",
+    cursor: "pointer",
+    "& svg": { width: "20px", height: "20px" },
+    _hover: { bgImage: "linear-gradient({colors.state.hover}, {colors.state.hover})" },
+    _disabled: { opacity: 0.5, cursor: "not-allowed" },
+  }),
+  timer: css({
+    position: "absolute",
+    top: "12px",
+    left: "12px",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1.5",
+    height: "28px",
+    px: "2.5",
+    borderRadius: "pill",
+    bg: "live",
+    color: "live.fg",
+    font: "700 13px/1 {fonts.mono}",
+    "& i": { width: "8px", height: "8px", borderRadius: "pill", bg: "live.fg", animation: "wd-pulse 1s infinite" },
+  }),
+  shutter: css({ position: "absolute", left: 0, right: 0, bottom: "14px", display: "flex", justifyContent: "center", "& .wd-btn": { height: "44px", borderRadius: "pill", px: "6" } }),
+  textarea: cx(input(), css({ height: "auto", minHeight: "3rem", py: "2.5", resize: "none", font: "14px/1.5 {fonts.body}" })),
+  foot: css({ display: "flex", alignItems: "center", gap: "2" }),
+  expires: css({ flex: 1, display: "inline-flex", alignItems: "center", gap: "1.5", textStyle: "caption", color: "fg.muted", "& svg": { width: "14px", height: "14px" } }),
+};
+const quietButton = btn();
+const primaryButton = btn({ variant: "primary" });
+const liveButton = btn({ variant: "live" });
+const dangerButton = btn({ variant: "danger" });
 
 const mode = ref<Mode>("attach");
 const body = ref("");
@@ -352,181 +429,169 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section :class="embedded ? 'grid gap-3' : 'grid gap-3 rounded-2xl border border-border bg-card p-4'">
-    <div role="tablist" aria-label="Composer mode" class="flex gap-1 rounded-full border border-border bg-background p-0.5">
+  <section :class="embedded ? ui.root : ui.card">
+    <div role="tablist" aria-label="Composer mode" :class="ui.modes">
       <button
         type="button"
         role="tab"
         :aria-selected="mode === 'attach'"
-        class="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors"
-        :class="mode === 'attach' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
         :disabled="busy"
         @click="activateMode('attach')"
       >
-        <Paperclip class="h-3.5 w-3.5" aria-hidden="true" />
+        <Paperclip aria-hidden="true" />
         Attach
       </button>
       <button
         type="button"
         role="tab"
         :aria-selected="mode === 'photo'"
-        class="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors"
-        :class="mode === 'photo' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
         :disabled="busy"
         @click="activateMode('photo')"
       >
-        <ImageIcon class="h-3.5 w-3.5" aria-hidden="true" />
+        <ImageIcon aria-hidden="true" />
         Photo
       </button>
       <button
         type="button"
         role="tab"
         :aria-selected="mode === 'record'"
-        class="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors"
-        :class="mode === 'record' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
         :disabled="busy"
         @click="activateMode('record')"
       >
-        <Video class="h-3.5 w-3.5" aria-hidden="true" />
+        <Video aria-hidden="true" />
         Record
       </button>
     </div>
 
-    <p v-if="errorMessage" class="rounded-[10px] border border-destructive/40 px-3 py-2 text-[13px] text-destructive-text">
+    <p v-if="errorMessage" :class="ui.alert">
       {{ errorMessage }}
     </p>
 
-    <div v-if="mode === 'attach' && !previewUrl" class="grid place-items-center rounded-2xl border border-dashed border-border px-3 py-6 text-center">
-      <label class="inline-flex cursor-pointer items-center gap-2 rounded-[10px] border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted">
-        <Paperclip class="h-4 w-4" aria-hidden="true" />
+    <div v-if="mode === 'attach' && !previewUrl" :class="ui.drop">
+      <label :class="quietButton">
+        <Upload aria-hidden="true" />
         Choose photo or video
         <input
           type="file"
           accept="image/*,video/*"
-          class="sr-only"
+          :class="ui.srOnly"
           :disabled="busy"
           @change="onAttachFile"
         />
       </label>
-      <p class="mt-2 type-section-label">
+      <span :class="ui.caption">
         Max {{ Math.floor(maxBytes / (1024 * 1024)) }} MB
-      </p>
+      </span>
     </div>
 
-    <div v-if="(mode === 'photo' || mode === 'record') && !previewUrl" class="grid gap-2">
-      <div class="relative overflow-hidden rounded-[10px] bg-background">
-        <video
-          ref="videoEl"
-          class="block max-h-[60vh] w-full"
-          playsinline
-          muted
-          autoplay
-        ></video>
-        <button
-          type="button"
-          class="absolute top-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-foreground hover:bg-muted"
-          :disabled="busy || recording"
-          :aria-label="facingMode === 'user' ? 'Switch to back camera' : 'Switch to front camera'"
-          @click="flipCamera"
-        >
-          <RefreshCw class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <div v-if="recording" class="absolute top-2 left-2 inline-flex items-center gap-1.5 rounded-full bg-live px-2.5 py-0.5 font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-live-foreground shadow-[0_0_10px_var(--glow-live)]">
-          <span class="h-2 w-2 rounded-full bg-live-foreground animate-pulse"></span>
-          {{ Math.ceil((RECORDING_MAX_MS - recordElapsedMs) / 1000) }}s
-        </div>
+    <div
+      v-if="(mode === 'photo' || mode === 'record') && !previewUrl"
+      :class="ui.stage"
+      :data-blocked="errorMessage && !cameraReady ? '' : undefined"
+      data-theme="night"
+    >
+      <video
+        ref="videoEl"
+        playsinline
+        muted
+        autoplay
+      ></video>
+      <button
+        type="button"
+        :class="ui.round"
+        :disabled="busy || recording"
+        :aria-label="facingMode === 'user' ? 'Switch to back camera' : 'Switch to front camera'"
+        @click="flipCamera"
+      >
+        <RefreshCw aria-hidden="true" />
+      </button>
+      <div v-if="recording" :class="ui.timer">
+        <i aria-hidden="true"></i>
+        {{ Math.ceil((RECORDING_MAX_MS - recordElapsedMs) / 1000) }}s
       </div>
-      <div class="flex items-center justify-center gap-2">
+      <div :class="ui.shutter">
         <button
           v-if="mode === 'photo'"
           type="button"
-          class="inline-flex h-9 items-center gap-1.5 rounded-[10px] bg-primary px-4 text-sm font-bold text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          :class="primaryButton"
           :disabled="busy || !cameraReady"
           @click="takePhoto"
         >
-          <Camera class="h-4 w-4" aria-hidden="true" />
           Capture
         </button>
         <template v-else>
           <button
             v-if="!recording"
             type="button"
-            class="inline-flex h-9 items-center gap-1.5 rounded-full bg-live px-4 text-sm font-bold text-live-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            :class="liveButton"
             :disabled="busy || !cameraReady"
             @click="startRecording"
           >
-            <Video class="h-4 w-4" aria-hidden="true" />
             Record
           </button>
           <button
             v-else
             type="button"
-            class="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-bold text-foreground transition-colors hover:bg-muted"
+            :class="dangerButton"
             @click="stopRecording"
           >
-            <Square class="h-4 w-4" aria-hidden="true" />
             Stop
           </button>
         </template>
       </div>
     </div>
 
-    <div v-if="previewUrl" class="grid gap-2">
-      <div class="relative overflow-hidden rounded-[10px] bg-background">
-        <img
-          v-if="previewKind === 'image'"
-          :src="previewUrl"
-          alt="Story preview"
-          class="block max-h-[60vh] w-full object-contain"
-        />
-        <video
-          v-else
-          :src="previewUrl"
-          class="block max-h-[60vh] w-full"
-          controls
-          playsinline
-        ></video>
-        <button
-          type="button"
-          class="absolute top-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-foreground hover:bg-muted"
-          :disabled="busy"
-          aria-label="Remove media"
-          @click="clearPreview"
-        >
-          <Trash2 class="h-4 w-4" aria-hidden="true" />
-        </button>
-      </div>
+    <div v-if="previewUrl" :class="[ui.stage, ui.preview]">
+      <img
+        v-if="previewKind === 'image'"
+        :src="previewUrl"
+        alt="Story preview"
+      />
+      <video
+        v-else
+        :src="previewUrl"
+        controls
+        playsinline
+      ></video>
+      <button
+        type="button"
+        :class="ui.round"
+        data-theme="night"
+        :disabled="busy"
+        aria-label="Remove media"
+        @click="clearPreview"
+      >
+        <Trash2 aria-hidden="true" />
+      </button>
     </div>
 
     <textarea
       v-model="body"
-      class="min-h-[3rem] w-full resize-y rounded-[10px] border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      :class="ui.textarea"
+      rows="2"
       placeholder="Add a caption (optional)"
       :disabled="busy"
       aria-label="Story caption"
     />
 
-    <div class="flex items-center justify-between gap-2">
-      <span class="type-section-label">Expires in 24h</span>
-      <div class="flex items-center gap-2">
-        <button
-          type="button"
-          class="inline-flex h-8 items-center gap-1 rounded-[10px] border border-border bg-card px-3 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted disabled:opacity-50"
-          :disabled="busy"
-          @click="cancel"
-        >
-          <X class="h-3.5 w-3.5" aria-hidden="true" />
-          Cancel
-        </button>
-        <button
-          type="button"
-          class="inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-primary px-3.5 text-[13px] font-bold text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="!canSubmit"
-          @click="submit"
-        >
-          {{ busy ? "Sharing…" : "Share" }}
-        </button>
-      </div>
+    <div :class="ui.foot">
+      <span :class="ui.expires"><Clock aria-hidden="true" />Expires in 24h</span>
+      <button
+        type="button"
+        :class="quietButton"
+        :disabled="busy"
+        @click="cancel"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        :class="primaryButton"
+        :disabled="!canSubmit"
+        @click="submit"
+      >
+        {{ busy ? "Sharing…" : "Share" }}
+      </button>
     </div>
   </section>
 </template>

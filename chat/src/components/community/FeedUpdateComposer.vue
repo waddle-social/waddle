@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, reactive, ref, watch, type Component } from "vue";
 import {
   Briefcase,
@@ -10,7 +11,6 @@ import {
   Send,
   Smile,
 } from "lucide-vue-next";
-import UserAvatar from "@/components/ui/UserAvatar.vue";
 import StoryComposer from "@/components/community/StoryComposer.vue";
 import { connectionStore } from "@/lib/connection-store";
 import {
@@ -31,7 +31,7 @@ import {
   type TuneValidationErrors,
 } from "@/lib/status-publication-ui";
 import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import {
   draftFromProfile,
@@ -41,6 +41,8 @@ import {
   type VCard4Profile,
 } from "@/lib/xmpp/vcard4-types";
 import type { FeedSurfaceComposerMode } from "@/shell/state";
+import { css, cx } from "styled-system/css";
+import { btn, field, floe, input, seg } from "styled-system/recipes";
 
 interface FeedUpdateComposerProps {
   selfJid: string | null;
@@ -77,11 +79,40 @@ const COMPOSER_MODES: readonly { id: ComposerMode; label: string; icon: Componen
   { id: "profile", label: "Profile", icon: IdCard },
 ];
 
-const fieldLabelClass = "type-section-label";
-const fieldClass = "rounded-[10px] border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
-const primaryButtonClass = "inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-primary px-3.5 text-[13px] font-bold text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
-const quietButtonClass = "inline-flex h-8 items-center gap-1.5 rounded-[10px] border border-border bg-card px-3 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50";
-const textareaClass = `${fieldClass} min-h-[4rem] resize-y`;
+const ui = {
+  root: cx(floe(), css({ "--pad": "16px", gap: "3", _focusWithin: { borderColor: "border.strong" } })),
+  modes: cx(seg(), css({ alignSelf: "flex-start", maxWidth: "100%", overflowX: "auto", flex: "none" })),
+  form: css({ display: "flex", flexDirection: "column", gap: "3" }),
+  grid: css({ display: "grid", gap: "3", gridTemplateColumns: { base: "minmax(0, 1fr)", sm: "repeat(2, minmax(0, 1fr))" } }),
+  gridLead: css({ display: "grid", gap: "3", gridTemplateColumns: { base: "minmax(0, 1fr)", sm: "minmax(0, 12rem) minmax(0, 1fr)" } }),
+  postBody: css({
+    resize: "none",
+    minHeight: "4rem",
+    border: 0,
+    bg: "transparent",
+    color: "fg",
+    font: "15px/1.5 {fonts.body}",
+    padding: "{spacing.1} {spacing.1.5}",
+    borderRadius: "sm",
+    _placeholder: { color: "fg.soft" },
+    _focusVisible: { outlineOffset: "0" },
+    _disabled: { opacity: 0.5 },
+  }),
+  actions: css({ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "2" }),
+  end: css({ display: "flex", justifyContent: "flex-end" }),
+  fieldError: css({ textStyle: "caption", color: "danger.text" }),
+};
+const fieldClass = cx(field(), css({ "& > span:first-child": { textStyle: "label", color: "fg" } }));
+const inputClass = input();
+const textareaClass = cx(input(), css({ height: "auto", minHeight: "4rem", py: "2.5", resize: "vertical", font: "14px/1.5 {fonts.body}" }));
+const primaryButtonClass = btn({ variant: "primary" });
+const quietButtonClass = btn();
+const counterClass = { base: css({ textStyle: "caption", color: "fg.muted" }), over: css({ textStyle: "caption", color: "danger.text" }) };
+const FEEDBACK_CLASS: Record<FeedbackTone, string> = {
+  muted: css({ textStyle: "caption", color: "fg.muted" }),
+  success: css({ textStyle: "caption", color: "success.text" }),
+  error: css({ textStyle: "caption", color: "danger.text" }),
+};
 const COMPOSER_MAX = 500;
 
 const composerMode = ref<ComposerMode>(props.initialMode);
@@ -147,22 +178,6 @@ watch(() => props.selfJid, () => {
 watch(() => props.initialMode, (mode) => {
   composerMode.value = mode;
 });
-
-function authorLabel(author: string | undefined): string {
-  if (!author) return "Anonymous";
-  return jidLocalpart(author);
-}
-
-function feedbackClass(tone: FeedbackTone): string {
-  switch (tone) {
-    case "success":
-      return "text-moss";
-    case "error":
-      return "text-destructive-text";
-    default:
-      return "text-muted-foreground";
-  }
-}
 
 function errorMessage(value: unknown, fallback = "Something went wrong."): string {
   return value instanceof Error ? value.message : fallback;
@@ -368,41 +383,32 @@ async function publishProfile() {
 </script>
 
 <template>
-  <section
-    class="grid gap-3 rounded-2xl border border-border bg-card p-4 focus-within:border-primary/60"
-    aria-label="Create feed update"
-  >
-    <div class="flex items-center gap-3">
-      <UserAvatar :name="authorLabel(selfJid ?? '')" :jid="selfJid ?? null" size="md" />
-      <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-center gap-1" role="tablist" aria-label="Feed update type">
-          <button
-            v-for="mode in COMPOSER_MODES"
-            :key="mode.id"
-            type="button"
-            role="tab"
-            class="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] font-semibold transition-colors"
-            :class="composerMode === mode.id ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'"
-            :aria-selected="composerMode === mode.id ? 'true' : 'false'"
-            @click="composerMode = mode.id"
-          >
-            <component :is="mode.icon" class="h-3.5 w-3.5" aria-hidden="true" />
-            {{ mode.label }}
-          </button>
-        </div>
-      </div>
+  <section :class="ui.root" aria-label="Create feed update">
+    <div :class="ui.modes" role="tablist" aria-label="Feed update type">
+      <button
+        v-for="mode in COMPOSER_MODES"
+        :key="mode.id"
+        type="button"
+        role="tab"
+        :aria-selected="composerMode === mode.id ? 'true' : 'false'"
+        @click="composerMode = mode.id"
+      >
+        <component :is="mode.icon" aria-hidden="true" />
+        {{ mode.label }}
+      </button>
     </div>
 
-    <form v-if="composerMode === 'post'" class="grid gap-3" @submit.prevent="submitPost">
+    <form v-if="composerMode === 'post'" :class="ui.form" @submit.prevent="submitPost">
       <textarea
         v-model="composerBody"
-        :class="textareaClass"
-        placeholder="Share something with the community..."
+        :class="ui.postBody"
+        rows="2"
+        placeholder="Share something with the community"
         :disabled="isPosting || postBusy"
         aria-label="Feed post body"
       />
-      <div class="flex items-center justify-between gap-2">
-        <span class="type-caption" :class="composerOver ? 'text-destructive-text' : 'text-muted-foreground'">
+      <div :class="ui.actions">
+        <span :class="composerOver ? counterClass.over : counterClass.base">
           {{ composerBody.length }} / {{ COMPOSER_MAX }}
         </span>
         <button
@@ -410,7 +416,7 @@ async function publishProfile() {
           :class="primaryButtonClass"
           :disabled="!canSubmitPost || composerOver"
         >
-          <Send class="h-3.5 w-3.5" aria-hidden="true" />
+          <Send aria-hidden="true" />
           {{ isPosting || postBusy ? "Posting..." : "Post" }}
         </button>
       </div>
@@ -425,22 +431,23 @@ async function publishProfile() {
       @cancel="storyComposerError = null"
     />
 
-    <form v-else-if="composerMode === 'mood'" class="grid gap-3" @submit.prevent="publishMood">
-      <div class="grid gap-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)]">
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Mood</span>
-          <select v-model="moodDraft.kind" :class="fieldClass" :disabled="pepBusy === 'mood'">
-            <option value="">Choose mood</option>
-            <option v-for="kind in MOOD_KINDS" :key="kind" :value="kind">
-              {{ formatPepKeyword(kind) }}
-            </option>
-          </select>
+    <form v-else-if="composerMode === 'mood'" :class="ui.form" @submit.prevent="publishMood">
+      <div :class="ui.gridLead">
+        <label :class="fieldClass">
+          <span>Mood</span>
+          <AppSelect
+            v-model="moodDraft.kind"
+            :options="MOOD_KINDS.map((kind) => ({ value: kind, label: formatPepKeyword(kind) }))"
+            placeholder="Choose mood"
+            :class="inputClass"
+            :disabled="pepBusy === 'mood'"
+          />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Text</span>
+        <label :class="fieldClass">
+          <span>Text</span>
           <input
             v-model="moodDraft.text"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'mood'"
             maxlength="180"
             placeholder="Optional note"
@@ -448,190 +455,191 @@ async function publishProfile() {
           />
         </label>
       </div>
-      <div class="flex justify-end">
+      <div :class="ui.end">
         <button
           type="submit"
           :class="primaryButtonClass"
           :disabled="pepBusy !== null"
         >
-          <Smile class="h-3.5 w-3.5" aria-hidden="true" />
+          <Smile aria-hidden="true" />
           {{ pepBusy === 'mood' ? "Publishing..." : "Publish mood" }}
         </button>
       </div>
     </form>
 
-    <form v-else-if="composerMode === 'activity'" class="grid gap-3" @submit.prevent="publishActivity">
-      <div class="grid gap-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)]">
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Activity</span>
-          <select v-model="activityDraft.general" :class="fieldClass" :disabled="pepBusy === 'activity'">
-            <option value="">Choose activity</option>
-            <option v-for="general in GENERAL_ACTIVITIES" :key="general" :value="general">
-              {{ formatPepKeyword(general) }}
-            </option>
-          </select>
-          <span v-if="activityErrors.general" class="type-caption text-destructive-text">{{ activityErrors.general }}</span>
+    <form v-else-if="composerMode === 'activity'" :class="ui.form" @submit.prevent="publishActivity">
+      <div :class="ui.gridLead">
+        <label :class="fieldClass">
+          <span>Activity</span>
+          <AppSelect
+            v-model="activityDraft.general"
+            :options="GENERAL_ACTIVITIES.map((general) => ({ value: general, label: formatPepKeyword(general) }))"
+            placeholder="Choose activity"
+            :class="inputClass"
+            :disabled="pepBusy === 'activity'"
+          />
+          <span v-if="activityErrors.general" :class="ui.fieldError">{{ activityErrors.general }}</span>
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Specific</span>
+        <label :class="fieldClass">
+          <span>Specific</span>
           <input
             v-model="activityDraft.specific"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'activity'"
             maxlength="80"
             placeholder="Optional detail"
             type="text"
           />
-          <span v-if="activityErrors.specific" class="type-caption text-destructive-text">{{ activityErrors.specific }}</span>
+          <span v-if="activityErrors.specific" :class="ui.fieldError">{{ activityErrors.specific }}</span>
         </label>
       </div>
-      <label class="grid gap-1.5">
-        <span :class="fieldLabelClass">Text</span>
+      <label :class="fieldClass">
+        <span>Text</span>
         <input
           v-model="activityDraft.text"
-          :class="fieldClass"
+          :class="inputClass"
           :disabled="pepBusy === 'activity'"
           maxlength="180"
           placeholder="Optional note"
           type="text"
         />
       </label>
-      <div class="flex justify-end">
+      <div :class="ui.end">
         <button
           type="submit"
           :class="primaryButtonClass"
           :disabled="pepBusy !== null"
         >
-          <Briefcase class="h-3.5 w-3.5" aria-hidden="true" />
+          <Briefcase aria-hidden="true" />
           {{ pepBusy === 'activity' ? "Publishing..." : "Publish activity" }}
         </button>
       </div>
     </form>
 
-    <form v-else-if="composerMode === 'tune'" class="grid gap-3" @submit.prevent="publishTune">
-      <div class="grid gap-3 sm:grid-cols-2">
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Title</span>
+    <form v-else-if="composerMode === 'tune'" :class="ui.form" @submit.prevent="publishTune">
+      <div :class="ui.grid">
+        <label :class="fieldClass">
+          <span>Title</span>
           <input
             v-model="tuneDraft.title"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'tune'"
             maxlength="160"
             type="text"
           />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Artist</span>
+        <label :class="fieldClass">
+          <span>Artist</span>
           <input
             v-model="tuneDraft.artist"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'tune'"
             maxlength="160"
             type="text"
           />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Source</span>
+        <label :class="fieldClass">
+          <span>Source</span>
           <input
             v-model="tuneDraft.source"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'tune'"
             maxlength="160"
             type="text"
           />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">URI</span>
+        <label :class="fieldClass">
+          <span>URI</span>
           <input
             v-model="tuneDraft.uri"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'tune'"
             maxlength="240"
             type="text"
           />
-          <span v-if="tuneErrors.uri" class="type-caption text-destructive-text">{{ tuneErrors.uri }}</span>
+          <span v-if="tuneErrors.uri" :class="ui.fieldError">{{ tuneErrors.uri }}</span>
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Length</span>
+        <label :class="fieldClass">
+          <span>Length</span>
           <input
             v-model="tuneDraft.length"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'tune'"
             inputmode="numeric"
             type="text"
           />
-          <span v-if="tuneErrors.length" class="type-caption text-destructive-text">{{ tuneErrors.length }}</span>
+          <span v-if="tuneErrors.length" :class="ui.fieldError">{{ tuneErrors.length }}</span>
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Rating</span>
+        <label :class="fieldClass">
+          <span>Rating</span>
           <input
             v-model="tuneDraft.rating"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="pepBusy === 'tune'"
             inputmode="numeric"
             type="text"
           />
-          <span v-if="tuneErrors.rating" class="type-caption text-destructive-text">{{ tuneErrors.rating }}</span>
+          <span v-if="tuneErrors.rating" :class="ui.fieldError">{{ tuneErrors.rating }}</span>
         </label>
       </div>
-      <p v-if="tuneErrors.form" class="type-caption text-destructive-text">{{ tuneErrors.form }}</p>
-      <div class="flex justify-end">
+      <p v-if="tuneErrors.form" :class="ui.fieldError">{{ tuneErrors.form }}</p>
+      <div :class="ui.end">
         <button
           type="submit"
           :class="primaryButtonClass"
           :disabled="pepBusy !== null"
         >
-          <Music class="h-3.5 w-3.5" aria-hidden="true" />
+          <Music aria-hidden="true" />
           {{ pepBusy === 'tune' ? "Publishing..." : "Publish tune" }}
         </button>
       </div>
     </form>
 
-    <form v-else class="grid gap-3" @submit.prevent="publishProfile">
-      <div class="grid gap-3 sm:grid-cols-2">
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Full name</span>
+    <form v-else :class="ui.form" @submit.prevent="publishProfile">
+      <div :class="ui.grid">
+        <label :class="fieldClass">
+          <span>Full name</span>
           <input
             v-model="profileDraft.fullName"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="profileLoading || pepBusy === 'profile'"
             maxlength="160"
             type="text"
           />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Nickname</span>
+        <label :class="fieldClass">
+          <span>Nickname</span>
           <input
             v-model="profileDraft.nickname"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="profileLoading || pepBusy === 'profile'"
             maxlength="80"
             type="text"
           />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">Pronouns</span>
+        <label :class="fieldClass">
+          <span>Pronouns</span>
           <input
             v-model="profileDraft.pronouns"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="profileLoading || pepBusy === 'profile'"
             maxlength="48"
             type="text"
           />
         </label>
-        <label class="grid gap-1.5">
-          <span :class="fieldLabelClass">URL</span>
+        <label :class="fieldClass">
+          <span>URL</span>
           <input
             v-model="profileDraft.url"
-            :class="fieldClass"
+            :class="inputClass"
             :disabled="profileLoading || pepBusy === 'profile'"
             maxlength="240"
             type="url"
           />
         </label>
       </div>
-      <label class="grid gap-1.5">
-        <span :class="fieldLabelClass">Bio</span>
+      <label :class="fieldClass">
+        <span>Bio</span>
         <textarea
           v-model="profileDraft.note"
           :class="textareaClass"
@@ -639,14 +647,14 @@ async function publishProfile() {
           maxlength="500"
         />
       </label>
-      <div class="flex items-center justify-between gap-2">
+      <div :class="ui.actions">
         <button
           type="button"
           :class="quietButtonClass"
           :disabled="profileLoading || pepBusy !== null"
           @click="loadProfileDraft"
         >
-          <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': profileLoading }" aria-hidden="true" />
+          <RefreshCw aria-hidden="true" />
           {{ profileLoading ? "Loading..." : "Reload" }}
         </button>
         <button
@@ -654,16 +662,16 @@ async function publishProfile() {
           :class="primaryButtonClass"
           :disabled="profileLoading || pepBusy !== null || !profileLoaded"
         >
-          <IdCard class="h-3.5 w-3.5" aria-hidden="true" />
+          <IdCard aria-hidden="true" />
           {{ pepBusy === 'profile' ? "Publishing..." : "Publish profile" }}
         </button>
       </div>
     </form>
 
-    <p v-if="composerFeedback" class="type-caption" :class="feedbackClass(composerFeedback.tone)" role="status">
+    <p v-if="composerFeedback" :class="FEEDBACK_CLASS[composerFeedback.tone]" role="status">
       {{ composerFeedback.message }}
     </p>
-    <p v-if="composerMode === 'story' && storyComposerError" class="type-caption text-destructive-text" role="status">
+    <p v-if="composerMode === 'story' && storyComposerError" :class="ui.fieldError" role="status">
       {{ storyComposerError }}
     </p>
   </section>

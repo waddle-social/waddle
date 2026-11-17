@@ -98,12 +98,12 @@ async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_an
     tx.rollback().await.expect("rollback rejected boundary");
 
     sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version=2000",
+        "DELETE FROM {}._migrations WHERE version>=2000",
         fixture.schema
     ))
     .execute(&fixture.admin)
     .await
-    .expect("remove current migration from fixture");
+    .expect("remove the required prefix from fixture");
     let mut tx = db.begin().await.expect("missing migration transaction");
     tx.execute(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",

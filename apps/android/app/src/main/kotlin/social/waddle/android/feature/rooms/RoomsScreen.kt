@@ -1,6 +1,7 @@
 package social.waddle.android.feature.rooms
 
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -10,18 +11,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyGridScope
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,8 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -40,12 +43,12 @@ import social.waddle.android.R
 import social.waddle.android.feature.home.CreateRoomHost
 import social.waddle.android.feature.home.DashedNote
 import social.waddle.android.feature.home.HomeViewModel
-import social.waddle.android.feature.home.PageHeader
 import social.waddle.android.feature.home.ShellSearchField
 import social.waddle.android.feature.home.rememberNow
 import social.waddle.android.feature.home.rememberStableOrder
 import social.waddle.android.theme.Waddle
-import social.waddle.android.ui.huddle.HuddleCard
+import social.waddle.android.ui.BackArrow
+import social.waddle.android.ui.WaddleTopBar
 import social.waddle.android.ui.huddle.PillButton
 import social.waddle.android.ui.huddle.SkeletonBlock
 import java.time.Clock
@@ -61,6 +64,7 @@ fun RoomsScreen(
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
     speaking: Set<String> = emptySet(),
     clock: Clock = Clock.systemDefaultZone(),
+    onBack: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: RoomsViewModel = viewModel(factory = RoomsViewModel.factory(graph))
@@ -83,6 +87,18 @@ fun RoomsScreen(
     Scaffold(
         contentWindowInsets = contentWindowInsets,
         snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            WaddleTopBar(
+                title = { Text(stringResource(R.string.rooms_browse_title)) },
+                navigationIcon = { BackArrow(onBack) },
+                actions = {
+                    if (canCreate) {
+                        NewRoomPill(onCreate = { create.open = true })
+                        Spacer(Modifier.size(Waddle.space.xs))
+                    }
+                },
+            )
+        },
     ) { padding ->
         RoomsContent(
             state = state,
@@ -122,76 +138,80 @@ fun RoomsContent(
     modifier: Modifier = Modifier,
     speaking: Set<String> = emptySet(),
 ) {
-    val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
     val ordered = rememberStableOrder(
         sorted = state.rooms,
         keyOf = RoomActivity::roomJid,
-        interacting = gridState.isScrollInProgress,
+        interacting = listState.isScrollInProgress,
     )
     val needle = query.trim()
     val visible = if (needle.isEmpty()) ordered else ordered.filter { it.name.contains(needle, ignoreCase = true) }
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = TILE_MIN_WIDTH),
-        state = gridState,
+    LazyColumn(
+        state = listState,
         contentPadding = PaddingValues(
             start = Waddle.space.md,
             end = Waddle.space.md,
-            top = Waddle.space.lg,
+            top = Waddle.space.xs,
             bottom = Waddle.space.xl,
         ),
-        verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
-        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = modifier
             .fillMaxSize()
             .imePadding()
             .testTag(RoomsScreenTestTags.SCREEN),
     ) {
-        fullWidth("header") {
-            RoomsHeader(rooms = state.rooms, canCreate = canCreate, onCreate = onCreate)
-        }
-        fullWidth("search") {
+        item(key = "search", contentType = "search") {
             ShellSearchField(
                 value = query,
                 onValueChange = onQueryChange,
                 placeholder = stringResource(R.string.rooms_search),
-                modifier = Modifier.padding(top = Waddle.space.xs, bottom = Waddle.space.xs),
+                modifier = Modifier.padding(bottom = Waddle.space.md),
             )
         }
         when {
-            state.rooms.isEmpty() && !state.settled -> loadingTiles()
-            state.rooms.isEmpty() -> fullWidth("empty") {
+            state.rooms.isEmpty() && !state.settled -> loadingRows()
+            state.rooms.isEmpty() -> item(key = "empty") {
                 DashedNote(text = stringResource(R.string.rooms_empty)) {
                     if (canCreate) NewRoomPill(onCreate)
                 }
             }
-            visible.isEmpty() -> fullWidth("no-match") {
+            visible.isEmpty() -> item(key = "no-match") {
                 DashedNote(text = stringResource(R.string.rooms_no_match, needle))
             }
-            else -> items(items = visible, key = { it.roomJid }, contentType = { "room" }) { room ->
-                RoomTile(
-                    room = room,
-                    nowMillis = nowMillis,
-                    onEnter = { onEnter(room) },
-                    onJoin = { onJoin(room) },
-                    speaking = speaking,
-                    modifier = Modifier.animateItem(),
-                )
+            // One card of rows, as chat lists them: each row draws its
+            // slice of the card, so the list stays lazy.
+            else -> itemsIndexed(items = visible, key = { _, room -> room.roomJid }, contentType = { _, _ -> "room" }) {
+                    index,
+                    room,
+                ->
+                Column(
+                    Modifier
+                        .animateItem()
+                        .clip(cellShape(first = index == 0, last = index == visible.lastIndex))
+                        .background(Waddle.colors.surface),
+                ) {
+                    if (index > 0) HorizontalDivider(color = Waddle.colors.borderSoft)
+                    RoomListRow(
+                        room = room,
+                        nowMillis = nowMillis,
+                        onEnter = { onEnter(room) },
+                        onJoin = { onJoin(room) },
+                        speaking = speaking,
+                    )
+                }
             }
         }
     }
 }
 
+/** The slice of the list card one row draws: rounded at the ends only. */
 @Composable
-private fun RoomsHeader(rooms: List<RoomActivity>, canCreate: Boolean, onCreate: () -> Unit) {
-    val live = rooms.count { it.live }
-    val count = pluralStringResource(R.plurals.rooms_count, rooms.size, rooms.size)
-    val kicker = if (live > 0) "$count · ${pluralStringResource(R.plurals.rooms_live, live, live)}" else count
-    PageHeader(
-        title = stringResource(R.string.rooms_title),
-        kicker = kicker,
-        lead = stringResource(R.string.rooms_lead),
-        live = live > 0,
-        action = { if (canCreate) NewRoomPill(onCreate) },
+private fun cellShape(first: Boolean, last: Boolean): RoundedCornerShape {
+    val r = Waddle.radius.card
+    return RoundedCornerShape(
+        topStart = if (first) r else 0.dp,
+        topEnd = if (first) r else 0.dp,
+        bottomStart = if (last) r else 0.dp,
+        bottomEnd = if (last) r else 0.dp,
     )
 }
 
@@ -205,27 +225,19 @@ private fun NewRoomPill(onCreate: () -> Unit) {
     )
 }
 
-private fun LazyGridScope.fullWidth(key: String, content: @Composable () -> Unit) {
-    item(key = key, span = { GridItemSpan(maxLineSpan) }, contentType = key) { content() }
-}
-
-/** "Finding your rooms." over the shapes of the tiles to come. */
-private fun LazyGridScope.loadingTiles() {
-    fullWidth("loading") { DashedNote(text = stringResource(R.string.rooms_loading)) }
-    items(count = SKELETON_TILES, key = { "skeleton-$it" }, contentType = { "skeleton" }) {
-        HuddleCard(modifier = Modifier.fillMaxWidth()) {
-            SkeletonBlock(Modifier.fillMaxWidth(SKELETON_KICKER))
-            Spacer(Modifier.size(Waddle.space.xs))
-            SkeletonBlock(Modifier.fillMaxWidth(SKELETON_TITLE), height = SKELETON_TITLE_HEIGHT)
-            Spacer(Modifier.size(Waddle.space.xs))
-            SkeletonBlock(Modifier.fillMaxWidth(SKELETON_BODY))
-        }
+/** "Finding your rooms." over the shapes of the rows to come. */
+private fun LazyListScope.loadingRows() {
+    item(key = "loading") { DashedNote(text = stringResource(R.string.rooms_loading)) }
+    items(count = SKELETON_ROWS, key = { "skeleton-$it" }, contentType = { "skeleton" }) {
+        SkeletonBlock(
+            Modifier
+                .padding(top = Waddle.space.xs)
+                .fillMaxWidth(),
+            height = SKELETON_ROW,
+            radius = Waddle.radius.control,
+        )
     }
 }
 
-private val TILE_MIN_WIDTH = 320.dp
-private val SKELETON_TITLE_HEIGHT = 18.dp
-private const val SKELETON_TILES = 3
-private const val SKELETON_KICKER = 0.35f
-private const val SKELETON_TITLE = 0.55f
-private const val SKELETON_BODY = 0.85f
+private val SKELETON_ROW = 56.dp
+private const val SKELETON_ROWS = 4

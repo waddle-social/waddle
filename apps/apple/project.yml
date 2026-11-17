@@ -4,6 +4,17 @@ options:
 packages:
   WaddleKit:
     path: WaddleKit
+  # Test-only: the design-system snapshot tests.
+  SnapshotTesting:
+    url: https://github.com/pointfreeco/swift-snapshot-testing
+    from: 1.18.0
+  # Call media. Pinned exactly: bump it under the LiveKit version-currency
+  # policy (#1533), after reading the release notes and re-running the
+  # connect check in WaddleTests/LiveKitCallMediaTests.swift against the
+  # SFU version in infrastructure/waddle.cloud/charts/livekit-sfu.
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift
+    exactVersion: 2.19.0
 settings:
   base:
     SWIFT_VERSION: 5.0
@@ -32,11 +43,23 @@ targets:
         embed: false
         link: true
       - package: WaddleKit
+      - package: LiveKit
     preBuildScripts:
       - name: Sync Waddle Brand Assets
         script: |
           set -euo pipefail
           env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
+    # Merged into the generated Info.plist, for keys it has no
+    # INFOPLIST_KEY_ setting for.
+    info:
+      path: Waddle/Platform/Waddle-iOS-Info.plist
+      properties:
+        # A call keeps its audio when the app goes to the background.
+        # Ringing a closed app needs a VoIP push, tracked separately.
+        UIBackgroundModes: [audio]
+        # XcodeGen would write 1.0 and 1; Xcode Cloud sets the build number.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
     entitlements:
       path: Waddle/Platform/Waddle-iOS.entitlements
       properties:
@@ -45,10 +68,14 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Waddle-iOS
+        # Both apps share a module name so one test source imports either.
+        PRODUCT_MODULE_NAME: Waddle
         PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_CFBundleIconName: AppIcon
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Waddle uses the microphone so people on a call can hear you."
+        INFOPLIST_KEY_NSCameraUsageDescription: "Waddle uses the camera so people on a video call can see you."
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -65,11 +92,13 @@ targets:
         excludes:
           - "**/*.md"
           - LaunchScreen.storyboard
+          - Platform/Waddle-iOS-Info.plist
     dependencies:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
       - package: WaddleKit
+      - package: LiveKit
     preBuildScripts:
       - name: Sync Waddle Brand Assets
         script: |
@@ -85,16 +114,67 @@ targets:
         com.apple.security.network.client: true
         # Composer file importer.
         com.apple.security.files.user-selected.read-only: true
+        # Call media: publishing the microphone and camera.
+        com.apple.security.device.audio-input: true
+        com.apple.security.device.camera: true
+        # WebRTC media binds UDP sockets and receives on them; not yet
+        # confirmed necessary with a signed build (#2480).
+        com.apple.security.network.server: true
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS
+        PRODUCT_MODULE_NAME: Waddle
         PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_CFBundleIconName: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Waddle uses the microphone so people on a call can hear you."
+        INFOPLIST_KEY_NSCameraUsageDescription: "Waddle uses the camera so people on a video call can see you."
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
         MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
+  # Unit tests hosted by each app: design-system snapshots in Night and
+  # Daylight. Goldens live in WaddleTests/__Snapshots__, one set per platform.
+  WaddleTests-iOS:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: WaddleTests
+        excludes:
+          - "**/__Snapshots__/**"
+      # The scripted port and fixtures, compiled into the test bundle: it
+      # must use the host app's copy of WaddleKit, not link a second one.
+      - path: WaddleKit/Sources/WaddleKitTestSupport
+    dependencies:
+      - target: Waddle-iOS
+      - package: SnapshotTesting
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social.tests
+        # `@testable import Waddle` re-imports the Rust FFI clang module.
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Waddle/RustClient"
+        OTHER_SWIFT_FLAGS: "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/Waddle/RustClient/module.modulemap"
+  WaddleTests-macOS:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: WaddleTests
+        excludes:
+          - "**/__Snapshots__/**"
+      # The scripted port and fixtures, compiled into the test bundle: it
+      # must use the host app's copy of WaddleKit, not link a second one.
+      - path: WaddleKit/Sources/WaddleKitTestSupport
+    dependencies:
+      - target: Waddle-macOS
+      - package: SnapshotTesting
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social.tests
+        # `@testable import Waddle` re-imports the Rust FFI clang module.
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Waddle/RustClient"
+        OTHER_SWIFT_FLAGS: "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/Waddle/RustClient/module.modulemap"
 # One scheme per app, and no combined scheme: an archive must build a single
 # app for a single platform. Xcode Cloud's ci_post_clone.sh builds only the
 # archived platform's XCFramework slice, so a scheme archiving both apps
@@ -104,7 +184,13 @@ schemes:
     build:
       targets:
         Waddle-iOS: all
+    test:
+      targets:
+        - WaddleTests-iOS
   Waddle-macOS:
     build:
       targets:
         Waddle-macOS: all
+    test:
+      targets:
+        - WaddleTests-macOS

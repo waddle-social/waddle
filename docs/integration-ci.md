@@ -1,7 +1,10 @@
 # Merge candidate verification
 
-`waddle-integration` runs on every pull request, merge-group `checks_requested`
-event, and explicit workflow dispatch. **Its same-repository `integration`
+`waddle-integration` runs on every merge-group `checks_requested` event and
+explicit workflow dispatch. It does not run on pull requests: every lane it
+contains is a copy of a workflow that already runs there (the Rust shard workflow
+`waddle-server-rustTests` is dispatch-only and is not part of this graph), and running both
+doubled the demand for each runner, including the 32-core test builder. **Its same-repository `integration`
 aggregate is candidate-controlled and is not eligible as the required trusted
 gate.** A candidate can edit the workflow, generator, adapter, tests or task
 definitions and manufacture success. Action SHA pins, read-only permissions,
@@ -33,7 +36,7 @@ and addition so both old and new paths participate; filenames stay NUL separated
 Every generated `uses:` reference must identify a full 40-character Git commit.
 The generator translates only the explicitly selected mutable source aliases
 below. The v4/Python refs were resolved from official upstream repositories on
-2026-10-30; v7 is the accepted 0.63.2 emitter alias pinned on 2026-10-31:
+2026-10-30; v7 is the accepted 0.76.1 emitter alias pinned on 2026-10-31:
 
 | Source alias | Fixed generated reference |
 | --- | --- |
@@ -82,26 +85,24 @@ cryptographic evidence against arbitrary candidate code forging its own files.
 
 ## Verified release bootstrap
 
-The CLI is explicitly pinned to **cuenv 0.63.2** through the shared
+The CLI is explicitly pinned to **cuenv 0.76.1** through the shared
 `#CuenvVersion` in `ci/contributors/cuenv.cue` and root
 `config.ci.cuenv.version`. Each of the seven projects is checked separately for
-that resolved configuration. The separately pinned CUE schema remains 0.57.3;
-cuenv prints a version-mismatch warning. Configuration, inventory and drift
-checks exercise this deliberately retained schema rather than claiming blanket
-cross-version compatibility.
+that resolved configuration. The CUE schema module is pinned to the same
+version, 0.76.1, in `cue.mod/module.cue`.
 
-[Release 0.63.2](https://github.com/cuenv/cuenv/releases/tag/0.63.2) contains the
-supported `ci --all` fix. The downloaded release artifacts have these SHA-256 pins:
+[Release 0.76.1](https://github.com/cuenv/cuenv/releases/tag/0.76.1) contains the
+supported `ci --all` behavior. The downloaded release artifacts have these SHA-256 pins:
 
 | Asset | SHA-256 |
 | --- | --- |
-| `cuenv-darwin-arm64` | `8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba` |
-| `cuenv-linux-arm64` | `0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519` |
-| `cuenv-linux-x64` | `5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa` |
+| `cuenv-darwin-arm64` | `e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160` |
+| `cuenv-linux-arm64` | `653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4` |
+| `cuenv-linux-x64` | `3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102` |
 
 The CUE-owned contributor checks OS/architecture, rejects any other version or
 missing digest, downloads to a temporary file, verifies SHA-256 before chmod or
-execution, then requires exact `cuenv 0.63.2` version output. Only then does it
+execution, then requires exact `cuenv 0.76.1` version output. Only then does it
 install into a private `RUNNER_TEMP` directory, append that directory to
 `GITHUB_PATH`, and run that installed binary for VCS materialization. There is no
 `latest` or unverified fallback and no `/usr/local` installation. The integration
@@ -109,7 +110,7 @@ planner runs executable bootstrap acceptance/negative tests; all generated relea
 steps must be identical. Platform mapping is simulated in those Linux-hosted
 fixtures; native Darwin/arm64 execution remains a hosted qualification.
 
-Regeneration with 0.63.2 intentionally accepts its automatic `actions/checkout@v7`
+Regeneration with 0.76.1 intentionally accepts its automatic `actions/checkout@v7`
 emission, mapped to the full SHA above in integration jobs; v4 remains supported
 and unknown future aliases such as v8 fail. The selected v7 action uses Node24,
 which requires Actions Runner >=2.327.1; authenticated Git from container actions
@@ -159,13 +160,16 @@ does not override the real workflow execution context.
 
 The existing server `checkCiDrift` and the integration planner check graph parity.
 Adding or changing a source PR lane without regenerating fails those checks.
-Original PR workflows remain active with their existing privileges, so applicable PR jobs temporarily execute
-in both workflows. This increases demand and deliberately preserves coverage;
-runner provisioning must be repaired before any separately trusted gate is enabled. Omitting
+Original PR workflows remain active with their existing privileges and are the
+only copy that runs on a pull request. A merge-group event runs the copies in
+this graph as well; the main ruleset requires no status check, so the queue does
+not wait for them. The planner's own contracts (`integration-ci.test.ts`,
+`test_integration_ci_project.py`, `test_cuenv_bootstrap.py`) also run in the
+server `checkCiDrift` task, which pull requests run. Omitting
 FlakeHub cache can increase compile and download time; no verification commands,
 runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
-warnings in `crates/ci/src/executor/reporting.rs` of cuenv (now CLI 0.63.2). Generated
+warnings in `crates/ci/src/executor/reporting.rs` of cuenv (now CLI 0.76.1). Generated
 integration jobs rely on Actions job results rather than those notifications.
 
 ## Open trusted-gate boundary

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 struct GifSearchTests {
     private func data(_ json: String) -> Data { Data(json.utf8) }

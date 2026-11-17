@@ -112,6 +112,8 @@ public struct WirePresence: Hashable, Sendable {
     public let occupant: Occupant?
     /// XEP-0319 idle-since.
     public let idleSince: Date?
+    /// XEP-0272 room-call advertisement; absence is the call leave marker.
+    public let groupCall: GroupCallMarker?
 
     public init(
         from: JID,
@@ -120,7 +122,8 @@ public struct WirePresence: Hashable, Sendable {
         status: String? = nil,
         hats: [Hat] = [],
         occupant: Occupant? = nil,
-        idleSince: Date? = nil
+        idleSince: Date? = nil,
+        groupCall: GroupCallMarker? = nil
     ) {
         self.from = from
         self.kind = kind
@@ -129,6 +132,7 @@ public struct WirePresence: Hashable, Sendable {
         self.hats = hats
         self.occupant = occupant
         self.idleSince = idleSince
+        self.groupCall = groupCall
     }
 
     /// Wears the server-assigned bot hat.

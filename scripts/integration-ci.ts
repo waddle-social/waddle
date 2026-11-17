@@ -73,7 +73,7 @@ function remapNeeds(value: any, lane: Lane): any {
 
 const utilitySteps = () => [
   { name: "Checkout exact candidate", uses: checkout, with: { ref: "${{ github.sha }}", "fetch-depth": 0, "persist-credentials": false } },
-  { name: "Install Bun", uses: setupBun, with: { "bun-version": "1.4.2" } },
+  { name: "Install Bun", uses: setupBun, with: { "bun-version": "1.4.4" } },
 ];
 
 export function generate(lanes: Lane[]): string {
@@ -155,9 +155,13 @@ export function generate(lanes: Lane[]): string {
       env: { JOB_RESULTS: "${{ toJSON(needs) }}", EXPECTED_JOBS: "${{ needs.plan.outputs.expected }}" },
     }],
   };
+  // Every lane here is copied from a workflow that already runs on the pull
+  // request. Running the copies there as well doubled the demand for each
+  // runner, including the 32-core builder, so this graph verifies merge-queue
+  // candidates and explicit dispatches only.
   const workflow = {
     name: "waddle-integration",
-    on: { pull_request: {}, merge_group: { types: ["checks_requested"] }, workflow_dispatch: {
+    on: { merge_group: { types: ["checks_requested"] }, workflow_dispatch: {
       inputs: { base_sha: { description: "Full ancestor SHA to compare with the selected workflow ref", required: true, type: "string" } },
     } },
     permissions: { contents: "read" },

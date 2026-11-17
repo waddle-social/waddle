@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 private let poll = ExtensionCommand(
     serviceJID: "extensions.waddle.test",

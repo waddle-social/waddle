@@ -88,6 +88,8 @@ pub(crate) use disco_info::muc_disco_info_for_remote;
 mod disco_items;
 pub(crate) use disco_items::{muc_rooms_for_remote, page_listing, RoomListings};
 pub(crate) mod errors;
+mod event_planning;
+pub(crate) mod event_planning_access;
 mod extension_forms;
 mod extension_route_items;
 mod full_jid_forward;

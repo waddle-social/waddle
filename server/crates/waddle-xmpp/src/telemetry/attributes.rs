@@ -48,6 +48,9 @@ mod tests {
     }
 }
 
+mod actor;
+pub use actor::ActorKind;
+pub use actor::ActorStopKind;
 mod authority;
 pub use authority::AccountMutationKind;
 pub use authority::AccountOperationOutcome;

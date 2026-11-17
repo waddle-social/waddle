@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { MessageCircle } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, kicker, tag } from "styled-system/recipes";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
@@ -98,129 +100,118 @@ const hasVCardSection = computed(
     !!vcard.value?.note ||
     !!safeWebsite.value,
 );
+
+// ProfileCard board, drawer variant: centred identity, one Message action,
+// then the vCard and PEP fields as a hairline-separated list.
+const drawerWidth = css({ width: "min(88vw, 360px)" });
+const kickerClass = kicker();
+const bodyClass = css({ display: "flex", flexDirection: "column", gap: "4", padding: "{spacing.1} {spacing.4} {spacing.4}" });
+const headClass = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "1", textAlign: "center" });
+const nameClass = css({ marginTop: "2", font: "700 20px/1.25 {fonts.display}", overflowWrap: "anywhere" });
+const jidClass = css({ font: "13px/1.4 {fonts.mono}", color: "fg.muted", wordBreak: "break-all" });
+const captionClass = css({ textStyle: "caption", color: "fg.muted" });
+const hatsClass = css({ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "1.5", marginTop: "1.5" });
+const tagClass = tag();
+const messageClass = cx(btn({ variant: "primary" }), css({ justifyContent: "center", width: "100%" }));
+const listClass = css({ margin: 0, display: "flex", flexDirection: "column" });
+const fieldClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1",
+  padding: "{spacing.3} 0",
+  borderTop: "1px solid {colors.border.soft}",
+  "& dd": { margin: 0, fontSize: "14px", lineHeight: 1.5, overflowWrap: "anywhere" },
+});
+const noteClass = css({ whiteSpace: "pre-line" });
+const mutedClass = css({ color: "fg.muted" });
+const linkClass = css({ color: "action.text", wordBreak: "break-all", textDecoration: "underline", textUnderlineOffset: "2px" });
+const loadingClass = css({ display: "flex", flexDirection: "column", gap: "2.5" });
 </script>
 
 <template>
-  <AppDrawer v-model:open="open" side="right" width-class="w-[var(--chat-profile-drawer-width)]" label="Profile drawer">
+  <AppDrawer v-model:open="open" side="right" :width-class="drawerWidth" label="Profile drawer">
     <template #title>
-      <span class="type-pane-title">Profile</span>
+      <span :class="kickerClass">Profile</span>
     </template>
 
-    <div class="chat-dialog-stack p-4">
-      <!-- Header -->
-      <div class="flex flex-col items-center gap-2 pt-2 text-center">
-        <UserAvatar :name="username" :jid="avatarJid ?? null" size="lg" :presence="presence" />
-        <div>
-          <div class="type-card-title">{{ username }}</div>
-          <div v-if="jid && jid !== username" class="type-caption break-all text-muted-foreground">{{ jid }}</div>
-          <div v-if="!isBotJid(jid)" class="type-caption text-muted-foreground">{{ presenceText ?? "offline" }}</div>
-        </div>
-      </div>
-
-      <!-- Role badges -->
-      <div v-if="shownHats.length" class="flex flex-wrap justify-center gap-1.5">
-        <span
-          v-for="hat in shownHats"
-          :key="hat.uri"
-          class="type-caption type-emphasis inline-flex h-7 items-center rounded-full border border-border bg-muted/30 px-2 text-muted-foreground"
-        >
-          {{ hat.title }}
+    <div :class="bodyClass">
+      <div :class="headClass">
+        <UserAvatar :name="username" :jid="avatarJid ?? null" size="xl" :presence="presence" />
+        <span :class="nameClass">{{ username }}</span>
+        <span v-if="jid && jid !== username" :class="jidClass">{{ jid }}</span>
+        <span v-if="!isBotJid(jid)" :class="captionClass">{{ presenceText ?? "offline" }}</span>
+        <span v-if="shownHats.length" :class="hatsClass">
+          <span v-for="hat in shownHats" :key="hat.uri" :class="tagClass">{{ hat.title }}</span>
         </span>
       </div>
 
-      <!-- Loading skeleton — uses the shared Skeleton component so
-           the luminous-shimmer treatment (iter-1 chat-skeleton
-           animation) is consistent with every other loading
-           placeholder in the app. Two skeleton blocks cover the
-           parallel vCard + PEP fetches. -->
-      <div v-if="loading" class="chat-panel-stack" aria-busy="true" aria-label="Loading profile">
-        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <Skeleton width="4rem" height="0.55rem" />
-          <Skeleton width="65%" height="0.85rem" />
-        </div>
-        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <Skeleton width="5rem" height="0.55rem" />
-          <Skeleton width="50%" height="0.85rem" />
-        </div>
-      </div>
-
-      <!-- vCard4 identity sections (Name / Pronouns / Bio / Website).
-           Rendered above mood/activity/tune because vCard is durable
-           identity while PEP mood/activity/tune is volatile presence. -->
-      <template v-if="!loading && hasVCardSection">
-        <section v-if="fullNameToShow" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Name</div>
-          <div class="type-field">{{ fullNameToShow }}</div>
-        </section>
-
-        <section v-if="vcard?.pronouns" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Pronouns</div>
-          <div class="type-field">{{ vcard.pronouns }}</div>
-        </section>
-
-        <section v-if="vcard?.note" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Bio</div>
-          <div class="type-field whitespace-pre-line">{{ vcard.note }}</div>
-        </section>
-
-        <section v-if="safeWebsite" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Website</div>
-          <div class="type-field">
-            <a
-              :href="safeWebsite"
-              target="_blank"
-              rel="noreferrer noopener"
-              class="break-all underline underline-offset-2 hover:text-primary"
-            >
-              {{ safeWebsite }}
-            </a>
-          </div>
-        </section>
-      </template>
-
-      <!-- PEP sections (presence: mood / activity / tune) -->
-      <template v-if="!loading && pepProfile">
-        <!-- Mood -->
-        <section v-if="pepProfile.mood" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Mood</div>
-          <div class="type-field">
-            {{ formatPepKeyword(pepProfile.mood.kind) }}
-            <span v-if="pepProfile.mood.text" class="text-muted-foreground"> &mdash; {{ pepProfile.mood.text }}</span>
-          </div>
-        </section>
-
-        <!-- Activity -->
-        <section v-if="pepProfile.activity" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Activity</div>
-          <div class="type-field">
-            {{ formatPepKeyword(pepProfile.activity.general) }}
-            <span v-if="pepProfile.activity.specific"> &middot; {{ formatPepKeyword(pepProfile.activity.specific) }}</span>
-            <span v-if="pepProfile.activity.text" class="text-muted-foreground"> &mdash; {{ pepProfile.activity.text }}</span>
-          </div>
-        </section>
-
-        <!-- Tune -->
-        <section v-if="pepProfile.tune" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="type-section-label text-muted-foreground/75">Listening to</div>
-          <div class="type-field">
-            <template v-if="pepProfile.tune.title">{{ pepProfile.tune.title }}</template>
-            <template v-if="pepProfile.tune.artist"> &mdash; {{ pepProfile.tune.artist }}</template>
-            <span v-if="pepProfile.tune.source" class="text-muted-foreground"> ({{ pepProfile.tune.source }})</span>
-          </div>
-        </section>
-      </template>
-
-      <!-- Message button (hidden for own profile and bots, which take no DMs) -->
+      <!-- Message (hidden for own profile and bots, which take no DMs) -->
       <button
         v-if="canMessage"
-        class="chat-action-button chat-action-button--primary type-action w-full"
+        :class="messageClass"
         type="button"
         aria-label="Message this person"
         @click="messagePerson"
       >
-        <MessageCircle class="h-4 w-4" />
+        <MessageCircle aria-hidden="true" />
         Message
       </button>
+
+      <!-- Two skeleton blocks cover the parallel vCard + PEP fetches. -->
+      <div v-if="loading" :class="loadingClass" aria-busy="true" aria-label="Loading profile">
+        <Skeleton height="64px" radius="var(--radii-sm)" />
+        <Skeleton height="40px" radius="var(--radii-sm)" />
+      </div>
+
+      <!-- vCard4 identity first (durable), then volatile PEP mood/activity/tune. -->
+      <dl v-if="!loading && (hasVCardSection || pepProfile)" :class="listClass">
+        <template v-if="hasVCardSection">
+          <div v-if="fullNameToShow" :class="fieldClass">
+            <dt :class="kickerClass">Name</dt>
+            <dd>{{ fullNameToShow }}</dd>
+          </div>
+          <div v-if="vcard?.pronouns" :class="fieldClass">
+            <dt :class="kickerClass">Pronouns</dt>
+            <dd>{{ vcard.pronouns }}</dd>
+          </div>
+          <div v-if="vcard?.note" :class="fieldClass">
+            <dt :class="kickerClass">Bio</dt>
+            <dd :class="noteClass">{{ vcard.note }}</dd>
+          </div>
+          <div v-if="safeWebsite" :class="fieldClass">
+            <dt :class="kickerClass">Website</dt>
+            <dd>
+              <a :href="safeWebsite" target="_blank" rel="noreferrer noopener" :class="linkClass">{{ safeWebsite }}</a>
+            </dd>
+          </div>
+        </template>
+
+        <template v-if="pepProfile">
+          <div v-if="pepProfile.mood" :class="fieldClass">
+            <dt :class="kickerClass">Mood</dt>
+            <dd>
+              {{ formatPepKeyword(pepProfile.mood.kind) }}
+              <span v-if="pepProfile.mood.text" :class="mutedClass"> &mdash; {{ pepProfile.mood.text }}</span>
+            </dd>
+          </div>
+          <div v-if="pepProfile.activity" :class="fieldClass">
+            <dt :class="kickerClass">Activity</dt>
+            <dd>
+              {{ formatPepKeyword(pepProfile.activity.general) }}
+              <span v-if="pepProfile.activity.specific"> &middot; {{ formatPepKeyword(pepProfile.activity.specific) }}</span>
+              <span v-if="pepProfile.activity.text" :class="mutedClass"> &mdash; {{ pepProfile.activity.text }}</span>
+            </dd>
+          </div>
+          <div v-if="pepProfile.tune" :class="fieldClass">
+            <dt :class="kickerClass">Listening to</dt>
+            <dd>
+              <template v-if="pepProfile.tune.title">{{ pepProfile.tune.title }}</template>
+              <template v-if="pepProfile.tune.artist"> &mdash; {{ pepProfile.tune.artist }}</template>
+              <span v-if="pepProfile.tune.source" :class="mutedClass"> ({{ pepProfile.tune.source }})</span>
+            </dd>
+          </div>
+        </template>
+      </dl>
     </div>
   </AppDrawer>
 </template>

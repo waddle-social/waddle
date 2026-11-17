@@ -21,6 +21,7 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { occupantJidDirectory } from "@/lib/avatars/author-jid";
 import { avatarStore } from "@/lib/avatars/avatar-store";
 import { createAvatarBinding } from "@/lib/avatars/bind-client";
+import { setOccupantPresence } from "@/presence/live-presence";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid } from "@/lib/xmpp-client";
 import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
@@ -170,6 +171,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     client.addOccupantRealJidHandler((roomJid, _nick, jid, isBot) => {
       if (isBot && jid) waddles.reloadRoomBotsIfUnlisted(roomJid, jid);
     });
+    client.addOccupantPresenceHandler(setOccupantPresence);
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);

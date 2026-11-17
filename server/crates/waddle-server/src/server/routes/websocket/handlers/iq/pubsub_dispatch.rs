@@ -61,6 +61,24 @@ pub(super) async fn handle_pubsub_iq(
             }
         };
 
+        // Event workspaces live under room JIDs, never under the public
+        // community calendar or personal PEP service. Intercept every room
+        // PubSub operation, including owner/configuration requests, so generic
+        // node ACLs cannot bypass the room's current membership boundary.
+        if target_jid.node().is_some() && target_jid.domain().as_str() == muc_domain {
+            let Some(sender) = phase.bound_jid() else {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            };
+            return super::event_planning::handle_room_pubsub(
+                iq,
+                state,
+                &target_jid,
+                sender,
+                request,
+            )
+            .await;
+        }
+
         debug!(?request, "Handling PubSub request via WebSocket");
 
         // The Space node of an enrolled host-grant scope is not served

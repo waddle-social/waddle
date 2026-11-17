@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import type { Editor } from "@tiptap/core";
 import { Link } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { BLOCK_FORMAT_ACTIONS, INLINE_FORMAT_ACTIONS, type EditorFormatAction } from "./editor-format-actions";
 import { useEditorLinkInput } from "./composables/use-editor-link-input";
+import { linkInput, toolActive } from "./composer-classes";
 
 /**
  * Slack-style fixed formatting row pinned to the top of the composer card,
@@ -17,6 +20,20 @@ const props = defineProps<{
 
 const { linkUrl, editingLink, linkInputRef, openLinkInput, applyLink, cancelLinkInput } =
   useEditorLinkInput(() => props.editor);
+
+// Spans the composer field's full width above the editor row.
+const bar = css({
+  order: -2,
+  flexBasis: "100%",
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: "0.5",
+  pb: "1",
+  mb: "0.5",
+  borderBottom: "1px solid {colors.border.soft}",
+});
+const divider = css({ width: "1px", height: "20px", mx: "1", bg: "border.soft" });
 
 const groups: readonly (readonly EditorFormatAction[])[] = [INLINE_FORMAT_ACTIONS, BLOCK_FORMAT_ACTIONS];
 
@@ -33,35 +50,33 @@ function onLinkClick() {
 </script>
 
 <template>
-  <div class="chat-composer-format-bar" role="toolbar" aria-label="Formatting">
+  <div :class="bar" role="toolbar" aria-label="Formatting">
     <template v-for="(group, groupIndex) in groups" :key="groupIndex">
-      <span v-if="groupIndex > 0" class="chat-composer-format-bar__divider" aria-hidden="true" />
+      <span v-if="groupIndex > 0" :class="divider" aria-hidden="true" />
       <AppTooltip v-for="action in group" :key="action.name" :label="action.title">
         <button
           type="button"
-          class="chat-composer-tool"
-          :class="{ 'chat-composer-tool--active': action.isActive(editor) }"
+          :class="iconbtn({ size: 'sm' })"
           :aria-label="action.title"
           :aria-pressed="action.isActive(editor)"
           :disabled="disabled"
           @mousedown.prevent
           @click="runAction(action)"
         >
-          <component :is="action.icon" class="h-4 w-4" aria-hidden="true" />
+          <component :is="action.icon" aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip v-if="groupIndex === 0" label="Link">
         <button
           type="button"
-          class="chat-composer-tool"
-          :class="{ 'chat-composer-tool--active': editingLink || editor.isActive('link') }"
+          :class="[iconbtn({ size: 'sm' }), editingLink && toolActive]"
           aria-label="Link"
           :aria-pressed="editor.isActive('link')"
           :disabled="disabled"
           @mousedown.prevent
           @click="onLinkClick"
         >
-          <Link class="h-4 w-4" aria-hidden="true" />
+          <Link aria-hidden="true" />
         </button>
       </AppTooltip>
     </template>
@@ -71,7 +86,7 @@ function onLinkClick() {
       v-model="linkUrl"
       type="url"
       inputmode="url"
-      class="type-caption ml-1 h-7 w-48 min-w-0 rounded-md border border-border bg-background px-2 text-foreground outline-none focus:border-primary"
+      :class="linkInput"
       placeholder="https://example.com"
       aria-label="Link URL"
       @keydown.enter.prevent="applyLink"

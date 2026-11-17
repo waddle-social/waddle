@@ -110,7 +110,7 @@
 }
 
 .chat-field-control--search {
-  padding-inline-start: 2.25rem;
+  padding-inline-start: var(--control-md);
 }
 
 .chat-field-control:focus {
@@ -242,16 +242,9 @@
   box-shadow: none;
 }
 
-.chat-badge-glow--mention {
-  background: var(--live);
-  color: var(--live-foreground);
-  box-shadow: 0 0 10px var(--glow-live);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .chat-list-row--mention::before,
-  .chat-list-row--mention-badge,
-  .chat-badge-glow--mention {
+  .chat-list-row--mention-badge {
     box-shadow: none;
   }
 }

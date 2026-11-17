@@ -28,7 +28,7 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0353::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_ringing,
-    CallOffer, JingleMI, NS_JINGLE_MESSAGE,
+    is_bodyless_jmi_signal, jmi_media, jmi_propose, CallOffer, JingleMI, NS_JINGLE_MESSAGE,
 };
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -60,6 +60,35 @@ fn jmi_envelope(to: &jid::Jid, body: Element) -> Element {
 fn xep_0353_namespace_matches_spec() {
     assert_eq!(NS_JINGLE_MESSAGE, "urn:xmpp:jingle-message:0");
     assert_eq!(NS_JINGLE_MESSAGE, xmpp_parsers::ns::JINGLE_MESSAGE);
+}
+
+#[test]
+fn xep_0353_bodyless_signal_recognition_is_namespace_and_envelope_scoped() {
+    let mut message = Message::new(None::<jid::Jid>);
+    message
+        .payloads
+        .push(Element::builder("retract", NS_JINGLE).build());
+    assert!(!is_bodyless_jmi_signal(&message));
+    message
+        .payloads
+        .push(Element::builder("future-signal", NS_JINGLE_MESSAGE).build());
+    assert!(!is_bodyless_jmi_signal(&message));
+    message
+        .payloads
+        .push(build_retract(SessionId("call".into())).into());
+    assert!(is_bodyless_jmi_signal(&message));
+    message.bodies.insert("en".into(), "call update".into());
+    assert!(!is_bodyless_jmi_signal(&message));
+    message.bodies.clear();
+    message
+        .payloads
+        .push(Element::builder("propose", NS_JINGLE).build());
+    assert!(is_bodyless_jmi_signal(&message));
+    message.payloads.push(build_propose(
+        SessionId("call".into()),
+        CallOffer::audio_only(),
+    ));
+    assert!(!is_bodyless_jmi_signal(&message));
 }
 
 // ── §3 propose — one <description/> per offered media kind ───────────
@@ -313,4 +342,55 @@ fn xep_0353_jingle_mi_rejects_wrong_namespace() {
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), "c1")
         .build();
     assert!(JingleMI::try_from(elem).is_err());
+}
+
+#[test]
+fn xep_0353_raw_recognizer_preserves_audio_and_video_descriptions() {
+    for (offer, expected_video) in [
+        (CallOffer::audio_only(), false),
+        (CallOffer::audio_video(), true),
+    ] {
+        let mut message = Message::new_with_type(MessageType::Chat, None);
+        message
+            .payloads
+            .push(build_propose(SessionId("offer-1".into()), offer));
+        let (sid, media) = jmi_propose(&message).expect("valid propose");
+        assert_eq!(sid, SessionId("offer-1".into()));
+        assert!(media.audio);
+        assert_eq!(media.video, expected_video);
+        assert_eq!(jmi_media(&message.payloads[0]), Some(media));
+    }
+}
+
+#[test]
+fn xep_0353_raw_recognizer_requires_nonempty_sid_and_top_level_propose() {
+    for payload in [
+        build_propose(SessionId(String::new()), CallOffer::audio_only()),
+        Element::from(build_retract(SessionId("offer-1".into()))),
+        Element::from(build_proceed(SessionId("offer-1".into()))),
+        Element::builder("wrapper", NS_JINGLE_MESSAGE)
+            .append(build_propose(
+                SessionId("offer-1".into()),
+                CallOffer::audio_only(),
+            ))
+            .build(),
+    ] {
+        let mut message = Message::new_with_type(MessageType::Chat, None);
+        message.payloads.push(payload);
+        assert!(jmi_propose(&message).is_none());
+    }
+}
+
+#[test]
+fn xep_0353_raw_recognizer_keeps_sid_without_recognized_rtp_media() {
+    let mut message = Message::new_with_type(MessageType::Chat, None);
+    message.payloads.push(
+        Element::builder("propose", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "offer-1")
+            .build(),
+    );
+    let (sid, media) = jmi_propose(&message).expect("nonempty propose id");
+    assert_eq!(sid, SessionId("offer-1".into()));
+    assert!(!media.audio);
+    assert!(!media.video);
 }

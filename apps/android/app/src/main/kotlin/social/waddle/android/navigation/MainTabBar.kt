@@ -14,6 +14,15 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.People
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -22,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
@@ -39,9 +49,36 @@ import social.waddle.android.ui.huddle.HuddleMotion
 import social.waddle.android.ui.huddle.LiveDot
 
 /**
+ * The phone tabs (Slack, Discord and Google Chat's shape): Home is the
+ * conversation list, then DMs, People and You. Each roots its own back
+ * stack at [root].
+ */
+enum class MainTab(
+    val root: WaddleNavKey,
+    val label: Int,
+    val icon: ImageVector,
+    val selectedIcon: ImageVector,
+    val testTag: String,
+) {
+    HOME(WaddleNavKey.Home, R.string.tab_home, Icons.Outlined.Home, Icons.Filled.Home, "tab-home"),
+    DMS(WaddleNavKey.DmList, R.string.tab_dms, Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble, "tab-dms"),
+    PEOPLE(WaddleNavKey.People, R.string.tab_people, Icons.Outlined.People, Icons.Filled.People, "tab-people"),
+    YOU(WaddleNavKey.You, R.string.tab_you, Icons.Outlined.Person, Icons.Filled.Person, "tab-you"),
+    ;
+
+    companion object {
+        /** The tab rooted at [key], if it is a tab root. */
+        fun rootedAt(key: Any?): MainTab? = entries.firstOrNull { it.root == key }
+    }
+}
+
+/** What the tab bar marks: unread direct messages, and whether a huddle is live. */
+data class TabBadges(val dmUnread: Int = 0, val live: Boolean = false)
+
+/**
  * Huddle's bottom tabs (web phone shell): the rail colour with a 1dp
  * top border, no indicator pill; the active tab's icon and label turn
- * teal. DMs carry a neutral unread count, Rooms an ember dot while a
+ * teal. DMs carry a neutral unread count, Home an ember dot while a
  * huddle is live. 64dp of tabs above the navigation bar.
  */
 @Composable
@@ -119,7 +156,7 @@ private fun TabItem(
     }
 }
 
-/** The DMs count or the Rooms live dot, announced in words rather than as a bare number. */
+/** The DMs count or the Home live dot, announced in words rather than as a bare number. */
 @Composable
 private fun TabBadge(tab: MainTab, badges: TabBadges, modifier: Modifier = Modifier) {
     when {
@@ -130,8 +167,8 @@ private fun TabBadge(tab: MainTab, badges: TabBadges, modifier: Modifier = Modif
                 modifier = modifier.clearAndSetSemantics { contentDescription = description },
             )
         }
-        tab == MainTab.ROOMS && badges.roomsLive -> {
-            val description = stringResource(R.string.tab_rooms_live)
+        tab == MainTab.HOME && badges.live -> {
+            val description = stringResource(R.string.tab_home_live)
             LiveDot(modifier = modifier.clearAndSetSemantics { contentDescription = description })
         }
     }

@@ -21,6 +21,7 @@ public final class SessionCoordinator {
     public internal(set) var status: SessionStatus = .init()
     public var connection: ConnectionStatus { status.connection }
 
+    public let calls: CallStore
     public let timelines: TimelineStore
     public let directory: DirectoryStore
     public let presence: PresenceStore
@@ -54,6 +55,7 @@ public final class SessionCoordinator {
 
     @ObservationIgnored let port: any XmppPort
     @ObservationIgnored private let reconnectPolicy: ReconnectPolicy
+    @ObservationIgnored private let handlesCalls: Bool
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored var foregroundProbeTask: Task<Void, Never>?
@@ -119,17 +121,22 @@ public final class SessionCoordinator {
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
     /// only as diagnostics, never as a disconnect). `outboxStore`: where
-    /// unsent messages are kept across launches.
+    /// unsent messages are kept across launches. `handlesCalls` is only for a
+    /// host that shows call UI: an invisible invitation must not ring back.
     public init(
         account: AccountIdentity,
         port: any XmppPort,
         reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
         connectBudget: TimeInterval = 15,
         outboxStore: any OutboxStore = InMemoryOutboxStore(),
-        timelineCapacity: Int = 500
+        timelineCapacity: Int = 500,
+        handlesCalls: Bool = false,
+        callMedia: (any CallMediaController)? = nil
     ) {
         self.account = account
         self.port = port
+        self.handlesCalls = handlesCalls
+        self.calls = CallStore(port: port, ownJID: { account.fullJID }, ownBareJID: account.jid, media: callMedia)
         self.outboxStore = outboxStore
         self.reconnectPolicy = reconnectPolicy
         self.connectBudget = connectBudget
@@ -194,6 +201,7 @@ public final class SessionCoordinator {
         readyTask = nil
         connectWatchdog?.cancel()
         connectWatchdog = nil
+        await stopCalls()
         await port.disconnect()
         eventTask?.cancel()
         eventTask = nil
@@ -333,6 +341,7 @@ public final class SessionCoordinator {
         timelines.clear()
         directory.clear()
         presence.clear()
+        calls.groupPresence.clear()
         roomBots.clear()
         typing.clear()
         unread.clearAll()
@@ -394,6 +403,8 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = Task { [weak self] in await self?.sessionReady() }
         case .disconnected:
+            // Like Android, the call slot survives stream loss and reconnects;
+            // call sends can fail while offline, without new recovery semantics.
             // Every disconnect creates a fresh FFI driver; its old
             // XEP-0198 state is not resumed, so replay unconfirmed sends.
             requeueUnconfirmedSendsForFreshStream()
@@ -410,14 +421,26 @@ public final class SessionCoordinator {
             // no longer known to be current.
             history.markAllStale()
             presence.clear()
+            calls.groupPresence.clear()
             mdsPublishSupported = nil
             if !isStopped, status.connection != .authenticationFailed {
                 scheduleReconnect()
             }
+        case let .call(event):
+            if handlesCalls, !isStopped { calls.handle(event) }
         case let .message(message):
             route(message)
         case let .presence(wirePresence):
-            presence.apply(wirePresence)
+            let update = presence.apply(wirePresence)
+            if handlesCalls, !isStopped {
+                switch update {
+                case .left(let room), .joinFailed(let room, _):
+                    // Out of the room, so out of earshot of its call.
+                    calls.groupPresence.clearRoom(room)
+                case .contact, .occupant, .joined, .ignored:
+                    calls.handleGroupPresence(wirePresence)
+                }
+            }
             refreshRoomBotsIfUndeclared(by: wirePresence)
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)

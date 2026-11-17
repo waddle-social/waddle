@@ -36,10 +36,12 @@ struct MessageActionDialogs: ViewModifier {
             }
             .sheet(item: $actions.reactionTarget) { item in
                 MessageReactionPickerSheet(item: item, actions: actions)
+                    .carryingCallDock()
                     .environment(session)
             }
             .sheet(item: $actions.safetyScoresTarget) { item in
                 MessageSafetyScoresSheet(item: item)
+                    .carryingCallDock()
                     .environment(session)
             }
             .background {

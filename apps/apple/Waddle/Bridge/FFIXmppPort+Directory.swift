@@ -83,7 +83,7 @@ extension FFIXmppPort {
     }
 
     func createRoom(localpart: String, name: String, summary: String?, nick: String) async throws -> BareJID {
-        let patch = WaddleRoomConfigPatch(name: name, description: summary, forum: nil, pinPermission: nil)
+        let patch = WaddleRoomConfigPatch(membersOnly: nil, publicRoom: nil, persistentRoom: nil, name: name, description: summary, forum: nil, pinPermission: nil)
         let created = try await mappingPortErrors { try await client.createRoom(localpart: localpart, nick: nick, patch: patch) }
         guard let room = FFIInbound.bareJID(created) else { throw PortError.failed }
         return room

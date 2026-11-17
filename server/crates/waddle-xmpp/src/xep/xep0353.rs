@@ -20,7 +20,11 @@
 //!   optional typed [`xmpp_parsers::jingle::Reason`] child built via
 //!   the [`Reason`-into-`Element`] conversion (XEP-0353 §3.5 SHOULD).
 
+use minidom::Element;
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
+use xmpp_parsers::message::Message;
+
+use super::xep_waddle_call_thread::CallThreadMedia;
 pub use xmpp_parsers::jingle_message::JingleMI;
 
 use super::xep0167::{MediaKind, NS_JINGLE_RTP};
@@ -74,6 +78,56 @@ impl CallOffer {
         };
         audio.into_iter().chain(video)
     }
+}
+
+/// Recognize a top-level JMI proposal without the single-description
+/// limitation of `JingleMI::Propose`. A non-empty session id is required;
+/// unrecognized media do not discard the proposal identity.
+pub fn jmi_propose(message: &Message) -> Option<(SessionId, CallThreadMedia)> {
+    let propose = message.payloads.iter().find(|payload| {
+        payload.is("propose", NS_JINGLE_MESSAGE)
+            && payload.attr("id").is_some_and(|id| !id.is_empty())
+    })?;
+    let sid = propose.attr("id").filter(|id| !id.is_empty())?;
+    let media = jmi_media(propose).unwrap_or(CallThreadMedia {
+        audio: false,
+        video: false,
+    });
+    Some((SessionId(sid.to_owned()), media))
+}
+
+/// Recognize a bodyless message with a top-level JMI `retract`, `proceed`,
+/// `reject`, `finish`, `ringing`, or legacy `accept` and no top-level JMI `propose`.
+pub fn is_bodyless_jmi_signal(message: &Message) -> bool {
+    message.bodies.is_empty()
+        && message.payloads.iter().any(|payload| {
+            payload.ns() == NS_JINGLE_MESSAGE
+                && matches!(
+                    payload.name(),
+                    "retract" | "proceed" | "reject" | "finish" | "ringing" | "accept"
+                )
+        })
+        && !message
+            .payloads
+            .iter()
+            .any(|payload| payload.is("propose", NS_JINGLE_MESSAGE))
+}
+
+/// Collect all recognized RTP media descriptions on a JMI element.
+pub fn jmi_media(element: &Element) -> Option<CallThreadMedia> {
+    let mut audio = false;
+    let mut video = false;
+    for description in element
+        .children()
+        .filter(|child| child.is("description", NS_JINGLE_RTP))
+    {
+        match description.attr("media") {
+            Some("audio") => audio = true,
+            Some("video") => video = true,
+            _ => {}
+        }
+    }
+    (audio || video).then_some(CallThreadMedia { audio, video })
 }
 
 /// Build a `<propose/>` JMI for an A/V call (XEP-0353 §3). The propose
@@ -152,6 +206,61 @@ pub fn build_finish(sid: SessionId, reason: Option<JingleReason>) -> minidom::El
 mod tests {
     use super::*;
     use minidom::Element;
+
+    #[test]
+    fn bodyless_jmi_signals_include_each_recognized_element() {
+        for name in [
+            "retract", "proceed", "reject", "finish", "ringing", "accept",
+        ] {
+            let mut message = Message::new(None::<jid::Jid>);
+            message
+                .payloads
+                .push(Element::builder(name, NS_JINGLE_MESSAGE).build());
+            assert!(is_bodyless_jmi_signal(&message), "{name}");
+        }
+    }
+
+    #[test]
+    fn top_level_jmi_propose_prevents_signal_suppression() {
+        let mut message = Message::new(None::<jid::Jid>);
+        message.payloads.push(build_propose(
+            SessionId("call".into()),
+            CallOffer::audio_only(),
+        ));
+        assert!(!is_bodyless_jmi_signal(&message));
+        message
+            .payloads
+            .push(build_retract(SessionId("call".into())).into());
+        assert!(!is_bodyless_jmi_signal(&message));
+    }
+
+    #[test]
+    fn jmi_signal_with_any_body_is_not_bodyless() {
+        for name in [
+            "retract", "proceed", "reject", "finish", "ringing", "accept",
+        ] {
+            let mut message = Message::new(None::<jid::Jid>);
+            message
+                .payloads
+                .push(Element::builder(name, NS_JINGLE_MESSAGE).build());
+            message.bodies.insert("no".into(), "call ended".into());
+            assert!(!is_bodyless_jmi_signal(&message), "{name}");
+            message.bodies.insert("no".into(), "".into());
+            assert!(!is_bodyless_jmi_signal(&message), "empty body on {name}");
+        }
+    }
+
+    #[test]
+    fn bodyless_message_without_top_level_jmi_signal_is_not_suppressed() {
+        let mut message = Message::new(None::<jid::Jid>);
+        assert!(!is_bodyless_jmi_signal(&message));
+        message.payloads.push(
+            Element::builder("future-signal", NS_JINGLE_MESSAGE)
+                .append(Element::builder("retract", NS_JINGLE_MESSAGE).build())
+                .build(),
+        );
+        assert!(!is_bodyless_jmi_signal(&message));
+    }
 
     #[test]
     fn ns_matches_xmpp_parsers() {

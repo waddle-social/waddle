@@ -12,8 +12,10 @@ on:
       - server/.cargo/**
       - server/Cargo.lock
       - server/Cargo.toml
-      - server/crates/**
       - server/crates/**/.cargo/**
+      - server/crates/waddle-xmpp-client-ffi/**
+      - server/crates/waddle-xmpp-client/**
+      - server/crates/waddle-xmpp-core/**
       - server/rust-toolchain.toml
       - server/vendor/**
   workflow_dispatch: {}
@@ -46,7 +48,9 @@ jobs:
         run: swift test
       - name: Build XMPP client XCFramework
         run: bash scripts/build-xcframework.sh --debug
-      - name: Build macOS app
-        run: xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-macOS -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
-      - name: Build iOS app
-        run: xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+      - name: Build and test macOS app
+        run: xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-macOS -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
+      - name: Build and test iOS app
+        run: |
+          device="$(python3 apps/apple/scripts/newest-iphone-simulator.py)"
+          xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination "platform=iOS Simulator,id=${device}" CODE_SIGNING_ALLOWED=NO test

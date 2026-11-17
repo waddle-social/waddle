@@ -159,12 +159,10 @@ describe("EventsPane calendar feed control", () => {
     expect(openLink).toContain(`href="${subscriptionHref}"`);
     expect(openLink).toContain('target="_blank"');
     expect(openLink).toContain('rel="noopener noreferrer"');
-    expect(openLink).toContain("min-h-11");
-    expect(openLink).not.toContain("sm:min-h-8");
+    // Button and 44px input recipes (touch targets come from the preset).
+    expect(openLink).toContain("wd-btn");
     expect(urlInput).toContain(`value="${feedUrl}"`);
-    expect(urlInput).toContain("basis-full");
-    expect(urlInput).toContain("min-h-11");
-    expect(urlInput).not.toContain("sm:min-h-8");
+    expect(urlInput).toContain("wd-input");
   });
 
   test("renders the feed controller URL through EventsPane", async () => {

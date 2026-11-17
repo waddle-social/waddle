@@ -4,7 +4,7 @@
 use super::{
     active_mention_ttl_ms_from_env, build_waddle_context, evaluate_push_gate_at_dispatch,
     target_from_subscription, xep0191_blocks_notification_candidate, BareJid, BlockingStorage,
-    DndState, NotificationActivity, NotificationCandidate, NotificationDrainDeps,
+    DndState, DrainBatch, NotificationActivity, NotificationCandidate, NotificationDrainDeps,
     NotificationOutboxError, NotificationOutboxStore, NotificationOutboxTarget, PushEvalCaches,
     PushEvalDeps, PushEvalStage, PushSubscriptionStore, RoomPolicyCacheEntry, SuppressedReason,
     T1PushDispatchOutcome,
@@ -28,14 +28,15 @@ impl NotificationOutboxStore {
         settings_projection: &NotificationSettingsProjectionStore,
         deps: NotificationDrainDeps<'_>,
         first_party_service_jid: &BareJid,
-        batch_size: usize,
+        batch: DrainBatch,
     ) -> Result<usize, NotificationOutboxError> {
+        let DrainBatch { scope, batch_size } = batch;
         let NotificationDrainDeps {
             room_policy,
             dnd_reader,
             activity_reader,
         } = deps;
-        let candidates = self.pending_candidates(batch_size).await?;
+        let candidates = self.pending_candidate_rows(scope, batch_size).await?;
         let mut target_cache = BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
         let mut room_policy_cache = BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
         let mut dnd_cache = BTreeMap::<BareJid, DndState>::new();
@@ -43,7 +44,7 @@ impl NotificationOutboxStore {
             BTreeMap::<(BareJid, BareJid), Option<NotificationActivity>>::new();
         let active_mention_ttl_ms = active_mention_ttl_ms_from_env();
         let mut processed = 0usize;
-        for candidate in candidates {
+        for (candidate, created_at_ms) in candidates {
             // Self-DM filtering happens at the `NotificationCandidate`
             // constructor (`SelfDirectedNotificationCandidate` typed
             // error). A self-directed candidate is structurally
@@ -63,6 +64,7 @@ impl NotificationOutboxStore {
                         .await?;
                     if claimed {
                         tracing::info!(
+                            stanza_id = candidate.archive_stanza_id.id.as_str(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = SuppressedReason::Xep0191Blocked.as_db_value(),
@@ -152,6 +154,7 @@ impl NotificationOutboxStore {
                         .await?;
                     if claimed {
                         tracing::info!(
+                            stanza_id = candidate.archive_stanza_id.id.as_str(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = reason.as_db_value(),
@@ -206,6 +209,7 @@ impl NotificationOutboxStore {
                     .await?;
                 if claimed {
                     tracing::info!(
+                        stanza_id = candidate.archive_stanza_id.id.as_str(),
                         notification_class = candidate.class().as_db_value(),
                         push_stage = "suppressed",
                         suppression_reason = reason.as_db_value(),
@@ -218,12 +222,21 @@ impl NotificationOutboxStore {
                 }
                 continue;
             }
-            let context = build_waddle_context(&candidate);
+            let context = build_waddle_context(&candidate, created_at_ms);
             let now_ms = crate::time::now_ms();
-            if self
+            if let Some(job_ids) = self
                 .persist_candidate_targets(&candidate, &targets, &context, &rich, now_ms)
                 .await?
             {
+                for job_id in job_ids {
+                    tracing::info!(
+                        stanza_id = candidate.archive_stanza_id.id.as_str(),
+                        delivery_id = candidate.delivery_id.map(tracing::field::display),
+                        job_id = job_id.as_str(),
+                        notification_class = candidate.class().as_db_value(),
+                        "notification candidate queued as job"
+                    );
+                }
                 processed += 1;
             }
         }
@@ -243,6 +256,7 @@ impl NotificationOutboxStore {
                 .await?;
             if claimed {
                 tracing::info!(
+                    stanza_id = candidate.archive_stanza_id.id.as_str(),
                     notification_class = candidate.class().as_db_value(),
                     push_stage = "suppressed",
                     suppression_reason = reason.as_db_value(),

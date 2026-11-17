@@ -84,6 +84,7 @@ where
                     reply,
                     sent_within_actor,
                     message_name,
+                    enqueued_at,
                     #[cfg(feature = "tracing")]
                     caller_span,
                 } => {
@@ -93,6 +94,7 @@ where
                         reply,
                         sent_within_actor,
                         message_name,
+                        enqueued_at,
                         #[cfg(feature = "tracing")]
                         caller_span,
                     )
@@ -112,6 +114,7 @@ where
         reply: Option<BoxReplySender>,
         sent_within_actor: bool,
         message_name: &'static str,
+        enqueued_at: std::time::Instant,
         #[cfg(feature = "tracing")] caller_span: tracing::Span,
     ) -> ControlFlow<ActorStopReason> {
         if !sent_within_actor && !self.finished_startup {
@@ -122,6 +125,7 @@ where
                 reply,
                 sent_within_actor,
                 message_name,
+                enqueued_at,
                 #[cfg(feature = "tracing")]
                 caller_span,
             });
@@ -142,6 +146,7 @@ where
         };
 
         let mut stop = false;
+        let started_at = std::time::Instant::now();
 
         #[cfg(feature = "tracing")]
         let res = AssertUnwindSafe(
@@ -156,6 +161,8 @@ where
         let res = AssertUnwindSafe(self.state.on_message(message, actor_ref, reply, &mut stop))
             .catch_unwind()
             .await;
+
+        crate::observer::message_handled::<A>(enqueued_at, started_at);
 
         match res {
             Ok(Ok(())) => {

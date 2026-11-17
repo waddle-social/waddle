@@ -20,22 +20,10 @@ let _serverRustInputs = [
 	"server/scripts/**",
 	"server/wit/**",
 	"server/charts/waddle-server/**",
-	{
-		project: "infrastructure/waddle.cloud"
-		task:    "namespaceServerRustInputs"
-		map: [
-			{
-				from: "target/cuenv/server-rust-inputs/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
-				to:   "infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
-			},
-			{
-				// Every Mimir rule file, so a second rules file is visible to
-				// the rule-drift tests in this sandbox too.
-				from: "target/cuenv/server-rust-inputs/rules/mimir"
-				to:   "infrastructure/waddle.cloud/rules/mimir"
-			},
-		]
-	},
+	"infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+	// Every Mimir rule file, so a second rules file is visible to the
+	// rule-drift tests in this sandbox too.
+	"infrastructure/waddle.cloud/rules/mimir/*.yaml",
 ]
 
 let _nativeRustEnv = {
@@ -56,7 +44,10 @@ schema.#Project & {
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
-			env:    _nativeRustEnv
+			// Each run builds in a fresh sandbox, so incremental state is
+			// never reused. Without it the build is 8 to 13% faster and the
+			// target directory 10 GB smaller (docs/ci-performance.md).
+			env: _nativeRustEnv & {CARGO_INCREMENTAL: "0"}
 			hermetic: sandbox: "dir"
 		}
 

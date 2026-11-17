@@ -8,7 +8,7 @@ use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress};
 use crate::ingress_uow::{
     settle_recorded, CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
 };
-use crate::notification_outbox::NotificationOutboxStore;
+use crate::notification_outbox::{DrainScope, NotificationOutboxStore};
 use crate::push_service::test_support::{notification_item, owner, scalar_i64};
 use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
 use waddle_xmpp::ingress::{
@@ -189,7 +189,7 @@ async fn live_outbox_keeps_collected_parent_acceptance(
     }
     if !matches!(scenario, ProofScenario::Live | ProofScenario::Parked) {
         let claim = outbox
-            .claim_due_outbox_jobs(1)
+            .claim_due_outbox_jobs(DrainScope::All, 1)
             .await
             .expect("claim owner")
             .remove(0);

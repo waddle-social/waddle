@@ -66,6 +66,20 @@ impl From<String> for NotificationOutboxJobId {
     }
 }
 
+/// Selection and limit for one notification outbox drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainBatch {
+    pub scope: DrainScope,
+    pub batch_size: usize,
+}
+
+/// Classes selected by a notification outbox sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainScope {
+    All,
+    CallsOnly,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationClass {
     DirectMessage,
@@ -74,6 +88,7 @@ pub enum NotificationClass {
     ChannelMention,
     ActiveChannelMention,
     NotifyAll,
+    Call,
 }
 
 impl NotificationClass {
@@ -85,6 +100,7 @@ impl NotificationClass {
             Self::ChannelMention => "channel_mention",
             Self::ActiveChannelMention => "active_channel_mention",
             Self::NotifyAll => "notify_all",
+            Self::Call => "call",
         }
     }
 
@@ -96,6 +112,7 @@ impl NotificationClass {
             "channel_mention" => Ok(Self::ChannelMention),
             "active_channel_mention" => Ok(Self::ActiveChannelMention),
             "notify_all" => Ok(Self::NotifyAll),
+            "call" => Ok(Self::Call),
             _ => Err(NotificationOutboxError::InvalidClass(value.to_string())),
         }
     }
@@ -109,6 +126,7 @@ pub enum NotificationReason {
     GroupchatChannelMention,
     GroupchatActiveChannelMention,
     GroupchatNotifyAll,
+    OfflineCall,
 }
 
 impl NotificationReason {
@@ -120,6 +138,7 @@ impl NotificationReason {
             Self::GroupchatChannelMention => "groupchat_channel_mention",
             Self::GroupchatActiveChannelMention => "groupchat_active_channel_mention",
             Self::GroupchatNotifyAll => "groupchat_notify_all",
+            Self::OfflineCall => "offline_call",
         }
     }
 
@@ -131,6 +150,7 @@ impl NotificationReason {
             "groupchat_channel_mention" => Ok(Self::GroupchatChannelMention),
             "groupchat_active_channel_mention" => Ok(Self::GroupchatActiveChannelMention),
             "groupchat_notify_all" => Ok(Self::GroupchatNotifyAll),
+            "offline_call" => Ok(Self::OfflineCall),
             _ => Err(NotificationOutboxError::InvalidReason(value.to_string())),
         }
     }
@@ -496,6 +516,8 @@ impl NotificationOutboxPruneOutcome {
 
 #[derive(Debug, Error)]
 pub enum NotificationOutboxError {
+    #[error("invalid call invitation data")]
+    InvalidCallData,
     #[error("notification outbox owner preparation requires a trusted non-attested handle")]
     OwnerPreparationRequiresTrustedHandle,
     #[error("notification outbox owner identity or database role is unsafe")]

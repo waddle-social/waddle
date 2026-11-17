@@ -213,7 +213,7 @@ and no ledger row, and the retirement has to be repeated.
 
 ## Ending sessions
 
-Three tables, on both engines (migration 2013), carry the second step:
+Three tables, on both engines (migration 2014), carry the second step:
 
 - `account_session_ending_replicas`: one lease per serving server process,
   registered when it starts serving, renewed every 5 s for 15 s, and ended

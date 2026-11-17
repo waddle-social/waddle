@@ -691,7 +691,10 @@ describe("HomeDashboard activity rendering", () => {
 
     expect(html).toContain("<strong>1</strong> active call");
     expect(html).toContain("1 live conversation");
-    expect(buttonForLabel(html, "Return to Bob call")).toContain("Return to Bob call");
+    // The Happening-now card is the way back; the hero does not repeat it.
+    expect(html).toContain('aria-label="Return Bob, ');
+    expect(html).not.toContain("Return to Bob call");
+    expect(html).toContain("Browse rooms");
     expect(html).not.toContain("Reconnect Bob call");
   });
 
@@ -710,16 +713,23 @@ describe("HomeDashboard activity rendering", () => {
       spaces: [{ id: "team", name: "Team" }],
       channels: [
         { id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" },
+        { id: "random", name: "Random", jid: "random@conference.example.com", spaceId: "team" },
       ],
       contacts: [],
       isLoading: false,
-      channelUnreadMap: {},
+      channelUnreadMap: {
+        general: { unread: 9, mentions: 0, threadUnread: 0 },
+        random: { unread: 1, mentions: 0, threadUnread: 0 },
+      },
       activeChannelJids: new Set<string>(),
       managedMucDomain: "conference.example.com",
       callParticipantCounts: {},
       dmConversations: [],
     });
 
+    // The busier room holds the call we are in; the hero skips it.
+    expect(html).toContain("Jump into Random");
+    expect(html).not.toContain("Jump into General");
     expect(html).toContain("<strong>1</strong> active call");
     expect(html).toContain("1 live conversation");
     expect(html).toContain("General");

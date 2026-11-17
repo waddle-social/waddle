@@ -1,9 +1,19 @@
+import { roomJidFromJoinUri } from "@/lib/room-links";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import type { Extensions, JSONContent } from "@tiptap/core";
 import { ChatCodeBlock } from "@/lib/editor/chat-code-block";
 import { ChatLink } from "@/lib/editor/chat-link";
 import { ChatKeymap } from "@/lib/editor/chat-keymap";
+import { css } from "styled-system/css";
+
+const linkClass = css({
+  color: "action.text",
+  textDecoration: "underline",
+  textDecorationColor: "color-mix(in oklab, currentColor 40%, transparent)",
+  transition: "text-decoration-color 0.15s",
+  _hover: { textDecorationColor: "currentColor" },
+});
 
 interface ChatEditorExtensionsOptions {
   placeholder?: string | (() => string);
@@ -32,10 +42,11 @@ export function createChatEditorExtensions(options: ChatEditorExtensionsOptions 
     }),
     ChatLink.configure({
       openOnClick: false,
+      isAllowedUri: (uri, ctx) => !!roomJidFromJoinUri(uri) || ctx.defaultValidate(uri),
       autolink: true,
       linkOnPaste: true,
       HTMLAttributes: {
-        class: "text-primary underline decoration-primary/40 hover:decoration-primary transition-colors",
+        class: linkClass,
       },
     }),
   );

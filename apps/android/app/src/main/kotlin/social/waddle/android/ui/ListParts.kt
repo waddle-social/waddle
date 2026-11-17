@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -29,7 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -73,6 +74,7 @@ fun WaddleTopBar(
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
+    containerColor: Color = Waddle.colors.bg,
 ) {
     val colors = Waddle.colors
     TopAppBar(
@@ -82,13 +84,22 @@ fun WaddleTopBar(
         modifier = modifier,
         scrollBehavior = scrollBehavior,
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = colors.bg,
+            containerColor = containerColor,
             scrolledContainerColor = colors.bgRail,
             titleContentColor = colors.fg,
             navigationIconContentColor = colors.fg,
             actionIconContentColor = colors.fgMuted,
         ),
     )
+}
+
+/** The top bar's back arrow; nothing when [onBack] is null (a root screen). */
+@Composable
+fun BackArrow(onBack: (() -> Unit)?) {
+    if (onBack == null) return
+    IconButton(onClick = onBack) {
+        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.action_back))
+    }
 }
 
 /**
@@ -105,18 +116,13 @@ fun UnreadCountBadge(count: Int, modifier: Modifier = Modifier, emphasized: Bool
     }
     CountBadge(
         count = count,
-        tone = if (emphasized) CountTone.LIVE else CountTone.NEUTRAL,
+        tone = if (emphasized) CountTone.MENTION else CountTone.NEUTRAL,
         prefix = if (emphasized) MENTION_PREFIX else "",
         modifier = modifier.clearAndSetSemantics { contentDescription = description },
     )
 }
 
-/**
- * Text set as a Huddle kicker (mono 11, uppercase, tracked) whose
- * uppercase is presentation only: accessibility and tests read [text] as
- * written, so screen readers do not spell short words out letter by
- * letter.
- */
+/** Text set as a Polar Huddle kicker (eyebrow: body 13/700, sentence case). */
 @Composable
 fun KickerText(
     text: String,
@@ -125,8 +131,8 @@ fun KickerText(
     heading: Boolean = false,
 ) {
     Text(
-        text = text.uppercase(LocalConfiguration.current.locales[0]),
-        style = Waddle.type.kicker,
+        text = text,
+        style = Waddle.type.eyebrow,
         color = color,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,

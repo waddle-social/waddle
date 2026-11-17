@@ -27,8 +27,9 @@ export function renderMeActionHtml(input: {
   markup?: readonly MarkupSpan[];
   references?: readonly MessageReference[];
   actor: string;
+  roomHref?: (roomJid: string) => string | null,
 }): string {
   const parsed = richMessageToTiptap({ body: input.body, markup: input.markup, references: input.references });
   const action = dropLeadingDocText(parsed, ME_COMMAND_PREFIX_LENGTH);
-  return renderRichDocHtml(withActor(action, input.actor));
+  return renderRichDocHtml(withActor(action, input.actor), input.roomHref);
 }

@@ -79,11 +79,13 @@ pub(crate) fn with_fake_apns(store: DatabasePushServiceStore) -> DatabasePushSer
         )
         .expect("APNs signer"),
     );
-    store.with_apns_provider(
-        tokens,
-        Arc::new(AcceptingApnsSender),
-        ApnsTopic::parse(APNS_TEST_TOPIC).expect("topic"),
-    )
+    store
+        .with_apns_provider(
+            tokens,
+            Arc::new(AcceptingApnsSender),
+            ApnsTopic::parse(APNS_TEST_TOPIC).expect("topic"),
+        )
+        .expect("valid VoIP topic")
 }
 
 /// A deliverable APNs device registration.

@@ -129,12 +129,14 @@ private struct MessageRowContent: View {
         .fullScreenCover(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
             if let imagePreviewFile {
                 MessageImagePreviewView(file: imagePreviewFile)
+                    .carryingCallDock()
             }
         }
         #elseif os(macOS)
         .sheet(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
             if let imagePreviewFile {
                 MessageImagePreviewView(file: imagePreviewFile)
+                    .carryingCallDock()
             }
         }
         #endif
@@ -208,7 +210,6 @@ private struct MessageRowContent: View {
         let nick = item.conversation.isRoom ? item.from?.resource : nil
         navigation.showProfile(PeerProfileRoute(
             name: author.name,
-            colorKey: author.colorKey,
             jid: author.avatarJID,
             room: nick == nil ? nil : item.conversation.jid,
             nick: nick

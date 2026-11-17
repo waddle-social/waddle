@@ -27,6 +27,10 @@ pub const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
 /// (xep-0045.xml examples 164/173).
 pub const NS_MUC_ROOMCONFIG: &str = "http://jabber.org/protocol/muc#roomconfig";
 
+/// XEP-0045 discovery feature identifying a persistent room.
+pub const FEATURE_MUC_PERSISTENT: &str = "muc_persistent";
+/// Keep the room after its last occupant leaves.
+pub const FIELD_PERSISTENT_ROOM: &str = "muc#roomconfig_persistentroom";
 /// XEP-0004 §3.2 hidden form-type discriminator field.
 pub const FIELD_FORM_TYPE: &str = "FORM_TYPE";
 /// XEP-0045 registrar: natural-language room name.
@@ -147,6 +151,12 @@ impl RoomConfigForm {
 /// a present-but-empty roomdesc as authoritative).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomConfigPatch {
+    /// Restrict entry to affiliated members.
+    pub members_only: Option<bool>,
+    /// Advertise the room in public discovery.
+    pub public_room: Option<bool>,
+    /// Retain the room after everyone leaves.
+    pub persistent_room: Option<bool>,
     /// Human-readable name advertised to clients.
     pub name: Option<String>,
     /// Longer human-readable description.
@@ -162,6 +172,23 @@ pub struct RoomConfigPatch {
 /// reported, so submitting the merged form never resets settings the
 /// caller did not edit.
 pub fn apply_room_config_patch(form: &mut RoomConfigForm, patch: &RoomConfigPatch) {
+    for (field, value) in [
+        (FIELD_MEMBERS_ONLY, patch.members_only),
+        (FIELD_PUBLIC_ROOM, patch.public_room),
+    ] {
+        if let Some(value) = value {
+            form.set_value(field, bool_form_value(value).to_string());
+        }
+    }
+    if form
+        .fields
+        .iter()
+        .any(|field| field.var == FIELD_PERSISTENT_ROOM)
+    {
+        if let Some(value) = patch.persistent_room {
+            form.set_value(FIELD_PERSISTENT_ROOM, bool_form_value(value).to_string());
+        }
+    }
     if let Some(name) = patch.name.as_ref() {
         form.set_value(FIELD_ROOM_NAME, name.clone());
     }
@@ -417,9 +444,15 @@ mod tests {
                 description: Some(String::new()),
                 forum: Some(true),
                 pin_permission: Some(RoomPinPermission::Anyone),
+                members_only: Some(true),
+                public_room: Some(false),
+                persistent_room: Some(true),
             },
         );
         assert_eq!(form.value(FIELD_ROOM_NAME), Some("New"));
+        assert_eq!(form.value(FIELD_MEMBERS_ONLY), Some("1"));
+        assert_eq!(form.value(FIELD_PUBLIC_ROOM), Some("0"));
+        assert_eq!(form.value(FIELD_PERSISTENT_ROOM), None);
         // Present-but-empty description clears server-side; the field
         // must exist with an empty value.
         let desc = form
@@ -488,5 +521,18 @@ mod tests {
             .and_then(|query| query.get_child("destroy", NS_MUC_OWNER))
             .expect("destroy");
         assert!(destroy.get_child("reason", NS_MUC_OWNER).is_none());
+    }
+    #[test]
+    fn persistence_patch_only_submits_service_offered_setting() {
+        let mut form = RoomConfigForm::default();
+        let patch = RoomConfigPatch {
+            persistent_room: Some(true),
+            ..RoomConfigPatch::default()
+        };
+        apply_room_config_patch(&mut form, &patch);
+        assert!(form.fields.is_empty());
+        form.set_value(FIELD_PERSISTENT_ROOM, "0".into());
+        apply_room_config_patch(&mut form, &patch);
+        assert_eq!(form.bool_value(FIELD_PERSISTENT_ROOM), Some(true));
     }
 }

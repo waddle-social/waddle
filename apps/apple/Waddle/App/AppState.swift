@@ -42,6 +42,10 @@ final class AppState {
     @ObservationIgnored var finishPendingPushRegistration: (@MainActor (SessionCoordinator) async -> Void)?
 
     let notifications = NotificationController()
+    @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
+    #if os(iOS)
+    @ObservationIgnored private lazy var systemCalls = SystemCallCenter()
+    #endif
     let preferences = Preferences()
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -69,6 +73,12 @@ final class AppState {
         notifications.onMarkRead = { [weak self] account, conversation in
             await self?.perform(.markRead(conversation), for: account)
         }
+        notifications.onAnswerCall = { [weak self] account, sid in
+            await self?.perform(.answerCall(sid: sid), for: account)
+        }
+        notifications.onDeclineCall = { [weak self] account, sid in
+            await self?.perform(.declineCall(sid: sid), for: account)
+        }
     }
 
     /// A notification action. One that arrives before the session exists
@@ -78,6 +88,8 @@ final class AppState {
         case open(ConversationID)
         case reply(ConversationID, String)
         case markRead(ConversationID)
+        case answerCall(sid: String)
+        case declineCall(sid: String)
     }
 
     func perform(_ action: NotificationAction, for account: BareJID) async {
@@ -94,8 +106,61 @@ final class AppState {
             await coordinator.send(Draft(text: text), in: conversation)
         case let .markRead(conversation):
             await coordinator.markDisplayed(conversation)
+        case let .answerCall(sid):
+            // Only the call that rang: by now another may hold the slot.
+            _ = await coordinator.calls.answer(sid: sid)
+        case let .declineCall(sid):
+            // Decline is for a call still ringing, never one since answered.
+            guard case .incoming = coordinator.calls.state else { return }
+            await coordinator.calls.end(sid: sid)
         }
     }
+
+    /// Keeps the ringer, and on an iPhone or iPad the system's call screen,
+    /// in step with `active`'s call slot for as long as it is the session;
+    /// whoever ends the session stops both.
+    private func followCalls(of active: ActiveSession) {
+        let coordinator = active.coordinator
+        let (state, isDoNotDisturb, isMediaConnected, isMuted) = withObservationTracking {
+            (
+                coordinator.calls.state, coordinator.status.availability == .doNotDisturb,
+                active.callMedia.phase == .connected, active.callMedia.isMicrophoneMutedByChoice
+            )
+        } onChange: { [weak self, weak active] in
+            Task { @MainActor in
+                guard let self, let active else { return }
+                self.followCalls(of: active)
+            }
+        }
+        guard session === active else { return }
+        #if os(iOS)
+        systemCalls.handlers = systemCallHandlers(for: active)
+        systemCalls.update(state: state, isMediaConnected: isMediaConnected, isMuted: isMuted, isDoNotDisturb: isDoNotDisturb)
+        #else
+        _ = (isMediaConnected, isMuted)
+        #endif
+        ringer.show(CallAlert(state: state, isDoNotDisturb: isDoNotDisturb).map { alert in
+            var callerName = ""
+            if case .ring(let ring) = alert { callerName = coordinator.directory.title(for: .direct(ring.from)) }
+            return .init(alert: alert, account: coordinator.account.jid, callerName: callerName)
+        })
+    }
+
+    #if os(iOS)
+    /// What the system's call screen may do, each to the call it names.
+    private func systemCallHandlers(for active: ActiveSession) -> SystemCallCenter.Handlers {
+        let calls = active.coordinator.calls
+        return .init(
+            answer: { sid in await calls.answer(sid: sid) },
+            end: { sid in await calls.end(sid: sid) },
+            setMuted: { [weak active] sid, isMuted in
+                guard let active, calls.state.sid == sid else { return }
+                await active.callMedia.setMicrophone(!isMuted)
+            },
+            name: { [weak active] conversation in active?.coordinator.directory.title(for: conversation) ?? "" }
+        )
+    }
+    #endif
 
     // MARK: - Lifecycle
 
@@ -266,6 +331,7 @@ final class AppState {
         }
         session = active
         phase = .signedIn
+        followCalls(of: active)
         active.coordinator.start()
         notifications.requestAuthorizationIfNeeded()
         // Actions queued for another account (a failed restore followed by
@@ -325,6 +391,10 @@ final class AppState {
         guard let active = session else { return }
         await finishPendingPushRegistration?(active.coordinator)
         session = nil
+        ringer.show(nil)
+        #if os(iOS)
+        systemCalls.update(state: .idle, isMediaConnected: false, isMuted: false, isDoNotDisturb: false)
+        #endif
         pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()
         if signingOut {
@@ -343,12 +413,14 @@ final class ActiveSession {
     let auth: AuthSession
     let coordinator: SessionCoordinator
     let navigation = NavigationModel()
+    /// The media of this session's call; the call dock reads and drives it.
+    let callMedia: LiveKitCallMediaController
 
     init?(auth: AuthSession, server: URL, preferences: Preferences) {
         guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
               let webSocket = AuthClient.xmppWebSocketURL(auth.xmppWebsocketURL, server: server)
         else { return nil }
-        let account = AccountIdentity(jid: jid, nick: auth.username)
+        let account = AccountIdentity(jid: jid, nick: auth.username, resource: ServerSettings.resource)
         let config = WaddleConfig(
             serverUrl: webSocket.absoluteString,
             jid: jid.description,
@@ -366,8 +438,13 @@ final class ActiveSession {
         } else {
             outbox = InMemoryOutboxStore()
         }
+        let callMedia = LiveKitCallMediaController()
         self.auth = auth
-        self.coordinator = SessionCoordinator(account: account, port: FFIXmppPort(config: config), outboxStore: outbox)
+        self.callMedia = callMedia
+        self.coordinator = SessionCoordinator(
+            account: account, port: FFIXmppPort(config: config), outboxStore: outbox,
+            handlesCalls: true, callMedia: callMedia
+        )
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
     }
 }

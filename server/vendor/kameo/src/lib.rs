@@ -10,6 +10,7 @@ pub mod error;
 pub(crate) mod links;
 pub mod mailbox;
 pub mod message;
+pub mod observer;
 #[cfg(not(feature = "remote"))]
 pub mod registry;
 #[cfg(feature = "remote")]

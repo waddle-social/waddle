@@ -1,49 +1,34 @@
 <script setup lang="ts">
+import { css, cx } from "styled-system/css";
+import { seg } from "styled-system/recipes";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { ScrollDirectionMode } from "@/lib/scroll-direction";
 
 const { mode, setScrollDirection } = useScrollDirectionPreference();
 
-const options: ReadonlyArray<{
-  value: ScrollDirectionMode;
-  label: string;
-  description: string;
-}> = [
-  { value: "chat", label: "Newest at bottom", description: "Keep the classic chat flow with fresh posts landing below older ones." },
-  { value: "social", label: "Newest at top", description: "Flip the timeline so the latest posts stay first as you read downward." },
+const options: ReadonlyArray<{ value: ScrollDirectionMode; label: string }> = [
+  { value: "chat", label: "At the bottom" },
+  { value: "social", label: "At the top" },
 ];
+
+const rowClass = css({ display: "flex", alignItems: "center", gap: "3", flexWrap: "wrap" });
+const labelClass = css({ flex: 1, minWidth: 0, fontSize: "15px" });
+const segClass = cx(seg(), css({ flex: "none" }));
 </script>
 
 <template>
-  <div class="flex flex-col gap-2">
-    <div class="flex items-center justify-between gap-3">
-      <span class="type-section-label text-muted-foreground/70">
-        Scroll direction
-      </span>
-    </div>
-    <div
-      role="radiogroup"
-      aria-label="Scroll direction"
-      class="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1"
-    >
+  <div :class="rowClass">
+    <span id="scroll-direction-label" :class="labelClass">Newest messages</span>
+    <div role="radiogroup" aria-labelledby="scroll-direction-label" :class="segClass">
       <button
         v-for="option in options"
         :key="option.value"
         type="button"
         role="radio"
         :aria-checked="mode === option.value"
-        class="min-h-16 rounded-md px-3 py-2 text-left transition-colors duration-150"
-        :class="mode === option.value
-          ? 'bg-background text-foreground shadow-sm'
-          : 'text-muted-foreground hover:text-foreground'"
         @click="setScrollDirection(option.value)"
       >
-        <div class="flex flex-col gap-0.5">
-          <span class="type-control">{{ option.label }}</span>
-          <span class="type-meta text-muted-foreground">
-            {{ option.description }}
-          </span>
-        </div>
+        {{ option.label }}
       </button>
     </div>
   </div>

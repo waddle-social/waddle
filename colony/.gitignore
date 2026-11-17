@@ -12,3 +12,6 @@ dist/
 
 # editor state
 .vscode/
+
+# panda codegen
+styled-system/

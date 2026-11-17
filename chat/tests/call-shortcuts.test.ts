@@ -155,6 +155,9 @@ describe("describeCallShortcutTarget", () => {
 
   test("an editable element is flagged so typing stays inert", () => {
     expect(describeCallShortcutTarget(fakeTarget(["textarea"])).editableTarget).toBe(true);
+    // AppSelect (Ark Select): the trigger and its open list.
+    expect(describeCallShortcutTarget(fakeTarget(["[role='combobox']"])).editableTarget).toBe(true);
+    expect(describeCallShortcutTarget(fakeTarget(["[role='listbox']"])).editableTarget).toBe(true);
     expect(
       describeCallShortcutTarget(fakeTarget(["[contenteditable='true']"])).editableTarget,
     ).toBe(true);

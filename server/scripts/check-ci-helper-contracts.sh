@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for the Postgres shard lane's CI helpers and the source
-# structure checks that run in the clippy lanes. The PR rustTests workflow runs
-# this before compiling; on main the publish-gating `ciHelperContracts` task
-# runs it, so a helper regression cannot ship an image.
+# structure checks that run in the clippy lanes. The manual rustTests workflow runs
+# this before compiling; on main the publish-gating `nixTestLocal` task runs
+# it before the shards, so a helper regression cannot ship an image.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -33,7 +33,7 @@ done
 # group or the schema-isolated allowlist. Review new fixtures and callers too.
 python3 scripts/check_postgres_test_group.py
 
-# The PR rustTests workflow runs this helper outside the dev shell. Use the
+# The manual rustTests workflow runs this helper outside the dev shell. Use the
 # pinned CUE from the flake when the ambient CLI is absent or a different
 # version; evaluating this graph with CUE 0.17 can hang (#1763).
 if command -v cue >/dev/null 2>&1 && [[ "$(cue version 2>/dev/null)" == *$'\nCUE language version v0.16.1\n'* ]]; then

@@ -1,6 +1,7 @@
 //! Pure direct-message candidate reconstruction from the canonical envelope.
 use super::{
-    NotificationCandidate, NotificationClass, NotificationMessageHints, NotificationOutboxError,
+    NotificationCall, NotificationCandidate, NotificationClass, NotificationMessageHints,
+    NotificationOutboxError,
 };
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -42,14 +43,24 @@ pub(crate) fn direct_candidate_from_envelope(
     // DM the recipient count is 1, but the same pattern is fanned out
     // N× in groupchat so the unified helper keeps both surfaces
     // consistent and avoids redundant XML traversals on the hot path.
-    let (class, hints) = direct_message_intrinsics(message, recipient);
-    let candidate = NotificationCandidate::direct_message_with_hints(
-        recipient.clone(),
-        sender_jid.clone(),
-        archive_stanza_id.clone(),
-        class == NotificationClass::DirectMessageMention,
-        hints,
-    )?;
+    let (class, hints, call) = direct_message_intrinsics(message, recipient);
+    let candidate = if let Some(call) = call {
+        NotificationCandidate::call_with_hints(
+            recipient.clone(),
+            sender_jid.clone(),
+            archive_stanza_id.clone(),
+            call,
+            hints,
+        )?
+    } else {
+        NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid.clone(),
+            archive_stanza_id.clone(),
+            class == NotificationClass::DirectMessageMention,
+            hints,
+        )?
+    };
     Ok(candidate.with_last_message_body(
         message
             .bodies
@@ -64,7 +75,11 @@ pub(crate) fn direct_candidate_from_envelope(
 pub(super) fn direct_message_intrinsics(
     message: &Message,
     recipient: &BareJid,
-) -> (NotificationClass, NotificationMessageHints) {
+) -> (
+    NotificationClass,
+    NotificationMessageHints,
+    Option<NotificationCall>,
+) {
     let RecipientMentionBits { is_mention, noping } =
         mention_bits_for_recipient(message, recipient);
     let hints = NotificationMessageHints::none()
@@ -77,12 +92,25 @@ pub(super) fn direct_message_intrinsics(
             ),
         )
         .with_reaction(waddle_xmpp::xep::xep0444::is_reaction_only_message(message));
-    let class = if is_mention {
+    let call = message
+        .bodies
+        .is_empty()
+        .then(|| waddle_xmpp::xep::xep0353::jmi_propose(message))
+        .flatten()
+        // Only an audio or video offer rings; other proposals stay messages.
+        .filter(|(_, media)| media.audio || media.video)
+        .map(|(session_id, media)| NotificationCall {
+            session_id,
+            video: media.video,
+        });
+    let class = if call.is_some() {
+        NotificationClass::Call
+    } else if is_mention {
         NotificationClass::DirectMessageMention
     } else {
         NotificationClass::DirectMessage
     };
-    (class, hints)
+    (class, hints, call)
 }
 
 /// Typed pair of message-frozen XEP-0513 mention signals for a single

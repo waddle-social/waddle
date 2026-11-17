@@ -10,14 +10,14 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import social.waddle.android.theme.WaddleTokens
 
 /**
- * Huddle motion: 160ms ease-out for state changes, 240ms for movement,
- * 400ms for a card entering. Speaking bars and live pulses are the only
+ * Polar Huddle motion: 150ms ease-out for state changes, 220ms for movement,
+ * 320ms for a card entering. Speaking bars and live pulses are the only
  * loops; [LocalReducedMotion] turns every loop and glow pulse off.
  */
 object HuddleMotion {
     const val FAST = WaddleTokens.Huddle.DurationMillis.FAST
-    const val NORMAL = WaddleTokens.Huddle.DurationMillis.NORMAL
-    const val ENTER = WaddleTokens.Huddle.DurationMillis.ENTER
+    const val NORMAL = WaddleTokens.Huddle.DurationMillis.BASE
+    const val ENTER = WaddleTokens.Huddle.DurationMillis.SLOW
     val easing = WaddleTokens.Huddle.Easing.out
 
     fun <T> fast(): FiniteAnimationSpec<T> = tween(FAST, easing = easing)

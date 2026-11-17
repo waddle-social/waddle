@@ -5,6 +5,8 @@
 use std::sync::Arc;
 
 use jid::BareJid;
+use tracing::Instrument;
+use waddle_xmpp::push::envelope::NotificationClass;
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
@@ -39,6 +41,8 @@ use super::types::{PushDevicePlatform, PushFanoutResult, PushNodeStatus, PushPub
 /// process is missing the VAPID signer, Web Push transport, or `sub`
 /// claim. Treated as transient so the next worker tick will retry once
 /// the operator wires up the missing piece.
+const ATTEMPT_STATUS_NOT_APPLICABLE: &str = "not-applicable";
+
 const ATTEMPT_STATUS_WEB_NOT_CONFIGURED: &str = "web-not-configured";
 
 /// Internal error during Web Push dispatch (encrypt/sign/aud derivation
@@ -85,6 +89,7 @@ struct PublishWorkPhase1 {
     job: PushPublishJob,
     sealed_devices: Vec<dispatch::SealedActiveDevice>,
     payload_xml: String,
+    no_active_devices: bool,
     /// `push_nodes.app_id` of the job's node. For Apple devices this is
     /// the bundle id the registration was made for; APNs dispatch
     /// refuses to send when it differs from the configured topic.
@@ -464,7 +469,44 @@ impl DatabasePushServiceStore {
         Ok(results)
     }
 
+    /// One attempt at a push publish job, traced as `push.job.attempt`.
+    ///
+    /// The span carries the job's identity and counts only: never the node,
+    /// device ids, endpoints, tokens or payload.
     pub(super) async fn process_publish_job_with_retention_limit(
+        &self,
+        job_id: &str,
+        retention_limit: i64,
+    ) -> Result<Option<PushFanoutResult>, XmppError> {
+        let span = tracing::info_span!(
+            "push.job.attempt",
+            job_id,
+            ancestry_job_id = tracing::field::Empty,
+            item_id = tracing::field::Empty,
+            attempted_devices = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let result = self
+            .publish_job_attempt(job_id, retention_limit)
+            .instrument(span.clone())
+            .await;
+        let outcome = match &result {
+            Ok(Some(fanout)) => {
+                span.record("attempted_devices", fanout.attempted_devices);
+                if fanout.attempted_devices == 0 {
+                    "nothing_sent"
+                } else {
+                    "processed"
+                }
+            }
+            Ok(None) => "skipped",
+            Err(_) => "error",
+        };
+        span.record("outcome", outcome);
+        result
+    }
+
+    async fn publish_job_attempt(
         &self,
         job_id: &str,
         retention_limit: i64,
@@ -487,20 +529,16 @@ impl DatabasePushServiceStore {
             sealed_devices,
             payload_xml,
             app_id,
+            no_active_devices,
         } = phase1;
 
-        // ---- Phase 2: outside any tx — encrypt, sign, and send.
-        // The XEP-0357 payload only needs to be parsed when a real
-        // provider (Web Push, APNs or FCM) is wired up. Without one,
-        // every device records a not-configured marker and we never
-        // look at the conversation / class / message-count fields.
-        // Parsing unconditionally would reject test fixtures whose
-        // `<notification>` payload omits the `urn:waddle:push:context:0`
-        // child the chat publisher attaches in production.
+        // ---- Phase 2: outside any tx — validate dispatch policy, then send.
+        // Valid call contexts are checked even without a provider. Historical
+        // provider-less fixtures may omit Waddle context entirely.
         let any_provider_ready = self.any_provider_ready();
         let parsed = match dispatch::parse_publish_payload(&payload_xml) {
             Ok(parsed) => Some(parsed),
-            Err(error) if any_provider_ready => {
+            Err(error) if any_provider_ready || dispatch::has_call_context(&payload_xml) => {
                 // This attempt cannot send. Only a job without earlier
                 // uncertainty may take a terminal failure disposition.
                 self.mark_publish_job_failed_after_phase1(
@@ -520,6 +558,49 @@ impl DatabasePushServiceStore {
             // safe structured fields for the degraded-provider log.
             Err(_) => None,
         };
+        if let Some(parsed) = parsed.as_ref() {
+            let is_call = parsed.class == NotificationClass::Call;
+            let is_voip_node = self
+                .apns_voip_topic
+                .as_ref()
+                .is_some_and(|topic| topic.as_str() == app_id);
+            let disposition = if is_call != is_voip_node {
+                Some((
+                    PUBLISH_JOB_STATUS_PUBLISHED,
+                    "not-applicable: notification class does not apply to this push node",
+                ))
+            } else if parsed.call.as_ref().is_some_and(|call| {
+                call.expires < u64::try_from(crate::time::now_ms() / 1000).unwrap_or(0)
+            }) {
+                Some((
+                    PUBLISH_JOB_STATUS_FAILED,
+                    "call-expired: call expired before provider dispatch",
+                ))
+            } else {
+                None
+            };
+            if let Some((status, diagnostic)) = disposition {
+                self.finish_pre_dispatch_job(&job, status, diagnostic, now_ms)
+                    .await?;
+                tracing::info!(
+                    notification_class = parsed.class.as_db_value(),
+                    push_stage = "provider_dispatch_skipped",
+                    provider_outcome = diagnostic,
+                    "push provider transition"
+                );
+                return Ok(Some(PushFanoutResult {
+                    item_id: job.item_id().to_string(),
+                    attempted_devices: 0,
+                }));
+            }
+        }
+        if no_active_devices {
+            self.defer_empty_publish_job(&job, now_ms).await?;
+            return Ok(Some(PushFanoutResult {
+                item_id: job.item_id().to_string(),
+                attempted_devices: 0,
+            }));
+        }
         let attempts = self
             .dispatch_devices(
                 &sealed_devices,
@@ -567,6 +648,11 @@ impl DatabasePushServiceStore {
         let Some(lock_target) = get_publish_job_tx(&mut tx, job_id).await? else {
             return Ok(Phase1Outcome::ShortCircuit(None));
         };
+        let span = tracing::Span::current();
+        span.record("item_id", lock_target.item_id());
+        if let Some(ancestry_job_id) = lock_target.ancestry_job_id() {
+            span.record("ancestry_job_id", tracing::field::display(ancestry_job_id));
+        }
         super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &lock_target).await?;
         lock_owner_tx(&mut tx, lock_target.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, lock_target.node(), now_ms).await?;
@@ -647,61 +733,7 @@ impl DatabasePushServiceStore {
         // retry path so an already delivered notification can complete.
         let already_delivered =
             delivered_device_ids_for_acceptance_tx(&mut tx, job.job_id()).await?;
-        if sealed_devices.is_empty() && already_delivered.is_empty() {
-            let failed_attempt_count = read_publish_job_attempt_count_tx(&mut tx, job.job_id())
-                .await?
-                .unwrap_or(0)
-                + 1;
-            let exhausted = failed_attempt_count >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS;
-            let status = if exhausted {
-                PUBLISH_JOB_STATUS_FAILED
-            } else {
-                PUBLISH_JOB_STATUS_QUEUED
-            };
-            let retry_at_ms = (!exhausted).then(|| retry_at_ms(now_ms, failed_attempt_count));
-            tx.execute(
-                r#"
-                UPDATE push_publish_jobs
-                SET status = ?,
-                    attempt_count = attempt_count + 1,
-                    last_error = ?,
-                    next_retry_at_ms = ?,
-                    claimed_at_ms = NULL,
-                    claim_token = NULL,
-                    updated_at_ms = ?
-                WHERE job_id = ? AND status = ?
-                "#,
-                crate::db_params![
-                    status,
-                    PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES,
-                    retry_at_ms,
-                    now_ms,
-                    job.job_id().to_string(),
-                    PUBLISH_JOB_STATUS_IN_PROGRESS,
-                ],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-            super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
-            tx.commit()
-                .await
-                .map_err(|error| XmppError::internal(error.to_string()))?;
-            waddle_xmpp::telemetry::reliability::increment_push_disposition(
-                PushRetryReason::PreSend,
-                PushFailureClass::PreSend,
-                if !exhausted {
-                    PushDisposition::Retry
-                } else if job.uncertain_send {
-                    PushDisposition::Parked
-                } else {
-                    PushDisposition::DeadLetter
-                },
-            );
-            return Ok(Phase1Outcome::ShortCircuit(Some(PushFanoutResult {
-                item_id: job.item_id().to_string(),
-                attempted_devices: 0,
-            })));
-        }
+        let no_active_devices = sealed_devices.is_empty() && already_delivered.is_empty();
         // #1123 per-device idempotency: a requeued job (one sibling
         // failed transiently) must not fan out again to devices whose
         // attempt for this same item already succeeded. Filter the
@@ -711,7 +743,7 @@ impl DatabasePushServiceStore {
             .into_iter()
             .filter(|device| !already_delivered.contains(&device.device_id))
             .collect();
-        if sealed_devices.is_empty() {
+        if sealed_devices.is_empty() && !no_active_devices {
             // Every remaining active device already received this
             // item (the failing sibling was disabled or unregistered
             // between retries). The job is complete — finalize as
@@ -766,8 +798,106 @@ impl DatabasePushServiceStore {
             job,
             sealed_devices,
             payload_xml,
+            no_active_devices,
             app_id: push_node.app_id,
         })))
+    }
+
+    async fn defer_empty_publish_job(
+        &self,
+        job: &PushPublishJob,
+        now_ms: i64,
+    ) -> Result<(), XmppError> {
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, job).await?;
+        lock_owner_tx(&mut tx, job.owner_bare_jid(), now_ms).await?;
+        lock_node_tx(&mut tx, job.node(), now_ms).await?;
+        if read_publish_job_claim_token_tx(&mut tx, job.job_id())
+            .await?
+            .as_deref()
+            != Some(job.claim_token())
+        {
+            return Ok(());
+        }
+        let failed_attempt_count = read_publish_job_attempt_count_tx(&mut tx, job.job_id())
+            .await?
+            .unwrap_or(0)
+            + 1;
+        let exhausted = failed_attempt_count >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS;
+        let status = if exhausted {
+            PUBLISH_JOB_STATUS_FAILED
+        } else {
+            PUBLISH_JOB_STATUS_QUEUED
+        };
+        let retry_at_ms = (!exhausted).then(|| retry_at_ms(now_ms, failed_attempt_count));
+        tx.execute(
+            r#"
+                UPDATE push_publish_jobs
+                SET status = ?,
+                    attempt_count = attempt_count + 1,
+                    last_error = ?,
+                    next_retry_at_ms = ?,
+                    claimed_at_ms = NULL,
+                    claim_token = NULL,
+                    updated_at_ms = ?
+                WHERE job_id = ? AND status = ? AND claim_token = ?
+                "#,
+            crate::db_params![
+                status,
+                PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES,
+                retry_at_ms,
+                now_ms,
+                job.job_id().to_string(),
+                PUBLISH_JOB_STATUS_IN_PROGRESS,
+                job.claim_token().to_string(),
+            ],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, job).await?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        waddle_xmpp::telemetry::reliability::increment_push_disposition(
+            PushRetryReason::PreSend,
+            PushFailureClass::PreSend,
+            if !exhausted {
+                PushDisposition::Retry
+            } else if job.uncertain_send {
+                PushDisposition::Parked
+            } else {
+                PushDisposition::DeadLetter
+            },
+        );
+        Ok(())
+    }
+
+    /// Applicability and a call's receipt-time expiry authoritatively settle custody.
+    /// Neither disposition can initiate a provider request, even after an uncertain claim.
+    async fn finish_pre_dispatch_job(
+        &self,
+        job: &PushPublishJob,
+        status: &'static str,
+        diagnostic: &'static str,
+        now_ms: i64,
+    ) -> Result<(), XmppError> {
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, job).await?;
+        lock_owner_tx(&mut tx, job.owner_bare_jid(), now_ms).await?;
+        lock_node_tx(&mut tx, job.node(), now_ms).await?;
+        tx.execute(
+            "UPDATE push_publish_jobs SET status = ?, uncertain_send = 0, attempt_count = attempt_count + 1, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ?, published_at_ms = ? WHERE job_id = ? AND status = ? AND claim_token = ?",
+            crate::db_params![status, diagnostic, now_ms, (status == PUBLISH_JOB_STATUS_PUBLISHED).then_some(now_ms), job.job_id().to_string(), PUBLISH_JOB_STATUS_IN_PROGRESS, job.claim_token().to_string()],
+        ).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, job).await?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        Ok(())
     }
 
     async fn current_apns_badge_count(&self, recipient: &BareJid) -> Option<u64> {
@@ -833,7 +963,10 @@ impl DatabasePushServiceStore {
         let has_apns_device = sealed_devices
             .iter()
             .any(|device| device.platform == PushDevicePlatform::Apns);
-        let badge_count = if self.apns.is_some() && parsed.is_some() && has_apns_device {
+        let badge_count = if self.apns.is_some()
+            && parsed.is_some_and(|parsed| parsed.class != NotificationClass::Call)
+            && has_apns_device
+        {
             self.current_apns_badge_count(recipient).await
         } else {
             None
@@ -851,7 +984,10 @@ impl DatabasePushServiceStore {
             .any(|device| device.platform == PushDevicePlatform::Fcm);
         let fcm_provider = match (self.fcm.as_ref(), parsed) {
             (Some(provider), Some(parsed)) => {
-                let access_token = if has_fcm_device && provider.serves_app_id(job.app_id) {
+                let access_token = if has_fcm_device
+                    && parsed.class != NotificationClass::Call
+                    && provider.serves_app_id(job.app_id)
+                {
                     Some(provider.tokens.current().await)
                 } else {
                     None
@@ -879,6 +1015,27 @@ impl DatabasePushServiceStore {
                 let fcm_provider = fcm_provider.clone();
                 let log_context = Arc::clone(&log_context);
                 async move {
+                    if log_context
+                        .as_ref()
+                        .as_ref()
+                        .is_some_and(|parsed| parsed.class == NotificationClass::Call)
+                        && device.platform != PushDevicePlatform::Apns
+                    {
+                        tracing::info!(
+                            notification_class = "call",
+                            push_stage = "provider_dispatch_skipped",
+                            provider_outcome = ATTEMPT_STATUS_NOT_APPLICABLE,
+                            "push provider transition"
+                        );
+                        return DispatchedAttempt {
+                            device_id: device.device_id.clone(),
+                            platform: device.platform,
+                            status: ATTEMPT_STATUS_NOT_APPLICABLE,
+                            last_error: Some("call requires an APNs PushKit device".to_string()),
+                            retry_after: None,
+                            retry: None,
+                        };
+                    }
                     match (&web_provider, device.platform) {
                         (Some((signer, sender, sub, parsed, secrets)), PushDevicePlatform::Web) => {
                             dispatch_web_device_owned(

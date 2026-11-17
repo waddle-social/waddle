@@ -5,15 +5,16 @@
 use super::publisher_persistence::retire_registration_outbox_tx;
 use super::publisher_persistence::{current_unread_count_for_job, PublisherTransition};
 use super::{
-    xep0191_blocks_notification_job, BareJid, BlockingStorage, Element, Error, InboxStorage,
-    NotificationOutboxError, NotificationOutboxJob, NotificationOutboxPublishOutcome,
-    NotificationOutboxStatus, NotificationOutboxStore, PubSubItem, PushSubscriptionStore,
-    SuppressedReason,
+    xep0191_blocks_notification_job, BareJid, BlockingStorage, DrainBatch, DrainScope, Element,
+    Error, InboxStorage, NotificationOutboxError, NotificationOutboxJob,
+    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
+    PubSubItem, PushSubscriptionStore, SuppressedReason,
 };
 #[cfg(test)]
 use super::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
 use crate::push_service::CanonicalNotificationTerminalProof;
 use crate::push_service::DatabasePushServiceStore;
+use tracing::Instrument;
 
 pub(super) const MAX_OUTBOX_ATTEMPTS: i64 = 5;
 const BASE_RETRY_DELAY_MS: i64 = 5_000;
@@ -151,13 +152,14 @@ pub(super) fn record_failure_transition(
 impl NotificationOutboxStore {
     pub async fn claim_due_outbox_jobs(
         &self,
+        scope: DrainScope,
         batch_size: usize,
     ) -> Result<Vec<NotificationOutboxJob>, NotificationOutboxError> {
         let batch_size = batch_size.clamp(1, 1_000);
         let now_ms = crate::time::now_ms();
         let stale_claimed_before_ms = now_ms.saturating_sub(OUTBOX_CLAIM_TIMEOUT_MS);
         let selected = self
-            .persist_due_outbox_selection(batch_size, now_ms, stale_claimed_before_ms)
+            .persist_due_outbox_selection(scope, batch_size, now_ms, stale_claimed_before_ms)
             .await?;
 
         let mut claimed = Vec::new();
@@ -197,32 +199,57 @@ impl NotificationOutboxStore {
         inbox_storage: &dyn InboxStorage,
         blocking_storage: &dyn BlockingStorage,
         first_party_service_jid: &BareJid,
-        batch_size: usize,
+        batch: DrainBatch,
     ) -> Result<Vec<NotificationOutboxPublishOutcome>, NotificationOutboxError> {
-        let jobs = self.claim_due_outbox_jobs(batch_size).await?;
+        let DrainBatch { scope, batch_size } = batch;
+        let jobs = self.claim_due_outbox_jobs(scope, batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            let outcome = match self
-                .publish_claimed_job(
-                    &job,
-                    push_service,
-                    push_store,
-                    inbox_storage,
-                    blocking_storage,
-                    first_party_service_jid,
-                )
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    tracing::warn!(job_id = job.job_id.as_str(), %error, "notification publish failed");
-                    self.retry_or_fail_outcome_for_claimed_job(
+            let span = tracing::info_span!(
+                "notification.job.publish",
+                job_id = job.job_id.as_str(),
+                notification_class = job.class().as_db_value(),
+                attempt_count = job.attempt_count,
+                outcome = tracing::field::Empty,
+            );
+            let outcome = async {
+                let outcome = match self
+                    .publish_claimed_job(
                         &job,
-                        PublishFailure::from_store_error(&error),
+                        push_service,
+                        push_store,
+                        inbox_storage,
+                        blocking_storage,
+                        first_party_service_jid,
                     )
-                    .await?
-                }
-            };
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::warn!(job_id = job.job_id.as_str(), %error, "notification publish failed");
+                        self.retry_or_fail_outcome_for_claimed_job(
+                            &job,
+                            PublishFailure::from_store_error(&error),
+                        )
+                        .await
+                        .inspect_err(|_| {
+                            tracing::Span::current().record("outcome", "error");
+                        })?
+                    }
+                };
+                tracing::Span::current().record(
+                    "outcome",
+                    match &outcome {
+                        NotificationOutboxPublishOutcome::Published { .. } => "published",
+                        NotificationOutboxPublishOutcome::RetryScheduled { .. } => "retry_scheduled",
+                        NotificationOutboxPublishOutcome::Failed { .. } => "failed",
+                        NotificationOutboxPublishOutcome::Suppressed { .. } => "suppressed",
+                    },
+                );
+                Ok::<_, NotificationOutboxError>(outcome)
+            }
+            .instrument(span)
+            .await?;
             // #531 push-pipeline observability: bucket the typed
             // outcome into the parallel counter so a single drain
             // pass produces a histogram-like cardinality on the
@@ -408,11 +435,12 @@ impl NotificationOutboxStore {
             });
         }
 
-        let unread = if job.queue_acceptance_may_exist {
-            None
-        } else {
-            current_unread_count_for_job(job, inbox_storage).await?
-        };
+        let unread =
+            if job.queue_acceptance_may_exist || job.class == super::NotificationClass::Call {
+                None
+            } else {
+                current_unread_count_for_job(job, inbox_storage).await?
+            };
         // #1126: the recipient reconnected and read the conversation
         // inside the notification window — an OS push now would be
         // for a message they already saw. Drop the job terminally.
@@ -467,6 +495,10 @@ impl NotificationOutboxStore {
             .await
         {
             Ok(result) => {
+                // Queue acceptance is durable even if upstream bookkeeping fails.
+                if job.class() == super::NotificationClass::Call && result.queued() {
+                    push_service.publish_job_wake().notify_one();
+                }
                 if !self.mark_job_published(job).await? {
                     return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                         job_id: job.job_id.clone(),
@@ -913,6 +945,7 @@ mod tests {
     use crate::notification_outbox::test_support::{
         bare, candidate, enqueue_jobs_for_test, inbox_with_unread, reclaim_stale_job, store, target,
     };
+    use crate::notification_outbox::DrainScope;
 
     // #1126: exponential backoff carries ±25% jitter so retries after
     // an outage do not drain in synchronized waves.
@@ -957,7 +990,7 @@ mod tests {
         let conversation = bare("bob@example.com");
         enqueue_jobs_for_test(&store, &candidate("archive-1"), &[target()]).await;
         let claimed = store
-            .claim_due_outbox_jobs(16)
+            .claim_due_outbox_jobs(DrainScope::All, 16)
             .await
             .expect("claim")
             .into_iter()

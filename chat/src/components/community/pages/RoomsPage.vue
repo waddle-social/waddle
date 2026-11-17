@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Menu } from "lucide-vue-next";
+import { Hash, Menu, MessagesSquare } from "lucide-vue-next";
+import spot from "@waddle/design/assets/spot-empty.svg?url";
+import { css, cx } from "styled-system/css";
+import { badge, btn, empty } from "styled-system/recipes";
+import { isForumChannel } from "@/lib/channel-types";
+import { pageClasses as page } from "@/components/community/pages/page-classes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { useCallParticipantAvatarJid } from "@/lib/avatars/use-call-participant-avatar";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
@@ -60,7 +65,6 @@ const {
   openThreads,
   openUnread,
   openCreateChannelDialog,
-  handleNewGroupDm,
   handleAddPeopleToDm,
   remoteCommunities,
 } = props.controller;
@@ -216,211 +220,258 @@ function endDmFromPage(peerJid: string, sid?: string) {
 function selectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);
 }
+
+// Rooms-Page board: one bordered list of rooms (live huddles first) with
+// Open, or Join for a live huddle; the legacy room and DM panels follow
+// as embedded cards.
+const newRoomBtn = btn({ variant: "primary" });
+const desktopOnly = css({ display: "none", md: { display: "inline-flex" } });
+const newRoomSmBtn = btn({ variant: "primary", size: "sm" });
+const openBtn = btn({ size: "sm" });
+const joinBtn = btn({ variant: "live", size: "sm" });
+const joinRemoteBtn = btn();
+const forgetBtn = cx(btn({ size: "sm" }), css({ color: "danger.text" }));
+const mentionBadge = badge();
+const unreadBadge = badge({ variant: "quiet" });
+const emptyClass = cx(empty(), css({ pt: "16", "& h2": { margin: 0, font: "700 24px/1.25 {fonts.display}", color: "fg" } }));
+const loadingClass = css({ py: "6", textAlign: "center", font: "400 14px/1.45 {fonts.body}", color: "fg.muted" });
+const list = css({ margin: 0, padding: 0, listStyle: "none", borderRadius: "16px", border: "1px solid {colors.border.soft}", bg: "surface", overflow: "hidden", "--ring-bg": "{colors.surface}" });
+const row = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "3",
+  minHeight: "64px",
+  padding: "{spacing.3} {spacing.4}",
+  borderBottom: "1px solid {colors.border.soft}",
+  _last: { borderBottom: 0 },
+  "&[data-live]": { bg: "live.subtle" },
+  _narrow: { gap: "2.5", px: "3" },
+});
+const rowIcon = css({ width: "18px", height: "18px", flex: "none", color: "fg.muted" });
+const rowEnter = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.5",
+  flex: 1,
+  minWidth: 0,
+  padding: 0,
+  border: 0,
+  bg: "transparent",
+  color: "fg",
+  font: "inherit",
+  textAlign: "left",
+  cursor: "pointer",
+  "&:hover > :first-child": { textDecoration: "underline", textUnderlineOffset: "3px" },
+});
+/** Name and address column of a row that cannot be entered. */
+const rowText = css({ display: "flex", flexDirection: "column", gap: "0.5", flex: 1, minWidth: 0 });
+const rowName = css({ font: "700 15px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const rowMeta = css({ font: "400 13px/1.35 {fonts.body}", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const liveMeta = css({ color: "live.text" });
+const rowSide = css({ display: "flex", alignItems: "center", gap: "2", flex: "none" });
+const avatars = css({ display: "flex", "& > * + *": { ml: "-6px" }, _narrow: { display: "none" } });
+const section = css({ display: "flex", flexDirection: "column", gap: "3" });
+const embed = css({
+  display: "flex",
+  minHeight: "20rem",
+  maxHeight: "44rem",
+  overflow: "hidden",
+  border: "1px solid {colors.border.soft}",
+  borderRadius: "16px",
+  bg: "surface",
+  "& > *": { width: "100% !important", flex: "1 1 0% !important", borderRight: "0 !important" },
+});
 </script>
 
 <template>
-  <div class="community-page">
-    <header class="community-page__header">
-      <div class="flex min-w-0 items-start gap-3">
-        <button
-          type="button"
-          class="community-page__mobile-nav lg:hidden"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
-        >
-          <Menu class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <div class="community-page__heading">
-          <span class="community-kicker" :class="liveCount > 0 ? 'community-kicker--live' : ''">
-            <span v-if="liveCount > 0" class="community-ember" aria-hidden="true" />
-            {{ tiles.length }} room{{ tiles.length === 1 ? "" : "s" }}<template v-if="liveCount > 0"> · {{ liveCount }} live</template>
-          </span>
-          <h1 class="community-page__title">Rooms</h1>
-          <p class="community-page__lead">Sorted by what is happening: huddles first, then mentions and unread.</p>
-        </div>
-      </div>
-      <div class="flex flex-wrap gap-2">
-        <!-- Offered only while the home server federates with other servers. -->
-        <button
-          v-if="waddles.federationAvailable.value"
-          type="button"
-          class="community-pill"
-          @click="ui.showRemoteCommunities.value = true"
-        >
-          Join from another server
-        </button>
-        <button
-          v-if="waddles.canManageChannels.value"
-          type="button"
-          class="community-pill"
-          @click="openCreateChannelDialog()"
-        >
-          New room
-        </button>
-      </div>
+  <div :class="page.root">
+    <!-- Phone header: the rail bar with the sidebar button. -->
+    <header :class="page.mobileBar" data-theme="night">
+      <button type="button" :class="page.mobileNav" aria-label="Open navigation" @click="emit('openNav')">
+        <Menu aria-hidden="true" />
+      </button>
+      <b :class="page.mobileTitle">Browse rooms</b>
+      <button v-if="waddles.canManageChannels.value" type="button" :class="newRoomSmBtn" @click="openCreateChannelDialog()">
+        New room
+      </button>
     </header>
 
-    <div class="community-page__body">
-      <section class="community-section" aria-label="Rooms">
-        <div v-if="waddles.isLoadingStructure.value && tiles.length === 0" class="community-empty">
-          Finding your rooms.
-        </div>
-        <div v-else-if="tiles.length === 0" class="community-empty">
-          No rooms yet. Create the first one and invite people in.
-        </div>
-        <div v-else class="community-grid">
-          <article
-            v-for="tile in tiles"
-            :key="tile.channel.id"
-            class="room-card"
-            :class="tile.live ? 'room-card--live' : ''"
-          >
-            <span class="community-kicker" :class="tile.live ? 'community-kicker--live' : ''">
-              <span v-if="tile.live" class="community-ember" aria-hidden="true" />
-              {{ tile.kicker }}
+    <div :class="page.scroll">
+      <div :class="page.content">
+        <header :class="page.head">
+          <div :class="page.heading">
+            <span :class="liveCount > 0 ? page.liveKicker : page.kicker">
+              <span v-if="liveCount > 0" :class="page.ember" aria-hidden="true" />
+              {{ tiles.length }} room{{ tiles.length === 1 ? "" : "s" }}<template v-if="liveCount > 0"> · {{ liveCount }} live</template>
             </span>
-            <button
-              type="button"
-              class="room-card__enter"
-              :aria-label="`Enter ${tile.channel.name}`"
-              @click="enterRoom(tile)"
-            >
-              <span class="room-card__title">{{ tile.channel.name }}</span>
+            <h1 :class="page.h1">Browse rooms</h1>
+            <p :class="page.lead">Sorted by what is happening: huddles first, then mentions and unread.</p>
+          </div>
+          <!-- Offered only while the home server federates with other servers;
+               shown at every width, since the phone bar has no room for it. -->
+          <button
+            v-if="waddles.federationAvailable.value"
+            type="button"
+            :class="joinRemoteBtn"
+            @click="ui.showRemoteCommunities.value = true"
+          >
+            Join from another server
+          </button>
+          <button v-if="waddles.canManageChannels.value && tiles.length > 0" type="button" :class="[newRoomBtn, desktopOnly]" @click="openCreateChannelDialog()">
+            New room
+          </button>
+        </header>
+
+        <section aria-label="Rooms" :class="section">
+          <div v-if="waddles.isLoadingStructure.value && tiles.length === 0" :class="loadingClass" role="status">
+            Finding your rooms.
+          </div>
+          <div v-else-if="tiles.length === 0" :class="emptyClass" role="status">
+            <img :src="spot" alt="" />
+            <h2>No rooms yet</h2>
+            <p v-if="waddles.canManageChannels.value">Create the first one to get people talking.</p>
+            <p v-else>They show up here once a server owner creates one.</p>
+            <button v-if="waddles.canManageChannels.value" type="button" :class="newRoomBtn" @click="openCreateChannelDialog()">
+              New room
             </button>
-            <p v-if="tile.preview" class="room-card__preview">{{ tile.preview }}</p>
-            <p v-else-if="!tile.live && tile.unread === 0" class="room-card__quiet">
-              It is quiet in here. Be the one who breaks the silence.
-            </p>
-            <div class="room-card__footer">
-              <div class="flex min-w-0 items-center gap-2">
-                <div v-if="tile.nicks.length > 0" class="room-card__avatars" :aria-label="`${tile.nicks.length} in the huddle`">
-                  <span v-for="avatar in tileAvatars(tile)" :key="avatar.nick" class="inline-flex rounded-full ring-2 ring-card">
-                    <UserAvatar :name="avatar.nick" :jid="avatar.jid" size="xs" />
-                  </span>
-                </div>
-                <span v-if="tile.mentions > 0" class="room-card__badge" :aria-label="`${tile.mentions} mentions`">@{{ tile.mentions }}</span>
-                <span v-else-if="tile.unread > 0" class="room-card__badge room-card__badge--unread" :aria-label="`${tile.unread} unread`">{{ tile.unread }}</span>
-              </div>
+          </div>
+          <ul v-else :class="list">
+            <li v-for="tile in tiles" :key="tile.channel.id" :class="row" :data-live="tile.live ? '' : undefined">
+              <MessagesSquare v-if="isForumChannel(tile.channel)" :class="rowIcon" aria-hidden="true" />
+              <Hash v-else :class="rowIcon" aria-hidden="true" />
               <button
-                v-if="tile.live"
                 type="button"
-                class="community-pill community-pill--live"
-                :aria-label="`Join the huddle in ${tile.channel.name}`"
-                @click="joinHuddle(tile)"
-              >
-                Join
-              </button>
-              <button
-                v-else
-                type="button"
-                class="community-pill"
+                :class="rowEnter"
                 :aria-label="`Enter ${tile.channel.name}`"
                 @click="enterRoom(tile)"
               >
-                Enter
+                <span :class="rowName">{{ tile.channel.name }}</span>
+                <span :class="[rowMeta, tile.live && liveMeta]">{{ tile.kicker }}<template v-if="tile.preview"> · {{ tile.preview }}</template></span>
               </button>
-            </div>
-          </article>
-        </div>
-      </section>
+              <div :class="rowSide">
+                <div v-if="tile.nicks.length > 0" :class="avatars" :aria-label="`${tile.nicks.length} in the huddle`">
+                  <UserAvatar v-for="avatar in tileAvatars(tile)" :key="avatar.nick" :name="avatar.nick" :jid="avatar.jid" size="xs" :in-call="false" />
+                </div>
+                <span v-if="tile.mentions > 0" :class="mentionBadge" :aria-label="`${tile.mentions} mentions`">@{{ tile.mentions }}</span>
+                <span v-else-if="tile.unread > 0" :class="unreadBadge" :aria-label="`${tile.unread} unread`">{{ tile.unread }}</span>
+                <button
+                  v-if="tile.live"
+                  type="button"
+                  :class="joinBtn"
+                  :aria-label="`Join the huddle in ${tile.channel.name}`"
+                  @click="joinHuddle(tile)"
+                >
+                  Join
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  :class="openBtn"
+                  :aria-label="`Enter ${tile.channel.name}`"
+                  @click="enterRoom(tile)"
+                >
+                  Open
+                </button>
+              </div>
+            </li>
+          </ul>
+        </section>
 
-      <!-- Rooms on other servers the user bookmarked, while this server
-           does not federate: nothing joins them, and only Forget is offered. -->
-      <section
-        v-if="waddles.unavailableRemoteRooms.value.length > 0"
-        class="community-section"
-        aria-label="Rooms on other servers, unavailable"
-      >
-        <h2 class="community-section__title">Rooms on other servers — unavailable</h2>
-        <p class="type-caption text-muted-foreground">
-          Your server doesn't connect to other servers right now, so these rooms can't be opened.
-        </p>
-        <ul class="grid gap-1">
-          <li
-            v-for="room in waddles.unavailableRemoteRooms.value"
-            :key="room.roomJid"
-            class="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-1.5"
-          >
-            <div class="min-w-0 flex-1">
-              <div class="type-control truncate">{{ room.name ?? room.roomJid }}</div>
-              <div class="type-meta text-muted-foreground truncate">{{ room.roomJid }}</div>
-            </div>
-            <button
-              type="button"
-              class="chat-action-button type-control text-destructive-text hover:bg-destructive/10"
-              title="Remove the room's bookmark on every device. Your access to the room is not changed."
-              @click="forgetUnavailableRoom(room.roomJid)"
-            >Forget</button>
-          </li>
-        </ul>
-      </section>
+        <!-- Rooms on other servers the user bookmarked, while this server
+             does not federate: nothing joins them, and only Forget is offered. -->
+        <section
+          v-if="waddles.unavailableRemoteRooms.value.length > 0"
+          :class="section"
+          aria-label="Rooms on other servers, unavailable"
+        >
+          <h2 :class="page.sectionTitle">Rooms on other servers — unavailable</h2>
+          <p :class="page.lead">
+            Your server doesn't connect to other servers right now, so these rooms can't be opened.
+          </p>
+          <ul :class="list">
+            <li v-for="room in waddles.unavailableRemoteRooms.value" :key="room.roomJid" :class="row">
+              <div :class="rowText">
+                <span :class="rowName">{{ room.name ?? room.roomJid }}</span>
+                <span :class="rowMeta">{{ room.roomJid }}</span>
+              </div>
+              <button
+                type="button"
+                :class="forgetBtn"
+                title="Remove the room's bookmark on every device. Your access to the room is not changed."
+                @click="forgetUnavailableRoom(room.roomJid)"
+              >
+                Forget
+              </button>
+            </li>
+          </ul>
+        </section>
 
-      <section class="community-section" aria-label="Browse all rooms">
-        <h2 class="community-section__title">Browse all rooms</h2>
-        <div class="community-embed">
-          <TopicsPanel
-            :waddle="waddles.currentSpace.value"
-            :spaces="waddles.sortedSpaces.value"
-            :channels="waddles.sortedChannels.value"
-            :active-channel-id="waddles.activeChannelId.value"
-            :can-manage-channels="waddles.canManageChannels.value"
-            :can-manage-community="waddles.canManageCommunity.value"
-            :is-loading="waddles.isLoadingStructure.value"
-            :member-count="displayedMemberCount"
-            :member-state="displayedMemberState"
-            :active-channel-jids="messaging.activeChannels.value"
-            :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
-            :channel-unread-map="computedChannelUnreadMap"
-            :call-participant-counts="callParticipantCounts"
-            :call-participants="callParticipants"
-            :call-media-by-room="callMediaByRoom"
-            :managed-muc-domain="managedMucDomain"
-            :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
-            :active-community-surface="ui.activeCommunitySurface.value"
-            :stories-active-count="stories.activeStories.value.length"
-            :upcoming-event-count="communityEvents.events.value.filter((event) => isEventUpcomingOrOngoing(event)).length"
-            :is-threads-active="ui.activePage.value === 'threads'"
-            :is-unread-active="ui.activePage.value === 'unread'"
-            :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
-            @select-channel="selectChannelFromPage"
-            @join-channel-call="joinChannelCallFromPage"
-            @leave-channel-call="leaveChannelCallFromPage"
-            @select-thread="onSelectThread"
-            @select-community-surface="selectCommunitySurface"
-            @select-threads-view="openThreads"
-            @select-unread-view="openUnread"
-            @create-channel="openCreateChannelDialog()"
-            @create-channel-in-space="openCreateChannelDialog"
-            @open-settings="ui.showWaddleSettings.value = true"
-            @open-members="ui.showMembers.value = true"
-            @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
-          />
-        </div>
-      </section>
+        <section :class="section" aria-label="Browse all rooms">
+          <h2 :class="page.sectionTitle">Browse all rooms</h2>
+          <div :class="embed">
+            <TopicsPanel
+              :waddle="waddles.currentSpace.value"
+              :spaces="waddles.sortedSpaces.value"
+              :channels="waddles.sortedChannels.value"
+              :active-channel-id="waddles.activeChannelId.value"
+              :can-manage-channels="waddles.canManageChannels.value"
+              :can-manage-community="waddles.canManageCommunity.value"
+              :is-loading="waddles.isLoadingStructure.value"
+              :member-count="displayedMemberCount"
+              :member-state="displayedMemberState"
+              :active-channel-jids="messaging.activeChannels.value"
+              :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
+              :channel-unread-map="computedChannelUnreadMap"
+              :call-participant-counts="callParticipantCounts"
+              :call-participants="callParticipants"
+              :call-media-by-room="callMediaByRoom"
+              :managed-muc-domain="managedMucDomain"
+              :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
+              :active-community-surface="ui.activeCommunitySurface.value"
+              :stories-active-count="stories.activeStories.value.length"
+              :upcoming-event-count="communityEvents.events.value.filter((event) => isEventUpcomingOrOngoing(event)).length"
+              :is-threads-active="ui.activePage.value === 'threads'"
+              :is-unread-active="ui.activePage.value === 'unread'"
+              :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
+              @select-channel="selectChannelFromPage"
+              @join-channel-call="joinChannelCallFromPage"
+              @leave-channel-call="leaveChannelCallFromPage"
+              @select-thread="onSelectThread"
+              @select-community-surface="selectCommunitySurface"
+              @select-threads-view="openThreads"
+              @select-unread-view="openUnread"
+              @create-channel="openCreateChannelDialog()"
+              @create-channel-in-space="openCreateChannelDialog"
+              @open-settings="ui.showWaddleSettings.value = true"
+              @open-members="ui.showMembers.value = true"
+              @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
+            />
+          </div>
+        </section>
 
-      <section class="community-section" aria-label="Direct messages">
-        <h2 class="community-section__title">Direct messages</h2>
-        <div class="community-embed">
-          <DmPanel
-            :conversations="dmConversations.conversations.value"
-            :group-dms="groupDmConversations"
-            :active-peer-jid="dmConversations.activePeerJid.value"
-            :active-group-dm-room-jid="null"
-            :thread-entries="dmThreadEntries ?? []"
-            :self-full-jid="selfFullJid"
-            hide-current-call
-            @answer-dm="answerDmFromPage"
-            @select-dm="selectDm"
-            @select-group-dm="selectGroupDm"
-            @select-thread="openThread"
-            @reconnect-dm="reconnectDmFromPage"
-            @end-dm="endDmFromPage"
-            @new-dm="ui.showNewDm.value = true"
-            @new-group-dm="handleNewGroupDm"
-            @add-people-to-dm="handleAddPeopleToDm"
-          />
-        </div>
-      </section>
+        <section :class="section" aria-label="Direct messages">
+          <h2 :class="page.sectionTitle">Direct messages</h2>
+          <div :class="embed">
+            <DmPanel
+              :conversations="dmConversations.conversations.value"
+              :group-dms="groupDmConversations"
+              :active-peer-jid="dmConversations.activePeerJid.value"
+              :active-group-dm-room-jid="null"
+              :thread-entries="dmThreadEntries ?? []"
+              :self-full-jid="selfFullJid"
+              hide-current-call
+              @answer-dm="answerDmFromPage"
+              @select-dm="selectDm"
+              @select-group-dm="selectGroupDm"
+              @select-thread="openThread"
+              @reconnect-dm="reconnectDmFromPage"
+              @end-dm="endDmFromPage"
+              @new-dm="ui.showNewDm.value = true"
+              @add-people-to-dm="handleAddPeopleToDm"
+            />
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>

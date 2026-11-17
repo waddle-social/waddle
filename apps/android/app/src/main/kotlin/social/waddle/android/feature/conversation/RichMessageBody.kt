@@ -116,13 +116,14 @@ private fun BlockquoteColumn(quote: RichBlock.Blockquote) {
 @Composable
 private fun annotatedParagraph(runs: List<RichInlineRun>): AnnotatedString {
     val uriHandler = LocalUriHandler.current
-    // Inline @mentions act (teal); the row tint says "you", not the name.
-    val mentionColor = Waddle.colors.actionText
+    // Inline @mentions (web `wd-mention`): gold text on gold subtle, bold.
+    val mentionColor = Waddle.colors.goldText
+    val mentionBackground = Waddle.colors.goldSubtle
     val linkColor = Waddle.colors.link
     val codeBackground = Waddle.colors.codeBackground
     return buildAnnotatedString {
         runs.forEach { run ->
-            val style = run.spanStyle(mentionColor, codeBackground)
+            val style = run.spanStyle(mentionColor, mentionBackground, codeBackground)
             val linkUri = run.linkUri
             if (linkUri != null) {
                 val linkStyle = style.copy(
@@ -142,17 +143,21 @@ private fun annotatedParagraph(runs: List<RichInlineRun>): AnnotatedString {
     }
 }
 
-private fun RichInlineRun.spanStyle(mentionColor: Color, codeBackground: Color): SpanStyle =
+private fun RichInlineRun.spanStyle(mentionColor: Color, mentionBackground: Color, codeBackground: Color): SpanStyle =
     SpanStyle(
         fontWeight = when {
             bold -> FontWeight.Bold
-            mentionUri != null -> FontWeight.SemiBold
+            mentionUri != null -> FontWeight.Bold
             else -> null
         },
         fontStyle = if (italic) FontStyle.Italic else null,
         textDecoration = if (strikethrough) TextDecoration.LineThrough else null,
         fontFamily = if (code) MonoFamily else null,
-        background = if (code) codeBackground else Color.Unspecified,
+        background = when {
+            code -> codeBackground
+            mentionUri != null -> mentionBackground
+            else -> Color.Unspecified
+        },
         color = if (mentionUri != null) mentionColor else Color.Unspecified,
     )
 

@@ -13,7 +13,7 @@ ledger entry. The
 [federation plan](../../../docs/planning/federation-2047.md) and distributed
 actor roadmap retain their ordering and activation gates.
 
-The first slice is implemented (`permissions/host_grant`, migration 2001).
+The first slice is implemented (`permissions/host_grant`, migration 2002).
 What it decided for its scope is recorded under
 [First-slice decisions](#first-slice-decisions); the evidence for those
 decisions is the first slice's focused set, executed as described under
@@ -31,7 +31,7 @@ address that is not in canonical form (see
 [Rollout part](#rollout-part-g24)).
 
 The restore slice (W5r in the plan, condition B7) is implemented as well
-(`permissions/host_grant/restore` and `witness`, migration 2002, the
+(`permissions/host_grant/restore` and `witness`, migration 2003, the
 `waddle-server host-grant` operator subcommand). Its decisions are recorded
 under [Restore incarnation decisions](#restore-incarnation-decisions), and
 its operator procedure is the
@@ -42,8 +42,8 @@ verification step 4 has not.
 
 The revocation slice (W5d in the plan) is implemented as well: the
 acknowledged revocation fence (`permissions/host_grant/fence`, migration
-2005), the sweep of seated occupants (`server/host_grant_revocation`), the
-ledger of retired account JIDs (`auth/retirement`, migration 2006) and the
+2006), the sweep of seated occupants (`server/host_grant_revocation`), the
+ledger of retired account JIDs (`auth/retirement`, migration 2007) and the
 operator acts that go with them. Its decisions are recorded under
 [Revocation fence decisions](#revocation-fence-decisions), and its focused
 set has run against disposable stores (see
@@ -648,13 +648,13 @@ without restating it.
 
 ### Canonical model as built
 
-Migration 2001 creates seven relations.
+Migration 2002 creates seven relations.
 
 | Relation | Holds |
 | --- | --- |
-| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. Migration 2002 adds the restore epoch the incarnation was established under, the database lineage it is bound to, a fixed authority identity and an operator's position acknowledgement; only a declared restore changes the incarnation (see [Restore incarnation decisions](#restore-incarnation-decisions)). |
+| `host_grant_authority` | The deployment's authority incarnation, one row. Every scope and every projection marker is bound to it; a scope bound to another incarnation admits nothing and accepts no grant change, and its projection is neither written nor activated. Migration 2003 adds the restore epoch the incarnation was established under, the database lineage it is bound to, a fixed authority identity and an operator's position acknowledgement; only a declared restore changes the incarnation (see [Restore incarnation decisions](#restore-incarnation-decisions)). |
 | `host_grant_scope_lifecycles` | One row per enrollment: lifecycle identity and scope key, both unique. Never deleted, and updated once at most: retirement stamps `retired_at_ms`. Only the schema owner writes it. |
-| `host_grant_scopes` | The latest state of a scope: incarnation, policy version, generation, the operation that recorded it, the latest generation whose projection was verified and activated, and `closed` or `active` with the reason for `closed` (`enrolled`, `retired`, `exhausted`; migration 2002 adds `restored`, `reconstructed`, `fenced` and the `lost_operations` mark). Its row lock is the scope's authority guard. |
+| `host_grant_scopes` | The latest state of a scope: incarnation, policy version, generation, the operation that recorded it, the latest generation whose projection was verified and activated, and `closed` or `active` with the reason for `closed` (`enrolled`, `retired`, `exhausted`; migration 2003 adds `restored`, `reconstructed`, `fenced` and the `lost_operations` mark). Its row lock is the scope's authority guard. |
 | `host_grant_rooms` | The rooms a scope manages and each room's authorization object. A binding is immutable. |
 | `host_grants` | One row per room and subject: the recorded affiliation, the effective affiliation, the generation and operation that last changed it, and why issuance accepted it. A revoke is a row whose affiliation is `none`. |
 | `host_grant_operations` | The immutable outcome of each operation: identity, fingerprint of its input, kind, initiator, incarnation, generation and the digest of the intended projection. One operation per generation of a lifecycle. |
@@ -1125,7 +1125,8 @@ projected subject are that canonical text.
 
 ### Rollout part (G24)
 
-- Migration 2001 is the first migration after the schema baseline. Under the
+- Migration 2002 is the first migration of this work after the schema
+  baseline; it follows 2001, which the previous release applies. Under the
   restricted runtime the owner phase applies it and grants its relations
   from the matrix, and the runtime's ledger preflight refuses a database
   whose ledger lacks it; a PostgreSQL server that owns its schema applies it
@@ -1133,16 +1134,19 @@ projected subject are that canonical text.
   version it does not know. The owner phase therefore runs with the new
   image before any new server starts, and old and new servers do not share
   the database across it. On SQLite the migration creates nothing.
-- The migrations after the baseline are numbered 2001 to 2013 without a
-  gap. The runner refuses a database that recorded a later version but not
+- The migrations after the baseline are numbered without a gap: 2001
+  (offline call notification candidates, outside this work), then 2002 to
+  2014. The runner refuses a database that recorded a later version but not
   an earlier one, so a skipped number could never be used once a later
   migration ships; the catalog's own test requires every version to follow
-  the one before. Before the first release that carries them, the account
-  traffic, Spaces and session-ending migrations were renumbered from 2010
-  to 2013 and 2015 to 2009 to 2013. A database that a build from before
-  that renumbering migrated (a development or test database; none shipped)
-  records versions that now name other migrations, with other checksums,
-  and every later startup refuses it: recreate it.
+  the one before. Before the first release that carries them, these
+  migrations were renumbered twice: the account traffic, Spaces and
+  session-ending migrations from 2010 to 2013 and 2015 to 2009 to 2013, and
+  then all of them from 2001 to 2013 to 2002 to 2014, because the offline
+  call notification candidates took 2001 first. A database that a build from
+  before a renumbering migrated (a development or test database; none
+  shipped) records versions that now name other migrations, with other
+  checksums, and every later startup refuses it: recreate it.
 - Every startup reads `retired_account_jids` once as the runtime role,
   before the first account provisioning, and refuses to start when it
   cannot, naming the table.
@@ -1906,7 +1910,7 @@ does not bring back:
      the same transaction; the restricted runtime role may not call
      `pg_control_system()` (the attestor requires it not to). On any other
      handle it is read from `pg_control_system()`. `authority_id` is a fixed
-     identity migration 2002 mints and nothing changes, so a restored copy
+     identity migration 2003 mints and nothing changes, so a restored copy
      finds the witness of the database it was copied from;
    - the **regression latch** of the authority (`latch_<authority_id>`):
      the position witness a regression was seen against, and whether it
@@ -1976,7 +1980,7 @@ with the configured epoch.
 - Configured epoch below the recorded one: refused (`epoch_mismatch`),
   nothing changed.
 - Equal: the lineage is bound if it is not yet (the first owner phase after
-  migration 2002). A database that holds a scope and whose lineage differs
+  migration 2003). A database that holds a scope and whose lineage differs
   from the bound one is refused (`lineage_changed`). A transition an earlier
   run did not finish is finished (`Resumed`).
 - Above: a restore transition. One transaction takes the authority row
@@ -2282,7 +2286,7 @@ declared restore clears.
 - **Replicas.** A replica attached before the transition, or to another
   server start or database, admits nothing until it has verified the fence
   again. A replica configured with an earlier epoch does not attach. A
-  binary built before migration 2002 refuses the ledger.
+  binary built before migration 2003 refuses the ledger.
 - **Accepted children.** The ingress acceptance contract is unchanged:
   children accepted before the restore point are in the restored database
   and replay as accepted; those accepted after it are gone with it.
@@ -2467,7 +2471,7 @@ does.
 
 ### Restore rollout part (G24)
 
-- Migration 2002 adds to `host_grant_authority` the restore epoch (default
+- Migration 2003 adds to `host_grant_authority` the restore epoch (default
   `0`), the lineage binding, the fixed `authority_id` and the position
   acknowledgement; to `host_grant_scopes` the `lost_operations` mark; the
   `restored`, `reconstructed` and `fenced` closed reasons; the `restore`,
@@ -2563,7 +2567,7 @@ from the commit alone, as in the earlier slices:
 What the commit does not cover is a decision that was read before it and
 whose effect has not happened yet, on any replica. ADR-0020 D5 does not
 accept a prior permission check as admission, so the acknowledgement covers
-exactly that (`permissions/host_grant/fence.rs`, migration 2005):
+exactly that (`permissions/host_grant/fence.rs`, migration 2006):
 
 - **Lease.** A replica decides for a managed room only while it holds a
   lease: a row of `host_grant_fence_replicas` whose `lease_expires_at` it
@@ -2924,7 +2928,7 @@ The subcommand is no replica: it holds no lease and waits for those that do.
 ### Non-reuse of retired account JIDs (D8)
 
 A home never issues the JID of a retired account to a new holder
-(`auth/retirement.rs`, migration 2006, both engines).
+(`auth/retirement.rs`, migration 2007, both engines).
 
 - **The ledger.** `retired_account_jids` holds the canonical bare JID of
   every retired account, the key `native_users.jid_key` uses. A row is never
@@ -2984,7 +2988,7 @@ A home never issues the JID of a retired account to a new holder
   nothing splits that delete.
 - **Ending the account's open sessions** (`auth/session_endings.rs`,
   `server/account_session_endings.rs`,
-  `server/routes/websocket/account_retirement.rs`, migration 2013, both
+  `server/routes/websocket/account_retirement.rs`, migration 2014, both
   engines). `retire_account` leaves them; the operator command takes the
   second step once the retirement committed. It records a request naming
   the canonical JID. Every serving replica holds a lease row it registers
@@ -3075,9 +3079,9 @@ runtime is the authority's writer, and the commit of a revoke is unaffected.
 
 ### Rollout part of the revocation fence (G24)
 
-- Migration 2005 creates the two fence relations on PostgreSQL and nothing
-  on SQLite; migration 2006 creates the ledger of retired JIDs on both.
-  Version 2004 is not in this catalog. The owner phase applies them and
+- Migration 2006 creates the two fence relations on PostgreSQL and nothing
+  on SQLite; migration 2007 creates the ledger of retired JIDs on both.
+  The owner phase applies them and
   grants from the matrix before any server of the release starts, as for the
   earlier migrations.
 - With no scope enrolled a replica holds no lease, runs no tick and no

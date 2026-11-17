@@ -13,7 +13,14 @@ extension FFIInbound {
             status: presence.status,
             hats: presence.hats.map { Hat(uri: $0.uri, title: $0.title) },
             occupant: occupant(presence),
-            idleSince: date(presence.idleSince)
+            idleSince: date(presence.idleSince),
+            groupCall: presence.muji.map { muji in
+                GroupCallMarker(
+                    isPreparing: muji.preparing,
+                    media: muji.active ? CallMedia(audio: muji.audio, video: muji.video) : nil,
+                    isHandRaised: presence.handRaised,
+                    isMuted: presence.muted)
+            }
         )
     }
 

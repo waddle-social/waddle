@@ -39,6 +39,10 @@ android {
         val serverUrl = (project.findProperty("waddleServerUrl") as String?)
             ?: "https://xmpp.waddle.social"
         buildConfigField("String", "WADDLE_SERVER_URL", "\"$serverUrl\"")
+        // GIF search is served by the web client, independently of XMPP/auth.
+        val gifProxyUrl = (project.findProperty("waddleGifProxyUrl") as String?)
+            ?: "https://waddle.chat"
+        buildConfigField("String", "WADDLE_GIF_PROXY_URL", "\"$gifProxyUrl\"")
     }
 
     buildFeatures {
@@ -203,6 +207,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.navigation3)
     implementation(libs.androidx.adaptive.navigation3)
     implementation(libs.coil.compose)
+    implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.core)

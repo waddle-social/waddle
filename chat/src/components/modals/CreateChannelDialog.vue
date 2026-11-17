@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import AppSelect from "@/components/ui/AppSelect.vue";
+import { computed, type Component } from "vue";
 import { FolderPlus, Hash, LayoutGrid, MessagesSquare, Sparkles, X } from "lucide-vue-next";
+import { iconbtn, btn, option } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
+import { formClasses as f } from "@/components/modals/form-classes";
 import type {
   CreateFormData,
   CreateIntent,
@@ -29,29 +33,29 @@ const emit = defineEmits<{
 
 // ── Intent helpers ────────────────────────────────────────────────
 
-const INTENTS: { value: CreateIntent; label: string; caption: string; icon: unknown }[] = [
+const INTENTS: { value: CreateIntent; label: string; caption: string; icon: Component }[] = [
   {
     value: "space",
     label: "Space",
-    caption: "A new community space. Add channels later.",
+    caption: "A group of rooms. Add rooms later.",
     icon: LayoutGrid,
   },
   {
     value: "muc",
-    label: "Standalone channel",
-    caption: "A real-time channel outside any Space.",
+    label: "Room",
+    caption: "Chat or forum, on its own.",
     icon: Hash,
   },
   {
     value: "space-muc",
-    label: "Channel in Space",
-    caption: "Add a channel to an existing space.",
+    label: "Room in a space",
+    caption: "Add a room to an existing space.",
     icon: FolderPlus,
   },
   {
     value: "space-with-muc",
-    label: "Space + Channel",
-    caption: "New space and its first channel together.",
+    label: "Space + room",
+    caption: "A new space and its first room.",
     icon: Sparkles,
   },
 ];
@@ -106,71 +110,61 @@ const isSubmitDisabled = computed(() => {
 
 const dialogTitle = computed(() => {
   switch (props.form.intent) {
-    case "space": return "New Space";
-    case "muc": return "New Standalone Channel";
-    case "space-muc": return "New Channel in Space";
-    case "space-with-muc": return "New Space + Channel";
+    case "space": return "New space";
+    case "muc": return "New room";
+    case "space-muc": return "New room in a space";
+    case "space-with-muc": return "New space and room";
   }
 });
 </script>
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="chat-dialog-header">
-      <h2 class="type-dialog-title">{{ dialogTitle }}</h2>
-      <button
-        class="chat-icon-button hover:bg-muted"
-        type="button"
-        aria-label="Close create dialog"
-        @click="open = false"
-      >
-        <X class="w-4 h-4 text-muted-foreground" />
+    <div :class="dialogParts.head">
+      <h2>{{ dialogTitle }}</h2>
+      <button :class="iconbtn()" type="button" aria-label="Close create dialog" @click="open = false">
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <div class="chat-dialog-stack chat-dialog-body">
+    <div :class="dialogParts.body">
       <!-- Intent selector -->
-      <div class="chat-field-stack">
-        <label class="type-section-label text-muted-foreground">What would you like to create?</label>
-        <div class="grid grid-cols-2 gap-2">
+      <div :class="f.field" role="group" aria-labelledby="create-intent-label">
+        <span id="create-intent-label" :class="f.label">What would you like to create?</span>
+        <div :class="f.options">
           <button
             v-for="opt in INTENTS"
             :key="opt.value"
             type="button"
-            class="flex flex-col gap-1 rounded-lg border px-3 py-3 text-left transition-all duration-200"
+            :class="option()"
             :aria-pressed="form.intent === opt.value"
-            :class="form.intent === opt.value
-              ? 'border-primary/30 bg-primary/8 shadow-[0_0_12px_var(--glow)]'
-              : 'border-border bg-muted/40 hover:bg-muted'"
             @click="selectIntent(opt.value)"
           >
-            <div class="type-control flex items-center gap-2">
-              <component :is="opt.icon" class="w-4 h-4 text-primary/80" />
-              {{ opt.label }}
-            </div>
-            <p class="type-caption text-muted-foreground">{{ opt.caption }}</p>
+            <span :class="f.optionTitle"><component :is="opt.icon" aria-hidden="true" />{{ opt.label }}</span>
+            <span :class="f.caption">{{ opt.caption }}</span>
           </button>
         </div>
       </div>
 
       <!-- ── Space fields ── -->
       <template v-if="form.intent === 'space'">
-        <div class="chat-field-stack">
-          <label for="create-space-name" class="type-section-label text-muted-foreground">Name</label>
+        <div :class="f.field">
+          <label for="create-space-name" :class="f.label">Name</label>
           <input
             id="create-space-name"
             :value="form.name"
-            class="chat-field-control type-field"
+            :class="f.input"
             placeholder="My Community"
             @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
           />
         </div>
-        <div class="chat-field-stack">
-          <label for="create-space-desc" class="type-section-label text-muted-foreground">Description</label>
+        <div :class="f.field">
+          <label for="create-space-desc" :class="f.label">Description</label>
           <textarea
             id="create-space-desc"
             :value="form.description"
-            class="chat-field-control chat-textarea-control type-field"
+            :class="f.textarea"
+            rows="2"
             placeholder="What is this space for?"
             @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
           />
@@ -179,23 +173,24 @@ const dialogTitle = computed(() => {
 
       <!-- ── MUC fields ── -->
       <template v-else-if="form.intent === 'muc'">
-        <div class="chat-field-stack">
-          <label for="create-muc-name" class="type-section-label text-muted-foreground">Name</label>
+        <div :class="f.field">
+          <label for="create-muc-name" :class="f.label">Name</label>
           <input
             id="create-muc-name"
             :value="form.name"
-            class="chat-field-control type-field"
+            :class="f.input"
             placeholder="general"
             @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
           />
         </div>
-        <div class="chat-field-stack">
-          <label for="create-muc-desc" class="type-section-label text-muted-foreground">Description</label>
+        <div :class="f.field">
+          <label for="create-muc-desc" :class="f.label">Description</label>
           <textarea
             id="create-muc-desc"
             :value="form.description"
-            class="chat-field-control chat-textarea-control type-field"
-            placeholder="What is this channel for?"
+            :class="f.textarea"
+            rows="2"
+            placeholder="What is this room for?"
             @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
           />
         </div>
@@ -203,47 +198,47 @@ const dialogTitle = computed(() => {
 
       <!-- ── MUC in existing Space fields ── -->
       <template v-else-if="form.intent === 'space-muc'">
-        <div class="chat-field-stack">
-          <label for="create-spacemuc-space" class="type-section-label text-muted-foreground">Target Space</label>
+        <div :class="f.field">
+          <label for="create-spacemuc-space" :class="f.label">Space</label>
           <template v-if="spaces && spaces.length > 0">
-            <select
+            <AppSelect
               id="create-spacemuc-space"
-              :value="form.space_node"
-              class="chat-field-control type-field"
-              @change="$emit('update:form', { ...form, space_node: ($event.target as HTMLSelectElement).value })"
-            >
-              <option value="" disabled>Select a space…</option>
-              <option v-for="s in spaces" :key="s.node" :value="s.node">{{ s.name }}</option>
-            </select>
+              :model-value="form.space_node"
+              :options="spaces.map((s) => ({ value: s.node, label: s.name }))"
+              placeholder="Select a space…"
+              :class="f.input"
+              @update:model-value="$emit('update:form', { ...form, space_node: $event })"
+            />
           </template>
           <template v-else>
             <input
               id="create-spacemuc-space"
               :value="form.space_node"
-              class="chat-field-control type-field"
+              :class="f.input"
               placeholder="team-space"
               @input="$emit('update:form', { ...form, space_node: ($event.target as HTMLInputElement).value })"
             />
-            <p class="type-caption text-muted-foreground">Enter an existing Spaces service node.</p>
+            <p :class="f.caption">Enter an existing Spaces service node.</p>
           </template>
         </div>
-        <div class="chat-field-stack">
-          <label for="create-spacemuc-name" class="type-section-label text-muted-foreground">Channel Name</label>
+        <div :class="f.field">
+          <label for="create-spacemuc-name" :class="f.label">Room name</label>
           <input
             id="create-spacemuc-name"
             :value="form.name"
-            class="chat-field-control type-field"
+            :class="f.input"
             placeholder="general"
             @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
           />
         </div>
-        <div class="chat-field-stack">
-          <label for="create-spacemuc-desc" class="type-section-label text-muted-foreground">Description</label>
+        <div :class="f.field">
+          <label for="create-spacemuc-desc" :class="f.label">Description</label>
           <textarea
             id="create-spacemuc-desc"
             :value="form.description"
-            class="chat-field-control chat-textarea-control type-field"
-            placeholder="What is this channel for?"
+            :class="f.textarea"
+            rows="2"
+            placeholder="What is this room for?"
             @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
           />
         </div>
@@ -251,100 +246,69 @@ const dialogTitle = computed(() => {
 
       <!-- ── Space + MUC fields ── -->
       <template v-else-if="form.intent === 'space-with-muc'">
-        <div class="chat-field-stack">
-          <label for="create-swm-sname" class="type-section-label text-muted-foreground">Space Name</label>
+        <div :class="f.field">
+          <label for="create-swm-sname" :class="f.label">Space name</label>
           <input
             id="create-swm-sname"
             :value="form.space_name"
-            class="chat-field-control type-field"
+            :class="f.input"
             placeholder="My Community"
             @input="$emit('update:form', { ...form, space_name: ($event.target as HTMLInputElement).value })"
           />
         </div>
-        <div class="chat-field-stack">
-          <label for="create-swm-sdesc" class="type-section-label text-muted-foreground">Space Description</label>
+        <div :class="f.field">
+          <label for="create-swm-sdesc" :class="f.label">Space description</label>
           <textarea
             id="create-swm-sdesc"
             :value="form.space_description"
-            class="chat-field-control chat-textarea-control type-field"
+            :class="f.textarea"
+            rows="2"
             placeholder="What is this space for?"
             @input="$emit('update:form', { ...form, space_description: ($event.target as HTMLTextAreaElement).value })"
           />
         </div>
-        <div class="chat-field-stack">
-          <label for="create-swm-mname" class="type-section-label text-muted-foreground">Channel Name</label>
+        <div :class="f.field">
+          <label for="create-swm-mname" :class="f.label">Room name</label>
           <input
             id="create-swm-mname"
             :value="form.muc_name"
-            class="chat-field-control type-field"
+            :class="f.input"
             placeholder="general"
             @input="$emit('update:form', { ...form, muc_name: ($event.target as HTMLInputElement).value })"
           />
         </div>
-        <div class="chat-field-stack">
-          <label for="create-swm-mdesc" class="type-section-label text-muted-foreground">Channel Description</label>
+        <div :class="f.field">
+          <label for="create-swm-mdesc" :class="f.label">Room description</label>
           <textarea
             id="create-swm-mdesc"
             :value="form.muc_description"
-            class="chat-field-control chat-textarea-control type-field"
-            placeholder="What is this channel for?"
+            :class="f.textarea"
+            rows="2"
+            placeholder="What is this room for?"
             @input="$emit('update:form', { ...form, muc_description: ($event.target as HTMLTextAreaElement).value })"
           />
         </div>
       </template>
 
       <!-- ── MUC subtype picker (shown for all intents that create a MUC) ── -->
-      <div v-if="hasMucType" class="chat-field-stack">
-        <label class="type-section-label text-muted-foreground">Channel type</label>
-        <div class="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            class="flex flex-col gap-1 rounded-lg border px-3 py-3 text-left transition-all duration-200"
-            :aria-pressed="currentMucType === 'text'"
-            :class="currentMucType === 'text'
-              ? 'border-primary/30 bg-primary/8 shadow-[0_0_12px_var(--glow)]'
-              : 'border-border bg-muted/40 hover:bg-muted'"
-            @click="setMucType('text')"
-          >
-            <div class="type-control flex items-center gap-2">
-              <Hash class="w-4 h-4 text-primary/80" />
-              Text
-            </div>
-            <p class="type-caption text-muted-foreground">Fast back-and-forth conversation.</p>
+      <div v-if="hasMucType" :class="f.field" role="group" aria-labelledby="create-type-label">
+        <span id="create-type-label" :class="f.label">Type</span>
+        <div :class="f.options">
+          <button type="button" :class="option()" :aria-pressed="currentMucType === 'text'" @click="setMucType('text')">
+            <span :class="f.optionTitle"><Hash aria-hidden="true" />Chat</span>
+            <span :class="f.caption">Fast back-and-forth conversation.</span>
           </button>
-          <button
-            type="button"
-            class="flex flex-col gap-1 rounded-lg border px-3 py-3 text-left transition-all duration-200"
-            :aria-pressed="currentMucType === 'forum'"
-            :class="currentMucType === 'forum'
-              ? 'border-primary/30 bg-primary/8 shadow-[0_0_12px_var(--glow)]'
-              : 'border-border bg-muted/40 hover:bg-muted'"
-            @click="setMucType('forum')"
-          >
-            <div class="type-control flex items-center gap-2">
-              <MessagesSquare class="w-4 h-4 text-primary/80" />
-              Forum
-            </div>
-            <p class="type-caption text-muted-foreground">Title-first topics with threaded replies.</p>
+          <button type="button" :class="option()" :aria-pressed="currentMucType === 'forum'" @click="setMucType('forum')">
+            <span :class="f.optionTitle"><MessagesSquare aria-hidden="true" />Forum</span>
+            <span :class="f.caption">Topics with threaded replies.</span>
           </button>
         </div>
       </div>
     </div>
 
-    <div class="chat-dialog-footer">
-      <button
-        class="chat-action-button chat-action-button--secondary type-control"
-        type="button"
-        @click="open = false"
-      >
-        Cancel
-      </button>
-      <button
-        class="chat-action-button chat-action-button--primary type-control disabled:opacity-40"
-        type="button"
-        :disabled="isSubmitDisabled"
-        @click="emit('submit')"
-      >
+    <div :class="dialogParts.foot">
+      <button :class="btn()" type="button" @click="open = false">Cancel</button>
+      <button :class="btn({ variant: 'primary' })" type="button" :disabled="isSubmitDisabled" @click="emit('submit')">
         {{ isSubmitting ? "Creating…" : "Create" }}
       </button>
     </div>

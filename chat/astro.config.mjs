@@ -2,9 +2,9 @@ import { fileURLToPath } from "node:url";
 import { format } from "node:util";
 import { defineConfig } from "astro/config";
 import cloudflare from "@astrojs/cloudflare";
-import pandacss from "@pandacss/postcss";
+import pandacss from "@pandacss/vite";
+import { waddleFonts } from "@waddle/design/astro-fonts";
 import faroUploader from "@grafana/faro-rollup-plugin";
-import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
 import { noiseSuppressionAudioWorkletVitePlugin } from "@workadventure/noise-suppression/vite";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
@@ -131,6 +131,8 @@ function isClientOutput(outputOptions) {
 export default defineConfig({
   compressHTML: true,
   output: "server",
+  // Polar Huddle families (self-hosted from Fontsource at build time).
+  fonts: waddleFonts,
   adapter: cloudflare(),
 
   server: {
@@ -157,17 +159,9 @@ export default defineConfig({
         },
       },
     },
-    // Panda CSS runs as a PostCSS plugin (there is no Vite plugin on the
-    // 1.x line). It is registered inline rather than via postcss.config
-    // because Vite's config loader hands the plugin's ESM namespace object
-    // to PostCSS instead of the factory, which fails the build.
-    css: {
-      postcss: {
-        plugins: [pandacss()],
-      },
-    },
     plugins: [
-      tailwindcss(),
+      // Appends the generated CSS to global.css (the file declaring the pd_* layers).
+      pandacss(),
       // Serve the DTLN (@workadventure/noise-suppression) AudioWorklet module
       // and its bundled LiteRT/model assets from our own origin — the #914 AI
       // noise filter must be self-hosted, no third-party CDN.
@@ -245,6 +239,18 @@ export default defineConfig({
   },
 
   integrations: [
+    // Dev-only design preview with fixture data: WADDLE_PREVIEW=1 bun run dev,
+    // then open /_preview?screen=…&theme=daylight (see preview/PreviewApp.vue).
+    {
+      name: "waddle-preview",
+      hooks: {
+        "astro:config:setup": ({ command, injectRoute }) => {
+          if (command === "dev" && process.env.WADDLE_PREVIEW) {
+            injectRoute({ pattern: "/_preview", entrypoint: "./preview/preview.astro" });
+          }
+        },
+      },
+    },
     vue({
       appEntrypoint: "/src/vue-app.ts",
     }),

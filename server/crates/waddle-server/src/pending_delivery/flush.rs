@@ -251,7 +251,7 @@ where
     R: ArchiveResolver + ?Sized,
 {
     let mut failed_releases = Vec::new();
-    let mut outcome = flush_for_resource_inner(
+    let mut outcome = waddle_xmpp::telemetry::producer_trace::replaying(flush_for_resource_inner(
         storage,
         registry,
         recipient,
@@ -259,7 +259,7 @@ where
         ctx,
         &mut failed_releases,
         false,
-    )
+    ))
     .await;
     outcome.failed_releases = failed_releases;
     outcome
@@ -812,7 +812,7 @@ where
         }
     }
     let mut failed_releases = Vec::new();
-    let mut next = flush_for_resource_inner(
+    let mut next = waddle_xmpp::telemetry::producer_trace::replaying(flush_for_resource_inner(
         storage,
         registry,
         recipient,
@@ -820,7 +820,7 @@ where
         ctx,
         &mut failed_releases,
         true,
-    )
+    ))
     .await;
     next.failed_releases = failed_releases;
     outcome.absorb(next);

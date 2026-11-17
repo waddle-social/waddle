@@ -1,14 +1,26 @@
 ---
+import { Font } from "astro:assets";
 import { ClientRouter } from "astro:transitions";
 import { env } from "cloudflare:workers";
 import AppShell from "@/components/AppShell.vue";
 import XmppProvider from "@/components/XmppProvider.vue";
+import ThemeRestore from "@/components/ThemeRestore.astro";
 import "@/styles/global.css";
+import { css } from "styled-system/css";
+import { waddle } from "styled-system/recipes";
+import spot from "@waddle/design/assets/spot-conversation.svg?url";
 
 // AppShell reads the active route from `window.location` at hydration
 // time via the router's module-level `currentMatch`; no need for the
 // page to thread an SSR-computed initial match through.
 const serverBaseUrl = env.SERVER_BASE_URL;
+
+// Static fallback until AppShell hydrates: the same landing as
+// LandingState ("Checking session." with the waddle spinner).
+const fallbackPage = css({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", px: "4", py: "12", bg: "bg", color: "fg" });
+const fallbackColumn = css({ display: "flex", flexDirection: "column", alignItems: "center", gap: "3", textAlign: "center" });
+const fallbackTitle = css({ margin: 0, font: "700 32px/1.15 {fonts.display}", letterSpacing: "-0.02em" });
+const srOnly = css({ srOnly: true });
 ---
 
 <html lang="en">
@@ -26,7 +38,10 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#0b1219" />
+    <meta name="theme-color" content="#060f19" />
+    <Font cssVariable="--font-display" preload />
+    <Font cssVariable="--font-body" preload />
+    <Font cssVariable="--font-mono" />
     <!-- Published here so the (bundled, static) Faro bootstrap script
          below can read the Worker-runtime `SERVER_BASE_URL` without
          hoisting it through Vite `define` — that would require the
@@ -35,15 +50,7 @@ const serverBaseUrl = env.SERVER_BASE_URL;
          Worker `env`. Faro uses this to scope W3C traceparent injection
          to just that origin. -->
     <meta name="waddle:server-base-url" content={serverBaseUrl} />
-    <script is:inline>
-      (function () {
-        try {
-          if (localStorage.getItem("waddle:theme") === "light") {
-            document.documentElement.setAttribute("data-theme", "light");
-          }
-        } catch (e) {}
-      })();
-    </script>
+    <ThemeRestore />
     <title>Waddle</title>
     <script>
       // Faro RUM bootstrap. Vite inlines `import.meta.env.PUBLIC_*` at
@@ -66,48 +73,17 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     </script>
     <ClientRouter />
   </head>
-  <body class="bg-background text-foreground font-sans antialiased">
+  <body>
     <XmppProvider client:only="vue" transition:persist serverBaseUrl={serverBaseUrl ?? ""} />
     <AppShell client:only="vue" transition:persist>
       <slot />
       <div slot="fallback" class="chat-app-shell chat-startup-shell" role="status" aria-live="polite">
-        <div class="community-shell">
-          <header class="community-header">
-            <div class="community-header__brand" aria-hidden="true">
-              <img src="/waddle-logo.svg" alt="" width="30" height="30" class="community-header__logo" />
-              <span class="community-header__name">Waddle</span>
-            </div>
-          </header>
-          <div class="community-shell__body">
-            <aside class="community-shell__rail" aria-hidden="true">
-              <div class="people-rail">
-                <div class="people-rail__search">
-                  <div class="people-rail__input" aria-hidden="true"></div>
-                </div>
-                <div class="people-rail__scroll">
-                  <div class="chat-startup-sidebar-loading type-caption text-sidebar-muted">
-                    <div class="flex items-center justify-center gap-1" aria-hidden="true">
-                      <span class="typing-dot"></span>
-                      <span class="typing-dot"></span>
-                      <span class="typing-dot"></span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </aside>
-            <main class="community-shell__main">
-              <div class="chat-pane-scroll community-startup__main">
-                <div class="type-caption flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">
-                  <div class="flex items-center justify-center gap-1.5" aria-hidden="true">
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                  </div>
-                  <p class="text-muted-foreground/60">Checking session.</p>
-                  <span class="sr-only">Loading Waddle</span>
-                </div>
-              </div>
-            </main>
+        <div class={fallbackPage}>
+          <div class={fallbackColumn}>
+            <img src={spot} alt="" width="120" height="120" />
+            <p class={fallbackTitle}>Checking session.</p>
+            <span class={waddle()} aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class={srOnly}>Loading Waddle</span>
           </div>
         </div>
       </div>

@@ -38,6 +38,12 @@
         rm -rf "$out/vendor/sqlx-postgres"
         cp -R ${./server/vendor/sqlx-postgres} "$out/vendor/sqlx-postgres"
         chmod -R u+w "$out/vendor/sqlx-postgres"
+        rm -rf "$out/vendor/minidom"
+        cp -R ${./server/vendor/minidom} "$out/vendor/minidom"
+        chmod -R u+w "$out/vendor/minidom"
+        rm -rf "$out/vendor/kameo"
+        cp -R ${./server/vendor/kameo} "$out/vendor/kameo"
+        chmod -R u+w "$out/vendor/kameo"
       '';
       # cuengine (a waddle-server dev-dependency) links a cgo archive of its
       # Go bridge. Its build.rs otherwise `go build`s it from source, which
@@ -90,11 +96,46 @@
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
           testArchiveRustc = mkTestRustcWrapper pkgs;
-          testBuilderMemoryGuard = ''
+          # Runner shapes for the co-located shard lane. CI gates only on the
+          # production lane. The others exist for ci/runner-benchmark, which
+          # measures whether a smaller Namespace machine, or more Cargo jobs
+          # on the same one, serves the lane as well; they are never gates.
+          productionShardLane = {
+            shardCores = 8;
+            cargoBuildJobs = 4;
+            minMemoryGiB = 56;
+          };
+          benchmarkShardLanes = {
+            # The production settings under a benchmark name: its archive is
+            # a derivation no ordinary CI job builds, so the baseline cannot
+            # be substituted from a cache while the other lanes compile.
+            "32x64" = productionShardLane;
+            "16x32" = {
+              shardCores = 4;
+              cargoBuildJobs = 4;
+              minMemoryGiB = 28;
+            };
+            "16x32-j8" = {
+              shardCores = 4;
+              cargoBuildJobs = 8;
+              minMemoryGiB = 28;
+            };
+            "8x32" = {
+              shardCores = 2;
+              cargoBuildJobs = 4;
+              minMemoryGiB = 28;
+            };
+            "32x64-j16" = {
+              shardCores = 8;
+              cargoBuildJobs = 16;
+              minMemoryGiB = 56;
+            };
+          };
+          mkTestBuilderMemoryGuard = minMemoryGiB: ''
             # MemTotal can exceed a container's cgroup limit. Enforce
             # both when cgroup v2 exposes its memory limit. Allow for
-            # kernel reservations on a nominal 64 GB runner.
-            required_memory_kib=$((56 * 1024 * 1024))
+            # kernel reservations: 56 GiB on a nominal 64 GB runner.
+            required_memory_kib=$((${toString minMemoryGiB} * 1024 * 1024))
             available_memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
             if [ -r /sys/fs/cgroup/memory.max ]; then
               cgroup_memory_bytes=$(cat /sys/fs/cgroup/memory.max)
@@ -106,14 +147,14 @@
               fi
             fi
             if [ "$available_memory_kib" -lt "$required_memory_kib" ]; then
-              echo "waddle-server-test-archive requires a 64 GB builder; use waddle-server-test on smaller machines" >&2
+              echo "waddle-server-test-archive requires ${toString minMemoryGiB} GiB of builder memory; use waddle-server-test on smaller machines" >&2
               exit 1
             fi
           '';
           # Opt in to a 64 GB builder; the ordinary check keeps one Cargo job.
           # Build portable archives once. Four isolated Nix sandboxes run
           # them on disjoint eight-CPU sets on the same 32-core builder.
-          serverTestArchive = self.checks.${system}.waddle-server-test.overrideAttrs (old: {
+          mkServerTestArchive = lane: self.checks.${system}.waddle-server-test.overrideAttrs (old: {
             pname = "waddle-server-test-archive";
             outputs = [
               "out"
@@ -122,7 +163,10 @@
               "shard3"
               "shard4"
             ];
-            CARGO_BUILD_JOBS = "4";
+            CARGO_BUILD_JOBS = toString lane.cargoBuildJobs;
+            # Empty for production. Lanes with equal settings still get their
+            # own archive derivation, so each benchmark variant compiles.
+            waddleBenchmarkLane = lane.benchmarkName or "";
             doInstallCargoArtifacts = false;
             # Metadata lives in out; it contains no runtime libraries. Avoid
             # stdenv adding out/lib to every shard's executable RPATH.
@@ -131,7 +175,7 @@
             preCheck = "";
             nativeBuildInputs = lib.filter (input: input != pkgs.postgresql_17) old.nativeBuildInputs;
             checkPhase = ''
-              ${testBuilderMemoryGuard}
+              ${mkTestBuilderMemoryGuard lane.minMemoryGiB}
               runHook preCheck
               ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 # Cargo fingerprints this wrapper for workspace members only;
@@ -260,11 +304,12 @@
               runHook postCheck
             '';
           });
-          mkServerTestShard =
-            partition:
+          serverTestArchive = mkServerTestArchive productionShardLane;
+          mkServerTestShardFor =
+            lane: partition:
             let
               testCheck = self.checks.${system}.waddle-server-test;
-              archiveOutput = serverTestArchive.${"shard${toString partition}"};
+              archiveOutput = (mkServerTestArchive lane).${"shard${toString partition}"};
             in
             pkgs.stdenvNoCC.mkDerivation {
               # Execute compiled archives without inheriting Crane compiler,
@@ -296,7 +341,7 @@
               installPhase = ''mkdir -p "$out"'';
               checkPhase = ''
                 ${pkgs.python3}/bin/python3 ${./server/scripts/pin-nextest-shard.py} \
-                  --parent-pid "$$" --partition ${toString partition} --count 4 --cores 8
+                  --parent-pid "$$" --partition ${toString partition} --count 4 --cores ${toString lane.shardCores}
                 runHook preCheck
                 mkdir -p "$out"
                 extracted="$TMPDIR/nextest-archive"
@@ -340,14 +385,15 @@
                   mv "''${reports[0]}" "$out/$1"
                 }
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$whole_filter"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads ${toString lane.shardCores} -E "$whole_filter"
                 take_junit_report junit-whole.xml
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$shared_filter" --partition "hash:${toString partition}/4"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads ${toString lane.shardCores} -E "$shared_filter" --partition "hash:${toString partition}/4"
                 take_junit_report junit-shared.xml
                 runHook postCheck
               '';
             };
+          mkServerTestShard = mkServerTestShardFor productionShardLane;
           serverPackageSrc = lib.fileset.toSource {
             root = ./server;
             fileset =
@@ -518,6 +564,22 @@
           waddle-server-test-shard-4 = mkServerTestShard 4;
 
         }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+          lib.concatMapAttrs (
+            name: lane:
+            {
+              "waddle-server-test-archive-bench-${name}" = mkServerTestArchive lane;
+            }
+            // lib.listToAttrs (
+              map (
+                partition:
+                lib.nameValuePair "waddle-server-test-shard-${toString partition}-bench-${name}" (
+                  mkServerTestShardFor lane partition
+                )
+              ) [ 1 2 3 4 ]
+            )
+          ) (lib.mapAttrs (name: lane: lane // { benchmarkName = name; }) benchmarkShardLanes)
+        )
       );
 
       checks = forAllSystems (
@@ -955,6 +1017,31 @@
               vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
             }
           );
+          # Bun matches the version developers run locally, so `bun install
+          # --frozen-lockfile` in CI accepts lockfiles written on a laptop
+          # (1.3.x and 1.4.x serialize bun.lock differently).
+          bun = pkgs.bun.overrideAttrs (
+            finalAttrs: prev: {
+              version = "1.4.4";
+              src = finalAttrs.passthru.sources.${system};
+              passthru = prev.passthru // {
+                sources =
+                  let
+                    release =
+                      file: hash:
+                      pkgs.fetchurl {
+                        url = "https://github.com/oven-sh/bun/releases/download/bun-v${finalAttrs.version}/bun-${file}.zip";
+                        inherit hash;
+                      };
+                  in
+                  {
+                    "aarch64-darwin" = release "darwin-aarch64" "sha256-wkDX8My5DCY6hJ/NsJt+5iYw2SE0jtaq/ahrnVd7xRA=";
+                    "aarch64-linux" = release "linux-aarch64" "sha256-uqa7NvUdblhWHgK76oJQOKnfRU9nPW13bou/hvjHhQ4=";
+                    "x86_64-linux" = release "linux-x64-baseline" "sha256-4ERutVmVdy65iUvrrppr42jZhai5Jx7hJEhvmUbu3XY=";
+                  };
+              };
+            }
+          );
         in
         {
           default = pkgs.mkShell {
@@ -965,7 +1052,7 @@
             PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
             packages = [
               rustToolchain
-              pkgs.bun
+              bun
               pkgs.nodejs_22
               pkgs.python3
               pkgs.go

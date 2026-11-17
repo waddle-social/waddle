@@ -194,6 +194,7 @@ export function useCommunityEvents(
         ...(master.description ? { description: master.description } : {}),
         ...(master.location ? { location: master.location } : {}),
         ...(master.organizer ? { organizer: master.organizer } : {}),
+        ...(master.workspaceRoom ? { workspaceRoom: master.workspaceRoom } : {}),
         ...(master.dtstart ? { dtstart: master.dtstart } : {}),
         ...(master.dtend ? { dtend: master.dtend } : {}),
         ...(master.rrule ? { rrule: master.rrule } : {}),

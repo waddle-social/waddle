@@ -62,6 +62,7 @@ pub(crate) use muc::{honoured_legacy_affiliation, principal_witness};
 pub(crate) use muc_update::try_handle_muc_presence_update;
 use probe::handle_presence_probe;
 use regular::handle_regular_presence_update;
+pub(in crate::server::routes::websocket) use regular::present_pending_subscriptions;
 pub(in crate::server::routes::websocket::handlers) use regular::show_name;
 pub(crate) use remote::{
     forget_blocked_requests, forget_request, is_remote_contact, offer_presence,

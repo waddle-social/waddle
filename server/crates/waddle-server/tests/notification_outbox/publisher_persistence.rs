@@ -8,9 +8,9 @@ use crate::support::{
 use waddle_server::db::{Database, DatabaseDriver};
 use waddle_server::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
 use waddle_server::notification_outbox::{
-    NotificationCandidate, NotificationOutboxJob, NotificationOutboxPublishOutcome,
-    NotificationOutboxStatus, NotificationOutboxStore, NotificationOutboxTarget,
-    PushServiceNodeName,
+    DrainBatch, DrainScope, NotificationCandidate, NotificationOutboxJob,
+    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
+    NotificationOutboxTarget, PushServiceNodeName,
 };
 use waddle_server::push_registrations::DatabasePushRegistrationStore;
 use waddle_server::push_service::{
@@ -103,7 +103,10 @@ async fn attach_parent(fixture: &IngressFixture, candidate: &NotificationCandida
 }
 
 async fn claim(store: &TestStore) -> NotificationOutboxJob {
-    let mut jobs = store.claim_due_outbox_jobs(1).await.expect("claim");
+    let mut jobs = store
+        .claim_due_outbox_jobs(DrainScope::All, 1)
+        .await
+        .expect("claim");
     assert_eq!(jobs.len(), 1);
     jobs.remove(0)
 }
@@ -116,7 +119,7 @@ async fn stale_claim_cannot_publish(fixture: IngressFixture) {
         .execute("UPDATE notification_outbox SET claimed_at_ms = 1", ())
         .await;
     assert!(store
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("expire claim")
         .is_empty());
@@ -340,7 +343,10 @@ async fn retry_and_terminal_durable_state(fixture: IngressFixture) {
             &inbox,
             &FailingBlockingStorage,
             &bare("push.example.com"),
-            1,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
         )
         .await
         .expect("retry outcome");
@@ -388,7 +394,10 @@ async fn retry_and_terminal_durable_state(fixture: IngressFixture) {
             &inbox,
             &FailingBlockingStorage,
             &bare("push.example.com"),
-            1,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
         )
         .await
         .expect("terminal policy outcome");

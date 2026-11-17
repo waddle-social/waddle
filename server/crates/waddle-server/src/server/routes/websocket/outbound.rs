@@ -44,6 +44,10 @@ where
         return false;
     }
     debug!(kind = ?outbound_stanza.kind, "Received outbound stanza from registry");
+    // Held, never entered: the span times this delivery in the producer's
+    // trace as a leaf. Entering it would export the whole recipient pass
+    // under every recipient of a fan-out.
+    let _write_span = outbound_stanza.write_span();
     // Recording into the SM queue makes the frame recovery-owned before the write
     // below can fail, so the relayed obligation must move with that entry rather
     // than die with this dequeued item (issue #1789).

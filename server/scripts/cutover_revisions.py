@@ -14,7 +14,7 @@ MANIFEST = 'infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml'
 # Match the server/build paths that trigger waddle-server-default.yml. Docs and
 # agent guidance do not publish images, so they cannot advance the cutover floor.
 SERVER_INPUTS = [
-    ':(top,glob)server/**/env.cue',
+    ':(top,glob)server/*.cue',
     ':(top,glob)server/.cargo/**',
     'server/.config/nextest.toml',
     'server/.config/required-cluster-tests.txt',
@@ -28,7 +28,6 @@ SERVER_INPUTS = [
     'server/observer-release.json',
     ':(top,glob)server/extensions/**',
     'server/rust-toolchain.toml',
-    ':(top,glob)server/schema/**',
     ':(top,glob)server/scripts/**',
     ':(top,glob)server/vendor/**',
     ':(top,glob)server/wit/**',

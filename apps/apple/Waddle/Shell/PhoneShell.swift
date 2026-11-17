@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// iPhone: Home, DMs, Activity and You tabs, each with its own stack.
+/// iPhone: Home, DMs, Inbox and You tabs, each with its own stack.
 struct PhoneShell: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -13,7 +13,7 @@ struct PhoneShell: View {
                 HomeList()
                     .routeDestinations()
             }
-            .tabItem { Label("Home", systemImage: "bubble.left.and.bubble.right") }
+            .tabItem { Label("Home", systemImage: "house") }
             .badge(roomUnread)
             .tag(PhoneTab.home)
 
@@ -21,17 +21,17 @@ struct PhoneShell: View {
                 DirectMessagesList()
                     .routeDestinations()
             }
-            .tabItem { Label("DMs", systemImage: "person.2") }
+            .tabItem { Label("DMs", systemImage: "bubble.left.and.bubble.right") }
             .badge(session.unread.totalDirect)
             .tag(PhoneTab.directMessages)
 
-            NavigationStack(path: $navigation.activityPath) {
-                ActivityView()
+            NavigationStack(path: $navigation.inboxPath) {
+                InboxView(style: .phone)
                     .routeDestinations()
             }
-            .tabItem { Label("Activity", systemImage: "at") }
+            .tabItem { Label("Inbox", systemImage: "tray") }
             .badge(session.unreadOverviewRoomCount)
-            .tag(PhoneTab.activity)
+            .tag(PhoneTab.inbox)
 
             NavigationStack {
                 ProfileView()
@@ -39,6 +39,7 @@ struct PhoneShell: View {
             .tabItem { Label("You", systemImage: "person.crop.circle") }
             .tag(PhoneTab.you)
         }
+        .tint(Theme.Colors.action)
     }
 
     private var roomUnread: Int {

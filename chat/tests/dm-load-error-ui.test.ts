@@ -10,7 +10,9 @@ describe("DM load error UI contract", () => {
     expect(contentArea).toContain('role="alert"');
     expect(contentArea).toContain('aria-live="assertive"');
     expect(contentArea).toContain("@click=\"emit('retryLoad')\"");
-    expect(contentArea).toContain("Messages are not available right now.");
+    expect(contentArea).toContain('variant="unavailable"');
+    const emptyState = readFileSync(new URL("../src/components/chat/TimelineEmptyState.vue", import.meta.url), "utf8");
+    expect(emptyState).toContain("Messages are not available right now");
   });
 
   test("wires the retry action only for active DM load failures", () => {

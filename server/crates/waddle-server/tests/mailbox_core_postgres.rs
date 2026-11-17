@@ -19,8 +19,10 @@ use waddle_server::ingress_uow::{
     IngressUnitOfWork, IngressUowError, MailboxAppendOutcome, MailboxError, MailboxRepository,
     MailboxTargetFence,
 };
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::mailbox::DirectRequestKey;
 use waddle_xmpp::ingress::mailbox::{
-    DirectRequestKey, MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxDispositionChange,
+    MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxDispositionChange,
     MailboxDispositionError, MailboxEntryDisposition, MailboxLaneFence, MailboxLaneIdentity,
     MailboxLaneOrigin, MailboxLaneRecipient, MailboxLaneSequence, MailboxOperationKey,
     MailboxOwnerDecision, MailboxRoomLane,
@@ -594,6 +596,52 @@ async fn owner_decides_only_the_lane_head_and_the_cursor_is_exclusive() {
 }
 
 #[tokio::test]
+async fn backlog_past_nine_entries_is_read_in_numeric_order() {
+    let Some(fixture) = Fixture::open("order").await else {
+        return;
+    };
+    let identity = lane("stream-a");
+    let presented = fence(3, 5, "node-a");
+    let mut operations = Vec::new();
+    for _ in 0..11 {
+        let operation = fixture.message().await;
+        append(&fixture.uow, &identity, &presented, operation)
+            .await
+            .expect("append");
+        operations.push(operation);
+    }
+
+    let mut owner = fixture.uow.begin().await.expect("begin owner");
+    let mut locked = MailboxRepository::lock_lane(&mut owner, &identity, &presented)
+        .await
+        .expect("lock lane");
+    let page = MailboxRepository::read_after_cursor(&mut owner, &locked, 16)
+        .await
+        .expect("read the backlog");
+    let read: Vec<_> = page.iter().map(|entry| entry.operation).collect();
+    assert_eq!(read, operations);
+
+    // With entries 9, 10 and 11 pending, the head is 9, not 10.
+    for operation in &operations[..8] {
+        MailboxRepository::decide(
+            &mut owner,
+            &mut locked,
+            *operation,
+            MailboxOwnerDecision::Accepted,
+        )
+        .await
+        .expect("owner decides the head");
+    }
+    let head = MailboxRepository::read_after_cursor(&mut owner, &locked, 1)
+        .await
+        .expect("read the head");
+    assert_eq!(head.len(), 1);
+    assert_eq!(head[0].operation, operations[8]);
+    owner.commit().await.expect("owner commits");
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn full_lane_and_full_node_refuse_before_any_write() {
     let Some(fixture) = Fixture::open("admit").await else {
         return;
@@ -857,6 +905,10 @@ impl Fixture {
 /// it, and its mailbox entry has the request as parent, not the message.
 /// The collector keeps the message while that entry is not consumed and
 /// takes the request and the entry with the message afterwards.
+///
+/// Direct requests exist only with clustering; without it their parent
+/// lookup always reports the parent missing.
+#[cfg(feature = "clustering")]
 #[tokio::test]
 async fn unconsumed_direct_request_retains_the_message_it_copies() {
     let Some(fixture) = Fixture::open("retain_direct").await else {

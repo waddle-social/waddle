@@ -1,8 +1,8 @@
-@import "tailwindcss";
-/* Panda CSS (@pandacss/postcss) injects the generated styles here. Layers
-   are prefixed so they never merge with Tailwind's base/utilities while
-   both systems are installed. */
-@layer pd_reset, pd_base, pd_tokens, pd_recipes, pd_utilities;
+/* Cascade order: Panda's reset and globals, then the legacy body rules
+   (base), Panda tokens, recipes and utilities, then the remaining legacy
+   `.chat-*` hook rules (components). @pandacss/vite appends the generated
+   styles to this file because it declares the Panda layers. */
+@layer pd_reset, pd_base, base, pd_tokens, pd_recipes, pd_utilities, components;
 @import "./global/tokens.css";
 @import "./global/motion.css";
 @import "./global/controls.css";
@@ -12,5 +12,3 @@
 @import "./global/surfaces.css";
 @import "./global/type.css";
 @import "./global/rich-text.css";
-@import "./global/extension-cards.css";
-@import "./global/community.css";

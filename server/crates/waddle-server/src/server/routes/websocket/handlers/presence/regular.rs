@@ -119,67 +119,10 @@ pub(super) async fn handle_regular_presence_update(
                     .then(|| remote_presence_state_from_presence(&presence, priority)),
             )
             .await;
-            // RFC 6121 §3.1.3: deliver queued inbound subscription requests on
-            // this resource's INITIAL available presence only. The per-connection
-            // CAS mirrors `claim_offline_flush` so auto-away/available flips
-            // within a session never re-prompt the user (issue #1104). A subscribe
-            // arriving while the user is online is still delivered directly by
-            // `handle_subscription_presence`'s live path; the queue exists for the
-            // next fresh session until the request is answered. Owner-gated so a
-            // superseded connection cannot consume the replacement's claim.
-            let first_available = match state
-                .deps
-                .protocol
-                .connection_registry
-                .entry_if_owner(sender_jid, owner)
-                .filter(|entry| entry.claim_pending_subscribes_flush())
-            {
-                // The selected account authority records the presentation
-                // before it is made, and a resumed session is not presented
-                // to again.
-                Some(entry) => {
-                    crate::server::routes::websocket::account_binding::mark_presented(
-                        state,
-                        sender_jid,
-                        &entry,
-                        Presentation::PendingSubscriptions,
-                    )
-                    .await
-                }
-                None => false,
-            };
-            let subscribe_stanzas = if first_available {
-                let mut stanzas = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .pending_subscription_stanzas(&sender_jid.to_bare());
-                // Requests from remote senders are recorded durably and
-                // delivered on every new session until answered (gate G18).
-                stanzas.extend(
-                    super::remote::pending_remote_subscriptions(state, &sender_jid.to_bare()).await,
-                );
-                stanzas
-            } else {
-                Vec::new()
-            };
-            // The pending-subscribe delivery is the same self-send deadlock
-            // class as the offline flush (it pushes into this connection's own
-            // outbound mpsc), so it moves off-task too. Both CASes above were
-            // consumed on the connection task; only the pushing is deferred.
-            spawn_session_recovery_delivery(
-                state,
-                sender_jid,
-                owner,
-                flush_plan,
-                subscribe_stanzas,
-            );
-            // RFC 6121 §4.2.2: a new presence session probes the remote
-            // contacts whose presence the account is subscribed to; local
-            // contacts' presence is known here already.
-            if first_available {
-                super::remote::spawn_probe_remote_contacts(state, &sender_jid.to_bare());
-            }
+            // Queued inbound subscription requests are presented after the
+            // frame, once the account authority holds this availability: see
+            // `present_pending_subscriptions`.
+            spawn_session_recovery_delivery(state, sender_jid, owner, flush_plan, Vec::new());
         } else {
             debug!(
                 jid = %sender_jid,
@@ -208,6 +151,64 @@ pub(super) async fn handle_regular_presence_update(
         );
     }
     broadcast_presence_to_subscribers(state, sender_jid, &presence, ordered_relay_origin).await;
+}
+
+/// Present the subscription requests queued for a resource, once per
+/// session, after the account authority has recorded the resource as
+/// available (RFC 6121 §3.1.3).
+///
+/// The connection calls this after each frame, once the frame's resource
+/// snapshot has reached the account authority. The order is what keeps a
+/// request from being stranded: `handle_subscription_presence` queues a
+/// subscribe before it asks the authority for the recipient's available
+/// resources, and this reads the queue only after the authority holds the
+/// availability. A request is therefore either delivered live by its
+/// sender's turn or found in the queue here. Reading the queue on the
+/// presence frame itself, before the authority learns the availability,
+/// lets a subscribe that saw the resource unavailable land in the queue
+/// after the read, where it waits for the next session.
+///
+/// The per-connection CAS makes this once per session, so later presence
+/// updates within a session never re-prompt the user (issue #1104). It is
+/// owner-gated, so a superseded connection cannot consume its
+/// replacement's claim.
+pub(in crate::server::routes::websocket) async fn present_pending_subscriptions(
+    state: &WebSocketState,
+    resource: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+) {
+    let registry = &state.deps.protocol.connection_registry;
+    let Some(entry) = registry
+        .entry_if_owner(resource, owner)
+        .filter(|entry| entry.is_presence_available())
+    else {
+        return;
+    };
+    if !entry.claim_pending_subscribes_flush() {
+        return;
+    }
+    // The selected account authority records the presentation before it is
+    // made, and a resumed session is not presented to again.
+    if !crate::server::routes::websocket::account_binding::mark_presented(
+        state,
+        resource,
+        &entry,
+        Presentation::PendingSubscriptions,
+    )
+    .await
+    {
+        return;
+    }
+    let account = resource.to_bare();
+    let mut subscribe_stanzas = registry.pending_subscription_stanzas(&account);
+    // Requests from remote senders are recorded durably and delivered on
+    // every new session until answered (gate G18).
+    subscribe_stanzas.extend(super::remote::pending_remote_subscriptions(state, &account).await);
+    spawn_session_recovery_delivery(state, resource, owner, None, subscribe_stanzas);
+    // RFC 6121 §4.2.2: a new presence session probes the remote contacts
+    // whose presence the account is subscribed to; local contacts' presence
+    // is known here already.
+    super::remote::spawn_probe_remote_contacts(state, &account);
 }
 
 #[cfg(feature = "clustering")]

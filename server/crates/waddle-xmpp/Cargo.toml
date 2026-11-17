@@ -48,7 +48,7 @@ opentelemetry = { workspace = true }
 # module macros); the SDK is used directly only for bounded provider
 # flushing and the in-memory metric/span exporter test seams.
 opentelemetry_sdk = { workspace = true }
-tracing-opentelemetry = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 # Utilities
@@ -120,7 +120,6 @@ waddle-ws-test-support = { path = "../waddle-ws-test-support" }
 test-utils = [
   "waddle-xmpp-core/test-utils",
   "opentelemetry_sdk/testing",
-  "dep:tracing-opentelemetry",
   "dep:tracing-subscriber",
 ]
 

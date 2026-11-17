@@ -12,11 +12,11 @@ struct ComposerSendButton: View {
         Button(action: action) {
             Image(systemName: isEditing ? "checkmark" : "paperplane.fill")
                 .font(.system(size: ComposerMetrics.sendSymbolSize, weight: .semibold))
-                .foregroundStyle(isEnabled ? Color.white : Color.secondary)
+                .foregroundStyle(isEnabled ? Theme.Colors.actionFg : Color.secondary)
                 .frame(width: ComposerMetrics.sendWidth, height: ComposerMetrics.sendHeight)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.Radius.small + 2, style: .continuous)
-                        .fill(isEnabled ? Color.accentColor : Color.secondary.opacity(0.12))
+                        .fill(isEnabled ? Theme.Colors.action : Color.secondary.opacity(0.12))
                 )
                 .frame(minWidth: ComposerMetrics.touchTarget, minHeight: ComposerMetrics.touchTarget)
                 .contentShape(Rectangle())

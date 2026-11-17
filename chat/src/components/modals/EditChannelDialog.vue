@@ -1,9 +1,19 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { ref, watch } from "vue";
 import { X } from "lucide-vue-next";
+import { btn, iconbtn } from "styled-system/recipes";
+import { css } from "styled-system/css";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
+import { formClasses as f } from "@/components/modals/form-classes";
 import type { ChannelEditFormData } from "@/lib/chat-ui";
 import type { ChannelSummary, PinPermission, SpaceSummary } from "@/lib/chat-types";
+
+const PIN_PERMISSION_OPTIONS: Array<{ value: PinPermission; label: string }> = [
+  { value: "admins-only", label: "Admins only" },
+  { value: "anyone", label: "Anyone" },
+];
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -49,63 +59,52 @@ function onMoveClick() {
   if (target === (props.channel?.spaceId ?? null)) return;
   emit("moveToSpace", target);
 }
+const titleClass = css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const moveRow = css({ display: "flex", alignItems: "center", gap: "2", "& select": { flex: 1, minWidth: 0 } });
+const strong = css({ color: "fg", fontWeight: 700 });
 </script>
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="chat-dialog-header">
-      <h2 class="type-dialog-title truncate">
-        {{ channel ? `Edit #${channel.name}` : "Edit channel" }}
-      </h2>
-      <button
-        class="chat-icon-button flex-none hover:bg-muted"
-        type="button"
-        aria-label="Close edit channel dialog"
-        @click="open = false"
-      >
-        <X class="w-4 h-4 text-muted-foreground" />
+    <div :class="dialogParts.head">
+      <h2 :class="titleClass">{{ channel ? `Edit ${channel.name}` : "Edit room" }}</h2>
+      <button :class="iconbtn()" type="button" aria-label="Close edit channel dialog" @click="open = false">
+        <X aria-hidden="true" />
       </button>
     </div>
 
-    <div class="chat-dialog-stack chat-dialog-body">
-      <div class="chat-field-stack">
-        <label for="edit-channel-name" class="type-section-label text-muted-foreground">
-          Name
-        </label>
+    <div :class="dialogParts.body">
+      <div :class="f.field">
+        <label for="edit-channel-name" :class="f.label">Name</label>
         <input
           id="edit-channel-name"
           :value="form.name"
-          class="chat-field-control type-field"
+          :class="f.input"
           @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
         />
       </div>
 
-      <div class="chat-field-stack">
-        <label for="edit-channel-description" class="type-section-label text-muted-foreground">
-          Description
-        </label>
+      <div :class="f.field">
+        <label for="edit-channel-description" :class="f.label">Description</label>
         <textarea
           id="edit-channel-description"
           :value="form.description"
-          class="chat-field-control chat-textarea-control type-field"
+          :class="f.textarea"
+          rows="2"
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
       </div>
 
-      <div class="chat-field-stack">
-        <label for="edit-channel-pin-permission" class="type-section-label text-muted-foreground">
-          Who can pin messages
-        </label>
-        <select
+      <div :class="f.field">
+        <label for="edit-channel-pin-permission" :class="f.label">Who can pin messages</label>
+        <AppSelect
           id="edit-channel-pin-permission"
-          :value="form.pinPermission ?? ''"
-          class="chat-field-control type-field"
-          @change="$emit('update:form', { ...form, pinPermission: ($event.target as HTMLSelectElement).value as PinPermission })"
-        >
-          <option value="" disabled>Keep current setting</option>
-          <option value="admins-only">Admins only</option>
-          <option value="anyone">Anyone</option>
-        </select>
+          :model-value="form.pinPermission ?? ''"
+          :options="PIN_PERMISSION_OPTIONS"
+          placeholder="Keep current setting"
+          :class="f.input"
+          @update:model-value="$emit('update:form', { ...form, pinPermission: $event })"
+        />
       </div>
 
       <!-- Whether accounts on other servers can reach this room. Shown
@@ -142,25 +141,20 @@ function onMoveClick() {
            single-membership per #620: publishing to the target
            Space retracts the bookmark from any prior Space, so the
            client just issues the publish. -->
-      <div v-if="canMoveChannel" class="chat-field-stack">
-        <label for="edit-channel-space" class="type-section-label text-muted-foreground">
-          Space
-        </label>
-        <div class="flex items-center gap-2">
-          <select
+      <div v-if="canMoveChannel" :class="f.field">
+        <label for="edit-channel-space" :class="f.label">Space</label>
+        <div :class="moveRow">
+          <AppSelect
             id="edit-channel-space"
-            :value="pendingTargetSpaceId ?? ''"
-            class="chat-field-control type-field flex-1"
+            :model-value="pendingTargetSpaceId ?? ''"
+            :options="spaces.map((space) => ({ value: space.id, label: space.name }))"
+            placeholder="No other spaces"
+            :class="f.input"
             :disabled="isSubmitting || spaces.length === 0"
-            @change="pendingTargetSpaceId = (($event.target as HTMLSelectElement).value || null)"
-          >
-            <option v-if="spaces.length === 0" value="" disabled>No other spaces</option>
-            <option v-for="space in spaces" :key="space.id" :value="space.id">
-              {{ space.name }}
-            </option>
-          </select>
+            @update:model-value="pendingTargetSpaceId = $event || null"
+          />
           <button
-            class="chat-action-button chat-action-button--secondary type-control"
+            :class="btn()"
             type="button"
             :disabled="
               isSubmitting
@@ -174,45 +168,31 @@ function onMoveClick() {
         </div>
         <p
           v-if="channel?.spaceId && pendingTargetSpaceId && pendingTargetSpaceId !== channel.spaceId"
-          class="type-meta text-muted-foreground"
+          :class="f.caption"
         >
           The room will move from
-          <span class="type-emphasis">
+          <span :class="strong">
             {{ spaces.find((s) => s.id === channel?.spaceId)?.name ?? channel.spaceId }}
           </span>
           to
-          <span class="type-emphasis">
+          <span :class="strong">
             {{ spaces.find((s) => s.id === pendingTargetSpaceId)?.name ?? pendingTargetSpaceId }}
           </span>.
         </p>
       </div>
     </div>
 
-    <div class="chat-dialog-footer flex-col sm:flex-row sm:items-center sm:justify-between">
+    <div :class="[dialogParts.foot, f.footSplit]">
+      <button :class="f.dangerOutline" type="button" @click="emit('delete')">Delete room</button>
+      <button :class="btn()" type="button" @click="open = false">Cancel</button>
       <button
-        class="chat-action-button type-control text-left text-destructive-text hover:bg-destructive/10 sm:text-center"
+        :class="btn({ variant: 'primary' })"
         type="button"
-        @click="emit('delete')"
+        :disabled="isSubmitting || !form.name.trim()"
+        @click="emit('save')"
       >
-        Delete channel
+        {{ isSubmitting ? "Saving…" : "Save" }}
       </button>
-      <div class="flex justify-end gap-2">
-        <button
-          class="chat-action-button chat-action-button--secondary type-control flex-1 sm:flex-none"
-          type="button"
-          @click="open = false"
-        >
-          Cancel
-        </button>
-        <button
-          class="chat-action-button chat-action-button--primary type-control flex-1 disabled:opacity-40 sm:flex-none"
-          type="button"
-          :disabled="isSubmitting || !form.name.trim()"
-          @click="emit('save')"
-        >
-          {{ isSubmitting ? "Saving…" : "Save" }}
-        </button>
-      </div>
     </div>
   </AppDialog>
 </template>

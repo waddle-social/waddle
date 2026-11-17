@@ -45,6 +45,49 @@ notification.
 A later refusal never erases uncertainty from an earlier send. Elapsed time,
 attempt count and message age do not establish provider acceptance or refusal.
 
+### Authoritative call dispositions
+
+Call invitations have a fixed deadline: the original message receipt time in
+Unix seconds plus 45 seconds. Before provider dispatch, a call past that deadline
+on its VoIP node ends `failed` with `uncertain_send = 0`, an error identifying call expiry, and
+settled notification ancestry. This is an explicit authoritative expiry
+disposition, including when an earlier attempt left `uncertain_send = 1`; the
+transport policy TTL does not extend the deadline.
+
+A newly inserted `call` candidate wakes this process's notification outbox loop
+only after its durable ingress transaction commits. A wake drains only call
+candidates and due call outbox jobs. Other classes, candidate recovery and
+pruning stay on the outbox timer. Confirmed queue acceptance of a call job wakes
+this process's Push Service job loop, which drains due jobs of all classes.
+Calls therefore avoid waiting for the default five-second outbox and ten-second
+provider timers. The `Notify` permits survive a busy loop and coalesce repeated
+wakes. These are local scheduling hints, with no cross-replica signalling:
+another replica can claim the work first, and timers remain the fallback for
+recovery, retries and ambiguous queue acceptance. Call work triggers both wakes.
+
+Bodyless messages with a top-level `urn:xmpp:jingle-message:0` child named
+`retract`, `proceed`, `reject`, `finish`, `ringing` or legacy `accept` and no
+top-level JMI `propose` create no notification candidate or candidate
+activity-preview intent.
+Their XEP-0160 pending delivery, `OfflineDelivery` marker and MAM storage remain
+intact. Messages with a body, with a proposal, or with only unknown JMI children
+follow normal notification policy. Signal suppression uses the existing result.
+
+Call jobs apply only to the node whose app ID exactly matches the configured
+APNs bundle ID plus `.voip`; other notification classes apply only to other
+nodes. A class/node mismatch ends `published`, clears `uncertain_send`, and
+settles ancestry without sending. The diagnostic records `not-applicable`,
+which acknowledges upstream custody without claiming provider delivery. Class
+and node app ID are immutable, so an earlier pass cannot have sent such a job.
+On the VoIP node, a non-APNs device records a non-retrying, non-disabling
+not-applicable attempt. Applicability is decided before expiry, and both run
+before empty-device retries.
+The configured topic identity is retained independently of provider readiness.
+When APNs configuration is entirely absent, there is no known VoIP topic:
+call jobs are not applicable, and an app ID ending in `.voip` alone does not
+establish a matching node. Existing non-call provider-not-configured handling
+continues to apply in that case.
+
 ## Scheduling and disposition
 
 The provider queue allows 24 failed scheduling attempts. Its retry delay grows

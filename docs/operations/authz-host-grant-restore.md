@@ -85,7 +85,7 @@ environment of the owner-phase job and of every server.
   step is finished by the next run with the same epoch (`finished a
   host-grant restore transition ...`);
 - with the recorded epoch, changes nothing, except that it binds the lineage
-  the first time it runs after migration 2002;
+  the first time it runs after migration 2003;
 - with an epoch below the recorded one, or against a database that holds a
   scope and was adopted without a raised epoch, is refused (exit status 4,
   `restore_fence`) and changes nothing.
@@ -464,7 +464,7 @@ Otherwise declare a restore.
 
 ## Rollout (G24)
 
-- Migration 2002 adds to the authority row the restore epoch, the lineage
+- Migration 2003 adds to the authority row the restore epoch, the lineage
   binding, a fixed authority identity and the position acknowledgement; to
   the scope rows the lost-operations mark; the `restored`, `reconstructed`
   and `fenced` states; the `restore`, `reconstruct`, `fence` and `reopen`

@@ -30,13 +30,13 @@ struct NewChannelSheet: View {
                 if let errorMessage {
                     Section {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Theme.Colors.dangerText)
                     }
                 }
             }
             .formStyle(.grouped)
             .disabled(isCreating)
-            .navigationTitle("New channel")
+            .navigationTitle("New room")
             .toolbar { sheetToolbar }
         }
         .interactiveDismissDisabled(isCreating)
@@ -80,7 +80,7 @@ struct NewChannelSheet: View {
                 navigation.open(conversation)
                 dismiss()
             } catch {
-                errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't create the channel. Try again.")
+                errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't create the room. Try again.")
                 isCreating = false
             }
         }
@@ -97,14 +97,14 @@ struct ChannelAddressPreview: View {
                 Text("Address")
                 Text("#\(slug)")
                     .font(.footnote.monospaced())
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Theme.Colors.fg)
             }
             .accessibilityElement(children: .combine)
         } else if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            Text("The name becomes the channel address, like #design-reviews.")
+            Text("The name becomes the room's address, like #design-reviews.")
         } else {
             Text("Use at least one letter or number.")
-                .foregroundStyle(.red)
+                .foregroundStyle(Theme.Colors.dangerText)
         }
     }
 }

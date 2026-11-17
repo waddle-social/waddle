@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { Loader2, X, Search } from "lucide-vue-next";
+import AppSelect from "@/components/ui/AppSelect.vue";
+import { X, Search } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { iconbtn, input, seg, waddle } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
+import { formClasses as f } from "@/components/modals/form-classes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableAffiliation } from "@/lib/chat-ui";
@@ -44,43 +49,54 @@ const affiliations: EditableAffiliation[] = ["member", "admin", "owner", "outcas
 function affiliationLabel(affiliation: EditableAffiliation): string {
   return affiliation === "outcast" ? "Banned" : affiliation;
 }
+const addSection = css({ display: "flex", flexDirection: "column", gap: "2", px: "6", pt: "3", pb: "3", borderBottom: "1px solid {colors.border.soft}" });
+const search = cx(input(), css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2",
+  width: "100%",
+  bg: "bg",
+  _focusWithin: { outline: "3px solid {colors.focus}", outlineOffset: "1px" },
+  "& svg": { width: "16px", height: "16px", flex: "none", color: "fg.soft" },
+  "& input": { flex: 1, minWidth: 0, height: "100%", border: 0, bg: "transparent", color: "fg", font: "inherit", outline: "none" },
+  "& input::placeholder": { color: "fg.soft" },
+}));
+const affiliationSeg = cx(seg(), css({ alignSelf: "flex-start", maxWidth: "100%", overflowX: "auto", "& > *": { textTransform: "capitalize" } }));
+const results = css({ display: "flex", flexDirection: "column", gap: "0.5", mx: "-2" });
+const addHint = css({ flex: "none", font: "600 13px/1 {fonts.body}", color: "action.text", textTransform: "capitalize" });
+const list = css({ display: "flex", flexDirection: "column", minHeight: 0, maxHeight: "24rem", overflowY: "auto", px: "6", pt: "2", pb: "5" });
+const row = css({ display: "flex", alignItems: "center", gap: "2.5", minHeight: "52px", py: "2", borderBottom: "1px solid {colors.border.soft}", _last: { borderBottom: 0 } });
+const capitalize = css({ textTransform: "capitalize" });
+const affiliationSelect = cx(input(), css({ height: "36px", minHeight: "36px", px: "2.5", font: "600 13px/1 {fonts.body}", textTransform: "capitalize", _coarse: { height: "44px", minHeight: "44px" } }));
+const stale = css({ py: "1.5", font: "400 13px/1.4 {fonts.body}", color: "warning.text" });
+const note = css({ py: "6", justifyContent: "center", textAlign: "center", font: "400 13px/1.4 {fonts.body}", color: "fg.muted" });
 </script>
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="chat-dialog-header">
-      <h2 class="type-dialog-title">Members</h2>
-      <button
-        class="chat-icon-button hover:bg-muted"
-        type="button"
-        aria-label="Close members dialog"
-        @click="open = false"
-      >
-        <X class="w-4 h-4 text-muted-foreground" />
+    <div :class="dialogParts.head">
+      <h2>Members</h2>
+      <button :class="iconbtn()" type="button" aria-label="Close members dialog" @click="open = false">
+        <X aria-hidden="true" />
       </button>
     </div>
 
     <!-- Search -->
-    <div v-if="canManageMembers" class="chat-panel-stack border-b border-border px-4 py-3 sm:px-5">
-      <div class="relative">
-        <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+    <section v-if="canManageMembers" :class="addSection" aria-label="Add members">
+      <div :class="search">
+        <Search aria-hidden="true" />
         <input
           :value="memberQuery"
-          class="chat-field-control chat-field-control--search type-field"
           placeholder="Search users to add…"
           aria-label="Search users to add"
           @input="$emit('update:memberQuery', ($event.target as HTMLInputElement).value)"
         />
       </div>
 
-      <div class="flex gap-1.5">
+      <div :class="affiliationSeg" role="group" aria-label="Add as">
         <button
           v-for="affiliation in affiliations"
           :key="affiliation"
-          class="type-control chat-action-button border capitalize"
-          :class="newMemberAffiliation === affiliation
-            ? 'border-primary/30 bg-primary/8 text-foreground shadow-[0_0_12px_var(--glow)]'
-            : 'border-border bg-muted/40 hover:bg-muted'"
           type="button"
           :aria-pressed="newMemberAffiliation === affiliation"
           @click="$emit('update:newMemberAffiliation', affiliation)"
@@ -90,86 +106,74 @@ function affiliationLabel(affiliation: EditableAffiliation): string {
       </div>
 
       <!-- Search results -->
-      <div v-if="searchResults.length > 0" class="flex flex-col gap-1">
+      <div v-if="searchResults.length > 0" :class="results">
         <button
           v-for="user in searchResults"
           :key="user.id"
-          class="chat-list-row flex min-h-12 w-full items-center gap-2.5 border border-border bg-muted/40 p-2 text-left hover:bg-muted"
+          :class="f.pickRow"
           type="button"
           @click="emit('addMember', user.id)"
         >
           <UserAvatar :name="user.display_name || user.username" :jid="user.jid" size="sm" />
-          <div class="flex-1 min-w-0">
-            <div class="type-control truncate">{{ user.display_name || user.username }}</div>
-            <div class="type-caption text-muted-foreground">@{{ user.username }}</div>
-          </div>
-          <span class="type-caption text-muted-foreground capitalize">
-            Add as {{ affiliationLabel(newMemberAffiliation) }}
+          <span :class="f.rowText">
+            <span :class="f.rowName">{{ user.display_name || user.username }}</span>
+            <span :class="f.rowSub">@{{ user.username }}</span>
           </span>
+          <span :class="addHint">Add as {{ affiliationLabel(newMemberAffiliation) }}</span>
         </button>
       </div>
 
-      <!-- Searching indicator — converges with iter-47/48/57 on
-           Loader2 so every "fetching" surface across the app
-           (channel search, emoji picker, GIF picker, member search)
-           speaks one visual language. -->
-      <div v-if="isSearching" class="type-caption text-muted-foreground flex items-center gap-1.5">
-        <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+      <!-- Searching indicator: the shared three-dot waddle loader. -->
+      <div v-if="isSearching" :class="f.status" role="status">
+        <span :class="waddle()" aria-hidden="true"><i /><i /><i /></span>
         <span>Searching…</span>
       </div>
-    </div>
+    </section>
 
     <!-- Member list -->
-    <div class="flex max-h-96 flex-col gap-1 overflow-auto px-4 py-3 sm:px-5">
-      <div
-        v-if="memberState === 'unavailable' && members.length > 0"
-        class="type-caption rounded-md border border-border bg-muted/35 px-3 py-2 text-muted-foreground"
-      >
+    <div :class="list">
+      <div v-if="memberState === 'unavailable' && members.length > 0" :class="stale">
         Showing last synced members.
       </div>
-      <div
-        v-for="member in members"
-        :key="member.jid"
-        class="chat-list-row flex min-h-12 items-center gap-2.5 p-2 hover:bg-muted/50"
-      >
+      <div v-for="member in members" :key="member.jid" :class="row">
         <UserAvatar :name="member.username" :jid="member.jid" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />
-        <div class="flex-1 min-w-0">
-          <div class="type-control truncate" :title="member.jid">{{ memberIdentityLabel(member, homeDomain) }}</div>
-          <div class="type-caption text-muted-foreground capitalize">
+        <div :class="f.rowText">
+          <span :class="f.rowName" :title="member.jid">{{ memberIdentityLabel(member, homeDomain) }}</span>
+          <span :class="[f.rowSub, capitalize]">
             {{ inferredMemberJids.has(member.jid) ? "Present now" : affiliationLabel(member.affiliation as EditableAffiliation) }}
-          </div>
+          </span>
         </div>
-        <div v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.affiliation !== 'owner'" class="flex items-center gap-1.5">
-          <select
-            :value="member.affiliation"
-            class="type-caption type-emphasis h-8 appearance-none rounded-lg border border-border bg-muted/60 px-2.5 capitalize transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
+        <template v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.affiliation !== 'owner'">
+          <AppSelect
+            :model-value="member.affiliation"
+            :options="affiliations.map((value) => ({ value, label: affiliationLabel(value) }))"
+            :class="affiliationSelect"
             :aria-label="`Affiliation for ${member.username}`"
-            @change="emit('updateAffiliation', member, ($event.target as HTMLSelectElement).value as EditableAffiliation)"
-          >
-            <option v-for="affiliation in affiliations" :key="affiliation" :value="affiliation">{{ affiliationLabel(affiliation) }}</option>
-          </select>
+            @update:model-value="emit('updateAffiliation', member, $event)"
+          />
           <button
-            class="chat-icon-button text-muted-foreground hover:text-destructive-text hover:bg-destructive/10"
+            :class="iconbtn({ size: 'sm' })"
             type="button"
             :aria-label="`Revoke ${memberIdentityLabel(member, homeDomain)}'s access`"
             :title="`Revoke ${memberIdentityLabel(member, homeDomain)}'s access`"
             @click="emit('removeMember', member)"
           >
-            <X class="w-3.5 h-3.5" />
+            <X aria-hidden="true" />
           </button>
-        </div>
-        <div v-else-if="inferredMemberJids.has(member.jid)" class="type-caption text-muted-foreground">
+        </template>
+        <span v-else-if="inferredMemberJids.has(member.jid)" :class="f.rowSub">
           Synced from presence
-        </div>
+        </span>
       </div>
 
-      <div v-if="members.length === 0 && memberState === 'loading'" class="type-caption text-center py-6 text-muted-foreground">
+      <div v-if="members.length === 0 && memberState === 'loading'" :class="[f.status, note]" role="status">
+        <span :class="waddle()" aria-hidden="true"><i /><i /><i /></span>
         Syncing members…
       </div>
-      <div v-else-if="members.length === 0 && memberState === 'unavailable'" class="type-caption text-center py-6 text-muted-foreground">
+      <div v-else-if="members.length === 0 && memberState === 'unavailable'" :class="note">
         Members are unavailable right now.
       </div>
-      <div v-else-if="members.length === 0" class="type-caption text-center py-6 text-muted-foreground">
+      <div v-else-if="members.length === 0" :class="note">
         No members
       </div>
     </div>

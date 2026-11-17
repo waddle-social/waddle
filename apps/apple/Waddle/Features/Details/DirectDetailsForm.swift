@@ -39,7 +39,6 @@ struct DirectPeerHeader: View {
         PeerHeader(
             name: name,
             jid: peer,
-            colorKey: peer.description,
             availability: presence?.availability ?? .offline,
             status: presence?.status,
             idleSince: presence?.idleSince
@@ -52,7 +51,6 @@ struct DirectPeerHeader: View {
 struct PeerHeader: View {
     let name: String
     let jid: BareJID?
-    let colorKey: String
     let availability: Availability
     let status: String?
     let idleSince: Date?
@@ -98,7 +96,7 @@ struct PeerHeader: View {
         if let jid {
             PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Self.avatarSize)
         } else {
-            AvatarView(name: name, colorKey: colorKey, size: Self.avatarSize)
+            AvatarView(name: name, size: Self.avatarSize)
                 .overlay(alignment: .bottomTrailing) {
                     PresenceDot(availability: availability, size: Self.avatarSize * 0.3)
                         .offset(x: Self.avatarSize * 0.075, y: Self.avatarSize * 0.075)
@@ -129,7 +127,6 @@ struct PeerProfileSheet: View {
                     PeerHeader(
                         name: profile.name,
                         jid: profile.jid,
-                        colorKey: profile.colorKey,
                         availability: presence.availability,
                         status: presence.status,
                         idleSince: presence.idleSince

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { MessageSquare, Phone, Video } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, liveDot } from "styled-system/recipes";
 import type { CallAnchorCardState } from "@/lib/call-thread-anchor";
 
 const props = defineProps<{
@@ -34,55 +36,95 @@ function openThread() {
   if (!props.state.threadId) return;
   emit("openThread", props.state.threadId);
 }
+
+// "Started a huddle" card (Huddle-Join board): live = surface card with an
+// aurora icon and Join; ended = dashed, dimmed. Marker classes stay for tests.
+const rootClass = css({
+  maxWidth: "460px",
+  padding: "4",
+  borderRadius: "16px",
+  bg: "surface",
+  border: "1px solid {colors.border.soft}",
+  color: "fg",
+  "&.call-anchor-card--ended": { padding: "{spacing.3} {spacing.4}", bg: "transparent", border: "1px dashed {colors.border}", opacity: 0.7 },
+});
+const rowClass = css({ display: "flex", minWidth: 0, alignItems: "center", gap: "2.5" });
+const iconClass = css({
+  position: "relative",
+  display: "inline-flex",
+  flex: "none",
+  width: "36px",
+  height: "36px",
+  alignItems: "center",
+  justifyContent: "center",
+  borderRadius: "pill",
+  bg: "live.subtle",
+  color: "live.text",
+  "& > svg": { width: "18px", height: "18px" },
+  ".call-anchor-card--ended &": { width: "auto", height: "auto", bg: "transparent", color: "fg.muted" },
+});
+const pulseClass = cx("call-anchor-card__pulse", liveDot(), css({ position: "absolute", top: 0, right: 0, width: "10px", height: "10px", boxShadow: "0 0 0 2px {colors.surface}" }));
+const copyClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", lineHeight: "1.35" });
+const titleRowClass = css({ display: "flex", minWidth: 0, alignItems: "center", gap: "2" });
+const titleClass = css({ margin: 0, font: "700 15px/1.35 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const countClass = css({ textStyle: "caption", color: "fg.muted", fontVariantNumeric: "tabular-nums" });
+const summaryClass = css({ margin: 0, textStyle: "caption", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const joinClass = cx(btn({ variant: "live", size: "sm" }), css({ flex: "none", _coarse: { height: "44px" } }));
+const threadClass = css({
+  display: "inline-flex",
+  maxWidth: "100%",
+  alignItems: "center",
+  gap: "1.5",
+  marginTop: "3",
+  padding: 0,
+  border: 0,
+  bg: "transparent",
+  font: "600 13px/1.3 {fonts.body}",
+  color: "action.text",
+  cursor: "pointer",
+  _hover: { textDecoration: "underline" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px", borderRadius: "xs" },
+  "& svg": { width: "14px", height: "14px", flex: "none" },
+  "& span": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+});
 </script>
 
 <template>
   <section
-    class="call-anchor-card rounded-lg border border-border bg-card px-3 py-2.5 shadow-sm"
-    :class="{
-      'call-anchor-card--live border-primary/35 bg-primary/5': isLive,
-      'call-anchor-card--ended opacity-70': !isLive,
-    }"
+    :class="[rootClass, isLive ? 'call-anchor-card--live' : 'call-anchor-card--ended']"
     :aria-label="state.ariaLabel"
   >
-    <div class="flex min-w-0 items-center gap-3">
-      <div class="relative flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-border bg-background text-muted-foreground">
-        <span
-          v-if="isLive"
-          class="call-anchor-card__pulse absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-success motion-safe:animate-pulse"
-          aria-hidden="true"
-        />
-        <component :is="MediaIcon" class="h-4 w-4" aria-hidden="true" />
+    <div :class="rowClass">
+      <div :class="iconClass">
+        <component :is="MediaIcon" aria-hidden="true" />
+        <span v-if="isLive" :class="pulseClass" aria-hidden="true" />
       </div>
-      <div class="min-w-0 flex-1">
-        <div class="flex min-w-0 items-center gap-2">
-          <p class="type-field-sm truncate text-foreground">{{ state.title }}</p>
-          <span class="type-meta type-numeric text-muted-foreground">
-            {{ state.participantCount }}
-          </span>
+      <div :class="copyClass">
+        <div :class="titleRowClass">
+          <p :class="titleClass">{{ state.title }}</p>
+          <span :class="countClass">{{ state.participantCount }}</span>
         </div>
-        <p class="type-caption truncate text-muted-foreground">{{ participantSummary }}</p>
+        <p :class="summaryClass">{{ participantSummary }}</p>
       </div>
       <button
         v-if="showAction"
         type="button"
-        class="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 type-control text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="{ 'cursor-not-allowed opacity-60': state.actionDisabled }"
+        :class="joinClass"
         :disabled="state.actionDisabled"
         @click.stop="joinCall"
       >
-        <component :is="MediaIcon" class="h-3.5 w-3.5" aria-hidden="true" />
+        <component :is="MediaIcon" aria-hidden="true" />
         <span>{{ state.actionLabel }}</span>
       </button>
     </div>
     <button
       v-if="state.threadId"
       type="button"
-      class="mt-2 inline-flex max-w-full items-center gap-1.5 type-caption text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      :class="threadClass"
       @click.stop="openThread"
     >
-      <MessageSquare class="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
-      <span class="truncate">{{ messageCountLabel }} ›</span>
+      <MessageSquare aria-hidden="true" />
+      <span>{{ messageCountLabel }} ›</span>
     </button>
   </section>
 </template>

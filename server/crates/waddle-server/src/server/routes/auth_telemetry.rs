@@ -51,7 +51,7 @@ pub(super) fn classify_auth_failure(failure: AuthFailure<'_>) -> (AuthStage, Aut
                 AuthError::JwtError(_) | AuthError::InvalidPassword(_) => {
                     AuthErrorCode::InvalidCredentials
                 }
-                AuthError::SessionNotFound(_) => AuthErrorCode::InvalidGrant,
+                AuthError::SessionNotFound => AuthErrorCode::InvalidGrant,
                 AuthError::SessionExpired => AuthErrorCode::Expired,
                 AuthError::DatabaseError(_)
                 | AuthError::UserAlreadyExists(_)
@@ -182,10 +182,7 @@ mod tests {
                 AuthError::JwtError("jwt".to_string()),
                 AuthErrorCode::InvalidCredentials,
             ),
-            (
-                AuthError::SessionNotFound("session".to_string()),
-                AuthErrorCode::InvalidGrant,
-            ),
+            (AuthError::SessionNotFound, AuthErrorCode::InvalidGrant),
             (AuthError::SessionExpired, AuthErrorCode::Expired),
             (
                 AuthError::DatabaseError("database".to_string()),

@@ -28,6 +28,7 @@ import {
   type ExtensionAnnotation,
   type ExtensionAnnotationAction,
 } from "@/lib/chat-ui";
+import { roomLinksKey } from "@/lib/room-links";
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { parseMeAction } from "@/lib/me-command";
@@ -35,8 +36,11 @@ import { renderMeActionHtml } from "@/lib/me-action-render";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
+import { css, cx } from "styled-system/css";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import { remoteMediaPolicyKey } from "@/lib/remote-media";
+import { isMonoBandMeta } from "./message-system-band";
+import { actionChipClasses as chips, bandClasses as band } from "./message-band-classes";
 import HlsVideoPlayer from "@/components/chat/HlsVideoPlayer.vue";
 
 const props = withDefaults(
@@ -225,20 +229,39 @@ const withheldMedia = computed(() => {
 // "* Author action" line. Corrections (XEP-0308) replace `body`, so an
 // edited `/me` message follows the same path.
 const isMeAction = computed(() => parseMeAction(displayBody.value) !== null);
+const roomLinks = inject(roomLinksKey);
+function onBodyClick(event: MouseEvent) {
+  if (!roomLinks || !(event.target instanceof Element)
+    || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const link = event.target.closest<HTMLAnchorElement>("a[data-room-jid]");
+  const roomJid = link?.dataset.roomJid;
+  if (!roomJid) return;
+  event.preventDefault();
+  event.stopPropagation();
+  roomLinks.open(roomJid);
+}
+
 const styledHtml = computed(() =>
   isMeAction.value
     ? renderMeActionHtml({
         body: displayBody.value,
         markup: props.message.markup,
         references: props.message.references,
+        roomHref: roomLinks?.href,
         actor: props.message.author,
       })
-    : renderStyledBody(displayBody.value, props.message.markup, props.message.references),
+    : renderStyledBody(displayBody.value, props.message.markup, props.message.references, roomLinks?.href),
 );
 const shouldRenderTextBody = computed(() =>
   !!displayBody.value && !props.message.extensionBodyFallback,
 );
 const styledBodyRef = ref<HTMLDivElement | null>(null);
+
+watch(styledBodyRef, (body, _previous, onCleanup) => {
+  if (!body || !roomLinks) return;
+  body.addEventListener("click", onBodyClick);
+  onCleanup(() => body.removeEventListener("click", onBodyClick));
+});
 
 async function highlightMessageCodeBlocks() {
   const el = styledBodyRef.value;
@@ -254,19 +277,257 @@ watch(
   { immediate: true },
 );
 
+// --- Presentation (Polar Huddle). Rich text keeps the editor's rules
+// (paragraphs, code, quotes, lists, links) and renders mentions in gold.
+const c = {
+  stack: css({ display: "flex", width: "100%", minWidth: 0, flexDirection: "column", alignItems: "flex-start", gap: "1.5" }),
+  rich: css({
+    color: "inherit",
+    overflowWrap: "anywhere",
+    overflow: "clip",
+    overflowClipMargin: "0.25em",
+    minWidth: 0,
+    width: "100%",
+    maxWidth: "100%",
+    "& p": { margin: 0 },
+    "& p + p": { mt: "2" },
+    "& strong, & .font-semibold": { fontWeight: 700 },
+    "& em": { fontStyle: "italic" },
+    "& del, & s": { textDecoration: "line-through", opacity: 0.6 },
+    "& code": { fontFamily: "mono", fontSize: "0.875em", fontWeight: 400, bg: "surface.code", padding: "1px {spacing.1}", borderRadius: "tag" },
+    "& pre": {
+      fontFamily: "mono",
+      fontSize: "sm",
+      lineHeight: 1.5,
+      padding: "{spacing.2.5} {spacing.4}",
+      my: "2",
+      maxWidth: "100%",
+      overflowX: "auto",
+      bg: "surface.code",
+      border: "1px solid {colors.border.soft}",
+      borderRadius: "control",
+    },
+    "& pre code": { padding: 0, bg: "transparent", borderRadius: 0, fontSize: "inherit" },
+    "& pre.shiki, & pre.shiki span": {
+      color: "light-dark(var(--shiki-light), var(--shiki-dark)) !important",
+      backgroundColor: "transparent !important",
+    },
+    "& pre.shiki": { backgroundColor: "light-dark(var(--shiki-light-bg), var(--shiki-dark-bg)) !important" },
+    "& blockquote": { my: "2", pl: "3", borderLeft: "3px solid {colors.border.strong}", color: "fg.muted" },
+    "& ul, & ol": { my: "1", pl: "1.4em" },
+    "& ul": { listStyleType: "disc" },
+    "& ol": { listStyleType: "decimal" },
+    "& li": { my: "0.5" },
+    "& li > p": { margin: 0 },
+    "& a": {
+      color: "action.text",
+      textDecoration: "underline",
+      textDecorationColor: "transparent",
+      textUnderlineOffset: "2px",
+      transition: "text-decoration-color {durations.fast} {easings.out}, color {durations.fast} {easings.out}",
+      _hover: { color: "fg", textDecorationColor: "currentColor" },
+    },
+    "& .rich-mention": { color: "gold.text", bg: "gold.subtle", fontWeight: 700, padding: "0 {spacing.1}", borderRadius: "tag" },
+  }),
+  text: css({ textStyle: "message" }),
+  compact: css({ textStyle: "body", lineClamp: 3 }),
+  me: css({ fontStyle: "italic" }),
+  sticker: css({ borderRadius: "control", objectFit: "contain", maxWidth: "112px", maxHeight: "112px" }),
+  stickerCompact: css({ borderRadius: "control", objectFit: "contain", maxWidth: "80px", maxHeight: "80px" }),
+  placeholder: css({
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "2",
+    px: "4",
+    textAlign: "center",
+    textStyle: "caption",
+    color: "fg.muted",
+    "& > svg": { width: "16px", height: "16px", color: "action.text" },
+  }),
+  dashed: css({ border: "1px dashed {colors.border}", borderRadius: "control" }),
+  size112: css({ width: "112px", height: "112px" }),
+  size80: css({ width: "80px", height: "80px" }),
+  thumb: css({ width: "80px", height: "80px", objectFit: "cover" }),
+  imageBox: css({ width: "192px", height: "144px" }),
+  h40: css({ width: "100%", height: "160px" }),
+  h20: css({ width: "100%", minHeight: "80px" }),
+  inlineImage: css({ borderRadius: "control", border: "1px solid {colors.border.soft}", cursor: "pointer", transition: "opacity {durations.fast} {easings.out}", _hover: { opacity: 0.9 } }),
+  inlineImageCompact: css({ maxHeight: "96px" }),
+  attachmentImage: css({
+    maxWidth: "100%",
+    maxHeight: "256px",
+    aspectRatio: "var(--image-width) / var(--image-height)",
+    width: "min(320px, var(--image-width) * 1px, 256px * var(--image-width) / var(--image-height))",
+  }),
+  linkCard: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "1",
+    width: "100%",
+    maxWidth: "576px",
+    p: "3",
+    textAlign: "left",
+    color: "fg",
+    textDecoration: "none",
+    bg: "surface",
+    border: "1px solid {colors.border.soft}",
+    borderLeft: "3px solid {colors.border.strong}",
+    borderRadius: "control",
+    transition: "border-color {durations.fast} {easings.out}, background-color {durations.fast} {easings.out}",
+  }),
+  linkCardHover: css({ _hover: { borderColor: "border", borderLeftColor: "action.text", bg: "surface.2" } }),
+  host: css({ display: "flex", alignItems: "center", gap: "1", textStyle: "caption", color: "fg.muted", "& svg": { width: "14px", height: "14px" } }),
+  previewImage: css({ width: "100%", borderRadius: "sm", border: "1px solid {colors.border.soft}", objectFit: "cover" }),
+  previewImageSized: css({ maxHeight: "192px" }),
+  previewImageFixed: css({ height: "192px" }),
+  unavailable: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "1",
+    px: "2",
+    py: "1",
+    textStyle: "caption",
+    color: "fg.muted",
+    border: "1px dashed {colors.border}",
+    borderRadius: "sm",
+    "& svg": { width: "14px", height: "14px" },
+  }),
+  linkTitle: css({ fontSize: "sm", fontWeight: 700, color: "fg", textDecoration: "none", "a&:hover": { textDecoration: "underline" } }),
+  linkDescription: css({ textStyle: "caption", color: "fg.muted", lineClamp: 2 }),
+  media: css({
+    position: "relative",
+    display: "flex",
+    width: "100%",
+    aspectRatio: "16 / 9",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "2",
+    overflow: "hidden",
+    borderRadius: "sm",
+    border: "1px solid {colors.border.soft}",
+    bg: "material.media",
+    color: "ice.50",
+    fontSize: "sm",
+    textDecoration: "none",
+    cursor: "pointer",
+    transition: "background-color {durations.fast} {easings.out}",
+    _hover: { bg: "surface.code" },
+    "& > img": { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" },
+    "& > svg": { position: "relative", width: "40px", height: "40px", filter: "drop-shadow(0 1px 2px rgb(0 0 0 / 0.5))" },
+    "& > svg:first-child": { width: "20px", height: "20px", filter: "none" },
+  }),
+  embed: css({ width: "100%", borderRadius: "sm", border: "1px solid {colors.border.soft}", bg: "surface.code" }),
+  embedRatio: css({ aspectRatio: "16 / 9" }),
+  strip: css({ display: "flex", flexWrap: "wrap", gap: "2" }),
+  imageTile: css({ maxWidth: "min(100%, 322px)", overflow: "hidden", borderRadius: "control", border: "1px solid {colors.border.soft}", bg: "surface" }),
+  cover: css({ objectFit: "cover" }),
+  contain: css({ objectFit: "contain" }),
+  imageButton: css({
+    display: "block",
+    maxWidth: "100%",
+    cursor: "zoom-in",
+    transition: "opacity {durations.fast} {easings.out}",
+    _hover: { opacity: 0.9 },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "-3px" },
+  }),
+  encryptedTag: css({
+    display: "flex",
+    alignItems: "center",
+    gap: "1",
+    px: "2",
+    py: "1",
+    borderTop: "1px solid {colors.border.soft}",
+    textStyle: "caption",
+    fontWeight: 600,
+    color: "fg.muted",
+    "& svg": { width: "12px", height: "12px", color: "action.text" },
+  }),
+  smallButton: css({
+    px: "2.5",
+    py: "1",
+    borderRadius: "sm",
+    border: "1px solid {colors.border}",
+    bg: "bg",
+    color: "fg",
+    textStyle: "caption",
+    cursor: "pointer",
+    transition: "background-color {durations.fast} {easings.out}",
+    _hover: { bg: "state.hover" },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "2px" },
+  }),
+  column: css({ display: "flex", flexDirection: "column", gap: "2" }),
+  columnTight: css({ display: "flex", flexDirection: "column", gap: "1.5" }),
+  card: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "2",
+    width: "min(100%, 448px)",
+    maxWidth: "100%",
+    p: "2",
+    bg: "surface",
+    border: "1px solid {colors.border.soft}",
+    borderRadius: "control",
+  }),
+  player: css({ width: "100%", maxHeight: "288px", borderRadius: "sm", border: "1px solid {colors.border.soft}", bg: "surface.code" }),
+  audio: css({ width: "100%" }),
+  pdf: css({ width: "100%", height: "288px", borderRadius: "sm", border: "1px solid {colors.border.soft}", bg: "bg" }),
+  fileMeta: css({ textStyle: "caption", color: "fg.muted" }),
+  fileMetaRow: css({ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "1.5", textStyle: "caption", color: "fg.muted" }),
+  encryptedInline: css({ display: "inline-flex", alignItems: "baseline", gap: "1", "& svg": { width: "12px", height: "12px", alignSelf: "center", color: "action.text" } }),
+  encryptedPill: css({ display: "inline-flex", alignItems: "center", gap: "1", px: "1.5", py: "0.5", borderRadius: "pill", bg: "action.subtle", color: "action.text", "& svg": { width: "12px", height: "12px" } }),
+  fileCard: css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "3",
+    width: "min(100%, 448px)",
+    maxWidth: "100%",
+    p: "3",
+    textAlign: "left",
+    color: "fg",
+    textDecoration: "none",
+    bg: "surface.2",
+    border: "1px solid {colors.border.soft}",
+    borderRadius: "control",
+    cursor: "pointer",
+    transition: "background-color {durations.fast} {easings.out}, border-color {durations.fast} {easings.out}",
+    _hover: { borderColor: "border" , bgImage: "linear-gradient({colors.state.hover}, {colors.state.hover})" },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "2px" },
+    "& > svg": { width: "16px", height: "16px", flex: "none", color: "fg.muted" },
+  }),
+  fileInfo: css({ flex: 1, minWidth: 0 }),
+  fileName: css({ fontSize: "sm", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+  fileError: css({ textStyle: "caption", color: "danger.text" }),
+  fileChip: css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1.5",
+    maxWidth: "100%",
+    px: "2",
+    py: "1",
+    textStyle: "caption",
+    color: "fg",
+    textDecoration: "none",
+    border: "1px solid {colors.border}",
+    borderRadius: "sm",
+    bg: "bg",
+    "a&:hover": { bg: "state.hover" },
+    "& svg": { width: "12px", height: "12px", flex: "none" },
+    "& > span:first-of-type": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+    "&[data-muted]": { bg: "surface.2", color: "fg.muted" },
+  }),
+  muted: css({ color: "fg.muted" }),
+};
 </script>
 
 <template>
-  <div class="chat-message-media-stack">
+  <div :class="c.stack">
     <!-- User text body (shown alongside attachments) -->
     <div
       v-if="shouldRenderTextBody"
       ref="styledBodyRef"
-      :class="[
-        'type-message-body styled-body',
-        compact ? 'type-field-sm line-clamp-3' : '',
-        isMeAction ? 'italic' : '',
-      ]"
+      :class="cx(c.rich, compact ? c.compact : c.text, isMeAction && c.me)"
       v-html="styledHtml"
     />
 
@@ -279,22 +540,16 @@ watch(
         v-if="resolvedAttachmentUrl(imageAttachments[0])"
         :src="resolvedAttachmentUrl(imageAttachments[0])!"
         :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
-        :class="[
-          'rounded-lg object-contain',
-          compact ? 'max-w-20 max-h-20' : 'max-w-28 max-h-28',
-        ]"
+        :class="compact ? c.stickerCompact : c.sticker"
         loading="lazy"
         @click.stop
       />
       <div
         v-else
-        :class="[
-          'type-caption flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground',
-          compact ? 'h-20 w-20' : 'h-28 w-28',
-        ]"
+        :class="cx(c.placeholder, c.dashed, compact ? c.size80 : c.size112)"
         @click.stop
       >
-        <Lock class="h-4 w-4 text-primary/70" />
+        <Lock />
         <span>{{ attachmentError(imageAttachments[0]) ?? (isDecryptingAttachment(imageAttachments[0]) ? "Decrypting sticker…" : "Preparing sticker…") }}</span>
       </div>
     </div>
@@ -304,34 +559,25 @@ watch(
       <img
         :src="message.body.trim()"
         alt="Image"
-        :class="[
-          'rounded-lg border border-border object-contain cursor-pointer transition-opacity hover:opacity-90',
-          compact ? 'max-h-24' : 'chat-attachment-image',
-        ]"
+        :class="cx(c.inlineImage, c.contain, compact ? c.inlineImageCompact : c.attachmentImage)"
         loading="lazy"
         @click.stop="openInlineImageLightbox"
       />
     </div>
 
-    <!-- Waddle extension annotations.
-         Event-intent (rare on human-authored messages — bot-authored
-         events are intercepted upstream and rendered as full-width
-         system bands by MessageCard) renders as a compact inline
-         notification card.
-         Tool-intent annotations from ANY number of extensions collapse
-         into a single horizontal action-chip strip beneath this block.
-         No fat boxes fanning out below the message. -->
+    <!-- Link previews (XEP-0511): text/image/unavailable cards keep the
+         whole-card anchor. -->
     <a
       v-for="{ preview, mediaState } in linkInfoCards"
       :key="`${preview.originalUrl}:${preview.normalizedUrl ?? ''}`"
       :href="linkPreviewHref(preview.originalUrl) ?? undefined"
       target="_blank"
       rel="noopener noreferrer"
-      class="flex max-w-xl flex-col gap-1 rounded-md border border-border bg-muted/40 p-3 text-left transition-colors hover:border-primary/50 hover:bg-muted/60"
+      :class="cx(c.linkCard, c.linkCardHover)"
       @click.stop
     >
-      <span class="type-meta flex items-center gap-1 text-muted-foreground">
-        <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
+      <span :class="c.host">
+        <ExternalLink aria-hidden="true" />
         {{ linkPreviewHost(preview.originalUrl) }}
       </span>
       <img
@@ -342,20 +588,17 @@ watch(
         :height="mediaState.image.height"
         loading="lazy"
         decoding="async"
-        :class="[
-          'w-full rounded border border-border object-cover',
-          mediaState.image.width && mediaState.image.height ? 'max-h-48' : 'h-48',
-        ]"
+        :class="cx(c.previewImage, mediaState.image.width && mediaState.image.height ? c.previewImageSized : c.previewImageFixed)"
       />
       <span
         v-else-if="mediaState.kind === 'remote-unavailable'"
-        class="type-caption flex items-center gap-1 rounded border border-dashed border-border bg-background/70 px-2 py-1 text-muted-foreground"
+        :class="c.unavailable"
       >
-        <AlertCircle aria-hidden="true" class="h-3.5 w-3.5" />
+        <AlertCircle aria-hidden="true" />
         Remote preview media unavailable
       </span>
-      <span v-if="preview.title" class="type-field text-foreground">{{ preview.title }}</span>
-      <span v-if="preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ preview.description }}</span>
+      <span v-if="preview.title" :class="c.linkTitle">{{ preview.title }}</span>
+      <span v-if="preview.description" :class="c.linkDescription">{{ preview.description }}</span>
     </a>
 
     <!-- Trusted direct-video preview cards. Playback is local-only and starts
@@ -364,10 +607,10 @@ watch(
     <div
       v-for="card in videoPreviewCards"
       :key="`video:${videoCardKey(card.preview)}`"
-      class="flex max-w-xl flex-col gap-1 rounded-md border border-border bg-muted/40 p-3 text-left"
+      :class="c.linkCard"
     >
-      <span class="type-meta flex items-center gap-1 text-muted-foreground">
-        <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
+      <span :class="c.host">
+        <ExternalLink aria-hidden="true" />
         {{ linkPreviewHost(card.preview.originalUrl) }}
       </span>
       <HlsVideoPlayer
@@ -381,16 +624,16 @@ watch(
         :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
         target="_blank"
         rel="noopener noreferrer"
-        class="relative flex aspect-video w-full items-center justify-center gap-2 overflow-hidden rounded border border-border bg-black/80 text-sm text-white hover:bg-black"
+        :class="c.media"
         @click.stop
       >
-        <AlertCircle aria-hidden="true" class="h-5 w-5" />
+        <AlertCircle aria-hidden="true" />
         Couldn't play here — watch on site
       </a>
       <button
         v-else
         type="button"
-        class="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded border border-border bg-black/80 text-white transition-colors hover:bg-black"
+        :class="c.media"
         :aria-label="`Play video${card.preview.title ? ': ' + card.preview.title : ''}`"
         @click.stop.prevent="startVideoPlayback(card.preview)"
       >
@@ -400,18 +643,17 @@ watch(
           :alt="card.poster.alt ?? ''"
           loading="lazy"
           decoding="async"
-          class="absolute inset-0 h-full w-full object-cover"
         />
-        <Play aria-hidden="true" class="relative h-10 w-10 drop-shadow" />
+        <Play aria-hidden="true" />
       </button>
       <a
         :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
         target="_blank"
         rel="noopener noreferrer"
-        class="type-field text-foreground hover:underline"
+        :class="c.linkTitle"
         @click.stop
       >{{ card.preview.title ?? card.preview.originalUrl }}</a>
-      <span v-if="card.preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ card.preview.description }}</span>
+      <span v-if="card.preview.description" :class="c.linkDescription">{{ card.preview.description }}</span>
     </div>
 
     <!-- Embeddable player previews (allowlisted og:video). Loads the third-party
@@ -420,17 +662,17 @@ watch(
     <div
       v-for="card in playerPreviewCards"
       :key="`player:${videoCardKey(card.preview)}`"
-      class="flex max-w-xl flex-col gap-1 rounded-md border border-border bg-muted/40 p-3 text-left"
+      :class="c.linkCard"
     >
-      <span class="type-meta flex items-center gap-1 text-muted-foreground">
-        <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
+      <span :class="c.host">
+        <ExternalLink aria-hidden="true" />
         {{ linkPreviewHost(card.preview.originalUrl) }}
       </span>
       <iframe
         v-if="playingEmbeds.has(videoCardKey(card.preview))"
         :src="card.player.url"
         :title="card.preview.title ?? 'Embedded player'"
-        :class="['w-full rounded border border-border bg-black', (card.player.width && card.player.height) ? '' : 'aspect-video']"
+        :class="cx(c.embed, !(card.player.width && card.player.height) && c.embedRatio)"
         :style="card.player.width && card.player.height ? { aspectRatio: `${card.player.width} / ${card.player.height}` } : undefined"
         loading="lazy"
         allow="encrypted-media; picture-in-picture; fullscreen"
@@ -440,7 +682,7 @@ watch(
       <button
         v-else
         type="button"
-        class="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded border border-border bg-black/80 text-white transition-colors hover:bg-black"
+        :class="c.media"
         :aria-label="`Play video${card.preview.title ? ': ' + card.preview.title : ''}`"
         @click.stop.prevent="startEmbedPlayback(card.preview)"
       >
@@ -450,47 +692,46 @@ watch(
           :alt="card.poster.alt ?? ''"
           loading="lazy"
           decoding="async"
-          class="absolute inset-0 h-full w-full object-cover"
         />
-        <Play aria-hidden="true" class="relative h-10 w-10 drop-shadow" />
+        <Play aria-hidden="true" />
       </button>
       <a
         :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
         target="_blank"
         rel="noopener noreferrer"
-        class="type-field text-foreground hover:underline"
+        :class="c.linkTitle"
         @click.stop
       >{{ card.preview.title ?? card.preview.originalUrl }}</a>
-      <span v-if="card.preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ card.preview.description }}</span>
+      <span v-if="card.preview.description" :class="c.linkDescription">{{ card.preview.description }}</span>
     </div>
 
+    <!-- Waddle extension annotations. Event-intent (rare on human-authored
+         messages; bot-authored events render as full-width system bands
+         in MessageCard) renders as a compact inline band. -->
     <section
       v-for="card in eventCards"
       :key="`${card.annotation.extensionId}:${card.annotation.annotationId}`"
-      class="chat-system-band chat-system-band--inline"
-      :class="[
-        card.presentation.tone === 'success' ? 'chat-system-band--tone-success' : '',
-        card.presentation.tone === 'danger'  ? 'chat-system-band--tone-danger'  : '',
-        card.presentation.tone === 'warning' ? 'chat-system-band--tone-warning' : '',
-        card.presentation.kind ? `chat-system-band--kind-${card.presentation.kind}` : '',
-      ]"
+      :class="band.root"
+      data-inline
+      :data-tone="card.presentation.tone || undefined"
+      :data-kind="card.presentation.kind || undefined"
     >
-      <div class="chat-system-band__header">
-        <span class="chat-system-band__source">
+      <div :class="band.header">
+        <span :class="band.source">
           <MessageSquare v-if="card.annotation.surfaceKind === 'chat-bot'" aria-hidden="true" />
           <Github v-else-if="card.presentation.kind === 'github-event'" aria-hidden="true" />
           <LayoutDashboard v-else aria-hidden="true" />
           {{ card.presentation.label || extensionSurfaceLabel(card.annotation.surfaceKind) }}
         </span>
-        <span v-if="card.presentation.primaryValue" class="chat-system-band__tone-pill">{{ card.presentation.primaryValue }}</span>
+        <span v-if="card.presentation.primaryValue" :class="band.pill">{{ card.presentation.primaryValue }}</span>
       </div>
-      <div class="chat-system-band__title">
+      <div :class="band.title">
         <a
           v-if="card.presentation.primaryUrl && !compact"
           :href="card.presentation.primaryUrl"
           target="_blank"
           rel="noopener noreferrer"
-          class="chat-system-band__title-link"
+          :class="band.titleLink"
           @click.stop
         >
           <span>{{ card.presentation.title }}</span>
@@ -500,20 +741,20 @@ watch(
       </div>
       <div
         v-if="card.presentation.details.length > 0 || card.presentation.secondaryValue"
-        class="chat-system-band__meta"
+        :class="band.meta"
       >
-        <span v-if="card.presentation.secondaryValue" class="chat-system-band__meta-item">
-          <span class="chat-system-band__meta-value">{{ card.presentation.secondaryValue }}</span>
+        <span v-if="card.presentation.secondaryValue" :class="band.metaItem">
+          <span :class="band.metaValue">{{ card.presentation.secondaryValue }}</span>
         </span>
         <span
           v-for="detail in card.presentation.details"
           :key="`${card.annotation.annotationId}:${detail.label}`"
-          class="chat-system-band__meta-item"
+          :class="band.metaItem"
         >
-          <span class="chat-system-band__meta-label">{{ detail.label }}</span>
+          <span :class="band.metaLabel">{{ detail.label }}</span>
           <span
-            class="chat-system-band__meta-value"
-            :class="(detail.label === 'Commit' || detail.label === 'Branch') ? 'chat-system-band__meta-value--mono' : ''"
+            :class="band.metaValue"
+            :data-mono="isMonoBandMeta(detail.label) || undefined"
             :title="detail.value"
           >{{ detail.value }}</span>
         </span>
@@ -522,37 +763,34 @@ watch(
 
     <!-- Tool-intent extension actions — a single horizontal chip strip
          under the message body. Multiple extensions each contributing
-         actions to the same message all collapse here; no fat boxes
-         fan out below.  -->
-    <div v-if="!compact && toolActionChips.length > 0" class="chat-extension-action-strip">
+         actions to the same message all collapse here. -->
+    <div v-if="!compact && toolActionChips.length > 0" :class="chips.strip">
       <button
         v-for="chip in toolActionChips"
         :key="`${chip.annotation.annotationId}:${chip.action.route}`"
         type="button"
-        class="chat-extension-action-chip"
-        :class="extensionActionState(chip.annotation.annotationId, chip.action)?.state
-          ? `chat-extension-action-chip--state-${extensionActionState(chip.annotation.annotationId, chip.action)?.state}`
-          : ''"
+        :class="chips.chip"
+        :data-state="extensionActionState(chip.annotation.annotationId, chip.action)?.state"
         :disabled="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'loading' || !chip.action.launch"
         :title="extensionActionState(chip.annotation.annotationId, chip.action)?.detail
           ?? `${chip.presentation.label}: ${chip.action.label}`"
         @click.stop="invokeExtension(chip.annotation.annotationId, chip.action)"
       >
-        <LoaderCircle v-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'loading'" class="animate-spin" aria-hidden="true" />
+        <LoaderCircle v-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'loading'" aria-hidden="true" />
         <CheckCircle2 v-else-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'success'" aria-hidden="true" />
         <AlertCircle v-else-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'warning'" aria-hidden="true" />
         <AlertCircle v-else-if="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'error'" aria-hidden="true" />
         <MessageSquare v-else-if="chip.annotation.surfaceKind === 'chat-bot'" aria-hidden="true" />
         <Github v-else-if="chip.presentation.kind === 'github-event'" aria-hidden="true" />
         <LayoutDashboard v-else aria-hidden="true" />
-        <span class="chat-extension-action-chip__source">{{ chip.presentation.label }}</span>
+        <span :class="chips.source">{{ chip.presentation.label }}</span>
         <span>{{ chip.action.label }}</span>
       </button>
       <template v-for="chip in toolActionChips" :key="`${chip.annotation.annotationId}:${chip.action.route}:detail`">
         <span
           v-if="extensionActionState(chip.annotation.annotationId, chip.action)?.detail && extensionActionState(chip.annotation.annotationId, chip.action)?.state !== 'success'"
-          class="chat-extension-action-detail"
-          :class="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'error' ? 'chat-extension-action-detail--error' : 'chat-extension-action-detail--warning'"
+          :class="chips.detail"
+          :data-state="extensionActionState(chip.annotation.annotationId, chip.action)?.state === 'error' ? 'error' : 'warning'"
         >
           {{ extensionActionState(chip.annotation.annotationId, chip.action)?.detail }}
         </span>
@@ -586,44 +824,38 @@ watch(
     </div>
 
     <!-- Image attachments gallery -->
-    <div v-if="imageAttachments.length > 0 && !isSticker && mediaShown" class="chat-attachment-strip">
+    <div v-if="imageAttachments.length > 0 && !isSticker && mediaShown" :class="c.strip">
       <div
         v-for="img in imageAttachments"
         :key="attachmentRenderKey(img)"
-        class="rounded-lg border border-border overflow-hidden bg-muted/40"
+        :class="c.imageTile"
       >
         <button
           v-if="resolvedAttachmentUrl(img)"
           type="button"
-          class="block hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-primary"
+          :class="c.imageButton"
           :title="img.name ?? 'Image'"
           @click.stop="openLightbox(img)"
         >
           <img
             :src="resolvedAttachmentUrl(img) || ''"
             :alt="img.name ?? 'Shared image'"
-            :class="[
-              'object-cover',
-              compact ? 'h-20 w-20' : 'chat-attachment-image',
-            ]"
+            :class="compact ? c.thumb : cx(c.attachmentImage, c.cover)"
             :style="img.width && img.height ? { '--image-width': img.width, '--image-height': img.height } : undefined"
             loading="lazy"
           />
         </button>
         <div
           v-else
-          :class="[
-            'type-caption flex flex-col items-center justify-center gap-2 px-4 text-center text-muted-foreground',
-            compact ? 'h-20 w-20' : 'h-36 w-48',
-          ]"
+          :class="cx(c.placeholder, compact ? c.size80 : c.imageBox)"
           @click.stop
         >
-          <Lock class="h-4 w-4 text-primary/70" />
+          <Lock />
           <span>{{ attachmentError(img) ?? (isDecryptingAttachment(img) ? "Decrypting image…" : "Preparing image…") }}</span>
           <button
             v-if="attachmentError(img) && !compact"
             type="button"
-            class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
+            :class="c.smallButton"
             @click.stop="downloadAttachment(img)"
           >
             Download
@@ -631,10 +863,10 @@ watch(
         </div>
         <div
           v-if="img.encrypted"
-          class="type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground"
+          :class="c.encryptedTag"
           @click.stop
         >
-          <Lock class="h-3 w-3 text-primary/70" />
+          <Lock />
           <span>Encrypted</span>
         </div>
       </div>
@@ -648,16 +880,16 @@ watch(
     />
 
     <!-- Inline video attachments -->
-    <div v-if="videoAttachments.length > 0 && mediaShown" class="flex flex-col gap-2">
+    <div v-if="videoAttachments.length > 0 && mediaShown" :class="c.column">
       <div
         v-for="file in videoAttachments"
         :key="attachmentKey(file)"
-        class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-2"
+        :class="c.card"
       >
         <video
           v-if="resolvedAttachmentUrl(file)"
           :src="resolvedAttachmentUrl(file) || ''"
-          class="max-h-72 w-full rounded-lg border border-border bg-black"
+          :class="c.player"
           controls
           playsinline
           :preload="compact ? 'none' : 'metadata'"
@@ -665,61 +897,61 @@ watch(
         />
         <div
           v-else
-          class="type-caption flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
+          :class="cx(c.placeholder, c.dashed, c.h40)"
         >
-          <Lock class="h-4 w-4 text-primary/70" />
+          <Lock />
           <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting video…" : "Preparing video…") }}</span>
           <button
             v-if="attachmentError(file)"
             type="button"
-            class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
+            :class="c.smallButton"
             @click.stop="downloadAttachment(file)"
           >
             Download
           </button>
         </div>
-        <div class="type-caption text-muted-foreground">
+        <div :class="c.fileMeta">
           {{ file.name ?? "Video" }} · {{ file.mediaType ?? "video" }}
           <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-          <span v-if="file.encrypted" class="inline-flex items-baseline gap-1"> · <Lock class="h-3 w-3 self-center text-primary/70" aria-hidden="true" /> Encrypted</span>
+          <span v-if="file.encrypted" :class="c.encryptedInline"> · <Lock aria-hidden="true" /> Encrypted</span>
         </div>
       </div>
     </div>
 
     <!-- Inline audio attachments -->
-    <div v-if="audioAttachments.length > 0 && mediaShown" class="flex flex-col gap-2">
+    <div v-if="audioAttachments.length > 0 && mediaShown" :class="c.column">
       <div
         v-for="file in audioAttachments"
         :key="attachmentKey(file)"
-        class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3"
+        :class="c.card"
       >
         <audio
           v-if="resolvedAttachmentUrl(file)"
           :src="resolvedAttachmentUrl(file) || ''"
-          class="w-full"
+          :class="c.audio"
           controls
           :preload="compact ? 'none' : 'metadata'"
           @click.stop
         />
         <div
           v-else
-          class="type-caption flex min-h-20 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
+          :class="cx(c.placeholder, c.dashed, c.h20)"
         >
-          <Lock class="h-4 w-4 text-primary/70" />
+          <Lock />
           <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting audio…" : "Preparing audio…") }}</span>
           <button
             v-if="attachmentError(file)"
             type="button"
-            class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
+            :class="c.smallButton"
             @click.stop="downloadAttachment(file)"
           >
             Download
           </button>
         </div>
-        <div class="type-caption text-muted-foreground">
+        <div :class="c.fileMeta">
           {{ file.name ?? "Audio" }} · {{ file.mediaType ?? "audio" }}
           <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-          <span v-if="file.encrypted" class="inline-flex items-baseline gap-1"> · <Lock class="h-3 w-3 self-center text-primary/70" aria-hidden="true" /> Encrypted</span>
+          <span v-if="file.encrypted" :class="c.encryptedInline"> · <Lock aria-hidden="true" /> Encrypted</span>
         </div>
       </div>
     </div>
@@ -728,62 +960,62 @@ watch(
     <!-- Downloadable attachments (non-compact) / chip (compact) -->
     <template v-if="!compact">
       <!-- Inline PDF attachments -->
-      <div v-if="pdfAttachments.length > 0 && mediaShown" class="flex flex-col gap-2">
+      <div v-if="pdfAttachments.length > 0 && mediaShown" :class="c.column">
         <div
           v-for="file in pdfAttachments"
           :key="attachmentKey(file)"
-          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-2"
+          :class="c.card"
         >
           <iframe
             v-if="resolvedAttachmentUrl(file)"
             :src="resolvedAttachmentUrl(file) || ''"
             :title="file.name ?? 'PDF document'"
-            class="h-72 w-full rounded-lg border border-border bg-background"
+            :class="c.pdf"
           />
           <div
             v-else
-            class="type-caption flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
+            :class="cx(c.placeholder, c.dashed, c.h40)"
           >
-            <Lock class="h-4 w-4 text-primary/70" />
+            <Lock />
             <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting PDF…" : "Preparing PDF…") }}</span>
             <button
               v-if="attachmentError(file)"
               type="button"
-              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
+              :class="c.smallButton"
               @click="downloadAttachment(file)"
             >
               Download
             </button>
           </div>
-          <div class="type-caption text-muted-foreground">
+          <div :class="c.fileMeta">
             {{ file.name ?? "PDF" }} · {{ file.mediaType ?? "application/pdf" }}
             <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
-            <span v-if="file.encrypted" class="inline-flex items-baseline gap-1"> · <Lock class="h-3 w-3 self-center text-primary/70" aria-hidden="true" /> Encrypted</span>
+            <span v-if="file.encrypted" :class="c.encryptedInline"> · <Lock aria-hidden="true" /> Encrypted</span>
           </div>
         </div>
       </div>
 
       <!-- Downloadable attachments -->
-      <div v-if="downloadableAttachments.length > 0" class="flex flex-col gap-1.5">
+      <div v-if="downloadableAttachments.length > 0" :class="c.columnTight">
         <template v-for="file in downloadableAttachments" :key="attachmentKey(file)">
           <button
             v-if="file.encrypted"
             type="button"
-            class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200 text-left"
+            :class="c.fileCard"
             @click="downloadAttachment(file)"
           >
-            <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            <div class="flex-1 min-w-0">
-              <div class="type-control truncate">{{ file.name ?? "File" }}</div>
-              <div class="type-caption flex flex-wrap items-center gap-1.5 text-muted-foreground">
+            <FileDown />
+            <div :class="c.fileInfo">
+              <div :class="c.fileName">{{ file.name ?? "File" }}</div>
+              <div :class="c.fileMetaRow">
                 <span>{{ file.mediaType ?? "file" }}</span>
                 <span v-if="file.size">· {{ formatFileSize(file.size) }}</span>
-                <span class="inline-flex items-center gap-1 rounded-full bg-primary/8 px-1.5 py-0.5 text-primary/80">
-                  <Lock class="h-3 w-3" />
+                <span :class="c.encryptedPill">
+                  <Lock />
                   Encrypted
                 </span>
               </div>
-              <div v-if="attachmentError(file)" class="type-caption text-destructive-text">
+              <div v-if="attachmentError(file)" :class="c.fileError">
                 {{ attachmentError(file) }}
               </div>
             </div>
@@ -795,12 +1027,12 @@ watch(
             :href="resolvedAttachmentUrl(file) ?? undefined"
             target="_blank"
             rel="noopener noreferrer"
-            class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200"
+            :class="c.fileCard"
           >
-            <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            <div class="flex-1 min-w-0">
-              <div class="type-control truncate">{{ file.name ?? "File" }}</div>
-              <div class="type-caption text-muted-foreground">
+            <FileDown />
+            <div :class="c.fileInfo">
+              <div :class="c.fileName">{{ file.name ?? "File" }}</div>
+              <div :class="c.fileMeta">
                 {{ file.mediaType ?? "file" }}
                 <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
               </div>
@@ -813,7 +1045,7 @@ watch(
       <!-- Compact: PDF + downloadables as uniform chip row -->
       <div
         v-if="(pdfAttachments.length + downloadableAttachments.length) > 0"
-        class="flex flex-col gap-1.5"
+        :class="c.columnTight"
       >
         <template
           v-for="file in [...pdfAttachments, ...downloadableAttachments]"
@@ -824,20 +1056,21 @@ watch(
             :href="resolvedAttachmentUrl(file) ?? undefined"
             target="_blank"
             rel="noopener noreferrer"
-            class="type-caption inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-foreground hover:bg-muted"
+            :class="c.fileChip"
             @click.stop
           >
-            <FileDown class="h-3 w-3" aria-hidden="true" />
-            <span class="truncate">{{ file.name ?? "Attachment" }}</span>
-            <span v-if="file.size" class="text-muted-foreground">{{ formatFileSize(file.size) }}</span>
+            <FileDown aria-hidden="true" />
+            <span>{{ file.name ?? "Attachment" }}</span>
+            <span v-if="file.size" :class="c.muted">{{ formatFileSize(file.size) }}</span>
           </a>
           <span
             v-else
-            class="type-caption inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-muted-foreground"
+            :class="c.fileChip"
+            data-muted
             title="Decrypting…"
           >
-            <Lock class="h-3 w-3" aria-hidden="true" />
-            <span class="truncate">{{ file.name ?? "Encrypted attachment" }}</span>
+            <Lock aria-hidden="true" />
+            <span>{{ file.name ?? "Encrypted attachment" }}</span>
           </span>
         </template>
       </div>

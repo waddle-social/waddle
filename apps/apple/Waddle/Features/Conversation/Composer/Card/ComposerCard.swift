@@ -60,15 +60,9 @@ struct ComposerCard: View {
         .animation(.easeInOut(duration: 0.18), value: isFocused)
     }
 
-    @ViewBuilder
     private var cardBackground: some View {
-        #if os(iOS)
-        RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-            .fill(.regularMaterial)
-        #else
         RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
             .fill(Color.secondaryBackground)
-        #endif
     }
 
     private var borderColor: Color {

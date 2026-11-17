@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { Dialog } from "@ark-ui/vue/dialog";
 import { X } from "lucide-vue-next";
+import { btn, iconbtn } from "styled-system/recipes";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { dialogParts } from "@/ui/part-classes";
 
 /**
  * Confirm / destructive action prompt. An `alertdialog` on `AppDialog`:
@@ -24,40 +26,31 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <AppDialog v-model:open="open" role="alertdialog">
-    <div class="chat-dialog-header">
+  <AppDialog v-model:open="open" role="alertdialog" size="sm">
+    <div :class="dialogParts.head">
       <Dialog.Title as-child>
-        <h2 class="type-dialog-title">{{ title }}</h2>
+        <h2>{{ title }}</h2>
       </Dialog.Title>
       <Dialog.CloseTrigger as-child>
-        <button
-          class="chat-icon-button hover:bg-muted"
-          type="button"
-          aria-label="Close confirmation dialog"
-        >
-          <X class="w-4 h-4 text-muted-foreground" />
+        <button :class="iconbtn({ size: 'sm' })" type="button" aria-label="Close confirmation dialog">
+          <X aria-hidden="true" />
         </button>
       </Dialog.CloseTrigger>
     </div>
 
-    <div class="chat-dialog-body">
+    <div :class="dialogParts.body">
       <Dialog.Description as-child>
-        <p class="type-field text-muted-foreground">{{ message }}</p>
+        <p>{{ message }}</p>
       </Dialog.Description>
     </div>
 
-    <div class="chat-dialog-footer">
+    <div :class="dialogParts.foot">
       <Dialog.CloseTrigger as-child>
-        <button class="chat-action-button chat-action-button--secondary type-control" type="button">
-          Cancel
-        </button>
+        <button :class="btn()" type="button">Cancel</button>
       </Dialog.CloseTrigger>
       <button
-        class="chat-action-button type-action disabled:opacity-30"
+        :class="btn({ variant: destructive ? 'danger' : 'primary' })"
         type="button"
-        :class="destructive
-          ? 'chat-action-button--destructive'
-          : 'chat-action-button--primary'"
         :disabled="loading"
         @click="emit('confirm')"
       >

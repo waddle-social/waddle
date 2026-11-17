@@ -1,5 +1,5 @@
 //! Stores of account traffic between remote senders and local accounts
-//! (ADR-0020 D7; gate G18; migrations 2009 and 2010):
+//! (ADR-0020 D7; gate G18; migrations 2010 and 2011):
 //!
 //! - the subscription requests remote senders sent that an account has
 //!   neither approved nor denied (RFC 6121 §3.1.3), delivered again on the

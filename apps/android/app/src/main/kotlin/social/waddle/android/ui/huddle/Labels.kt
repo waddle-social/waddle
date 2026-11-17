@@ -1,10 +1,12 @@
 package social.waddle.android.ui.huddle
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -19,10 +21,11 @@ import androidx.compose.ui.unit.dp
 import social.waddle.android.theme.Waddle
 
 /**
- * Huddle's kicker: mono 11, uppercase, tracked 0.08em, muted — the small
- * label above a section, a card or a count line ("FRI 16 OCT · 12 AROUND").
- * [live] turns it ember with a [LiveDot] in front, for what is happening
- * now. Kickers that head a section are headings for screen readers.
+ * Polar Huddle's kicker (web `wd-kicker`, the eyebrow style): body 13/700,
+ * sentence case, muted — the small label above a section, a card or a
+ * count line ("Fri 16 Oct · 12 around"). [live] turns it aurora with a
+ * [LiveDot] in front, for what is happening now. Kickers that head a
+ * section are headings for screen readers.
  */
 @Composable
 fun Kicker(
@@ -39,8 +42,8 @@ fun Kicker(
     ) {
         if (live) LiveDot()
         Text(
-            text = text.uppercase(),
-            style = Waddle.type.kicker,
+            text = text,
+            style = Waddle.type.eyebrow,
             color = color,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -50,17 +53,17 @@ fun Kicker(
 
 /** What a [CountBadge] counts, which decides its colour. */
 enum class CountTone {
-    /** Mentions and anything live: ember. */
-    LIVE,
+    /** Mentions: the gold neck patch, "this is for you". */
+    MENTION,
 
-    /** Plain unread: neutral. */
+    /** Plain unread: quiet. */
     NEUTRAL,
 }
 
 /**
- * A small mono count (web `count` recipe): ember for mentions, neutral
- * for plain unread. Counts above 99 read "99+". [prefix] adds "@" for
- * mention counts.
+ * A small count (web `wd-badge`): gold for mentions, quiet (surface 2,
+ * muted, hairline) for plain unread. Counts above 99 read "99+". [prefix]
+ * adds "@" for mention counts.
  */
 @Composable
 fun CountBadge(
@@ -71,19 +74,21 @@ fun CountBadge(
 ) {
     val colors = Waddle.colors
     val (fill, ink) = when (tone) {
-        CountTone.LIVE -> colors.live to colors.liveFg
-        CountTone.NEUTRAL -> colors.neutralBadge to colors.onNeutralBadge
+        CountTone.MENTION -> colors.gold to colors.goldFg
+        CountTone.NEUTRAL -> colors.surface2 to colors.fgMuted
     }
+    val shape = RoundedCornerShape(Waddle.radius.pill)
     Box(
         modifier = modifier
             .defaultMinSize(minWidth = BADGE_HEIGHT, minHeight = BADGE_HEIGHT)
-            .background(fill, RoundedCornerShape(Waddle.radius.pill))
+            .background(fill, shape)
+            .then(if (tone == CountTone.NEUTRAL) Modifier.border(HAIRLINE, colors.border, shape) else Modifier)
             .padding(horizontal = BADGE_PADDING),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = prefix + if (count > MAX_COUNT) "$MAX_COUNT+" else count.toString(),
-            style = Waddle.type.time,
+            style = Waddle.type.badge,
             color = ink,
             maxLines = 1,
         )
@@ -101,13 +106,13 @@ enum class TagTone {
     ACTION,
 
     /** Bots. */
-    MOSS,
+    SUCCESS,
 
     /** Live states: "Live", "Speaking". */
     LIVE,
 }
 
-/** A mono uppercase tag for roles and states: text only, no fill (web hat tags). */
+/** A tag for roles and states (web `wd-tag`): 22dp, hairline outline, radius 6, coloured text. */
 @Composable
 fun HuddleTag(text: String, modifier: Modifier = Modifier, tone: TagTone = TagTone.NEUTRAL) {
     val colors = Waddle.colors
@@ -115,18 +120,22 @@ fun HuddleTag(text: String, modifier: Modifier = Modifier, tone: TagTone = TagTo
         TagTone.NEUTRAL -> colors.fgMuted
         TagTone.GOLD -> colors.goldText
         TagTone.ACTION -> colors.actionText
-        TagTone.MOSS -> colors.mossText
+        TagTone.SUCCESS -> colors.successText
         TagTone.LIVE -> colors.liveText
     }
-    Text(
-        text = text.uppercase(),
-        style = Waddle.type.kicker,
-        color = color,
-        maxLines = 1,
-        modifier = modifier,
-    )
+    Box(
+        modifier = modifier
+            .height(TAG_HEIGHT)
+            .border(HAIRLINE, colors.border, RoundedCornerShape(Waddle.radius.tag))
+            .padding(horizontal = Waddle.space.xs),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text = text, style = Waddle.type.tag, color = color, maxLines = 1)
+    }
 }
 
 private val BADGE_HEIGHT = 20.dp
 private val BADGE_PADDING = 6.dp
+private val TAG_HEIGHT = 22.dp
+private val HAIRLINE = 1.dp
 private const val MAX_COUNT = 99

@@ -1,4 +1,7 @@
 ---
+import { css, cx } from "../../../styled-system/css";
+import { btn } from "../../../styled-system/recipes";
+import ActionCard from "../../components/ActionCard.astro";
 import WebsiteLayout from "../../layouts/WebsiteLayout.astro";
 import { getWaitlistRuntime } from "../../lib/waitlist/runtime";
 import { inspectUnsubscribeToken } from "../../lib/waitlist/service";
@@ -14,57 +17,50 @@ if (result === "removed") {
 	const { store } = getWaitlistRuntime();
 	mode = (await inspectUnsubscribeToken(token, store)) === "ready" ? "ready" : "stale";
 }
+
+const heading = {
+	ready: "Cancel this waitlist request?",
+	success: "Request canceled.",
+	stale: "That link is no longer active.",
+}[mode];
+const copy = {
+	ready: "Waddle will stop sending notes to this inbox for this signup.",
+	success: "Nothing else will be sent from this signup.",
+	stale: "Cancel links are single-use. If you still get notes, use the link in the newest one.",
+}[mode];
+const wide = css({ height: "44px", minHeight: "44px", justifyContent: "center", textDecoration: "none" });
+const half = css({ flex: "1 1 160px" });
 ---
 
 <WebsiteLayout
 	title="Cancel Waitlist Request"
 	description="Cancel a pending Waddle waitlist request."
 	canonicalPath="/waitlist/unsubscribe"
-	footerMode="stacked"
 >
-	<section class="action-shell">
-		<div class:list={["action-card", mode === "success" && "action-card--quiet"]}>
-			<p class="action-kicker">request control</p>
-			<h1 class="action-title">
-				{
-					mode === "ready"
-						? "Cancel this waitlist request?"
-						: mode === "success"
-							? "Request canceled."
-							: "That link is no longer active."
-				}
-			</h1>
-			<p class="action-copy">
-				{
-					mode === "ready"
-						? "This removes the pending request entirely. If you ever want back in, you can join again from scratch."
-						: mode === "success"
-							? "The pending request is gone. Nothing else will be sent from this signup."
-							: "Cancel links are single-use. If you want a fresh invite later, join again from the homepage."
-				}
-			</p>
+	<ActionCard heading={heading}>
+		{copy}
 
-			{
-				mode === "ready" ? (
-					<form method="post" action="/api/waitlist/unsubscribe" class="action-form">
-						<input type="hidden" name="token" value={token ?? ""} />
-						<div class="action-actions">
-							<button type="submit" class="action-button action-button--ghost">
-								cancel this request
-							</button>
-							<a href="/" class="action-link">
-								keep it instead
-							</a>
-						</div>
-					</form>
-				) : (
-					<div class="action-actions">
-						<a href="/" class="action-button action-button--ghost">
-							return to homepage
-						</a>
-					</div>
-				)
-			}
-		</div>
-	</section>
+		{
+			mode === "ready" ? (
+				<form
+					slot="actions"
+					method="post"
+					action="/api/waitlist/unsubscribe"
+					class={css({ display: "flex", gap: "2", pt: "2", flexWrap: "wrap" })}
+				>
+					<input type="hidden" name="token" value={token ?? ""} />
+					<button type="submit" class={cx(btn({ variant: "danger" }), wide, half)}>
+						Cancel this request
+					</button>
+					<a href="/" class={cx(btn(), wide, half)}>
+						Keep it instead
+					</a>
+				</form>
+			) : (
+				<a slot="actions" href="/" class={cx(btn(), wide, css({ mt: "2" }))}>
+					Return to homepage
+				</a>
+			)
+		}
+	</ActionCard>
 </WebsiteLayout>

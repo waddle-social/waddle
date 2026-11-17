@@ -132,17 +132,17 @@ and the session), the codec changes in `crates/waddle-xmpp/src/s2s/`
 the WebSocket call sites (`handlers/unserved_route.rs`, `frame.rs`, the
 presence handler, `s2s_delivery.rs`, the blocking check in
 `handlers/iq/destination_route.rs`), the wiring in `server/http.rs` and
-`server/lifecycle.rs`, migration 2003 (`s2s_iq_correlations` and
-`s2s_iq_correlation_owners`) and migration 2004
+`server/lifecycle.rs`, migration 2004 (`s2s_iq_correlations` and
+`s2s_iq_correlation_owners`) and migration 2005
 (`s2s_remote_room_occupancies` and `s2s_remote_room_verdicts`). Inbound MUC
 adds `route/local_rooms.rs`, `route/seats.rs` and `route/router/hosting.rs`,
 the room host `server/routes/websocket/s2s_rooms.rs`, the delivery hook of
-`crates/waddle-xmpp/src/registry/connection_registry.rs` and migration 2007
+`crates/waddle-xmpp/src/registry/connection_registry.rs` and migration 2008
 (`s2s_local_room_seats`). Spaces add `route/local_spaces.rs` and
 `route/router/spaces.rs`, the Spaces host
 `server/routes/websocket/s2s_spaces.rs` with
 `handlers/iq/spaces_remote.rs`, the hook in the PubSub fan-out, the stores
-in `db/s2s_spaces.rs` and migrations 2011 (`s2s_federated_spaces`) and 2012
+in `db/s2s_spaces.rs` and migrations 2012 (`s2s_federated_spaces`) and 2013
 (`s2s_space_subscriptions`).
 
 ## The router
@@ -730,7 +730,7 @@ to its room. Because nothing reaches an unverified JID, a join's
 `<status/>` text never does either.
 
 **Shared occupancy.** Each occupancy is one row of
-`s2s_remote_room_occupancies` in the global database (migration 2004):
+`s2s_remote_room_occupancies` in the global database (migration 2005):
 the local full JID, the room's bare JID, the nickname, the phase, the
 affiliation the room last stated, the join it waits on and that join's
 presence id, leaves whose answer is still to come, the replica whose
@@ -1131,7 +1131,7 @@ from a sender without a seat `not-acceptable`, and presence from such a
 sender that asks for no seat is ignored.
 
 The setting is read from the room's actor where the replica holds one, and
-otherwise from the channel catalog (`channels.federated`, migration 2008),
+otherwise from the channel catalog (`channels.federated`, migration 2009),
 which the room's configuration and the channel commands keep in step. A
 room with neither is not found: no room is created for a remote principal.
 While the setting cannot be read the answer is `internal-server-error`
@@ -1224,7 +1224,7 @@ strength, the trust profile, and the generation of the snapshot the stream
 was admitted under. The replica keeps the seats it holds in memory
 (`SeatIndex`), which is what egress and every decision that names a seated
 remote occupant read; the shared table `s2s_local_room_seats` (migration
-2007) carries the bounds across replicas and lets another replica find and
+2008) carries the bounds across replicas and lets another replica find and
 end a seat. Those decisions reach the index through the app state's
 host-grant gate, bound to the ingress authority's attachment gate when the
 replica starts hosting rooms, on a deployment without a canonical grant
@@ -1865,7 +1865,7 @@ that existed before it did and for every new one; there is no deployment
 default that turns it on. A Space's owner reads and sets it in the node's
 configuration form (`urn:waddle:spaces:federated`, a boolean field of the
 `pubsub#owner` configure form on the Spaces service). It is stored apart
-from the PubSub node (`s2s_federated_spaces`, migration 2011), as a row
+from the PubSub node (`s2s_federated_spaces`, migration 2012), as a row
 that exists while the setting is on and names the creation time of the node
 it was turned on for: a Space deleted and created again under the same name
 is not federated, whatever row its predecessor left. Deleting a Space
@@ -2544,8 +2544,8 @@ not S2S is on, and are listed below with the others.
 
 Spaces change nothing for remote senders while S2S is disabled: no router
 exists, so no Spaces host is attached, the pass that notifies subscribers
-at other servers returns before it reads anything, and migrations 2011 and
-2012 create two tables that stay empty unless an owner turns a Space's
+at other servers returns before it reads anything, and migrations 2012 and
+2013 create two tables that stay empty unless an owner turns a Space's
 `federated` setting on. The
 setting can be set while S2S is off and takes effect once it is on. Three of
 its changes apply whether or not S2S is on, and are listed below.
@@ -2644,17 +2644,17 @@ runbook (G24):
   now goes to the remote route first, so it is answered with
   `remote-server-not-found` like any other message for an unserved domain,
   and no pin is recorded.
-- Migration 2003 creates `s2s_iq_correlations` and
+- Migration 2004 creates `s2s_iq_correlations` and
   `s2s_iq_correlation_owners` on both engines, and the owner phase grants
   the runtime `SELECT, INSERT, DELETE` on the first and `SELECT, INSERT,
   UPDATE, DELETE` on the second. Both stay empty while S2S is off.
-- Migration 2004 creates `s2s_remote_room_occupancies` and
+- Migration 2005 creates `s2s_remote_room_occupancies` and
   `s2s_remote_room_verdicts` on both engines, and the owner phase grants
   the runtime `SELECT, INSERT, UPDATE, DELETE` on both. Both stay empty
-  while S2S is off. Like the 2003 tables they belong to no restricted
+  while S2S is off. Like the 2004 tables they belong to no restricted
   same-pool runtime store, so `runtime_store_acl.rs` verifies nothing
   further for them.
-- Migration 2007 creates `s2s_local_room_seats` on both engines, and the
+- Migration 2008 creates `s2s_local_room_seats` on both engines, and the
   owner phase grants the runtime `SELECT, INSERT, UPDATE, DELETE` on it. It
   stays empty while S2S is off.
 - In a room no host-grant scope manages, a `muc#admin` request that grants
@@ -2669,7 +2669,7 @@ runbook (G24):
 - The admin command that sets a room affiliation
   (`channels:set-affiliation`) refuses an owner or admin affiliation for
   such an account the same way. Before, it wrote one for any JID.
-- Migration 2008 adds `channels.federated` on both engines, zero for every
+- Migration 2009 adds `channels.federated` on both engines, zero for every
   row. The owner's configuration form of every room offers a new boolean
   field, `urn:waddle:roomconfig:federated`, off for every room; setting it
   has no effect while S2S is off, since no remote principal reaches a room.

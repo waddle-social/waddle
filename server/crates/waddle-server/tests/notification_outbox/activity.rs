@@ -12,10 +12,10 @@ use waddle_server::notification_activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
 use waddle_server::notification_outbox::{
-    active_mention_ttl_ms_from_env, NoopDndReader, NotificationCandidate, NotificationClass,
-    NotificationDrainDeps, NotificationThreadId, DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
-    MAX_ACTIVE_MENTION_TTL_SECONDS, MIN_ACTIVE_MENTION_TTL_SECONDS,
-    WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV,
+    active_mention_ttl_ms_from_env, DrainBatch, DrainScope, NoopDndReader, NotificationCandidate,
+    NotificationClass, NotificationDrainDeps, NotificationThreadId,
+    DEFAULT_ACTIVE_MENTION_TTL_SECONDS, MAX_ACTIVE_MENTION_TTL_SECONDS,
+    MIN_ACTIVE_MENTION_TTL_SECONDS, WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 
@@ -124,7 +124,10 @@ async fn t1_active_channel_mention_with_recent_activity_delivers() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -199,7 +202,10 @@ async fn t1_active_channel_mention_future_timestamp_does_not_extend_ttl_window()
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -270,7 +276,10 @@ async fn t1_active_channel_mention_with_stale_activity_suppresses_with_xep0513_a
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -332,7 +341,10 @@ async fn t1_active_channel_mention_with_no_activity_record_suppresses() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -393,7 +405,10 @@ async fn xep0513_active_miss_t1_suppression_persists_audit_and_keeps_storage() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -492,7 +507,10 @@ async fn t1_active_channel_mention_cache_collapses_same_recipient_lookups() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");

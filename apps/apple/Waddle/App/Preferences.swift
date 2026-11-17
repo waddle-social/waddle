@@ -15,9 +15,9 @@ final class Preferences {
 
         var title: String {
             switch self {
-            case .system: return "System"
-            case .light: return "Light"
-            case .dark: return "Dark"
+            case .system: return "Match system"
+            case .light: return "Daylight"
+            case .dark: return "Night"
             }
         }
 

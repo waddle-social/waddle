@@ -1,14 +1,16 @@
 package social.waddle.android.feature.rooms
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Call
@@ -16,7 +18,6 @@ import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -41,8 +42,6 @@ import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.CountBadge
 import social.waddle.android.ui.huddle.CountTone
 import social.waddle.android.ui.huddle.HuddleAvatar
-import social.waddle.android.ui.huddle.HuddleCard
-import social.waddle.android.ui.huddle.Kicker
 import social.waddle.android.ui.huddle.PillButton
 import social.waddle.android.ui.huddle.PillTone
 
@@ -62,13 +61,12 @@ fun roomKickerText(kicker: RoomKicker): String = when (kicker) {
 }
 
 /**
- * One room on the Rooms tab (web `room-card`): what is happening as a
- * kicker, the name, the last message (or an invitation when it is
- * quiet), who is in the huddle, and one way in. A live huddle turns the
- * tile ember and glows; nothing else does.
+ * One room in the Browse rooms list (web `wd-room` list row): glyph,
+ * name, what is happening, the huddle faces when it is live, and one way
+ * in — Join a live huddle, else Open.
  */
 @Composable
-fun RoomTile(
+fun RoomListRow(
     room: RoomActivity,
     nowMillis: Long,
     onEnter: () -> Unit,
@@ -77,34 +75,42 @@ fun RoomTile(
     speaking: Set<String> = emptySet(),
 ) {
     val colors = Waddle.colors
-    HuddleCard(modifier = modifier.fillMaxWidth(), live = room.live, onClick = onEnter) {
-        Kicker(
-            text = roomKickerText(roomKickerOf(room, nowMillis)),
-            live = room.live,
-            color = if (room.live) colors.liveText else colors.fgMuted,
+    val loud = room.mentions > 0 || room.loudUnread > 0
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onEnter)
+            .heightIn(min = LIST_ROW)
+            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.sm),
+    ) {
+        Icon(
+            if (room.forum) Icons.Outlined.Forum else Icons.Outlined.Tag,
+            contentDescription = null,
+            tint = if (loud) colors.fg else colors.fgSoft,
+            modifier = Modifier.size(LIST_GLYPH),
         )
-        Spacer(Modifier.size(Waddle.space.xs))
-        RoomTitle(name = room.name, forum = room.forum)
-        roomBodyOf(room)?.let { body ->
-            Spacer(Modifier.size(Waddle.space.xxs))
+        Column(Modifier.weight(1f)) {
             Text(
-                text = body,
-                style = MaterialTheme.typography.bodyMedium,
-                color = colors.fgMuted,
-                maxLines = 2,
+                text = room.name,
+                style = Waddle.type.bodySmall,
+                fontWeight = if (loud) FontWeight.Bold else FontWeight.SemiBold,
+                color = colors.fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = roomKickerText(roomKickerOf(room, nowMillis)),
+                style = Waddle.type.time,
+                color = if (room.live) colors.liveText else colors.fgMuted,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.size(Waddle.space.sm))
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            if (room.huddle.isNotEmpty()) {
-                HuddleStack(participants = room.huddle, speaking = speaking)
-                Spacer(Modifier.width(Waddle.space.xs))
-            }
-            RoomBadge(room)
-            Spacer(Modifier.weight(1f))
-            RoomPill(room = room, onEnter = onEnter, onJoin = onJoin)
-        }
+        if (room.huddle.isNotEmpty()) HuddleStack(participants = room.huddle, speaking = speaking)
+        RoomBadge(room)
+        RoomPill(room = room, onEnter = onEnter, onJoin = onJoin, enterLabel = R.string.room_open)
     }
 }
 
@@ -162,7 +168,7 @@ private fun RoomBadge(room: RoomActivity) {
             val description = pluralStringResource(R.plurals.room_mentions_description, room.mentions, room.mentions)
             CountBadge(
                 count = room.mentions,
-                tone = CountTone.LIVE,
+                tone = CountTone.MENTION,
                 prefix = "@",
                 modifier = Modifier.clearAndSetSemantics { contentDescription = description },
             )
@@ -179,7 +185,12 @@ private fun RoomBadge(room: RoomActivity) {
 
 /** Ember "Join" while there is a huddle to join, else a quiet "Enter". */
 @Composable
-private fun RoomPill(room: RoomActivity, onEnter: () -> Unit, onJoin: () -> Unit) {
+private fun RoomPill(
+    room: RoomActivity,
+    onEnter: () -> Unit,
+    onJoin: () -> Unit,
+    @StringRes enterLabel: Int = R.string.room_enter,
+) {
     if (room.canJoin) {
         val description = stringResource(R.string.room_join_description, room.name)
         PillButton(
@@ -192,7 +203,7 @@ private fun RoomPill(room: RoomActivity, onEnter: () -> Unit, onJoin: () -> Unit
     } else {
         val description = stringResource(R.string.room_enter_description, room.name)
         PillButton(
-            text = stringResource(R.string.room_enter),
+            text = stringResource(enterLabel),
             onClick = onEnter,
             tone = PillTone.QUIET,
             modifier = Modifier.semantics { contentDescription = description },
@@ -238,6 +249,8 @@ fun HuddleStack(
 }
 
 private const val MAX_STACK = 4
+private val LIST_ROW = 64.dp
+private val LIST_GLYPH = 20.dp
 private val STACK_OVERLAP = 6.dp
 private val STACK_RING = 2.dp
 private val TITLE_GLYPH = 18.dp

@@ -6,11 +6,14 @@ use crate::db::DatabaseDriver;
 use crate::db::Rows;
 use crate::db::Transaction;
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 use jid::BareJid;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::pubsub::PubSubStorage;
-use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
+use waddle_xmpp::push::apns::{
+    ApnsIdentifierError, ApnsProviderTokenSource, ApnsSender, ApnsTopic,
+};
 use waddle_xmpp::push::fcm::{FcmAccessTokenSource, FcmAppId, FcmProjectId, FcmSender};
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
@@ -26,6 +29,7 @@ use super::secrets::PushSecretCipher;
 
 #[derive(Clone)]
 pub struct DatabasePushServiceStore {
+    publish_job_wake: Arc<Notify>,
     pub(super) db: Database,
     /// Shared unread projection used to refresh the APNs app badge at send
     /// time, so queued retries do not replay a stale absolute count.
@@ -48,6 +52,9 @@ pub struct DatabasePushServiceStore {
     /// APNs provider (#529). `None` when `WADDLE_APNS_*` is unset:
     /// Apple devices then record `apns-not-configured`.
     pub(super) apns: Option<ApnsProvider>,
+    /// Node identity is independent from transport readiness. With all APNs
+    /// configuration unset there is no known VoIP topic; no suffix is inferred.
+    pub(super) apns_voip_topic: Option<ApnsTopic>,
     /// FCM provider (#530). `None` when `WADDLE_FCM_*` is unset:
     /// Android devices then record `fcm-not-configured`.
     pub(super) fcm: Option<FcmProvider>,
@@ -102,6 +109,10 @@ pub(super) fn test_secret_key() -> &'static [u8] {
 }
 
 impl DatabasePushServiceStore {
+    pub(crate) fn publish_job_wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.publish_job_wake)
+    }
+
     #[cfg(test)]
     pub async fn try_new(db: Database) -> Result<Self, XmppError> {
         Self::new_with_secret_key(db, test_secret_key()).await
@@ -137,6 +148,7 @@ impl DatabasePushServiceStore {
         pubsub_boundary: Option<PushServicePubSubBoundary>,
     ) -> Self {
         Self {
+            publish_job_wake: Arc::new(Notify::new()),
             db,
             inbox_storage: None,
             secrets: Arc::new(PushSecretCipher::new(secret_key)),
@@ -145,6 +157,7 @@ impl DatabasePushServiceStore {
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
+            apns_voip_topic: None,
             fcm: None,
         }
     }
@@ -247,13 +260,23 @@ impl DatabasePushServiceStore {
         tokens: Arc<dyn ApnsProviderTokenSource>,
         sender: Arc<dyn ApnsSender>,
         topic: ApnsTopic,
-    ) -> Self {
+    ) -> Result<Self, ApnsIdentifierError> {
+        let voip_topic = super::apns_config::voip_topic(&topic)?;
+        self.apns_voip_topic = Some(voip_topic.clone());
         self.apns = Some(ApnsProvider {
             tokens,
             sender,
             topic,
+            voip_topic,
         });
-        self
+        Ok(self)
+    }
+
+    /// Retain configured APNs node identity when transport is unavailable.
+    /// This does not enable sending or change environment configuration rules.
+    pub fn with_apns_topic(mut self, topic: ApnsTopic) -> Result<Self, ApnsIdentifierError> {
+        self.apns_voip_topic = Some(super::apns_config::voip_topic(&topic)?);
+        Ok(self)
     }
 
     /// Install the FCM OAuth access-token source, HTTP v1 transport, the

@@ -5,19 +5,28 @@ name: waddle-chat-pullRequest
 on:
   pull_request:
     paths:
-    - .cargo/**
+    - '*.cue'
     - .github/workflows/waddle-chat-pullrequest.yml
-    - apps/android/**/build.gradle.kts
+    - apps/android/app/build.gradle.kts
+    - apps/android/app/build.gradle.kts/**
     - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt
     - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt/**
+    - apps/android/build.gradle.kts
+    - apps/android/build.gradle.kts/**
+    - apps/android/core/client/build.gradle.kts
+    - apps/android/core/client/build.gradle.kts/**
     - apps/android/gradle/libs.versions.toml
     - apps/android/gradle/libs.versions.toml/**
     - apps/android/settings.gradle.kts
     - apps/android/settings.gradle.kts/**
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**
+    - apps/apple/Waddle/Design/WaddleTokens.swift
+    - apps/apple/Waddle/Design/WaddleTokens.swift/**
     - bun.lock
     - bun.lock/**
+    - chat/**
+    - chat/*.cue
     - chat/astro.config.mjs
     - chat/astro.config.mjs/**
     - chat/dist/**
@@ -30,7 +39,6 @@ on:
     - chat/panda.config.ts
     - chat/panda.config.ts/**
     - chat/public/**
-    - chat/schema/**
     - chat/scripts/**
     - chat/scripts/build-xmpp-wasm.mjs
     - chat/scripts/build-xmpp-wasm.mjs/**
@@ -39,10 +47,6 @@ on:
     - chat/scripts/resolve-commit-sha.mjs
     - chat/scripts/resolve-commit-sha.mjs/**
     - chat/src/**
-    - chat/src/styles/global/tokens.css
-    - chat/src/styles/global/tokens.css/**
-    - chat/src/styles/huddle-tokens.ts
-    - chat/src/styles/huddle-tokens.ts/**
     - chat/tests/**
     - chat/tests/native-telemetry-off.test.ts
     - chat/tests/native-telemetry-off.test.ts/**
@@ -50,7 +54,12 @@ on:
     - chat/tsconfig.json/**
     - chat/wrangler.jsonc
     - chat/wrangler.jsonc/**
+    - ci/*.cue
+    - ci/contributors/*.cue
     - cue.mod/**
+    - design/**
+    - design/src/preset.ts
+    - design/src/preset.ts/**
     - env.cue
     - env.cue/**
     - flake.lock
@@ -66,13 +75,11 @@ on:
     - scripts/generate-design-tokens.mjs/**
     - scripts/native-telemetry-cargo-closure.py
     - scripts/native-telemetry-cargo-closure.py/**
-    - server/.cargo/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
-    - server/crates/**
-    - server/crates/**/.cargo/**
+    - server/crates/waddle-xmpp-client-ffi/**
     - server/crates/waddle-xmpp-client-wasm/**
     - server/crates/waddle-xmpp-client-wasm/Cargo.toml
     - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
@@ -83,8 +90,6 @@ on:
     - server/rust-toolchain.toml/**
     - server/vendor/**
     - server/wasm-pkg/waddle-xmpp-client-wasm/**
-    - website/src/styles/global/brand-palette.css
-    - website/src/styles/global/brand-palette.css/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -94,7 +99,6 @@ jobs:
       contents: read
       checks: write
       pull-requests: write
-      packages: none
       id-token: write
     name: waddle-chat-pullRequest
     runs-on: ubuntu-24.04
@@ -120,8 +124,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.63.2"
-        if [ "$cuenv_version" != "0.63.2" ]; then
+        cuenv_version="0.76.1"
+        if [ "$cuenv_version" != "0.76.1" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -129,15 +133,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba"
+            cuenv_sha256="e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519"
+            cuenv_sha256="653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa"
+            cuenv_sha256="3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -156,7 +160,7 @@ jobs:
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.63.2" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.76.1" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi

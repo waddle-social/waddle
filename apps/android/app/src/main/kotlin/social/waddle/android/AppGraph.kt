@@ -113,6 +113,8 @@ class AppGraph(
     val stayConnectedSupported: Boolean = Distribution.stayConnectedSupported,
     /** Seals the FCM envelope private key at rest. */
     keyWrapper: KeyWrapper = AndroidKeystoreWrapper(),
+    /** GIF proxy origin, independent of the XMPP/auth server (`-PwaddleGifProxyUrl`). */
+    gifProxyUrl: String = BuildConfig.WADDLE_GIF_PROXY_URL,
 ) {
     private val appContext: Context = context.applicationContext
 
@@ -129,12 +131,11 @@ class AppGraph(
         loginGatewayFactory ?: { WaddleLoginAuthGateway(authApi) }
 
     /**
-     * GIF search over the server origin's `/api/giphy` proxy (the web
-     * contract). Same-origin as the auth REST base; a deployment
-     * without the proxy degrades to the "not configured" picker state.
+     * GIF search over the web client's `/api/giphy` proxy. The XMPP/auth
+     * service does not serve this route. The API key stays in the proxy.
      */
     val gifSearchGateway: GifSearchGateway =
-        gifSearchGateway ?: GiphyProxyGateway(serverUrl, okHttpClient)
+        gifSearchGateway ?: GiphyProxyGateway(gifProxyUrl, okHttpClient)
 
     private val networkSignal: NetworkSignal = networkSignal
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))

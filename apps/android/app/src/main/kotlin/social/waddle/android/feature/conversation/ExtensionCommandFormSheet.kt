@@ -140,7 +140,7 @@ private fun FormField(
         }
         ExtensionFieldType.LIST_SINGLE -> {
             Column {
-                Text(text = label, style = Waddle.type.kicker)
+                Text(text = label, style = Waddle.type.eyebrow)
                 field.options.forEach { option ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -166,7 +166,7 @@ private fun FormField(
         }
         ExtensionFieldType.LIST_MULTI -> {
             Column {
-                Text(text = label, style = Waddle.type.kicker)
+                Text(text = label, style = Waddle.type.eyebrow)
                 field.options.forEach { option ->
                     val selected = option.value in field.values
                     Row(

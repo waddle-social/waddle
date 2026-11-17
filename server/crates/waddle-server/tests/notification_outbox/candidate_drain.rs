@@ -12,7 +12,8 @@ use waddle_server::ingress_uow::{
     CanonicalMessageRepository, DbRetryClass, EffectIntentRepository, IngressUowError,
 };
 use waddle_server::notification_outbox::{
-    NoopDndReader, NotificationCandidate, NotificationOutboxError, NotificationOutboxStore,
+    DrainBatch, DrainScope, NoopDndReader, NotificationCandidate, NotificationOutboxError,
+    NotificationOutboxStore,
 };
 use waddle_server::notification_settings_projection::NotificationSettingsProjectionStore;
 use waddle_server::test_support::attach_notification_candidate_lineage_for_test;
@@ -59,7 +60,10 @@ impl DrainDependencies {
                     noop_activity_reader(),
                 ),
                 &bare("push.example.com"),
-                16,
+                DrainBatch {
+                    scope: DrainScope::All,
+                    batch_size: 16,
+                },
             )
             .await
     }
@@ -548,7 +552,10 @@ async fn exhausted_policy_settles_candidate(fixture: IngressFixture) {
                 noop_activity_reader(),
             ),
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("terminal policy disposition");

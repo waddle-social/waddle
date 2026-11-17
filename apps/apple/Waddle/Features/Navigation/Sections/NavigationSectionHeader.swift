@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// A list section title with a trailing "+" button.
+/// A section label in a navigation list, with a trailing "+".
+/// It is an ordinary row, so it scrolls with its section and never floats.
 struct NavigationSectionHeader: View {
     let title: String
     let addLabel: String
@@ -9,16 +10,19 @@ struct NavigationSectionHeader: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
             Text(title)
+                .huddleText(Theme.Typography.sidebarSection)
+                .foregroundStyle(Theme.Colors.fgSoft)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
             Button(action: action) {
-                Image(systemName: "plus")
-                    .imageScale(.medium)
-                    .contentShape(Rectangle())
+                NavigationIconLabel(symbol: "plus", color: Theme.Colors.fgSoft)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .accessibilityLabel(Text(addLabel))
             .help(addLabel)
         }
+        .padding(.leading, Theme.Spacing.m)
+        .navigationListRow(top: Theme.Spacing.m)
     }
 }
 
@@ -31,9 +35,47 @@ struct NavigationLoadingRow: View {
             ProgressView()
                 .controlSize(.small)
             Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgSoft)
         }
+        .padding(.horizontal, Theme.Spacing.m)
+        .navigationListRow()
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Shown when a navigation search finds nothing.
+struct NoMatchesView: View {
+    let query: String
+
+    var body: some View {
+        EmptyStateView(
+            title: "No matches",
+            message: "Nothing here is called “\(query)”. Check the spelling or try another name.",
+            symbol: "magnifyingglass"
+        )
+    }
+}
+
+/// A quiet in-list action for an empty section ("New room", "New message").
+struct NavigationEmptyAction: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            NavigationRowChrome {
+                NavigationRowLabel(title: title) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.Colors.fgSoft)
+                } trailing: {
+                    EmptyView()
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .navigationListRow()
     }
 }

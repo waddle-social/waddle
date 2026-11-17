@@ -2,6 +2,7 @@ package cuenv
 
 import (
 	"list"
+	"strings"
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
 	xRust "github.com/cuenv/cuenv/contrib/rust"
@@ -35,29 +36,34 @@ let _namespaceRustTaskInputs = list.Concat([_rustInputs, [
 	"README.md",
 	"capabilities.toml",
 	"charts/waddle-server/**",
-	"../.rules.cue",
-	"../cue.mod/module.cue",
-	"../cuenv.lock",
-	"../env.cue",
-	"../flake.lock",
-	"../flake.nix",
-	"../namespace.cue",
-	"../ci/contributors/*.cue",
-	"../infrastructure/waddle.cloud/env.cue",
-	"../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
-	"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+	schema.#ModuleFiles & {paths: [
+		".rules.cue",
+		"cue.mod/module.cue",
+		"cuenv.lock",
+		"env.cue",
+		"flake.lock",
+		"flake.nix",
+		"namespace.cue",
+		"ci/contributors/cuenv.cue",
+		"ci/contributors/nix.cue",
+		"infrastructure/waddle.cloud/env.cue",
+		"infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+		"infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+	]},
 ]])
 
 // These inputs preserve publisher trigger policy. Nix delegator tasks run
 // uncached in the live checkout: the flake filesets supply the complete
 // dev-dependency closure to Nix's own sandbox and derivation cache.
 let _nixInputs = [
-	"../flake.nix",
-	"../flake.lock",
-	// The nix test derivations copy the Mimir reliability rules into the
-	// build tree for the #1436 registration drift guard, so rules edits
-	// must re-run the Rust test lanes.
-	"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+	schema.#ModuleFiles & {paths: [
+		"flake.nix",
+		"flake.lock",
+		// The nix test derivations copy the Mimir reliability rules into the
+		// build tree for the #1436 registration drift guard, so rules edits
+		// must re-run the Rust test lanes.
+		"infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+	]},
 	"Cargo.toml",
 	"Cargo.lock",
 	".config/nextest.toml",
@@ -80,10 +86,42 @@ let _nextestTask = schema.#Task & {
 
 let _chartInputs = ["charts/waddle-server/**"]
 let _gitopsWaddleServerInputs = [
-	"../infrastructure/waddle.cloud/gitops/waddle-server/**",
-	"../infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
-	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
+	schema.#ModuleFiles & {paths: [
+		"infrastructure/waddle.cloud/gitops/waddle-server/**",
+		"infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
+		"infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
+	]},
 ]
+
+// The short publish gates that the main pipeline runs in one job.
+let _mainCheckNames = [
+	"checkCiDrift",
+	"checkSwitchableAlternativeProgram",
+	"checkAlertRules",
+	"checkXmppClientFfiBindings",
+	"renderDeployment",
+]
+// Pull requests run the same short gates plus the format check in one job.
+let _pullRequestCheckNames = list.Concat([_mainCheckNames, ["nixFmt"]])
+
+// One job for several short tasks: they take one runner and one Nix, cache
+// and cuenv setup. Every task runs even after an earlier one fails, and the
+// job fails if any did.
+let _batchArgs = {
+	#names: [...string]
+	out: ["-uo", "pipefail", "-c", #"""
+		failed=()
+		for check in \#(strings.Join(#names, " ")); do
+		  echo "::group::${check}"
+		  cuenv task "${check}" || failed+=("${check}")
+		  echo "::endgroup::"
+		done
+		if (( ${#failed[@]} )); then
+		  echo "Failed checks: ${failed[*]}" >&2
+		  exit 1
+		fi
+		"""#]
+}
 let _deploymentInputs = ["deployment.cue", "observer-release.json", "scripts/observer_release.py", "scripts/test_observer_release.py"]
 
 schema.#Project & {
@@ -175,33 +213,36 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
-				// cuenv has no per-task runner. nixTestLocal depends on the
-				// helper but not on itself, so it alone selects the privileged
-				// 32-core builder. Publish depends on both and keeps its normal
-				// profile. The JSON round trip permits optional needs lookups;
-				// CI checks the generated graph and its default-success gates.
-				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
+				// cuenv has no per-task runner, so one expression selects it
+				// from the job's dependencies. A job that does not wait for
+				// fmt runs on the privileged 32-core builder: that is
+				// nixTestLocal, the longest gate, which therefore asks for
+				// its runner the moment the workflow starts, and fmt itself,
+				// which takes about a minute. Every other job waits for fmt
+				// and uses the normal profile. The JSON round trip permits a
+				// lookup of a dependency the job does not have; CI checks the
+				// generated graph and its default-success gates.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
 					"pull-requests": "none"
 				}
 			}
+			// Each job queues for a runner and repeats the Nix, cache and
+			// cuenv setup, so the short checks share one job (mainChecks).
+			// The compile-heavy gates stay separate so that they overlap.
 			tasks: [
-				_t.checkCiDrift,
-				_t.checkSwitchableAlternativeProgram,
-				_t.checkAlertRules,
 				_t.fmt,
-				_t.clippy,
-				_t.test,
-				_t.doctest,
-				_t.checkXmppClientFfiBindings,
-				_t.renderDeployment,
-				_t.nixBuildImageStream,
-				_t.nixBuildExtensionModules,
-				// Publish evidence: Postgres + all-features shards with the
+				_t.mainChecks,
+				_t.mainClippy,
+				_t.mainTest,
+				_t.mainDoctest,
+				_t.mainBuildImageStream,
+				_t.mainBuildExtensionModules,
+				// Publish evidence: the shard-lane helper contracts, then the
+				// Postgres + all-features shards with the
 				// required-cluster-tests.txt executed-name check (#1796).
-				_t.ciHelperContracts,
 				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
@@ -236,23 +277,27 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
+			// The short checks share one job (pullRequestChecks): each job
+			// repeats about 75 seconds of Nix, cache and cuenv setup and
+			// takes one of the 20 concurrent GitHub job slots.
 			tasks: [
-				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.checkAlertRules,
-				_t.nixFmt, _t.nixClippy,
-				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
+				_t.pullRequestChecks,
+				_t.nixClippy, _t.nixDoctest,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
 		// Native PostgreSQL characterization is independent of image publishing.
+		// It gates nothing, so it runs after merge and on request, on a
+		// GitHub runner: Namespace capacity is left to the lanes that gate
+		// pull requests and publishing.
 		roomChildContract: {
 			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
-			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -294,6 +339,9 @@ schema.#Project & {
 			}
 			tasks: [_t.federationGrantFenceProof]
 		}
+		// Runs after merge and on request. Its build closure repeats the
+		// pull-request image, clippy and fmt builds, and the proof gates
+		// nothing, so pull requests do not run it.
 		parentMoveNative: {
 			mode: "expanded"
 			when: {
@@ -311,29 +359,16 @@ schema.#Project & {
 			}
 			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
 		}
-		parentMoveNativePullRequest: {
-			mode: "expanded"
-			when: pullRequest: true
-			provider: github: runner: "ubuntu-24.04"
-			provider: github: permissions: {
-				"id-token":      "write"
-				contents:        "read"
-				checks:          "write"
-				packages:        "read"
-				"pull-requests": "none"
-			}
-			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
-		}
 		// Native SQL subscriber-capture characterization; no publishing task.
+		// Scheduled like roomChildContract, for the same reason.
 		spaceFanoutContract: {
 			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
-			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token": "write"
 				contents:   "read"
@@ -354,9 +389,15 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.clippy, _t.test, _t.doctest]
+			// The default-feature, no-Postgres test lane is the only Rust
+			// gate of the main pipeline that no other pull-request lane
+			// covers. Pull requests get clippy and doctests from the
+			// pullRequest pipeline's nixClippy and nixDoctest, which run the
+			// same commands over the same workspace and features.
+			tasks: [_t.test]
 		}
-		// Rust archives and shards are generated from ci/rust-tests/workflow.cue.
+		// The manual-only rustTests workflow (workflow_dispatch) runs the same
+		// archives and shards; it is generated from ci/rust-tests/workflow.cue.
 		rootSync: {
 			mode: "expanded"
 			when: {
@@ -373,7 +414,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkAllCiDrift, _t.checkRootSyncDrift]
+			tasks: [_t.rootSyncChecks]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -397,12 +438,20 @@ schema.#Project & {
 			]
 		}
 		xmppServerCompliance: {
-			// The measured source compile is 4m13 on Namespace versus
-			// 12m47 on GitHub's standard runner. Keep this heavy lane here.
+			// The Postgres, all-features shards (nixTestLocal in the default
+			// pipeline) run these server tests after merge and gate image
+			// publishing, so this lane runs after merge and on request. The measured source compile is
+			// 4m13 on Namespace versus 12m47 on GitHub's standard runner;
+			// nothing waits for this lane, so it takes the slower runner
+			// and leaves Namespace capacity to the publishing pipeline.
 			mode: "expanded"
-			when: ci.pipelines.xmppCompliance.when
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				manual:        true
+			}
 			provider: github: {
-				runner:      "namespace-profile-linux-x86"
+				runner:      "ubuntu-24.04"
 				permissions: ci.pipelines.xmppCompliance.provider.github.permissions
 			}
 			tasks: [_t.nixXmppServerTests]
@@ -428,8 +477,7 @@ schema.#Project & {
 			inputs: [
 				"experiments/grant-fence/**",
 				"experiments/native-fixture/**",
-				"../flake.lock",
-				"../flake.nix",
+				schema.#ModuleFiles & {paths: ["flake.lock", "flake.nix"]},
 				"rust-toolchain.toml",
 			]
 		}
@@ -451,8 +499,7 @@ schema.#Project & {
 				"experiments/grant-fence/native.nix",
 				"experiments/grant-fence/Cargo.lock",
 				"experiments/native-fixture/**",
-				"../flake.lock",
-				"../flake.nix",
+				schema.#ModuleFiles & {paths: ["flake.lock", "flake.nix"]},
 				"rust-toolchain.toml",
 			]
 		}
@@ -461,7 +508,7 @@ schema.#Project & {
 			hermetic: false
 			command:  "nix"
 			args: ["build", "--no-link", "../#waddle-server", "../#checks.x86_64-linux.waddle-server-clippy", "../#checks.x86_64-linux.waddle-server-fmt"]
-			inputs: list.Concat([_nixInputs, _cargoResolutionInputs, ["../namespace.cue", "experiments/parent-move/**", "experiments/grant-fence/src/**", "experiments/grant-fence/tests/**"]])
+			inputs: list.Concat([_nixInputs, _cargoResolutionInputs, ["experiments/parent-move/**", "experiments/grant-fence/src/**", "experiments/grant-fence/tests/**", schema.#ModuleFiles & {paths: ["namespace.cue"]}]])
 		}
 
 		checkAuthzIdCodec: schema.#Task & {
@@ -479,11 +526,14 @@ schema.#Project & {
 				"experiments/authz-id-codec/**",
 				"rust-toolchain.toml",
 				".cargo/**",
-				"../flake.nix",
-				"../flake.lock",
-				"../cuenv.lock",
-				"../env.cue",
-				"../ci/contributors/*.cue",
+				schema.#ModuleFiles & {paths: [
+					"flake.nix",
+					"flake.lock",
+					"cuenv.lock",
+					"env.cue",
+					"ci/contributors/cuenv.cue",
+					"ci/contributors/nix.cue",
+				]},
 			]
 		}
 
@@ -495,10 +545,9 @@ schema.#Project & {
 		}
 
 		checkCiDrift: schema.#Task & {
-			// Reads sibling projects through ../ inputs and shells out to cuenv,
-			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
-			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
-			// this in the live checkout with the ambient environment.
+			// Reads sibling projects through module-file inputs and shells out to
+			// cuenv, cue or nix, which need the host HOME. Hermetic tasks scrub
+			// HOME, so run this in the live checkout with the ambient environment.
 			hermetic: false
 			command:  "bash"
 			args: ["-c", #"""
@@ -529,7 +578,23 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					if ! bash scripts/sync-runner-benchmark.sh --check; then
+					  overall_status=1
+					fi
 					if ! bun scripts/integration-ci.ts --check; then
+					  overall_status=1
+					fi
+					# The integration planner runs these contracts itself, but
+					# only for merge groups and manual dispatches. Pull requests
+					# that change the planner, its adapter or the cuenv bootstrap
+					# get them here.
+					if ! bun test scripts/integration-ci.test.ts; then
+					  overall_status=1
+					fi
+					if ! python3 scripts/test_integration_ci_project.py; then
+					  overall_status=1
+					fi
+					if ! python3 scripts/test_cuenv_bootstrap.py; then
 					  overall_status=1
 					fi
 					# checkCiDrift is itself a direct publication gate. Verify the
@@ -538,25 +603,56 @@ schema.#Project & {
 					if ! python3 server/scripts/test_default_publish_graph.py; then
 					  overall_status=1
 					fi
+					# Only the checkAllCiDrift task (rootSync pipeline) sets this: the
+					# guard's inputs are globs that would wake the billed server
+					# pipeline if checkCiDrift declared them.
+					if [[ "${WADDLE_CI_INPUT_GUARD:-}" == 1 ]]; then
+					  if ! python3 server/scripts/test_ci_trigger_inputs.py; then
+					    overall_status=1
+					  fi
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
-				"**/env.cue",
+				"env.cue",
 				"deployment.cue",
-				"../.github/workflows/hestia-cache-gc.yml",
-				"../ci/contributors/*.cue",
-				"../scripts/integration-ci*",
-				"../scripts/test_integration_ci_project.py",
-				"../scripts/test_cuenv_bootstrap.py",
-				"../.github/workflows/waddle-integration.yml",
-				"../ci/rust-tests/**",
-				"../scripts/sync-rust-tests.sh",
 				"scripts/test_default_publish_graph.py",
-				"../ci/cache-benchmark/**",
-				"../scripts/*cache-benchmark*",
-				"../.github/workflows/waddle-ci-cache-benchmark.yml",
-				"../.github/workflows/waddle-server-*.yml",
-				"../cue.mod/module.cue",
+				schema.#ModuleFiles & {paths: [
+					".github/workflows/hestia-cache-gc.yml",
+					"ci/contributors/cuenv.cue",
+					"ci/contributors/nix.cue",
+					"scripts/integration-ci-project.py",
+					"scripts/integration-ci.test.ts",
+					"scripts/integration-ci.ts",
+					"scripts/test_integration_ci_project.py",
+					"scripts/test_cuenv_bootstrap.py",
+					".github/workflows/waddle-integration.yml",
+					"ci/rust-tests/**",
+					"scripts/sync-rust-tests.sh",
+					"ci/cache-benchmark/**",
+					"scripts/ci-cache-benchmark.py",
+					"scripts/sync-cache-benchmark.sh",
+					"scripts/test-ci-cache-benchmark.py",
+					".github/workflows/waddle-ci-cache-benchmark.yml",
+					"ci/runner-benchmark/**",
+					"scripts/sync-runner-benchmark.sh",
+					".github/workflows/waddle-ci-runner-benchmark.yml",
+					".github/workflows/waddle-server-authzidcodec.yml",
+					".github/workflows/waddle-server-default.yml",
+					".github/workflows/waddle-server-federationgrantfence.yml",
+					".github/workflows/waddle-server-federationgrantfencepullrequest.yml",
+					".github/workflows/waddle-server-namespacerustchecks.yml",
+					".github/workflows/waddle-server-parentmovenative.yml",
+					".github/workflows/waddle-server-publish-tags-to-flakehub.yml",
+					".github/workflows/waddle-server-pullrequest.yml",
+					".github/workflows/waddle-server-roomchildcontract.yml",
+					".github/workflows/waddle-server-rootsync.yml",
+					".github/workflows/waddle-server-rusttests.yml",
+					".github/workflows/waddle-server-spacefanoutcontract.yml",
+					".github/workflows/waddle-server-xmppcompliance.yml",
+					".github/workflows/waddle-server-xmppservercompliance.yml",
+					"cue.mod/module.cue",
+				]},
 			]
 		}
 
@@ -570,17 +666,33 @@ schema.#Project & {
 			hermetic: false
 			command:  tasks.checkCiDrift.command
 			args:     tasks.checkCiDrift.args
+			env: WADDLE_CI_INPUT_GUARD: "1"
+			// Globs on purpose: this lane runs on a free runner, and these are the
+			// roots server/scripts/test_ci_trigger_inputs.py reads, so a new project,
+			// workflow, rules file, Android module, Apple test or crate manifest
+			// wakes it before the guard can fail a publish run.
 			inputs: list.Concat([tasks.checkCiDrift.inputs, [
-				"../**/env.cue",
-				"../.github/workflows/waddle-*.yml",
+				schema.#ModuleFiles & {paths: [
+					"**/env.cue",
+					".github/workflows/*.yml",
+					"infrastructure/waddle.cloud/rules/mimir/*.yaml",
+					"apps/android/**/build.gradle.kts",
+					"apps/android/**/src/**",
+					"apps/apple/**",
+					"scripts/*",
+					"ci/contributors/*.cue",
+					"apps/linux/Cargo.toml",
+					"server/Cargo.toml",
+					"server/crates/*/Cargo.toml",
+					"server/scripts/test_ci_trigger_inputs.py",
+				]},
 			]])
 		}
 
 		checkRootSyncDrift: schema.#Task & {
-			// Reads sibling projects through ../ inputs and shells out to cuenv,
-			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
-			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
-			// this in the live checkout with the ambient environment.
+			// Reads sibling projects through module-file inputs and shells out to
+			// cuenv, cue or nix, which need the host HOME. Hermetic tasks scrub
+			// HOME, so run this in the live checkout with the ambient environment.
 			hermetic: false
 			command:  "bash"
 			args: ["-c", #"""
@@ -590,19 +702,21 @@ schema.#Project & {
 					git -C .. diff --exit-code -- .
 				"""#]
 			inputs: [
-				"../env.cue",
-				"../cuenv.lock",
-				"../.rules.cue",
-				"../.gitignore",
-				"../ci/contributors/*.cue",
+				schema.#ModuleFiles & {paths: [
+					"env.cue",
+					"cuenv.lock",
+					".rules.cue",
+					".gitignore",
+					"ci/contributors/cuenv.cue",
+					"ci/contributors/nix.cue",
+				]},
 			]
 		}
 
 		checkSwitchableAlternativeProgram: schema.#Task & {
-			// Reads sibling projects through ../ inputs and shells out to cuenv,
-			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
-			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
-			// this in the live checkout with the ambient environment.
+			// Reads sibling projects through module-file inputs and shells out to
+			// cuenv, cue or nix, which need the host HOME. Hermetic tasks scrub
+			// HOME, so run this in the live checkout with the ambient environment.
 			hermetic: false
 			command:  "bash"
 			args: ["-c", #"""
@@ -665,21 +779,25 @@ schema.#Project & {
 					bun test ../tests/critical-journeys.test.ts
 				"""#]
 			inputs: [
-				"../apps/apple/**/Tests/**",
-				"../chat/tests/**",
-				"../docs/evidence/**",
 				"capabilities.toml",
 				"crates/**/tests/**",
 				"crates/waddle-server/src/server/routes/websocket/tests/**",
 				"crates/waddle-server/tests/server_capability_manifest.rs",
-				"../docs/product/critical-journeys.json",
-				"../docs/product/gate-evidence.json",
-				"../docs/product/performance-profile.json",
-				"../docs/planning/switchable-alternative.md",
-				"../tests/**",
-				"../cuenv.lock",
-				"../xeps/xep-*.xml",
 				"env.cue",
+				schema.#ModuleFiles & {paths: [
+					"apps/apple/WaddleKit/Tests/**",
+					"chat/tests/**",
+					"docs/evidence/**",
+					"docs/product/critical-journeys.json",
+					"docs/product/gate-evidence.json",
+					"docs/product/performance-profile.json",
+					"docs/planning/switchable-alternative.md",
+					"tests/**",
+					"cuenv.lock",
+				]},
+				// xeps/ is a nested VCS checkout (gitignored, materialised by
+				// `cuenv sync vcs`): a file reference cannot enter it, and its
+				// files never appear in a diff of this repository.
 			]
 		}
 
@@ -691,9 +809,8 @@ schema.#Project & {
 		// the cloud project, because a fixture, unit or Prometheus (flake)
 		// change ships with this image: these expanded pipelines run every
 		// listed task as its own job whenever the derived trigger paths
-		// match, so ../ inputs select it. Non-expanded `cuenv ci` matches
-		// changed files against inputs without resolving ../ and would skip
-		// it. Reads the rules from the live checkout, so not hermetic.
+		// match, so the module-file inputs select it. Reads the rules from the
+		// live checkout, so not hermetic.
 		checkAlertRules: schema.#Task & {
 			hermetic: false
 			command:  "bash"
@@ -708,11 +825,13 @@ schema.#Project & {
 				// lanes. Tests-only edits run through cloud rulesTest instead;
 				// this non-hermetic task still reads the current tests whenever
 				// an image publication runs.
-				"../infrastructure/waddle.cloud/rules/mimir/*.yaml",
 				"crates/waddle-server/src/clustering/alert_metric_contract.json",
 				"crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
-				"../flake.nix",
-				"../flake.lock",
+				schema.#ModuleFiles & {paths: [
+					"infrastructure/waddle.cloud/rules/mimir/*.yaml",
+					"flake.nix",
+					"flake.lock",
+				]},
 			]
 		}
 
@@ -764,7 +883,7 @@ schema.#Project & {
 					"scripts/ingress-typed-entry-allowlist.txt",
 					"scripts/check-ci-helper-contracts.sh",
 					".config/required-cluster-tests.txt",
-					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],
+					schema.#ModuleFiles & {paths: ["scripts/ci-timings.py", "tests/ci-timings-test.py"]}],
 				tasks.checkCiDrift.inputs,
 				tasks.checkSwitchableAlternativeProgram.inputs,
 				tasks.checkXmppClientFfiBindings.inputs,
@@ -776,18 +895,17 @@ schema.#Project & {
 
 		// Contract tests for the shard lane's helpers (required-test check,
 		// shard planning, archive transfer) and the Postgres test-environment
-		// structure check. The PR rustTests workflow runs the same script.
+		// structure check. The manual rustTests workflow runs the same script
+		// before compiling, and on main nixTestLocal runs it first.
 		ciHelperContracts: schema.#Task & {
-			// Reads ../tests and ../scripts through ../ inputs, which cuenv
-			// 0.56 rejects under the "dir" sandbox.
+			// Reads ../tests and ../scripts from the live checkout.
 			hermetic: false
 			command:  "bash"
 			args: ["scripts/check-ci-helper-contracts.sh"]
 			inputs: list.Concat([_nixInputs, [
 				"scripts/**",
 				".config/required-cluster-tests.txt",
-				"../scripts/ci-timings.py",
-				"../tests/ci-timings-test.py",
+				schema.#ModuleFiles & {paths: ["scripts/ci-timings.py", "tests/ci-timings-test.py"]},
 			]])
 		}
 
@@ -796,13 +914,25 @@ schema.#Project & {
 		// cuenv 0.57.3 emits no timeout-minutes for the main-pipeline job (it
 		// gates publish), so the lane bounds itself inside the PR job's 60
 		// minutes; a timeout fails the lane with diagnostics instead of
-		// holding publish for GitHub's six-hour default.
-		nixTestLocal: schema.#Task & {
+		// holding publish for GitHub's six-hour default. The manual rustTests
+		// workflow runs this command after its own helper-contract step.
+		nixTestShards: schema.#Task & {
 			command: "timeout"
 			args: ["--kill-after=2m", "55m", "bash", "scripts/run-nextest-shards.sh"]
-			dependsOn: [tasks.ciHelperContracts]
 			inputs: tasks.nixTestArchive.inputs
 			outputs: ["server/.ci/nextest-archive"]
+			hermetic: false
+		}
+
+		// The main pipeline's publish evidence: the helper contracts, then
+		// the bounded shard lane, in one job. The contracts take under two
+		// minutes; as a separate job they made the longest gate wait for a
+		// second runner before it could ask for its own.
+		nixTestLocal: schema.#Task & {
+			command: "bash"
+			args: ["-euo", "pipefail", "-c", "bash scripts/check-ci-helper-contracts.sh && exec \(strings.Join(list.Concat([[tasks.nixTestShards.command], tasks.nixTestShards.args]), " "))"]
+			inputs: list.Concat([tasks.ciHelperContracts.inputs, tasks.nixTestShards.inputs])
+			outputs:  tasks.nixTestShards.outputs
 			hermetic: false
 		}
 
@@ -879,18 +1009,89 @@ schema.#Project & {
 			inputs: _namespaceRustTaskInputs
 		}
 
+		// The main pipeline's short publish gates in one job.
+		mainChecks: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     (_batchArgs & {#names: _mainCheckNames}).out
+			inputs: list.Concat([for name in _mainCheckNames {tasks[name].inputs}])
+			dependsOn: [tasks.fmt]
+		}
+
+		pullRequestChecks: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     (_batchArgs & {#names: _pullRequestCheckNames}).out
+			inputs: list.Concat([for name in _pullRequestCheckNames {tasks[name].inputs}])
+		}
+
+		rootSyncChecks: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     (_batchArgs & {#names: ["checkAllCiDrift", "checkRootSyncDrift"]}).out
+			inputs: list.Concat([tasks.checkAllCiDrift.inputs, tasks.checkRootSyncDrift.inputs])
+		}
+
+		// The main pipeline's compile-heavy publish gates. They are the
+		// tasks pull requests run, plus a dependency on fmt: the runner
+		// expression of the default pipeline keys on that dependency, and
+		// declaring it on the shared tasks would add an fmt job to every
+		// pull-request pipeline that lists them.
+		mainClippy: schema.#Task & {
+			hermetic: false
+			command:  tasks.clippy.command
+			args:     tasks.clippy.args
+			inputs:   tasks.clippy.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainTest: schema.#Task & {
+			hermetic: false
+			command:  tasks.test.command
+			args:     tasks.test.args
+			inputs:   tasks.test.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		// The Nix doctest check that pull requests build: the same workspace
+		// and features as the namespace doctest task, with dependencies from
+		// the shared artifact. When main's tree is the one a pull request
+		// already checked, the result comes from the cache.
+		mainDoctest: schema.#Task & {
+			hermetic: false
+			command:  tasks.nixDoctest.command
+			args:     tasks.nixDoctest.args
+			inputs:   tasks.nixDoctest.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainBuildImageStream: schema.#Task & {
+			hermetic: false
+			command:  tasks.nixBuildImageStream.command
+			args:     tasks.nixBuildImageStream.args
+			inputs:   tasks.nixBuildImageStream.inputs
+			dependsOn: [tasks.fmt]
+		}
+
+		mainBuildExtensionModules: schema.#Task & {
+			hermetic: false
+			command:  tasks.nixBuildExtensionModules.command
+			args:     tasks.nixBuildExtensionModules.args
+			inputs:   tasks.nixBuildExtensionModules.inputs
+			dependsOn: [tasks.fmt]
+		}
+
 		checkXmppClientFfiBindings: schema.#Task & {
-			// Reads sibling projects through ../ inputs and shells out to cuenv,
-			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
-			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
-			// this in the live checkout with the ambient environment.
+			// Reads sibling projects through module-file inputs and shells out to
+			// cuenv, cue or nix, which need the host HOME. Hermetic tasks scrub
+			// HOME, so run this in the live checkout with the ambient environment.
 			hermetic: false
 			command:  "bash"
 			args: ["scripts/check-xmpp-client-ffi-bindings.sh"]
 			inputs: list.Concat([
 				_rustInputs,
 				[
-					"../apps/apple/Waddle/RustClient/Generated/**",
+					schema.#ModuleFiles & {paths: ["apps/apple/Waddle/RustClient/Generated/**"]},
 				],
 			])
 		}
@@ -934,10 +1135,9 @@ schema.#Project & {
 		}
 
 		renderDeployment: schema.#Task & {
-			// Reads sibling projects through ../ inputs and shells out to cuenv,
-			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
-			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
-			// this in the live checkout with the ambient environment.
+			// Reads sibling projects through module-file inputs and shells out to
+			// cuenv, cue or nix, which need the host HOME. Hermetic tasks scrub
+			// HOME, so run this in the live checkout with the ambient environment.
 			hermetic: false
 			command:  "bash"
 			args: ["-c", #"""
@@ -1341,10 +1541,9 @@ schema.#Project & {
 
 		publishContainerImage: schema.#Task & {
 			ci: github: permissions: packages: "write"
-			// Reads sibling projects through ../ inputs and shells out to cuenv,
-			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
-			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
-			// this in the live checkout with the ambient environment.
+			// Reads sibling projects through module-file inputs and shells out to
+			// cuenv, cue or nix, which need the host HOME. Hermetic tasks scrub
+			// HOME, so run this in the live checkout with the ambient environment.
 			hermetic: false
 			command:  "bash"
 			env: {
@@ -1557,21 +1756,19 @@ schema.#Project & {
 			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/cutover_revisions.py", "scripts/publish_chart.py"]])
 			outputs: ["target/digests/**"]
 			dependsOn: [
-				tasks.checkCiDrift,
-				tasks.checkSwitchableAlternativeProgram,
-				tasks.checkAlertRules,
 				tasks.fmt,
-				tasks.clippy,
-				tasks.test,
-				tasks.doctest,
-				tasks.checkXmppClientFfiBindings,
-				tasks.renderDeployment,
-				tasks.nixBuildImageStream,
-				tasks.nixBuildExtensionModules,
-				// No image ships unless the Postgres + all-features lane ran
-				// every required cluster test on this exact commit. Keep both
-				// direct gates, even though the shard lane also needs helpers.
-				tasks.ciHelperContracts,
+				// checkCiDrift, checkSwitchableAlternativeProgram,
+				// checkAlertRules, checkXmppClientFfiBindings and
+				// renderDeployment.
+				tasks.mainChecks,
+				tasks.mainClippy,
+				tasks.mainTest,
+				tasks.mainDoctest,
+				tasks.mainBuildImageStream,
+				tasks.mainBuildExtensionModules,
+				// No image ships unless the helper contracts passed and the
+				// Postgres + all-features lane ran every required cluster
+				// test on this exact commit.
 				tasks.nixTestLocal,
 			]
 		}
@@ -1579,8 +1776,7 @@ schema.#Project & {
 		flakehubPublished: schema.#Task & {
 			command: "true"
 			inputs: [
-				"../flake.nix",
-				"../flake.lock",
+				schema.#ModuleFiles & {paths: ["flake.nix", "flake.lock"]},
 			]
 		}
 

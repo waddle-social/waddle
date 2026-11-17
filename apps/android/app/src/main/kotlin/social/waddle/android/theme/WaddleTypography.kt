@@ -1,21 +1,39 @@
 package social.waddle.android.theme
 
+import androidx.annotation.FontRes
 import androidx.compose.material3.Typography
+import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
-import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
+import social.waddle.android.R
 
 /**
- * Waddle ships no font files on any platform: display and body use the
- * system face (headlines differ by weight and size), mono uses the system
- * monospace.
+ * One variable font file as a family: an instance per weight the text
+ * styles use, each pinned on the `wght` axis.
  */
-val MonoFamily: FontFamily = FontFamily.Monospace
+@OptIn(ExperimentalTextApi::class)
+private fun variableFamily(@FontRes font: Int, vararg weights: Int): FontFamily = FontFamily(
+    weights.map { weight ->
+        Font(font, FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
+    },
+)
+
+// ponytail: Bricolage's opsz axis stays at its default; set it per size if headlines look off next to the web.
+/** Polar Huddle display face: Bricolage Grotesque. */
+val DisplayFamily: FontFamily = variableFamily(R.font.bricolage_grotesque, 500, 600, 700, 750, 800)
+
+/** Polar Huddle body face: Atkinson Hyperlegible Next. */
+val BodyFamily: FontFamily = variableFamily(R.font.atkinson_hyperlegible_next, 400, 500, 600, 700, 800)
+
+/** Polar Huddle code face: Atkinson Hyperlegible Mono. */
+val MonoFamily: FontFamily = variableFamily(R.font.atkinson_hyperlegible_mono, 400, 500, 600, 700)
 
 /** Extra leading split evenly above and below each line, as CSS does. */
 private val Centered = LineHeightStyle(
@@ -24,96 +42,105 @@ private val Centered = LineHeightStyle(
 )
 
 private fun familyOf(font: HuddleFont): FontFamily = when (font) {
-    HuddleFont.Display, HuddleFont.Body -> FontFamily.Default
+    HuddleFont.Display -> DisplayFamily
+    HuddleFont.Body -> BodyFamily
     HuddleFont.Mono -> MonoFamily
 }
 
-/**
- * A Huddle text style as a Compose style. Line height is relative to the
- * size (`em`), as on the web; a style that inherits it on the web gets
- * [fallbackLeading]. Case is not a style in Compose: uppercase styles are
- * rendered through [social.waddle.android.ui.huddle.Kicker].
- */
+/** A Polar Huddle text style as a Compose style; line height is relative to the size, as on the web. */
 private fun HuddleTextStyle.toStyle(
     size: TextUnit = this.size,
     weight: FontWeight = this.weight,
-    fallbackLeading: Float = SNUG,
-): TextStyle {
-    val leading = if (lineHeight.isSpecified) lineHeight.value else fallbackLeading
-    return TextStyle(
-        fontFamily = familyOf(font),
-        fontWeight = weight,
-        fontSize = size,
-        lineHeight = (size.value * leading).sp,
-        letterSpacing = letterSpacing,
-        lineHeightStyle = Centered,
-    )
-}
+    leading: Float = lineHeight.value,
+): TextStyle = TextStyle(
+    fontFamily = familyOf(font),
+    fontWeight = weight,
+    fontSize = size,
+    lineHeight = (size.value * leading).sp,
+    letterSpacing = letterSpacing,
+    lineHeightStyle = Centered,
+)
 
-private const val SNUG = 1.2f
+/** Single-line web styles (badge, tag) set leading 1; Compose gets a little room so wrapped text never clips. */
+private const val TIGHT_LEADING = 1.25f
 
-/** Display lines get a little air on Android, where 1.0 clips accents in two-line headings. */
-private const val DISPLAY_LEADING = 1.1f
+private const val LEAD_LEADING = 1.5f
 
 private val T = WaddleTokens.Huddle.Type
-
-/**
- * Huddle's text styles (web `textStyles`), for the roles Material has no
- * name for. Prefer these by name in new code: `Waddle.type.kicker`.
- */
-object WaddleType {
-    val hero: TextStyle = T.hero.toStyle().copy(lineHeight = (T.hero.size.value * DISPLAY_LEADING).sp)
-    val display: TextStyle = T.display.toStyle().copy(lineHeight = (T.display.size.value * DISPLAY_LEADING).sp)
-    val headline: TextStyle = T.headline.toStyle().copy(lineHeight = (T.headline.size.value * DISPLAY_LEADING).sp)
-
-    /** Room, card, section and people titles: display 18/600. */
-    val title: TextStyle = T.title.toStyle()
-
-    /** Big numbers. */
-    val stat: TextStyle = T.stat.toStyle()
-    val lead: TextStyle = T.lead.toStyle()
-
-    /** Message body: body 15/1.5. */
-    val body: TextStyle = T.body.toStyle()
-
-    /** Buttons, tabs, fields: body 14/500. */
-    val control: TextStyle = T.control.toStyle()
-
-    /** Mono 11/500, tracked 0.08em; render uppercase through `Kicker`. */
-    val kicker: TextStyle = T.kicker.toStyle()
-
-    /** Timestamps and counts: mono 12. */
-    val time: TextStyle = T.time.toStyle()
-}
-
 private val F = WaddleTokens.Huddle.FontSize
 
 /**
- * Huddle mapped onto Material roles, so stock components follow it:
- * display roles are the hero/display/headline styles, title roles are
- * the display style (top bars, sheet and dialog titles), body roles the body style at
- * message/body/caption sizes, labels the control style down to kicker
- * size.
+ * Polar Huddle's text styles (web `textStyles`), for the roles Material
+ * has no name for. Prefer these by name: `Waddle.type.eyebrow`.
+ */
+object WaddleType {
+    val hero: TextStyle = T.hero.toStyle()
+    val display: TextStyle = T.display.toStyle()
+    val headline: TextStyle = T.headline.toStyle()
+
+    /** Screen, card and sheet titles: display 20/700. */
+    val title: TextStyle = T.title.toStyle()
+
+    /** Section and room names: display 18/700. */
+    val subtitle: TextStyle = T.subtitle.toStyle()
+
+    /** Big numbers. */
+    val stat: TextStyle = T.headline.toStyle()
+
+    /** Intro copy under a title: body 18/1.5. */
+    val lead: TextStyle = T.body.toStyle(size = F.lg, leading = LEAD_LEADING)
+
+    /** Message body: body 16/24. */
+    val body: TextStyle = T.message.toStyle()
+
+    /** Secondary copy and row text: body 15/22. */
+    val bodySmall: TextStyle = T.body.toStyle()
+
+    /** Message author: body 15/700. */
+    val author: TextStyle = T.author.toStyle()
+
+    /** Buttons, tabs, fields and row labels: body 14/600. */
+    val control: TextStyle = T.label.toStyle()
+
+    /** Section label above a group, card or count line: body 13/700, sentence case. */
+    val eyebrow: TextStyle = T.eyebrow.toStyle()
+
+    /** Timestamps and meta lines: body 13/18. */
+    val time: TextStyle = T.timestamp.toStyle()
+
+    /** Counts: body 12/700. */
+    val badge: TextStyle = T.badge.toStyle(leading = TIGHT_LEADING)
+
+    /** Roles and states: body 12/600. */
+    val tag: TextStyle = T.tag.toStyle(leading = TIGHT_LEADING)
+
+    /** Inline and block code: mono 14/20. */
+    val code: TextStyle = T.code.toStyle()
+}
+
+/**
+ * Polar Huddle mapped onto Material roles, so stock components follow it:
+ * display and headline roles are the display face, titles the display face
+ * at chat sizes, body roles the message/body/caption styles, labels the
+ * label and tag styles.
  */
 val WaddleTypography = Typography(
     displayLarge = WaddleType.hero,
     displayMedium = WaddleType.display,
     displaySmall = WaddleType.headline,
     headlineLarge = WaddleType.headline,
-    headlineMedium = T.title.toStyle(size = 24.sp, weight = FontWeight.Bold).copy(letterSpacing = (-0.02).em),
-    headlineSmall = T.title.toStyle(size = 20.sp, weight = FontWeight.Bold),
+    headlineMedium = T.title.toStyle(size = F.xxl, weight = FontWeight(750)).copy(letterSpacing = (-0.015).em),
+    headlineSmall = WaddleType.title,
     titleLarge = WaddleType.title,
-    titleMedium = T.title.toStyle(size = 16.sp),
-    titleSmall = T.title.toStyle(size = F.body),
+    titleMedium = T.subtitle.toStyle(size = F.base),
+    titleSmall = WaddleType.control,
     bodyLarge = WaddleType.body,
-    bodyMedium = T.body.toStyle(size = F.body),
-    bodySmall = T.body.toStyle(size = F.caption).copy(lineHeight = (F.caption.value * CAPTION_LEADING).sp),
+    bodyMedium = WaddleType.bodySmall,
+    bodySmall = T.caption.toStyle(),
     labelLarge = WaddleType.control,
-    labelMedium = T.control.toStyle(size = F.caption),
-    labelSmall = T.control.toStyle(size = F.kicker),
+    labelMedium = T.label.toStyle(size = F.xs),
+    labelSmall = WaddleType.tag,
 )
 
-private const val CAPTION_LEADING = 1.35f
-
-/** Timestamps, counters and kickers: Huddle `time` (mono 12). */
+/** Timestamps and counters. */
 val MonoMeta: TextStyle = WaddleType.time

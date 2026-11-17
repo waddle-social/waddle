@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { css, cx } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, Video } from "lucide-vue-next";
@@ -50,40 +52,37 @@ const pillDisabled = computed(() => callBusy.value || busyWithOtherCall.value ||
 function joinExistingCall(): void {
   void startCall(roomCall.media.value);
 }
+
+const groupClass = css({ display: "flex", alignItems: "center", gap: "1" });
+const buttonClass = cx(iconbtn(), css({ _disabled: { opacity: 0.4, cursor: "not-allowed" } }));
 </script>
 
 <template>
   <div
     v-if="showStartControls || showActivePill"
-    class="flex items-center gap-1.5"
+    :class="groupClass"
   >
     <template v-if="showStartControls">
     <AppTooltip label="Voice call in this channel">
       <button
-        class="chat-icon-button chat-icon-button--md transition-all duration-200"
-        :class="callBusy
-          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        :class="buttonClass"
         type="button"
         aria-label="Start voice call in this channel"
         :disabled="callBusy"
         @click="startCall({ audio: true, video: false })"
       >
-        <Phone class="w-3.5 h-3.5" />
+        <Phone aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip label="Video call in this channel">
       <button
-        class="chat-icon-button chat-icon-button--md transition-all duration-200"
-        :class="callBusy
-          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        :class="buttonClass"
         type="button"
         aria-label="Start video call in this channel"
         :disabled="callBusy"
         @click="startCall({ audio: true, video: true })"
       >
-        <Video class="w-3.5 h-3.5" />
+        <Video aria-hidden="true" />
       </button>
     </AppTooltip>
     </template>

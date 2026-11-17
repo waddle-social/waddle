@@ -451,6 +451,35 @@ async fn complete_destroy_snapshot(
         debug!(room = %room_jid, "Skipped stale destroy completion after room lifecycle replacement");
         return Ok(ResponseBatch::default());
     }
+    // Each room lifecycle has its own private planning backing node. Remove
+    // the destroyed generation before acknowledging completion; an older
+    // in-flight request can only recreate an inaccessible old generation.
+    let namespace = waddle_xmpp_core::event_planning::NODE_EVENT_PLANNING;
+    let planning_nodes = if let Some(lifecycle) = snapshot.lifecycle {
+        vec![format!("{namespace}:{}", lifecycle.as_uuid())]
+    } else {
+        // Nondurable actors use a random occupancy incarnation. The local
+        // destroy barrier still prevents replacement while cleanup runs.
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .list_nodes(&room_jid)
+            .await
+            .map_err(|error| {
+                warn!(room = %room_jid, %error, "Failed to list destroyed event workspace nodes");
+            })?
+            .into_iter()
+            .filter(|node| {
+                node.strip_prefix(namespace)
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+            })
+            .collect()
+    };
+    for node in planning_nodes {
+        state.deps.protocol.pubsub_storage.delete_node(&room_jid, &node).await
+            .map_err(|error| { warn!(room = %room_jid, %error, "Failed to remove destroyed event workspace planning data"); })?;
+    }
     if let Some(lifecycle) = snapshot.lifecycle {
         let inline_presence_required = inline_session
             .is_some_and(|session| snapshot_recipients_include_session(&snapshot, session));
@@ -2856,5 +2885,50 @@ mod destroy_completion_tests {
         assert!(delivery_outcome_warrants_retry(
             &waddle_xmpp::registry::BroadcastOutcome::DroppedFull
         ));
+    }
+    #[tokio::test]
+    async fn completed_room_destroy_removes_private_event_planning_node() {
+        let state = create_test_websocket_state().await;
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let destroy_snapshot = snapshot(attempt);
+        let room = destroy_snapshot.room_jid.clone();
+        let node = format!(
+            "{}:{}",
+            waddle_xmpp_core::event_planning::NODE_EVENT_PLANNING,
+            uuid::Uuid::new_v4()
+        );
+        let planning = waddle_xmpp_core::event_planning::PlanningItem::new(
+            "event",
+            waddle_xmpp_core::event_planning::PlanningKind::Event,
+            "Private London trip",
+        );
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(
+                &room,
+                &node,
+                &waddle_xmpp::pubsub::PubSubItem {
+                    id: Some("event".into()),
+                    publisher: None,
+                    payload: Some(planning.to_element()),
+                },
+                None,
+                true,
+            )
+            .await
+            .expect("seed private planning state");
+        complete_destroy_snapshot(state.as_ref(), destroy_snapshot, None)
+            .await
+            .expect("complete destroy cleanup");
+        assert!(state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_node(&room, &node)
+            .await
+            .expect("node lookup")
+            .is_none());
     }
 }

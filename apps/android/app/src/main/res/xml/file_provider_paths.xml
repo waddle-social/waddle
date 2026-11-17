@@ -5,4 +5,5 @@
     <cache-path
         name="decrypted_attachments"
         path="decrypted_attachments/" />
+    <cache-path name="event_exports" path="event_exports/" />
 </paths>

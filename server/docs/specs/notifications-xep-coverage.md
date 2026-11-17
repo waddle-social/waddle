@@ -66,6 +66,14 @@ push_publish_jobs  (durable row, Push Service queue; provider
 | Scenario | XEPs exercised | Pinning test(s) |
 |---|---|---|
 | Offline DM produces a durable XEP-0357 push | XEP-0160 (offline storage), XEP-0313 (MAM), XEP-0359 (stable stanza id), XEP-0357 (`<publish>` payload + `urn:xmpp:push:summary` form + `message-count`) | `xep0357_offline_dm_emits_durable_summary_pubsub_publish_job` (`tests/xep0357_push_service_ws.rs`) — full WS-level pipeline; `xep0357_payload_uses_summary_form_and_waddle_context_only` (`notification_outbox.rs`) — payload shape |
+| Offline call invitation becomes class `call`, reason `offline_call` | XEP-0353 raw top-level `<propose>` with nonempty session id, an audio or video RTP description and no body; XEP-0334 store hint; XEP-0357 routing context | `direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call` (`tests/notification_outbox/calls.rs`); raw-recognizer tests in `crates/waddle-xmpp/tests/xep0353_jingle_message.rs` cover audio and audio+video descriptions |
+| Recognized bodyless call signals stay deliverable without generic alerts | XEP-0353 top-level `retract`, `proceed`, `reject`, `finish`, `ringing` or legacy `accept` with no top-level JMI `propose`; XEP-0160 pending delivery and MAM retained | `offline_call_signals_preserve_pending_delivery_without_generic_alerts` (`tests/notification_outbox/calls.rs`); predicate unit tests and `tests/xep0353_jingle_message.rs` |
+| Calls honor mute, DND and blocking while passing on-mention | XEP-0492 (`never`, `on-mention`), XEP-0191, Waddle DND | `calls_respect_never_dnd_blocking_and_pass_on_mention` (`tests/notification_outbox/calls.rs`) |
+| Latest call replaces queued call context; DM stays separate | XEP-0353 session identity; XEP-0357 coalescing and fixed receipt-based deadline | `latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_expiry` (`tests/notification_outbox/calls.rs`) |
+| Zero unread does not suppress an invitation | XEP-0353 call signals have no inbox projection | `unread_zero_does_not_suppress_call_job` (`tests/notification_outbox/publish.rs`); existing DM unread-zero test retains suppression |
+| Offline call reaches PushKit; ordinary DM reaches alert token | XEP-0353 + XEP-0357, canonical offline ingress and APNs routing | `offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_token` (`tests/xep0357_push_service_apns.rs`) |
+| Calls wake both local loops without timer waits; a busy loop retains the next wake | XEP-0353 + XEP-0357 durable commit/queue acceptance; process-local scheduling | `committed_call_wakes_both_notification_loops_with_stored_permit`, `committed_dm_does_not_wake_notification_outbox_loop`, `call_wake_during_provider_sweep_is_not_lost`, `call_wake_during_outbox_sweep_is_not_lost` (`tests/xep0357_push_service_apns.rs`), all with one-hour timers |
+| Expiry and class/node mismatches settle custody even after uncertainty | XEP-0357 durable acceptance, authoritative call disposition | `sqlite_call_policies_clear_uncertainty_and_settle_ancestry` / `postgres_call_policies_clear_uncertainty_and_settle_ancestry` (`tests/xep0357_call_dispositions.rs`), including configured topic without a provider |
 | Personal MUC mention (`occupantid` / JID) | XEP-0045 (MUC), XEP-0421 (occupant-id), XEP-0513 (`<mention/>` payload) | `xep0513_groupchat_personal_mentions_match_jid_or_occupant_id_and_respect_noping` (`groupchat_inbox.rs`); `explicit_mentions_route_and_replay_from_mam` (`tests/xep0513_mentions_ws.rs`) |
 | Channel/everyone mention with permission gate | XEP-0045 + XEP-0513 §"Multi-User Chats Permissions" (`mentions#channel = moderators` policy) | `xep0513_channel_mention_downgrades_to_notify_all_for_unpermitted_sender` (`groupchat_inbox.rs`); `xep0513_channel_permission_is_frozen_per_dispatch_across_all_recipients` (`crates/waddle-xmpp/src/protocol/room/inbox.rs`) — recipient-set sweep is frozen before per-recipient classification |
 | `<active/>` mention narrows to currently-active recipients | XEP-0513 §"Active" + XEP-0085 chat states (the activity projection's signal) | `xep0513_active_qualifier_distinguishes_channel_mention_classification` (`groupchat_inbox.rs`) — T0 classification; `t1_active_channel_mention_with_recent_activity_delivers` / `_with_stale_activity_suppresses_with_xep0513_active_miss` / `_with_no_activity_record_suppresses` (`notification_outbox.rs`) — T1 TTL filter |
@@ -105,6 +113,39 @@ Provider-side outcomes are the OTel family `waddle.push.provider{stage, provider
 | `provider_sent` | The provider accepted the notification. |
 | `provider_token_expired` | The provider reported the device gone (Web Push 404/410, APNs `Unregistered`, FCM `UNREGISTERED` / invalid token); the device is disabled. |
 | `provider_rejected` | The provider answered with an error (auth, sender mismatch, clock skew, payload too large, rate limit, 5xx, other rejection). |
+
+Call dispatch also has local dispositions before any provider send. These do
+not add provider-answer metric stages:
+
+| Disposition | Durable outcome |
+|---|---|
+| Class/node not applicable | `published`, uncertainty cleared, ancestry settled; diagnostic `not-applicable`. This acknowledges custody without claiming delivery. |
+| Non-APNs device on the VoIP node | Per-device `not-applicable` attempt; no retry or device disable. |
+| Call deadline passed, on the VoIP node | `failed`, uncertainty cleared, ancestry settled; diagnostic `call-expired`. Applicability is decided first, so an expired call on any other node ends not applicable. |
+
+Only the node with app ID equal to the configured bundle ID plus `.voip`
+accepts `call`; that node excludes other classes. Calls use APNs push type
+`voip`, priority 10, no collapse ID, and expiration equal to the original
+receipt time in Unix seconds plus 45. The `waddle` routing object contains
+caller bare JID, stanza ID, node and `call` (`sid`, `video`, `expires`), with
+no `aps`, display name or body. Alert payloads retain their existing privacy
+contract.
+
+Newly inserted `call` candidates wake the local outbox loop after durable commit.
+Confirmed call-job queue acceptance wakes the local Push Service loop. This
+avoids the default 5 s and 10 s timer waits. A woken outbox sweep drains only call
+candidates and due call jobs. Other classes, candidate recovery and pruning stay
+on the outbox timer. The Push Service loop drains due jobs of all classes on
+both wakes and timer ticks. Stored `Notify` permits retain wakes received during a
+sweep. Wakes are process-local. Another replica may claim the row first, and timers
+provide a fallback for recovery, retries and ambiguous queue acceptance.
+
+Bodyless messages with a top-level JMI `retract`, `proceed`, `reject`, `finish`,
+`ringing` or legacy `accept` and no top-level JMI `propose` use the existing
+suppressed result and produce no notification candidate or candidate activity preview.
+XEP-0160 pending storage, the `OfflineDelivery` marker and MAM storage are
+preserved. Messages with a body, with a proposal, or with only unknown JMI
+children follow normal notification policy.
 
 `provider` is one of `web_push`, `apns`, `fcm`. Network failures, timeouts and local preflight rejections carry no provider answer and are not counted here; they surface as `retry_scheduled` / `dead_lettered` on `waddle.push.pipeline`. The family is not zero-registered: a pod with no push registrations has nothing to report. The alert *"provider keeps returning errors"* is `rate(waddle.push.provider{stage="provider_rejected"})` per `provider`.
 

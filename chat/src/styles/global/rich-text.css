@@ -1,56 +1,27 @@
 @layer components {
-/* Collapsed accordion bar label — vertical text for thread ancestry strips */
-.accordion-bar-label {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  font-size: var(--text-caption);
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-height: 60%;
-  letter-spacing: 0;
-}
-
-/* Rich text rendered from XEP metadata and TipTap composer nodes. */
-/* `overflow-wrap: anywhere` (not `break-word`) is required so an unbreakable
-   token shrinks the box's min-content intrinsic size to a single character —
-   otherwise long URLs/slugs hold the message body wider than the pane and
-   produce a horizontal scrollbar on flex/grid layouts. The composer applies
-   the same rule on `.ProseMirror` (see ChatEditor.vue).
-   `width: 100%; max-width: 100%` pin the body to its container width even in
-   flex parents that use `align-items: flex-start` (see
-   `.chat-message-media-stack` in composer-pane.css). Without these the box
-   sizes to its widest *block* child — a long-line `<pre>` would push the
-   styled-body wider than the grid cell instead of scrolling internally. */
-.styled-body {
-  overflow-wrap: anywhere;
-  /* Combining marks can paint far beyond the line box without increasing
-     layout height. Bound that ink, allowing a little normal glyph overhang. */
-  overflow: clip;
-  overflow-clip-margin: 0.25em;
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-}
-:where(.styled-body, .chat-editor .ProseMirror) p {
+  :where(.chat-editor .ProseMirror) p {
   margin: 0;
-}
-:where(.styled-body, .chat-editor .ProseMirror) p + p {
-  margin-top: 0.5rem;
-}
-:where(.styled-body, .chat-editor .ProseMirror) strong {
+  }
+
+  :where(.chat-editor .ProseMirror) p + p {
+  margin-top: var(--space-xs);
+  }
+
+  :where(.chat-editor .ProseMirror) strong {
   font-weight: 600;
-}
-:where(.styled-body, .chat-editor .ProseMirror) em {
+  }
+
+  :where(.chat-editor .ProseMirror) em {
   font-style: italic;
-}
-:where(.styled-body, .chat-editor .ProseMirror) del,
-:where(.styled-body, .chat-editor .ProseMirror) s {
+  }
+
+  :where(.chat-editor .ProseMirror) del,
+:where(.chat-editor .ProseMirror) s {
   text-decoration: line-through;
   opacity: 0.48;
-}
-:where(.styled-body, .chat-editor .ProseMirror) code {
+  }
+
+  :where(.chat-editor .ProseMirror) code {
   font-family: var(--font-code);
   font-size: 0.8em;
   padding: 0.15em 0.4em;
@@ -58,8 +29,9 @@
   background: var(--rich-code-bg);
   border: 1px solid var(--rich-code-border);
   border-radius: var(--radius-xs);
-}
-:where(.styled-body, .chat-editor .ProseMirror) pre {
+  }
+
+  :where(.chat-editor .ProseMirror) pre {
   font-family: var(--font-code);
   font-size: 0.8em;
   padding: 0.85em 1.1em;
@@ -67,73 +39,68 @@
   background: var(--rich-code-bg);
   border: 1px solid var(--rich-code-border);
   border-radius: var(--radius-md);
-  /* `max-width: 100%` pins the pre to its container so very-long lines
-     scroll inside the pre instead of pushing the styled-body wider —
-     a sibling-element defense matching the one on `.styled-body`. */
+  
   max-width: 100%;
   overflow-x: auto;
   margin: 0.5em 0;
-}
-:where(.styled-body, .chat-editor .ProseMirror) pre code {
+  }
+
+  :where(.chat-editor .ProseMirror) pre code {
   padding: 0;
   background: transparent;
   border: 0;
   border-radius: 0;
   color: inherit;
   font-size: inherit;
-}
-.styled-body pre.shiki,
-.styled-body pre.shiki span {
-  color: light-dark(var(--shiki-light), var(--shiki-dark)) !important;
-  background-color: transparent !important;
-}
-.styled-body pre.shiki {
-  background-color: light-dark(var(--shiki-light-bg), var(--shiki-dark-bg)) !important;
-}
-:where(.styled-body, .chat-editor .ProseMirror) blockquote {
+  }
+
+  :where(.chat-editor .ProseMirror) blockquote {
   border: 1px solid var(--rich-quote-border);
   border-radius: var(--radius-md);
   color: var(--rich-quote-foreground);
   padding: 0.65em 0.85em;
   margin: 0.5em 0;
   background: color-mix(in oklab, var(--rich-quote-border) 8%, transparent);
-}
-:where(.styled-body, .chat-editor .ProseMirror) ul,
-:where(.styled-body, .chat-editor .ProseMirror) ol {
+  }
+
+  :where(.chat-editor .ProseMirror) ul,
+:where(.chat-editor .ProseMirror) ol {
   margin: 0.35em 0;
   padding-left: 1.4em;
-}
-:where(.styled-body, .chat-editor .ProseMirror) ul {
+  }
+
+  :where(.chat-editor .ProseMirror) ul {
   list-style-type: disc;
-}
-:where(.styled-body, .chat-editor .ProseMirror) ol {
+  }
+
+  :where(.chat-editor .ProseMirror) ol {
   list-style-type: decimal;
-}
-:where(.styled-body, .chat-editor .ProseMirror) li {
+  }
+
+  :where(.chat-editor .ProseMirror) li {
   margin: 0.15em 0;
-}
-:where(.styled-body, .chat-editor .ProseMirror) li > p {
+  }
+
+  :where(.chat-editor .ProseMirror) li > p {
   margin: 0;
-}
-/* Links in message bodies + editor — the at-rest treatment is no
- * underline (just the --rich-link colour), with the underline
- * fading in on hover. Previously the underline appeared abruptly
- * via `text-decoration: none` → `underline`; using a transparent
- * text-decoration-color at rest lets the browser animate the
- * underline colour to current on hover for a smoother reveal. */
-:where(.styled-body, .chat-editor .ProseMirror) a {
+  }
+
+  :where(.chat-editor .ProseMirror) a {
   color: var(--rich-link);
   text-decoration: underline transparent;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
   transition: text-decoration-color 0.18s ease, color 0.18s ease;
-}
-:where(.styled-body, .chat-editor .ProseMirror) a:hover {
+  }
+
+  :where(.chat-editor .ProseMirror) a:hover {
   color: color-mix(in oklab, var(--rich-link) 80%, var(--foreground));
   text-decoration-color: currentColor;
-}
-.rich-mention {
+  }
+
+  .rich-mention {
   color: var(--primary);
   font-weight: 600;
-}
+  }
+
 }

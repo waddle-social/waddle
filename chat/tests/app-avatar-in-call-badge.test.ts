@@ -21,8 +21,8 @@ describe("AppAvatar in-call badge", () => {
   test("the badge layers on top of the presence dot, not replacing it", async () => {
     const html = await render({ name: "Alice", presence: "online", inCall: true });
     // Overlay, never replacement (ADR-010): the Show dot must still render.
-    // The dot is the `avatar` recipe's presence slot keyed by `data-show`.
-    expect(html).toContain('data-show="available"');
+    // The dot is the `presence` recipe keyed by `data-presence`.
+    expect(html).toContain('data-presence="available"');
     expect(html).toContain("app-avatar-call-badge");
   });
 });

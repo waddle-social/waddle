@@ -29,11 +29,11 @@ struct ConversationRowActions: ViewModifier {
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
                 markReadButton
-                    .tint(.blue)
+                    .tint(Theme.Colors.info)
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 muteButton
-                    .tint(.indigo)
+                    .tint(Theme.Colors.fgSoft)
             }
     }
 

@@ -12,6 +12,7 @@ import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.text.AnnotatedString
@@ -82,7 +83,8 @@ class MessageComposerJvmTest {
         }
 
         field.performTextInput("hi ")
-        compose.onNodeWithContentDescription("Mention someone").performClick()
+        compose.onNodeWithContentDescription("More message options").performClick()
+        compose.onNodeWithText("Mention someone").performClick()
         field.performTextInput("al")
 
         field.assertTextEquals("hi @al")

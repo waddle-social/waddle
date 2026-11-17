@@ -248,7 +248,9 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
 
     let (conversation_kind, is_mention) = match candidate.class() {
         NotificationClass::DirectMessage => (ConversationKind::Direct, false),
-        NotificationClass::DirectMessageMention => (ConversationKind::Direct, true),
+        NotificationClass::DirectMessageMention | NotificationClass::Call => {
+            (ConversationKind::Direct, true)
+        }
         NotificationClass::PersonalMention
         | NotificationClass::ChannelMention
         | NotificationClass::ActiveChannelMention => {

@@ -697,10 +697,14 @@ impl MigrationRunner {
 /// snapshot while waiting can prevent concurrent index maintenance finishing.
 async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, DatabaseError> {
     let deadline = tokio::time::Instant::now() + MIGRATION_LOCK_WAIT;
+    // The last conflict an attempt observed. Once one is seen, running out of
+    // time reports it: the deadline can land inside a later attempt's
+    // statement, and that is still contention, not an unexplained timeout.
+    let mut observed: Option<LockConflict> = None;
     loop {
         let mut tx = tokio::time::timeout_at(deadline, db.begin_discard_postgres_on_drop())
             .await
-            .map_err(|_| DatabaseError::MigrationLockTimeout)??;
+            .map_err(|_| timed_out(observed))??;
         // This utility statement takes no data snapshot. READ COMMITTED makes
         // the post-ledger-lock read observe a competing runner's commit.
         let isolation = tokio::time::timeout_at(
@@ -716,19 +720,16 @@ async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, Databas
             }
             Err(_) => {
                 rollback_migration_attempt(tx).await?;
-                return Err(DatabaseError::MigrationLockTimeout);
+                return Err(timed_out(observed));
             }
         }
         let mut contended = None;
-        for (key, contention_error) in [
+        for (key, conflict) in [
             (
                 CATALOG_MUTATION_ADVISORY_LOCK_KEY,
-                DatabaseError::MigrationCatalogFenceContended,
+                LockConflict::CatalogFence,
             ),
-            (
-                MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
-                DatabaseError::MigrationLedgerLockContended,
-            ),
+            (MIGRATION_LEDGER_ADVISORY_LOCK_KEY, LockConflict::Ledger),
         ] {
             let connection = tx.postgres_connection().ok_or_else(|| {
                 DatabaseError::QueryFailed("migration locks require PostgreSQL".to_owned())
@@ -743,7 +744,7 @@ async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, Databas
             match acquired {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => {
-                    contended = Some(contention_error);
+                    contended = Some(conflict);
                     break;
                 }
                 Ok(Err(error)) => {
@@ -752,7 +753,7 @@ async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, Databas
                 }
                 Err(_) => {
                     rollback_migration_attempt(tx).await?;
-                    return Err(DatabaseError::MigrationLockTimeout);
+                    return Err(timed_out(observed));
                 }
             }
         }
@@ -762,19 +763,42 @@ async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, Databas
                 rollback_migration_attempt(tx).await?;
                 return Err(DatabaseError::MigrationLockTimeout);
             }
-            Some(error) => {
+            Some(conflict) => {
+                observed = Some(conflict);
                 rollback_migration_attempt(tx).await?;
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    return Err(error);
+                    return Err(conflict.into());
                 }
                 tokio::time::sleep(MIGRATION_LOCK_RETRY.min(remaining)).await;
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(error);
+                    return Err(conflict.into());
                 }
             }
         }
     }
+}
+
+/// Which migration lock an acquisition attempt found held.
+#[derive(Clone, Copy)]
+enum LockConflict {
+    CatalogFence,
+    Ledger,
+}
+
+impl From<LockConflict> for DatabaseError {
+    fn from(conflict: LockConflict) -> Self {
+        match conflict {
+            LockConflict::CatalogFence => Self::MigrationCatalogFenceContended,
+            LockConflict::Ledger => Self::MigrationLedgerLockContended,
+        }
+    }
+}
+
+/// The deadline's error: the observed conflict, or a plain timeout when no
+/// attempt got far enough to see one.
+fn timed_out(observed: Option<LockConflict>) -> DatabaseError {
+    observed.map_or(DatabaseError::MigrationLockTimeout, Into::into)
 }
 
 async fn rollback_migration_attempt(tx: Transaction<'_>) -> Result<(), DatabaseError> {
@@ -791,4 +815,25 @@ struct LedgerRow {
     version: i64,
     description: String,
     checksum: Option<String>,
+}
+
+#[cfg(test)]
+mod lock_conflict_tests {
+    use super::{timed_out, DatabaseError, LockConflict};
+
+    #[test]
+    fn a_deadline_after_an_observed_conflict_reports_that_conflict() {
+        assert!(matches!(
+            timed_out(Some(LockConflict::Ledger)),
+            DatabaseError::MigrationLedgerLockContended
+        ));
+        assert!(matches!(
+            timed_out(Some(LockConflict::CatalogFence)),
+            DatabaseError::MigrationCatalogFenceContended
+        ));
+        assert!(matches!(
+            timed_out(None),
+            DatabaseError::MigrationLockTimeout
+        ));
+    }
 }

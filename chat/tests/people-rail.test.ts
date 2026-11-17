@@ -5,7 +5,6 @@ import {
   buildPeopleRail,
   filterPeople,
   isAroundPresence,
-  presenceFromShow,
   splitKnownPeople,
   usePeopleRail,
   type PeopleRailSources,
@@ -13,6 +12,7 @@ import {
 import type { DmConversation, RosterContact } from "../src/lib/xmpp/types";
 import type { MemberSummary, RoomBotSummary } from "../src/lib/chat-types";
 import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
+import { presenceFromShow } from "../src/presence/live-presence";
 import { renderVueComponent } from "./helpers/render-vue-sfc";
 
 const ROOM = "general@conference.example.com";
@@ -184,6 +184,45 @@ describe("presenceFromShow / filterPeople", () => {
     expect(filterPeople(groups.around, "BUILD").map((p) => p.jid)).toEqual(["bob@example.com"]);
     expect(filterPeople(groups.around, "carol@").map((p) => p.jid)).toEqual(["carol@example.com"]);
     expect(filterPeople(groups.around, "  ").length).toBe(2);
+  });
+});
+
+describe("one presence per person across the rail, Home and Members", () => {
+  // A room only hears the Show a client joined with, so it says "online" for a
+  // contact who has since gone away; the person's live presence wins.
+  const live = { "bob@example.com": "away", "carol@example.com": "available" } as const;
+
+  test("the rail's room section and around/away split read live presence", () => {
+    const groups = buildPeopleRail(sources({
+      activeRoomJid: ROOM,
+      roomPresence: { bob: "online" },
+      authorJidByNick: { bob: "bob@example.com" },
+      contacts: [contact("carol@example.com", "offline")],
+      livePresence: live,
+    }));
+
+    expect(groups.room.map((p) => [p.jid, p.presence, p.status])).toEqual([["bob@example.com", "away", "away"]]);
+    expect(groups.around.map((p) => p.jid)).toEqual(["carol@example.com"]);
+  });
+
+  test("Home's known people and the Members cards read live presence", () => {
+    const known = splitKnownPeople([contact("carol@example.com", "offline")], [], live);
+    expect(known.around.map((p) => [p.jid, p.presenceShow])).toEqual([["carol@example.com", "available"]]);
+
+    const cards = buildMemberCards({
+      roomActive: true,
+      members: [member("bob@example.com")],
+      roomBots: [],
+      roomPresence: { bob: "online" },
+      authorJidByNick: { bob: "bob@example.com" },
+      contacts: [],
+      conversations: [],
+      huddleJids: new Set(),
+      speakingJids: new Set(),
+      peerInCall: () => false,
+      livePresence: live,
+    });
+    expect(cards.map((c) => [c.jid, c.presence])).toEqual([["bob@example.com", "away"]]);
   });
 });
 
@@ -391,12 +430,12 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
     expect(botHtml).toContain("helper");
     expect(botHtml).not.toContain("<button");
     expect(botHtml).not.toContain("Message");
-    expect(botHtml).not.toContain("data-show");
+    expect(botHtml).not.toContain("data-presence");
 
     // The same markup for a person is a Message button with a dot.
     const personHtml = await html(groups.room, false);
     expect(personHtml).toContain('aria-label="Message bob, available"');
-    expect(personHtml).toContain('data-show="available"');
+    expect(personHtml).toContain('data-presence="available"');
   });
 
   test("an avatar never shows a status for a known bot, even when handed one", async () => {
@@ -408,8 +447,8 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
         import.meta.url,
       );
 
-    expect(await avatar(`${BOT}/bot`)).not.toContain("data-show");
-    expect(await avatar("bob@example.com")).toContain('data-show="available"');
+    expect(await avatar(`${BOT}/bot`)).not.toContain("data-presence");
+    expect(await avatar("bob@example.com")).toContain('data-presence="available"');
   });
 });
 

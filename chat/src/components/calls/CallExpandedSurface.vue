@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
+import { PictureInPicture2 } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { btn } from "styled-system/recipes";
 import {
   $callState,
   $lastCallError,
@@ -259,7 +262,7 @@ const subline = computed(() => {
       ? "Waiting for others to join…"
       : `${others} other${others === 1 ? "" : "s"} in call`;
   }
-  return state.value.media.video ? "Video call" : "Audio call";
+  return state.value.media.video ? "Video call" : "Voice call";
 });
 
 const callThreadOverride = computed(() => {
@@ -427,16 +430,26 @@ async function toggleExpandedSurface(): Promise<void> {
   $callUiMode.set(nextMode);
 }
 
-function enterImmersive(): void {
+// Fullscreen is one step: the immersive takeover with browser fullscreen on
+// top. requestFullscreen rejects when the gesture was consumed, denied or
+// unsupported (iPhone Safari); the takeover still stands and fills the window.
+function enterFullscreen(): void {
   $callUiMode.set("immersive");
+  if (typeof document === "undefined" || document.fullscreenElement) return;
+  surfaceRef.value?.requestFullscreen?.().catch(() => {});
+}
+
+function toggleFullscreen(): void {
+  if (isImmersive.value) void toggleExpandedSurface();
+  else enterFullscreen();
 }
 
 // #1034: keyboard shortcuts while the expanded/immersive surface is focused.
 // Gated on `isOpen` because the split surface stays mounted alongside this one
-// — without the gate every shortcut would fire twice. `F` enters immersive and
-// requests native fullscreen (idempotent: it never toggles fullscreen back
-// off). `Esc` is intentionally NOT mapped here: the bespoke `onKeydown` below
-// already owns Escape (menu/settings/dock/PiP/collapse precedence).
+// — without the gate every shortcut would fire twice. `F` enters fullscreen
+// (idempotent: it never toggles fullscreen back off). `Esc` is intentionally
+// NOT mapped here: the bespoke `onKeydown` below already owns Escape
+// (menu/settings/dock/PiP/collapse precedence).
 useCallShortcuts(
   {
     "toggle-mic": () => void toggleMic(),
@@ -449,12 +462,7 @@ useCallShortcuts(
       void toggleScreenShare();
     },
     "toggle-raise-hand": () => void onToggleRaisedHand(),
-    "enter-immersive": () => {
-      enterImmersive();
-      // requestFullscreen rejects if the gesture was consumed or denied;
-      // swallow it so the immersive switch still stands.
-      if (!nativeFullscreenActive.value) void toggleNativeFullscreen().catch(() => {});
-    },
+    "enter-immersive": enterFullscreen,
   },
   () => isOpen.value,
 );
@@ -490,16 +498,6 @@ function revealImmersiveChrome(): void {
   if (typeof window === "undefined" || !isImmersive.value) return;
   clearChromeIdleTimer();
   scheduleImmersiveChromeHide();
-}
-
-async function toggleNativeFullscreen(): Promise<void> {
-  if (typeof document === "undefined") return;
-  if (document.fullscreenElement === surfaceRef.value) {
-    await document.exitFullscreen();
-    return;
-  }
-  if (document.fullscreenElement) return;
-  await surfaceRef.value?.requestFullscreen?.();
 }
 
 function onFullscreenChange(): void {
@@ -721,17 +719,91 @@ onBeforeUnmount(() => {
     document.removeEventListener("fullscreenchange", onFullscreenChange);
   }
 });
+
+// HuddleStage (expanded / immersive): the dark stage fills the chat pane
+// (immersive: the window). `call-expanded` stays as the marker the call
+// shortcuts scope to.
+const rootClass = css({
+  position: "absolute",
+  inset: 0,
+  zIndex: 30,
+  display: "flex",
+  flexDirection: "column",
+  bgColor: "sea.deep",
+  color: "fg",
+  fontFamily: "body",
+});
+const immersiveClass = css({ position: "fixed", zIndex: 80 });
+const chromeClass = css({
+  transition: "opacity 180ms ease, transform 180ms ease, visibility 180ms ease",
+  _motionReduce: { transition: "opacity 180ms ease, visibility 180ms ease" },
+});
+const chromeOverlayClass = css({ position: "absolute", insetInline: 0, zIndex: 3 });
+const headerOverlayClass = css({ insetBlockStart: 0 });
+const footerOverlayClass = css({ insetBlockEnd: 0 });
+const chromeHiddenClass = css({ opacity: 0, pointerEvents: "none", visibility: "hidden" });
+const headerHiddenClass = css({ transform: "translateY(-8px)" });
+const footerHiddenClass = css({ transform: "translateY(8px)" });
+const errorClass = css({
+  margin: "0 {spacing.4} {spacing.2.5}",
+  padding: "{spacing.2.5} {spacing.3}",
+  borderRadius: "12px",
+  bg: "color-mix(in srgb, {colors.danger} 14%, transparent)",
+  border: "1px solid color-mix(in srgb, {colors.danger} 40%, transparent)",
+  color: "danger.text",
+  fontSize: "13px",
+});
+const mainClass = css({ flex: "1 1 0%", minHeight: 0, display: "flex", gap: "3", overflow: "hidden", "@media (max-width: 760px)": { flexDirection: "column" } });
+const mainImmersiveClass = css({ position: "absolute", inset: 0, zIndex: 0 });
+const gridClass = css({ flex: "1 1 0%", minWidth: 0, minHeight: 0, position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" });
+const reactionsClass = css({ pointerEvents: "none", position: "absolute", inset: 0, zIndex: 2, overflow: "hidden" });
+const reactionClass = css({
+  position: "absolute",
+  left: "calc(14% + var(--reaction-x, 0%))",
+  bottom: "16%",
+  fontSize: "36px",
+  lineHeight: 1,
+  filter: "drop-shadow(0 4px 8px rgb(0 0 0 / 0.28))",
+  animation: "call-reaction-float 2.4s ease-out forwards",
+  _motionReduce: { animation: "wd-fade 2.4s ease-out reverse forwards" },
+});
+const pipClass = css({
+  flex: 1,
+  margin: "0 {spacing.4} {spacing.3}",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "3",
+  padding: "4",
+  textAlign: "center",
+  borderRadius: "12px",
+  border: "1px dashed {colors.border}",
+  "& > svg": { width: "40px", height: "40px", color: "fg.muted", strokeWidth: 1.5 },
+  "& b": { font: "700 17px/1.3 {fonts.display}" },
+  "& span": { color: "fg.muted", fontSize: "14px" },
+});
+const pipButtonClass = btn({ variant: "primary" });
+const dockClass = css({ display: "contents" });
+const dockImmersiveClass = css({
+  position: "absolute",
+  insetBlock: "72px 80px",
+  insetInlineEnd: "16px",
+  zIndex: 2,
+  display: "flex",
+  maxWidth: "min(384px, calc(100vw - 32px))",
+  "@media (max-width: 760px)": { insetBlock: "auto 80px", insetInline: "12px", maxWidth: "none" },
+});
+const footerClass = css({ display: "flex", alignItems: "center", justifyContent: "center", padding: "{spacing.3} {spacing.4} {spacing.4}", _narrow: { padding: "{spacing.3} {spacing.3} {spacing.5}" } });
+const parkingClass = css({ display: "none" });
 </script>
 
 <template>
   <div
     v-if="isOpen"
     ref="surfaceRef"
-    class="call-expanded"
-    :class="{
-      'call-expanded--immersive': isImmersive,
-      'call-expanded--chrome-hidden': isImmersive && !chromeVisible,
-    }"
+    :class="['call-expanded', rootClass, isImmersive && ['call-expanded--immersive', immersiveClass]]"
+    data-theme="night"
     role="region"
     :aria-label="isImmersive ? 'Active call (immersive)' : 'Active call (expanded)'"
     tabindex="-1"
@@ -740,13 +812,18 @@ onBeforeUnmount(() => {
     @pointermove="revealImmersiveChrome"
   >
     <CallStageHeader
-      class="call-expanded__chrome call-expanded__header"
+      :class="[
+        'call-expanded__chrome',
+        chromeClass,
+        isImmersive && [chromeOverlayClass, headerOverlayClass],
+        isImmersive && !chromeVisible && [chromeHiddenClass, headerHiddenClass],
+      ]"
       :title="peerLabel"
       :subline="subline"
     />
     <div
       v-if="lastError"
-      class="call-expanded__error"
+      :class="errorClass"
       role="alert"
     >
       {{ lastError }}
@@ -756,15 +833,18 @@ onBeforeUnmount(() => {
       v-if="selfSharePresentation"
       :presentation="selfSharePresentation"
     />
-    <main class="call-expanded__main">
-      <div class="call-expanded__grid">
+    <main :class="[mainClass, isImmersive && mainImmersiveClass]">
+      <div :class="gridClass">
         <div
           v-if="pictureInPictureMode === 'document'"
-          class="call-expanded__pip-placeholder"
+          :class="pipClass"
         >
+          <PictureInPicture2 aria-hidden="true" />
+          <b>The {{ isMucCall ? "huddle" : "call" }} is in Picture-in-Picture</b>
+          <span>Keep chatting while it floats above your other windows.</span>
           <button
             type="button"
-            class="chat-action-button chat-action-button--secondary"
+            :class="pipButtonClass"
             @click="togglePictureInPicture"
           >
             Return to call
@@ -783,11 +863,11 @@ onBeforeUnmount(() => {
           :muted-keys="mutedIdentityKeys"
           @open-participants="openCallParticipants"
         />
-        <div class="call-expanded__reactions" aria-live="polite" aria-atomic="false">
+        <div :class="reactionsClass" aria-live="polite" aria-atomic="false">
           <span
             v-for="reaction in activeCallReactions"
             :key="reaction.id"
-            class="call-expanded__reaction"
+            :class="reactionClass"
             :style="{ '--reaction-x': `${Math.abs(hashInCallReactionId(reaction.id)) % 72}%` }"
           >
             {{ reaction.emoji }}
@@ -796,7 +876,7 @@ onBeforeUnmount(() => {
       </div>
       <div
         v-if="dockOpen"
-        class="call-expanded__dock-overlay"
+        :class="['call-expanded__dock-overlay', isImmersive ? dockImmersiveClass : dockClass]"
       >
         <CallDock
           :rows="rosterRows"
@@ -827,7 +907,15 @@ onBeforeUnmount(() => {
         </CallDock>
       </div>
     </main>
-    <footer class="call-expanded__chrome call-expanded__footer">
+    <footer
+      :class="[
+        'call-expanded__chrome',
+        chromeClass,
+        footerClass,
+        isImmersive && [chromeOverlayClass, footerOverlayClass],
+        isImmersive && !chromeVisible && [chromeHiddenClass, footerHiddenClass],
+      ]"
+    >
       <CallControls
         :mic-enabled="micEnabled"
         :cam-enabled="camEnabled"
@@ -835,7 +923,6 @@ onBeforeUnmount(() => {
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
         :is-immersive="isImmersive"
-        :is-native-fullscreen="nativeFullscreenActive"
         :participants-open="participantsOpen"
         :participant-count="participantCount"
         :chat-open="chatOpen"
@@ -850,8 +937,7 @@ onBeforeUnmount(() => {
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="toggleExpandedSurface"
-        @toggle-immersive="enterImmersive"
-        @toggle-native-fullscreen="toggleNativeFullscreen"
+        @toggle-fullscreen="toggleFullscreen"
         @toggle-participants="toggleCallParticipants"
         @toggle-chat="toggleCallChat"
         @open-settings="settingsOpen = true"
@@ -864,7 +950,7 @@ onBeforeUnmount(() => {
       />
     </footer>
     <CallSettingsDialog v-model:open="settingsOpen" />
-    <div ref="pictureInPictureParkingRef" class="call-expanded__pip-parking" aria-hidden="true">
+    <div ref="pictureInPictureParkingRef" :class="parkingClass" aria-hidden="true">
       <div ref="pictureInPicturePanelRef">
         <CallPictureInPicturePanel
           :tile="pictureInPictureTile"
@@ -880,171 +966,12 @@ onBeforeUnmount(() => {
   </div>
 </template>
 
-<style scoped>
-.call-expanded {
-  /* Absolutely positioned within ContentArea's `position: relative`
-   * root, so the call paints over the chat without escaping the app
-   * shell. Sidebars, channel list, and thread panel stay visible. */
-  position: absolute;
-  inset: 0;
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  background: var(--background);
-}
-
-/* The immersive stage is a live surface: it keeps the night ground and
- * ink in daylight too. Controls inside it keep their own tokens. */
-.call-expanded--immersive {
-  position: fixed;
-  z-index: 80;
-  background: var(--night-ground);
-  color: var(--night-foreground);
-}
-
-.call-expanded--immersive .call-expanded__main {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-}
-
-.call-expanded--immersive .call-expanded__header,
-.call-expanded--immersive .call-expanded__footer {
-  position: absolute;
-  inset-inline: 0;
-  z-index: 3;
-}
-
-.call-expanded--immersive .call-expanded__header {
-  inset-block-start: 0;
-}
-
-.call-expanded--immersive .call-expanded__footer {
-  inset-block-end: 0;
-}
-
-.call-expanded__chrome {
-  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease;
-}
-
-.call-expanded--chrome-hidden .call-expanded__chrome {
-  opacity: 0;
-  pointer-events: none;
-  visibility: hidden;
-}
-
-.call-expanded--chrome-hidden .call-expanded__header {
-  transform: translateY(-0.5rem);
-}
-
-.call-expanded--chrome-hidden .call-expanded__footer {
-  transform: translateY(0.5rem);
-}
-
-.call-expanded__error {
-  border-bottom: 1px solid color-mix(in oklab, var(--destructive) 30%, transparent);
-  background: color-mix(in oklab, var(--destructive) 10%, transparent);
-  padding: 0.5rem 1rem;
-  color: var(--destructive);
-}
-
-.call-expanded__main {
-  flex: 1 1 0%;
-  min-height: 0;
-  display: flex;
-  overflow: hidden;
-}
-
-.call-expanded__grid {
-  flex: 1 1 0%;
-  min-width: 0;
-  min-height: 0;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.call-expanded__reactions {
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  overflow: hidden;
-}
-
-.call-expanded__reaction {
-  position: absolute;
-  left: calc(14% + var(--reaction-x, 0%));
-  bottom: 16%;
-  font-size: 2.25rem;
-  line-height: 1;
-  filter: drop-shadow(0 0.25rem 0.5rem rgb(0 0 0 / 0.28));
-  animation: call-expanded-reaction-float 2.4s ease-out forwards;
-}
-
-@keyframes call-expanded-reaction-float {
-  0% {
-    opacity: 0;
-    transform: translate3d(0, 0.75rem, 0) scale(0.82);
-  }
-  12% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: translate3d(0, -8rem, 0) scale(1.18);
-  }
-}
-
-.call-expanded__pip-placeholder {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
-  background: var(--muted);
-  color: var(--muted-foreground);
-}
-
-.call-expanded__dock-overlay {
-  display: contents;
-}
-
-.call-expanded--immersive .call-expanded__dock-overlay {
-  position: absolute;
-  inset-block: 4.5rem 5rem;
-  inset-inline-end: 1rem;
-  z-index: 2;
-  display: flex;
-  max-width: min(24rem, calc(100vw - 2rem));
-}
-
-.call-expanded__footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-top: 1px solid var(--border);
-  padding: 0.75rem 1rem;
-}
-
-.call-expanded__pip-parking {
-  display: none;
-}
-
-/* On narrow viewports the dock becomes a full-width bottom panel (see
- * CallDock's own ≤760px rule). Match that here by stacking the stage above
- * it, so the grid stays visible instead of being squeezed beside a
- * 100%-wide dock in a row layout. */
-@media (max-width: 760px) {
-  .call-expanded__main {
-    flex-direction: column;
-  }
-
-  .call-expanded--immersive .call-expanded__dock-overlay {
-    inset-block: auto 5rem;
-    inset-inline: 0.75rem;
-    max-width: none;
-  }
+<style>
+/* Reaction float: Panda has no keyframe for it, so it lives here (unscoped,
+   so the Panda class can name it). */
+@keyframes call-reaction-float {
+  0% { opacity: 0; transform: translate3d(0, 0.75rem, 0) scale(0.82); }
+  12% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  100% { opacity: 0; transform: translate3d(0, -8rem, 0) scale(1.18); }
 }
 </style>

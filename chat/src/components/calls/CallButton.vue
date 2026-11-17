@@ -3,6 +3,8 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, Video } from "lucide-vue-next";
 import { $callState } from "@/lib/calls/call-store";
+import { css, cx } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { dmCallActivityAction } from "@/lib/calls/call-activity-dock";
 import {
@@ -127,97 +129,82 @@ async function handlePeerCallActivity(): Promise<void> {
       return;
   }
 }
+
+// Start Voice / Video in a DM header (Huddle-DM board): plain icon buttons.
+// While the peer has a call going, one live pill offers Answer / Reconnect.
+const groupClass = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1",
+  "&[data-activity=true]": { padding: "0.5", borderRadius: "pill", bg: "live.subtle", border: "1px solid {colors.live}" },
+});
+const hintClass = css({
+  maxWidth: "8rem",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  paddingInline: "{spacing.2} {spacing.0.5}",
+  font: "600 13px/1 {fonts.body}",
+  color: "live.text",
+  _narrow: { display: "none" },
+});
+const buttonClass = cx(iconbtn(), css({ _disabled: { opacity: 0.4, cursor: "not-allowed" } }));
+const activityClass = cx(iconbtn({ size: "sm" }), css({
+  color: "live.text",
+  _hover: { bg: "live", color: "live.fg" },
+  _disabled: { opacity: 0.4, cursor: "not-allowed", _hover: { bg: "transparent", color: "live.text" } },
+}));
 </script>
 
 <template>
   <div
     v-if="showPeerCallActivity || showStartControls"
-    class="call-button-group"
-    :class="{ 'call-button-group--activity': showPeerCallActivity }"
+    :class="groupClass"
+    :data-activity="showPeerCallActivity"
   >
     <span
       v-if="showPeerCallActivity"
-      class="call-button-group__hint type-meta"
+      :class="hintClass"
       aria-hidden="true"
     >
       {{ activityBannerLabel }}
     </span>
     <AppTooltip v-if="showPeerCallActivity" :label="activityButtonLabel">
       <button
-        class="chat-icon-button chat-icon-button--md transition-all duration-200"
-        :class="activityButtonDisabled
-          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-          : 'text-success-foreground hover:bg-success/10 hover:text-success-foreground'"
+        :class="activityClass"
         type="button"
         :aria-label="activityButtonLabel"
         :disabled="activityButtonDisabled"
         @click="handlePeerCallActivity"
       >
-        <PhoneIncoming v-if="peerActivityAction === 'answer'" class="w-3.5 h-3.5" />
-        <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
-        <Phone v-else class="w-3.5 h-3.5" />
+        <PhoneIncoming v-if="peerActivityAction === 'answer'" aria-hidden="true" />
+        <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" aria-hidden="true" />
+        <Phone v-else aria-hidden="true" />
       </button>
     </AppTooltip>
     <template v-else-if="showStartControls">
     <AppTooltip :label="voiceLabel">
       <button
-        class="chat-icon-button chat-icon-button--md transition-all duration-200"
-        :class="inCall
-          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        :class="buttonClass"
         type="button"
         :aria-label="voiceLabel"
         :disabled="inCall"
         @click="startCall({ audio: true, video: false })"
       >
-        <Phone class="w-3.5 h-3.5" />
+        <Phone aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip :label="videoLabel">
       <button
-        class="chat-icon-button chat-icon-button--md transition-all duration-200"
-        :class="inCall
-          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        :class="buttonClass"
         type="button"
         :aria-label="videoLabel"
         :disabled="inCall"
         @click="startCall({ audio: true, video: true })"
       >
-        <Video class="w-3.5 h-3.5" />
+        <Video aria-hidden="true" />
       </button>
     </AppTooltip>
     </template>
   </div>
 </template>
-
-<style scoped>
-.call-button-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-}
-
-.call-button-group--activity {
-  gap: 0.25rem;
-  border: 1px solid color-mix(in oklab, var(--success) 28%, transparent);
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--success) 10%, transparent);
-  padding: 0.125rem;
-}
-
-.call-button-group__hint {
-  max-width: 8rem;
-  overflow: hidden;
-  padding-inline: 0.375rem 0.125rem;
-  color: var(--success-foreground);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@media (max-width: 48rem) {
-  .call-button-group__hint {
-    display: none;
-  }
-}
-</style>

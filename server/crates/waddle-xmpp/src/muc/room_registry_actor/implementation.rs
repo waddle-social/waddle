@@ -2816,7 +2816,7 @@ impl RoomRegistryActor {
                 room = %room_jid,
                 "Detected dead RoomActor; failing fast to avoid silent room state loss"
             );
-            metrics::record_actor_restart("room_actor", "detected_dead_actor_fail_fast");
+            metrics::record_actor_dead_detected("room_actor", "detected_dead_actor_fail_fast");
             // FIX 3: release BEFORE returning the error — a dead actor
             // whose claim is never released is a genuinely orphaned
             // claim (this node holds it in Postgres but has no way left

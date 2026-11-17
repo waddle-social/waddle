@@ -36,3 +36,12 @@ The unused mDNS development bootstrap helpers (`bootstrap` and `bootstrap_on`)
 and the corresponding libp2p mDNS feature are removed. Waddle builds and drives
 its own swarm, resolving configured bootstrap hosts through Tokio. This keeps
 unused mDNS and Hickory DNS code out of the clustering dependency graph.
+
+`src/observer.rs` adds a dependency-free, process-wide `ActorObserver` hook
+(`set_actor_observer`). `Signal::Message` carries `enqueued_at`, stamped where
+`request/ask.rs` and `request/tell.rs` build the signal;
+`ActorBehaviour::handle_message` reports each handled message's queue wait and
+handler time, and `run_actor_lifecycle` reports a successful start and the
+stop reason. The server uses it to record the same telemetry for every actor
+(`waddle-server/src/actor_telemetry.rs`). Unlike the upstream `metrics`
+feature it adds no crate and leaves labelling to the host.

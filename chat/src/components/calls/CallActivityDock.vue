@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { ArrowRight, Hash, MessageCircle, Phone, PhoneIncoming, PhoneOff, PhoneOutgoing, Video } from "lucide-vue-next";
+import { PhoneOff } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, iconbtn, liveDot } from "styled-system/recipes";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { liveKicker } from "@/ui/part-classes";
 import {
   $mucCallParticipantOwners,
   $mucCallParticipants,
@@ -26,7 +30,6 @@ import type { ChannelSummary, GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { callParticipantAvatarJid } from "@/lib/avatars/author-jid";
-import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 
 defineOptions({ inheritAttrs: false });
 
@@ -254,15 +257,6 @@ function participantAvatarJid(entry: CallActivityDockEntry, label: string): stri
   return callParticipantAvatarJid(entry.roomJid, label, owners);
 }
 
-const participantAvatarUrl = useAvatarUrls(() =>
-  visibleEntries.value.flatMap((entry) =>
-    visibleParticipantLabels(entry).map((label) => participantAvatarJid(entry, label)),
-  ),
-);
-
-function participantInitial(label: string): string {
-  return label.trim().charAt(0).toUpperCase() || "?";
-}
 
 function selectEntry(entry: CallActivityDockEntry): void {
   if (!entryCanSelect(entry)) return;
@@ -291,401 +285,146 @@ function selectEntry(entry: CallActivityDockEntry): void {
       return;
   }
 }
+
+// Sidebar "Live now" (Sidebar board): an aurora card per live call. The
+// `call-activity-dock--mobile` hook (ChatReadyShell) turns the list into a
+// swipeable strip above the page on phones, where the sidebar is a drawer.
+const rootClass = css({
+  display: "flex",
+  flexDirection: "column",
+  "&.call-activity-dock--mobile": {
+    borderBottom: "1px solid {colors.border.soft}",
+    bg: "bg.rail",
+    padding: "{spacing.1.5} {spacing.3}",
+    md: { display: "none" },
+  },
+});
+const headClass = cx(liveKicker, css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  padding: "{spacing.4} {spacing.2} {spacing.1} {spacing.3}",
+  ".call-activity-dock--mobile &": { srOnly: true },
+}));
+const listClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1.5",
+  margin: "0 {spacing.0.5}",
+  ".call-activity-dock--mobile &": {
+    flexDirection: "row",
+    overflowX: "auto",
+    overscrollBehaviorX: "contain",
+    scrollbarWidth: "none",
+    margin: 0,
+    "& > *": { flex: "none", width: "min(20rem, 88vw)" },
+  },
+});
+const cardClass = css({
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  gap: "1",
+  borderRadius: "14px",
+  bg: "live.subtle",
+  color: "fg",
+  "&[data-active=true]": { boxShadow: "inset 0 0 0 1px {colors.live}" },
+});
+const rowClass = css({
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  padding: "{spacing.2.5} {spacing.3}",
+  border: 0,
+  borderRadius: "inherit",
+  bg: "transparent",
+  color: "inherit",
+  textAlign: "left",
+  cursor: "pointer",
+  _hover: { "& [data-part=action]": { bg: "live.hover" } },
+  // Not `_disabled`: its class name would read "disabled" in SSR output.
+  "&[data-selectable=false]": { cursor: "default", opacity: 0.6 },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+});
+const copyClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "1.5" });
+const titleClass = css({ display: "flex", alignItems: "center", gap: "1.5", font: "700 14px/1.3 {fonts.body}", "& > span:last-child": { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
+const metaClass = css({ display: "flex", alignItems: "center", gap: "1", minWidth: 0 });
+const stackClass = css({ display: "inline-flex", flex: "none", "& > * + *": { marginLeft: "-6px" }, "& > *": { boxShadow: "0 0 0 2px {colors.bg.rail}", borderRadius: "pill" } });
+const captionClass = css({ textStyle: "caption", color: "fg.muted", marginLeft: "1", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const actionClass = cx(btn({ variant: "live", size: "sm" }), css({ pointerEvents: "none" }));
+const hostClass = css({ display: "contents" });
+const srOnlyClass = css({ srOnly: true });
+const endClass = cx(iconbtn({ size: "sm" }), css({ marginRight: "2", bg: "danger", color: "danger.fg", _hover: { bg: "danger.hover", color: "danger.fg" } }));
 </script>
 
 <template>
-  <div class="call-activity-dock-host">
-    <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  <div :class="hostClass">
+    <p :class="srOnlyClass" role="status" aria-live="polite" aria-atomic="true">
       {{ statusMessage }}
     </p>
     <section
       v-if="visibleEntries.length > 0"
-      class="call-activity-dock"
-      :class="$attrs.class"
+      :class="[rootClass, $attrs.class]"
       role="region"
       aria-label="Active calls"
     >
-      <div class="call-activity-dock__header">
-        <span class="call-activity-dock__pulse" aria-hidden="true" />
-        <span class="type-section-label">Active calls</span>
-        <span class="call-activity-dock__total type-count-badge" aria-hidden="true">
-          {{ entryCount }}
-        </span>
-      </div>
-      <div class="call-activity-dock__list">
+      <h2 :class="headClass">Live now <span aria-hidden="true">· {{ entryCount }}</span></h2>
+      <div :class="listClass">
         <div
           v-for="entry in visibleEntries"
           :key="entry.key"
-          class="call-activity-dock__row-shell"
-          :class="{
-            'call-activity-dock__row-shell--active': entry.isActive,
-            'call-activity-dock__row-shell--disabled': !entryCanSelect(entry),
-          }"
+          :class="cardClass"
+          :data-active="entry.isActive"
         >
           <button
             type="button"
-            class="call-activity-dock__row"
+            :class="rowClass"
             :disabled="!entryCanSelect(entry)"
+            :data-selectable="entryCanSelect(entry)"
             :aria-current="entry.isActive ? 'page' : undefined"
             :title="entryTitle(entry)"
             :aria-label="entryTitle(entry)"
             @click="selectEntry(entry)"
           >
-            <span class="call-activity-dock__icon" aria-hidden="true">
-              <Video v-if="entry.kind === 'channel' && entry.media.video" class="h-3.5 w-3.5" />
-              <Hash v-else-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
-              <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" />
-              <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
-              <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
-              <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />
-              <Phone v-else class="h-3.5 w-3.5" />
-            </span>
-            <span class="call-activity-dock__copy">
-              <span class="call-activity-dock__title type-control">{{ entry.title }}</span>
-              <span class="call-activity-dock__status type-meta">
-                {{ entryMeta(entry) }}
+            <span :class="copyClass">
+              <span :class="titleClass">
+                <span :class="liveDot()" aria-hidden="true" />
+                <span>{{ entry.title }}</span>
+              </span>
+              <span :class="metaClass">
+                <span v-if="visibleParticipantLabels(entry).length" :class="stackClass" aria-hidden="true">
+                  <UserAvatar
+                    v-for="label in visibleParticipantLabels(entry)"
+                    :key="`${entry.key}:${label}`"
+                    :name="label"
+                    :jid="participantAvatarJid(entry, label)"
+                    :in-call="false"
+                    size="sm"
+                  />
+                </span>
+                <span :class="captionClass">{{ entryMeta(entry) }}</span>
               </span>
               <span
                 v-if="entryParticipantPreview(entry)"
-                class="call-activity-dock__participants type-meta"
-                :title="`${entryParticipantPreview(entry)} in call`"
-              >
-                <span class="call-activity-dock__participant-stack" aria-hidden="true">
-                  <span
-                    v-for="label in visibleParticipantLabels(entry)"
-                    :key="`${entry.key}:${label}`"
-                    class="call-activity-dock__participant"
-                  >
-                    <img
-                      v-if="participantAvatarUrl(participantAvatarJid(entry, label))"
-                      :src="participantAvatarUrl(participantAvatarJid(entry, label)) ?? undefined"
-                      alt=""
-                      class="call-activity-dock__participant-image"
-                    />
-                    <template v-else>{{ participantInitial(label) }}</template>
-                  </span>
-                </span>
-                <span class="call-activity-dock__participant-copy">
-                  {{ entryParticipantPreview(entry) }}
-                </span>
-              </span>
+                :class="srOnlyClass"
+              >{{ entryParticipantPreview(entry) }}</span>
             </span>
-            <span
-              v-if="entry.kind === 'channel'"
-              class="call-activity-dock__count type-count-badge"
-              aria-hidden="true"
-            >
-              {{ entry.participantCount }}
-            </span>
-            <span class="call-activity-dock__action type-meta" aria-hidden="true">
-              {{ entryAction(entry) }}
-              <ArrowRight v-if="entryCanSelect(entry)" class="h-3 w-3" />
-            </span>
+            <span :class="actionClass" data-part="action" aria-hidden="true">{{ entryAction(entry) }}</span>
           </button>
           <button
             v-if="entryCanEnd(entry)"
             type="button"
-            class="call-activity-dock__end"
+            :class="endClass"
             :title="endEntryLabel(entry)"
             :aria-label="endEntryLabel(entry)"
             @click="endEntry(entry)"
           >
-            <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+            <PhoneOff aria-hidden="true" />
           </button>
         </div>
       </div>
     </section>
   </div>
 </template>
-
-<style scoped>
-.call-activity-dock-host {
-  display: contents;
-}
-
-.call-activity-dock {
-  display: flex;
-  flex-shrink: 0;
-  flex-direction: column;
-  gap: 0.375rem;
-  min-height: 0;
-  max-height: min(40dvh, 18rem);
-  border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--card) 92%, transparent),
-      color-mix(in oklab, var(--sidebar-accent) 28%, var(--card))
-    );
-  padding: 0.5rem;
-}
-
-.call-activity-dock__header {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0 0.25rem;
-  color: var(--sidebar-muted);
-}
-
-.call-activity-dock__total {
-  display: inline-flex;
-  min-width: 1.125rem;
-  height: 1.125rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--sidebar-accent) 76%, transparent);
-  color: var(--sidebar-foreground);
-  font-variant-numeric: tabular-nums;
-}
-
-.call-activity-dock__pulse {
-  width: 0.375rem;
-  height: 0.375rem;
-  border-radius: 9999px;
-  background: oklch(0.7 0.18 145);
-  box-shadow: 0 0 0 3px color-mix(in oklab, oklch(0.7 0.18 145) 24%, transparent);
-}
-
-.call-activity-dock__list {
-  display: grid;
-  gap: 0.25rem;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.call-activity-dock__row-shell {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.25rem;
-  border-radius: var(--radius-sm);
-}
-
-.call-activity-dock__row {
-  display: grid;
-  width: 100%;
-  grid-template-columns: 1.75rem minmax(0, 1fr) auto auto;
-  min-height: 3rem;
-  align-items: center;
-  gap: 0.5rem;
-  border-radius: var(--radius-sm);
-  padding: 0.375rem 0.5rem;
-  color: var(--sidebar-muted);
-  text-align: left;
-  transition:
-    background-color 160ms ease-out,
-    color 160ms ease-out,
-    transform 160ms ease-out;
-}
-
-.call-activity-dock__row:hover:not(:disabled),
-.call-activity-dock__row-shell--active .call-activity-dock__row {
-  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
-  color: var(--sidebar-foreground);
-}
-
-.call-activity-dock__row:hover:not(:disabled) {
-  transform: translateY(-1px);
-}
-
-.call-activity-dock__row-shell--disabled .call-activity-dock__row,
-.call-activity-dock__row-shell--disabled .call-activity-dock__row:hover {
-  cursor: default;
-  opacity: 0.72;
-  transform: none;
-}
-
-.call-activity-dock__row-shell--disabled .call-activity-dock__action {
-  background: color-mix(in oklab, var(--sidebar-accent) 58%, transparent);
-  color: var(--sidebar-muted);
-}
-
-.call-activity-dock__row:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 42%, transparent);
-}
-
-.call-activity-dock__icon {
-  display: inline-flex;
-  width: 1.75rem;
-  height: 1.75rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 12%, transparent);
-  color: var(--success-foreground);
-}
-
-:global(.dark) .call-activity-dock__icon {
-  color: oklch(0.82 0.14 145);
-}
-
-.call-activity-dock__copy {
-  display: grid;
-  min-width: 0;
-  gap: 0.0625rem;
-}
-
-.call-activity-dock__title,
-.call-activity-dock__status,
-.call-activity-dock__participants,
-.call-activity-dock__participant-copy {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.call-activity-dock__status {
-  color: var(--sidebar-muted);
-}
-
-.call-activity-dock__participants {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  color: var(--sidebar-muted);
-}
-
-.call-activity-dock__participant-stack {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding-left: 0.125rem;
-}
-
-.call-activity-dock__participant {
-  display: inline-flex;
-  width: 1rem;
-  height: 1rem;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid color-mix(in oklab, var(--sidebar-border) 74%, transparent);
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--sidebar-accent) 82%, var(--card));
-  color: var(--sidebar-foreground);
-  font-size: 0.5625rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.call-activity-dock__participant-image {
-  width: 100%;
-  height: 100%;
-  border-radius: 9999px;
-  object-fit: cover;
-}
-
-.call-activity-dock__participant + .call-activity-dock__participant {
-  margin-left: -0.25rem;
-}
-
-.call-activity-dock__count {
-  display: inline-flex;
-  min-width: 1.125rem;
-  height: 1.125rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9999px;
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 18%, transparent);
-  color: var(--success-foreground);
-  font-variant-numeric: tabular-nums;
-}
-
-.call-activity-dock__action {
-  display: inline-flex;
-  min-width: 3.25rem;
-  height: 1.625rem;
-  align-items: center;
-  justify-content: center;
-  gap: 0.25rem;
-  border-radius: 9999px;
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 16%, transparent);
-  color: var(--success-foreground);
-  white-space: nowrap;
-}
-
-.call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
-.call-activity-dock__row-shell--active .call-activity-dock__action {
-  background: color-mix(in oklab, oklch(0.7 0.18 145) 26%, transparent);
-  color: var(--success-foreground);
-}
-
-:global(.dark) .call-activity-dock__action,
-:global(.dark) .call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
-:global(.dark) .call-activity-dock__row-shell--active .call-activity-dock__action {
-  color: oklch(0.86 0.13 145);
-}
-
-.call-activity-dock__end {
-  display: inline-flex;
-  width: 2.25rem;
-  min-height: 3rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--destructive);
-  transition:
-    background-color 160ms ease-out,
-    color 160ms ease-out;
-}
-
-.call-activity-dock__end:hover {
-  background: color-mix(in oklab, var(--destructive) 10%, transparent);
-}
-
-.call-activity-dock__end:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--destructive) 32%, transparent);
-}
-
-.call-activity-dock.call-activity-dock--mobile {
-  max-height: none;
-  border-top: 0;
-  border-right: 0;
-  border-bottom: 1px solid var(--border);
-  padding: 0.375rem 0.75rem;
-}
-
-.call-activity-dock.call-activity-dock--mobile .call-activity-dock__header {
-  display: none;
-}
-
-.call-activity-dock.call-activity-dock--mobile .call-activity-dock__list {
-  display: flex;
-  gap: 0.375rem;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-}
-
-.call-activity-dock.call-activity-dock--mobile .call-activity-dock__list::-webkit-scrollbar {
-  display: none;
-}
-
-.call-activity-dock.call-activity-dock--mobile .call-activity-dock__row {
-  min-width: min(17rem, 84vw);
-}
-
-.call-activity-dock.call-activity-dock--mobile .call-activity-dock__row-shell {
-  min-width: min(20rem, 92vw);
-}
-
-@media (min-width: 64rem) {
-  .call-activity-dock.call-activity-dock--mobile {
-    display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .call-activity-dock__row {
-    transition: none;
-  }
-
-  .call-activity-dock__row:hover {
-    transform: none;
-  }
-}
-</style>

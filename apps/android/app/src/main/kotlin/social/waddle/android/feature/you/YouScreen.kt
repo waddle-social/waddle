@@ -34,6 +34,7 @@ import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.feature.profile.formatPepKeyword
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.BackArrow
 import social.waddle.android.ui.GlyphTile
 import social.waddle.android.ui.GroupDivider
 import social.waddle.android.ui.GroupedRow
@@ -51,6 +52,7 @@ fun YouScreen(
     onOpenProfile: () -> Unit,
     onOpenSettings: () -> Unit,
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
+    onBack: (() -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val session by graph.currentSession.collectAsStateWithLifecycle()
@@ -67,6 +69,7 @@ fun YouScreen(
         onOpenProfile = onOpenProfile,
         onOpenSettings = onOpenSettings,
         contentWindowInsets = contentWindowInsets,
+        onBack = onBack,
     )
 }
 
@@ -77,11 +80,17 @@ internal fun YouContent(
     onOpenProfile: () -> Unit,
     onOpenSettings: () -> Unit,
     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
+    onBack: (() -> Unit)? = null,
 ) {
     Scaffold(
         contentWindowInsets = contentWindowInsets,
         containerColor = Waddle.colors.bg,
-        topBar = { WaddleTopBar(title = { Text(text = stringResource(R.string.you_title)) }) },
+        topBar = {
+            WaddleTopBar(
+                title = { Text(text = stringResource(R.string.you_title)) },
+                navigationIcon = { BackArrow(onBack) },
+            )
+        },
     ) { padding ->
         Column(
             verticalArrangement = Arrangement.spacedBy(Waddle.space.xs),
@@ -191,13 +200,13 @@ private fun IdentityCard(identity: YouIdentity, onClick: () -> Unit) {
  * a ready stream shows the green dot; a lost one shows hollow; while
  * connecting nothing is claimed.
  */
-private fun presenceOf(connection: ConnectionState): PresenceShow? = when (connection) {
+internal fun presenceOf(connection: ConnectionState): PresenceShow? = when (connection) {
     ConnectionState.Ready -> PresenceShow.AVAILABLE
     ConnectionState.Offline, ConnectionState.AuthFailed, ConnectionState.Paused -> PresenceShow.OFFLINE
     else -> null
 }
 
-private fun connectionLabelOf(connection: ConnectionState): Int = when (connection) {
+internal fun connectionLabelOf(connection: ConnectionState): Int = when (connection) {
     ConnectionState.Ready -> R.string.huddle_you_connected
     ConnectionState.Connecting, is ConnectionState.Reconnecting -> R.string.huddle_you_connecting
     ConnectionState.Paused -> R.string.huddle_you_paused

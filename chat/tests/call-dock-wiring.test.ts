@@ -161,34 +161,29 @@ describe("call surfaces use the Participants dock", () => {
     expect(source).toContain("@focusin=\"revealImmersiveChrome\"");
     expect(source).toContain("chromeHasFocus()");
     expect(source).toContain("watch(isImmersive");
-    expect(source).toContain("visibility: hidden");
-    expect(source).toContain("position: absolute");
+    expect(source).toContain('visibility: "hidden"');
+    expect(source).toContain('position: "absolute"');
   });
 
-  test("Immersive layers browser fullscreen and exits back to Expanded", () => {
+  test("Fullscreen is immersive plus browser fullscreen and exits back to Expanded", () => {
     const surface = surfaceSource("CallExpandedSurface.vue");
     expect(surface).toContain("requestFullscreen");
     expect(surface).toContain("document.exitFullscreen()");
     expect(surface).toContain("shouldExitNativeFullscreenForModeChange");
     expect(surface).toContain("document.fullscreenElement === surfaceRef.value");
-    expect(surface).toContain("if (document.fullscreenElement) return");
     expect(surface).toContain("const wasNativeFullscreenActive = nativeFullscreenActive.value");
     expect(surface).toContain("if (wasNativeFullscreenActive && !nativeFullscreenActive.value)");
     expect(surface).toContain("fullscreenchange");
     expect(surface).toContain("callUiModeAfterFullscreenExit(uiMode.value)");
     expect(surface).toContain("void toggleExpandedSurface()");
-    expect(surface).toContain("@toggle-native-fullscreen");
-    expect(surface).toContain("@toggle-immersive");
+    // The button and the `F` shortcut share one entry path.
+    expect(surface).toContain("@toggle-fullscreen=\"toggleFullscreen\"");
+    expect(surface).toContain("\"enter-immersive\": enterFullscreen");
 
     const controls = surfaceSource("CallControls.vue");
     expect(controls).toContain("isImmersive");
-    expect(controls).toContain("isNativeFullscreen");
-    expect(controls).toContain("toggleNativeFullscreen");
-    expect(controls).toContain("isNativeFullscreen ? Minimize2 : Maximize2");
-    expect(controls).toContain("toggleImmersive");
+    expect(controls).toContain("toggleFullscreen");
     expect(controls).not.toContain(":aria-pressed=\"isExpanded\"");
-    expect(controls).toContain("Enter browser fullscreen");
-    expect(controls).toContain("Exit browser fullscreen");
   });
 
   test("call lifecycle cleanup resets any non-split UI mode for the next call", () => {

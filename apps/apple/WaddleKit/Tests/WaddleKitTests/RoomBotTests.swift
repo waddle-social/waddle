@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 private let helper = bare("helper@extensions.waddle.test")
 private let scribe = bare("scribe@extensions.waddle.test")

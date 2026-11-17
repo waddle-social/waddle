@@ -163,8 +163,9 @@ The Rust workflow is generated directly from `ci/rust-tests/workflow.cue`, which
 imports the task commands from `server/env.cue` and the shared Nix/cache setup.
 cuenv 0.55.0's matrix generation neither preserves ordinary dependencies nor
 exposes artifact compression, and its task wrapper loads the complete development
-shell. The focused generator runs the same Nix tasks directly, uploads the shard NARs without an additional ZIP layer, and retains
-every previous path trigger. The metadata travels separately; workers verify the
+shell. The focused generator runs the same Nix tasks directly, uploads the shard NARs without an additional ZIP layer, and was
+given the pull-request path triggers until 2026-11, when it became dispatch-only
+(see "Pull request scope (2026-11)"). The metadata travels separately; workers verify the
 NAR checksum and expected output before importing it.
 Run `bash scripts/sync-rust-tests.sh` after changing those inputs; `checkCiDrift`
 checks this generator alongside cuenv. The final `nixTest` gate always reports and
@@ -522,3 +523,125 @@ support retaining FlakeHub for archive transfer: Hestia 3 and snapshots proved
 seeded availability, while Namespace's successful authenticated seed was
 followed by another empty warm volume. Detailed setup, restore, full-read and
 post-step evidence is in [ci-cache-benchmarks.md](ci-cache-benchmarks.md).
+
+## Main publication latency and runner contention
+
+[Main run 43592102868](https://github.com/waddle-social/waddle/actions/runs/43592102868)
+took 49 minutes from push to the end of its last gate. Its 13 gate jobs queued
+at 11:53; the first started at 12:09 and the rest followed at about one a
+minute. `ciHelperContracts` (1m51) started at 12:22, and `nixTestLocal` (14m23)
+could not ask for its 32-core builder until that finished. Each job spent about
+40 seconds on Nix, cache and cuenv setup. Pull requests produced about 85
+workflow runs that day against 15 pushes, on the same Namespace runners.
+
+The `default` pipeline now has eight gates instead of thirteen:
+
+| Job | Runner | Waits for | Runs |
+| --- | --- | --- | --- |
+| `fmt` | 32-core builder | nothing | `cargo fmt --check` |
+| `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
+| `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
+| `mainClippy`, `mainTest` | profile | `fmt` | the namespace clippy and test tasks |
+| `mainDoctest` | profile | `fmt` | the Nix doctest check that pull requests build (`nixDoctest`) |
+| `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
+| `publishContainerImage` | profile | every job above | publication |
+
+cuenv 0.63.2 has no per-task runner, and a GitHub `runs-on` expression can
+only tell jobs apart by their dependencies. The expression gives the builder
+to a job that does not wait for `fmt`. That lets `nixTestLocal` request its
+runner when the workflow starts; the price is that `fmt` (about a minute) also
+runs on the builder and the other gates start after it. Matrix tasks would
+select a runner by name, but 0.63.2 names the job `nixTestLocal-<value>` while
+dependents still need `nixTestLocal`, which is not a valid workflow.
+
+The plain `test` gate stays on `main` beside the shards. It builds the default
+features (about 180 `not(feature = ...)` sites in the server crates compile only
+there) and passes `--all-targets`; the shards build `--all-features --lib
+--tests`. Neither selection contains the other.
+
+Pull requests no longer start these lanes:
+
+| Lane | Runner it used | Now runs | Pull-request coverage that remains |
+| --- | --- | --- | --- |
+| `waddle-integration` (a copy of every PR lane) | all of them | merge groups, dispatch | the original workflows |
+| `namespaceRustChecks` `clippy`, `doctest` | Namespace profile | `main` (`mainClippy`, `mainDoctest`) | `nixClippy`, `nixDoctest`: same workspace, features and lints |
+| `xmppServerCompliance` | Namespace profile | `main`, dispatch | none on pull requests; the Postgres, all-features shards run post-merge as `nixTestLocal` (2026-11) |
+| `roomChildContract`, `spaceFanoutContract` | Namespace profile | `main`, dispatch | none; they gate nothing |
+| `parentMoveNativePullRequest` | GitHub | `main`, dispatch (`parentMoveNative`) | its build closure repeats `nixClippy`, `nixFmt` and `nixBuildImageStream` |
+| Android `deviceTests` | Namespace profile | `main`, dispatch | Android `pullRequest` |
+
+`mainDoctest` builds the `waddle-server-doctest` Nix check instead of running
+`cargo test --doc` from an empty target directory. The plain task compiled 729
+crates for about 8 minutes to run 18 doctests; the Nix check takes its
+dependencies from the shared artifact and is a cache hit when a pull request
+already checked the same tree.
+
+The namespace `test` task sets `CARGO_INCREMENTAL=0`. Its build is bounded by
+one compiler process: `waddle-server` compiled with its unit tests takes about
+7 minutes on a 4 vCPU runner and runs to the end of the build, after the plain
+library (4.4 minutes) and about 3 minutes of third-party crates. All
+integration test binaries together take under a minute, so the linker does not
+matter. Measured on GitHub runners with `cargo test --no-run`, compared on the
+same CPU model because runner speed varies more than the setting:
+
+| CPU | Incremental on | Incremental off |
+| --- | --- | --- |
+| Xeon 6975P-C | 11m13s, 11m21s | 9m43s, 9m57s |
+| EPYC 9V74 | 16m08s | 14m37s, 14m44s, 15m20s |
+| EPYC 7763 | 18m28s, 18m29s | not sampled |
+
+The target directory shrinks from 51 GB to 41 GB. mold on top of this showed
+no gain in three runs.
+
+The short pull-request checks share one job, as `mainChecks` does on `main`:
+`pullRequestChecks` runs `checkCiDrift`, `checkSwitchableAlternativeProgram`,
+`checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` and
+`nixFmt`, and `rootSyncChecks` runs `checkAllCiDrift` and `checkRootSyncDrift`.
+Each separate job spent about 75 seconds on Nix, cache and cuenv setup before
+its command started, and a server pull request held eight of the 20 concurrent
+GitHub job slots for these checks.
+
+`namespaceRustChecks` keeps `test` on pull requests: it is the only pull-request
+lane that builds the default features, and it is a publish gate on `main`.
+On `main`, `roomChildContract`, `spaceFanoutContract` and
+`xmppServerCompliance` use GitHub runners, so they no longer take Namespace
+runners from the publishing pipeline that the same push starts.
+
+These are design expectations, not measurements. The account's Namespace
+concurrency limit is unverified (see the 64 vCPU observation above); if it is
+64 vCPU, `fmt` and `nixTestLocal` together fill it for the first minute.
+
+## Pull request scope (2026-11)
+
+Pull requests run light, important checks only. The `waddle-server-rustTests`
+workflow (Postgres, all-features, four isolated shards on the 32-core Namespace
+builder) no longer has a `pull_request` trigger, and `waddle-integration` no
+longer contains it.
+
+- **On pull requests:** the per-project `pullRequest` pipelines (server Nix
+  lanes, `namespaceRustChecks` `test`, chat, apps, website, design, colony,
+  infrastructure) and `checkCiDrift`.
+- **After merge:** the same shards run as `nixTestLocal` in the server `default`
+  pipeline. It gates image publishing, including every test in
+  `.config/required-cluster-tests.txt`.
+- **On demand:** run the shards on a branch with
+  `gh workflow run waddle-server-rusttests.yml --ref <branch>`.
+- **Runners:** the `website`, `design`, `colony` and `infrastructure/waddle.cloud`
+  pull-request lanes use free `ubuntu-24.04` GitHub-hosted runners (the repository
+  is public), as `chat` and the server Nix lanes already did. Deploy and `default`
+  pipelines are unchanged.
+
+Earlier sections that describe the pull-request shard lane are historical
+measurements and were not rewritten.
+
+## Measuring CI spend
+
+```sh
+GITHUB_TOKEN=... bun scripts/ci-cost-report.ts --repo waddle-social/waddle --days 7 [--json] [--rate <class>=<usd-per-minute>]
+```
+
+Add `--stdin` to aggregate saved jobs JSON from standard input offline. The unit is
+vCPU-minutes for Namespace Linux shapes (`nscloud-*-NxM` uses N;
+`namespace-profile-linux-x86` uses `--profile-vcpu`, default 8) and plain
+minutes for macOS. GitHub-hosted minutes are listed but weighted 0. Cancelled
+and failed jobs count. Shares are of weighted units, not dollars.

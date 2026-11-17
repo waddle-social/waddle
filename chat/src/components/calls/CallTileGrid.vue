@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
+import { css } from "styled-system/css";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
@@ -226,6 +227,32 @@ function activateOverflow(): void {
   emit("openParticipants");
 }
 
+// HuddleStage grid: 10px gaps inside the stage padding; the speaker view is
+// one large tile over a strip of thumbnails.
+const rootClass = css({ display: "flex", height: "100%", width: "100%", flexDirection: "column", gap: "2.5", overflow: "hidden", padding: "0 {spacing.2.5} {spacing.1.5}", _narrow: { padding: "0 {spacing.1.5} {spacing.0.5}", gap: "2" } });
+const equalClass = css({ display: "grid", height: "100%", width: "100%", gap: "2.5", padding: "1.5", overflow: "hidden", _narrow: { gap: "2" } });
+const focusClass = css({ flex: "1 1 auto", minHeight: 0, display: "flex", padding: "1.5" });
+const thumbsClass = css({ display: "flex", gap: "2.5", overflowX: "auto", flexShrink: 0, padding: "1.5", maxHeight: "116px" });
+const thumbClass = css({ width: "144px", aspectRatio: "16 / 9", flex: "0 0 auto" });
+const overflowClass = css({
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "1",
+  minWidth: 0,
+  minHeight: 0,
+  border: 0,
+  borderRadius: "12px",
+  bg: "surface.2",
+  color: "fg",
+  cursor: "pointer",
+  _hover: { bgImage: "linear-gradient({colors.state.hover}, {colors.state.hover})" },
+  _focusVisible: { outline: "2px solid {colors.focus}", outlineOffset: "2px" },
+});
+const overflowCountClass = css({ font: "700 22px/1 {fonts.display}" });
+const overflowLabelClass = css({ fontSize: "sm", color: "fg.muted" });
+
 const gridStyle = computed(() => ({
   gridTemplateColumns: `repeat(${layout.value.cols}, minmax(0, 1fr))`,
   gridTemplateRows: `repeat(${layout.value.rows}, minmax(0, 1fr))`,
@@ -233,10 +260,10 @@ const gridStyle = computed(() => ({
 </script>
 
 <template>
-  <div class="call-tile-grid">
+  <div :class="rootClass">
     <!-- Speaker-focus layout: one large tile + horizontal thumb strip. -->
     <template v-if="focusedTile">
-      <div class="call-tile-grid__focus">
+      <div :class="focusClass">
         <CallTile
           :key="focusedTile.key"
           :label="focusedTile.label"
@@ -249,14 +276,12 @@ const gridStyle = computed(() => ({
           :video-track="focusedTile.videoTrack"
           :raised-hand="raisedHandTileKeys.has(focusedTile.key)"
           :attach="attach"
-          class="call-tile--focused"
           @activate="toggleFocus(focusedTile)"
         />
       </div>
-      <div v-if="otherTiles.length" class="call-tile-grid__thumbs">
+      <div v-if="otherTiles.length" :class="thumbsClass">
+        <div v-for="tile in otherTiles" :key="tile.key" :class="thumbClass">
         <CallTile
-          v-for="tile in otherTiles"
-          :key="tile.key"
           :label="tile.label"
           :avatar-jid="tile.identity"
           :attach-key="tile.key"
@@ -267,9 +292,9 @@ const gridStyle = computed(() => ({
           :video-track="tile.videoTrack"
           :raised-hand="raisedHandTileKeys.has(tile.key)"
           :attach="attach"
-          class="call-tile--thumb"
           @activate="toggleFocus(tile)"
         />
+        </div>
       </div>
     </template>
 
@@ -280,7 +305,7 @@ const gridStyle = computed(() => ({
     <div
       v-else
       :ref="setGridEl"
-      class="call-tile-grid__equal"
+      :class="equalClass"
       :style="gridStyle"
     >
       <CallTile
@@ -302,100 +327,13 @@ const gridStyle = computed(() => ({
       <button
         v-if="overflow"
         type="button"
-        class="call-tile-grid__overflow"
+        :class="['call-tile-grid__overflow', overflowClass]"
         :aria-label="`Show ${overflow.hiddenCount} more ${overflow.hiddenCount === 1 ? 'participant' : 'participants'}`"
         @click="activateOverflow"
       >
-        <span class="call-tile-grid__overflow-count">+{{ overflow.hiddenCount }}</span>
-        <span class="call-tile-grid__overflow-label">more</span>
+        <span :class="overflowCountClass">+{{ overflow.hiddenCount }}</span>
+        <span :class="overflowLabelClass">more</span>
       </button>
     </div>
   </div>
 </template>
-
-<style scoped>
-.call-tile-grid {
-  display: flex;
-  height: 100%;
-  width: 100%;
-  flex-direction: column;
-  gap: var(--space-xs);
-  overflow: hidden;
-}
-
-.call-tile-grid__equal {
-  display: grid;
-  height: 100%;
-  width: 100%;
-  gap: var(--space-xs);
-  padding: var(--space-xs);
-  /* `grid-template-columns` / `grid-template-rows` are set inline by
-   * the script. The cells are `minmax(0, 1fr)` (not `1fr`) so they
-   * can shrink below the video's intrinsic min-content during a
-   * splitter drag — without the `0` floor, grid would overflow. */
-  overflow: hidden;
-}
-
-.call-tile-grid__focus {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  padding: var(--space-xs);
-}
-
-.call-tile-grid__thumbs {
-  display: flex;
-  gap: var(--space-xs);
-  overflow-x: auto;
-  flex-shrink: 0;
-  padding: 0 var(--space-xs) var(--space-xs);
-  max-height: 6.5rem;
-}
-
-/* The "+N more" Overflow tile fills its grid cell like any tile, but
- * is an activatable button (opens the Participants panel) rather than a
- * video surface. */
-.call-tile-grid__overflow {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2xs);
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--muted);
-  color: var(--foreground);
-  cursor: pointer;
-  font: inherit;
-}
-
-.call-tile-grid__overflow:hover,
-.call-tile-grid__overflow:focus-visible {
-  /* Single percentage so the components sum to 100% — otherwise color-mix
-   * scales the result's alpha down and the hover renders translucent. */
-  background: color-mix(in oklab, var(--muted), var(--foreground) 12%);
-}
-
-.call-tile-grid__overflow:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-
-.call-tile-grid__overflow-count {
-  font-size: var(--text-display);
-  font-weight: 600;
-  line-height: 1;
-}
-
-.call-tile-grid__overflow-label {
-  font-size: var(--text-body);
-  opacity: 0.8;
-}
-
-/* The `.call-tile--focused` and `.call-tile--thumb` variants are
- * styled inside CallTile.vue (where they override the default 16:9
- * cap). The grid is only responsible for placing the right CallTile
- * variants inside the right wrapper. */
-</style>

@@ -3,6 +3,8 @@ import { resolveRoomMessageTarget } from "@/lib/messaging/room-message-target";
 import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, watchEffect } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
+import { css, cx } from "styled-system/css";
+import { btn } from "styled-system/recipes";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import {
   isTopPinnedScrollDirection,
@@ -26,7 +28,7 @@ const props = withDefaults(defineProps<{
   ariaLabel: string;
   contentClass?: string;
 }>(), {
-  contentClass: "chat-message-list",
+  contentClass: "",
 });
 
 const emit = defineEmits<{
@@ -35,6 +37,7 @@ const emit = defineEmits<{
 }>();
 
 const scrollElement = ref<HTMLDivElement | null>(null);
+const preserveTopPinnedHistory = ref(false);
 const hasOlderSentinel = computed(() => props.hasOlder || props.loadingOlder);
 const rowCount = computed(() => props.items.length + (hasOlderSentinel.value ? 1 : 0));
 const sentinelIndex = computed(() => {
@@ -68,6 +71,9 @@ const virtualizer = useVirtualizer(computed(() => ({
   getScrollElement: () => scrollElement.value,
   estimateSize: (index: number) => (index === sentinelIndex.value ? 44 : 112),
   overscan: 8,
+  // In social mode new messages come in above the reader. Keep the
+  // visible row in place when the reader has left the live edge.
+  anchorTo: props.sentinelPosition !== "start" && preserveTopPinnedHistory.value ? "end" : "start",
   getItemKey: (index: number) => {
     const message = itemForVirtualIndex(index);
     return message ? timelineRowKey(message) : "older-history-sentinel";
@@ -133,8 +139,63 @@ async function scrollToMessageId(messageId: string, align: "start" | "center" | 
   return true;
 }
 
+// Rows keep growing after the pin settles (late measurement, images, link
+// previews), which pushes the newest text below the fold. While the reader
+// is parked at the bottom edge, follow every growth of the list.
+const STICK_TOLERANCE_PX = 64;
+let followBottom = false;
+let bottomMode = false;
+let lastScrollTop = 0;
+const listElement = ref<HTMLDivElement | null>(null);
+
+function distanceFromBottom(el: HTMLElement): number {
+  return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+function onScroll(event: Event) {
+  const el = scrollElement.value;
+  if (el && bottomMode) {
+    const scrollTop = el.scrollTop;
+    if (distanceFromBottom(el) <= STICK_TOLERANCE_PX) {
+      followBottom = true;
+    } else if (scrollTop < lastScrollTop) {
+      // A growing row can increase the bottom gap before the resize
+      // observer runs. Keep following unless the reader moves up.
+      followBottom = false;
+    }
+    lastScrollTop = scrollTop;
+  }
+  if (el) preserveTopPinnedHistory.value = props.sentinelPosition !== "start" && el.scrollTop > STICK_TOLERANCE_PX;
+  emit("scroll", event);
+  maybeLoadOlder();
+}
+
+let followObserver: ResizeObserver | null = null;
+watch(listElement, (list) => {
+  followObserver?.disconnect();
+  followObserver = null;
+  if (!list || typeof ResizeObserver === "undefined") return;
+  followObserver = new ResizeObserver(() => {
+    const el = scrollElement.value;
+    if (el && followBottom && distanceFromBottom(el) > 0) el.scrollTop = el.scrollHeight;
+  });
+  followObserver.observe(list);
+  if (scrollElement.value) followObserver.observe(scrollElement.value);
+}, { flush: "post" });
+onBeforeUnmount(() => followObserver?.disconnect());
+
+/** Starts following the live edge; edge scrolls that bypass
+ * `scrollToPinnedEdge` (thread panels) call this directly. */
+function followEdge(mode: ScrollDirectionMode) {
+  bottomMode = !isTopPinnedScrollDirection(mode);
+  followBottom = bottomMode;
+  preserveTopPinnedHistory.value = false;
+  lastScrollTop = scrollElement.value?.scrollTop ?? 0;
+}
+
 async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   if (props.items.length === 0) return false;
+  followEdge(mode);
   const itemIndex = isTopPinnedScrollDirection(mode) ? 0 : props.items.length - 1;
   virtualizer.value.scrollToIndex(virtualIndexForItemIndex(itemIndex), {
     align: isTopPinnedScrollDirection(mode) ? "start" : "end",
@@ -175,23 +236,39 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   return true;
 }
 
-defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
+defineExpose({ scrollElement, followEdge, scrollToMessageId, scrollToPinnedEdge });
+
+// Chat panes never scroll sideways: long text wraps, <pre> scrolls itself.
+const scrollClass = css({
+  display: "flex",
+  flexDirection: "column",
+  flex: "1",
+  minHeight: 0,
+  overflowX: "hidden",
+  overflowY: "auto",
+  scrollbarGutter: "stable",
+  px: "2",
+  py: "4",
+});
+const listClass = css({ position: "relative", flex: "none" });
+const rowClass = css({ position: "absolute", left: 0, top: 0, width: "100%" });
+const sentinelClass = css({ display: "flex", alignItems: "center", justifyContent: "center", py: "3", textStyle: "caption", color: "fg.muted" });
 </script>
 
 <template>
   <div
     ref="scrollElement"
-    class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
+    :class="scrollClass"
     :aria-label="ariaLabel"
-    @scroll="(event) => { emit('scroll', event); maybeLoadOlder(); }"
+    @scroll="onScroll"
   >
-    <div :class="contentClass" :style="{ height: `${totalSize}px`, position: 'relative' }">
+    <div ref="listElement" :class="cx(listClass, contentClass)" :style="{ height: `${totalSize}px` }">
       <div
         v-for="virtualRow in virtualItems"
         :key="virtualRow.key"
         :data-index="virtualRow.index"
         :ref="virtualizer.measureElement"
-        class="absolute left-0 top-0 w-full"
+        :class="rowClass"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
       >
         <slot
@@ -201,13 +278,13 @@ defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
         />
         <div
           v-else
-          class="type-caption flex items-center justify-center py-3 text-muted-foreground"
+          :class="sentinelClass"
           data-older-history-sentinel
         >
           <button
             v-if="hasOlder && !loadingOlder"
             type="button"
-            class="rounded-full border border-border bg-background px-3 py-1.5 transition-colors hover:bg-muted"
+            :class="btn({ size: 'sm' })"
             @click="emit('loadOlder')"
           >
             Load older messages

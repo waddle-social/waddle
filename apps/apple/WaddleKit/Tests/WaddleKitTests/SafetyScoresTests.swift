@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 /// A room-authored XEP-0422 fastening carrying `urn:waddle:safety-scores:1`,
 /// as the Rust core hands it over after parsing.

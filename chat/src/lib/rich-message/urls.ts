@@ -1,3 +1,4 @@
+import { roomJidFromJoinUri } from "@/lib/room-links";
 import { codePointLength } from "@/lib/text-offsets";
 import type { MarkupSpan, MessageReference } from "./types";
 
@@ -101,6 +102,7 @@ function countOccurrences(text: string, char: string): number {
 }
 
 export function safeUri(uri: string): string | null {
+  if (roomJidFromJoinUri(uri)) return uri;
   try {
     const url = new URL(uri);
     if (!["http:", "https:", "mailto:"].includes(url.protocol)) return null;

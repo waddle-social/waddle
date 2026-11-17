@@ -532,6 +532,11 @@ async fn insert_groupchat_notification_candidate(
         .await
     {
         Ok(NotificationCandidateInsertOutcome::Inserted) => {
+            info!(
+                stanza_id = candidate.archive_stanza_id().id.as_str(),
+                notification_class = candidate.class().as_db_value(),
+                "notification candidate recorded"
+            );
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),

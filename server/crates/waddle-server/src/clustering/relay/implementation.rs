@@ -109,6 +109,7 @@ pub(in crate::clustering::relay) enum RelayDispatchKind {
     ExtensionRoomSend,
     MucAdminQuery,
     RemoteRoomRequest,
+    EventPlanningAccess,
 }
 
 impl RelayDispatchKind {
@@ -133,6 +134,7 @@ impl RelayDispatchKind {
             Self::ExtensionRoomSend => "extension_room_send",
             Self::MucAdminQuery => "muc_admin_query",
             Self::RemoteRoomRequest => "remote_room_request",
+            Self::EventPlanningAccess => "event_planning_access",
         }
     }
 }
@@ -1412,6 +1414,45 @@ impl Message<RelayRemoteRoomRequest> for RelayActor {
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
             bridge.remote_room_request_local(msg).await
+        })
+    }
+}
+
+/// Read-only event-workspace authorization from the node owning the room.
+/// Separate message id: existing ordered-relay and admin-query wire shapes
+/// remain unchanged for mixed-version peers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayEventPlanningAccess {
+    pub room: jid::BareJid,
+    /// Bound requester, stamped by the originating XMPP connection.
+    pub requester: jid::FullJid,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayEventPlanningAccessReply {
+    Access(
+        crate::server::routes::websocket::handlers::iq::event_planning_access::EventPlanningAccess,
+    ),
+    NotOwner,
+    Unavailable,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.event_planning_access.v1")]
+impl Message<RelayEventPlanningAccess> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayEventPlanningAccessReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayEventPlanningAccess,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::EventPlanningAccess, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.room));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.event_planning_access_local(msg).await
         })
     }
 }
@@ -2802,6 +2843,41 @@ impl RelayHandle {
         &mut self,
         mut message: RelayMucAdminQuery,
     ) -> Result<RelayMucAdminQueryReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote_ref = self.resolve().await?;
+                match remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                {
+                    Ok(reply) => Ok(reply),
+                    Err(error) if is_stale_ref_error(&error) => {
+                        self.cached = None;
+                        let remote_ref = self.resolve().await?;
+                        remote_ref
+                            .ask(&message)
+                            .mailbox_timeout(self.mailbox_timeout)
+                            .reply_timeout(self.reply_timeout)
+                            .await
+                            .map_err(send_error)
+                    }
+                    Err(error) => Err(send_error(error)),
+                }
+            } => result,
+        }
+    }
+
+    /// Read-only affiliation lookup from the room's current owner.
+    pub(crate) async fn event_planning_access(
+        &mut self,
+        mut message: RelayEventPlanningAccess,
+    ) -> Result<RelayEventPlanningAccessReply, RelayAskError> {
         message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
         tokio::select! {

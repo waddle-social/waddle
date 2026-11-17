@@ -8,8 +8,9 @@ use crate::support::{
 };
 use jid::{BareJid, Jid};
 use waddle_server::notification_outbox::{
-    DndReader, DndState, NoopDndReader, NotificationCandidate, NotificationClass,
-    NotificationMessageHints, NotificationOutboxError, NotificationThreadId, RichSummary,
+    DndReader, DndState, DrainBatch, DrainScope, NoopDndReader, NotificationCandidate,
+    NotificationClass, NotificationMessageHints, NotificationOutboxError, NotificationThreadId,
+    RichSummary,
 };
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::NS_DATA_FORMS;
@@ -160,7 +161,10 @@ async fn t1_xep0492_never_records_typed_suppressed_reason() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -238,7 +242,10 @@ async fn t1_xep0492_on_mention_miss_records_typed_suppressed_reason() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -294,7 +301,10 @@ async fn t1_xep0191_blocked_records_typed_suppressed_reason() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -352,7 +362,10 @@ async fn t1_noping_records_typed_suppressed_reason() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -412,7 +425,10 @@ async fn t1_xep0444_reaction_records_typed_suppressed_reason() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -481,7 +497,10 @@ async fn t1_opt_in_without_hint_emits_rich_summary() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -552,7 +571,10 @@ async fn t1_groupchat_rich_sender_is_occupant_jid() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -609,7 +631,10 @@ async fn t1_no_store_strips_body_but_still_delivers_with_opt_in() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -673,7 +698,10 @@ async fn t1_no_permanent_store_strips_body_but_still_delivers_with_opt_in() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -745,7 +773,10 @@ async fn t1_active_dnd_suppresses_with_typed_reason() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -803,7 +834,10 @@ async fn xep0191_blocked_t1_suppression_keeps_pending_delivery_intact() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -879,7 +913,10 @@ async fn xep0513_noping_t1_suppression_persists_candidate_and_keeps_storage() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -962,7 +999,10 @@ async fn xep0334_no_store_delivers_minimal_push_and_keeps_storage() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -1034,7 +1074,10 @@ async fn xep0334_no_permanent_store_delivers_minimal_push_and_keeps_storage() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -1097,7 +1140,10 @@ async fn waddle_dnd_t1_suppression_persists_audit_and_keeps_storage() {
             &projection,
             deps,
             &bare("push.example.com"),
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");
@@ -1198,7 +1244,10 @@ async fn dnd_integration_with_pep_shaped_reader_suppresses_push_only() {
             &projection,
             deps,
             &push_service_jid,
-            16,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
         )
         .await
         .expect("drain candidates");

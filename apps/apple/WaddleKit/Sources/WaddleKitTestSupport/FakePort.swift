@@ -1,0 +1,285 @@
+import Foundation
+import WaddleKit
+
+/// Records every port call and answers with scripted values.
+@MainActor
+final class FakePort: XmppPort {
+    nonisolated let events: AsyncStream<XmppEvent>
+    private let continuation: AsyncStream<XmppEvent>.Continuation
+
+    var externalServices: [ExternalService] = []
+    var externalServicesFetchCount = 0
+    var holdExternalServicesFetch = false
+    var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
+
+    var callSends: [CallSend] = []
+    var completedCallSends: [CallSend] = []
+    var callResults: [String: Bool] = [:]
+    var callTerminateOutcome: CallTerminateOutcome = .ok
+    var heldCallVerbs: Set<String> = []
+    var heldCallSends: [CheckedContinuation<Void, Never>] = []
+
+    var sent: [OutboundMessage] = []
+    var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
+    var reactions: [(target: String, emojis: [String])] = []
+    var corrections: [(target: String, body: String, options: OutboundOptions)] = []
+    var retractions: [String] = []
+    var displayed: [(id: String, conversation: ConversationID)] = []
+    var publishedCursors: [DisplayedCursor] = []
+    var chatStates: [(ChatState, ConversationID)] = []
+    var joined: [BareJID] = []
+    var roomBots: [BareJID: [RoomBot]] = [:]
+    var roomBotRequests: [BareJID] = []
+    var failsRoomBots = false
+    var userSearchResults: [String: [UserSearchResult]] = [:]
+    var userSearchRequests: [String] = []
+    var failsUserSearch = false
+    var inboxReads: [BareJID] = []
+    /// Every `<mark-read/>` with its thread, in order.
+    var inboxReadRequests: [(partner: BareJID, threadID: String?)] = []
+    var failingInboxReads = 0
+    var failsInboxFetch = false
+    var topology: Topology = .empty
+    var inbox: [InboxEntry] = []
+    var cursors: [DisplayedCursor] = []
+    var historyPages: [ArchivePage] = []
+    var historyRequests: [(ConversationID, String?)] = []
+    var failingHistoryRequests = 0
+    var connectCount = 0
+    var probeConnectionResult = true
+    var probeConnectionCount = 0
+    var avatarLookups: [BareJID] = []
+    var publishedAvatarID = "own1"
+    var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
+
+    init() {
+        var captured: AsyncStream<XmppEvent>.Continuation!
+        events = AsyncStream { captured = $0 }
+        continuation = captured
+    }
+
+    func emit(_ event: XmppEvent) {
+        continuation.yield(event)
+    }
+
+    var connectDelay: UInt64 = 0
+    var disconnectCount = 0
+    var holdsConnects = false
+    private(set) var heldConnects: [CheckedContinuation<Void, Never>] = []
+
+    func releaseConnects() {
+        let held = heldConnects
+        heldConnects = []
+        held.forEach { $0.resume() }
+    }
+
+    func connect() async {
+        connectCount += 1
+        if holdsConnects {
+            await withCheckedContinuation { heldConnects.append($0) }
+        }
+        if connectDelay > 0 {
+            try? await Task.sleep(nanoseconds: connectDelay)
+        }
+    }
+
+    func disconnect() async {
+        disconnectCount += 1
+        emit(.disconnected)
+    }
+    func probeConnection() async -> Bool {
+        probeConnectionCount += 1
+        return probeConnectionResult
+    }
+    func sendPresence(_ availability: Availability, status: String?) async {}
+
+    func send(_ message: OutboundMessage) async -> SendOutcome {
+        sent.append(message)
+        return sendOutcome(message)
+    }
+
+    func sendCorrection(of targetID: String, body: String, in conversation: ConversationID, options: OutboundOptions) async -> SendOutcome {
+        corrections.append((targetID, body, options))
+        return .sent(stanzaID: "correction")
+    }
+
+    func sendReaction(to targetID: String, emojis: [String], in conversation: ConversationID) async -> Bool {
+        reactions.append((targetID, emojis))
+        return true
+    }
+
+    func sendRetraction(of targetID: String, in conversation: ConversationID) async -> Bool {
+        retractions.append(targetID)
+        return true
+    }
+
+    func sendModeration(of targetID: String, in room: BareJID, reason: String?) async -> Bool { true }
+
+    func sendChatState(_ state: ChatState, in conversation: ConversationID) async -> Bool {
+        chatStates.append((state, conversation))
+        return true
+    }
+
+    func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool { true }
+    func fetchPins(in room: BareJID) async throws -> [PinEntry] { [] }
+
+    /// While set, history fetches suspend until `releaseHistory()`.
+    var holdsHistory = false
+    private(set) var heldHistory: [CheckedContinuation<Void, Never>] = []
+
+    func releaseHistory() {
+        let held = heldHistory
+        heldHistory = []
+        held.forEach { $0.resume() }
+    }
+
+    func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async throws -> ArchivePage {
+        historyRequests.append((conversation, cursor))
+        if holdsHistory {
+            await withCheckedContinuation { heldHistory.append($0) }
+        }
+        if failingHistoryRequests > 0 {
+            failingHistoryRequests -= 1
+            throw PortError.failed
+        }
+        guard !historyPages.isEmpty else { return ArchivePage(messages: [], first: nil, isComplete: true) }
+        return historyPages.removeFirst()
+    }
+
+    /// Thread pages by thread id; a missing entry is an empty, complete page.
+    var threadPages: [String: ArchivePage] = [:]
+    var failingThreads: Set<String> = []
+    var threadRequests: [(room: BareJID, threadID: String, max: Int)] = []
+
+    func fetchThreadHistory(in room: BareJID, threadID: String, before _: String?, max: Int) async throws -> ArchivePage {
+        threadRequests.append((room, threadID, max))
+        if failingThreads.contains(threadID) { throw PortError.failed }
+        return threadPages[threadID] ?? ArchivePage(messages: [], first: nil, isComplete: true)
+    }
+
+    func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage {
+        ArchivePage(messages: [], first: nil, isComplete: true)
+    }
+
+    func sendDisplayed(stanzaID: String, in conversation: ConversationID) async -> Bool {
+        displayed.append((stanzaID, conversation))
+        return true
+    }
+
+    func publishDisplayedCursor(_ cursor: DisplayedCursor) async -> Bool {
+        publishedCursors.append(cursor)
+        return true
+    }
+
+    func supportsDisplayedCursorPublish() async -> Bool { true }
+    func fetchDisplayedCursors() async throws -> [DisplayedCursor] { cursors }
+    func subscribeDisplayedCursors() async -> Bool { true }
+    func fetchInbox() async throws -> [InboxEntry] {
+        if failsInboxFetch { throw PortError.failed }
+        return inbox
+    }
+
+    func markInboxRead(partner: BareJID, threadID: String?) async throws {
+        inboxReadRequests.append((partner, threadID))
+        if failingInboxReads > 0 {
+            failingInboxReads -= 1
+            throw PortError.rejected
+        }
+        inboxReads.append(partner)
+    }
+
+    func discoverTopology() async -> Result<Topology, PortError> { .success(topology) }
+
+    func joinRoom(_ room: BareJID, nick: String) async {
+        joined.append(room)
+    }
+
+    func leaveRoom(_ room: BareJID, nick: String) async {}
+    func listMembers(of room: BareJID) async throws -> [RoomMember] { [] }
+    func listRoomBots(in room: BareJID) async throws -> [RoomBot] {
+        roomBotRequests.append(room)
+        if failsRoomBots { throw PortError.failed }
+        return roomBots[room] ?? []
+    }
+    func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws {}
+    func kick(nick: String, from room: BareJID, reason: String?) async throws {}
+    func searchUsers(_ query: String) async throws -> [UserSearchResult] {
+        userSearchRequests.append(query)
+        if failsUserSearch { throw PortError.failed }
+        return userSearchResults[query] ?? []
+    }
+
+    func createRoom(localpart: String, name: String, summary: String?, nick: String) async throws -> BareJID {
+        BareJID(localpart: localpart, domain: "muc.waddle.test")!
+    }
+
+    func createGroupDM(name: String, members: [BareJID]) async throws -> BareJID {
+        BareJID(localpart: "group", domain: "muc.waddle.test")!
+    }
+
+    func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {}
+    func fetchNotifyModes() async throws -> [ConversationID: NotifyMode] { [:] }
+    func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
+        avatarLookups.append(jid)
+        return avatarLookup(jid, knownID)
+    }
+    func publishAvatar(_: AvatarImage) async throws -> String {
+        publishedAvatarID
+    }
+    func removeAvatar() async throws {}
+    func fetchMood(of jid: BareJID) async throws -> UserMood? { nil }
+    func publishMood(_ mood: UserMood) async throws {}
+    func retractMood() async throws {}
+    func requestUploadSlot(filename: String, size: Int, mediaType: String) async -> UploadSlot? { nil }
+    func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? { nil }
+    func disablePush(_ registration: PushRegistration) async -> Bool { true }
+
+    var extensionCommandDiscovery: Result<[ExtensionCommand], PortError> = .success([])
+    var extensionDiscoveryCount = 0
+    var invokeResult: Result<ExtensionCommandResult, PortError> = .failure(.failed)
+    var invocations: [(command: ExtensionCommand, room: BareJID?)] = []
+    var submitResult: Result<ExtensionCommandResult, PortError> = .failure(.failed)
+    var submissions: [ExtensionSubmission] = []
+
+    struct ExtensionSubmission: Equatable {
+        let command: ExtensionCommand
+        let sessionID: String?
+        let values: [ExtensionFormValue]
+        let action: ExtensionCommandAction
+        let room: BareJID?
+    }
+
+    /// While set, discovery suspends until `releaseExtensionDiscovery()`.
+    var holdsExtensionDiscovery = false
+    private var heldExtensionDiscovery: [CheckedContinuation<Void, Never>] = []
+
+    func releaseExtensionDiscovery() {
+        let held = heldExtensionDiscovery
+        heldExtensionDiscovery = []
+        held.forEach { $0.resume() }
+    }
+
+    func discoverExtensionCommands() async throws -> [ExtensionCommand] {
+        extensionDiscoveryCount += 1
+        if holdsExtensionDiscovery {
+            await withCheckedContinuation { heldExtensionDiscovery.append($0) }
+        }
+        return try extensionCommandDiscovery.get()
+    }
+
+    func invokeExtensionCommand(_ command: ExtensionCommand, room: BareJID?) async throws -> ExtensionCommandResult {
+        invocations.append((command, room))
+        return try invokeResult.get()
+    }
+
+    func submitExtensionCommandForm(
+        _ command: ExtensionCommand,
+        sessionID: String?,
+        values: [ExtensionFormValue],
+        action: ExtensionCommandAction,
+        room: BareJID?
+    ) async throws -> ExtensionCommandResult {
+        submissions.append(ExtensionSubmission(command: command, sessionID: sessionID, values: values, action: action, room: room))
+        return try submitResult.get()
+    }
+}

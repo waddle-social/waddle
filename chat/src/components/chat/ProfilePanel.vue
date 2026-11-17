@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { computed, ref, useId, watch } from "vue";
+import { useStore } from "@nanostores/vue";
 import { Popover } from "@ark-ui/vue/popover";
 import type { PopoverOpenChangeDetails, PopoverRootProps } from "@ark-ui/vue/popover";
-import { Bell, BellOff, ChevronUp, LogOut, Settings, Volume2, VolumeX } from "lucide-vue-next";
+import { Bell, BellOff, LogOut, Settings, SlidersHorizontal, Volume2, VolumeX } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import PresencePicker from "@/components/chat/PresencePicker.vue";
 import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
+import { $selfPresenceShow } from "@/presence/presence-store";
+import { menuClasses } from "@/ui/menu-classes";
+import type { OccupantPresence } from "@/lib/xmpp-client";
 import type { XmppServerVersion } from "@/shell/version";
 import type { WaddleSession } from "@/lib/server-auth";
 
@@ -18,8 +24,6 @@ const props = defineProps<{
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
   messageSoundsEnabled?: boolean;
-  totalUnreadCount?: number;
-  totalMentionCount?: number;
   compact?: boolean;
   /** Where the account popover opens relative to its trigger. Defaults
    * to below the avatar in compact (header) mode, above the account row
@@ -44,14 +48,23 @@ const bellTitle = computed(() => {
   return "Enable notifications";
 });
 
-const bellAriaLabel = computed(() => {
-  const base = bellTitle.value;
-  if ((props.totalMentionCount ?? 0) > 0) return `${base}, ${props.totalMentionCount} unread mention${props.totalMentionCount === 1 ? "" : "s"} in channels`;
-  if ((props.totalUnreadCount ?? 0) > 0) return `${base}, ${props.totalUnreadCount} unread message${props.totalUnreadCount === 1 ? "" : "s"} in channels`;
-  return base;
-});
+const bellOff = computed(() =>
+  props.notificationPermission === "denied" || (props.notificationPermission === "granted" && !props.notificationsEnabled),
+);
 
 const accountMenuLabel = computed(() => `${props.session.username} — Account menu`);
+
+// The footer trigger reads the own status as others see it, auto-away
+// included, so it matches the own avatar's dot (Sidebar board: "Available").
+const selfShow = useStore($selfPresenceShow);
+const STATUS: Record<string, { label: string; presence: OccupantPresence }> = {
+  available: { label: "Available", presence: "online" },
+  chat: { label: "Free to chat", presence: "online" },
+  away: { label: "Away", presence: "away" },
+  xa: { label: "Away", presence: "away" },
+  dnd: { label: "Do Not Disturb", presence: "dnd" },
+};
+const status = computed(() => STATUS[selfShow.value] ?? STATUS.available!);
 
 // One open flag serves both layouts; the popover is re-created when
 // `compact` flips, so close it rather than let it float in the wrong spot.
@@ -64,9 +77,6 @@ const positioning = computed(() =>
     ? { placement: props.placement ?? ("bottom-end" as const), gutter: 8 }
     : { placement: props.placement ?? ("top-start" as const), gutter: 8 },
 );
-
-const popoverClass =
-  "z-popover flex flex-col gap-1 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-[var(--shadow-floating)] outline-none data-[state=open]:animate-fade-in";
 
 function handleBellClick() {
   if (props.notificationPermission === "denied") return;
@@ -103,38 +113,54 @@ watch(
   () => props.compact,
   () => closeMenu(),
 );
+
+// Settings-Menu board.
+const content = cx(menuClasses.content, css({ width: "300px", p: "2.5", gap: "1" }));
+const header = css({ display: "flex", alignItems: "center", gap: "3", px: "1.5", pt: "1.5", pb: "2.5" });
+const headerText = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", lineHeight: 1.3 });
+const headerName = css({ font: "700 15px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const caption = css({ textStyle: "caption", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+const separator = css({ height: "1px", bg: "border.soft", mx: "1", my: "1" });
+const row = cx(menuClasses.item, css({ _hover: { bg: "state.hover" } }));
+const dangerRow = cx(row, css({ "&, & svg": { color: "danger.text" } }));
+const version = css({ px: "3", pt: "1" });
+// Footer trigger (Sidebar board): avatar + bold name + status caption.
+const footer = css({ display: "flex", alignItems: "center", gap: "2.5", minWidth: 0, flex: 1 });
+const footerButton = css({
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  height: "44px",
+  pr: "1.5",
+  pl: 0,
+  border: 0,
+  borderRadius: "control",
+  bg: "transparent",
+  color: "fg",
+  textAlign: "left",
+  cursor: "pointer",
+  _hover: { bg: "state.hover" },
+});
+const footerText = css({ minWidth: 0, display: "flex", flexDirection: "column", "& b": { fontSize: "sm", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
+const compactRow = css({ position: "relative", display: "flex", alignItems: "center", gap: "1" });
+const iconButton = iconbtn();
+const bellButton = cx(iconButton, css({ _disabled: { opacity: 0.4, cursor: "not-allowed" } }));
 </script>
 
 <template>
-  <!-- Compact: a header row (bell + avatar); the popover drops below. -->
-  <div v-if="compact" class="relative flex items-center gap-1">
-    <AppTooltip :label="bellTitle" placement="bottom">
+  <div :class="compact ? compactRow : footer">
+    <AppTooltip v-if="compact" :label="bellTitle" placement="bottom">
       <button
-        class="relative flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-200"
+        :class="bellButton"
         type="button"
-        :class="notificationPermission === 'denied'
-          ? 'cursor-not-allowed text-rail-foreground opacity-30'
-          : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
-        :aria-label="bellAriaLabel"
+        :aria-label="bellTitle"
         :disabled="notificationPermission === 'denied'"
         @click="handleBellClick"
       >
-        <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
-        <Bell v-else class="h-3.5 w-3.5" />
-        <!-- Bell-corner count badges pick up the same glow halo the
-             sidebar unread/mention badges use (iter 39 brand
-             language). The bell is the global unread/mention indicator
-             — it should pull the eye at least as much as a single row. -->
-        <span
-          v-if="(totalMentionCount ?? 0) > 0"
-          class="chat-badge-glow--mention type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-live text-live-foreground"
-          aria-hidden="true"
-        >{{ totalMentionCount }}</span>
-        <span
-          v-else-if="(totalUnreadCount ?? 0) > 0"
-          class="chat-badge-glow--primary type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
-          aria-hidden="true"
-        >{{ totalUnreadCount }}</span>
+        <BellOff v-if="bellOff" aria-hidden="true" />
+        <Bell v-else aria-hidden="true" />
       </button>
     </AppTooltip>
     <Popover.Root
@@ -145,168 +171,73 @@ watch(
       unmount-on-exit
       @open-change="onOpenChange"
     >
-      <AppTooltip :label="accountMenuLabel" placement="bottom" :trigger-id="triggerId">
+      <AppTooltip :label="compact ? accountMenuLabel : ''" placement="bottom" :trigger-id="triggerId">
         <Popover.Trigger as-child>
-          <button
-            class="flex h-10 w-10 items-center justify-center rounded-lg text-rail-foreground transition-all duration-200 hover:bg-rail-hover hover:text-rail-active"
-            type="button"
-            :aria-label="accountMenuLabel"
-          >
-            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="xs" />
+          <button v-if="compact" :class="iconButton" type="button" :aria-label="accountMenuLabel">
+            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="sm" />
+          </button>
+          <button v-else :class="footerButton" type="button" :aria-label="accountMenuLabel">
+            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" :presence="status.presence" />
+            <span :class="footerText">
+              <b>{{ session.username }}</b>
+              <span :class="caption">{{ status.label }}</span>
+            </span>
           </button>
         </Popover.Trigger>
       </AppTooltip>
-      <Popover.Positioner>
-        <Popover.Content
-          :class="[popoverClass, 'w-[var(--chat-profile-menu-width)]']"
-          :aria-label="`${session.username} account menu`"
-        >
-          <div class="flex min-h-12 items-center gap-3 rounded-lg bg-muted/30 px-2.5 py-2">
-            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="sm" />
-            <div class="min-w-0 flex-1">
-              <Popover.Title as-child>
-                <div class="type-menu-title truncate">{{ session.username }}</div>
-              </Popover.Title>
-              <div class="type-meta text-muted-foreground">Signed in</div>
-            </div>
-            <ThemeSwitcher />
-          </div>
-          <div class="mt-1 border-t border-border pt-2">
-            <PresencePicker />
-          </div>
-          <div class="mt-1 flex flex-col gap-1 border-t border-border pt-2">
-            <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
-              type="button"
-              @click="handleOpenSettings"
-            >
-              <Settings class="h-3.5 w-3.5 text-primary/70" />
-              <span>Settings</span>
-            </button>
-            <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
-              type="button"
-              :aria-pressed="messageSoundsEnabled !== false"
-              @click="handleToggleMessageSounds"
-            >
-              <Volume2 v-if="messageSoundsEnabled !== false" class="h-3.5 w-3.5 text-primary/70" />
-              <VolumeX v-else class="h-3.5 w-3.5 text-muted-foreground" />
-              <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
-            </button>
-            <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive-text"
-              type="button"
-              @click="handleLogout"
-            >
-              <LogOut class="h-3.5 w-3.5" />
-              <span>Log out</span>
-            </button>
-          </div>
-          <div class="mt-1 border-t border-border px-2.5 pt-2">
-            <VersionFooter
-              :web-commit-sha="webCommitSha"
-              :server-version="serverVersion"
-              layout="detail"
-            />
-          </div>
-        </Popover.Content>
-      </Popover.Positioner>
-    </Popover.Root>
-  </div>
-
-  <div v-else class="flex flex-shrink-0 flex-col gap-2.5 border-t border-border px-3 py-2.5">
-    <div class="relative flex items-center gap-2">
-      <Popover.Root
-        :open="menuOpen"
-        :ids="popoverIds"
-        :positioning="positioning"
-        lazy-mount
-        unmount-on-exit
-        @open-change="onOpenChange"
-      >
-        <Popover.Trigger as-child>
-          <button
-            class="flex h-10 min-w-0 flex-1 items-center gap-2.5 rounded-lg px-1.5 text-left transition-all duration-200 hover:bg-sidebar-accent"
-            type="button"
-            :aria-label="accountMenuLabel"
-          >
-            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="sm" />
-            <span class="type-menu-title min-w-0 flex-1 truncate text-sidebar-foreground">{{ session.username }}</span>
-            <ChevronUp
-              class="h-3.5 w-3.5 flex-shrink-0 text-sidebar-muted transition-transform duration-200"
-              :class="menuOpen ? 'rotate-180' : ''"
-            />
-          </button>
-        </Popover.Trigger>
+      <Teleport to="body">
         <Popover.Positioner>
-          <Popover.Content
-            :class="[popoverClass, 'w-[var(--chat-account-menu-width)]']"
-            :aria-label="`${session.username} account menu`"
-          >
+          <Popover.Content :class="content" :aria-label="`${session.username} account menu`">
+            <div :class="header">
+              <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" :presence="status.presence" size="lg" />
+              <div :class="headerText">
+                <Popover.Title as-child>
+                  <b :class="headerName">{{ session.username }}</b>
+                </Popover.Title>
+                <span :class="caption">{{ session.jid }}</span>
+              </div>
+            </div>
+            <div :class="separator" aria-hidden="true" />
             <PresencePicker />
-            <div class="my-1 border-t border-border" aria-hidden="true" />
             <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
+              :class="row"
               type="button"
-              @click="handleOpenSettings"
+              :disabled="notificationPermission === 'denied'"
+              @click="handleBellClick"
             >
-              <Settings class="h-3.5 w-3.5 text-primary/70" />
-              <span>Settings</span>
+              <BellOff v-if="bellOff" aria-hidden="true" />
+              <Bell v-else aria-hidden="true" />
+              <span>{{ bellTitle }}</span>
             </button>
             <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
+              :class="row"
               type="button"
               :aria-pressed="messageSoundsEnabled !== false"
               @click="handleToggleMessageSounds"
             >
-              <Volume2 v-if="messageSoundsEnabled !== false" class="h-3.5 w-3.5 text-primary/70" />
-              <VolumeX v-else class="h-3.5 w-3.5 text-muted-foreground" />
+              <Volume2 v-if="messageSoundsEnabled !== false" aria-hidden="true" />
+              <VolumeX v-else aria-hidden="true" />
               <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
             </button>
-            <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive-text"
-              type="button"
-              @click="handleLogout"
-            >
-              <LogOut class="h-3.5 w-3.5" />
+            <ThemeSwitcher />
+            <button :class="row" type="button" @click="handleOpenSettings">
+              <Settings aria-hidden="true" />
+              <span>Settings</span>
+            </button>
+            <div :class="separator" aria-hidden="true" />
+            <button :class="dangerRow" type="button" @click="handleLogout">
+              <LogOut aria-hidden="true" />
               <span>Log out</span>
             </button>
+            <div :class="version">
+              <VersionFooter :web-commit-sha="webCommitSha" :server-version="serverVersion" layout="detail" />
+            </div>
           </Popover.Content>
         </Popover.Positioner>
-      </Popover.Root>
-      <AppTooltip :label="bellTitle">
-        <button
-          class="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
-          type="button"
-          :class="notificationPermission === 'denied'
-            ? 'cursor-not-allowed opacity-30'
-            : 'text-sidebar-muted hover:bg-sidebar-accent hover:text-primary'"
-          :aria-label="bellAriaLabel"
-          :disabled="notificationPermission === 'denied'"
-          @click="handleBellClick"
-        >
-          <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
-          <Bell v-else class="h-3.5 w-3.5" />
-          <span
-            v-if="(totalMentionCount ?? 0) > 0"
-            class="type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-live text-live-foreground"
-            aria-hidden="true"
-          >{{ totalMentionCount }}</span>
-          <span
-            v-else-if="(totalUnreadCount ?? 0) > 0"
-            class="type-count-badge absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
-            aria-hidden="true"
-          >{{ totalUnreadCount }}</span>
-        </button>
-      </AppTooltip>
-      <ThemeSwitcher />
-    </div>
-    <div class="border-t border-border pt-2">
-      <VersionFooter
-        :web-commit-sha="webCommitSha"
-        :server-version="serverVersion"
-        layout="inline"
-      />
-    </div>
+      </Teleport>
+    </Popover.Root>
+    <button v-if="!compact" :class="iconButton" type="button" aria-label="Settings" @click="emit('open-settings')">
+      <SlidersHorizontal aria-hidden="true" />
+    </button>
   </div>
 </template>

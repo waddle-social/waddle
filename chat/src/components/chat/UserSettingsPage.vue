@@ -1,6 +1,11 @@
 <script setup lang="ts">
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { computed, reactive, ref } from "vue";
-import { ChevronLeft, MessageCircle, ScanText, UserRound, Volume2, VolumeX } from "lucide-vue-next";
+import spotError from "@waddle/design/assets/spot-error.svg?url";
+import { css } from "styled-system/css";
+import { seg, toggle } from "styled-system/recipes";
+import { feedbackClass, settingsClasses as sc, type FeedbackTone } from "@/components/chat/settings-classes";
+import { useTheme, type ThemeMode } from "@/preferences/theme";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import ReadReceiptSwitcher from "@/components/chat/ReadReceiptSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
@@ -41,18 +46,85 @@ const emit = defineEmits<{
   "toggle-message-sounds": [];
 }>();
 
-type FeedbackTone = "muted" | "success" | "error";
-
 interface StatusFeedback {
   tone: FeedbackTone;
   message: string;
 }
 
-const fieldLabelClass = "type-section-label text-muted-foreground/75";
-const fieldClass = "chat-field-control type-field disabled:opacity-50";
-const textareaClass = "chat-field-control chat-textarea-control type-field disabled:opacity-50";
-const primaryButtonClass = "chat-action-button chat-action-button--primary type-control disabled:opacity-40";
-const secondaryButtonClass = "chat-action-button chat-action-button--secondary type-control disabled:opacity-40";
+const pageScrollClass = css({ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", bg: "bg", color: "fg" });
+const pageClass = css({
+  width: "100%",
+  maxWidth: "760px",
+  boxSizing: "border-box",
+  display: "flex",
+  flexDirection: "column",
+  gap: "3",
+  padding: "{spacing.4} {spacing.3} {spacing.12}",
+  md: { gap: "5", padding: "{spacing.8} {spacing.10} {spacing.16}" },
+});
+const titleClass = css({
+  position: "absolute", width: "1px", height: "1px", overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap",
+  md: { position: "static", width: "auto", height: "auto", overflow: "visible", clip: "auto", margin: 0, font: "700 30px/1.2 {fonts.display}", letterSpacing: "-0.01em" },
+});
+const offlineClass = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  margin: 0,
+  padding: "{spacing.3} {spacing.4}",
+  borderRadius: "control",
+  bg: "color-mix(in srgb, {colors.presence.away} 12%, transparent)",
+  border: "1px solid color-mix(in srgb, {colors.presence.away} 40%, transparent)",
+  fontSize: "14px",
+  "& img": { width: "36px", height: "36px", flex: "none" },
+});
+const themeGridClass = css({ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "2.5" });
+const themeOptionClass = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  padding: "2.5",
+  borderRadius: "control",
+  border: "2px solid {colors.border.soft}",
+  cursor: "pointer",
+  "&:has(input:checked)": { borderColor: "action" },
+  "&:has(input:focus-visible)": { outline: "3px solid {colors.focus}", outlineOffset: "2px" },
+});
+const themeSwatchClass = css({
+  display: "flex",
+  alignItems: "flex-end",
+  gap: "1",
+  height: "56px",
+  boxSizing: "border-box",
+  padding: "2",
+  borderRadius: "sm",
+  bg: "bg",
+  border: "1px solid {colors.border}",
+  "& > :first-child": { width: "40%", height: "10px", borderRadius: "5px", bg: "surface.2", border: "1px solid {colors.border.soft}" },
+  "& > :last-child": { width: "30%", height: "10px", borderRadius: "5px", bg: "action", marginLeft: "auto" },
+});
+const themeLabelClass = css({ display: "flex", alignItems: "center", gap: "2", fontSize: "14px", "& input": { accentColor: "action", margin: 0 } });
+const segClass = seg();
+const statusSegClass = [segClass, css({ alignSelf: "flex-start" })];
+const rowClass = css({ display: "flex", alignItems: "center", gap: "3", flexWrap: "wrap" });
+const rowCopyClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "0.5", fontSize: "15px" });
+const switchClass = toggle();
+const formClass = css({ display: "flex", flexDirection: "column", gap: "4" });
+
+const { mode: themeMode, setTheme } = useTheme();
+const themeOptions: ReadonlyArray<{ value: ThemeMode; label: string }> = [
+  { value: "system", label: "System" },
+  { value: "night", label: "Night" },
+  { value: "daylight", label: "Daylight" },
+];
+
+type StatusTab = "mood" | "activity" | "tune";
+const statusTabs: ReadonlyArray<{ value: StatusTab; label: string }> = [
+  { value: "mood", label: "Mood" },
+  { value: "activity", label: "Activity" },
+  { value: "tune", label: "Listening" },
+];
+const statusTab = ref<StatusTab>("mood");
 
 const moodOptions = MOOD_KINDS.map((kind) => ({
   value: kind,
@@ -115,17 +187,6 @@ const activitySpecificHint = computed(() => {
   }
   return "Looks good.";
 });
-
-function feedbackClass(tone: FeedbackTone): string {
-  switch (tone) {
-    case "success":
-      return "text-emerald-700 dark:text-emerald-300";
-    case "error":
-      return "text-destructive-text";
-    default:
-      return "text-muted-foreground";
-  }
-}
 
 function normalizeError(value: unknown): string {
   return value instanceof Error ? value.message : "Something went wrong.";
@@ -341,403 +402,238 @@ async function clearTuneStatus() {
 }
 </script>
 
-<template>
-  <div class="flex-1 min-w-0 min-h-0 overflow-auto bg-background">
-    <div class="z-sticky sticky top-0 border-b border-border glass-surface">
-      <div class="mx-auto flex h-14 max-w-4xl items-center gap-3 px-4 sm:px-6">
-        <button
-          class="chat-action-button chat-action-button--secondary type-control text-muted-foreground hover:text-foreground"
-          type="button"
-          @click="emit('close')"
-        >
-          <ChevronLeft class="h-4 w-4" />
-          <span>Back</span>
-        </button>
-        <div class="min-w-0">
-          <h1 class="type-chat-title">Settings</h1>
-          <p class="type-caption text-muted-foreground">Share profile signals, tune reading flow, and check build details.</p>
-        </div>
-      </div>
-    </div>
 
-    <div class="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-5 sm:px-6">
-      <section class="chat-section-card glass-panel">
-        <div class="flex items-center gap-3">
-          <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="md" />
-          <div class="min-w-0">
-            <div class="type-section-label flex items-center gap-2 text-muted-foreground/70">
-              <UserRound class="h-3.5 w-3.5" />
-              <span>Signed in</span>
-            </div>
-            <h2 class="type-chat-title mt-1 truncate">{{ session.username }}</h2>
-            <p class="type-caption text-muted-foreground">Reading preferences, profile signals, and build details for this device.</p>
-          </div>
+<template>
+  <div :class="pageScrollClass">
+    <main :class="pageClass">
+      <h1 :class="titleClass">Settings</h1>
+
+      <p v-if="!xmppClient" :class="offlineClass" role="status">
+        <img :src="spotError" alt="" />
+        Reconnect to edit your profile and status.
+      </p>
+
+      <VCardEditor :xmpp-client="xmppClient" :self-jid="session.jid">
+        <template #avatar>
+          <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="lg" />
+        </template>
+      </VCardEditor>
+
+      <section id="appearance" :class="sc.card" aria-labelledby="appearance-title">
+        <h2 id="appearance-title" :class="sc.heading">Appearance</h2>
+        <div role="radiogroup" aria-label="Theme" :class="themeGridClass">
+          <label v-for="option in themeOptions" :key="option.value" :class="themeOptionClass">
+            <!-- The System swatch takes the resolved page theme. -->
+            <span
+              :class="themeSwatchClass"
+              :data-theme="option.value === 'system' ? undefined : option.value"
+              aria-hidden="true"
+              ><span /><span
+            /></span>
+            <span :class="themeLabelClass">
+              <input
+                type="radio"
+                name="theme"
+                :value="option.value"
+                :checked="themeMode === option.value"
+                @change="setTheme(option.value)"
+              />
+              {{ option.label }}
+            </span>
+          </label>
         </div>
       </section>
 
-      <VCardEditor :xmpp-client="xmppClient" :self-jid="session.jid" />
-
-      <section class="chat-section-card glass-panel">
-        <div class="flex items-center justify-between gap-3">
-          <div class="flex min-w-0 items-center gap-3">
-            <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Volume2 v-if="messageSoundsEnabled !== false" class="h-4 w-4" />
-              <VolumeX v-else class="h-4 w-4" />
-            </div>
-            <div class="chat-settings-copy min-w-0">
-              <h2 id="message-sounds-title" class="type-pane-title">Message sounds</h2>
-              <p id="message-sounds-description" class="type-caption text-muted-foreground">
-                {{ messageSoundsEnabled !== false ? "In-app message sounds are enabled on this device." : "In-app message sounds are disabled on this device." }}
-              </p>
-            </div>
-          </div>
+      <section id="status" :class="sc.card" aria-labelledby="status-title">
+        <div :class="sc.cardHead">
+          <h2 id="status-title" :class="sc.heading">Status</h2>
+          <p :class="sc.caption">Shown to your contacts next to your name.</p>
+        </div>
+        <div role="group" aria-label="Status type" :class="statusSegClass">
           <button
+            v-for="tab in statusTabs"
+            :key="tab.value"
             type="button"
-            :class="secondaryButtonClass"
-            :aria-pressed="messageSoundsEnabled !== false"
-            :aria-label="messageSoundsEnabled !== false ? 'Disable message sounds' : 'Enable message sounds'"
-            aria-describedby="message-sounds-description"
-            @click="emit('toggle-message-sounds')"
+            :aria-pressed="statusTab === tab.value"
+            @click="statusTab = tab.value"
           >
-            {{ messageSoundsEnabled !== false ? "Disable message sounds" : "Enable message sounds" }}
+            {{ tab.label }}
           </button>
         </div>
-      </section>
 
-      <section class="chat-section-card glass-panel">
-        <div class="flex items-start gap-3 pb-4">
-          <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <MessageCircle class="h-4 w-4" />
+        <form v-if="statusTab === 'mood'" :class="formClass" aria-label="Mood" @submit.prevent="publishMoodStatus">
+          <div :class="sc.grid">
+            <label :class="sc.label">
+              Mood
+              <AppSelect v-model="moodDraft.kind" :options="moodOptions" placeholder="Choose a mood" :class="sc.input" />
+            </label>
+            <label :class="sc.label">
+              Note (optional)
+              <input
+                v-model="moodDraft.text"
+                :class="sc.input"
+                maxlength="160"
+                placeholder="Settled in and ready to catch up."
+                type="text"
+              />
+            </label>
           </div>
-          <div class="chat-settings-copy max-w-2xl">
-            <h2 class="type-pane-title">Profile signals</h2>
-            <p class="type-caption text-muted-foreground">
-              Publish lightweight XMPP profile signals for mood, activity, and tune. Keep them short, calm, and easy to scan.
+          <div :class="sc.actions">
+            <button type="submit" :class="sc.primary" :disabled="moodBusy || !xmppClient">
+              {{ moodBusy ? "Sharing…" : "Set mood" }}
+            </button>
+            <button type="button" :class="sc.secondary" :disabled="moodBusy || !xmppClient" @click="clearMoodStatus">
+              Clear
+            </button>
+            <p :class="feedbackClass(moodFeedback.tone)" aria-live="polite">{{ moodFeedback.message }}</p>
+          </div>
+        </form>
+
+        <form v-else-if="statusTab === 'activity'" :class="formClass" aria-label="Activity" @submit.prevent="publishActivityStatus">
+          <div :class="sc.grid">
+            <label :class="sc.label">
+              Activity
+              <AppSelect
+                v-model="activityDraft.general"
+                :options="activityOptions"
+                placeholder="Choose an activity"
+                :class="sc.input"
+                :aria-invalid="activityErrors.general ? 'true' : undefined"
+              />
+              <small v-if="activityErrors.general" :class="sc.hintError">{{ activityErrors.general }}</small>
+            </label>
+            <label :class="sc.label">
+              Specific activity (optional)
+              <input
+                v-model="activityDraft.specific"
+                :class="sc.input"
+                :aria-invalid="activityErrors.specific ? 'true' : undefined"
+                maxlength="64"
+                placeholder="deep focus"
+                type="text"
+              />
+              <small :class="activityErrors.specific ? sc.hintError : sc.hint">
+                {{ activityErrors.specific ?? activitySpecificHint }}
+              </small>
+            </label>
+            <label :class="[sc.label, sc.wide]">
+              Note (optional)
+              <input
+                v-model="activityDraft.text"
+                :class="sc.input"
+                maxlength="160"
+                placeholder="Heads down for the next hour."
+                type="text"
+              />
+            </label>
+          </div>
+          <div :class="sc.actions">
+            <button type="submit" :class="sc.primary" :disabled="activityBusy || !xmppClient">
+              {{ activityBusy ? "Sharing…" : "Set activity" }}
+            </button>
+            <button type="button" :class="sc.secondary" :disabled="activityBusy || !xmppClient" @click="clearActivityStatus">
+              Clear
+            </button>
+            <p :class="feedbackClass(activityFeedback.tone)" aria-live="polite">{{ activityFeedback.message }}</p>
+          </div>
+        </form>
+
+        <form v-else :class="formClass" aria-label="Listening" @submit.prevent="publishTuneStatus">
+          <div :class="sc.grid">
+            <label :class="sc.label">
+              Title
+              <input v-model="tuneDraft.title" :class="sc.input" maxlength="120" placeholder="Come Together" type="text" />
+            </label>
+            <label :class="sc.label">
+              Artist
+              <input v-model="tuneDraft.artist" :class="sc.input" maxlength="120" placeholder="The Beatles" type="text" />
+            </label>
+            <label :class="sc.label">
+              Album or source (optional)
+              <input v-model="tuneDraft.source" :class="sc.input" maxlength="120" placeholder="Abbey Road" type="text" />
+            </label>
+            <label :class="sc.label">
+              Track number (optional)
+              <input v-model="tuneDraft.track" :class="sc.input" maxlength="40" placeholder="1" type="text" />
+            </label>
+            <label :class="sc.label">
+              Length in seconds (optional)
+              <input
+                v-model="tuneDraft.length"
+                :class="sc.input"
+                :aria-invalid="tuneErrors.length ? 'true' : undefined"
+                inputmode="numeric"
+                placeholder="259"
+                type="text"
+              />
+              <small :class="tuneErrors.length ? sc.hintError : sc.hint">{{ tuneErrors.length ?? "Whole seconds." }}</small>
+            </label>
+            <label :class="sc.label">
+              Rating (optional)
+              <input
+                v-model="tuneDraft.rating"
+                :class="sc.input"
+                :aria-invalid="tuneErrors.rating ? 'true' : undefined"
+                inputmode="numeric"
+                placeholder="9"
+                type="text"
+              />
+              <small :class="tuneErrors.rating ? sc.hintError : sc.hint">{{ tuneErrors.rating ?? "1 to 10." }}</small>
+            </label>
+            <label :class="[sc.label, sc.wide]">
+              Link (optional)
+              <input
+                v-model="tuneDraft.uri"
+                :class="sc.input"
+                :aria-invalid="tuneErrors.uri ? 'true' : undefined"
+                maxlength="240"
+                placeholder="https://… or spotify:track:…"
+                type="text"
+              />
+              <small :class="tuneErrors.uri ? sc.hintError : sc.hint">{{ tuneErrors.uri ?? "A full URL or URI." }}</small>
+            </label>
+          </div>
+          <div :class="sc.actions">
+            <button type="submit" :class="sc.primary" :disabled="tuneBusy || !xmppClient">
+              {{ tuneBusy ? "Sharing…" : "Set tune" }}
+            </button>
+            <button type="button" :class="sc.secondary" :disabled="tuneBusy || !xmppClient" @click="clearTuneStatus">
+              Clear
+            </button>
+            <p :class="feedbackClass(tuneErrors.form ? 'error' : tuneFeedback.tone)" aria-live="polite">
+              {{ tuneErrors.form ?? tuneFeedback.message }}
             </p>
           </div>
-        </div>
-
-        <p
-          v-if="!xmppClient"
-          class="type-caption mb-4 rounded-lg border border-border/70 bg-muted/50 px-3 py-2 text-muted-foreground"
-          role="status"
-        >
-          Reconnect before publishing or clearing profile signals.
-        </p>
-
-        <div class="divide-y divide-border/70">
-          <form
-            class="chat-settings-form pb-4"
-            @submit.prevent="publishMoodStatus"
-          >
-            <div class="chat-settings-copy">
-              <p class="type-section-label text-muted-foreground/70">XEP-0107</p>
-              <h3 class="type-pane-title">Mood</h3>
-              <p class="type-caption text-muted-foreground">
-                Share how things feel right now, with an optional note for context.
-              </p>
-            </div>
-
-            <div class="grid gap-3">
-              <div class="chat-settings-field-row">
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Mood</span>
-                  <select v-model="moodDraft.kind" :class="fieldClass">
-                    <option value="">Choose a mood</option>
-                    <option
-                      v-for="option in moodOptions"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Optional note</span>
-                  <textarea
-                    v-model="moodDraft.text"
-                    :class="textareaClass"
-                    maxlength="160"
-                    placeholder="Settled in and ready to catch up."
-                    rows="2"
-                  />
-                </label>
-              </div>
-
-              <div class="flex flex-wrap items-center gap-2">
-                <button
-                  type="submit"
-                  :class="primaryButtonClass"
-                  :disabled="moodBusy || !xmppClient"
-                >
-                  {{ moodBusy ? "Sharing…" : "Publish mood" }}
-                </button>
-                <button
-                  type="button"
-                  :class="secondaryButtonClass"
-                  :disabled="moodBusy || !xmppClient"
-                  @click="clearMoodStatus"
-                >
-                  Clear
-                </button>
-                <p class="type-caption" :class="feedbackClass(moodFeedback.tone)" aria-live="polite">
-                  {{ moodFeedback.message }}
-                </p>
-              </div>
-            </div>
-          </form>
-
-          <form
-            class="chat-settings-form py-4"
-            @submit.prevent="publishActivityStatus"
-          >
-            <div class="chat-settings-copy">
-              <p class="type-section-label text-muted-foreground/70">XEP-0108</p>
-              <h3 class="type-pane-title">Activity</h3>
-              <p class="type-caption text-muted-foreground">
-                Pick a broad category, then add a specific detail if you want a more precise signal.
-              </p>
-            </div>
-
-            <div class="grid gap-3">
-              <div class="grid gap-3 sm:grid-cols-2">
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">General activity</span>
-                  <select v-model="activityDraft.general" :class="fieldClass">
-                    <option value="">Choose an activity</option>
-                    <option
-                      v-for="option in activityOptions"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                  <p v-if="activityErrors.general" class="type-caption text-destructive-text">
-                    {{ activityErrors.general }}
-                  </p>
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Specific activity</span>
-                  <input
-                    v-model="activityDraft.specific"
-                    :class="fieldClass"
-                    maxlength="64"
-                    placeholder="deep focus"
-                    type="text"
-                  />
-                  <p
-                    class="type-caption"
-                    :class="activityErrors.specific ? 'text-destructive-text' : 'text-muted-foreground'"
-                  >
-                    {{ activityErrors.specific ?? activitySpecificHint }}
-                  </p>
-                </label>
-
-                <label class="grid gap-1.5 sm:col-span-2">
-                  <span :class="fieldLabelClass">Optional note</span>
-                  <textarea
-                    v-model="activityDraft.text"
-                    :class="textareaClass"
-                    maxlength="160"
-                    placeholder="Heads down for the next hour."
-                    rows="2"
-                  />
-                </label>
-              </div>
-
-              <div class="flex flex-wrap items-center gap-2">
-                <button
-                  type="submit"
-                  :class="primaryButtonClass"
-                  :disabled="activityBusy || !xmppClient"
-                >
-                  {{ activityBusy ? "Sharing…" : "Publish activity" }}
-                </button>
-                <button
-                  type="button"
-                  :class="secondaryButtonClass"
-                  :disabled="activityBusy || !xmppClient"
-                  @click="clearActivityStatus"
-                >
-                  Clear
-                </button>
-                <p class="type-caption" :class="feedbackClass(activityFeedback.tone)" aria-live="polite">
-                  {{ activityFeedback.message }}
-                </p>
-              </div>
-            </div>
-          </form>
-
-          <form
-            class="chat-settings-form pt-4"
-            @submit.prevent="publishTuneStatus"
-          >
-            <div class="chat-settings-copy">
-              <p class="type-section-label text-muted-foreground/70">XEP-0118</p>
-              <h3 class="type-pane-title">Tune</h3>
-              <p class="type-caption text-muted-foreground">
-                Share what is playing now. Any field is optional, but at least one detail is needed to publish.
-              </p>
-            </div>
-
-            <div class="grid gap-3">
-              <div class="grid gap-3 sm:grid-cols-2">
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Title</span>
-                  <input
-                    v-model="tuneDraft.title"
-                    :class="fieldClass"
-                    maxlength="120"
-                    placeholder="Come Together"
-                    type="text"
-                  />
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Artist</span>
-                  <input
-                    v-model="tuneDraft.artist"
-                    :class="fieldClass"
-                    maxlength="120"
-                    placeholder="The Beatles"
-                    type="text"
-                  />
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Source</span>
-                  <input
-                    v-model="tuneDraft.source"
-                    :class="fieldClass"
-                    maxlength="120"
-                    placeholder="Abbey Road"
-                    type="text"
-                  />
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Track</span>
-                  <input
-                    v-model="tuneDraft.track"
-                    :class="fieldClass"
-                    maxlength="40"
-                    placeholder="1"
-                    type="text"
-                  />
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Length (seconds)</span>
-                  <input
-                    v-model="tuneDraft.length"
-                    :class="fieldClass"
-                    inputmode="numeric"
-                    placeholder="259"
-                    type="text"
-                  />
-                  <p
-                    class="type-caption"
-                    :class="tuneErrors.length ? 'text-destructive-text' : 'text-muted-foreground'"
-                  >
-                    {{ tuneErrors.length ?? "Optional. Use whole seconds." }}
-                  </p>
-                </label>
-
-                <label class="grid gap-1.5">
-                  <span :class="fieldLabelClass">Rating</span>
-                  <input
-                    v-model="tuneDraft.rating"
-                    :class="fieldClass"
-                    inputmode="numeric"
-                    placeholder="9"
-                    type="text"
-                  />
-                  <p
-                    class="type-caption"
-                    :class="tuneErrors.rating ? 'text-destructive-text' : 'text-muted-foreground'"
-                  >
-                    {{ tuneErrors.rating ?? "Optional. Whole numbers from 1 to 10." }}
-                  </p>
-                </label>
-
-                <label class="grid gap-1.5 sm:col-span-2">
-                  <span :class="fieldLabelClass">URL or URI</span>
-                  <input
-                    v-model="tuneDraft.uri"
-                    :class="fieldClass"
-                    maxlength="240"
-                    placeholder="https://example.com/track or spotify:track:…"
-                    type="text"
-                  />
-                  <p
-                    class="type-caption"
-                    :class="tuneErrors.uri ? 'text-destructive-text' : 'text-muted-foreground'"
-                  >
-                    {{ tuneErrors.uri ?? "Optional. Use a full URL or URI." }}
-                  </p>
-                </label>
-              </div>
-
-              <div class="flex flex-wrap items-center gap-2">
-                <button
-                  type="submit"
-                  :class="primaryButtonClass"
-                  :disabled="tuneBusy || !xmppClient"
-                >
-                  {{ tuneBusy ? "Sharing…" : "Publish tune" }}
-                </button>
-                <button
-                  type="button"
-                  :class="secondaryButtonClass"
-                  :disabled="tuneBusy || !xmppClient"
-                  @click="clearTuneStatus"
-                >
-                  Clear
-                </button>
-                <p class="type-caption" :class="feedbackClass(tuneFeedback.tone)" aria-live="polite">
-                  {{ tuneErrors.form ?? tuneFeedback.message }}
-                </p>
-              </div>
-            </div>
-          </form>
-        </div>
+        </form>
       </section>
 
-      <section class="chat-section-card glass-panel">
-        <div class="flex items-start gap-3 pb-4">
-          <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <ScanText class="h-4 w-4" />
-          </div>
-          <div class="chat-settings-copy">
-            <h2 class="type-pane-title">Reading flow</h2>
-            <p class="type-caption text-muted-foreground">
-              Set whether the newest messages land at the bottom or the top.
-            </p>
-          </div>
-        </div>
-        <div class="grid gap-3">
-          <ScrollDirectionSwitcher />
-          <ReadReceiptSwitcher />
-        </div>
-      </section>
-
-      <section class="chat-section-card glass-panel">
-        <h2 class="type-pane-title">About this build</h2>
-        <p class="type-caption pt-1 text-muted-foreground">
-          Helpful version details when you need to compare client and server behavior.
-        </p>
-        <div class="pt-4">
-          <VersionFooter
-            :web-commit-sha="webCommitSha"
-            :server-version="serverVersion"
-            layout="detail"
+      <section id="messages" :class="sc.card" aria-labelledby="messages-title">
+        <h2 id="messages-title" :class="sc.heading">Messages</h2>
+        <ScrollDirectionSwitcher />
+        <div :class="rowClass">
+          <span :class="rowCopyClass">
+            <span id="message-sounds-title">Message sounds</span>
+            <span id="message-sounds-description" :class="sc.caption">
+              {{ messageSoundsEnabled !== false ? "In-app sounds are on for this device." : "In-app sounds are off for this device." }}
+            </span>
+          </span>
+          <button
+            type="button"
+            role="switch"
+            :class="switchClass"
+            :aria-checked="messageSoundsEnabled !== false"
+            aria-labelledby="message-sounds-title"
+            aria-describedby="message-sounds-description"
+            @click="emit('toggle-message-sounds')"
           />
         </div>
+        <ReadReceiptSwitcher />
       </section>
-    </div>
+
+      <section id="about" :class="sc.card" aria-labelledby="about-title">
+        <h2 id="about-title" :class="sc.heading">About this build</h2>
+        <VersionFooter :web-commit-sha="webCommitSha" :server-version="serverVersion" layout="detail" />
+      </section>
+    </main>
   </div>
 </template>

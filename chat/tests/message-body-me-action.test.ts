@@ -21,7 +21,7 @@ function renderMessageBody(msg: TimelineMessage, compact = false): Promise<strin
 describe("MessageBody XEP-0245 /me rendering", () => {
   test("renders `/me` bodies as an italic `* Author action` line", async () => {
     const html = await renderMessageBody(message({ body: "/me shrugs in disgust" }));
-    expect(html).toMatch(/class="[^"]*styled-body[^"]*italic/);
+    expect(html).toMatch(/ font-style_italic[ "]/);
     expect(html).toContain('<span class="font-semibold">* Atlas</span> shrugs in disgust');
     expect(html).not.toContain("/me ");
   });
@@ -42,6 +42,6 @@ describe("MessageBody XEP-0245 /me rendering", () => {
   test("non-matching bodies render normally", async () => {
     const html = await renderMessageBody(message({ body: "/meshrugs" }));
     expect(html).toContain("<p>/meshrugs</p>");
-    expect(html).not.toMatch(/styled-body[^"]*italic/);
+    expect(html).not.toMatch(/ font-style_italic[ "]/);
   });
 });

@@ -198,7 +198,7 @@ export function useChatAppController() {
     selfJid: computed(() => session.value?.jid ?? null),
   });
 
-  const { computedChannelUnreadMap, totalTabUnreadCount } = useChatReadActivity({
+  const { computedChannelUnreadMap, inboxUnreadCount } = useChatReadActivity({
     appReady: computed(() => connectionStore.appState === "ready"),
     session,
     xmppClient,
@@ -543,7 +543,7 @@ export function useChatAppController() {
     activeRoomChannel: conversation.activeRoomChannel,
     computedChannelUnreadMap,
     groupDmConversations,
-    totalTabUnreadCount,
+    inboxUnreadCount,
     notifications,
     appUpdate,
     version,
@@ -583,7 +583,6 @@ export function useChatAppController() {
     selectDm: dmSync.selectDm,
     searchDmRecipients: dmSync.searchDmRecipients,
     handleNewDm: dmSync.handleNewDm,
-    handleNewGroupDm: dmSync.handleNewGroupDm,
     handleAddPeopleToDm: dmSync.handleAddPeopleToDm,
     handleCreateGroupDm: dmSync.handleCreateGroupDm,
     openCreateChannelDialog: workspaceDialogs.openCreateChannelDialog,

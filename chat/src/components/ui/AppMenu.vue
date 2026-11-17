@@ -91,7 +91,7 @@ function onSelect(details: MenuSelectionDetails) {
     <Teleport to="body">
       <Menu.Positioner>
         <Menu.Content
-          :class="[menuClasses.content, contentClass, 'data-[state=open]:animate-fade-in']"
+          :class="[menuClasses.content, contentClass]"
           v-bind="ariaLabel ? { 'aria-label': ariaLabel } : {}"
         >
           <slot />

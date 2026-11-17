@@ -43,7 +43,7 @@ fn oauth_failure(
 
 fn oauth_status_for_session_validation_error(error: &crate::auth::AuthError) -> &'static str {
     match error {
-        crate::auth::AuthError::SessionNotFound(_) | crate::auth::AuthError::SessionExpired => {
+        crate::auth::AuthError::SessionNotFound | crate::auth::AuthError::SessionExpired => {
             "invalid_token"
         }
         _ => "server_error",
@@ -262,8 +262,7 @@ pub(super) async fn handle_sasl_oauthbearer(
         }
         Err(e) => {
             let status = oauth_status_for_session_validation_error(&e);
-            // SessionNotFound formats the presented bearer token, so do not
-            // include verifier errors in logs or the wire response.
+            // Verifier errors stay out of logs and the wire response.
             warn!("SASL OAUTHBEARER session validation failed");
             oauth_failure(
                 sasl2,
@@ -912,9 +911,7 @@ mod tests {
     #[test]
     fn oauth_session_validation_errors_use_generic_oauth_statuses() {
         assert_eq!(
-            oauth_status_for_session_validation_error(&AuthError::SessionNotFound(
-                "secret-token".to_owned()
-            )),
+            oauth_status_for_session_validation_error(&AuthError::SessionNotFound),
             "invalid_token"
         );
         assert_eq!(

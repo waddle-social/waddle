@@ -6,6 +6,20 @@ import {
   $desktopToolbarSuspensionEpoch,
   clearDesktopToolbarOwner,
 } from "@/stores/message-toolbar";
+import { css } from "styled-system/css";
+
+/**
+ * Desktop toolbar visibility, layered on the toolbar's hidden base style:
+ * `reveal` shows it while its row (`[data-msg-row]`) is hovered or holds
+ * focus, `shown` pins it open (lock owner or reaction mode), and a
+ * suppressed toolbar gets neither.
+ */
+export const toolbarVisibility = {
+  reveal: css({ "[data-msg-row]:hover &, [data-msg-row]:focus-within &": { opacity: 1, translate: "0 0", pointerEvents: "auto" } }),
+  // `[class]` lifts it over the toolbar's own hidden base.
+  shown: css({ "&[class]": { opacity: 1, translate: "0 0", pointerEvents: "auto", zIndex: "panel" } }),
+  suppressed: "",
+};
 
 /**
  * Transient action surfaces for one message card: the desktop hover
@@ -37,13 +51,9 @@ export function useMessageActionSurfaces(input: {
     desktopToolbarOwnerId.value !== null && desktopToolbarOwnerId.value !== input.messageId(),
   );
   const desktopToolbarVisibilityClass = computed(() => {
-    if (desktopToolbarSuppressed.value) {
-      return "opacity-0 motion-safe:translate-y-1 pointer-events-none z-sticky";
-    }
-    if (ownsDesktopToolbarLock.value || input.reactionModeSelected()) {
-      return "opacity-100 translate-y-0 pointer-events-auto z-floating";
-    }
-    return "opacity-0 motion-safe:translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 focus-within:opacity-100 focus-within:translate-y-0 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky";
+    if (desktopToolbarSuppressed.value) return toolbarVisibility.suppressed;
+    if (ownsDesktopToolbarLock.value || input.reactionModeSelected()) return toolbarVisibility.shown;
+    return toolbarVisibility.reveal;
   });
   const anyOverlayOpen = computed(() => pickerOpen.value || sheetOpen.value);
 

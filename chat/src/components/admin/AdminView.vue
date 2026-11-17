@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { ChevronLeft } from "lucide-vue-next";
+import { css, cx } from "styled-system/css";
+import { btn, empty, waddle } from "styled-system/recipes";
+import spotEmpty from "@waddle/design/assets/spot-empty.svg?url";
+import spotError from "@waddle/design/assets/spot-error.svg?url";
 import AdminLayout from "@/components/admin/AdminLayout.vue";
 import UsersPanel from "@/components/admin/UsersPanel.vue";
 import SpacesPanel from "@/components/admin/SpacesPanel.vue";
@@ -53,8 +57,14 @@ const showDenied = computed(() => roleState.value === "denied" || roleState.valu
 const deniedMessage = computed(() =>
   roleState.value === "error"
     ? "Couldn't verify your admin access. Please try again."
-    : "Admin access only. Ask a community owner if you need to manage this server.",
+    : "Ask a community owner if you need to manage this server.",
 );
+
+// Admin-Access board: a centred loader, or the empty state with one way back.
+// The shell's main column is a flex column; the box fills it.
+const centreClass = css({ display: "flex", alignItems: "center", justifyContent: "center", gap: "3", flex: 1, minHeight: 0, padding: "{spacing.8} {spacing.4}", boxSizing: "border-box", bg: "bg", color: "fg.muted", fontSize: "15px" });
+const deniedClass = cx(empty(), css({ maxWidth: "420px", color: "fg", "& h1": { margin: 0, font: "700 24px/1.25 {fonts.display}" } }));
+const backClass = btn();
 
 onMounted(() => {
   void checkRole();
@@ -62,15 +72,25 @@ onMounted(() => {
 </script>
 
 <template>
-  <div v-if="isLoading" class="admin-role-loading" role="status">Checking admin access…</div>
+  <div v-if="isLoading">
+    <div :class="centreClass" role="status">
+      <span :class="waddle()" aria-hidden="true"><i /><i /><i /></span>
+      Checking admin access…
+    </div>
+  </div>
 
-  <div v-else-if="showDenied" class="admin-denied" role="status">
-    <h1>Admin access only</h1>
-    <p>{{ deniedMessage }}</p>
-    <button type="button" class="admin-denied-back" @click="emit('back')">
-      <ChevronLeft :size="16" aria-hidden="true" />
-      <span>Back to chat</span>
-    </button>
+  <div v-else-if="showDenied">
+    <div :class="centreClass">
+      <section :class="deniedClass" role="status">
+        <img :src="roleState === 'error' ? spotError : spotEmpty" alt="" />
+        <h1>Admin access only</h1>
+        <p>{{ deniedMessage }}</p>
+        <button type="button" :class="backClass" @click="emit('back')">
+          <ChevronLeft aria-hidden="true" />
+          <span>Back to chat</span>
+        </button>
+      </section>
+    </div>
   </div>
 
   <AdminLayout
@@ -90,47 +110,3 @@ onMounted(() => {
     </template>
   </AdminLayout>
 </template>
-
-<style scoped>
-.admin-role-loading,
-.admin-denied {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100dvh;
-  background: var(--background);
-  color: var(--foreground);
-  gap: 0.75rem;
-  text-align: center;
-  padding: 2rem;
-}
-
-.admin-denied h1 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0;
-}
-
-.admin-denied p {
-  font-size: 0.95rem;
-  color: var(--muted-foreground);
-  max-width: 28rem;
-  margin: 0;
-  line-height: 1.5;
-}
-
-.admin-denied-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  margin-top: 0.5rem;
-  padding: 0.45rem 0.875rem;
-  border-radius: 0.5rem;
-  border: 1px solid var(--border);
-  background: var(--card);
-  font: inherit;
-  cursor: pointer;
-}
-</style>

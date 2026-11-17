@@ -4,6 +4,8 @@ import { MessageSquare, Pencil, Pin, PinOff, Reply, SmilePlus, Trash2 } from "lu
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
+import { css, cx } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 
 defineProps<{
   pickerOpen: boolean;
@@ -31,6 +33,53 @@ const emit = defineEmits<{
 
 const quickEmojis = QUICK_REACTION_EMOJIS;
 const pickerButtonEl = ref<HTMLButtonElement | null>(null);
+
+// Hidden at rest; `visibilityClass` (from useMessageActionSurfaces)
+// reveals it on row hover/focus or pins it open.
+const bar = cx("wd-msg__actions", css({
+  position: "absolute",
+  top: "-16px",
+  right: "4",
+  zIndex: "sticky",
+  display: "flex",
+  alignItems: "center",
+  gap: "0.5",
+  p: "0.5",
+  borderRadius: "control",
+  bg: "surface",
+  border: "1px solid {colors.border}",
+  boxShadow: "elev.2",
+  opacity: 0,
+  translate: "0 4px",
+  pointerEvents: "none",
+  transition: "opacity {durations.fast} {easings.out}, translate {durations.fast} {easings.out}",
+  _motionReduce: { translate: "0 0" },
+  _coarse: { display: "none" },
+  // Reaction mode (the toolbar is then a live status region).
+  "&[role=status]": { borderColor: "action.text", bg: "action.subtle" },
+}));
+const btn = cx(iconbtn({ size: "sm" }), css({ position: "relative", "&[aria-expanded=true]": { bg: "state.selected", color: "fg" } }));
+const emojiBtn = cx(btn, css({ fontSize: "md", lineHeight: 1 }));
+const dangerBtn = cx(btn, css({ _hover: { color: "danger.text", bg: "danger.subtle" } }));
+const keycap = css({
+  position: "absolute",
+  top: "-6px",
+  right: "-4px",
+  display: "grid",
+  placeItems: "center",
+  width: "16px",
+  height: "16px",
+  borderRadius: "pill",
+  border: "1px solid {colors.action.text}",
+  bg: "surface",
+  color: "action.text",
+  fontSize: "10px",
+  fontWeight: 700,
+  lineHeight: 1,
+  fontVariantNumeric: "tabular-nums",
+});
+const pickerWrap = css({ position: "relative", display: "flex" });
+const divider = css({ width: "1px", height: "20px", mx: "0.5", bg: "border" });
 </script>
 
 <template>
@@ -39,42 +88,37 @@ const pickerButtonEl = ref<HTMLButtonElement | null>(null);
        sheet instead, so this toolbar stays hidden and we never show two
        emoji rails at once. -->
   <div
-    :class="[
-      'chat-hover-action-toolbar absolute -top-4 right-3 flex items-center gap-1 transition-[opacity,transform] duration-150 ease-out bg-card border border-border rounded-lg shadow-[0_10px_28px_-12px_var(--glow-strong),0_4px_12px_-4px_color-mix(in_oklab,var(--foreground)_20%,transparent)] p-1 [@media(pointer:coarse)]:hidden',
-      visibilityClass,
-      reactionModeSelected ? 'chat-hover-action-toolbar--reaction-mode' : '',
-    ]"
+    :class="cx(bar, visibilityClass)"
     :role="reactionModeSelected ? 'status' : undefined"
     :aria-live="reactionModeSelected ? 'polite' : undefined"
   >
     <AppTooltip v-for="(e, index) in quickEmojis" :key="e" :label="`React with ${e}`">
       <button
         type="button"
-        class="chat-hover-action-toolbar-btn type-emoji-button relative h-8 w-8 flex items-center justify-center rounded-md hover:bg-muted motion-safe:hover:scale-110"
+        :class="emojiBtn"
         :aria-label="`React to message with ${e}`"
         @click="emit('react', e)"
       >
         <span
           v-if="reactionModeSelected"
-          class="chat-reaction-mode-keycap type-meta type-numeric"
+          :class="keycap"
           aria-hidden="true"
         >{{ index + 1 }}</span>
         {{ e }}
       </button>
     </AppTooltip>
-    <div class="relative">
+    <div :class="pickerWrap">
       <AppTooltip label="Add reaction">
         <button
           ref="pickerButtonEl"
           type="button"
-          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
-          :class="pickerOpen ? 'bg-muted text-foreground' : ''"
+          :class="btn"
           aria-label="Add reaction"
           :aria-expanded="pickerOpen"
           aria-haspopup="dialog"
           @click="emit('togglePicker')"
         >
-          <SmilePlus class="w-4 h-4" aria-hidden="true" />
+          <SmilePlus aria-hidden="true" />
         </button>
       </AppTooltip>
       <EmojiPicker
@@ -87,53 +131,53 @@ const pickerButtonEl = ref<HTMLButtonElement | null>(null);
     <AppTooltip v-if="canReply" label="Reply">
       <button
         type="button"
-        class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+        :class="btn"
         aria-label="Reply to message"
         @click="emit('reply')"
       >
-        <Reply class="w-4 h-4" aria-hidden="true" />
+        <Reply aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip :label="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'">
       <button
         type="button"
-        class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+        :class="btn"
         :aria-label="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
         @click="emit('replyInThread')"
       >
-        <MessageSquare class="w-4 h-4" aria-hidden="true" />
+        <MessageSquare aria-hidden="true" />
       </button>
     </AppTooltip>
     <AppTooltip v-if="canPin" :label="isPinned ? 'Unpin from channel' : 'Pin to channel'">
       <button
         type="button"
-        class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+        :class="btn"
         :aria-label="isPinned ? 'Unpin from channel' : 'Pin to channel'"
         @click="emit('togglePin')"
       >
-        <component :is="isPinned ? PinOff : Pin" class="w-4 h-4" aria-hidden="true" />
+        <component :is="isPinned ? PinOff : Pin" aria-hidden="true" />
       </button>
     </AppTooltip>
     <template v-if="isSelf">
-      <div class="w-px h-5 bg-border mx-0.5" />
+      <div :class="divider" />
       <AppTooltip label="Edit message">
         <button
           type="button"
-          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+          :class="btn"
           aria-label="Edit message"
           @click="emit('edit')"
         >
-          <Pencil class="w-4 h-4" aria-hidden="true" />
+          <Pencil aria-hidden="true" />
         </button>
       </AppTooltip>
       <AppTooltip label="Delete message">
         <button
           type="button"
-          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive-text hover:bg-destructive/10"
+          :class="dangerBtn"
           aria-label="Delete message"
           @click="emit('retract')"
         >
-          <Trash2 class="w-4 h-4" aria-hidden="true" />
+          <Trash2 aria-hidden="true" />
         </button>
       </AppTooltip>
     </template>

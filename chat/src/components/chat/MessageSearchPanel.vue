@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
-import { Loader2, Search, SearchX, X } from "lucide-vue-next";
+import { Search, SearchX, X } from "lucide-vue-next";
+import { css } from "styled-system/css";
+import { iconbtn } from "styled-system/recipes";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import type { MessageSearchResult, OccupantPresence } from "@/lib/xmpp-client";
@@ -51,85 +53,96 @@ function closeSearch() {
   searchSubmitted.value = false;
   emit("clear");
 }
+// One quiet search row under the header, results in a short scrolling list.
+const cls = {
+  bar: css({ flex: "none", display: "flex", alignItems: "center", gap: "3", px: "6", py: "2", borderBottom: "1px solid {colors.border.soft}", animation: "wd-fade {durations.fast} {easings.out}", _narrow: { px: "4" } }),
+  icon: css({ width: "16px", height: "16px", flex: "none", color: "fg.muted" }),
+  input: css({ flex: 1, minWidth: 0, height: "40px", border: 0, bg: "transparent", color: "fg", font: "400 15px/1.4 {fonts.body}", outline: "none", _placeholder: { color: "fg.soft" } }),
+  results: css({ flex: "none", maxHeight: "224px", overflowY: "auto", borderBottom: "1px solid {colors.border.soft}", bg: "bg.rail" }),
+  state: css({ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "1.5", py: "5", textStyle: "caption", color: "fg.muted", textAlign: "center" }),
+  stateIcon: css({ width: "20px", height: "20px", color: "fg.soft" }),
+  row: css({
+    display: "flex",
+    width: "100%",
+    alignItems: "flex-start",
+    gap: "3",
+    px: "6",
+    py: "3",
+    border: 0,
+    borderTop: "1px solid {colors.border.soft}",
+    bg: "transparent",
+    color: "fg",
+    textAlign: "left",
+    cursor: "pointer",
+    _first: { borderTop: 0 },
+    _hover: { bg: "state.hover" },
+    _focusVisible: { outline: "3px solid {colors.focus}", outlineOffset: "-3px" },
+    _narrow: { px: "4" },
+  }),
+  stack: css({ minWidth: 0, flex: 1 }),
+  meta: css({ display: "flex", alignItems: "baseline", gap: "2" }),
+  nick: css({ fontSize: "sm", fontWeight: 700 }),
+  time: css({ textStyle: "timestamp", color: "fg.muted", fontVariantNumeric: "tabular-nums" }),
+  body: css({ margin: 0, textStyle: "caption", color: "fg.muted", truncate: true }),
+};
 </script>
 
 <template>
   <!-- Search bar -->
-  <div v-if="open" class="px-[var(--chat-content-inline)] py-2.5 border-b border-border glass-surface flex items-center gap-3 flex-shrink-0 animate-fade-in">
-    <div class="chat-message-lane flex items-center gap-3">
-      <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-      <input
-        ref="searchInputEl"
-        v-model="searchInput"
-        placeholder="Search messages…"
-        aria-label="Search messages"
-        class="type-field flex-1 bg-transparent focus:outline-none placeholder:text-muted-foreground/40"
-        @keydown.enter="doSearch"
-        @keydown.escape="closeSearch"
-      />
-      <button
-        v-if="searchInput"
-        class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-        aria-label="Clear search"
-        type="button"
-        @click="closeSearch"
-      >
-        <X class="w-3.5 h-3.5" />
-      </button>
-    </div>
+  <div v-if="open" :class="cls.bar">
+    <Search :class="cls.icon" aria-hidden="true" />
+    <input
+      ref="searchInputEl"
+      v-model="searchInput"
+      placeholder="Search messages…"
+      aria-label="Search messages"
+      :class="cls.input"
+      @keydown.enter="doSearch"
+      @keydown.escape="closeSearch"
+    />
+    <button
+      v-if="searchInput"
+      :class="iconbtn({ size: 'sm' })"
+      aria-label="Clear search"
+      type="button"
+      @click="closeSearch"
+    >
+      <X aria-hidden="true" />
+    </button>
   </div>
 
   <!-- Search results -->
-  <div v-if="open && (searchSubmitted || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
-    <div class="chat-message-lane">
-      <!-- Loading state — Loader2 spinner alongside the copy so the
-           user sees the request is in flight, not just frozen. -->
-      <div
-        v-if="isSearching"
-        class="type-caption flex items-center justify-center gap-2 px-[var(--chat-content-inline)] py-5 text-muted-foreground"
-      >
-        <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
-        <span>Searching…</span>
-      </div>
-      <!-- Empty state — SearchX glyph stacked above the copy so the
-           "no matches" outcome reads as an authored state, not a
-           one-line ghost. -->
-      <div
-        v-else-if="results.length === 0"
-        class="flex flex-col items-center justify-center gap-1.5 px-[var(--chat-content-inline)] py-6 text-center"
-      >
-        <SearchX class="h-5 w-5 text-muted-foreground/60" aria-hidden="true" />
-        <span class="type-caption text-muted-foreground">No matching messages</span>
-      </div>
-      <div v-else class="divide-y divide-border">
-        <!-- Each search result row gets the author's avatar on the
-             left so the eye can triage results by who-said-it at a
-             glance — the same recognition cue the timeline uses.
-             Avatar (xs) + content stack (name + time on row one,
-             truncated body on row two) lets the row read as a
-             compact preview of the matching message. -->
-        <button
-          v-for="result in results"
-          :key="result.id"
-          class="flex w-full items-start gap-3 px-[var(--chat-content-inline)] py-3 text-left hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-          type="button"
-          @click="emit('openResult', result)"
-        >
-          <UserAvatar
-            :name="result.nick"
-            :jid="avatarJidFor(result)"
-            :presence="roomPresence[result.nick] ?? 'offline'"
-            size="xs"
-          />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-baseline gap-2">
-              <span class="type-control">{{ result.nick }}</span>
-              <span class="type-meta type-numeric text-muted-foreground">{{ formatTimelineStamp(result.createdAt) }}</span>
-            </div>
-            <p class="type-caption truncate text-muted-foreground">{{ result.body }}</p>
-          </div>
-        </button>
-      </div>
+  <div v-if="open && (searchSubmitted || isSearching)" :class="cls.results">
+    <div v-if="isSearching" :class="cls.state" role="status">
+      <span>Searching…</span>
     </div>
+    <div v-else-if="results.length === 0" :class="cls.state">
+      <SearchX :class="cls.stateIcon" aria-hidden="true" />
+      <span>No matching messages</span>
+    </div>
+    <template v-else>
+      <!-- Author avatar, name and time, then the matching line. -->
+      <button
+        v-for="result in results"
+        :key="result.id"
+        :class="cls.row"
+        type="button"
+        @click="emit('openResult', result)"
+      >
+        <UserAvatar
+          :name="result.nick"
+          :jid="avatarJidFor(result)"
+          :presence="roomPresence[result.nick] ?? 'offline'"
+          size="sm"
+        />
+        <div :class="cls.stack">
+          <div :class="cls.meta">
+            <span :class="cls.nick">{{ result.nick }}</span>
+            <span :class="cls.time">{{ formatTimelineStamp(result.createdAt) }}</span>
+          </div>
+          <p :class="cls.body">{{ result.body }}</p>
+        </div>
+      </button>
+    </template>
   </div>
 </template>

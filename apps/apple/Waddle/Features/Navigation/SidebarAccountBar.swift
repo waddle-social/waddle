@@ -33,9 +33,8 @@ struct SidebarAccountBar: View {
         }
         .padding(.horizontal, Theme.Spacing.m)
         .padding(.vertical, Theme.Spacing.s)
-        .background(.bar)
         .overlay(alignment: .top) {
-            Divider()
+            HuddleDivider()
         }
     }
 }
@@ -52,11 +51,12 @@ struct SidebarAccountLabel: View {
             PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Theme.Size.rowAvatar)
             VStack(alignment: .leading, spacing: 0) {
                 Text(name)
-                    .font(.subheadline.weight(.semibold))
+                    .huddleText(Theme.Typography.label)
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                 Text(statusLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.timestamp)
+                    .foregroundStyle(Theme.Colors.fgSoft)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
@@ -75,23 +75,23 @@ struct SidebarSettingsButton: View {
 
     var body: some View {
         #if os(macOS)
-        SettingsLink {
-            Image(systemName: "gearshape")
-                .imageScale(.large)
-        }
-        .buttonStyle(.borderless)
-        .help("Settings")
-        .accessibilityLabel(Text("Settings"))
+        SettingsLink { icon }
+            .buttonStyle(.plain)
+            .help("Settings")
+            .accessibilityLabel(Text("Settings"))
         #else
         Button {
             navigation.sheet = .settings
         } label: {
-            Image(systemName: "gearshape")
-                .imageScale(.large)
+            icon
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .help("Settings")
         .accessibilityLabel(Text("Settings"))
         #endif
+    }
+
+    private var icon: some View {
+        NavigationIconLabel(symbol: "slider.horizontal.3")
     }
 }

@@ -32,6 +32,7 @@ public enum XmppEvent: Sendable {
     case disconnected
     case message(WireMessage)
     case presence(WirePresence)
+    case call(CallEvent)
     /// XEP-0198 acknowledged the outbound stanza with this client id.
     case deliveryAcked(stanzaID: String)
     /// Transport failure, which cannot override an acknowledgement.
@@ -157,4 +158,4 @@ public protocol CommandPort: AnyObject, Sendable {
 }
 
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort
+public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort

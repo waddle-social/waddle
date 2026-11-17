@@ -46,6 +46,8 @@ export interface CommunityEvent {
   description?: string;
   location?: string;
   organizer?: string;
+  /** Access-controlled event planning MUC, independent of the public calendar. */
+  workspaceRoom?: string;
   /** Epoch ms. */
   dtstampMs?: number;
   dtstart?: CalendarDateValue;
@@ -75,6 +77,8 @@ export interface CommunityEventInput {
   description?: string;
   location?: string;
   organizer?: string;
+  /** Access-controlled event planning MUC, independent of the public calendar. */
+  workspaceRoom?: string;
   dtstart?: CalendarDateValue;
   dtend?: CalendarDateValue;
   rrule?: Rrule;
@@ -111,6 +115,7 @@ export interface WasmVEvent {
   description?: string | null;
   location?: string | null;
   organizer?: string | null;
+  workspace_room?: string | null;
   dtstamp?: string | null;
   dtstart?: CalendarDateValue | null;
   dtend?: CalendarDateValue | null;
@@ -195,6 +200,7 @@ export function eventFromWasm(event: WasmVEvent): CommunityEvent {
     ...(event.description ? { description: event.description } : {}),
     ...(event.location ? { location: event.location } : {}),
     ...(event.organizer ? { organizer: event.organizer } : {}),
+    ...(event.workspace_room ? { workspaceRoom: event.workspace_room } : {}),
     ...(typeof dtstamp === "number" && Number.isFinite(dtstamp) ? { dtstampMs: dtstamp } : {}),
     ...(dtstart ? { dtstart } : {}),
     ...(dtend ? { dtend } : {}),

@@ -11,26 +11,27 @@ struct SplitShell: View {
     var body: some View {
         @Bindable var navigation = navigation
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            Sidebar(selection: $navigation.selection)
+            Sidebar()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
             NavigationStack {
                 detail
+                    .background(Theme.Colors.bg)
+                    #if os(macOS)
+                    // The title bar continues the page ground instead of the system grey.
+                    .toolbarBackground(Theme.Colors.bg, for: .windowToolbar)
+                    .toolbarBackground(.visible, for: .windowToolbar)
+                    #endif
             }
         }
+        .tint(Theme.Colors.action)
         .inspector(isPresented: inspectorBinding) {
             inspectorContent
                 .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
         }
         .sheet(isPresented: $navigation.isQuickSwitcherPresented) {
             QuickSwitcher()
-        }
-        .onChange(of: navigation.selection) { _, _ in
-            // A thread belongs to the conversation it was opened in; details
-            // and pins follow the new selection.
-            if case .thread = navigation.inspector {
-                navigation.inspector = nil
-            }
+                .carryingCallDock()
         }
     }
 
@@ -40,11 +41,16 @@ struct SplitShell: View {
             ConversationScreen(conversation: conversation)
                 .id(conversation)
         } else {
-            EmptyStateView(
-                title: "No conversation selected",
-                message: "Pick a channel or direct message from the sidebar.",
-                symbol: "bubble.left.and.bubble.right"
-            )
+            switch navigation.splitSection {
+            case .home:
+                EmptyStateView(
+                    title: "Pick a conversation",
+                    message: "Choose a room or a direct message to start reading.",
+                    symbol: "bubble.left.and.bubble.right"
+                )
+            case .inbox:
+                InboxView(style: .sidebar)
+            }
         }
     }
 

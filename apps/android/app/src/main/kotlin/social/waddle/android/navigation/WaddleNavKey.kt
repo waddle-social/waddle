@@ -10,8 +10,19 @@ import kotlinx.serialization.Serializable
  * back stack survives process death via `rememberNavBackStack`.
  */
 sealed interface WaddleNavKey : NavKey {
+    /** The root: the sidebar (rooms, direct messages, you). */
     @Serializable
     data object Home : WaddleNavKey
+
+    /** Browse rooms. */
+    @Serializable
+    data object Rooms : WaddleNavKey
+
+    @Serializable
+    data object People : WaddleNavKey
+
+    @Serializable
+    data object You : WaddleNavKey
 
     @Serializable
     data class Channel(val roomJid: String, val name: String) : WaddleNavKey
@@ -35,6 +46,9 @@ sealed interface WaddleNavKey : NavKey {
 
     @Serializable
     data object Settings : WaddleNavKey
+
+    @Serializable
+    data object Events : WaddleNavKey
 
     /** Own-profile publishing (vCard4, avatar, mood/activity/tune). */
     @Serializable

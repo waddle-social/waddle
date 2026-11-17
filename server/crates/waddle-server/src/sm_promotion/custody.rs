@@ -78,17 +78,19 @@ pub(crate) async fn promote_session_with_custody(
             .collect();
         if matching.is_empty() {
             let one = super::detached_session_for_terminal_entry(session, entry.clone());
-            let single = promote_session_unacked_with_policy(
-                &one,
-                StreamPromotionDeps {
-                    registry: deps.registry,
-                    user_registry: deps.user_registry,
-                    pending_storage: deps.pending_storage,
-                    blocklist: deps.blocklist,
-                    server_domain: deps.server_domain,
-                    recent_tombstones: deps.recent_tombstones,
-                    allow_unfenced_effects: deps.allow_unfenced_effects,
-                },
+            let single = waddle_xmpp::telemetry::producer_trace::replaying(
+                promote_session_unacked_with_policy(
+                    &one,
+                    StreamPromotionDeps {
+                        registry: deps.registry,
+                        user_registry: deps.user_registry,
+                        pending_storage: deps.pending_storage,
+                        blocklist: deps.blocklist,
+                        server_domain: deps.server_domain,
+                        recent_tombstones: deps.recent_tombstones,
+                        allow_unfenced_effects: deps.allow_unfenced_effects,
+                    },
+                ),
             )
             .await;
             summary.redelivered += single.redelivered;

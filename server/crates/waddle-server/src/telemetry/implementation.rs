@@ -227,26 +227,63 @@ pub(in crate::telemetry) fn log_bridge_filter() -> EnvFilter {
 }
 
 pub(in crate::telemetry) fn build_log_filter() -> EnvFilter {
-    if let Ok(filter) = std::env::var("RUST_LOG") {
-        return EnvFilter::try_new(filter).unwrap_or_else(|_| default_filter());
-    }
+    log_filter_from(
+        std::env::var("RUST_LOG").ok().as_deref(),
+        std::env::var("WADDLE_LOG_LEVEL").ok().as_deref(),
+    )
+}
 
-    if let Ok(level_or_filter) = std::env::var("WADDLE_LOG_LEVEL") {
-        let level_or_filter = level_or_filter.trim();
-        if !level_or_filter.is_empty() {
-            let filter = if level_or_filter.contains('=') || level_or_filter.contains(',') {
-                level_or_filter.to_string()
-            } else {
-                format!(
-                    "{level},waddle_server={level},waddle_xmpp={level}",
-                    level = level_or_filter
-                )
-            };
-            return EnvFilter::try_new(filter).unwrap_or_else(|_| default_filter());
+/// Resolve the primary log filter: `RUST_LOG` wins, then
+/// `WADDLE_LOG_LEVEL`, then [`default_filter`]. Directives that do not
+/// parse fall back to the default.
+pub(in crate::telemetry) fn log_filter_from(
+    rust_log: Option<&str>,
+    waddle_log_level: Option<&str>,
+) -> EnvFilter {
+    let directives = rust_log.map(str::to_owned).or_else(|| {
+        let level_or_filter = waddle_log_level?.trim();
+        if level_or_filter.is_empty() {
+            None
+        } else if level_or_filter.contains('=') || level_or_filter.contains(',') {
+            Some(level_or_filter.to_owned())
+        } else {
+            Some(format!(
+                "{level_or_filter},waddle_server={level_or_filter},waddle_xmpp={level_or_filter}"
+            ))
         }
+    });
+    let operator_filter = directives
+        .as_deref()
+        .and_then(|directives| Some((directives, EnvFilter::try_new(directives).ok()?)));
+    match operator_filter {
+        Some((directives, filter)) if names_postgres_notices(directives) => filter,
+        Some((_, filter)) => quiet_postgres_notices(filter),
+        None => quiet_postgres_notices(default_filter()),
     }
+}
 
-    default_filter()
+/// sqlx logs every Postgres NOTICE under this target, at WARN.
+const POSTGRES_NOTICE_TARGET: &str = "sqlx::postgres::notice";
+
+/// Whether the operator set a level for exactly the Postgres NOTICE target.
+fn names_postgres_notices(directives: &str) -> bool {
+    directives
+        .split(',')
+        .filter_map(|directive| directive.split_once('='))
+        .any(|(target, _)| target.trim() == POSTGRES_NOTICE_TARGET)
+}
+
+/// Raise the Postgres NOTICE target to ERROR.
+///
+/// The pool checkout hooks issue a defensive `ROLLBACK` on every checkout
+/// (`db::physical_attestation`). Outside a transaction Postgres answers
+/// "there is no transaction in progress", which made up 97% of production
+/// log volume.
+fn quiet_postgres_notices(filter: EnvFilter) -> EnvFilter {
+    match format!("{POSTGRES_NOTICE_TARGET}=error").parse() {
+        Ok(directive) => filter.add_directive(directive),
+        Err(_) => filter,
+    }
 }
 
 /// Initialize OpenTelemetry tracing with OTLP export.
@@ -361,6 +398,10 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // pod exports 0 instead of no series (the waddle_connected_users
     // alias reads absent otherwise — Qodo review on PR #1426).
     waddle_xmpp::metrics::init_pod_gauges();
+
+    // After the meter provider: an actor observed earlier would bind the
+    // `waddle.actor.*` instruments to the noop provider.
+    crate::actor_telemetry::install();
 
     // Register the process start-time/CPU/FD instruments eagerly so a
     // fresh pod exports its restart signal on the first OTLP push

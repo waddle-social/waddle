@@ -223,6 +223,11 @@ restrictedRuntime:
     # When empty the chart reads it from the ConfigMap the owner Job
     # published, which needs cluster access at render time.
     document: {}
+    # Fresh install: while no handoff exists, render the Deployment at zero
+    # replicas instead of failing, so the release that renders the owner
+    # CronJob can be installed before its first Job has run. A Deployment
+    # that is serving is never scaled down for this.
+    awaitOwnerJob: false
   ownerJob:
     enabled: false
     # Generation the keypair-pool enrollment is recorded under. Generate one

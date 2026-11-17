@@ -1,5 +1,6 @@
 import Testing
 @testable import WaddleKit
+@testable import WaddleKitTestSupport
 
 @Suite("APNs push routing")
 struct PushRouteTests {

@@ -1411,3 +1411,17 @@ impl Message<ReleaseClaimIfUnbound> for AccountCoordinatorActor {
         Ok(self.release_claim_if_unbound().await)
     }
 }
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::AccountCoordinatorActor;
+    use waddle_xmpp::telemetry::attributes::ActorKind;
+
+    #[test]
+    fn maps_to_its_own_actor_kind() {
+        assert_eq!(
+            crate::actor_telemetry::actor_kind(<AccountCoordinatorActor as kameo::Actor>::name()),
+            ActorKind::AccountCoordinator
+        );
+    }
+}

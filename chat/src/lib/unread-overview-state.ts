@@ -48,6 +48,7 @@ interface UnreadThreadCandidate {
 }
 
 interface UnreadRoomCandidate {
+  channel: ChannelSummary;
   roomJid: string;
   channelUnread: number;
   threads: UnreadThreadCandidate[];
@@ -56,10 +57,14 @@ interface UnreadRoomCandidate {
 
 /**
  * Derive the set of MUC rooms that carry any unread — either channel-level
- * unread or unread threads — from the live inbox state. DMs (`kind: "direct"`)
- * are excluded. Sorted most-recently-active first.
+ * unread or unread threads — and have a channel the user can open.
+ * Sorted most-recently-active first.
  */
-export function selectUnreadRoomCandidates(state: InboxState): UnreadRoomCandidate[] {
+export function selectUnreadRoomCandidates(
+  state: InboxState,
+  channels: readonly ChannelSummary[],
+): UnreadRoomCandidate[] {
+  const inboxChannels = channels.filter((channel) => !channel.isGroupDm);
   const roomJids = new Set<string>();
   for (const entry of state.channels.values()) {
     if (entry.kind === "muc" && entry.unread > 0) roomJids.add(entry.partner);
@@ -70,6 +75,8 @@ export function selectUnreadRoomCandidates(state: InboxState): UnreadRoomCandida
 
   const candidates: UnreadRoomCandidate[] = [];
   for (const roomJid of roomJids) {
+    const channel = findChannelForRoomJid(roomJid, inboxChannels);
+    if (!channel) continue;
     const channelEntry = state.channels.get(roomJid);
     const channelUnread =
       channelEntry && channelEntry.kind === "muc" ? channelEntry.unread : 0;
@@ -90,7 +97,7 @@ export function selectUnreadRoomCandidates(state: InboxState): UnreadRoomCandida
       ...threads.map((thread) => thread.lastUpdated),
       0,
     );
-    candidates.push({ roomJid, channelUnread, threads, lastUpdated });
+    candidates.push({ channel, roomJid, channelUnread, threads, lastUpdated });
   }
 
   candidates.sort((left, right) => right.lastUpdated - left.lastUpdated);
@@ -189,7 +196,7 @@ export function findChannelForRoomJid(
   const matched = channels.find((channel) => channel.jid && barePeerJid(channel.jid) === roomJid);
   if (matched) return matched;
   const slug = resolveChannelIdForRoomJid(roomJid, channels);
-  return slug ? channels.find((channel) => channel.id === slug) ?? null : null;
+  return slug ? channels.find((channel) => !channel.jid && channel.id === slug) ?? null : null;
 }
 
 function missingMamUpdateTargets(
@@ -306,9 +313,8 @@ export function useUnreadOverview(deps: {
     candidate: UnreadRoomCandidate,
     serial: number,
   ): Promise<UnreadChannelGroup | null> {
-    const channel = findChannelForRoomJid(candidate.roomJid, deps.channels.value);
-    if (!channel) return null;
     if (serial !== requestSerial) return null;
+    const { channel } = candidate;
     const spaceId = channel.spaceId ?? "";
     const channelId = channel.id;
     const timelineFromMam = async (mamResults: LiveRoomMessage[]): Promise<TimelineMessage[]> => {
@@ -354,13 +360,15 @@ export function useUnreadOverview(deps: {
     if (candidate.channelUnread > 0) {
       const page = await client.queryMamPage(spaceId, channelId, fetchSize(candidate.channelUnread), {
         type: "latest",
-      });
-      channelMessages = lastUnreadFromMamHits(
-        await timelineFromMam(page.messages),
-        page.messages,
-        candidate.channelUnread,
-        isFeedTimelineMessage,
-      );
+      }).catch(() => null);
+      if (page) {
+        channelMessages = lastUnreadFromMamHits(
+          await timelineFromMam(page.messages),
+          page.messages,
+          candidate.channelUnread,
+          isFeedTimelineMessage,
+        );
+      }
     }
 
     if (serial !== requestSerial) return null;
@@ -383,24 +391,20 @@ export function useUnreadOverview(deps: {
           thread.threadId,
           fetchSize(thread.unread),
           { type: "latest" },
-        );
+        ).catch(() => null);
         return {
           threadId: thread.threadId,
           title: thread.title,
           unreadCount: thread.unread,
-          messages: lastUnreadFromMamHits(
+          messages: page ? lastUnreadFromMamHits(
             await timelineFromMam(page.messages),
             page.messages,
             thread.unread,
             () => true,
-          ),
+          ) : [],
         };
       },
     );
-
-    if (channelMessages.length === 0 && threads.every((thread) => thread.messages.length === 0)) {
-      return null;
-    }
 
     return {
       channelId,
@@ -424,7 +428,7 @@ export function useUnreadOverview(deps: {
       return;
     }
 
-    const candidates = selectUnreadRoomCandidates(deps.inboxState.value);
+    const candidates = selectUnreadRoomCandidates(deps.inboxState.value, deps.channels.value);
     isLoading.value = true;
     error.value = null;
     try {

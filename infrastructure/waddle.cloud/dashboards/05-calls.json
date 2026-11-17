@@ -12,13 +12,581 @@
       }
     ]
   },
-  "description": "Reserved for LiveKit capacity, call lifecycle, media path, SFU gate, and token-mint panels when #1317–#1319 land.",
+  "description": "Call setup, credentials, lifecycle cleanup, reconciliation, SFU capacity, and media quality across the Waddle server and LiveKit.",
   "editable": true,
   "graphTooltip": 1,
-  "panels": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "description": "Falling setup success or rising failures indicates callers cannot reliably establish calls.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": null,
+      "panels": [],
+      "title": "Call setup (server)",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Call setup attempts and successes",
+      "description": "Attempts rising without matching successes indicate call establishment failures or stalled setup.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(waddle_call_setup_attempted_total[$__rate_interval]))",
+          "legendFormat": "attempted",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(waddle_call_setup_ok_total[$__rate_interval]))",
+          "legendFormat": "successful",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Call setup failures by reason",
+      "description": "A rising failure rate identifies reasons callers cannot establish calls.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(waddle_call_setup_failed_total[$__rate_interval]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 }
+    },
+    {
+      "type": "stat",
+      "title": "Current call setup success ratio",
+      "description": "A low success-to-attempt rate ratio indicates unreliable call setup, while no attempts leave the ratio empty.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(waddle_call_setup_ok_total[$__rate_interval])) / (sum(rate(waddle_call_setup_attempted_total[$__rate_interval])) > 0)",
+          "legendFormat": "successful / attempted",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Call signaling by event",
+      "description": "An unexpected drop or surge in signaling events relative to setup attempts can indicate interrupted call negotiation.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (event) (rate(waddle_call_signaling_total[$__rate_interval]))",
+          "legendFormat": "{{event}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 }
+    },
+    {
+      "collapsed": false,
+      "description": "Rising credential failures, denials, or gate rejections indicate users are being prevented from joining calls.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "id": null,
+      "panels": [],
+      "title": "Tokens and gates",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "SFU tokens minted",
+      "description": "A drop in token minting while call attempts continue indicates users may be unable to join the SFU.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(waddle_call_sfu_token_minted_total[$__rate_interval]))",
+          "legendFormat": "minted",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "SFU token denials by reason",
+      "description": "A rising denial rate indicates SFU access is being rejected for the shown reasons, with no data until the first denial.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(waddle_call_sfu_token_denied_total[$__rate_interval]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "TURN credentials by outcome",
+      "description": "Rising unsuccessful outcomes indicate callers may lack TURN credentials needed for relayed connectivity.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(waddle_call_turn_credentials_total[$__rate_interval]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "LiveKit admin failures by operation",
+      "description": "A nonzero failure rate indicates LiveKit control-plane operations are failing after final normalization.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(waddle_call_admin_call_failed_total[$__rate_interval]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Call-control rate limits by surface",
+      "description": "A rising rejection rate indicates call-control requests are exceeding local limits, with no data until the first rejection.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (surface) (rate(waddle_call_control_rate_limited_total[$__rate_interval]))",
+          "legendFormat": "{{surface}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 }
+    },
+    {
+      "collapsed": false,
+      "description": "Rising webhook queues or teardown backlog and age indicate delayed lifecycle cleanup.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "id": null,
+      "panels": [],
+      "title": "Webhooks and teardown",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook ingestion by event and outcome",
+      "description": "Rising unsuccessful outcomes indicate LiveKit lifecycle events are not being applied successfully.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (event, outcome) (rate(waddle_call_webhook_events_total[$__rate_interval]))",
+          "legendFormat": "{{event}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 }
+    },
+    {
+      "type": "timeseries",
+      "title": "LiveKit webhook dispatch rate",
+      "description": "Dispatch falling while queue-length percentiles rise indicates webhook delivery may be stalled.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(livekit_webhook_dispatch_total[$__rate_interval]))",
+          "legendFormat": "dispatched",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 }
+    },
+    {
+      "type": "timeseries",
+      "title": "LiveKit webhook queue length p50 and p95",
+      "description": "High queue-length observation percentiles indicate webhook delivery is falling behind.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(livekit_webhook_queue_length_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(livekit_webhook_queue_length_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Teardown outbox depth p50 and p95",
+      "description": "High sweep-time depth percentiles indicate durable teardown intents are accumulating.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(waddle_call_teardown_outbox_depth_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(waddle_call_teardown_outbox_depth_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Teardown outbox oldest age p50 and p95",
+      "description": "High oldest-intent age percentiles indicate durable call cleanup is delayed.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(waddle_call_teardown_outbox_oldest_age_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(waddle_call_teardown_outbox_oldest_age_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Teardown drain and stale drops",
+      "description": "Falling drain throughput with a growing backlog or rising stale drops indicates delayed cleanup or obsolete lifecycle events.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(waddle_call_teardown_outbox_drained_total[$__rate_interval]))",
+          "legendFormat": "drained",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(waddle_call_teardown_stale_dropped_total[$__rate_interval]))",
+          "legendFormat": "stale dropped",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 }
+    },
+    {
+      "collapsed": false,
+      "description": "Long reconciliation passes or sustained registry repairs indicate lifecycle state is drifting from the SFU.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 },
+      "id": null,
+      "panels": [],
+      "title": "Reconciliation",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation pass duration p50 and p95",
+      "description": "High pass-duration percentiles indicate reconciliation may be too slow to repair call state promptly.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(waddle_call_reconcile_pass_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(waddle_call_reconcile_pass_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation rooms examined and repaired",
+      "description": "Sustained adoption or sweeping relative to examined rooms indicates recurring registry drift.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(waddle_call_reconcile_rooms_examined_total[$__rate_interval]))",
+          "legendFormat": "examined",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(waddle_call_reconcile_rooms_adopted_total[$__rate_interval]))",
+          "legendFormat": "adopted",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(waddle_call_reconcile_rooms_swept_total[$__rate_interval]))",
+          "legendFormat": "swept",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 }
+    },
+    {
+      "collapsed": false,
+      "description": "Unexpected capacity growth or activity drops during call demand indicate SFU pressure or join and media failures.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 68 },
+      "id": null,
+      "panels": [],
+      "title": "SFU capacity",
+      "type": "row"
+    },
+    {
+      "type": "stat",
+      "title": "Current active SFU rooms",
+      "description": "An unexpected room surge relative to participants can indicate abandoned rooms or growing SFU demand.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(livekit_room_total)",
+          "legendFormat": "active rooms",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 69 },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Current active SFU participants",
+      "description": "Unexpectedly high participant counts indicate increased SFU load, while a sudden drop during active calls can indicate disconnects.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(livekit_participant_total)",
+          "legendFormat": "active participants",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 69 },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "SFU participant joins",
+      "description": "A drop in joins while setup attempts continue indicates callers may be failing to reach the SFU.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(livekit_participant_join_total[$__rate_interval]))",
+          "legendFormat": "joined",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 77 }
+    },
+    {
+      "type": "timeseries",
+      "title": "SFU track publications and subscriptions",
+      "description": "Unexpectedly low publication or subscription activity during joins can indicate media establishment failures.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(livekit_track_published_total[$__rate_interval]))",
+          "legendFormat": "published",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(livekit_track_subscribed_total[$__rate_interval]))",
+          "legendFormat": "subscribed",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 77 }
+    },
+    {
+      "collapsed": false,
+      "description": "High loss, jitter, latency, or feedback rates and low quality scores indicate degraded call media.",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 85 },
+      "id": null,
+      "panels": [],
+      "title": "Media quality",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Packet loss p50 and p95",
+      "description": "High packet-loss percentage sample percentiles indicate degraded media delivery rather than a packet-weighted loss ratio.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(livekit_packet_loss_percent_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(livekit_packet_loss_percent_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 86 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Jitter p50 and p95",
+      "description": "High jitter percentiles indicate uneven packet arrival that can cause audio or video disruption.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(livekit_jitter_us_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(livekit_jitter_us_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "µs" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 86 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Round-trip time p50 and p95",
+      "description": "High round-trip-time percentiles indicate network delay that can make conversations less responsive.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(livekit_rtt_ms_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(livekit_rtt_ms_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 94 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Quality score p05 and p50",
+      "description": "Low quality-score percentiles indicate poor media quality among the lower-scoring observations.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.05, sum by (le) (rate(livekit_quality_score_bucket[$__rate_interval])))",
+          "legendFormat": "p05",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(livekit_quality_score_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 94 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Forward latency p50 and p95",
+      "description": "High forwarding-latency percentiles indicate the SFU is taking longer to relay media packets.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(livekit_forward_latency_ns_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(livekit_forward_latency_ns_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ns" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 102 }
+    },
+    {
+      "type": "timeseries",
+      "title": "NACK and PLI feedback rate",
+      "description": "High negative-acknowledgement or picture-loss-indication rates can indicate packet loss or repeated video recovery.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(livekit_nack_total[$__rate_interval]))",
+          "legendFormat": "NACK",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(livekit_pli_total[$__rate_interval]))",
+          "legendFormat": "PLI",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 102 }
+    }
+  ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["waddle", "calls", "skeleton"],
+  "tags": ["waddle", "calls"],
   "templating": {
     "list": [
       {

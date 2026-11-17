@@ -33,6 +33,7 @@ class UnsafeDiagnosticSidecar(InputError):
 
 STORE_DIR = Path('/nix/store')
 STORE_NAME = re.compile(r'^[0123456789abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+$')
+OUTPUT_NAME = re.compile(r'[A-Za-z0-9+_?=-][A-Za-z0-9+._?=-]*')
 DIAGNOSTICS = Path('server/.ci/nextest-archive')
 ARTIFACTS = ('whole-inventory.json', 'shared-inventory.json', 'whole-coverage.json',
              'shared-coverage.json', 'junit-whole.xml', 'junit-shared.xml')
@@ -139,8 +140,21 @@ def derivation_identities(drvs, source, candidate, run_id):
     else:
         raise InputError('Nix returned unexpected derivations')
     identities = []
+    inputs = {}
     for partition, (drv, entry) in enumerate(zip(drvs, entries), 1):
         try:
+            input_drvs = entry['inputs']['drvs'] if versioned else entry['inputDrvs']
+            if not isinstance(input_drvs, dict):
+                raise InputError(f'shard {partition} has invalid input derivations')
+            for input_drv, wanted in input_drvs.items():
+                if versioned:
+                    input_drv = str(STORE_DIR / input_drv)
+                input_drv = str(store_path(input_drv, derivation=True))
+                names = wanted['outputs'] if isinstance(wanted, dict) else wanted
+                if (not isinstance(names, list) or not names
+                        or not all(isinstance(name, str) and OUTPUT_NAME.fullmatch(name) for name in names)):
+                    raise InputError(f'shard {partition} has invalid input derivation outputs')
+                inputs.setdefault(input_drv, set()).update(names)
             env = entry['env']
             attrs = {
                 'waddleQualificationCandidateSha': candidate,
@@ -169,7 +183,9 @@ def derivation_identities(drvs, source, candidate, run_id):
         identities.append({'partition': partition, 'drv_path': drv, 'output_path': output})
     if len({item['output_path'] for item in identities}) != 4:
         raise InputError('shard outputs are not unique')
-    return identities
+    if inputs.keys() & set(drvs):
+        raise InputError('a shard derivation depends on another shard')
+    return identities, [f"{drv}^{','.join(sorted(names))}" for drv, names in sorted(inputs.items())]
 
 
 def reject_existing_outputs(identities):
@@ -367,6 +383,15 @@ def load_snapshot_gate(source):
     return module
 
 
+def benchmark_lane():
+    # ci/runner-benchmark selects one of flake.nix's benchmarkShardLanes. The
+    # unset default is the production lane, the only one that is evidence.
+    lane = os.environ.get('WADDLE_NEXTEST_BENCHMARK_LANE', '')
+    if lane and not re.fullmatch(r'[0-9a-z]+(-[0-9a-z]+)*', lane):
+        raise InputError(f'invalid WADDLE_NEXTEST_BENCHMARK_LANE: {lane!r}')
+    return lane
+
+
 def build_record(candidate, run_id, source, identities, required_path, diagnostics, gate):
     reports = [Path(item['output_path']) / f'junit-{selection}.xml'
                for item in identities for selection in ('whole', 'shared')]
@@ -427,6 +452,7 @@ def atomic_write(path, record):
 
 def run(root, diagnostics):
     sidecar = diagnostics / 'qualification-evidence.json'
+    lane = benchmark_lane()
     candidate = check_candidate(root)
     run_id = secrets.token_hex(32)
     if not re.fullmatch(r'[0-9a-f]{64}', run_id):
@@ -458,15 +484,30 @@ def run(root, diagnostics):
                  '--option', 'sandbox-fallback', 'false']
     command(['nix', 'build', '--print-build-logs', '--no-link', *isolation,
              f'{flake}#waddle-ci-sandbox-probe'], cwd=root / 'server', capture=False)
-    archive = store_path(command(['bash', 'scripts/build-nextest-archive.sh',
-                                  f'{flake}#waddle-server-test-archive'], cwd=source / 'server').strip())
+    # Run the candidate's helper from the checkout, not from inside the source
+    # store path: Nix first resolves an installable containing '/' as a path
+    # relative to the working directory, so 'path:/nix/store/...#attr' under
+    # /nix/store/<source>/server names the source store path itself.
+    archive = store_path(command(['bash', str(source / 'server/scripts/build-nextest-archive.sh'),
+                                  f'{flake}#waddle-server-test-archive' + (f'-bench-{lane}' if lane else '')],
+                                 cwd=root / 'server').strip())
     for name in ('ci-performance/cargo-timing.html', 'partition-coverage.json', 'plan.json'):
         atomic_copy(STORE_DIR, archive, Path(name), diagnostics / Path(name).name)
     wrapper = source / 'server/scripts/qualification-shards.nix'
     drvs = command(['nix-instantiate', '--store', 'daemon', str(wrapper), '--argstr', 'sourcePath', str(source),
-                    '--argstr', 'candidateSha', candidate, '--argstr', 'runId', run_id]).splitlines()
-    identities = derivation_identities(drvs, source, candidate, run_id)
+                    '--argstr', 'candidateSha', candidate, '--argstr', 'runId', run_id,
+                    *(['--argstr', 'lane', lane] if lane else [])]).splitlines()
+    identities, input_outputs = derivation_identities(drvs, source, candidate, run_id)
     reject_existing_outputs(identities)
+    # Realise the shards' dependencies first, from binary caches where
+    # available: a fresh runner cannot rebuild the nixpkgs bootstrap from
+    # source. Only the run-specific shard outputs below are built with
+    # substitution disabled. 'allowSubstitutes = false' on the shards alone is
+    # not enough because 'always-allow-substitutes' (set by the Determinate
+    # Nix installer) overrides it.
+    if input_outputs:
+        command(['nix', 'build', '--print-build-logs', '--no-link', '--max-jobs', '4', '--cores', '8',
+                 *isolation, *input_outputs], cwd=root / 'server', capture=False)
     results = command(['nix', 'build', '--print-build-logs', '--no-link', '--json', '--keep-going',
                        '--max-jobs', '4', '--cores', '8', *isolation, '--option', 'substitute', 'false',
                        *(f'{drv}^out' for drv in drvs)], cwd=root / 'server')
@@ -480,7 +521,11 @@ def run(root, diagnostics):
     record = build_record(candidate, run_id, source, identities,
                           source / 'server/.config/required-cluster-tests.txt', diagnostics, gate)
     check_candidate(root, candidate)
-    atomic_write(sidecar, record)
+    if lane:
+        # Same tests and gate, but another machine shape: never evidence.
+        print(f'Benchmark lane {lane}: qualification evidence not written')
+    else:
+        atomic_write(sidecar, record)
     print(f"All {record['required_test_gate']['required_count']} required tests executed and passed")
 
 

@@ -56,8 +56,10 @@ pub enum AuthError {
     #[error("JWT validation failed: {0}")]
     JwtError(String),
 
-    #[error("Session not found: {0}")]
-    SessionNotFound(String),
+    /// Carries no session id: the id is the bearer credential, and this
+    /// error is logged and returned to callers.
+    #[error("Session not found")]
+    SessionNotFound,
 
     #[error("Session expired")]
     SessionExpired,

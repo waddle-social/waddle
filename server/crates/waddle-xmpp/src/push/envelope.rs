@@ -86,6 +86,8 @@ impl PushClass {
 /// is validated; downstream sees a typed value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotificationClass {
+    /// Incoming XEP-0353 call invitation; delivered only to PushKit nodes.
+    Call,
     /// 1:1 direct message.
     Dm,
     /// 1:1 direct message that explicitly @-mentions the recipient.
@@ -110,6 +112,7 @@ pub struct NotificationClassParseError(pub Box<str>);
 impl NotificationClass {
     pub fn from_db_value(s: &str) -> Result<Self, NotificationClassParseError> {
         match s {
+            "call" => Ok(Self::Call),
             "dm" => Ok(Self::Dm),
             "dm_mention" => Ok(Self::DmMention),
             "personal_mention" => Ok(Self::PersonalMention),
@@ -122,6 +125,7 @@ impl NotificationClass {
 
     pub fn as_db_value(self) -> &'static str {
         match self {
+            Self::Call => "call",
             Self::Dm => "dm",
             Self::DmMention => "dm_mention",
             Self::PersonalMention => "personal_mention",
@@ -137,7 +141,8 @@ impl NotificationClass {
     /// broadcast → `Room` (lower urgency, shorter TTL).
     pub fn transport_policy(self) -> PushClass {
         match self {
-            Self::Dm | Self::DmMention => PushClass::DirectMessage,
+            // VoIP expiry is carried in the call metadata, never derived from this TTL.
+            Self::Call | Self::Dm | Self::DmMention => PushClass::DirectMessage,
             Self::PersonalMention | Self::ChannelMention | Self::ActiveChannelMention => {
                 PushClass::Mention
             }
@@ -246,6 +251,14 @@ pub fn push_topic_for(class: PushClass, conversation: &str) -> PushTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_class_round_trips_and_has_high_urgency() {
+        let class = NotificationClass::from_db_value("call").expect("call class");
+        assert_eq!(class, NotificationClass::Call);
+        assert_eq!(class.as_db_value(), "call");
+        assert_eq!(class.transport_policy().urgency(), Urgency::High);
+    }
 
     #[test]
     fn class_bucket_size_picks_dm_vs_default() {

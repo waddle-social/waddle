@@ -41,9 +41,11 @@ def value(key): return args[args.index(key) + 1]
 def state(): return json.loads((diag / 'nix-state.json').read_text())
 def drv(i): return str(store / ('a' * 32 + '-waddle-server-test-shard-' + str(i) + '-0.1.0-' + state()['run'] + '.drv'))
 def output(i): return str(store / ('b' * 32 + '-waddle-server-test-shard-' + str(i) + '-0.1.0-' + state()['run']))
+def input_drv(name): return 'g' * 32 + '-' + name + '.drv'
 if os.path.basename(sys.argv[0]) == 'nix-instantiate':
     d = {'source': value('sourcePath'), 'candidate': value('candidateSha'), 'run': value('runId')}
     (diag / 'nix-state.json').write_text(json.dumps(d))
+    (diag / 'instantiate-args.json').write_text(json.dumps(args))
     for i in range(1, 5): print(drv(i))
     sys.exit(0)
 if args[:2] == ['store', 'info']:
@@ -61,7 +63,11 @@ elif args[:2] == ['derivation', 'show']:
                'waddleQualificationSource': data['source'], 'preferLocalBuild': '1', 'allowSubstitutes': ''}
         if os.getenv('BAD_DERIVATION') and i == 3: env['waddleQualificationRunId'] = '0' * 64
         derivations[pathlib.Path(drv(i)).name] = {'env': env,
-            'inputs': {'srcs': [pathlib.Path(data['source']).name]},
+            'inputs': {'srcs': [pathlib.Path(data['source']).name],
+                       'drvs': {input_drv('stdenv'): {'outputs': ['out'], 'dynamicOutputs': {}},
+                                input_drv('archive'): {'outputs': ['out', f'shard{i}'], 'dynamicOutputs': {}},
+                                **({input_drv('bad name'): {'outputs': ['out'], 'dynamicOutputs': {}}}
+                                   if os.getenv('BAD_INPUT') else {})}},
             'outputs': {'out': {'path': pathlib.Path(output(i)).name}}}
     print(json.dumps({'version': 4, 'derivations': derivations}))
 elif args[0] == 'path-info':
@@ -71,7 +77,11 @@ elif args[0] == 'path-info':
 elif args[0] == 'build' and args[-1].endswith('#waddle-ci-sandbox-probe'):
     (diag / 'probe-args.json').write_text(json.dumps(args))
     sys.exit(int(os.getenv('SANDBOX_EXIT', '0')))
+elif args[0] == 'build' and '--json' not in args:
+    (diag / 'input-build-args.json').write_text(json.dumps(args))
+    sys.exit(int(os.getenv('INPUT_BUILD_EXIT', '0')))
 elif args[0] == 'build':
+    if not (diag / 'input-build-args.json').exists(): sys.exit(98)
     (diag / 'build-args.json').write_text(json.dumps(args))
     if os.getenv('HOLD_BUILD'):
         (diag / 'hold-started').touch()
@@ -114,7 +124,7 @@ class LocalShardTests(unittest.TestCase):
         for name in ('check_required_tests.py', 'verify_candidate_snapshot.py', 'qualification-shards.nix'):
             shutil.copyfile(SCRIPT_DIR / name, scripts / name)
         (scripts / 'build-nextest-archive.sh').write_text(
-            'printf "%s\\n%s\\n" "$PWD" "$1" > "$TEST_ROOT/.ci/nextest-archive/helper-source"\n'
+            'printf "%s\\n%s\\n%s\\n" "$PWD" "$0" "$1" > "$TEST_ROOT/.ci/nextest-archive/helper-source"\n'
             'exit_code="${COMPILE_EXIT:-0}"\n'
             'if [ "$exit_code" != 0 ]; then exit "$exit_code"; fi\n'
             'printf "%s\\n" "$TEST_ARCHIVE"\n')
@@ -205,6 +215,26 @@ raise SystemExit(r.main())
             process.kill()
             return process.communicate()
 
+    def test_benchmark_lane_selects_its_shards_and_writes_no_evidence(self):
+        self.env['WADDLE_NEXTEST_BENCHMARK_LANE'] = '16x32-j8'
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.diag / 'instantiate-args.json').read_text())
+        self.assertEqual(args[args.index('lane') + 1], '16x32-j8')
+        self.assertIn('Benchmark lane 16x32-j8: qualification evidence not written', result.stdout)
+        self.assertFalse((self.diag / 'qualification-evidence.json').exists())
+
+    def test_production_lane_passes_no_lane_argument(self):
+        self.assertEqual(self.run_shards().returncode, 0)
+        self.assertNotIn('lane', json.loads((self.diag / 'instantiate-args.json').read_text()))
+
+    def test_invalid_benchmark_lane_is_rejected_before_building(self):
+        self.env['WADDLE_NEXTEST_BENCHMARK_LANE'] = '16x32"; evil'
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('invalid WADDLE_NEXTEST_BENCHMARK_LANE', result.stderr)
+        self.assertFalse((self.diag / 'build-args.json').exists())
+
     def test_all_four_isolated_shards_are_required_and_evidence_is_retained(self):
         result = self.run_shards()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -216,9 +246,17 @@ raise SystemExit(r.main())
         self.assertEqual(args[args.index('--max-jobs') + 1], '4')
         self.assertEqual(args[args.index('--cores') + 1], '8')
         self.assertIn('--keep-going', args)
+        inputs = json.loads((self.diag / 'input-build-args.json').read_text())
+        archive = self.store / ('g' * 32 + '-archive.drv')
+        self.assertEqual(inputs[-2:], [f'{archive}^out,shard1,shard2,shard3,shard4',
+                                       f"{self.store / ('g' * 32 + '-stdenv.drv')}^out"])
+        input_settings = {inputs[i + 1]: inputs[i + 2] for i, arg in enumerate(inputs) if arg == '--option'}
+        self.assertEqual(input_settings, {'builders': '', 'sandbox': 'true', 'sandbox-fallback': 'false'})
+        self.assertEqual(inputs[inputs.index('--store') + 1], 'daemon')
         state = json.loads((self.diag / 'nix-state.json').read_text())
         self.assertEqual((self.diag / 'helper-source').read_text().splitlines(),
-                         [str(Path(state['source']) / 'server'), f"path:{state['source']}#waddle-server-test-archive"])
+                         [str(self.server), str(Path(state['source']) / 'server/scripts/build-nextest-archive.sh'),
+                          f"path:{state['source']}#waddle-server-test-archive"])
         for partition in range(1, 5):
             for name in REPORTS:
                 self.assertEqual((self.diag / f'shard-{partition}/{name}').read_text(), f'verified shard {partition}')
@@ -527,14 +565,23 @@ raise SystemExit(r.main())
         self.assertFalse(self.sidecar().exists())
 
     def test_already_valid_outputs_and_undetermined_store_state_fail_before_build(self):
-        for setting in ('ALREADY_VALID', 'PATH_INFO_ERROR', 'UNTRUSTED_DAEMON', 'BAD_DERIVATION'):
+        for setting in ('ALREADY_VALID', 'PATH_INFO_ERROR', 'UNTRUSTED_DAEMON', 'BAD_DERIVATION', 'BAD_INPUT'):
             with self.subTest(setting=setting):
                 self.env[setting] = '1'
                 result = self.run_shards()
                 self.assertNotEqual(result.returncode, 0, setting)
+                self.assertFalse((self.diag / 'input-build-args.json').exists())
                 self.assertFalse((self.diag / 'build-args.json').exists())
                 self.assertFalse(self.sidecar().exists())
                 del self.env[setting]
+
+    def test_failed_dependency_build_stops_before_shard_build(self):
+        self.env['INPUT_BUILD_EXIT'] = '13'
+        result = self.run_shards()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.diag / 'input-build-args.json').exists())
+        self.assertFalse((self.diag / 'build-args.json').exists())
+        self.assertFalse(self.sidecar().exists())
 
     def test_partial_duplicate_and_mismatched_build_results_fail_closed(self):
         for setting in ('partial', 'duplicate', 'mismatch'):

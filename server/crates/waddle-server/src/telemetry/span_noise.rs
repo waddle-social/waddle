@@ -33,9 +33,17 @@
 //!   parented — to the enqueuing sweep so retry queues can never hold
 //!   a sweep root open.
 //!
-//! Pre-existing named roots (`xmpp.stanza.dispatch`, `xmpp.muc.fanout`,
-//! `http_request`, `clustering.shutdown_drain`, ...) pass through the
-//! same way: anything not on the lists delegates to the inner sampler.
+//! - `xmpp.stanza.dispatch` — one per inbound stanza
+//!   (`websocket::frame_backstop::StanzaBackstop`). It is opened with
+//!   `parent: None` because the live connection actor handles frames
+//!   inside its own `actor.lifecycle` span, which is dropped below
+//!   together with every descendant.
+//!
+//! Other named roots (`xmpp.muc.fanout`, `http_request`,
+//! `clustering.shutdown_drain`, ...) pass through the same way:
+//! anything not on the lists delegates to the inner sampler. A span
+//! opened inside an actor's own loop inherits `actor.lifecycle` and is
+//! dropped unless it is an explicit root.
 
 use opentelemetry::trace::{Link, SpanKind, TraceContextExt, TraceId};
 use opentelemetry::{Context, KeyValue};
@@ -270,6 +278,7 @@ mod tests {
             "clustering.relay.dispatch",
             "janitor.sweep",
             "janitor.orphan_work",
+            "xmpp.stanza.dispatch",
         ];
         let filter = SpanNoiseFilter::new(Sampler::AlwaysOn);
         for name in DEDICATED_ROOT_SPAN_NAMES {

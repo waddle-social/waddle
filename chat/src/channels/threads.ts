@@ -82,9 +82,13 @@ function buildIndex(messages: readonly TimelineMessage[]): MessageThreadIndex {
       if (replyId === threadId) return false;
       return !groupMembers.has(replyId);
     }) ?? null;
-    const root = byId.get(threadId) ?? standardRoot;
-    const directChildren = root ? group.filter((m) => m.id !== root.id) : group.slice();
-    const lastTs = group[group.length - 1]?.createdAt ?? root?.createdAt ?? "";
+    // A DM call can have a start card and an outcome card with the same
+    // thread ID. Either can anchor the thread, but neither is a chat reply.
+    const callRoot = group.find((m) => m.callThread && !m.callThread.outcome)
+      ?? group.find((m) => m.callThread);
+    const root = callRoot ?? byId.get(threadId) ?? standardRoot;
+    const directChildren = group.filter((m) => m.id !== root?.id && !(callRoot && m.callThread));
+    const lastTs = (callRoot ? directChildren : group).at(-1)?.createdAt ?? root?.createdAt ?? "";
     const parentThreadId = parentLinks.get(threadId);
     entries.set(threadId, {
       threadId,

@@ -1,4 +1,4 @@
-{{- if .Values.restrictedRuntime.enabled }}
+{{- if and .Values.restrictedRuntime.enabled (not (include "waddle-server.restrictedHandoffPending" .)) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

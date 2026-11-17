@@ -12,7 +12,7 @@ use crate::notification_outbox::candidate_persistence::{
 };
 use crate::notification_outbox::publisher_persistence::settle_outbox_ancestry_tx;
 use crate::notification_outbox::test_support::{candidate, target_named};
-use crate::notification_outbox::{lock_outbox_ancestry_tx, RichSummary};
+use crate::notification_outbox::{lock_outbox_ancestry_tx, DrainBatch, DrainScope, RichSummary};
 use crate::notification_outbox::{
     retire_registration_outbox_tx, NotificationOutboxPruneOutcome,
     NotificationOutboxPublishOutcome, PushServiceNodeName,
@@ -88,7 +88,7 @@ async fn fanout(
             &mut tx,
             candidate,
             target,
-            &build_waddle_context(candidate),
+            &build_waddle_context(candidate, 0),
             &RichSummary::minimal(),
             now,
         )
@@ -270,7 +270,7 @@ async fn notification_provider_binding_and_revocation(
     )
     .await;
     let claimed = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -478,7 +478,7 @@ async fn notification_lost_backing_marker_preserves_newer_wire(fixture: IngressF
     )
     .await;
     let claimed = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -509,7 +509,7 @@ async fn notification_lost_backing_marker_preserves_newer_wire(fixture: IngressF
     fixture.execute("UPDATE push_publish_jobs SET backing_state = 'pending', backing_published_at_ms = NULL WHERE ancestry_job_id = ?", crate::db_params![claimed.job_id.as_str()]).await;
     fixture.execute("UPDATE notification_outbox SET status = 'queued', published_at_ms = NULL WHERE job_id = ?", crate::db_params![claimed.job_id.as_str()]).await;
     let retry = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("reclaim")
         .remove(0);
@@ -607,7 +607,7 @@ async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
     let parent = attach(&fixture, &parked_candidate).await;
     fanout(&outbox, &parked_candidate, std::slice::from_ref(&target)).await;
     let parked = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);
@@ -634,7 +634,17 @@ async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
         .expect("parent lock");
     let outcomes = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        outbox.drain_due_outbox_jobs(&push, &registrations, &inbox, &blocking, &service, 1),
+        outbox.drain_due_outbox_jobs(
+            &push,
+            &registrations,
+            &inbox,
+            &blocking,
+            &service,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
+        ),
     )
     .await
     .expect("parked parent must not stall drain")
@@ -651,7 +661,17 @@ async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
     );
     held_parent.commit().await.expect("release parent");
     let reconciled = outbox
-        .drain_due_outbox_jobs(&push, &registrations, &inbox, &blocking, &service, 1)
+        .drain_due_outbox_jobs(
+            &push,
+            &registrations,
+            &inbox,
+            &blocking,
+            &service,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 1,
+            },
+        )
         .await
         .expect("reconcile after release");
     assert!(
@@ -725,7 +745,7 @@ async fn explicit_revocation_retires_parked_boundary_without_provider_row(
     )
     .await;
     let job = outbox
-        .claim_due_outbox_jobs(1)
+        .claim_due_outbox_jobs(DrainScope::All, 1)
         .await
         .expect("claim")
         .remove(0);

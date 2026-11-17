@@ -43,10 +43,15 @@ public struct AccountIdentity: Hashable, Sendable {
     /// The nickname used when joining rooms. Own MUC reflections arrive
     /// from `room/nick`, so authorship in rooms compares against this.
     public let nick: String
+    /// The configured bound resource, absent when only the bare account is known.
+    public let resource: String?
+    /// A full address exists only when the resource is known and valid.
+    public var fullJID: JID? { resource.flatMap { jid.with(resource: $0) } }
 
-    public init(jid: BareJID, nick: String) {
+    public init(jid: BareJID, nick: String, resource: String? = nil) {
         self.jid = jid
         self.nick = nick
+        self.resource = resource
     }
 }
 

@@ -48,6 +48,8 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			// Light pull-request lane: free GitHub-hosted runner (public repository).
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				contents:   "read"
 				"id-token": "write"
@@ -62,16 +64,17 @@ schema.#Project & {
 			command: "bun"
 			args: ["run", "build"]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]},
 				"package.json",
 				"astro.config.ts",
+				"panda.config.ts",
 				"tsconfig.json",
 				"wrangler.jsonc",
 				"drizzle.config.ts",
 				"src/**",
 				"public/**",
 				"drizzle/**",
+				schema.#ModuleFiles & {paths: ["design/package.json", "design/src/**", "design/assets/**"]},
 			]
 			outputs: [
 				"dist/**",
@@ -85,8 +88,7 @@ schema.#Project & {
 			args: ["run", "scripts/smoke-oidc.mjs"]
 			dependsOn: [tasks.build]
 			inputs: [
-				"../package.json",
-				"../bun.lock",
+				schema.#ModuleFiles & {paths: ["package.json", "bun.lock"]},
 				"package.json",
 				"scripts/smoke-oidc.mjs",
 				"scripts/oidc-smoke-worker.mjs",

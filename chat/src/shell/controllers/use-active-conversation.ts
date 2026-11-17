@@ -124,6 +124,7 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
       peerUsername: conversation.peerUsername,
       presenceShow: conversation.presenceShow,
       presenceIdleSince: conversation.presenceIdleSince,
+      mucPm: conversation.mucPm,
     };
   });
 
