@@ -11,7 +11,7 @@
 
 import type { InjectionKey } from "vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
-import { canonicalDomain, isRemoteRoomJid, roomHostDomain, type HomeAddresses } from "@/lib/xmpp/remote-address";
+import { canonicalDomain, roomHost, roomHostDomain, type HomeAddresses } from "@/lib/xmpp/remote-address";
 
 /** Decides, per message, the other server whose media waits for the user, or `null`. */
 export type RemoteMediaPolicy = (message: TimelineMessage) => string | null;
@@ -33,6 +33,9 @@ function domainOf(jid: string | undefined): string | null {
  * only, or `null` when it may load as before:
  * - the user's own messages always load;
  * - a message in a room on another server waits, whoever sent it;
+ * - a message in a room whose host is not known yet waits too: before the
+ *   home MUC service is discovered only rooms on the account domain or a
+ *   known home service count as home, and the others are placed once it is;
  * - a message whose sender's real address is on another domain waits.
  *
  * A sender in a room of this deployment whose real address the room does
@@ -41,7 +44,9 @@ function domainOf(jid: string | undefined): string | null {
 export function remoteMediaSource(message: TimelineMessage, home: HomeAddresses | null): string | null {
   if (message.isSelf || !home) return null;
   const roomJid = bareOf(message.authorOccupantJid) || bareOf(message.stanzaIdBy);
-  if (roomJid.includes("@") && isRemoteRoomJid(roomJid, home)) return roomHostDomain(roomJid);
+  if (roomJid.includes("@") && roomHost(roomJid, home) !== "home") {
+    return roomHostDomain(roomJid) ?? roomJid.slice(roomJid.lastIndexOf("@") + 1);
+  }
   const accountDomain = canonicalDomain(home.accountDomain);
   const senderJid = message.authorRealJid ?? (message.authorOccupantJid ? undefined : message.authorJid);
   const senderDomain = domainOf(senderJid);

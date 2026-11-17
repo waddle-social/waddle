@@ -47,9 +47,16 @@ describe("media from other servers", () => {
     }), HOME)).toBeNull();
   });
 
-  test("before the home MUC service is known, room addresses decide nothing", () => {
+  test("before the home MUC service is known, media in a room that cannot be placed waits", () => {
     const undiscovered = { ...HOME, mucService: null };
-    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob" }), undiscovered)).toBeNull();
+    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob" }), undiscovered)).toBe("chat.remote.test");
+    // The conventional home MUC name is no evidence either, until discovered.
+    expect(remoteMediaSource(message({ authorOccupantJid: "general@muc.home.test/bob" }), undiscovered)).toBe("muc.home.test");
     expect(remoteMediaSource(message({ authorJid: "bob@remote.test" }), undiscovered)).toBe("remote.test");
+    // Rooms on the account domain and the user's own messages still load.
+    expect(remoteMediaSource(message({ authorOccupantJid: "general@home.test/bob" }), undiscovered)).toBeNull();
+    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob", isSelf: true }), undiscovered)).toBeNull();
+    // Once discovered, a home room's media loads again.
+    expect(remoteMediaSource(message({ authorOccupantJid: "general@muc.home.test/bob" }), HOME)).toBeNull();
   });
 });
