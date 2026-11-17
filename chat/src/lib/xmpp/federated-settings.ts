@@ -30,6 +30,7 @@ const NS_DATAFORM = "jabber:x:data";
 const NS_MUC_OWNER = "http://jabber.org/protocol/muc#owner";
 const NS_PUBSUB_OWNER = "http://jabber.org/protocol/pubsub#owner";
 const NODE_CONFIG_FORM = "http://jabber.org/protocol/pubsub#node_config";
+const FIELD_MAX_ITEMS = "pubsub#max_items";
 
 /** A XEP-0004 boolean value, or `null` for anything else. */
 export function parseFormBoolean(value: string | null | undefined): boolean | null {
@@ -76,11 +77,20 @@ function buildSpaceConfigureRequest(id: string, spacesServiceJid: string, node: 
 }
 
 /**
- * The configure submission that changes only the `federated` field. The
- * Spaces service applies a submitted form as a change to the node's
- * configuration, so fields left out keep their values.
+ * The configure submission that changes the `federated` field. The Spaces
+ * service applies a submitted form as a change to the node's
+ * configuration, so most fields left out keep their values; `max_items` is
+ * the exception, since the service resets an omitted `max_items` to
+ * unlimited. The value read from the node's form is therefore sent back
+ * unchanged when there is one.
  */
-export function buildSpaceFederatedSubmission(id: string, spacesServiceJid: string, node: string, federated: boolean): string {
+export function buildSpaceFederatedSubmission(
+  id: string,
+  spacesServiceJid: string,
+  node: string,
+  federated: boolean,
+  currentMaxItems?: string | null,
+): string {
   return buildIqXml({
     type: "set",
     id,
@@ -97,6 +107,7 @@ export function buildSpaceFederatedSubmission(id: string, spacesServiceJid: stri
           attrs: { type: "submit" },
           children: [
             submitField("FORM_TYPE", NODE_CONFIG_FORM, "hidden"),
+            ...(currentMaxItems ? [submitField(FIELD_MAX_ITEMS, currentMaxItems)] : []),
             submitField(FIELD_SPACE_FEDERATED, federated ? "1" : "0"),
           ],
         }],
@@ -105,11 +116,24 @@ export function buildSpaceFederatedSubmission(id: string, spacesServiceJid: stri
   });
 }
 
-/** Read a Space's `federated` setting from its owner configure form. */
-export async function fetchSpaceFederated(xmpp: RawIqClient, spacesServiceJid: string, node: string): Promise<boolean | null> {
+async function fetchSpaceConfigureForm(xmpp: RawIqClient, spacesServiceJid: string, node: string): Promise<Document> {
   const id = crypto.randomUUID();
   const response = await sendRawIq(xmpp, { xml: buildSpaceConfigureRequest(id, spacesServiceJid, node), id, to: spacesServiceJid, node });
-  return formBooleanField(parseXmlResponse(response), FIELD_SPACE_FEDERATED);
+  return parseXmlResponse(response);
+}
+
+/** The value of a field in the first data form under `doc`, or `null`. */
+function formFieldValue(doc: Document | Element, fieldName: string): string | null {
+  const form = firstElementNS(doc, NS_DATAFORM, "x");
+  if (!form) return null;
+  const field = childElements(form, "field", NS_DATAFORM).find((candidate) => candidate.getAttribute("var") === fieldName);
+  const value = field ? childElements(field, "value", NS_DATAFORM)[0]?.textContent?.trim() : undefined;
+  return value || null;
+}
+
+/** Read a Space's `federated` setting from its owner configure form. */
+export async function fetchSpaceFederated(xmpp: RawIqClient, spacesServiceJid: string, node: string): Promise<boolean | null> {
+  return formBooleanField(await fetchSpaceConfigureForm(xmpp, spacesServiceJid, node), FIELD_SPACE_FEDERATED);
 }
 
 /**
@@ -127,8 +151,9 @@ export async function setSpaceFederated(
   const id = crypto.randomUUID();
   let error: unknown = null;
   try {
+    const form = await fetchSpaceConfigureForm(xmpp, spacesServiceJid, node);
     await sendRawIq(xmpp, {
-      xml: buildSpaceFederatedSubmission(id, spacesServiceJid, node, federated),
+      xml: buildSpaceFederatedSubmission(id, spacesServiceJid, node, federated, formFieldValue(form, FIELD_MAX_ITEMS)),
       id,
       to: spacesServiceJid,
       node,

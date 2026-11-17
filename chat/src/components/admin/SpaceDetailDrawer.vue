@@ -53,6 +53,10 @@ let membersRequestId = 0;
 const federated = ref<boolean | null | undefined>(undefined);
 const federatedSaving = ref(false);
 const federatedError = ref("");
+// Bumped whenever a read or a change settles: the checkbox is redrawn from
+// the value the server holds, even when that value did not change and the
+// box was toggled by the click.
+const federatedRenderKey = ref(0);
 let federatedRequestId = 0;
 
 /** The Spaces service: the domain of the Space's address. */
@@ -71,7 +75,10 @@ async function loadFederated() {
   federated.value = undefined;
   try {
     const value = await fetchSpaceFederated(agent, spacesService(), props.space.space_node);
-    if (requestId === federatedRequestId) federated.value = value;
+    if (requestId === federatedRequestId) {
+      federated.value = value;
+      federatedRenderKey.value += 1;
+    }
   } catch (err: unknown) {
     if (requestId !== federatedRequestId) return;
     federated.value = null;
@@ -100,7 +107,10 @@ async function changeFederated(next: boolean) {
     if (requestId !== federatedRequestId) return;
     federatedError.value = err instanceof Error ? err.message : "Couldn't change whether this Space is open to other servers.";
   } finally {
-    if (requestId === federatedRequestId) federatedSaving.value = false;
+    // Whatever settled the request (its answer, or a newer read of another
+    // Space that superseded it), the setting can be changed again.
+    federatedSaving.value = false;
+    federatedRenderKey.value += 1;
   }
 }
 
@@ -272,6 +282,7 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
         <p v-if="federated === undefined" class="type-caption text-muted-foreground">Loading…</p>
         <label v-else-if="federated !== null" class="flex items-start gap-2.5">
           <input
+            :key="federatedRenderKey"
             type="checkbox"
             class="mt-1"
             :checked="federated"

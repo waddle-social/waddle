@@ -21,10 +21,11 @@ function ownerFormXml(fields: Record<string, string>): string {
   }</x></query></iq>`;
 }
 
-function spaceConfigureXml(federated: string | null): string {
+function spaceConfigureXml(federated: string | null, maxItems: string | null = null): string {
   return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub#owner"><configure node="eng"><x xmlns="jabber:x:data" type="form">`
     + `<field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field>`
     + `<field var="pubsub#title"><value>Engineering</value></field>`
+    + (maxItems === null ? "" : `<field var="pubsub#max_items"><value>${maxItems}</value></field>`)
     + (federated === null ? "" : `<field var="${FIELD_SPACE_FEDERATED}" type="boolean"><value>${federated}</value></field>`)
     + `</x></configure></pubsub></iq>`;
 }
@@ -59,7 +60,7 @@ describe("a room's federated setting", () => {
   });
 
   test("is written only when asked and only when the form offers it", async () => {
-    await withFakeDomParser(async () => {
+    await withXml(async () => {
       const submitted: string[] = [];
       const offering = {
         async send_raw_iq(xml: string) {
@@ -102,6 +103,35 @@ describe("a Space's federated setting", () => {
     await withXml(async () => {
       expect(await fetchSpaceFederated({ async send_raw_iq() { return spaceConfigureXml("1"); } }, "spaces.home.test", "eng")).toBe(true);
       expect(await fetchSpaceFederated({ async send_raw_iq() { return spaceConfigureXml(null); } }, "spaces.home.test", "eng")).toBeNull();
+    });
+  });
+
+  test("the change sends the Space's max_items back unchanged, since the service resets an omitted one", async () => {
+    await withXml(async () => {
+      const submitted: string[] = [];
+      const xmpp = {
+        async send_raw_iq(xml: string) {
+          if (xml.includes('type="set"')) {
+            submitted.push(xml);
+            return '<iq type="result"/>';
+          }
+          return spaceConfigureXml(submitted.length > 0 ? "1" : "0", "50");
+        },
+      };
+      const result = await setSpaceFederated(xmpp, "spaces.home.test", "eng", true);
+      expect(result).toEqual({ current: true, error: null });
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0]).toContain('<field var="pubsub#max_items"><value>50</value></field>');
+      expect(submitted[0]).toContain(`<field var="${FIELD_SPACE_FEDERATED}"><value>1</value></field>`);
+      expect(submitted[0]).not.toContain("pubsub#title");
+    });
+  });
+
+  test("a form without max_items submits none", async () => {
+    await withXml(async () => {
+      const xml = buildSpaceFederatedSubmission("c2", "spaces.home.test", "eng", false, null);
+      expect(xml).not.toContain("pubsub#max_items");
+      expect(xml).toContain(`<field var="${FIELD_SPACE_FEDERATED}"><value>0</value></field>`);
     });
   });
 

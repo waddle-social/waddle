@@ -1,6 +1,6 @@
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import type { PinPermission } from "@/lib/chat-types";
-import { escapeXml } from "./extension-commands/xml";
+import { buildIqXml, type XmlElementSpec } from "./xml-build";
 
 const NS_DATAFORM = "jabber:x:data";
 const NS_MUC_OWNER = "http://jabber.org/protocol/muc#owner";
@@ -54,13 +54,28 @@ function dataField(name: string, value: string) {
   return { name, value };
 }
 
+/** XEP-0004 `submit` form carrying each field with one value. */
+function submitForm(fields: ReadonlyArray<{ name: string; value: string }>): XmlElementSpec {
+  return {
+    name: "x",
+    ns: NS_DATAFORM,
+    attrs: { type: "submit" },
+    children: fields.map((field) => ({
+      name: "field",
+      attrs: { var: field.name },
+      children: [{ name: "value", text: field.value }],
+    })),
+  };
+}
+
 function slugifyNodeId(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "space";
 }
 
-async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: string, to: string): Promise<string> {
+/** Build the IQ with the DOM, so `to` and every payload value are escaped. */
+async function sendIq(client: HybridClient, type: "get" | "set", payload: XmlElementSpec, to: string): Promise<string> {
   if (!client.send_raw_iq) throw new Error("XMPP session is not ready");
-  return client.send_raw_iq(`<iq type="${type}" id="${crypto.randomUUID()}" to="${to}">${xmlPayload}</iq>`);
+  return client.send_raw_iq(buildIqXml({ type, id: crypto.randomUUID(), to, payload }));
 }
 
 async function joinRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
@@ -79,12 +94,7 @@ async function fetchMucOwnerConfig(
   client: HybridClient,
   roomJid: string,
 ): Promise<Map<string, string>> {
-  const responseXml = await sendIq(
-    client,
-    "get",
-    `<query xmlns="${NS_MUC_OWNER}"/>`,
-    roomJid,
-  );
+  const responseXml = await sendIq(client, "get", { name: "query", ns: NS_MUC_OWNER }, roomJid);
   const doc = new DOMParser().parseFromString(responseXml, "text/xml");
   const form = doc.getElementsByTagNameNS(NS_DATAFORM, "x")[0];
   const fields = new Map<string, string>();
@@ -124,15 +134,8 @@ export async function configureMucRoom(
     current.set(FIELD_ROOM_FEDERATED, params.federated ? "1" : "0");
   }
   current.set("FORM_TYPE", NS_MUC_ROOMCONFIG);
-  const fieldsXml = Array.from(current.entries())
-    .map(([name, value]) => `<field var="${escapeXml(name)}"><value>${escapeXml(value)}</value></field>`)
-    .join("");
-  await sendIq(
-    client,
-    "set",
-    `<query xmlns="${NS_MUC_OWNER}"><x xmlns="${NS_DATAFORM}" type="submit">${fieldsXml}</x></query>`,
-    roomJid,
-  );
+  const fields = Array.from(current.entries()).map(([name, value]) => dataField(name, value));
+  await sendIq(client, "set", { name: "query", ns: NS_MUC_OWNER, children: [submitForm(fields)] }, roomJid);
 }
 
 export async function createMucRoom(client: HybridClient, mucServiceJid: string, params: CreateMucRoomParams): Promise<{ roomJid: string }> {
@@ -144,12 +147,7 @@ export async function createMucRoom(client: HybridClient, mucServiceJid: string,
     ...(params.description ? [dataField("muc#roomconfig_roomdesc", params.description)] : []),
     ...(params.mucType === "forum" ? [dataField("muc#roomconfig_forum", "1")] : []),
   ];
-  await sendIq(
-    client,
-    "set",
-    `<query xmlns="${NS_MUC_OWNER}"><x xmlns="${NS_DATAFORM}" type="submit">${fields.map((field) => `<field var="${escapeXml(field.name)}"><value>${escapeXml(field.value)}</value></field>`).join("")}</x></query>`,
-    roomJid,
-  );
+  await sendIq(client, "set", { name: "query", ns: NS_MUC_OWNER, children: [submitForm(fields)] }, roomJid);
   try { await leaveRoom(client, roomJid, params.nick); } catch {}
   return { roomJid };
 }
@@ -163,22 +161,35 @@ export async function createSpaceNode(client: HybridClient, spacesServiceJid: st
     dataField("pubsub#access_model", "open"),
     ...(params.description ? [dataField("pubsub#description", params.description)] : []),
   ];
-  await sendIq(
-    client,
-    "set",
-    `<pubsub xmlns="${NS_PUBSUB}"><create node="${escapeXml(nodeId)}"/><configure node="${escapeXml(nodeId)}"><x xmlns="${NS_DATAFORM}" type="submit">${fields.map((field) => `<field var="${escapeXml(field.name)}"><value>${escapeXml(field.value)}</value></field>`).join("")}</x></configure></pubsub>`,
-    spacesServiceJid,
-  );
+  await sendIq(client, "set", {
+    name: "pubsub",
+    ns: NS_PUBSUB,
+    children: [
+      { name: "create", attrs: { node: nodeId } },
+      { name: "configure", attrs: { node: nodeId }, children: [submitForm(fields)] },
+    ],
+  }, spacesServiceJid);
   return { node: nodeId, serviceJid: spacesServiceJid };
 }
 
 async function publishMucToSpace(client: HybridClient, spacesServiceJid: string, spaceNode: string, mucJid: string, params: PublishMucToSpaceParams): Promise<void> {
-  await sendIq(
-    client,
-    "set",
-    `<pubsub xmlns="${NS_PUBSUB}"><publish node="${escapeXml(spaceNode)}"><item id="${escapeXml(mucJid)}"><conference xmlns="${NS_BOOKMARKS_1}" name="${escapeXml(params.name)}" autojoin="${params.autojoin === false ? "false" : "true"}"/></item></publish></pubsub>`,
-    spacesServiceJid,
-  );
+  await sendIq(client, "set", {
+    name: "pubsub",
+    ns: NS_PUBSUB,
+    children: [{
+      name: "publish",
+      attrs: { node: spaceNode },
+      children: [{
+        name: "item",
+        attrs: { id: mucJid },
+        children: [{
+          name: "conference",
+          ns: NS_BOOKMARKS_1,
+          attrs: { name: params.name, autojoin: params.autojoin === false ? "false" : "true" },
+        }],
+      }],
+    }],
+  }, spacesServiceJid);
 }
 
 /**
