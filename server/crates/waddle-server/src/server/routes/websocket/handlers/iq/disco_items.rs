@@ -1118,8 +1118,9 @@ async fn live_public_instant_room_items(
     channel_backed
         .drop_unlisted_channel_rooms(state, &mut candidates)
         .await;
-    // A room an enrolled host-grant scope manages is never listed, with or
-    // without a channel row; if that cannot be read, no instant room is.
+    // A room an enrolled host-grant scope manages is listed only from its
+    // channel row, under its grants; the instant-room scan lists none, and
+    // if enrollment cannot be read it lists no instant room at all.
     let channel_ids: Vec<String> = candidates
         .iter()
         .filter_map(waddle_xmpp::parse_managed_room_jid)
