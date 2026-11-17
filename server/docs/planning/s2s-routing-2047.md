@@ -142,7 +142,7 @@ the room host `server/routes/websocket/s2s_rooms.rs`, the delivery hook of
 `route/router/spaces.rs`, the Spaces host
 `server/routes/websocket/s2s_spaces.rs` with
 `handlers/iq/spaces_remote.rs`, the hook in the PubSub fan-out, the stores
-in `db/s2s_spaces.rs` and migrations 2012 (`s2s_federated_spaces`) and 2013
+in `db/s2s_spaces.rs` and migrations 2011 (`s2s_federated_spaces`) and 2012
 (`s2s_space_subscriptions`).
 
 ## The router
@@ -1865,7 +1865,7 @@ that existed before it did and for every new one; there is no deployment
 default that turns it on. A Space's owner reads and sets it in the node's
 configuration form (`urn:waddle:spaces:federated`, a boolean field of the
 `pubsub#owner` configure form on the Spaces service). It is stored apart
-from the PubSub node (`s2s_federated_spaces`, migration 2012), as a row
+from the PubSub node (`s2s_federated_spaces`, migration 2011), as a row
 that exists while the setting is on and names the creation time of the node
 it was turned on for: a Space deleted and created again under the same name
 is not federated, whatever row its predecessor left. Deleting a Space
@@ -2515,8 +2515,8 @@ not S2S is on, and are listed below with the others.
 
 Spaces change nothing for remote senders while S2S is disabled: no router
 exists, so no Spaces host is attached, the pass that notifies subscribers
-at other servers returns before it reads anything, and migrations 2012 and
-2013 create two tables that stay empty unless an owner turns a Space's
+at other servers returns before it reads anything, and migrations 2011 and
+2012 create two tables that stay empty unless an owner turns a Space's
 `federated` setting on. The
 setting can be set while S2S is off and takes effect once it is on. Two of
 its changes apply whether or not S2S is on, and are listed below.

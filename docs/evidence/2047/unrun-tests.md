@@ -314,7 +314,7 @@ gate (`--all-targets`). All are step 3 of the verification phase.
 | `waddle-server/src/auth/directory/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/auth/native/tests.rs` | W5i | none | Not run |
 | `waddle-server/src/db/migrations/tests.rs` | W5b | PostgreSQL for the `postgres_` cases; they skip without `WADDLE_TEST_POSTGRES_URL` | Not run |
-| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2010 to 2013 and 2015 in the version order) | W6c, W7a, W6d | none | Not run |
+| `waddle-server/src/db/migrations/after_baseline.rs` (its `tests` module: migrations 2009 to 2013 in the version order, and every version after the baseline without a gap) | W6c, W7a, W6d | none | Not run |
 | `waddle-server/src/pending_delivery/database/custody/tests.rs` (edited: the custody transfer takes the store's cache of whether the ledger of retired JIDs exists) | W6d | as before the edit | Not run |
 | `waddle-server/src/server/routes/websocket/connection.rs` (`tests`: three cases pass the force-detach close the stream error it now takes, `<conflict/>` as before) | W6d | none | Not run |
 | `waddle-server/src/server/routes/websocket/tests/retirement.rs` (edited: the retirement cause of a retired account's detach, not a transfer) | W6d | none | Not run |
