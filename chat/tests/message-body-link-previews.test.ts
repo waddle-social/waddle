@@ -210,7 +210,9 @@ async function loadMessageBodyComponent() {
 }
 
 function rewriteImports(code: string, importer: URL, tempDir: string): string {
-  return code.replace(/from\s+["']([^"']+)["']/g, (_match, specifier: string) =>
+  // A module specifier holds no whitespace, so template text that reads
+  // `from '<expression>'` once compiled is not taken for an import.
+  return code.replace(/from\s+["']([^"'\s]+)["']/g, (_match, specifier: string) =>
     `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir))}`);
 }
 
