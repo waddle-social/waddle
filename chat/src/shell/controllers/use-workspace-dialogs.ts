@@ -6,6 +6,8 @@ import type { ChatShellState } from "@/shell/state";
 import type { connectionStore as ConnectionStore } from "@/lib/connection-store";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import { jidDomainOrEmpty } from "@/lib/xmpp/jid";
+import { memberIdentityLabel } from "@/waddles/remote-community-presentation";
 
 interface WorkspaceDialogsDeps {
   ui: ChatShellState;
@@ -133,7 +135,10 @@ export function useWorkspaceDialogs(deps: WorkspaceDialogsDeps) {
 
   function handleRemoveMember(member: MemberSummary) {
     pendingRemoveMember = member;
-    ui.confirmRemoveMember.value = member.username;
+    ui.confirmRemoveMember.value = memberIdentityLabel(
+      member,
+      jidDomainOrEmpty(connectionStore.session?.jid ?? ""),
+    );
   }
 
   async function confirmRemoveMember() {

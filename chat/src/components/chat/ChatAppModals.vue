@@ -5,6 +5,7 @@ import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
 import NewGroupDmDialog from "@/components/modals/NewGroupDmDialog.vue";
 import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
+import RemoteCommunitiesDialog from "@/components/modals/RemoteCommunitiesDialog.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
@@ -15,6 +16,7 @@ const props = defineProps<{
 const {
   ui,
   waddles,
+  remoteCommunities,
   messaging,
   members,
   displayedMembers,
@@ -38,6 +40,10 @@ const {
 
 <template>
     <!-- Dialogs -->
+    <RemoteCommunitiesDialog
+      v-model:open="ui.showRemoteCommunities.value"
+      :remote="remoteCommunities"
+    />
     <NewDmDialog
       v-model:open="ui.showNewDm.value"
       :search-recipients="searchDmRecipients"
@@ -96,6 +102,7 @@ const {
       :search-results="members.memberSearchResults.value"
       :is-searching="members.isSearchingUsers.value"
       :can-manage-members="waddles.canManageMembers.value"
+      :home-domain="controller.selfDomain.value"
       :room-presence="messaging.roomPresence.value"
       :room-last-seen="messaging.roomLastSeen.value"
       @update:member-query="members.memberQuery.value = $event"
@@ -128,9 +135,9 @@ const {
 
     <ConfirmDialog
       :open="ui.confirmRemoveMember.value !== null"
-      title="Remove member?"
-      :message="`Are you sure you want to remove ${ui.confirmRemoveMember.value ?? 'this member'} from the waddle?`"
-      confirm-label="Remove member"
+      title="Revoke access?"
+      :message="`${ui.confirmRemoveMember.value ?? 'This member'} will no longer be a member of this room. If it is members-only, they can't join again until someone adds them. This does not change their own bookmarks or the room's history.`"
+      confirm-label="Revoke access"
       destructive
       @update:open="(v: boolean) => { if (!v) ui.confirmRemoveMember.value = null }"
       @confirm="confirmRemoveMember"

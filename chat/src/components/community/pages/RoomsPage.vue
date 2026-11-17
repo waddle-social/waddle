@@ -14,7 +14,7 @@ import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import type { CallMedia } from "@/lib/calls/types";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { MessageThreadEntry } from "@/channels/threads";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidDomainOrEmpty } from "@/lib/xmpp/jid";
 import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
@@ -87,6 +87,13 @@ function roomKey(jid: string | undefined | null): string {
   return jid ? barePeerJid(jid).toLowerCase() : "";
 }
 
+/** The domain of a room hosted outside this deployment's MUC service, or `null`. */
+function remoteHost(jid: string | undefined): string | null {
+  const managed = props.managedMucDomain?.trim().toLowerCase();
+  const domain = jid ? jidDomainOrEmpty(jid).toLowerCase() : "";
+  return managed && domain && domain !== managed ? domain : null;
+}
+
 const tiles = computed<RoomTile[]>(() => {
   const channels = waddles.sortedChannels.value.filter((channel) => !channel.isGroupDm);
   const unreadMap = buildHomeChannelUnreadMap(
@@ -116,19 +123,23 @@ const tiles = computed<RoomTile[]>(() => {
       const hereCount = isActive ? hereCountForActiveRoom : null;
       const hasActivity = !!channel.jid && activeKeys.has(roomKey(channel.jid));
       const live = callCount > 0;
+      // A room on another server says where it is: two servers can each
+      // have a room of the same name.
+      const host = remoteHost(channel.jid);
+      const place = host ? `Room on ${host}` : "Room";
       let kicker: string;
       if (live) {
         kicker = `${media?.video ? "Video" : "Voice"} huddle · ${callCount} in`;
       } else if (hereCount !== null) {
-        kicker = `Room · ${hereCount} here`;
+        kicker = `${place} · ${hereCount} here`;
       } else if (activity.mentions > 0) {
-        kicker = `Room · ${activity.mentions} mention${activity.mentions === 1 ? "" : "s"}`;
+        kicker = `${place} · ${activity.mentions} mention${activity.mentions === 1 ? "" : "s"}`;
       } else if (activity.unread > 0) {
-        kicker = `Room · ${activity.unread} unread`;
+        kicker = `${place} · ${activity.unread} unread`;
       } else if (hasActivity) {
-        kicker = "Room · active";
+        kicker = `${place} · active`;
       } else {
-        kicker = "Room · quiet";
+        kicker = `${place} · quiet`;
       }
       return {
         channel,
@@ -229,14 +240,23 @@ function selectCommunitySurface(surface: "feed" | "events") {
           <p class="community-page__lead">Sorted by what is happening: huddles first, then mentions and unread.</p>
         </div>
       </div>
-      <button
-        v-if="waddles.canManageChannels.value"
-        type="button"
-        class="community-pill"
-        @click="openCreateChannelDialog()"
-      >
-        New room
-      </button>
+      <div class="flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="community-pill"
+          @click="ui.showRemoteCommunities.value = true"
+        >
+          Join from another server
+        </button>
+        <button
+          v-if="waddles.canManageChannels.value"
+          type="button"
+          class="community-pill"
+          @click="openCreateChannelDialog()"
+        >
+          New room
+        </button>
+      </div>
     </header>
 
     <div class="community-page__body">

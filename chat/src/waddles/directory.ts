@@ -751,6 +751,7 @@ export function useWaddleDirectory(
     memberLoadState,
     serverRole,
     mucServiceJid,
+    spacesServiceJid,
     activeSpaceId,
     activeChannelId,
     isLoadingStructure,
