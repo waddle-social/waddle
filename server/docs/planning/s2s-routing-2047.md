@@ -2388,6 +2388,46 @@ runbook (G24):
   needs S2S; with S2S off it is left out, in every room. Before, it was
   left out of a managed room and seated again in any other, where nothing
   could reach it.
+- The PEP node `urn:waddle:joined-spaces:0` is a well-known private node:
+  it is created with `whitelist` access, up to 1,024 items and no
+  last-item delivery, an owner configure cannot weaken that, only its
+  owner publishes to it, and a publish without an item id is refused
+  (`bad-request`). Before, a client could create it as any other PEP node,
+  with presence access and one item. Nothing on the server reads it.
+
+The web client changes these whether or not S2S is on (the S2S-off
+behaviour of the chat app, for the same runbook):
+
+- The client no longer joins a room again in the session after its own
+  unavailable presence carries status 301 (banned), 321 (affiliation
+  removed) or 322 (room made members-only), in a room of this deployment
+  too, and no longer carries such a room into a later sign-in as one it
+  had joined. Before, a reconnect or a scheduled retry joined it again and
+  was refused.
+- A room's `<destroy/>` presence (XEP-0045 §10.9, which carries no status
+  110) is taken as the end of the user's own occupancy, and the room is not
+  joined again in the session. Before, it was not recognised as the user's
+  own and the room stayed shown as joined.
+- An error presence that answers a join after the client's own wait for
+  it ran out (15 seconds for a room of this deployment) is applied to that
+  join: it replaces the retry the timeout scheduled, and a denial blocks
+  automatic joins as a timely one does. Before, it was dropped and the
+  retry went ahead.
+- A home Space item naming a room on another domain is neither listed in
+  the Space nor joined from it; while the home MUC service has not been
+  discovered, a Space item is placed only when the home MUC catalog lists
+  its room, and the others wait for a later discovery. Before, such an
+  item was asked for its `disco#info` and, when it answered as a room,
+  listed in the Space and joined at sign-in. With S2S off the request
+  failed and the item was dropped, so only the second part is visible.
+- The user's own XEP-0402 bookmarks of rooms on another domain are listed
+  under "Rooms on other servers — unavailable", with Forget only, until the
+  home server advertises `urn:waddle:s2s:0`; nothing joins them. Before,
+  they were asked for their `disco#info`, which fails with S2S off, and
+  were not listed.
+- Changing a Space's `federated` setting sends its `pubsub#max_items` back
+  unchanged. Before, the change omitted it and the Spaces service reset it
+  to unlimited.
 
 ## Restrictions and risks
 
