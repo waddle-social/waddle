@@ -873,7 +873,7 @@ async fn select_direct_route(
 /// the sender wrote. The recipient pass tombstones the archived message a
 /// retraction names by its id, and keys a correction's state under the
 /// message it replaces; for a local sender its own server checked the
-/// author first (XEP-0424 Business Rules, XEP-0308 §5), and for a remote
+/// author first (the Business Rules of XEP-0424 and XEP-0308), and for a remote
 /// one this does, by the same lookup the tombstone resolves its target
 /// with. A message that retracts and corrects nothing, or names a message
 /// the archive does not hold, passes; one whose target another sender

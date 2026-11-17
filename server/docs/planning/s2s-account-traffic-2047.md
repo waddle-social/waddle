@@ -19,8 +19,9 @@ The rules were read against the pinned sources in `xeps/`: RFC 6121 (from
 the RFC Editor) and the XSF sources at
 `4132c531487fe9450ae90b905b8df950d0d478b2`: XEP-0060 1.30.0, XEP-0115
 1.6.0, XEP-0191 1.3, XEP-0199 2.0.1, XEP-0280 1.0.1, XEP-0313 1.1.3 and
-XEP-0359 0.7.0; XEP-0424 0.5.0 and XEP-0357 0.4.1, which `xeps/` does not hold,
-were read at the same commit of the XSF repository.
+XEP-0359 0.7.0; XEP-0424 0.5.0, XEP-0357 0.4.1, XEP-0308 1.2.1, XEP-0353
+0.8.0 and XEP-0511 0.1.1, which `xeps/` does not hold, were read at the
+same commit of the XSF repository.
 
 Nothing here is executed evidence. The evidence is written and compiled but
 not run until verification (D9):
@@ -380,7 +381,9 @@ inbox and archive only as the conversation's peer.
   replaces; for a local sender its own server checks first that the
   sender wrote it (XEP-0424 0.5.0, Business Rules: a retraction is
   processed only when it and the original message come from the same
-  bare JID; XEP-0308 §5). For a remote sender the account side checks it,
+  bare JID; XEP-0308 1.2.1, Business Rules: in a direct conversation the
+  correction's bare JID must match the original's). For a remote sender
+  the account side checks it,
   by the lookup the tombstone resolves its target with: a retraction or
   correction naming an archived message another sender wrote, or whose
   target cannot be read, is dropped unanswered. The link-preview
@@ -796,7 +799,10 @@ store. This is the slice's rollout part (G24).
   is no longer admitted, so it is not delivered, but the copy the
   acceptance archived stays in the account's archive and inbox. The purge
   reads the archived message of every row that refers to the archive, one
-  read per row at each flush while S2S is enabled.
+  read per row at each flush while S2S is enabled, a local sender's row
+  included: an offline row that refers to the archive names no sender,
+  and only the read tells a remote sender's row from a local one. A row
+  that holds its message whole is classified without a read.
 - **A remote message's rich payloads are archived as they come**
   (corrections, replies, reactions), as a local one's are. Nothing is
   fetched for it: a XEP-0511 link card or a link-preview request it
