@@ -2039,8 +2039,11 @@ steps; nothing a remote owner can do reaches them.
    destroyed are recovered only by a restore from backup.
 
 **Event notifications to remote subscribers.** A publish or a retract on a
-Space fans out to local subscribers as before; a subscriber at another
-server is skipped there. Once the publication is stored, the fan-out only
+Space fans out to its local subscribers; a subscriber at another server is
+skipped there. A retract is notified once it stands, because a Space
+node's `pubsub#notify_retract` is on (XEP-0503 node configuration) and
+XEP-0060 §7.2.2.1 then requires it, as it does for a request that asks
+with `notify`. Once the publication is stored, the fan-out only
 queues it for the Spaces host (`queue_remote_notification`, then
 `RemoteRoute::space_published`): a bounded queue of 1,024 publications for
 each replica. A publication takes one of its Space's allowance of notified
