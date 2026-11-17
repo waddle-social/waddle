@@ -160,12 +160,9 @@ fn recipient_intent(intent: &IngressEffectIntent, recipient: &BareJid, sender: &
                     .iter()
                     .all(|resource| resource.to_bare() == *recipient)
         }
-        IngressEffectIntent::RelayCarbons { owner, exclude, .. } => {
-            owner == recipient
-                && exclude
-                    .iter()
-                    .all(|resource| resource.to_bare() == *recipient)
-        }
+        // The resources a relayed carbon excludes are not addressed; the
+        // owner whose resources receive it is.
+        IngressEffectIntent::RelayCarbons { owner, .. } => owner == recipient,
         IngressEffectIntent::InboxProject { owner, mutation } => {
             owner == recipient
                 && match mutation {

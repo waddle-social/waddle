@@ -466,7 +466,8 @@ pub(in crate::server::routes::interpret::direct_archive) fn prune_oldest_pending
             .or_default()
             .push((entry.key().clone(), entry.value().started));
     }
-    // Newest last, so that each initiator's oldest is at the front.
+    // Newest first, so that each initiator's oldest is last, where `pop`
+    // takes it.
     for offers in by_initiator.values_mut() {
         offers.sort_by_key(|(_, started)| std::cmp::Reverse(*started));
     }
