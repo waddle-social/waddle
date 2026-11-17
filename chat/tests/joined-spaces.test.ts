@@ -11,6 +11,7 @@ import {
   parseJoinedSpaceItems,
   parseJoinedSpaces,
   pepJoinedSpaceStore,
+  unfollowOvertaken,
 } from "../src/lib/xmpp/joined-spaces";
 import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
 
@@ -210,5 +211,41 @@ describe("unfollows kept on this device", () => {
     const missing = localSpaceUnfollowIntentStore("alice@home.test", null);
     expect(missing.load()).toEqual([]);
     expect(() => missing.save([{ serviceJid: "spaces.a.test", node: "main", remoteDone: true, preferenceDone: false }])).not.toThrow();
+  });
+});
+
+describe("telling whether an entry changed since this device saw it", () => {
+  test("each write's revision is published and read back", async () => {
+    await withXml(async () => {
+      const xml = buildPutJoinedSpaceIq("p1", { serviceJid: "spaces.a.test", node: "main", follow: true, revision: "r-1" });
+      expect(xml).toContain(`<space xmlns="${NODE}" service="spaces.a.test" node="main" follow="true" rev="r-1">`);
+      const doc = new DOMParser().parseFromString(itemsXml([
+        { id: "xmpp:spaces.a.test?;node=main", space: 'service="spaces.a.test" node="main" follow="true" rev="r-1"' },
+      ]), "text/xml");
+      expect(parseJoinedSpaceItems(doc)).toEqual([{ serviceJid: "spaces.a.test", node: "main", follow: true, revision: "r-1" }]);
+    });
+  });
+
+  test("an unfollow kept on this device remembers the revision it saw", () => {
+    const storage = memoryStorage();
+    localSpaceUnfollowIntentStore("alice@home.test", storage).save([
+      { serviceJid: "spaces.a.test", node: "main", remoteDone: false, preferenceDone: true, seenRevision: "r-1" },
+    ]);
+    expect(localSpaceUnfollowIntentStore("alice@home.test", storage).load()).toEqual([
+      { serviceJid: "spaces.a.test", node: "main", remoteDone: false, preferenceDone: true, seenRevision: "r-1" },
+    ]);
+  });
+
+  test("only a follow written under another revision overtakes an unfollow", () => {
+    const intent = { serviceJid: "spaces.a.test", node: "main", remoteDone: false, preferenceDone: true, seenRevision: "r-1" };
+    const entry = { serviceJid: "spaces.a.test", node: "main" };
+    expect(unfollowOvertaken(intent, { ...entry, follow: true, revision: "r-2" })).toBe(true);
+    expect(unfollowOvertaken(intent, { ...entry, follow: true, revision: "r-1" })).toBe(false);
+    expect(unfollowOvertaken(intent, { ...entry, follow: false, revision: "r-2" })).toBe(false);
+    expect(unfollowOvertaken(intent, undefined)).toBe(false);
+    // An unfollow from before revisions, against an entry an older client wrote.
+    const { seenRevision: _none, ...older } = intent;
+    expect(unfollowOvertaken(older, { ...entry, follow: true })).toBe(false);
+    expect(unfollowOvertaken(older, { ...entry, follow: true, revision: "r-2" })).toBe(true);
   });
 });

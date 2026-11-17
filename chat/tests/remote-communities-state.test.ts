@@ -533,7 +533,15 @@ describe("unfollowing when the host cannot confirm it", () => {
       expect(remote.spaces.value[0]).toMatchObject({ following: false });
       expect(remote.spaces.value[0]!.note).toContain("next sign-in");
       expect(intents.state.intents).toEqual([
-        { serviceJid: "spaces.remote.test", node: "eng", remoteDone: false, preferenceDone: true },
+        {
+          serviceJid: "spaces.remote.test",
+          node: "eng",
+          remoteDone: false,
+          preferenceDone: true,
+          // The list entry this device wrote; a later follow from another
+          // device writes another.
+          seenRevision: memory.state.preferences[0]!.revision!,
+        },
       ]);
       expect(memory.state.preferences).toMatchObject([{ follow: false }]);
 
@@ -727,6 +735,58 @@ describe("leaving reads the stored bookmark", () => {
       for (const entry of timer.pending.splice(0)) entry.callback();
       await settle();
       expect(fake.joined).toEqual([ROOM]);
+    });
+  });
+});
+
+describe("an unfollow overtaken by a follow from another device", () => {
+  const space = { serviceJid: "spaces.remote.test", node: "eng" };
+
+  test("is dropped at sign-in: the Space stays followed and its subscription is renewed", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer, intents } = setup(
+        { intents: [{ ...space, remoteDone: false, preferenceDone: true, seenRevision: "written-here" }] },
+        [{ ...space, follow: true, revision: "written-elsewhere" }],
+      );
+      await settle();
+      for (const entry of timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(fake.sent.some((xml) => xml.includes("<unsubscribe "))).toBe(false);
+      expect(fake.sent.some((xml) => xml.includes("<subscribe "))).toBe(true);
+      expect(intents.state.intents).toEqual([]);
+      expect(remote.spaces.value[0]).toMatchObject({ following: true });
+    });
+  });
+
+  test("still applies while the list holds the entry this device wrote", async () => {
+    await withXml(async () => {
+      const { fake, timer, intents } = setup(
+        { intents: [{ ...space, remoteDone: false, preferenceDone: true, seenRevision: "written-here" }] },
+        [{ ...space, follow: false, revision: "written-here" }],
+      );
+      await settle();
+      for (const entry of timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(fake.sent.some((xml) => xml.includes("<unsubscribe "))).toBe(true);
+      expect(intents.state.intents).toEqual([]);
+    });
+  });
+
+  test("is checked again when the delayed unsubscribe runs", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer, memory, intents } = setup(
+        { intents: [{ ...space, remoteDone: false, preferenceDone: true, seenRevision: "written-here" }] },
+        [{ ...space, follow: false, revision: "written-here" }],
+      );
+      await settle();
+      expect(timer.pending).toHaveLength(1);
+      // Another device follows the Space again before the unsubscribe runs.
+      memory.state.preferences = [{ ...space, follow: true, revision: "written-elsewhere" }];
+      for (const entry of timer.pending.splice(0)) entry.callback();
+      await settle();
+      expect(fake.sent.some((xml) => xml.includes("<unsubscribe "))).toBe(false);
+      expect(intents.state.intents).toEqual([]);
+      expect(remote.spaces.value[0]).toMatchObject({ following: true });
     });
   });
 });

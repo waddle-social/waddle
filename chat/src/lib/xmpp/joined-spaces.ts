@@ -8,7 +8,8 @@
 //
 //   <item id='xmpp:spaces.example.org?;node=dev'>
 //     <space xmlns='urn:waddle:joined-spaces:0'
-//            service='spaces.example.org' node='dev' name='Developers' follow='true'/>
+//            service='spaces.example.org' node='dev' name='Developers' follow='true'
+//            rev='0b8e…'/>
 //   </item>
 //
 // The item id is the Space's node IRI in canonical form (service domain
@@ -19,7 +20,9 @@
 //
 // `follow` records that the user wants the Space's updates, so the client
 // renews its XEP-0060 subscription at sign-in; the host decides whether
-// that subscription exists. An entry is a preference only: it never stands
+// that subscription exists. `rev` is a random token each write of the
+// entry sets anew, so a device can tell whether the entry changed since it
+// last saw it without comparing clocks across devices. An entry is a preference only: it never stands
 // for a membership, role or any permission. What the user may see or do in
 // a Space and its rooms is answered by their hosts every time.
 //
@@ -57,6 +60,8 @@ export interface JoinedSpacePreference {
   name?: string;
   /** The user wants the Space's updates (an XEP-0060 subscription). */
   follow: boolean;
+  /** Token of the write that stored this entry; absent on entries older clients wrote. */
+  revision?: string;
 }
 
 /** Read and change the user's joined-space list, one Space at a time. */
@@ -87,7 +92,8 @@ function preferenceFromElement(entry: Element): JoinedSpacePreference | null {
   if (!serviceJid || !node) return null;
   const name = entry.getAttribute("name")?.trim();
   const follow = ["true", "1"].includes(entry.getAttribute("follow") ?? "");
-  return { serviceJid, node, ...(name ? { name } : {}), follow };
+  const revision = entry.getAttribute("rev")?.trim();
+  return { serviceJid, node, ...(name ? { name } : {}), follow, ...(revision ? { revision } : {}) };
 }
 
 function deduplicated(entries: Iterable<JoinedSpacePreference | null>): JoinedSpacePreference[] {
@@ -167,6 +173,7 @@ export function buildPutJoinedSpaceIq(id: string, preference: JoinedSpacePrefere
                 node: preference.node,
                 name: preference.name || undefined,
                 follow: preference.follow ? "true" : undefined,
+                rev: preference.revision || undefined,
               },
             }],
           }],
@@ -302,6 +309,24 @@ export interface SpaceUnfollowIntent {
   remoteDone: boolean;
   /** The joined-space list no longer says to follow the Space. */
   preferenceDone: boolean;
+  /**
+   * The `revision` of the Space's list entry when this device last wrote or
+   * read it for the unfollow; absent when the entry had none. An entry that
+   * says to follow under another revision was written later, by a device
+   * that followed again, and the unfollow no longer applies.
+   */
+  seenRevision?: string;
+}
+
+/**
+ * Whether an unfollow was overtaken by a later follow written to the list
+ * from another device (see `SpaceUnfollowIntent.seenRevision`).
+ */
+export function unfollowOvertaken(
+  intent: SpaceUnfollowIntent,
+  entry: JoinedSpacePreference | undefined,
+): boolean {
+  return !!entry && entry.follow && entry.revision !== intent.seenRevision;
 }
 
 export interface SpaceUnfollowIntentStore {
@@ -346,6 +371,9 @@ export function localSpaceUnfollowIntentStore(
             node: entry.node,
             remoteDone: entry.remoteDone === true,
             preferenceDone: entry.preferenceDone === true,
+            ...(typeof entry.seenRevision === "string" && entry.seenRevision
+              ? { seenRevision: entry.seenRevision }
+              : {}),
           }];
         }).slice(0, MAX_JOINED_SPACES);
       } catch {

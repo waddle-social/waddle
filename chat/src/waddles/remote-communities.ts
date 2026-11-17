@@ -27,6 +27,7 @@ import {
   joinedSpaceKey,
   localSpaceUnfollowIntentStore,
   pepJoinedSpaceStore,
+  unfollowOvertaken,
   type JoinedSpacePreference,
   type JoinedSpaceStore,
   type SpaceUnfollowIntent,
@@ -174,6 +175,8 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
   const roomIntents = new Map<string, number>();
   const bookmarkWrites = new Map<string, Promise<unknown>>();
   let intentSequence = 0;
+  /** The `revision` of each Space's joined-space entry as last read or written here. */
+  const listRevisions = new Map<string, string | undefined>();
 
   const sortedRooms = computed(() =>
     [...rooms.value]
@@ -746,12 +749,15 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     updateSpace(preference, { following: true, subscription, status: { state: "ready" } });
     try {
       const entryName = name ?? findSpace(key)?.name ?? undefined;
+      const revision = crypto.randomUUID();
       await createStore(context.xmpp, context.own).put({
         serviceJid,
         node,
         ...(entryName ? { name: entryName } : {}),
         follow: true,
+        revision,
       });
+      listRevisions.set(key, revision);
       updateSpace(preference, { listed: true });
     } catch {
       updateSpace(preference, {
@@ -761,15 +767,23 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     void refreshSpace(preference);
   }
 
-  /** Write `follow` off to the Space's list entry, if the list still holds it. */
-  async function writeUnfollowed(space: RemoteSpaceEntry): Promise<void> {
-    if (!space.listed) return;
+  /**
+   * Write `follow` off to the Space's list entry, if the list still holds
+   * it. Resolves the entry's revision afterwards.
+   */
+  async function writeUnfollowed(space: RemoteSpaceEntry): Promise<string | undefined> {
+    const key = joinedSpaceKey(space);
+    if (!space.listed) return listRevisions.get(key);
+    const revision = crypto.randomUUID();
     await store().put({
       serviceJid: space.serviceJid,
       node: space.node,
       ...(space.name ? { name: space.name } : {}),
       follow: false,
+      revision,
     });
+    listRevisions.set(key, revision);
+    return revision;
   }
 
   /**
@@ -802,11 +816,13 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
         return;
       }
     }
+    const seenRevision = listRevisions.get(key);
     const intent: SpaceUnfollowIntent = {
       serviceJid: space.serviceJid,
       node: space.node,
       remoteDone: remoteFailure === null || unsubscribeSettled(remoteFailure),
       preferenceDone: false,
+      ...(seenRevision ? { seenRevision } : {}),
     };
     setIntent(key, intent);
     // Unfollowed here whatever the host answered; what is left to finish
@@ -818,8 +834,9 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
         : "You no longer follow this Space here, but its server refused to end the subscription."
       : null;
     try {
-      await writeUnfollowed(space);
-      setIntent(key, { ...intent, preferenceDone: true });
+      const written = await writeUnfollowed(space);
+      const { seenRevision: _previous, ...rest } = intent;
+      setIntent(key, { ...rest, preferenceDone: true, ...(written ? { seenRevision: written } : {}) });
     } catch {
       note = note ?? "Your other devices may still renew this subscription.";
     }
@@ -851,17 +868,32 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
   /**
    * Bring the Spaces' entries in line with the stored list and this
    * device's unconfirmed unfollows: a Space this device unfollowed is shown
-   * unfollowed whatever the list still says.
+   * unfollowed whatever the list still says, unless another device followed
+   * it again since (its entry says to follow under a newer revision); such
+   * an unfollow is dropped. Resolves the unfollows that still apply.
    */
-  function applyPreferences(preferences: readonly JoinedSpacePreference[], intents: readonly SpaceUnfollowIntent[]) {
-    const unfollowed = new Set(intents.map(joinedSpaceKey));
+  function applyPreferences(
+    preferences: readonly JoinedSpacePreference[],
+    intents: readonly SpaceUnfollowIntent[],
+  ): SpaceUnfollowIntent[] {
+    const entries = new Map(preferences.map((preference) => [joinedSpaceKey(preference), preference] as const));
+    const current: SpaceUnfollowIntent[] = [];
+    for (const intent of intents) {
+      const key = joinedSpaceKey(intent);
+      if (unfollowOvertaken(intent, entries.get(key))) setIntent(key, null);
+      else current.push(intent);
+    }
+    const unfollowed = new Set(current.map(joinedSpaceKey));
     for (const preference of preferences) {
+      const key = joinedSpaceKey(preference);
+      listRevisions.set(key, preference.revision);
       updateSpace(preference, {
-        name: findSpace(joinedSpaceKey(preference))?.name ?? preference.name ?? null,
+        name: findSpace(key)?.name ?? preference.name ?? null,
         listed: true,
-        following: preference.follow && !unfollowed.has(joinedSpaceKey(preference)),
+        following: preference.follow && !unfollowed.has(key),
       });
     }
+    return current;
   }
 
   /**
@@ -944,6 +976,22 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     let next = { ...intent };
     try {
       const { xmpp, own } = requireXmpp();
+      // This runs a while after sign-in: read the list again, so a follow
+      // another device wrote meanwhile is not undone here. A list that
+      // cannot be read leaves the unfollow for the next sign-in.
+      let entry: JoinedSpacePreference | undefined;
+      try {
+        entry = (await store().load()).find((preference) => joinedSpaceKey(preference) === key);
+      } catch {
+        return;
+      }
+      if (startedGeneration !== generation) return;
+      if (unfollowOvertaken(intent, entry)) {
+        setIntent(key, null);
+        updateSpace(intent, { following: true }, { existingOnly: true });
+        void renewSubscription(intent);
+        return;
+      }
       if (!next.remoteDone) {
         try {
           await unsubscribeFromSpace(xmpp, intent.serviceJid, intent.node, own);
@@ -958,8 +1006,9 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
         if (!space?.listed) next = { ...next, preferenceDone: true };
         else {
           try {
-            await writeUnfollowed(space);
-            next = { ...next, preferenceDone: true };
+            const written = await writeUnfollowed(space);
+            const { seenRevision: _previous, ...rest } = next;
+            next = { ...rest, preferenceDone: true, ...(written ? { seenRevision: written } : {}) };
           } catch {
             // Kept for the next sign-in.
           }
@@ -993,8 +1042,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
       return;
     }
     if (startedGeneration !== generation) return;
-    const intents = loadIntents();
-    applyPreferences(preferences, intents);
+    const intents = applyPreferences(preferences, loadIntents());
     const unfollowed = new Set(intents.map(joinedSpaceKey));
     const tasks: Array<() => Promise<void>> = [
       ...intents.map((intent) => () => finishUnfollow(intent)),
@@ -1044,6 +1092,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     leftByUser.clear();
     roomIntents.clear();
     bookmarkWrites.clear();
+    listRevisions.clear();
     lookup.value = { state: "idle" };
     rooms.value = [];
     spaces.value = [];
