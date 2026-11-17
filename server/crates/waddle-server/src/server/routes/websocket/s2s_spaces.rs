@@ -944,7 +944,8 @@ impl Asked<'_> {
     /// XEP-0503, "Fetching spaces from a spaces service": the Spaces this
     /// asker would be answered about, of the at most [`MAX_LISTED_SPACES`]
     /// Spaces whose `federated` setting is on, sorted by node and paged
-    /// with XEP-0059. A node on the query asks for the Space's children
+    /// with XEP-0059. When more Spaces than that are on, the answer tells no
+    /// count. A node on the query asks for the Space's children
     /// ([`Self::children`]).
     async fn disco_items(&self) -> Vec<Stanza> {
         let Iq::Get { payload, .. } = self.iq else {
@@ -956,12 +957,15 @@ impl Asked<'_> {
         if let Some(node) = query.node {
             return self.children(node, query.rsm.as_ref()).await;
         }
-        let Ok(federated) = FederatedSpaces::new(database(self.state).clone())
-            .list(&self.service, MAX_LISTED_SPACES)
+        let Ok(mut federated) = FederatedSpaces::new(database(self.state).clone())
+            .list(&self.service, MAX_LISTED_SPACES.saturating_add(1))
             .await
         else {
             return self.refuse(internal());
         };
+        // One more than the bound is read to tell whether any was left out.
+        let complete = federated.len() <= MAX_LISTED_SPACES;
+        federated.truncate(MAX_LISTED_SPACES);
         let mut items = Vec::new();
         for (node, enabled_for) in federated {
             // A Space that cannot be decided now is left out of the list.
@@ -978,9 +982,13 @@ impl Asked<'_> {
             });
         }
         items.sort_by(|a, b| a.node.cmp(&b.node));
-        let (items, rsm) = page_listing(items, query.rsm.as_ref(), MAX_LISTED_SPACES, |item| {
-            item.node.as_deref().unwrap_or_default()
-        });
+        let (items, rsm) = page_listing(
+            items,
+            query.rsm.as_ref(),
+            MAX_LISTED_SPACES,
+            complete,
+            |item| item.node.as_deref().unwrap_or_default(),
+        );
         result(
             self.iq,
             Some(Element::from(DiscoItemsResult {
@@ -998,9 +1006,14 @@ impl Asked<'_> {
     /// lists a published item: the service's address, and the item ID, the
     /// room's JID, as its name. The node is answered as [`Self::open`]
     /// answers it, and an account that may not read the Space is refused as
-    /// a read of its items is. Of the Space's items at most
-    /// [`MAX_RETURNED_ITEMS`] are read, sorted by item ID and paged with
-    /// XEP-0059.
+    /// a read of its items is. Only a room's bookmark is a room of the
+    /// Space: an item without a payload is not.
+    ///
+    /// The Space's [`MAX_RETURNED_ITEMS`] most recently published items are
+    /// read, as a read of its items reads them; a room among older items of
+    /// a Space that holds more is not listed to accounts at other servers,
+    /// and such a listing tells no count, since what it left out is not
+    /// known. The rooms are sorted by item ID and paged with XEP-0059.
     async fn children(&self, node: String, rsm: Option<&SetQuery>) -> Vec<Stanza> {
         let space = match self.open(&node).await {
             Ok(space) => space,
@@ -1009,19 +1022,34 @@ impl Asked<'_> {
         if !reads(space.node.config.access_model, space.affiliation) {
             return self.refuse(forbidden("You may not read this Space."));
         }
-        let Ok(stored) = self
+        // One more than the bound is read to tell whether any was left out;
+        // the oldest of them is then dropped.
+        let Ok(mut stored) = self
             .storage()
-            .get_items(&self.service, &node, Some(MAX_RETURNED_ITEMS), &[])
+            .get_items(
+                &self.service,
+                &node,
+                Some(MAX_RETURNED_ITEMS.saturating_add(1)),
+                &[],
+            )
             .await
         else {
             return self.refuse(internal());
         };
+        let most = usize::try_from(MAX_RETURNED_ITEMS).unwrap_or(usize::MAX);
+        let complete = stored.len() <= most;
+        if !complete {
+            stored.drain(..stored.len() - most);
+        }
         let mut items = Vec::new();
         for item in &stored {
             let item = item.to_pubsub_item();
             let Some(id) = item.id else {
                 continue;
             };
+            if item.payload.is_none() {
+                continue;
+            }
             if self.child_visible(&id, item.payload.as_ref()).await {
                 items.push(xmpp_parsers::disco::Item {
                     jid: Jid::from(self.service.clone()),
@@ -1032,8 +1060,7 @@ impl Asked<'_> {
         }
         items.sort_by(|a, b| a.name.cmp(&b.name));
         items.dedup_by(|a, b| a.name == b.name);
-        let most = usize::try_from(MAX_RETURNED_ITEMS).unwrap_or(usize::MAX);
-        let (items, rsm) = page_listing(items, rsm, most, |item| {
+        let (items, rsm) = page_listing(items, rsm, most, complete, |item| {
             item.name.as_deref().unwrap_or_default()
         });
         result(

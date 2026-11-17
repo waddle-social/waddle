@@ -93,6 +93,14 @@ impl RoomReplies {
 /// silent holder.
 pub const HOLDER_ASK_LIMIT: Duration = Duration::from_millis(4_500);
 
+/// How long a host's answer to a request for the MUC service's room list
+/// (XEP-0045 §6.3) takes at most, the rooms read and every asker's grants
+/// decided. It is well below the router's budget for one request
+/// ([`super::RouterLimits::room_request_timeout`], 5 s by default), so the
+/// host answers with what it decided in time, leaving out a room it could
+/// not decide, before the router answers the request as undecided.
+pub const SERVICE_LISTING_LIMIT: Duration = Duration::from_millis(2_500);
+
 /// Where a request for a room is decided.
 #[derive(Debug)]
 pub enum RoomPlacement {

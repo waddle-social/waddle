@@ -171,33 +171,6 @@ pub(crate) async fn list_xmpp_channels(
     rows.iter().map(parse_channel_record).collect()
 }
 
-/// At most `limit` catalog rows of rooms that MUC service discovery lists
-/// (`public_room`) and that accounts at other servers may reach
-/// (`federated`), in the catalog's order. Whether a row is a group
-/// conversation, or a room an enrolled host-grant scope manages, is the
-/// caller's to decide.
-pub(crate) async fn list_federated_public_xmpp_channels(
-    actor: ActorRef<DbActor>,
-    limit: usize,
-) -> Result<Vec<XmppChannelRecord>, String> {
-    let rows = actor
-        .ask(DbQuery {
-            sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room, federated
-                FROM channels
-                WHERE federated = ? AND public_room = ?
-                ORDER BY position ASC, created_at ASC, id ASC
-                LIMIT ?
-            "#
-            .to_string(),
-            params: vec![true.into(), true.into(), (limit as i64).into()],
-        })
-        .await
-        .map_err(|e| format!("Failed to query federated channels: {e}"))?;
-
-    rows.iter().map(parse_channel_record).collect()
-}
-
 pub(crate) async fn upsert_xmpp_channel(
     actor: ActorRef<DbActor>,
     channel: &XmppChannelUpsert,

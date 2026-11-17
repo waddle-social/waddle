@@ -7,12 +7,18 @@ use super::{
     Affiliation, BareJid, CheckPermission, CommandBoundary, ConnectionPhase, DbQuery, DbQueryOne,
     DiscoItem, FullJid, GetSnapshot, IqHandlerContext, Jid, Object, ObjectType, Permission,
     Relation, RoomArchiveAccess, RsmRequest, RsmResponse, Subject, SubjectType, WebSocketState,
-    XmppChannelRecord, NODE_COMMANDS, PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
+    NODE_COMMANDS, PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
 };
-use crate::permissions::host_grant::{HostGrantAction, PrincipalEvidence, RoomBinding, RoomGate};
+use crate::permissions::host_grant::{
+    HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomBinding, RoomGate,
+};
 use crate::permissions::ListSubjects;
-use crate::server::xmpp_channels::list_federated_public_xmpp_channels;
+use futures::StreamExt;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
+use tokio::time::Instant;
 use waddle_xmpp::xep::xep0059::{build_rsm_response_element, extract_rsm_request};
 use waddle_xmpp::xep::xep0402::NS_BOOKMARKS2;
 use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
@@ -310,35 +316,28 @@ pub(super) async fn handle_disco_items_iq(
                 }
             };
             let requester = phase.bound_jid().map(|jid| jid.to_bare());
-            let Ok(items) = muc_service_rooms(
-                state,
-                muc_domain,
-                RoomListingFor::Session(requester.as_ref()),
-            )
-            .await
-            else {
-                return vec![build_iq_error_xml_typed(
-                    id,
-                    None,
-                    None,
-                    internal_server_error_iq_error("Failed to list MUC rooms."),
-                )];
-            };
-            let Some(rsm_request) = rsm_request else {
-                let response = build_disco_items_response(request_iq, &items, None);
-                return vec![iq_to_xml(response)];
+            let items = match muc_rooms_for_session(state, muc_domain, requester.as_ref()).await {
+                Ok(items) => items,
+                Err(error) => {
+                    warn!(error = %error, "Failed to list MUC rooms");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        internal_server_error_iq_error("Failed to list MUC rooms."),
+                    )];
+                }
             };
             let (page, rsm_response) =
-                page_disco_items(&items, &rsm_request, |item| item.jid.as_str());
-            let mut response = build_disco_items_response(request_iq, page, None);
-            if let xmpp_parsers::iq::Iq::Result {
-                payload: Some(query),
-                ..
-            } = &mut response
-            {
-                query.append_child(build_rsm_response_element(&rsm_response));
-            }
-            return vec![iq_to_xml(response)];
+                page_disco_items(&items, rsm_request.as_ref(), usize::MAX, |item| {
+                    item.jid.as_str()
+                });
+            return vec![paged_disco_items_response(
+                request_iq,
+                page,
+                None,
+                rsm_response,
+            )];
         }
 
         if query.node.as_deref() == Some(NODE_WADDLE_ROOM_BOTS) {
@@ -525,95 +524,89 @@ pub(super) async fn handle_disco_items_iq(
                         )];
                     }
                 };
-                let Some(rsm_request) = rsm_request else {
-                    let response = build_disco_items_response(request_iq, &items, Some(node));
-                    return vec![iq_to_xml(response)];
-                };
-                let (page, rsm_response) = page_disco_items(&items, &rsm_request, |item| {
-                    item.name.as_deref().unwrap_or_default()
-                });
-                let mut response = build_disco_items_response(request_iq, page, Some(node));
-                if let xmpp_parsers::iq::Iq::Result {
-                    payload: Some(query),
-                    ..
-                } = &mut response
-                {
-                    query.append_child(build_rsm_response_element(&rsm_response));
-                }
-                return vec![iq_to_xml(response)];
+                let (page, rsm_response) = page_disco_items(
+                    &items,
+                    rsm_request.as_ref(),
+                    MAX_LISTED_SPACE_ROOMS,
+                    |item| item.name.as_deref().unwrap_or_default(),
+                );
+                return vec![paged_disco_items_response(
+                    request_iq,
+                    page,
+                    Some(node),
+                    rsm_response,
+                )];
             }
-            let items: Vec<DiscoItem> = match query.node.as_deref() {
-                Some(_) => vec![],
-                None => match spaces_service_bare_jid(spaces_domain) {
-                    Ok(spaces_jid) => match state
-                        .deps
-                        .protocol
-                        .pubsub_storage
-                        .list_nodes(&spaces_jid)
-                        .await
-                    {
-                        Ok(nodes) => {
-                            let requester = phase.bound_jid().map(|jid| jid.to_bare());
-                            let mut items = Vec::new();
-                            for node in nodes {
-                                let Ok(Some(space_node)) = state
-                                    .deps
-                                    .protocol
-                                    .pubsub_storage
-                                    .get_node(&spaces_jid, &node)
-                                    .await
-                                else {
-                                    continue;
-                                };
-                                let Some(space) = space_details_from_node(&space_node) else {
-                                    continue;
-                                };
-                                // The Space node of an enrolled host-grant
-                                // scope is not served through PubSub, so it
-                                // is not listed either.
-                                if state.deps.app_state.host_grants.space_enrolled(&node).await
-                                    != Ok(false)
-                                {
-                                    continue;
-                                }
-                                let visible = match requester.as_ref() {
-                                    Some(requester) => crate::pubsub_authz::can_subscribe(
-                                        &state.deps.protocol.pubsub_storage,
-                                        &spaces_jid,
-                                        &node,
-                                        requester,
-                                        false,
-                                    )
-                                    .await
-                                    .unwrap_or(false),
-                                    None => matches!(
-                                        space_node.config.access_model,
-                                        waddle_xmpp::pubsub::AccessModel::Open
-                                    ),
-                                };
-                                if visible {
-                                    items.push(DiscoItem::spaces_node(
-                                        spaces_domain,
-                                        &node,
-                                        Some(&space.name),
-                                    ));
-                                }
+            // A node on the query was answered above with that Space's rooms.
+            let items: Vec<DiscoItem> = match spaces_service_bare_jid(spaces_domain) {
+                Ok(spaces_jid) => match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .list_nodes(&spaces_jid)
+                    .await
+                {
+                    Ok(nodes) => {
+                        let requester = phase.bound_jid().map(|jid| jid.to_bare());
+                        let mut items = Vec::new();
+                        for node in nodes {
+                            let Ok(Some(space_node)) = state
+                                .deps
+                                .protocol
+                                .pubsub_storage
+                                .get_node(&spaces_jid, &node)
+                                .await
+                            else {
+                                continue;
+                            };
+                            let Some(space) = space_details_from_node(&space_node) else {
+                                continue;
+                            };
+                            // The Space node of an enrolled host-grant
+                            // scope is not served through PubSub, so it
+                            // is not listed either.
+                            if state.deps.app_state.host_grants.space_enrolled(&node).await
+                                != Ok(false)
+                            {
+                                continue;
                             }
-                            items
+                            let visible = match requester.as_ref() {
+                                Some(requester) => crate::pubsub_authz::can_subscribe(
+                                    &state.deps.protocol.pubsub_storage,
+                                    &spaces_jid,
+                                    &node,
+                                    requester,
+                                    false,
+                                )
+                                .await
+                                .unwrap_or(false),
+                                None => matches!(
+                                    space_node.config.access_model,
+                                    waddle_xmpp::pubsub::AccessModel::Open
+                                ),
+                            };
+                            if visible {
+                                items.push(DiscoItem::spaces_node(
+                                    spaces_domain,
+                                    &node,
+                                    Some(&space.name),
+                                ));
+                            }
                         }
-                        Err(error) => {
-                            warn!(error = %error, "Failed to list Spaces nodes");
-                            vec![]
-                        }
-                    },
+                        items
+                    }
                     Err(error) => {
-                        warn!(error = %error, "Invalid Spaces service JID");
+                        warn!(error = %error, "Failed to list Spaces nodes");
                         vec![]
                     }
                 },
+                Err(error) => {
+                    warn!(error = %error, "Invalid Spaces service JID");
+                    vec![]
+                }
             };
 
-            let response = build_disco_items_response(request_iq, &items, query.node.as_deref());
+            let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
         }
 
@@ -739,10 +732,57 @@ pub(super) async fn handle_disco_items_iq(
 /// DB read.
 const MUC_DISCO_ITEMS_FETCH_BOUND: usize = 10_000;
 
-/// Catalog rows read for one listing of the MUC service to an account at
-/// another server: only rows of rooms that are listed and open to other
-/// servers are read, and a room beyond the bound is not listed to them.
-const REMOTE_LISTING_FETCH_BOUND: usize = 4_096;
+/// Longest a session's listing of the MUC service, or of a Space's rooms,
+/// takes, the rooms read and the session's grants decided: a room not
+/// decided by then is left out, and the listing is answered with the rest.
+const LISTING_LIMIT: Duration = Duration::from_millis(2_500);
+
+/// Longest the rooms a listing may name are read for, before any asker's
+/// grants: the channel catalog, the live rooms and their actors. A room
+/// whose actor has not answered by then is left out.
+const CANDIDATES_LIMIT: Duration = Duration::from_millis(1_500);
+
+/// Longest one build of the rooms the MUC service may list to accounts at
+/// other servers takes ([`RemoteRoomCandidates`]). It is below
+/// [`CANDIDATES_LIMIT`], so the asker whose request started the build is
+/// answered from it.
+const REMOTE_CANDIDATES_BUILD_LIMIT: Duration = Duration::from_millis(1_200);
+
+/// How long a replica answers accounts at other servers from one build of
+/// the rooms its MUC service may list.
+const REMOTE_CANDIDATES_TTL: Duration = Duration::from_secs(2);
+
+/// Managed rooms whose grants one listing reads at once.
+const GRANT_READS_AT_ONCE: usize = 4;
+
+/// Instant rooms whose actors one listing asks at once.
+const SNAPSHOT_ASKS_AT_ONCE: usize = 16;
+
+/// Live instant rooms one listing asks at most. Every catalog-backed room
+/// is set aside before the bound applies, so they never take its places.
+const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
+
+/// Room addresses one catalog membership query names at most.
+const CATALOG_CHECK_CHUNK: usize = 500;
+
+/// Rooms one answer to a session's `disco#items` of a Space node lists at
+/// most; the rest are reached by paging (XEP-0059).
+const MAX_LISTED_SPACE_ROOMS: usize = 1_024;
+
+/// Why the MUC service's rooms could not be listed now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum RoomListingError {
+    /// The channel catalog could not be read.
+    #[error("the channel catalog could not be read")]
+    Catalog,
+    /// Whether a room is managed by an enrolled host-grant scope cannot be
+    /// told: the enrolled set has not loaded.
+    #[error("the host-grant enrolled set is not known")]
+    Enrollment,
+    /// The rooms were not read within the listing's time.
+    #[error("the rooms were not read in time")]
+    Deadline,
+}
 
 /// Extract an optional XEP-0059 `<set/>` from a disco#items query.
 fn rsm_request_from_iq(iq: &xmpp_parsers::iq::Iq) -> Result<Option<RsmRequest>, ()> {
@@ -795,30 +835,63 @@ fn page_window<T>(
 
 /// XEP-0059 paging over a disco#items list sorted by `key` (a stable UID
 /// ordering per XEP-0059 §2.2): the room JID for the MUC service, the item
-/// ID for a Space's children.
+/// ID for a Space's rooms. A page holds at most `most` items whatever the
+/// request asks; the `<set/>` that places it is answered when the request
+/// asked for paging, or when the list did not fit in one answer (XEP-0059
+/// §1), and `None` otherwise.
 fn page_disco_items<'a>(
     items: &'a [DiscoItem],
-    request: &RsmRequest,
+    request: Option<&RsmRequest>,
+    most: usize,
     key: fn(&DiscoItem) -> &str,
-) -> (&'a [DiscoItem], RsmResponse) {
+) -> (&'a [DiscoItem], Option<RsmResponse>) {
     let total = items.len();
-    let max = request.max.map(|max| max as usize).unwrap_or(total);
+    let max = request
+        .and_then(|request| request.max)
+        .map_or(most, |max| (max as usize).min(most));
     let (start, end) = page_window(
         items,
         key,
         max,
-        request.before.as_deref(),
-        request.after.as_deref(),
-        request.index.map(|index| index as usize),
+        request.and_then(|request| request.before.as_deref()),
+        request.and_then(|request| request.after.as_deref()),
+        request
+            .and_then(|request| request.index)
+            .map(|index| index as usize),
     );
     let page = &items[start..end];
+    if request.is_none() && page.len() == total {
+        return (page, None);
+    }
     let mut response = RsmResponse::new().with_count(u32::try_from(total).unwrap_or(u32::MAX));
     if let (Some(first), Some(last)) = (page.first(), page.last()) {
         response = response
             .with_first(key(first).to_owned(), u32::try_from(start).ok())
             .with_last(key(last).to_owned());
     }
-    (page, response)
+    (page, Some(response))
+}
+
+/// The `disco#items` result answering `request_iq` with `page` of `node`,
+/// carrying the `<set/>` that places the page when there is one.
+fn paged_disco_items_response(
+    request_iq: &xmpp_parsers::iq::Iq,
+    page: &[DiscoItem],
+    node: Option<&str>,
+    rsm: Option<RsmResponse>,
+) -> String {
+    let mut response = build_disco_items_response(request_iq, page, node);
+    if let (
+        Some(rsm),
+        xmpp_parsers::iq::Iq::Result {
+            payload: Some(query),
+            ..
+        },
+    ) = (rsm, &mut response)
+    {
+        query.append_child(build_rsm_response_element(&rsm));
+    }
+    iq_to_xml(response)
 }
 
 /// One page of a listing for an account at another server: at most `most`
@@ -826,11 +899,15 @@ fn page_disco_items<'a>(
 /// `<set/>` that places the page is told when the request asked for
 /// paging, or when the listing did not fit in one answer: a responder that
 /// returns a limited result set says so (XEP-0059 §1, XEP-0045 §6.3). Its
-/// count and index are of the listing as built for this asker.
+/// index is of the listing as built for this asker, and so is its count
+/// when the listing is `complete`; a listing built from a bounded read
+/// that may have left items out tells no count, and always carries the
+/// `<set/>`.
 pub(crate) fn page_listing(
     items: Vec<Item>,
     rsm: Option<&SetQuery>,
     most: usize,
+    complete: bool,
     key: fn(&Item) -> &str,
 ) -> (Vec<Item>, Option<SetResult>) {
     let total = items.len();
@@ -843,7 +920,7 @@ pub(crate) fn page_listing(
         rsm.and_then(|rsm| rsm.after.as_deref()),
         rsm.and_then(|rsm| rsm.index),
     );
-    let partial = end - start < total;
+    let partial = end - start < total || !complete;
     let page: Vec<Item> = items.into_iter().skip(start).take(end - start).collect();
     if rsm.is_none() && !partial {
         return (page, None);
@@ -854,7 +931,7 @@ pub(crate) fn page_listing(
             item: key(first).to_owned(),
         }),
         last: page.last().map(|last| key(last).to_owned()),
-        count: Some(total),
+        count: complete.then_some(total),
     };
     (page, Some(set))
 }
@@ -872,100 +949,422 @@ enum RoomListingFor<'a> {
     },
 }
 
-impl RoomListingFor<'_> {
+impl<'a> RoomListingFor<'a> {
     fn is_remote(self) -> bool {
         matches!(self, Self::Remote { .. })
     }
+
+    /// The subject whose grants decide a managed room, and the evidence
+    /// they are decided on; `None` for a session without a bound account,
+    /// which is listed no managed room.
+    fn subject(self) -> Option<(&'a BareJid, PrincipalEvidence)> {
+        match self {
+            Self::Session(requester) => {
+                requester.map(|requester| (requester, PrincipalEvidence::NoStream))
+            }
+            Self::Remote { account, evidence } => Some((account, *evidence)),
+        }
+    }
 }
 
-/// XEP-0045 §6.3: the rooms of the MUC service listed to `audience`,
-/// sorted by room JID.
+/// A room the MUC service may list, as the channel catalog or the room's
+/// actor describes it, before any asker's grants are read: it is public
+/// (not hidden) and no group conversation.
+#[derive(Clone, Debug)]
+pub(crate) struct ListedRoom {
+    jid: BareJid,
+    name: String,
+    /// The channel the room's address names, if it names one: the key a
+    /// host-grant scope's enrollment of the room is read by.
+    channel: Option<String>,
+    /// Whether the room has a catalog row. A room an enrolled scope manages
+    /// is listed only from its row.
+    catalogued: bool,
+    /// Whether accounts at other servers may reach the room (`federated`).
+    federated: bool,
+}
+
+/// What finds a room's canonical grants.
+enum GrantKey {
+    /// The channel the enrolled set names the room by.
+    Channel(String),
+    /// The room's address.
+    Room(BareJid),
+}
+
+impl GrantKey {
+    fn binding(&self) -> RoomBinding<'_> {
+        match self {
+            Self::Channel(channel) => RoomBinding::Channel(channel),
+            Self::Room(room) => RoomBinding::Room(room),
+        }
+    }
+}
+
+/// The rooms of one listing for one asker, before its answer is built:
+/// those no enrolled scope manages, and the managed ones whose grants
+/// allowed the asker `view`, with the grants they were decided on.
+struct ViewDecisions<T> {
+    /// Rooms no enrolled scope manages, listed as their own rules say.
+    unmanaged: Vec<T>,
+    /// Managed rooms whose canonical grants allowed `view` when read.
+    allowed: Vec<(T, ManagedRoomGrants)>,
+    /// Whom `allowed` was decided for, on what evidence.
+    subject: Option<(BareJid, PrincipalEvidence)>,
+}
+
+impl<T> ViewDecisions<T> {
+    fn unmanaged(unmanaged: Vec<T>) -> Self {
+        Self {
+            unmanaged,
+            allowed: Vec::new(),
+            subject: None,
+        }
+    }
+
+    /// The rooms listed, asked just before the answer is built: every
+    /// unmanaged room, and each managed room whose grants still allow
+    /// `view` ([`HostGrantGate::still_allows`]), the decision itself while
+    /// its fence ticket is current and a decision read now otherwise. A
+    /// managed room that is not confirmed by `deadline` is left out.
+    async fn still_viewable(self, gate: &HostGrantGate, deadline: Instant) -> Vec<T> {
+        let Self {
+            mut unmanaged,
+            allowed,
+            subject,
+        } = self;
+        let Some((subject, evidence)) = subject else {
+            return unmanaged;
+        };
+        let (subject, evidence) = (&subject, &evidence);
+        let mut confirmed = futures::stream::iter(allowed)
+            .map(|(room, grants)| async move {
+                let still = gate
+                    .still_allows(&grants, subject, evidence, HostGrantAction::View)
+                    .await;
+                (room, still)
+            })
+            .buffer_unordered(GRANT_READS_AT_ONCE);
+        while let Ok(Some((room, still))) =
+            tokio::time::timeout_at(deadline, confirmed.next()).await
+        {
+            if still {
+                unmanaged.push(room);
+            }
+        }
+        unmanaged
+    }
+}
+
+/// Decide each of `rooms` for `subject`, whose request reached the surface
+/// with `evidence`: a room no enrolled scope manages (any longer) is kept
+/// as unmanaged, and a managed one only where its canonical grants allow
+/// `view`, with those grants. At most [`GRANT_READS_AT_ONCE`] rooms' grants
+/// are read at once, all by `deadline`; a room not decided by then, or
+/// whose grants cannot be read, is left out.
+async fn decide_views<T>(
+    gate: &HostGrantGate,
+    rooms: Vec<(T, GrantKey)>,
+    subject: &BareJid,
+    evidence: PrincipalEvidence,
+    deadline: Instant,
+) -> ViewDecisions<T> {
+    let mut decided = ViewDecisions {
+        unmanaged: Vec::new(),
+        allowed: Vec::new(),
+        subject: Some((subject.clone(), evidence)),
+    };
+    let mut decisions = futures::stream::iter(rooms)
+        .map(|(room, key)| async move {
+            let grants = gate.room(key.binding()).await;
+            (room, grants)
+        })
+        .buffer_unordered(GRANT_READS_AT_ONCE);
+    while let Ok(Some((room, grants))) = tokio::time::timeout_at(deadline, decisions.next()).await {
+        match grants {
+            RoomGate::Unmanaged => decided.unmanaged.push(room),
+            RoomGate::Managed(grants)
+                if grants.allows_as(subject, &evidence, HostGrantAction::View) =>
+            {
+                decided.allowed.push((room, grants));
+            }
+            RoomGate::Managed(_) | RoomGate::Unavailable => {}
+        }
+    }
+    decided
+}
+
+/// The rooms the MUC service may list (XEP-0045 §6.3) before any asker's
+/// grants are read, sorted by room JID: the public catalog rows that are
+/// no group conversation, and the live instant rooms whose actors describe
+/// them so by `deadline`.
 ///
-/// A room is listed when it is public (not hidden) and no group
-/// conversation. For an account at another server it must also be open to
-/// other servers (its `federated` setting), read from the catalog for a
-/// catalog-backed room and from the room's actor for an instant one; the
-/// room's Space, if it has one, adds and removes nothing (ADR-0020 D4). A
-/// room an enrolled host-grant scope manages is listed only to an account
-/// whose canonical grants allow it `view`, on the evidence of the stream
-/// that carried the request for an account at another server. A room whose
-/// grants cannot be read now is left out.
-async fn muc_service_rooms(
+/// Every catalog row is read, public or not, within
+/// [`MUC_DISCO_ITEMS_FETCH_BOUND`], so the instant-room scan sets
+/// catalog-backed rooms aside in memory; only when the read filled the
+/// bound are the scan's candidates checked against the catalog.
+async fn room_candidates(
     state: &WebSocketState,
     muc_domain: &str,
-    audience: RoomListingFor<'_>,
-) -> Result<Vec<DiscoItem>, String> {
-    let (mut items, channel_backed) =
-        canonical_channel_disco_items(state, muc_domain, audience).await?;
+    deadline: Instant,
+) -> Result<Vec<ListedRoom>, RoomListingError> {
+    let db = state.deps.app_state.db_pool.global_actor().clone();
+    let read = tokio::time::timeout_at(
+        deadline,
+        list_xmpp_channels(db, MUC_DISCO_ITEMS_FETCH_BOUND, 0),
+    )
+    .await;
+    let channels = match read {
+        Ok(Ok(channels)) => channels,
+        Ok(Err(error)) => {
+            warn!(error = %error, "Failed to list canonical channels for MUC discovery");
+            return Err(RoomListingError::Catalog);
+        }
+        Err(_) => return Err(RoomListingError::Deadline),
+    };
+    let channel_backed = ChannelBackedRooms {
+        jids: channels
+            .iter()
+            .filter_map(|channel| waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok())
+            .collect(),
+        // When the fetch filled the bound, rows beyond it exist and the set
+        // is incomplete: membership misses fall back to a catalog check.
+        truncated: channels.len() >= MUC_DISCO_ITEMS_FETCH_BOUND,
+    };
+    let mut rooms: Vec<ListedRoom> = channels
+        .into_iter()
+        .filter(|channel| {
+            channel.public_room && channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+        })
+        .filter_map(|channel| {
+            let jid = waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok()?;
+            Some(ListedRoom {
+                jid,
+                name: channel.name,
+                channel: Some(channel.id),
+                catalogued: true,
+                federated: channel.federated,
+            })
+        })
+        .collect();
     // XEP-0045 §6.3 (#1265 item 11): public live instant rooms are part of
     // the service's item list too, not only channel-backed persistent
     // rooms.
-    items.extend(
-        live_public_instant_room_items(state, muc_domain, &channel_backed, audience.is_remote())
-            .await,
-    );
-    items.sort_by(|a, b| a.jid.cmp(&b.jid));
-    items.dedup_by(|a, b| a.jid == b.jid);
-    Ok(items)
+    rooms.extend(instant_room_candidates(state, muc_domain, &channel_backed, deadline).await);
+    rooms.sort_by(|a, b| a.jid.as_str().cmp(b.jid.as_str()));
+    rooms.dedup_by(|a, b| a.jid == b.jid);
+    Ok(rooms)
 }
 
-/// XEP-0045 §6.3 for an account at another server: the rooms
-/// [`muc_service_rooms`] lists to it, sorted by room JID. `Err` when the
-/// listing cannot be built now.
-pub(crate) async fn muc_rooms_for_remote(
+/// Of `candidates`, the rooms the MUC service lists to `audience`, before
+/// the answer is built ([`ViewDecisions::still_viewable`]).
+///
+/// For an account at another server a room must be open to other servers
+/// (its `federated` setting), read from the catalog for a catalog-backed
+/// room and from the room's actor for an instant one; the room's Space, if
+/// it has one, adds and removes nothing (ADR-0020 D4). Whether a room is
+/// managed is read now, from the replica's enrolled set: a room an enrolled
+/// host-grant scope manages is listed only from its catalog row, and only
+/// to a subject whose canonical grants allow it `view`, on the evidence of
+/// the stream that carried the request for an account at another server.
+/// `Err` while the enrolled set has not loaded.
+async fn rooms_listed_to(
     state: &WebSocketState,
+    candidates: &[ListedRoom],
+    audience: RoomListingFor<'_>,
+    deadline: Instant,
+) -> Result<ViewDecisions<ListedRoom>, RoomListingError> {
+    let reachable: Vec<&ListedRoom> = candidates
+        .iter()
+        .filter(|room| !audience.is_remote() || room.federated)
+        .collect();
+    let channels: Vec<&str> = reachable
+        .iter()
+        .filter_map(|room| room.channel.as_deref())
+        .collect();
+    let gate = &state.deps.app_state.host_grants;
+    let enrolled = match tokio::time::timeout_at(deadline, gate.enrolled_channels(&channels)).await
+    {
+        Ok(Ok(enrolled)) => enrolled,
+        Ok(Err(_)) => return Err(RoomListingError::Enrollment),
+        Err(_) => return Err(RoomListingError::Deadline),
+    };
+    let mut unmanaged = Vec::new();
+    let mut managed = Vec::new();
+    for room in reachable {
+        match room
+            .channel
+            .as_ref()
+            .filter(|channel| enrolled.contains(channel.as_str()))
+        {
+            None => unmanaged.push(room.clone()),
+            // An instant room at the address of a managed room is listed
+            // to nobody.
+            Some(_) if !room.catalogued => {}
+            Some(channel) => managed.push((room.clone(), GrantKey::Channel(channel.clone()))),
+        }
+    }
+    let mut decided = match audience.subject() {
+        Some((subject, evidence)) => decide_views(gate, managed, subject, evidence, deadline).await,
+        None => ViewDecisions::unmanaged(Vec::new()),
+    };
+    decided.unmanaged.extend(unmanaged);
+    Ok(decided)
+}
+
+/// XEP-0045 §6.3 for a session: the rooms of the MUC service listed to
+/// it, sorted by room JID, read and decided within [`LISTING_LIMIT`].
+async fn muc_rooms_for_session(
+    state: &WebSocketState,
+    muc_domain: &str,
+    requester: Option<&BareJid>,
+) -> Result<Vec<DiscoItem>, RoomListingError> {
+    let started = Instant::now();
+    let deadline = started + LISTING_LIMIT;
+    let candidates = room_candidates(state, muc_domain, started + CANDIDATES_LIMIT).await?;
+    let decided = rooms_listed_to(
+        state,
+        &candidates,
+        RoomListingFor::Session(requester),
+        deadline,
+    )
+    .await?;
+    let mut rooms = decided
+        .still_viewable(&state.deps.app_state.host_grants, deadline)
+        .await;
+    rooms.sort_by(|a, b| a.jid.as_str().cmp(b.jid.as_str()));
+    Ok(rooms
+        .into_iter()
+        .map(|room| DiscoItem::muc_room(room.jid.as_str(), &room.name))
+        .collect())
+}
+
+/// XEP-0045 §6.3 for an account at another server: the rooms of the MUC
+/// service listed to it ([`rooms_listed_to`]), sorted by room JID, from the
+/// replica's recent build of the rooms it may list (`candidates`) and the
+/// account's grants decided now, all by `deadline`. `Err` when the listing
+/// cannot be built now.
+pub(crate) async fn muc_rooms_for_remote(
+    state: &Arc<WebSocketState>,
+    candidates: &Arc<RemoteRoomCandidates>,
     account: &BareJid,
     evidence: &PrincipalEvidence,
-) -> Result<Vec<Item>, ()> {
-    let muc_domain = state.deps.service_domains.muc.clone();
-    let items = muc_service_rooms(
+    deadline: Instant,
+) -> Result<Vec<Item>, RoomListingError> {
+    let read_by = deadline.min(Instant::now() + CANDIDATES_LIMIT);
+    let rooms = candidates.rooms(state, read_by).await?;
+    let decided = rooms_listed_to(
         state,
-        &muc_domain,
+        &rooms,
         RoomListingFor::Remote { account, evidence },
+        deadline,
     )
-    .await
-    .map_err(|_| ())?;
-    Ok(items
+    .await?;
+    let mut rooms = decided
+        .still_viewable(&state.deps.app_state.host_grants, deadline)
+        .await;
+    rooms.sort_by(|a, b| a.jid.as_str().cmp(b.jid.as_str()));
+    Ok(rooms
         .into_iter()
-        .filter_map(|item| {
-            Some(Item {
-                jid: item.jid.parse::<Jid>().ok()?,
-                node: None,
-                name: item.name,
-            })
+        .map(|room| Item {
+            jid: Jid::from(room.jid),
+            node: None,
+            name: Some(room.name),
         })
         .collect())
 }
 
-/// Whether the room of the channel `channel_id`, which an enrolled
-/// host-grant scope manages, is listed to `audience`: its canonical grants
-/// allow `view`, read by the channel, the key the enrolled check used. A
-/// session without a bound account, and a room whose grants cannot be read
-/// now, is not listed.
-async fn managed_room_listed(
-    state: &WebSocketState,
-    channel_id: &str,
-    audience: RoomListingFor<'_>,
-) -> bool {
-    let (subject, evidence) = match audience {
-        RoomListingFor::Session(Some(requester)) => (requester, PrincipalEvidence::NoStream),
-        RoomListingFor::Session(None) => return false,
-        RoomListingFor::Remote { account, evidence } => (account, *evidence),
-    };
-    matches!(
-        state
-            .deps
-            .app_state
-            .host_grants
-            .allows_as(
-                RoomBinding::Channel(channel_id),
-                subject,
-                &evidence,
-                HostGrantAction::View,
-            )
-            .await,
-        RoomGate::Managed(true)
-    )
+/// One build of the rooms [`RemoteRoomCandidates`] holds.
+type CandidatesBuild = Result<Arc<[ListedRoom]>, RoomListingError>;
+
+/// The rooms a replica's MUC service may list to accounts at other servers
+/// ([`room_candidates`]), built at most once at a time and reused for
+/// [`REMOTE_CANDIDATES_TTL`]: what the catalog and the rooms' actors say of
+/// them, and nothing that depends on the asker. Whether a room is managed,
+/// and the asker's grants in it, are read for every request.
+///
+/// A build runs on a task of its own, within
+/// [`REMOTE_CANDIDATES_BUILD_LIMIT`]: an asker whose time runs out stops
+/// waiting for it, and the build goes on for the askers after it. A room
+/// whose catalog row or configuration changed is listed as it was for at
+/// most the reuse time.
+#[derive(Default)]
+pub(crate) struct RemoteRoomCandidates {
+    held: tokio::sync::Mutex<HeldCandidates>,
+}
+
+#[derive(Default)]
+struct HeldCandidates {
+    /// The last build that succeeded, and when it finished.
+    built: Option<(Instant, Arc<[ListedRoom]>)>,
+    /// The build running now, which every asker waits for.
+    building: Option<watch::Receiver<Option<CandidatesBuild>>>,
+}
+
+impl RemoteRoomCandidates {
+    /// The rooms of a build that finished within [`REMOTE_CANDIDATES_TTL`],
+    /// or of the build running now, or else of one started now, waited for
+    /// until `deadline`.
+    async fn rooms(
+        self: &Arc<Self>,
+        state: &Arc<WebSocketState>,
+        deadline: Instant,
+    ) -> CandidatesBuild {
+        let mut building = {
+            let Ok(mut held) = tokio::time::timeout_at(deadline, self.held.lock()).await else {
+                return Err(RoomListingError::Deadline);
+            };
+            if let Some((built_at, rooms)) = &held.built {
+                if built_at.elapsed() < REMOTE_CANDIDATES_TTL {
+                    return Ok(Arc::clone(rooms));
+                }
+            }
+            match held
+                .building
+                .as_ref()
+                .filter(|building| building.has_changed().is_ok())
+            {
+                Some(building) => building.clone(),
+                None => {
+                    let building = self.build(state);
+                    held.building = Some(building.clone());
+                    building
+                }
+            }
+        };
+        let built =
+            match tokio::time::timeout_at(deadline, building.wait_for(Option::is_some)).await {
+                Ok(Ok(built)) => (*built).clone(),
+                Ok(Err(_)) | Err(_) => None,
+            };
+        built.unwrap_or(Err(RoomListingError::Deadline))
+    }
+
+    /// Start a build on a task of its own; the receiver is told its result.
+    fn build(
+        self: &Arc<Self>,
+        state: &Arc<WebSocketState>,
+    ) -> watch::Receiver<Option<CandidatesBuild>> {
+        let (told, building) = watch::channel(None);
+        let candidates = Arc::clone(self);
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            let muc_domain = state.deps.service_domains.muc.clone();
+            let deadline = Instant::now() + REMOTE_CANDIDATES_BUILD_LIMIT;
+            let built: CandidatesBuild = room_candidates(&state, &muc_domain, deadline)
+                .await
+                .map(Arc::from);
+            {
+                let mut held = candidates.held.lock().await;
+                held.building = None;
+                if let Ok(rooms) = &built {
+                    held.built = Some((Instant::now(), Arc::clone(rooms)));
+                }
+            }
+            let _ = told.send(Some(built));
+        });
+        building
+    }
 }
 
 /// Why a Space's children are not listed to a session.
@@ -988,16 +1387,20 @@ impl SpaceListingRefusal {
 }
 
 /// XEP-0503, "Advertising space membership": the rooms a Space lists, as
-/// the `disco#items` of its node, for a session that may read the Space.
-/// Each is listed as XEP-0060 §5.5 lists a published item, with the
-/// service's address and the item ID (the room's JID) as its name, so a
-/// client verifies that a room it was told of is part of the Space.
+/// the `disco#items` of its node, for a session that may read the Space,
+/// sorted by item ID. Each is listed as XEP-0060 §5.5 lists a published
+/// item, with the service's address and the item ID (the room's JID) as
+/// its name, so a client verifies that a room it was told of is part of the
+/// Space.
 ///
-/// Only bookmarks of rooms are listed. A room of this deployment that an
-/// enrolled host-grant scope manages is listed only where its canonical
-/// grants allow the session `view`; every other bookmark is listed as the
-/// Space's items show it. Unlike a read of the items, the listing writes
-/// nothing.
+/// Only bookmarks of rooms are listed: an item without a payload, or whose
+/// payload is no XEP-0402 `conference`, is not a room. A room of this
+/// deployment that an enrolled host-grant scope manages is listed only
+/// where its canonical grants allow the session `view`, read at most
+/// [`GRANT_READS_AT_ONCE`] at a time within [`LISTING_LIMIT`] and confirmed
+/// just before the answer is built; one not decided in that time is left
+/// out. Every other bookmark is listed as the Space's items show it. Unlike
+/// a read of the items, the listing writes nothing.
 async fn space_children_for_session(
     state: &WebSocketState,
     spaces_domain: &str,
@@ -1007,6 +1410,7 @@ async fn space_children_for_session(
     let Some(requester) = requester else {
         return Err(SpaceListingRefusal::NotFound);
     };
+    let deadline = Instant::now() + LISTING_LIMIT;
     let spaces_jid =
         spaces_service_bare_jid(spaces_domain).map_err(|_| SpaceListingRefusal::Unavailable)?;
     // The Space node of an enrolled host-grant scope is served to nobody.
@@ -1032,16 +1436,17 @@ async fn space_children_for_session(
             SpaceListingRefusal::Unavailable
         })?;
     let muc_domain = state.deps.service_domains.muc.as_str();
-    let mut items = Vec::new();
+    let mut elsewhere = Vec::new();
+    let mut here = Vec::new();
     for item in &stored {
         let item = item.to_pubsub_item();
-        let Some(id) = item.id.as_deref() else {
+        let Some(id) = item.id else {
             continue;
         };
-        if item
+        if !item
             .payload
             .as_ref()
-            .is_some_and(|payload| !payload.is("conference", NS_BOOKMARKS2))
+            .is_some_and(|payload| payload.is("conference", NS_BOOKMARKS2))
         {
             continue;
         }
@@ -1053,206 +1458,100 @@ async fn space_children_for_session(
             continue;
         };
         if room.domain().as_str() == muc_domain {
-            let gate = state
-                .deps
-                .app_state
-                .host_grants
-                .allows_as(
-                    RoomBinding::Room(&room),
-                    requester,
-                    &PrincipalEvidence::NoStream,
-                    HostGrantAction::View,
-                )
-                .await;
-            if !matches!(gate, RoomGate::Unmanaged | RoomGate::Managed(true)) {
-                continue;
-            }
+            here.push((id, GrantKey::Room(room)));
+        } else {
+            elsewhere.push(id);
         }
-        items.push(DiscoItem::new(spaces_domain, Some(id), None));
     }
-    items.sort_by(|a, b| a.name.cmp(&b.name));
-    items.dedup_by(|a, b| a.name == b.name);
-    Ok(items)
+    let gate = &state.deps.app_state.host_grants;
+    let mut decided =
+        decide_views(gate, here, requester, PrincipalEvidence::NoStream, deadline).await;
+    decided.unmanaged.extend(elsewhere);
+    let mut ids = decided.still_viewable(gate, deadline).await;
+    ids.sort();
+    ids.dedup();
+    Ok(ids
+        .iter()
+        .map(|id| DiscoItem::new(spaces_domain, Some(id), None))
+        .collect())
 }
 
-/// Live rooms created ad hoc through the MUC protocol (no managed
-/// channel record) that are public and not group DMs, and, for an account
-/// at another server (`remote`), open to other servers. Channel-backed
-/// rooms are already listed from the database.
-async fn live_public_instant_room_items(
+/// Live rooms created ad hoc through the MUC protocol (no catalog row)
+/// that are public and not group DMs, as their actors describe them by
+/// `deadline`. Catalog-backed rooms are listed from the catalog, never from
+/// their actors: a candidate the catalog check cannot clear is left out.
+async fn instant_room_candidates(
     state: &WebSocketState,
     muc_domain: &str,
     channel_backed: &ChannelBackedRooms,
-    remote: bool,
-) -> Vec<DiscoItem> {
-    let room_jids =
-        match waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-            .list_rooms()
-            .await
-        {
-            Ok(room_jids) => room_jids,
-            Err(error) => {
-                warn!(error = %error, "Failed to list live MUC rooms for disco#items");
-                return Vec::new();
-            }
-        };
-    // Bound the per-request work: this runs on the client's
-    // connect-time topology discovery, so it must stay cheap. Every
-    // catalog-backed room (public or private) is skipped in memory —
-    // no per-room DB query — so only true instant rooms, normally zero
-    // to a handful, cost one snapshot ask each, capped hard.
-    const MAX_INSTANT_ROOM_SCAN: usize = 1_000;
-    // Order of operations: (1) the free in-memory filter removes every
-    // catalog-listed room so managed rooms never consume cap slots;
-    // (2) sort for a deterministic selection when the cap bites;
-    // (3) cap so the batched DB probe's IN-clause and the snapshot
-    // asks stay bounded.
+    deadline: Instant,
+) -> Vec<ListedRoom> {
+    let registry = waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
+    let room_jids = match tokio::time::timeout_at(deadline, registry.list_rooms()).await {
+        Ok(Ok(room_jids)) => room_jids,
+        Ok(Err(error)) => {
+            warn!(error = %error, "Failed to list live MUC rooms for disco#items");
+            return Vec::new();
+        }
+        Err(_) => return Vec::new(),
+    };
+    // Order of operations: (1) the free in-memory filter, and the catalog
+    // check when the catalog read was bounded, set every catalog-backed
+    // room aside, so they never take the scan's places; (2) sort for a
+    // deterministic selection when the bound bites; (3) bound the snapshot
+    // asks.
     let mut candidates: Vec<BareJid> = room_jids
         .into_iter()
         .filter(|room_jid| {
             room_jid.domain().as_str() == muc_domain && !channel_backed.jids.contains(room_jid)
         })
         .collect();
-    candidates.sort_unstable();
-    candidates.truncate(MAX_INSTANT_ROOM_SCAN);
+    candidates.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
     channel_backed
-        .drop_unlisted_channel_rooms(state, &mut candidates)
+        .drop_unlisted_channel_rooms(state, &mut candidates, deadline)
         .await;
-    // A room an enrolled host-grant scope manages is listed only from its
-    // channel row, under its grants; the instant-room scan lists none, and
-    // if enrollment cannot be read it lists no instant room at all.
-    let channel_ids: Vec<String> = candidates
-        .iter()
-        .filter_map(waddle_xmpp::parse_managed_room_jid)
-        .collect();
-    let channel_refs: Vec<&str> = channel_ids.iter().map(String::as_str).collect();
-    let Ok(enrolled) = state
-        .deps
-        .app_state
-        .host_grants
-        .enrolled_channels(&channel_refs)
-        .await
-    else {
-        return Vec::new();
-    };
-    candidates.retain(|room_jid| {
-        waddle_xmpp::parse_managed_room_jid(room_jid)
-            .is_none_or(|channel_id| !enrolled.contains(&channel_id))
-    });
-    let mut items = Vec::new();
-    for room_jid in candidates {
-        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
-            continue;
-        };
-        let Ok(snapshot) = room_actor
-            .ask(GetSnapshot)
-            .reply_timeout(DISCO_ITEMS_SNAPSHOT_TIMEOUT)
-            .await
-        else {
-            continue;
-        };
-        let config = &snapshot.room.config;
-        if !config.public_room || config.group_dm || (remote && !config.federated) {
-            continue;
-        }
-        let name = if config.name.trim().is_empty() {
-            room_jid
-                .node()
-                .map(|node| node.to_string())
-                .unwrap_or_else(|| room_jid.to_string())
-        } else {
-            config.name.clone()
-        };
-        items.push(DiscoItem::muc_room(&room_jid.to_string(), &name));
+    candidates.truncate(MAX_INSTANT_ROOM_SCAN);
+    // The actors are asked a few at a time, all by `deadline`: a wedged
+    // actor costs its own room's place in the listing and no more.
+    let mut asks = futures::stream::iter(candidates)
+        .map(|room_jid| instant_room(state, room_jid))
+        .buffer_unordered(SNAPSHOT_ASKS_AT_ONCE);
+    let mut rooms = Vec::new();
+    while let Ok(Some(room)) = tokio::time::timeout_at(deadline, asks.next()).await {
+        rooms.extend(room);
     }
-    items
+    rooms
 }
 
-fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {
-    channels
-        .into_iter()
-        .filter(|channel| channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM)
-        .filter(|channel| channel.public_room)
-        .filter_map(|channel| {
-            waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
-                .ok()
-                .map(|room_jid| DiscoItem::muc_room(&room_jid.to_string(), &channel.name))
-        })
-        .collect()
-}
-
-/// The channel disco items listed to `audience` PLUS the JID set of the
-/// catalog-backed rooms this request read, so the instant-room scan can
-/// classify channel-backed rooms in memory without per-room DB reads.
-///
-/// A session's request reads every catalog row (public or not), within
-/// [`MUC_DISCO_ITEMS_FETCH_BOUND`]. A request of an account at another
-/// server reads only the rows of rooms that are public and open to other
-/// servers, within [`REMOTE_LISTING_FETCH_BOUND`]; the set is then
-/// incomplete, and the instant-room scan checks its candidates against the
-/// catalog.
-async fn canonical_channel_disco_items(
-    state: &WebSocketState,
-    muc_domain: &str,
-    audience: RoomListingFor<'_>,
-) -> Result<(Vec<DiscoItem>, ChannelBackedRooms), String> {
-    let db = state.deps.app_state.db_pool.global_actor().clone();
-    let (fetched, complete) = if audience.is_remote() {
-        let channels = list_federated_public_xmpp_channels(db, REMOTE_LISTING_FETCH_BOUND).await;
-        (channels, false)
+/// The live instant room `room_jid` as its actor describes it, when it is
+/// public and no group conversation; `None` otherwise and when its actor
+/// does not answer.
+async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> Option<ListedRoom> {
+    let room_actor = get_room_actor(state, &room_jid).await?;
+    let snapshot = room_actor
+        .ask(GetSnapshot)
+        .reply_timeout(DISCO_ITEMS_SNAPSHOT_TIMEOUT)
+        .await
+        .ok()?;
+    let config = &snapshot.room.config;
+    if !config.public_room || config.group_dm {
+        return None;
+    }
+    let name = if config.name.trim().is_empty() {
+        room_jid
+            .node()
+            .map(|node| node.to_string())
+            .unwrap_or_else(|| room_jid.to_string())
     } else {
-        let channels = list_xmpp_channels(db, MUC_DISCO_ITEMS_FETCH_BOUND, 0).await;
-        let complete = channels
-            .as_ref()
-            .is_ok_and(|channels| channels.len() < MUC_DISCO_ITEMS_FETCH_BOUND);
-        (channels, complete)
+        config.name.clone()
     };
-    let mut channels = fetched.map_err(|error| {
-        warn!(error = %error, "Failed to list canonical channels for MUC discovery");
-        error
-    })?;
-    if audience.is_remote() {
-        // The query reads only these; a row is checked again here so the
-        // listing never rests on the query alone.
-        for channel in &mut channels {
-            channel.public_room &= channel.federated;
-        }
-    }
-    // A room an enrolled host-grant scope manages is members-only and is
-    // listed only to an account its canonical grants allow `view`.
-    let listed: Vec<&str> = channels
-        .iter()
-        .filter(|channel| channel.public_room)
-        .map(|channel| channel.id.as_str())
-        .collect();
-    let enrolled = state
-        .deps
-        .app_state
-        .host_grants
-        .enrolled_channels(&listed)
-        .await
-        .map_err(|error| error.to_string())?;
-    for channel in &mut channels {
-        if enrolled.contains(&channel.id)
-            && !managed_room_listed(state, &channel.id, audience).await
-        {
-            channel.public_room = false;
-        }
-    }
-    let channel_backed = ChannelBackedRooms {
-        jids: channels
-            .iter()
-            .filter_map(|channel| waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok())
-            .collect(),
-        // When the fetch filled the bound, or read only some rows, rows
-        // beyond it exist and the set is incomplete — membership misses
-        // must fall back to a per-room catalog check.
-        truncated: !complete,
-    };
-    Ok((
-        channels_to_disco_items(channels, muc_domain),
-        channel_backed,
-    ))
+    Some(ListedRoom {
+        channel: waddle_xmpp::parse_managed_room_jid(&room_jid),
+        jid: room_jid,
+        name,
+        catalogued: false,
+        federated: config.federated,
+    })
 }
 
 /// The catalog-backed room JIDs known to this request, plus whether the
@@ -1265,13 +1564,17 @@ struct ChannelBackedRooms {
 impl ChannelBackedRooms {
     /// Drop catalog-backed rooms that the bounded fetch missed. No-op
     /// for the common (untruncated) case — the in-memory set filtering
-    /// already happened; a truncated catalog fetch issues ONE batched
-    /// membership query for the capped candidate list instead of a
-    /// per-room lookup.
+    /// already happened; a truncated catalog fetch checks every candidate
+    /// whose address names a channel, [`CATALOG_CHECK_CHUNK`] to a query,
+    /// by `deadline`. A candidate the check cannot clear (a query failed or
+    /// ran out of time) is dropped when its address names a channel: such
+    /// a room is listed only from its catalog row, never from its actor's
+    /// configuration.
     async fn drop_unlisted_channel_rooms(
         &self,
         state: &WebSocketState,
         candidates: &mut Vec<BareJid>,
+        deadline: Instant,
     ) {
         if !self.truncated || candidates.is_empty() {
             return;
@@ -1286,41 +1589,43 @@ impl ChannelBackedRooms {
         if channel_ids.is_empty() {
             return;
         }
-        let placeholders = vec!["?"; channel_ids.len()].join(", ");
-        let rows = state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .ask(DbQuery {
+        let mut backed: HashSet<BareJid> = HashSet::new();
+        for chunk in channel_ids.chunks(CATALOG_CHECK_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let rows = state.deps.app_state.db_pool.global_actor().ask(DbQuery {
                 sql: format!("SELECT id FROM channels WHERE id IN ({placeholders})"),
-                params: channel_ids
+                params: chunk
                     .iter()
                     .map(|(_, channel_id)| channel_id.clone().into())
                     .collect(),
-            })
-            .await;
-        let known: HashSet<String> = match rows {
-            Ok(rows) => rows
-                .into_iter()
-                .filter_map(|row| match row.into_iter().next() {
-                    Some(crate::db::Value::Text(id)) => Some(id),
-                    _ => None,
-                })
-                .collect(),
-            Err(error) => {
-                warn!(error = %error, "Failed batched channel membership check for disco#items");
-                // Fail closed for listing purposes: treat lookup failure
-                // as "unknown", keeping candidates (their snapshot config
-                // still gates what gets listed).
-                return;
-            }
-        };
-        let backed: HashSet<&BareJid> = channel_ids
-            .iter()
-            .filter(|(_, channel_id)| known.contains(channel_id))
-            .map(|(room_jid, _)| room_jid)
-            .collect();
+            });
+            let known: HashSet<String> = match tokio::time::timeout_at(deadline, rows).await {
+                Ok(Ok(rows)) => rows
+                    .into_iter()
+                    .filter_map(|row| match row.into_iter().next() {
+                        Some(crate::db::Value::Text(id)) => Some(id),
+                        _ => None,
+                    })
+                    .collect(),
+                Ok(Err(error)) => {
+                    warn!(error = %error, "Failed batched channel membership check for disco#items");
+                    candidates
+                        .retain(|room_jid| waddle_xmpp::parse_managed_room_jid(room_jid).is_none());
+                    return;
+                }
+                Err(_) => {
+                    candidates
+                        .retain(|room_jid| waddle_xmpp::parse_managed_room_jid(room_jid).is_none());
+                    return;
+                }
+            };
+            backed.extend(
+                chunk
+                    .iter()
+                    .filter(|(_, channel_id)| known.contains(channel_id))
+                    .map(|(room_jid, _)| room_jid.clone()),
+            );
+        }
         candidates.retain(|room_jid| !backed.contains(room_jid));
     }
 }
