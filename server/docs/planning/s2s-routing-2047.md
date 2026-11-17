@@ -1316,7 +1316,7 @@ sender of the request it answers.
 | A stanza of the occupant arrives on a stream that proved something else | As for a stanza that cannot be queued |
 | The room's `federated` setting is turned off | Every seat of the room ends once the change is committed: the room removes the occupant with status 333 and the occupant is sent its own unavailable presence with statuses 110 and 333 |
 | The host refuses a request of a seated occupant in a way that ends its occupancy (its domain is no longer admitted, its room is not open to it any more, its leave could not be answered) | The seat ends, the room is told to remove the occupant, with status 333 for those who stay, and the occupant is sent its own unavailable presence with statuses 110 and 333 after the refusal. Where the request was presence that entered the room again and the room refused that join, the refusal itself tells the occupant that it is not in the room, and it is not told again |
-| The host does not decide a join within the per-item budget (5 s) | The join is answered with `internal-server-error` (type `wait`); the seat opened for it, and one the occupant gave up to enter again, end without a further notice, and the room removes the occupant if it seated it |
+| The host does not decide a join within the per-item budget (5 s) | The join is answered with `internal-server-error` (type `wait`); the seat opened for it, and one the occupant gave up to enter again, end without a further notice, and the room removes the occupant if it seated it. Any other request the host does not decide in time is answered as its kind is answered when it is refused before it is taken: an IQ, or a message that carries something, with `internal-server-error` (type `wait`), presence that enters the room from a sender without a seat with error presence, and nothing else; a seated occupant's presence is not answered, so its seat stands |
 | The room no longer seats the occupant (its actor ended, or it removed the occupant without its presence passing the router) | Every 60 s a pass asks each room with seats, once, for the occupants it seats and their generations, and releases the seats the room does not name; the occupant is sent its own unavailable presence with statuses 110 and 333. A pass runs on a task of its own, takes at most 256 rooms and 60 s, and the next goes on where it stopped |
 | The room seats an occupant of another server for which this replica holds no seat, pending seats included (its seat ended and the room's removal timed out, or the room was restored with it) | The same pass removes it from the room, with status 333 for those who stay: nothing could reach it. Rooms whose removal of an occupant could not be confirmed are asked at the next pass first, whether or not a seat is still held there. A seat of the same occupancy that ends while the removal waits or runs, or after it ran (a seat taken over from a replica that stopped, held a moment after the room was restored), is not dropped as a second end: it takes the removal's place, or follows it, so its row is removed and its occupant told as for that seat; the last 4,096 occupancies removed this way are remembered for that |
 | The seat's row could not be removed when the seat ended | The same pass reads this replica's rows, a page of 256 in the order of the table's key, and removes those older than 30 s for which it holds no seat |
@@ -2275,15 +2275,44 @@ an asker when all of these hold:
   read now is not listed.
 
 Any other room is absent from the listing, as a room that does not exist
-is, so the listing tells nothing of it. A remote asker's listing is built
-from at most 4,096 catalog rows of rooms that are public and open to other
-servers, read by one query, and from the live instant rooms (at most 1,000
-scanned, as for sessions); a room beyond those bounds is not listed to
-remote askers. A session's listing reads every catalog row, within the
-10,000 it read before. An instant room, which has no catalog row, is known
-only to the replica that holds its actor, so a listing built on another
-replica lacks it, and the pages of one listing built on different replicas
-can differ; a catalogued room is listed the same by every replica.
+is, so the listing tells nothing of it.
+
+**How a listing is built.** Every listing reads the channel catalog,
+within the 10,000 rows a session's listing read before, and the live
+instant rooms. A room with a catalog row is listed from its row and never
+from its actor's configuration. The instant-room scan sets every
+catalog-backed room aside before it takes at most 1,000 candidates; when
+the catalog read filled its bound, the candidates whose address names a
+channel are checked against the catalog, 500 to a query, and one the check
+cannot clear (a query failed or ran out of time) is left out. The actors
+of the remaining instant rooms are asked sixteen at a time, and a room
+whose actor has not answered within the listing's reading time (1.5 s) is
+left out. Whether a room is managed is read from the replica's enrolled
+set for every request, and a managed room's grants are read four rooms at
+a time; every grant that allowed `view` is confirmed with
+`HostGrantGate::still_allows` just before the answer is built, the
+decision itself while its fence ticket is current and a decision read
+again otherwise. A managed room not decided or confirmed within the
+listing's time (2.5 s in all) is left out; a listing whose catalog or
+enrolled set cannot be read is answered with `internal-server-error`
+(type `wait`).
+
+A request of an account at another server for the service's rooms is
+handed by the room shard that took it to a task of its own, so no room's
+requests wait behind a listing; a replica builds at most four such
+listings at once and answers a request beyond them with
+`resource-constraint` (type `wait`). The host answers within 2.5 s; the
+router answers a listing the host did not answer within the per-item
+budget (5 s) with `internal-server-error` (type `wait`), so the request
+is always answered. What the catalog and the rooms' actors say of the
+rooms (not who manages them, and not anyone's grants) is read for remote
+askers at most once at a time on a replica, by a task of its own within
+1.2 s, and reused for 2 s: a room whose catalog row or configuration
+changed, a room closed to other servers included, can be listed as it was
+for up to 2 s. An instant room, which has no catalog row, is known only to
+the replica that holds its actor, so a listing built on another replica
+lacks it, and the pages of one listing built on different replicas can
+differ; a catalogued room is listed the same by every replica.
 
 Before this slice the service listed nothing to remote askers. XEP-0045
 §6.3 says a service SHOULD return the full list of the public rooms it
@@ -2304,17 +2333,27 @@ left out.
 
 - A session is answered for a Space it may read (as its `<items/>` read
   is decided) and gets `item-not-found` for any other node, a node that
-  does not exist and the Space of an enrolled scope included;
-  `internal-server-error` (type `wait`) while that cannot be told. Every
-  room bookmark is listed, as the Space's items show it, except a room an
-  enrolled scope manages that the session's grants do not allow it to
-  view. Unlike a read of the items, the listing writes nothing: it does not
-  publish the bookmarks a Space lacks or repair a room's parent.
+  does not exist and the Space of an enrolled scope included, in the same
+  error from the same address; `internal-server-error` (type `wait`)
+  while that cannot be told. Every room bookmark is listed, as the Space's
+  items show it, except a room an enrolled scope manages that the
+  session's grants do not allow it to view, decided four rooms at a time
+  and confirmed before the answer as for the MUC service; a room not
+  decided within 2.5 s is left out. An item without a payload is no room.
+  One answer lists at most 1,024 rooms; a listing that does not fit
+  carries its `<set/>` and the rest is reached by paging. Unlike a read of
+  the items, the listing writes nothing: it does not publish the
+  bookmarks a Space lacks or repair a room's parent.
 - An account at another server is answered as for every request about a
   node ([Spaces](#spaces-w7a)), and is told of the rooms it may be told of
   there: rooms of this deployment's MUC service that are open to other
-  servers, and, for a managed room, that its grants admit it to view. At
-  most 256 of the Space's items are read.
+  servers, and, for a managed room, that its grants admit it to view. The
+  Space's 256 most recently published items are read, as a read of its
+  items reads them: a room among older items of a Space that holds more is
+  not listed to accounts at other servers, and such a listing carries its
+  `<set/>` with no count, since what the read left out is not known. The
+  Spaces service's own listing tells no count either when more than 256
+  Spaces are open to other servers.
 
 **Paging (XEP-0059).** Every listing above is sorted by its key (the room's
 JID for the MUC service, the item ID for a Space's rooms, the node for the
@@ -2324,10 +2363,12 @@ is placed by its order and never looked up, so an anchor that names a room
 the asker is not listed tells nothing of it, and a room removed between
 pages skips nothing. The count and the first item's index are of the
 listing as built for the asker. A remote asker gets at most 256 items in
-one answer whatever `max` asks; a listing that does not fit in one answer
-carries the `<set/>` even when the request had none, as a responder that
-returns a limited result set does (XEP-0059 §1, XEP-0045 §6.3). XEP-0059 is
-read at the same pinned commit. A `<set/>` that is not well formed is
+one answer whatever `max` asks, and a session at most 1,024 of a Space
+node's rooms; a listing that does not fit in one answer carries the
+`<set/>` even when the request had none, as a responder that returns a
+limited result set does (XEP-0059 §1, XEP-0045 §6.3). A session's listing
+of the MUC service's rooms is not bounded per answer, as before. XEP-0059
+is read at the same pinned commit. A `<set/>` that is not well formed is
 `bad-request`.
 
 **Evidence.** Written and compiled, not run (D9):
@@ -2336,26 +2377,41 @@ read at the same pinned commit. A `<set/>` that is not well formed is
   service lists its open rooms and a room no occupants; no room a remote
   asker may not reach (not federated, hidden, a group conversation) while
   a session is still told of the rooms its rules list; paging, with the
-  count of the asker's listing and an anchor placed by its order; and a
-  client that walks from the server's items to the service's, finds a
-  Space's room and enters it by its plain JID while the Space is not open
-  to other servers;
+  count of the asker's listing and an anchor placed by its order; backward
+  paging and an index; an anchor naming a hidden room, or one not open to
+  other servers, answered exactly as one naming no room; a listing of 257
+  rooms answered with 256 and an unasked `<set/>`; and a client that walks
+  from the server's items to the service's, finds a Space's room and
+  enters it by its plain JID while the Space is not open to other servers;
 - `crates/waddle-server/tests/xep0045_s2s_inbound_muc.rs`: a managed room
   listed only to a remote member its grants admit, and to nobody once it
-  is closed to other servers (PostgreSQL);
+  is closed to other servers and the reuse window has passed
+  (PostgreSQL);
+- `crates/waddle-server/tests/xep0045_s2s_inbound_muc_router.rs`: room
+  lists the host does not answer in time answered with
+  `internal-server-error` (type `wait`), one beyond the four built at once
+  with `resource-constraint`, a room's request not held behind them, a
+  room's IQ the host did not decide in time answered and a seated
+  occupant's change of presence not; and every request of a slow room
+  answered (scripted host);
 - `crates/waddle-server/tests/xep0503_s2s_inbound_spaces.rs`: a Space's
-  node lists the rooms a remote asker may be told of, in pages, and refuses
-  a banned account;
+  node lists the rooms a remote asker may be told of, in pages, refuses
+  a banned account, and tells no count once the Space holds more than the
+  256 items read;
 - `crates/waddle-server/tests/xep0503_s2s_inbound_spaces_host_grant.rs`: a
   managed room in a Space's node listing only for the member (PostgreSQL);
 - `crates/waddle-server/tests/xep0503_spaces_ws.rs`: a Space's node lists
   its room to a session, and a session that never asks the Spaces service
   finds the room in the MUC service's listing and enters it by its plain
-  JID;
+  JID; a Space the session may not read answered as a node that does not
+  exist; a session's paging of a Space node's rooms;
 - `crates/waddle-server/tests/xep0045_host_grant_fence.rs`
   (`host_grant_fence_cases/sinks.rs`): the managed room listed to a member
   and not to an ungranted account, and the enrolled Space node's children
-  not found (PostgreSQL).
+  not found; a Space no scope enrolls listing the managed room only to a
+  member, and no item without a payload; a managed room whose grants
+  cannot be read left out of both listings, which are still answered
+  (PostgreSQL).
 
 ## Behaviour with S2S off
 
@@ -2384,7 +2440,7 @@ its changes apply whether or not S2S is on, and are listed below.
 
 The MUC fallback changes nothing for remote senders while S2S is
 disabled: no room or Spaces host is attached, so no listing is built for
-one. Two of its changes apply whether or not S2S is on, and are listed
+one. Three of its changes apply whether or not S2S is on, and are listed
 below.
 
 These change behaviour while S2S is disabled, and belong to the rollout
@@ -2392,14 +2448,31 @@ runbook (G24):
 
 - The MUC service's `disco#items` lists a public room an enrolled
   host-grant scope manages to a session whose canonical grants allow
-  `view`; before, such a room was listed to nobody. Every connect-time
-  listing of a session reads the grants of each public managed room in the
-  catalog, one after another.
+  `view`; before, such a room was listed to nobody (the deployment's owner
+  chose this on 2026-11-17, over the earlier rule that a managed room is
+  listed to nobody). The first-party chat client joins every room the MUC
+  service lists that it holds no bookmark for
+  (`chat/src/lib/xmpp/discovery.ts`, where a listed room without a
+  bookmark is given `autojoin`), so at connect a member now joins each
+  managed room it may view, as it already joins every public unmanaged
+  room. Every connect-time listing of a session reads the grants of each
+  public managed room in the catalog, four at a time within the listing's
+  2.5 s, and leaves out a room not decided by then; a session's listing
+  whose catalog or enrolled set cannot be read is answered with
+  `internal-server-error`, as before.
+- A session's listing of the MUC service asks the actors of live instant
+  rooms sixteen at a time within 1.5 s, where it asked them one after
+  another with 5 s each; an instant room whose actor is slower is left
+  out. When the catalog read fills its bound, an instant-room candidate
+  whose address names a channel and that the catalog check cannot clear is
+  left out; before, it was kept and listed from its actor's
+  configuration.
 - The `disco#items` of a Space node answers a session with the rooms the
   Space holds (the service's address and each room's JID as the item's
-  name), or `item-not-found` for a node the session may not read; before,
-  it answered an empty list for any node. First-party clients read a
-  Space's rooms through `<items/>`, which is unchanged.
+  name), at most 1,024 in one answer, or `item-not-found` for a node the
+  session may not read; before, it answered an empty list for any node.
+  First-party clients read a Space's rooms through `<items/>`, which is
+  unchanged.
 
 - A Space owner's configuration form on the Spaces service carries one
   more field, `urn:waddle:spaces:federated`, off by default.
@@ -2662,9 +2735,12 @@ runbook (G24):
 - **A slow room loses its joins.** Deciding one request, changing its
   seat and queueing its answer share 5 s. A join the room has not decided
   by then ends the seat opened for it and is answered with error presence
-  (`internal-server-error`, type `wait`); any other request is left
-  unanswered. A room whose actor is slower than that under
-  load turns its remote occupants' joins away until it recovers.
+  (`internal-server-error`, type `wait`); any other request is answered
+  as its kind is (an IQ or a message that carries something with
+  `internal-server-error`, type `wait`), though the room may still carry
+  out a message it had taken: a client that sends it again can post it
+  twice. A room whose actor is slower than that under load turns its
+  remote occupants' joins away until it recovers.
 - **Joins where a replica carries requests.** A replica that carries
   requests to the room's holder cannot tell whether the sender of presence
   holds a seat there, so presence that does not carry the `muc` element is

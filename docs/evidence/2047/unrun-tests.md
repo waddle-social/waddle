@@ -132,11 +132,11 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Run 5/5, run8 S2S rerun2 log |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run8 S2S rerun2 log |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run8 S2S rerun2 log |
-| `xep0045_s2s_inbound_muc` (33) | W6a, W7b | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and six cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration, the room listed only to its member) | Not run on this tree (W7b added `a_managed_room_is_listed_only_to_a_remote_principal_its_grants_admit`); the other 32 ran 32/32 in the run8 S2S rerun2 log |
+| `xep0045_s2s_inbound_muc` (33) | W6a, W7b | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and six cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration, the room listed only to its member) | Not run on this tree (W7b added `a_managed_room_is_listed_only_to_a_remote_principal_its_grants_admit`, which asks again until the replica's 2 s reuse of its rooms has passed for the room closed to other servers); the other 32 ran 32/32 in the run8 S2S rerun2 log |
 | `xep0045_s2s_inbound_muc_replicas` (9) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Three cases hand the holder stanzas with what a dialback stream, or a public-CA certificate, would have proved. Compiled with and without `clustering` | Run 9/9, run8 S2S rerun2 log; 9/9 with `clustering`, run8 clustering rerun2 log |
-| `xep0045_s2s_inbound_muc_router` (31) | W6a | loopback; the production S2S router and connection manager with a scripted room host, a seat table whose inserts a case can hold, and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4.5 s; two bound another account's answer at 2 s behind one account's flood; one waits up to 15 s for a kept leave to be placed again, and one runs 14 s to pass a sweep of 12 s. The case for the lifecycle's stop wires the router and connection manager to a stop token as the server does | Run 31/31, run8 S2S rerun2 log; 31/31 with `clustering`, run8 clustering rerun2 log |
+| `xep0045_s2s_inbound_muc_router` (32) | W6a, W7b | loopback; the production S2S router and connection manager with a scripted room host, a seat table whose inserts a case can hold, and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4.5 s; two bound another account's answer at 2 s behind one account's flood; one waits up to 15 s for a kept leave to be placed again, and one runs 14 s to pass a sweep of 12 s. The case for the lifecycle's stop wires the router and connection manager to a stop token as the server does. W7b's case holds the host for 1 s budgets and asserts that a room's request reaches the host within 800 ms of five room lists | Not run on this tree (W7b added `a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answered` and made `a_slow_room_holds_no_stream_and_ends_no_seat` count only `resource-constraint` refusals as the immediate ones and expect every request answered); its 31 earlier cases, that one before the change, ran 31/31 in the run8 S2S rerun2 log and 31/31 with `clustering` in the run8 clustering rerun2 log |
 | `xep0313_s2s_inbound_mam` (5) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Run 5/5, run8 S2S rerun2 log |
-| `xep0030_s2s_inbound_muc_discovery` (10) | W6a, W7b | loopback; in-memory SQLite | Not run on this tree (W7b replaced `disco_items_lists_neither_rooms_nor_occupants_to_remote_askers` with `the_service_lists_its_open_rooms_and_a_room_lists_no_occupants` and added `the_service_lists_no_room_a_remote_asker_may_not_reach`, `the_room_list_is_paged_for_a_remote_asker` and `a_client_without_spaces_finds_a_spaces_room_and_enters_it_by_its_plain_jid`); the W6a cases ran 7/7 in the run8 S2S rerun2 log |
+| `xep0030_s2s_inbound_muc_discovery` (13) | W6a, W7b | loopback; in-memory SQLite | Not run on this tree (W7b replaced `disco_items_lists_neither_rooms_nor_occupants_to_remote_askers` with `the_service_lists_its_open_rooms_and_a_room_lists_no_occupants` and added `the_service_lists_no_room_a_remote_asker_may_not_reach`, `the_room_list_is_paged_for_a_remote_asker`, `the_room_list_pages_backward_and_from_an_index_for_a_remote_asker`, `an_anchor_naming_an_unlisted_room_is_answered_as_one_naming_no_room`, `a_room_list_beyond_one_answer_carries_its_set_unasked` (257 catalog rows) and `a_client_without_spaces_finds_a_spaces_room_and_enters_it_by_its_plain_jid`); the W6a cases ran 7/7 in the run8 S2S rerun2 log |
 | `xep0085_s2s_inbound_chat_states` (4) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Run 4/4, run8 S2S rerun2 log |
 | `xep0115_s2s_inbound_caps` (1) | W6a | loopback; in-memory SQLite | Run 1/1, run8 S2S rerun2 log |
 | `xep0308_s2s_inbound_corrections` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run8 S2S rerun2 log |
@@ -158,7 +158,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0115_s2s_account_caps_ws` (1) | W6c | as `s2s_account_traffic_ws` | Run 1/1, run8 S2S rerun2 log |
 | `xep0199_s2s_account_ping_ws` (3) | W6c | as `s2s_account_traffic_ws` | Run 3/3, run8 S2S rerun2 log |
 | `xep0313_s2s_account_archive_ws` (2) | W6c | as `s2s_account_traffic_ws` | Run 2/2, run8 S2S rerun2 log |
-| `xep0503_s2s_inbound_spaces` (11) | W7a, W7b | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Not run on this tree (W7b added `a_spaces_rooms_are_listed_in_pages` and `a_banned_account_is_refused_a_spaces_listing`, and a node listing to two cases); the W7a cases ran 9/9 in the run8 S2S rerun2 log |
+| `xep0503_s2s_inbound_spaces` (12) | W7a, W7b | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Not run on this tree (W7b added `a_spaces_rooms_are_listed_in_pages`, `a_banned_account_is_refused_a_spaces_listing` and `a_spaces_listing_beyond_its_read_tells_no_count` (257 rooms and bookmarks), and a node listing to two cases); the W7a cases ran 9/9 in the run8 S2S rerun2 log |
 | `xep0060_s2s_inbound_spaces_pubsub` (22) | W7a | as `xep0503_s2s_inbound_spaces` | Run 22/22, run8 S2S rerun2 log |
 | `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a, W7b | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Not run on this tree (W7b added the node listing to `a_managed_rooms_bookmark_is_told_only_to_a_principal_its_grants_admit`); ran 4/4 in the run8 S2S rerun2 log before |
 | `xep0503_s2s_outbound_spaces_ws` (3) | W7a | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Run 3/3, run8 S2S rerun2 log |
@@ -185,7 +185,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run8 host-grant rerun1 log |
 | `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run8 host-grant rerun1 log |
 | `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run8 host-grant rerun1 log |
-| `xep0045_host_grant_fence` (29 in 2 modules) | W5c, integration, W5d, W7b | PostgreSQL 17; loopback | Not run on this tree (W7b changed `sinks::the_enrolled_space_and_the_managed_room_are_not_described_by_the_services`: the MUC service lists the managed room to a member and not to an ungranted account, and the enrolled Space node's `disco#items` is not found); ran 29/29 in the run8 host-grant rerun1 log before |
+| `xep0045_host_grant_fence` (31 in 2 modules) | W5c, integration, W5d, W7b | PostgreSQL 17; loopback | Not run on this tree (W7b changed `sinks::the_enrolled_space_and_the_managed_room_are_not_described_by_the_services` and renamed it `sinks::the_enrolled_space_is_not_described_and_the_managed_room_is_listed_only_to_a_member`: the MUC service lists the managed room to a member and not to an ungranted account, and the enrolled Space node's `disco#items` is not found; it added `sinks::a_plain_spaces_listing_names_a_managed_room_only_to_a_member` and `sinks::a_managed_room_whose_grants_cannot_be_read_is_left_out_of_the_listings`); ran 29/29 in the run8 host-grant rerun1 log before |
 | `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run8 host-grant rerun1 log |
 | `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run8 host-grant rerun1 log |
 | `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run8 host-grant rerun1 log |
@@ -213,7 +213,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `rfc6121_roster_ws` (edited, 12) | W5i | TestServer process | Not run |
 | `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Not run |
 | `xep0492_dm_bookmarks_ws` (edited, 6) | W5i | none | Not run |
-| `xep0503_spaces_ws` (edited, 12) | W5i, W7a, W7b | TestServer process | Not run on this tree (W7b added `a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one`); the other 11 ran 11/11 in the run8 S2S rerun2 log (W7a added two cases: a session's Space and channel under the startup issuance policy, and `spaces:delete` destroying only the rooms whose parent the Space is) |
+| `xep0503_spaces_ws` (edited, 14) | W5i, W7a, W7b | TestServer process | Not run on this tree (W7b added `a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one`, `a_space_node_a_session_may_not_read_is_listed_as_one_that_does_not_exist` and `a_session_pages_a_space_nodes_rooms`); the other 11 ran 11/11 in the run8 S2S rerun2 log (W7a added two cases: a session's Space and channel under the startup issuance policy, and `spaces:delete` destroying only the rooms whose parent the Space is) |
 
 ### waddle-client-session
 
@@ -306,14 +306,14 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | | Count |
 | --- | --- |
 | Test targets listed | 120 (97 integration targets, 21 library test modules, 2 chat test files) |
-| Run, with a cited log | 69 targets, 1,036 cases, all passed in their latest cited run |
-| Not run | 51 targets (21 of them library modules) |
+| Run, with a cited log | 68 targets, 1,005 cases, all passed in their latest cited run |
+| Not run | 52 targets (21 of them library modules) |
 
-W7b (the MUC fallback) changed six targets that had run, which are listed
-as not run on this tree: `xep0030_s2s_inbound_muc_discovery`,
-`xep0045_s2s_inbound_muc`, `xep0503_s2s_inbound_spaces`,
-`xep0503_s2s_inbound_spaces_host_grant`, `xep0503_spaces_ws` and
-`xep0045_host_grant_fence`; it added no target. It added
+W7b (the MUC fallback) changed seven targets that had run, which are
+listed as not run on this tree: `xep0030_s2s_inbound_muc_discovery`,
+`xep0045_s2s_inbound_muc`, `xep0045_s2s_inbound_muc_router`,
+`xep0503_s2s_inbound_spaces`, `xep0503_s2s_inbound_spaces_host_grant`,
+`xep0503_spaces_ws` and `xep0045_host_grant_fence`; it added no target. It added
 `Hosted::catalogued_room` to `s2s_inbound_muc_support`, which every target
 that includes the support compiles with. It changed the production paths
 of the MUC service's `disco#items` for sessions (a managed room is listed
@@ -323,7 +323,12 @@ list was answered), so the targets that exercise them should run again in
 verification although their cases did not change: `admin_channels_ws`,
 `group_dm_ws`, `xep0030_discovery_destination_ws`, the
 `websocket::tests::muc` and `websocket::tests::iq` library modules, and the
-local Spaces suites of the run8 S2S log.
+local Spaces suites of the run8 S2S log. It also changed the router's
+answer to any request the room host did not decide within the per-item
+budget (answered as its kind is, where an IQ or a message was dropped),
+and moved the service's room list off the room shards, so
+`xep0045_s2s_inbound_muc_replicas` and `clustering_remote_room_request`
+should run again with `clustering` too.
 
 W7a added six targets, listed `admin_spaces_ws` for the case it added
 there, added two cases to `xep0503_spaces_ws` and one to `s2s_reachability`.
