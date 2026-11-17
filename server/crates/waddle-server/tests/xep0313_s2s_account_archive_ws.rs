@@ -118,7 +118,10 @@ async fn a_remote_message_stored_offline_is_archived_and_received_with_the_archi
     // The recipient's archive stamps the message, and the stored row refers
     // to that copy instead of holding one of its own.
     let archived = support::wait_for_archived(&federated, ALICE, "offline-1").await;
-    assert_eq!(archived.from, jid(BOB_PHONE));
+    // The row names the sender by its bare JID, as for a local sender (the
+    // recipient pass keys a direct archive row by bare JIDs); the forwarded
+    // stanza keeps the full one.
+    assert_eq!(archived.from, jid(BOB));
     let rows = support::offline_rows(&federated, ALICE).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     let PendingPayload::Archived(stamp) = &rows[0].payload else {
@@ -159,7 +162,7 @@ async fn a_remote_message_held_by_a_detached_session_is_archived_once() {
     let ids: Vec<&str> = held.iter().filter_map(|stanza| stanza.attr("id")).collect();
     assert_eq!(ids, vec!["held-1"], "{held:?}");
     let archived = support::wait_for_archived(&federated, ALICE, "held-1").await;
-    assert_eq!(archived.from, jid(BOB_PHONE));
+    assert_eq!(archived.from, jid(BOB));
     assert_eq!(
         support::archived_copies(&federated, ALICE, "held-1").await,
         1

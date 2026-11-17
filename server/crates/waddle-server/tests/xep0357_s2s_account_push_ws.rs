@@ -56,7 +56,8 @@ async fn a_remote_message_stored_offline_refers_to_the_archive_and_raises_a_loca
     // Both stored rows refer to Alice's archive.
     let remote = support::wait_for_archived(&federated, ALICE, "push-remote").await;
     let local = support::wait_for_archived(&federated, ALICE, "push-local").await;
-    assert_eq!(remote.from, jid(BOB_PHONE));
+    // The row names the sender by its bare JID, as for a local sender.
+    assert_eq!(remote.from, jid(BOB));
     let rows = support::routing::wait_for_async(support::ARRIVES, || async {
         let rows = support::offline_rows(&federated, ALICE).await;
         (rows.len() == 2).then_some(rows)
