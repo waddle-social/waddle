@@ -56,6 +56,9 @@ public final class SessionCoordinator {
     @ObservationIgnored let port: any XmppPort
     @ObservationIgnored private let reconnectPolicy: ReconnectPolicy
     @ObservationIgnored private let handlesCalls: Bool
+    /// Push proposals can wait in the effects queue behind a tie-break or
+    /// migration. Their stream copies must not queue that work again.
+    @ObservationIgnored private var pushedCallSids: [String] = []
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored var foregroundProbeTask: Task<Void, Never>?
@@ -188,6 +191,7 @@ public final class SessionCoordinator {
     /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
         isStopped = true
+        calls.pushedCallConnectionChanged(isOnline: false)
         reconnectTask?.cancel()
         reconnectTask = nil
         foregroundProbeTask?.cancel()
@@ -202,6 +206,7 @@ public final class SessionCoordinator {
         connectWatchdog?.cancel()
         connectWatchdog = nil
         await stopCalls()
+        pushedCallSids.removeAll()
         await port.disconnect()
         eventTask?.cancel()
         eventTask = nil
@@ -395,6 +400,7 @@ public final class SessionCoordinator {
             reconnectTask?.cancel()
             reconnectTask = nil
             status.connection = .online
+            calls.pushedCallConnectionChanged(isOnline: true)
             // Avatars may have changed while we were away; rows on screen
             // ask again.
             avatars.markAllStale()
@@ -403,6 +409,7 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = Task { [weak self] in await self?.sessionReady() }
         case .disconnected:
+            calls.pushedCallConnectionChanged(isOnline: false)
             // Like Android, the call slot survives stream loss and reconnects;
             // call sends can fail while offline, without new recovery semantics.
             // Every disconnect creates a fresh FFI driver; its old
@@ -427,7 +434,7 @@ public final class SessionCoordinator {
                 scheduleReconnect()
             }
         case let .call(event):
-            if handlesCalls, !isStopped { calls.handle(event) }
+            _ = receiveCall(event)
         case let .message(message):
             route(message)
         case let .presence(wirePresence):
@@ -459,6 +466,7 @@ public final class SessionCoordinator {
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
+            calls.pushedCallConnectionChanged(isOnline: false)
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil
@@ -468,6 +476,20 @@ public final class SessionCoordinator {
             status.connection = .authenticationFailed
             onAuthenticationFailed?()
         }
+    }
+
+    /// Pushes and stream arrivals share the host's call-handling policy.
+    func receiveCall(_ event: CallEvent, isPushed: Bool = false) -> Bool {
+        guard handlesCalls, !isStopped else { return false }
+        if case .propose = event.kind {
+            if pushedCallSids.contains(event.sid) { return calls.state.isLive && calls.state.sid == event.sid }
+            if isPushed {
+                pushedCallSids.append(event.sid)
+                if pushedCallSids.count > 32 { pushedCallSids.removeFirst() }
+            }
+        }
+        calls.handle(event, retryRingingWhenOnline: isPushed && connection != .online)
+        return calls.state.isLive && calls.state.sid == event.sid
     }
 
     /// The ready pipeline: presence, directory, joins, read state, queue.

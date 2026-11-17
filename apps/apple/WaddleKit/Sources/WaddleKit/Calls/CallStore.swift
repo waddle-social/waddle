@@ -15,7 +15,13 @@ import Observation
 
     /// The one call slot; terminal states remain until dismissed or replaced.
     public private(set) var state: CallState = .idle {
-        didSet { mediaSession?.update(state) }
+        didSet {
+            if oldValue.isLive, oldValue.sid != state.sid || !state.isLive, let sid = oldValue.sid {
+                markFinished(sid: sid)
+            }
+            if case .ended(let sid, _) = state { markFinished(sid: sid) }
+            mediaSession?.update(state)
+        }
     }
     /// Last failed wire verb; fresh calls, inbound transitions, dismissal and clear reset it.
     public private(set) var lastError: String?
@@ -33,6 +39,9 @@ import Observation
     @ObservationIgnored private var sessionTimer: Task<Void, Never>?
     /// Abort history is bounded because reductions can outpace the effects queue.
     @ObservationIgnored private(set) var recentlyAbortedSids: [String] = []
+    @ObservationIgnored private var finishedSids: [String] = []
+    @ObservationIgnored private var pendingPushedRinging: CallEvent?
+    @ObservationIgnored private var pushedCallsOnline = false
     @ObservationIgnored private(set) var generation = 0
     @ObservationIgnored private var effectTask: Task<Void, Never>?
     @ObservationIgnored private var effects: [@MainActor () async -> Void] = []
@@ -66,6 +75,11 @@ import Observation
 
     /// Reduce arrivals synchronously; only remote-originated effects enter the serial queue.
     public func handle(_ event: CallEvent) {
+        handle(event, retryRingingWhenOnline: false)
+    }
+
+    func handle(_ event: CallEvent, retryRingingWhenOnline: Bool) {
+        if case .propose = event.kind, isFinished(sid: event.sid) { return }
         if fulfillGroupAccept(event) { return }
         if endGroupFromRemote(event) { return }
         let before = state
@@ -90,14 +104,56 @@ import Observation
         {
             enqueue { [weak self] in
                 // A decline that ran while this effect was queued already answered the proposer.
-                guard let self, self.state.isIncoming, self.state.sid == event.sid else { return }
-                _ = await self.send(epoch: epoch, error: "call ringing failed") {
+                guard let self, self.isRinging(sid: event.sid) else { return }
+                let sent = await self.send(epoch: epoch, error: "call ringing failed") {
                     await self.port.sendCallRinging(to: event.from.bare, sid: event.sid)
                 }
+                guard retryRingingWhenOnline, !sent, self.generation == epoch, self.isRinging(sid: event.sid) else { return }
+                self.pendingPushedRinging = event
+                self.retryPushedRingingIfOnline()
             }
         }
         enqueue { [weak self] in
             await self?.remoteEffect(event, before: before, epoch: epoch)
+        }
+    }
+
+    /// Remembers a call ended on this device, even before it held the slot.
+    /// The last 32 distinct session ids survive dismissal and session clear.
+    public func markFinished(sid: String) {
+        guard !finishedSids.contains(sid) else { return }
+        finishedSids.append(sid)
+        if finishedSids.count > 32 { finishedSids.removeFirst() }
+        if pendingPushedRinging?.sid == sid { pendingPushedRinging = nil }
+    }
+
+    public func isFinished(sid: String) -> Bool { finishedSids.contains(sid) }
+
+    func pushedCallConnectionChanged(isOnline: Bool) {
+        pushedCallsOnline = isOnline
+        retryPushedRingingIfOnline()
+    }
+
+    private func isRinging(sid: String) -> Bool {
+        guard case .incoming(let call) = state else { return false }
+        return call.sid == sid && !call.isAccepting && !isFinished(sid: sid)
+    }
+
+    private func retryPushedRingingIfOnline() {
+        guard pushedCallsOnline, let event = pendingPushedRinging else { return }
+        // Claim the one retry before its send can suspend or another online
+        // event can arrive. It runs behind the first attempt in the queue.
+        pendingPushedRinging = nil
+        let epoch = generation
+        enqueue { [weak self] in
+            guard let self, self.generation == epoch, self.isRinging(sid: event.sid) else { return }
+            guard self.pushedCallsOnline else {
+                self.pendingPushedRinging = event
+                return
+            }
+            _ = await self.send(epoch: epoch, error: "call ringing failed") {
+                await self.port.sendCallRinging(to: event.from.bare, sid: event.sid)
+            }
         }
     }
 
@@ -161,6 +217,8 @@ import Observation
         sessionTimer?.cancel()
         sessionTimer = nil
         recentlyAbortedSids.removeAll()
+        pendingPushedRinging = nil
+        pushedCallsOnline = false
         acceptInFlight?.outcome.cancel()
         acceptInFlight = nil
         generation += 1
