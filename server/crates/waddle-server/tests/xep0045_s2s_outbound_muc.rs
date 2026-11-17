@@ -21,8 +21,9 @@
 //! occupant without what a client would read as its own server's
 //! statement about its account (carbon and archive wrappers, inbox and pin
 //! payloads, XEP-0511 link cards and link-preview requests, a stanza id in
-//! the account's name); an archive result is kept only from the room's
-//! bare JID, and what it forwards is cleaned the same way.
+//! the account's name); an archive result is kept only on a message from
+//! the room's bare JID that is no groupchat, and what it forwards is
+//! cleaned the same way.
 //!
 //! `home-a.test` runs the S2S router with a recording delivery in place of
 //! WebSocket clients, its tables in an in-memory SQLite database (two

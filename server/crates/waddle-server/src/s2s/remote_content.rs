@@ -19,8 +19,9 @@
 //! `<result/>` messages from the room's bare JID (XEP-0313 §4.2), which a
 //! client accepts only as answers to a query it has open with that entity,
 //! matching the stanza's `from` and the `queryid` (§8.2); they are kept, and
-//! what they forward is cleaned as any nested content is. A `<result/>` from
-//! any other address is removed.
+//! what they forward is cleaned as any nested content is. A result message
+//! is no groupchat, so a `<result/>` on the room's groupchat (its subject,
+//! say), or from any other address, is removed.
 //!
 //! Presence and IQ payloads are not cleaned here: a client reads none of
 //! these payloads from them.
@@ -33,7 +34,7 @@ use waddle_xmpp::xep::{
     is_link_metadata_element, is_link_preview_request_element, NS_INBOX, NS_WADDLE_INBOX,
 };
 use waddle_xmpp_core::mam::MAM_NS;
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 use crate::destination::{ServedDomains, UnservedDestination};
 
@@ -64,7 +65,10 @@ pub(crate) fn sanitize_message(
 ) {
     let archive_results = match source {
         RemoteSource::Account => false,
-        RemoteSource::Room(room) => message.from.as_ref() == Some(&Jid::from(room.clone())),
+        RemoteSource::Room(room) => {
+            message.type_ != MessageType::Groupchat
+                && message.from.as_ref() == Some(&Jid::from(room.clone()))
+        }
     };
     message.payloads.retain(|payload| {
         if payload.is("result", MAM_NS) {

@@ -809,9 +809,10 @@ the account side does for a remote account's message
 and link-preview requests, and every XEP-0359 `<stanza-id/>` whose `by`
 names a domain this deployment serves or cannot be read; the room's own
 `<stanza-id/>`, in its bare JID's name, is kept. A XEP-0313 `<result/>` is
-kept only on a message from the room's bare JID, the archive a query from
-the resource names (below); what it forwards is cleaned as anything a
-payload nests is. Presence from the room is delivered as it comes: a
+kept only on a message from the room's bare JID that is no groupchat, as
+the archive a query from the resource names answers (below; XEP-0313 §4.2,
+and a client takes it only for a query it has open with that address,
+§8.2); what it forwards is cleaned as anything a payload nests is. Presence from the room is delivered as it comes: a
 client reads none of these payloads from presence.
 
 A message a local resource sends to a remote room goes to the S2S router
