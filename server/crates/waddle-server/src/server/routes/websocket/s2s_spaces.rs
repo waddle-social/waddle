@@ -1131,15 +1131,6 @@ impl Asked<'_> {
         };
         let subscriber = Jid::from(self.account.clone());
         let admitted = admitted_now(self.state);
-        // A ban written after the Space was read above is read again under
-        // the Space's lock, where the ban's removal of a subscription waits.
-        let banned = async {
-            self.storage()
-                .affiliation(&self.service, node, &self.account)
-                .await
-                .map(|affiliation| affiliation.is_outcast())
-                .map_err(|error| crate::db::s2s_spaces::SpaceStoreError::Storage(error.to_string()))
-        };
         let recorded = subscriptions
             .record(
                 &self.service,
@@ -1152,7 +1143,6 @@ impl Asked<'_> {
                     now_ms: chrono::Utc::now().timestamp_millis(),
                 },
                 &admitted,
-                banned,
             )
             .await;
         match recorded.as_ref().map(|recording| recording.outcome) {
@@ -1163,21 +1153,33 @@ impl Asked<'_> {
             }
             // The Space was closed to other servers since it was read.
             Ok(SubscriptionRecord::NotFederated) => return self.refuse(no_such_node()),
-            // The account was banned since the Space was read: answered as
-            // a banned account's request is, refused in a public Space and
-            // told nothing of a private one.
-            Ok(SubscriptionRecord::Banned) => {
-                return match space.node.config.access_model {
-                    AccessModel::Open => {
-                        self.refuse(forbidden("You may not subscribe to this Space."))
-                    }
-                    _ => self.refuse(no_such_node()),
-                };
-            }
             Err(_) => return self.refuse(internal()),
         }
         if let Ok(recording) = &recorded {
             self.forget_removed(&recording.removed).await;
+        }
+        // A ban written since the Space was read above is read again now
+        // that the row is committed. A ban is written before its removal of
+        // the banned account's row, so either this finds the ban or that
+        // removal finds the row. A banned account is answered as its
+        // request is when the ban was there first: refused in a public
+        // Space, told nothing of a private one.
+        let banned = self
+            .storage()
+            .affiliation(&self.service, node, &self.account)
+            .await
+            .map(|affiliation| affiliation.is_outcast());
+        if !matches!(banned, Ok(false)) {
+            let _ = subscriptions
+                .remove(&self.service, node, &self.account)
+                .await;
+            return match (banned, space.node.config.access_model) {
+                (Ok(_), AccessModel::Open) => {
+                    self.refuse(forbidden("You may not subscribe to this Space."))
+                }
+                (Ok(_), _) => self.refuse(no_such_node()),
+                (Err(_), _) => self.refuse(internal()),
+            };
         }
         let subscribed = match self
             .storage()

@@ -9,7 +9,8 @@ use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::identity::CanonicalBareJid;
 
 /// A retract of one item of a Space node: the node, the item and whether
-/// the request asked for subscribers to be notified (XEP-0060 §7.2.2.1).
+/// the request asked for subscribers to be notified (XEP-0060 §7.2.2.1,
+/// where a request with `notify` must be notified).
 pub(super) struct SpacesRetract<'a> {
     pub(super) node: &'a str,
     pub(super) item_id: &'a str,

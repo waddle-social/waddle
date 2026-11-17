@@ -21,9 +21,11 @@
 //! remote domain, and those to one Space, are counted one at a time on
 //! every replica. Turning a Space's `federated` setting off and removing
 //! one subscription take the Space's lock too, and a subscription re-reads
-//! the setting and the account's ban under it, so no subscription is
-//! recorded for a Space after its setting went off, nor for an account
-//! after it was banned.
+//! the setting under it, so no subscription is recorded for a Space after
+//! its setting went off. A ban is decided by the caller once the
+//! subscription is committed (see [`SpaceSubscriptions::record`]): no
+//! transaction of this store waits for another connection while it holds
+//! one.
 //!
 //! A subscription lapses [`SUBSCRIPTION_LIFETIME_MS`] after it was last
 //! made: a lapsed row counts against no bound and names no subscriber, and
@@ -38,7 +40,6 @@
 //! `server/docs/planning/s2s-routing-2047.md`.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use jid::BareJid;
@@ -309,9 +310,6 @@ pub enum SubscriptionRecord {
     /// Not recorded: the Space's `federated` setting is not on for the node
     /// created at the time the request named, read under the Space's lock.
     NotFederated,
-    /// Not recorded: the account is banned from the Space, read under the
-    /// Space's lock.
-    Banned,
 }
 
 /// A subscription the store removed while it recorded another: it had
@@ -680,17 +678,20 @@ impl SpaceSubscriptions {
 
     /// Record that `request.account` subscribed to the node `node` of
     /// `service` created at `node_created_at_ms`, within the bounds, while
-    /// the Space's `federated` setting is on for that node and `banned`
-    /// does not find the account banned from it. A subscription the account
-    /// already holds to that node is recorded again with this request's
-    /// evidence, which renews it, and counts against no bound; rows left
-    /// for an earlier node of the name, and lapsed rows of the Space, are
-    /// removed first.
+    /// the Space's `federated` setting is on for that node. A subscription
+    /// the account already holds to that node is recorded again with this
+    /// request's evidence, which renews it, and counts against no bound;
+    /// rows left for an earlier node of the name, and lapsed rows of the
+    /// Space, are removed first.
     ///
-    /// `banned` is awaited under the Space's lock, after the setting is read
-    /// again: a ban is written before the banned account's subscription is
-    /// removed under that lock ([`Self::remove`]), so either this reads the
-    /// ban or that removal finds the row this writes.
+    /// The account's ban, which the PubSub service stores, is not read
+    /// here: the transaction holds its connection and its locks, and reading
+    /// from a store that may share the pool would wait for a second
+    /// connection while holding them. The caller reads it once this
+    /// returns: a ban is written before the banned account's row is removed
+    /// ([`Self::remove`]), so either that read finds the ban, and the caller
+    /// removes the row, or the ban's removal comes after this commit and
+    /// finds the row.
     ///
     /// Only the rows of domains `admitted` admits now hold a place against
     /// the bound on the Space's remote subscribers and against the
@@ -706,7 +707,6 @@ impl SpaceSubscriptions {
         node_created_at_ms: i64,
         request: SubscriptionRequest<'_>,
         admitted: &(dyn Fn(&str) -> bool + Send + Sync),
-        banned: impl Future<Output = Result<bool, SpaceStoreError>> + Send,
     ) -> Result<Recording, SpaceStoreError> {
         let SubscriptionRequest {
             account,
@@ -744,17 +744,6 @@ impl SpaceSubscriptions {
         if !federated {
             tx.rollback().await.map_err(storage)?;
             return Ok(Recording::only(SubscriptionRecord::NotFederated));
-        }
-        match banned.await {
-            Ok(false) => {}
-            Ok(true) => {
-                tx.rollback().await.map_err(storage)?;
-                return Ok(Recording::only(SubscriptionRecord::Banned));
-            }
-            Err(error) => {
-                tx.rollback().await.map_err(storage)?;
-                return Err(error);
-            }
         }
         // Rows of an earlier node of the name named a Space that was
         // deleted, whose PubSub records went with it.
@@ -931,8 +920,8 @@ impl SpaceSubscriptions {
     /// Forget the subscription of `account` to `node` of `service`, under
     /// the Space's lock: a subscription being recorded for the account at
     /// the same time is committed first and removed here, or recorded
-    /// after and decided on what was written before this ran (a ban among
-    /// it, see [`Self::record`]).
+    /// after this ran, and then its caller reads what was written before
+    /// (a ban among it, see [`Self::record`]).
     pub async fn remove(
         &self,
         service: &BareJid,
