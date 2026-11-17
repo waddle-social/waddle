@@ -41,6 +41,8 @@ import type { BuiltinSlashOutcome } from "@/lib/slash-builtins";
 import { rewriteBuiltinSendDoc } from "@/lib/slash-builtin-doc";
 import { pickPresence } from "@/presence/presence-store";
 
+const roomPickerLegend = css({ srOnly: true });
+
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
 
@@ -693,12 +695,11 @@ const cls = {
       @close="showGifPicker = false"
     />
 
-    <div
+    <fieldset
       v-if="roomResults.length > 0"
-      role="group"
-      aria-label="Link a room"
       :class="[composerPopover.root, isTopPinned ? composerPopover.below : composerPopover.above]"
     >
+      <legend :class="roomPickerLegend">Link a room</legend>
       <button
         v-for="(room, index) in roomResults"
         :key="room.jid"
@@ -716,7 +717,7 @@ const cls = {
           :class="composerPopover.hint"
         >{{ room.jid }}</span>
       </button>
-    </div>
+    </fieldset>
 
     <ComposerMentionPopover
       v-if="showMentions && mentionResults.length > 0"

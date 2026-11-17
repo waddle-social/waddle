@@ -5,10 +5,10 @@ const ROOM_JOIN_URI = /^xmpp:((?:[a-z0-9._~!$()*+,;=-]|%[0-9a-f]{2})+)@([a-z0-9.
 
 export function roomJidFromJoinUri(uri: string): string | null {
   const match = ROOM_JOIN_URI.exec(uri);
-  if (!match || match[0] !== uri) return null;
+  if (!match) return null;
   try {
     const localpart = decodeURIComponent(match[1]);
-    if (/[\s\x00-\x1f\x7f"&'\/:<>@]/.test(localpart)) return null;
+    if (/(?:\p{Cc}|\s|["&'/:<>@])/u.test(localpart)) return null;
     return `${localpart}@${match[2].toLowerCase()}`;
   } catch {
     return null;

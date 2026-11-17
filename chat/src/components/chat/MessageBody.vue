@@ -227,6 +227,12 @@ const shouldRenderTextBody = computed(() =>
 );
 const styledBodyRef = ref<HTMLDivElement | null>(null);
 
+watch(styledBodyRef, (body, _previous, onCleanup) => {
+  if (!body || !roomLinks) return;
+  body.addEventListener("click", onBodyClick);
+  onCleanup(() => body.removeEventListener("click", onBodyClick));
+});
+
 async function highlightMessageCodeBlocks() {
   const el = styledBodyRef.value;
   if (!el) return;
@@ -491,7 +497,6 @@ const c = {
       v-if="shouldRenderTextBody"
       ref="styledBodyRef"
       :class="cx(c.rich, compact ? c.compact : c.text, isMeAction && c.me)"
-      @click="onBodyClick"
       v-html="styledHtml"
     />
 
