@@ -111,6 +111,19 @@ pub fn is_owner_only_pep_node(node: &str) -> bool {
         || node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
 }
 
+/// Whether a PEP node is written and administered by its account alone,
+/// so that neither an affiliation row (`owner`, `publisher`,
+/// `publish-only`) nor its publish model extends publishing,
+/// configuration, purging, deletion or affiliation and subscription
+/// management to another entity.
+///
+/// The joined-spaces node is the account's private data (XEP-0223); its
+/// affiliations set refuses such grants, and this keeps any row written
+/// before or around that refusal from acting as one.
+fn is_owner_managed_pep_node(node: &str) -> bool {
+    node == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
+}
+
 /// Whether `entity` is permitted to publish to a node (XEP-0060 §7.1.3).
 pub async fn can_publish(
     storage: &Arc<dyn PubSubStorage>,
@@ -119,6 +132,9 @@ pub async fn can_publish(
     entity: &BareJid,
     is_pep: bool,
 ) -> Result<bool, XmppError> {
+    if is_pep && is_owner_managed_pep_node(node) && !derive_pep_owner(target, entity) {
+        return Ok(false);
+    }
     let aff = effective_affiliation(storage, target, node, entity, is_pep).await?;
     if aff.is_outcast() {
         return Ok(false);
@@ -154,6 +170,9 @@ pub async fn can_administer(
     entity: &BareJid,
     is_pep: bool,
 ) -> Result<bool, XmppError> {
+    if is_pep && is_owner_managed_pep_node(node) && !derive_pep_owner(target, entity) {
+        return Ok(false);
+    }
     let aff = effective_affiliation(storage, target, node, entity, is_pep).await?;
     Ok(matches!(aff, Affiliation::Owner))
 }
