@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "6ee605e3d45ef31f686c92a1b458f1f412b8248c",
+  "baseline_commit": "1a0c240e12010553eb24db524c23b8631b6032af",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -349,7 +349,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "sha256": "6faf62453a79809f1ae28a155a213db614487618df5d205f477a43a62faadb88"
+      "sha256": "31e15b0acdd63e6c0f129760795a6ef580616e9552027ff528ad6c73b919c1bd"
     }
   ],
   "anchors": {
@@ -1165,12 +1165,12 @@
     },
     "hg-muc-listing": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "line": 1304,
+      "line": 1315,
       "text": "async fn rooms_listed_to("
     },
     "hg-space-children-listing": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
-      "line": 1670,
+      "line": 1691,
       "text": "async fn space_children_for_session("
     }
   },
@@ -1231,7 +1231,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "6efef75ff27095d3908200380dafda96d2a2b333809548f59e708101b7e707da",
+    "sha256": "c4ae8ea533ea680d96eea53cf12b96452538131cbc7c17364bf3663c0197164d",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,

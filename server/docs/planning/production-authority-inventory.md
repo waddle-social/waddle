@@ -19,7 +19,7 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
-`6ee605e3d45ef31f686c92a1b458f1f412b8248c` (see the last refresh below); the original
+`1a0c240e12010553eb24db524c23b8631b6032af` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1515,6 +1515,15 @@ thirty-third refresh:
   builds the state with the listings' shared reads; no anchor there moved.
 - The raw scan still holds 1640 records, each token's count unchanged;
   its digest changed because matched lines moved.
+
+The selected evidence was refreshed a thirty-fifth time, through
+`1a0c240e12010553eb24db524c23b8631b6032af`. One reviewed file changed (`disco_items.rs`): a session's
+listing of the MUC service waits longer for its rooms and decides the
+managed rooms' grants within a time of its own once they are read, and an
+asker that waited for a read which ran out of another asker's time asks
+again. It decides each managed room as before. `hg-muc-listing` and
+`hg-space-children-listing` moved with the lines added above them, no
+anchor's text changed, and the raw scan still holds 1640 records.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
