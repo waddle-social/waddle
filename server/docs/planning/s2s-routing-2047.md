@@ -32,6 +32,12 @@ that are open to other servers, read what they list, subscribe to them and
 are notified of changes, and change a Space only as D8 allows
 ([Spaces](#spaces-w7a)).
 
+The MUC fallback slice (W7b) lets a client without Spaces support, local
+or remote, reach every child room of a Space by its plain MUC JID: the MUC
+service's `disco#items` lists the rooms the asker may reach, remote askers
+included, and the `disco#items` of a Space's node lists the rooms the Space
+holds that the asker may be told of ([MUC fallback](#muc-fallback-w7b)).
+
 Nothing here is executed evidence. The evidence is written and compiled but
 not run until verification (D9):
 
@@ -319,6 +325,12 @@ these effects:
   address the requester blocked after sending is completed and then
   dropped: the requester receives nothing. An error this server generated
   bypasses the blocking list.
+
+The `disco#items` answers of the MUC service and of a Space's node list
+rooms ([MUC fallback](#muc-fallback-w7b)). They are answers of the
+operations above, not further ones, and change nothing: they read the
+channel catalog, the live rooms' configuration, the host grants of the
+rooms an enrolled scope manages and the Space's items.
 
 Enabling a further service, or a further operation of one, for remote
 senders is its own reviewed change to `reach` (or, for room traffic, the
@@ -1085,7 +1097,7 @@ request with `item-not-found`, in the condition, type and text of the
 answer for a room that does not exist, so the answer does not tell the two
 apart. The
 requests that are answered alike for every address stay so: a ping of a
-room's bare JID is an empty result, `disco#items` an empty list, a message
+room's bare JID is an empty result, its `disco#items` an empty list, a message
 from a sender without a seat `not-acceptable`, and presence from such a
 sender that asks for no seat is ignored.
 
@@ -1107,7 +1119,8 @@ then is refused as above and removes it.
 | Operation | Addressed to | Answer |
 | --- | --- | --- |
 | `disco#info` | The service or a room | The description local sessions get, reduced to its identities and to the features `disco#info`, `disco#items`, `http://jabber.org/protocol/muc` and a room's XEP-0045 type flags (`muc_*`); no extension form. A room an enrolled scope manages is described to an asker its grants admit and is `item-not-found` to any other. A room that does not exist or is not federated, and any `node`, is `item-not-found`. A description that could not be built is `internal-server-error` (type `wait`), which a peer does not cache as a statement about the address |
-| `disco#items` | The service or a room | An empty list: neither rooms nor occupants are listed to remote askers (XEP-0045 §6.3 and §6.5 allow it). A `node` or an occupant JID is `item-not-found` |
+| `disco#items` | The service | The rooms the asker may reach and be told of, by their plain JIDs, at most 256 in one answer and paged with XEP-0059 ([MUC fallback](#muc-fallback-w7b)). `internal-server-error` (type `wait`) when the listing cannot be built. A query that is not well formed is `bad-request` |
+| `disco#items` | A room | An empty list, the same for every room address: a room's occupants are not listed to remote askers (XEP-0045 §6.5 allows it). A `node` or an occupant JID is `item-not-found` |
 | Ping | The service or a room's bare JID | An empty result |
 | Ping | The sender's own occupant JID | The XEP-0410 self-ping, answered from the sender's seat, the room's grants and its occupancy: a result while joined, `not-acceptable` otherwise, `remote-server-timeout` (the error XEP-0410 §4 has a client take no decision from) while a managed room's grants cannot be read, the room's actor cannot be reached or it does not answer |
 | Ping | Another occupant's JID | `service-unavailable`: relaying it would reach an account (D7) |
@@ -1884,8 +1897,8 @@ as the effect boundary honours any standing (`honoured` in the host):
 | --- | --- |
 | `disco#info` of the service | The identity `pubsub`/`service` and the features `disco#info`, `disco#items` and `http://jabber.org/protocol/pubsub`. The further features XEP-0503 has a Spaces service advertise are not told to remote askers until their use across servers has been shown (gate G21) |
 | `disco#info` of a node | The identity `pubsub`/`leaf` and a `pubsub#meta-data` form with `pubsub#type` (`urn:xmpp:spaces:0`, which is how XEP-0503 recognises a Space) and the title. The owners, the creator, the creation date, the access model and the asker's affiliation are not told: they are accounts and policy of this deployment. `forbidden` for an account banned from a public Space |
-| `disco#items` of the service | The Spaces the asker would be answered about, at most 256 |
-| `disco#items` of a node | An empty list for an open Space: a Space's content is read as PubSub items |
+| `disco#items` of the service | The Spaces the asker would be answered about, of at most 256 federated Spaces, sorted by node and paged with XEP-0059 |
+| `disco#items` of a node | The rooms the Space lists that the asker may be told of (below), as XEP-0060 §5.5 lists published items: the service's address, and the item ID, the room's JID, as the name; at most 256 of the Space's items are read, sorted by item ID and paged with XEP-0059 ([MUC fallback](#muc-fallback-w7b)). `forbidden` for an account that may not read the Space, as for `<items/>` |
 | Ping of the service | An empty result |
 | `<items/>` | The XEP-0402 bookmarks of the rooms the asker may be told of (below), at most 256, without the publisher's address. `forbidden` for an account that may not read the Space. The store is read and nothing is written: a session's read also publishes bookmarks a Space lacks and repairs a room's parent, and a remote principal's read does neither |
 | `<subscribe/>` | For the sender's own account, named by its bare JID or one of its full JIDs: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one. The service keeps one subscription for an account, under its bare JID, as it does for sessions; the answer names that bare JID and notifications are addressed to it. A Space closed to other servers while the request was decided answers `item-not-found`, and neither record is left |
@@ -2224,6 +2237,122 @@ privilege, and then only to addresses that subscribed themselves.
 - An error message a subscriber's server returns for a notification is
   dropped; it does not end the subscription (XEP-0060 §12.3 allows a
   service to).
+
+## MUC fallback (W7b)
+
+XEP-0503 version 0.3.0 (xsf/xeps
+4132c531487fe9450ae90b905b8df950d0d478b2) keeps a Space's rooms ordinary
+XEP-0045 rooms, and ADR-0020 D4 rests third-party interoperability on that:
+a client without Spaces support, local or remote, reaches every child room
+of a Space by its plain MUC JID. Reaching a room needs no code of its own:
+a room is joined, read and discovered at its own address, decided by the
+room's own rules, whichever Space lists it, and nothing is inherited from a
+Space to its rooms. What this slice adds is the discovery that lets such a
+client find the rooms: the MUC service's `disco#items` (XEP-0045 §6.3),
+for remote askers as for sessions, and the `disco#items` of a Space's node,
+which XEP-0503 ("Advertising space membership") names as the way to verify
+that a room is part of a Space.
+
+**The MUC service's rooms (XEP-0045 §6.3).** The service lists a room to
+an asker when all of these hold:
+
+- the room is public: a hidden room (`muc#roomconfig_publicroom` off) is
+  listed to nobody, as §6.3 says;
+- it is no group conversation of this deployment's accounts;
+- for an account at another server, its `federated` setting is on, read
+  from the channel catalog for a room with a catalog row, which the room's
+  configuration keeps in step, and from the room's actor for an instant
+  room. The room's Space adds and removes nothing: a federated room in a
+  Space that is not open to other servers is listed and entered like any
+  other, and a room that is not federated is not listed whatever its
+  Space's setting says (D4);
+- for a room an enrolled host-grant scope manages, the asker's canonical
+  grants allow `view`: for a session, decided without stream evidence, as
+  channel search decides it; for an account at another server, on the
+  evidence of the stream that carried the request, through the
+  evidence-naming form of the gate behind the revocation fence's ticket,
+  as the room's own `disco#info` decides it. A room whose grants cannot be
+  read now is not listed.
+
+Any other room is absent from the listing, as a room that does not exist
+is, so the listing tells nothing of it. A remote asker's listing is built
+from at most 4,096 catalog rows of rooms that are public and open to other
+servers, read by one query, and from the live instant rooms (at most 1,000
+scanned, as for sessions); a room beyond those bounds is not listed to
+remote askers. A session's listing reads every catalog row, within the
+10,000 it read before.
+
+Before this slice the service listed nothing to remote askers. XEP-0045
+§6.3 says a service SHOULD return the full list of the public rooms it
+hosts, and the rooms an account at another server may reach are the public
+ones open to other servers, so the listing follows the SHOULD for those:
+listing them tells an asker nothing a `disco#info` of each room would not.
+Before this slice a managed room was listed to nobody; it is now listed to
+an account that may view it, which is what the room's `disco#info` tells
+that account ([host-grant design](host-grant-authority-2047.md#b2-policy-for-the-surfaces-this-slice-protects-g14-part)).
+
+**A Space's rooms.** The `disco#items` of a Space's node lists the rooms the
+Space holds, each as XEP-0060 §5.5 lists a published item: the service's
+address as `jid`, the item ID, which is the room's JID, as `name`, and no
+`node`. A client verifies that a room it was told of is part of the Space
+by finding the room's JID there. Only bookmarks of rooms are listed: an item
+that is no XEP-0402 `conference`, such as a Space's avatar or banner, is
+left out.
+
+- A session is answered for a Space it may read (as its `<items/>` read
+  is decided) and gets `item-not-found` for any other node, a node that
+  does not exist and the Space of an enrolled scope included;
+  `internal-server-error` (type `wait`) while that cannot be told. Every
+  room bookmark is listed, as the Space's items show it, except a room an
+  enrolled scope manages that the session's grants do not allow it to
+  view. Unlike a read of the items, the listing writes nothing: it does not
+  publish the bookmarks a Space lacks or repair a room's parent.
+- An account at another server is answered as for every request about a
+  node ([Spaces](#spaces-w7a)), and is told of the rooms it may be told of
+  there: rooms of this deployment's MUC service that are open to other
+  servers, and, for a managed room, that its grants admit it to view. At
+  most 256 of the Space's items are read.
+
+**Paging (XEP-0059).** Every listing above is sorted by its key (the room's
+JID for the MUC service, the item ID for a Space's rooms, the node for the
+Spaces service) and answers a `<set/>` request: `max`, `after`, `before`
+(an empty one for the last page) and `index`. An `after` or `before` anchor
+is placed by its order and never looked up, so an anchor that names a room
+the asker is not listed tells nothing of it, and a room removed between
+pages skips nothing. The count and the first item's index are of the
+listing as built for the asker. A remote asker gets at most 256 items in
+one answer whatever `max` asks; a listing that does not fit in one answer
+carries the `<set/>` even when the request had none, as a responder that
+returns a limited result set does (XEP-0059 §1, XEP-0045 §6.3). XEP-0059 is
+read at the same pinned commit. A `<set/>` that is not well formed is
+`bad-request`.
+
+**Evidence.** Written and compiled, not run (D9):
+
+- `crates/waddle-server/tests/xep0030_s2s_inbound_muc_discovery.rs`: the
+  service lists its open rooms and a room no occupants; no room a remote
+  asker may not reach (not federated, hidden, a group conversation) while
+  a session is still told of the rooms its rules list; paging, with the
+  count of the asker's listing and an anchor placed by its order; and a
+  client that walks from the server's items to the service's, finds a
+  Space's room and enters it by its plain JID while the Space is not open
+  to other servers;
+- `crates/waddle-server/tests/xep0045_s2s_inbound_muc.rs`: a managed room
+  listed only to a remote member its grants admit, and to nobody once it
+  is closed to other servers (PostgreSQL);
+- `crates/waddle-server/tests/xep0503_s2s_inbound_spaces.rs`: a Space's
+  node lists the rooms a remote asker may be told of, in pages, and refuses
+  a banned account;
+- `crates/waddle-server/tests/xep0503_s2s_inbound_spaces_host_grant.rs`: a
+  managed room in a Space's node listing only for the member (PostgreSQL);
+- `crates/waddle-server/tests/xep0503_spaces_ws.rs`: a Space's node lists
+  its room to a session, and a session that never asks the Spaces service
+  finds the room in the MUC service's listing and enters it by its plain
+  JID;
+- `crates/waddle-server/tests/xep0045_host_grant_fence.rs`
+  (`host_grant_fence_cases/sinks.rs`): the managed room listed to a member
+  and not to an ungranted account, and the enrolled Space node's children
+  not found (PostgreSQL).
 
 ## Behaviour with S2S off
 
@@ -2618,10 +2747,20 @@ runbook (G24):
   one the room expects (the message's own id for a correction, the room's
   `stanza-id` for a retraction or a reaction) is refused as a session's
   is.
-- **MAM is answered but not advertised** to remote askers, and
-  `disco#items` lists nothing to them: a remote client must be given a
-  room's address. XEP-0313 §7 expects the feature in `disco#info`; like
-  ping on the server domain this waits for gate G21.
+- **MAM is answered but not advertised** to remote askers. XEP-0313 §7
+  expects the feature in `disco#info`; like ping on the server domain this
+  waits for gate G21.
+- **Paging is answered but not advertised.** The MUC service's and a
+  Space's `disco#items` answer XEP-0059 paging for remote askers, and a
+  listing longer than one answer carries the `<set/>` XEP-0045 §6.3 asks
+  for, but `http://jabber.org/protocol/rsm` is not among the features told
+  to remote askers until gate G21 shows it.
+- **A room's Space is not told to remote askers.** XEP-0503 has a room
+  advertise its parent Space in `disco#info` (the `urn:xmpp:spaces:0`
+  feature and form, and `muc#roomconfig_pubsub`). A room's `disco#info` for
+  remote askers carries no extension form and no feature beyond the MUC
+  ones, so a remote client learns a room's Space only from the Space's
+  side; this waits for gate G21 like the other features.
 
 - **Several replicas, one stream per pair.** Each replica dials its own
   outbound stream to a peer, and the connection manager keeps one stream
@@ -2685,7 +2824,15 @@ runbook (G24):
   the publisher's request; a replica's publications wait for that task in
   one queue of 1,024, so a burst of publications to Spaces with many remote
   subscribers delays their notifications, and beyond the queue drops them.
-  Neither read is cached.
+  Neither read is cached. The `disco#items` of a Space's node reads up to
+  256 items and, for each room, whether it is open to other servers and,
+  for a managed room, its grants, as `<items/>` does.
+- **MUC fallback: what one listing reads.** The MUC service's `disco#items`
+  for a remote asker reads up to 4,096 catalog rows in one query, asks the
+  actor of each live instant room (at most 1,000, normally none to a
+  handful) for its configuration, and reads the grants of each managed room
+  among the rows. It is not cached: a remote domain's allowance of 50
+  stanzas a second to the MUC service can ask for that many listings.
 - **Spaces: a notification dials.** A notification for a subscriber whose
   domain has no established stream makes this server dial it, within the
   connection manager's bounds and backoff. A remote account that subscribes
