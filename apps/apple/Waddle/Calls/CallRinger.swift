@@ -46,22 +46,28 @@ final class CallRinger {
             NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
             NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
             NSWindow.didBecomeMainNotification, NSWindow.willCloseNotification,
+            CallSurfaceWindow.didChange,
         ]
-        for name in changes {
-            activity.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                // After this turn: a closing window still counts as visible
-                // while its notification is being delivered.
-                Task { @MainActor in self?.isAppActive = Self.isInFront }
-            })
+        // After this turn: a closing window still counts as visible while
+        // its notification is being delivered.
+        let recheck: @Sendable (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor in self?.isAppActive = Self.isInFront }
         }
+        for name in changes {
+            activity.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main, using: recheck))
+        }
+        // Space changes are announced on the workspace's own centre.
+        activity.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main, using: recheck))
         #endif
     }
 
     #if os(macOS)
-    /// Only a window that shows the call dock counts: Settings does not.
+    /// Only a window that shows the call dock, on the desktop being looked
+    /// at, counts: Settings does not, nor does a window on another Space.
     private static var isInFront: Bool {
         NSApplication.shared.isActive
-            && CallSurfaceWindow.windows.allObjects.contains { $0.isVisible && !$0.isMiniaturized }
+            && CallSurfaceWindow.windows.allObjects.contains { $0.isVisible && !$0.isMiniaturized && $0.isOnActiveSpace }
     }
     #endif
 
@@ -110,6 +116,8 @@ struct CallSurfaceWindow: NSViewRepresentable {
     /// Held weakly, and the window's own identifier is left alone: the
     /// system uses it to restore the window and its frame.
     @MainActor static let windows = NSHashTable<NSWindow>.weakObjects()
+    /// Posted when a window joins: it may open in the middle of a ring.
+    static let didChange = Notification.Name("social.waddle.call-surface-window")
 
     func makeNSView(context: Context) -> NSView { Marker() }
     func updateNSView(_ view: NSView, context: Context) {}
@@ -117,7 +125,9 @@ struct CallSurfaceWindow: NSViewRepresentable {
     private final class Marker: NSView {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if let window { CallSurfaceWindow.windows.add(window) }
+            guard let window else { return }
+            CallSurfaceWindow.windows.add(window)
+            NotificationCenter.default.post(name: CallSurfaceWindow.didChange, object: nil)
         }
     }
 }
