@@ -638,13 +638,15 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     }
     const intent = nextRoomIntent(key);
     const startedGeneration = generation;
+    // The room list is read again only when a bookmark was rewritten: a
+    // reload with nothing changed would only show the same list.
+    let rewritten = false;
     void writeBookmark(key, intent, async () => {
-      if (await turnOffRoomBookmarkAutojoin(context.xmpp, context.own, canonical)) {
-        if (startedGeneration === generation) updateRoom(canonical, { autojoin: false });
-      }
+      rewritten = await turnOffRoomBookmarkAutojoin(context.xmpp, context.own, canonical);
+      if (rewritten && startedGeneration === generation) updateRoom(canonical, { autojoin: false });
     }).then(
-      (wrote) => {
-        if (wrote && startedGeneration === generation) void deps.reloadRooms();
+      () => {
+        if (rewritten && startedGeneration === generation) void deps.reloadRooms();
       },
       () => {
         if (startedGeneration !== generation) return;

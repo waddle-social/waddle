@@ -689,11 +689,13 @@ describe("a room that turned out not to exist", () => {
 
   test("a missing room the user never bookmarked is not bookmarked now", async () => {
     await withXml(async () => {
-      const { fake } = setup();
+      const { fake, reloads } = setup();
       fake.failJoin(ROOM, roomCreatedError());
       await settle();
       expect(fake.sent.some((xml) => xml.includes("<publish "))).toBe(false);
       expect(fake.storedBookmarks.size).toBe(0);
+      // Nothing changed, so the room list is not read again.
+      expect(reloads()).toBe(0);
     });
   });
 
