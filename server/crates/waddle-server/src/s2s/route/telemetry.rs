@@ -94,13 +94,13 @@ pub(super) fn room_request_timed_out() {
 }
 
 /// A remote entity's request for the MUC service's room list was answered
-/// with `resource-constraint`: as many lists as a replica builds at once
-/// were being built.
+/// with `resource-constraint`: as many lists as a replica builds at once,
+/// or as many as one remote domain's requests hold, were being built.
 pub(super) fn service_listing_refused() {
     counter_add!(
         "waddle.s2s.route.room_requests.listings_refused",
         "{stanza}",
-        "Requests of remote principals for the MUC service's room list refused because the replica was building as many as it builds at once.",
+        "Requests of remote principals for the MUC service's room list refused because the replica was building as many as it builds at once, or as many for the asker's domain as one domain may hold.",
         1,
     );
 }

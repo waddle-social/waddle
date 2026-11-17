@@ -777,6 +777,9 @@ struct Inner {
     /// entities, apart from the room shards
     /// ([`hosting::SERVICE_LISTINGS`]).
     service_listings: Arc<Semaphore>,
+    /// How many of those places each remote domain holds
+    /// ([`hosting::SERVICE_LISTINGS_PER_DOMAIN`]).
+    service_listing_domains: Arc<Mutex<HashMap<CanonicalDomain, usize>>>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
 }
@@ -883,6 +886,7 @@ impl S2sRouter {
             room_queues,
             completions: Arc::new(Semaphore::new(options.limits.completions)),
             service_listings: Arc::new(Semaphore::new(hosting::SERVICE_LISTINGS)),
+            service_listing_domains: Arc::default(),
             tasks: TaskTracker::new(),
             shutdown,
         });

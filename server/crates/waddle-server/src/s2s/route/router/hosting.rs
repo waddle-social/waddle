@@ -105,6 +105,11 @@ const RECONCILE_ROOMS: usize = 256;
 /// answered with `resource-constraint`.
 pub(super) const SERVICE_LISTINGS: usize = 4;
 
+/// Of [`SERVICE_LISTINGS`], how many the requests of one remote domain hold
+/// at once, so that one domain's requests never take every place; a request
+/// beyond its domain's share is answered with `resource-constraint`.
+pub(super) const SERVICE_LISTINGS_PER_DOMAIN: usize = 2;
+
 /// How long a leave or an error that could not be placed is kept to be
 /// placed again.
 const PENDING_LEAVE_TTL: Duration = Duration::from_secs(120);
@@ -414,6 +419,27 @@ fn enters(presence: &Presence) -> bool {
 /// hold no seat in the room it addresses, which only the replica that
 /// decides the room can tell; presence that does not carry the `muc`
 /// element enters the room only from such a sender.
+/// One of the places for the MUC service's room lists, held by the task
+/// that builds one for a remote domain; dropping it gives the place back to
+/// the replica and to the domain's share.
+struct ListingPlace {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    domains: Arc<Mutex<HashMap<CanonicalDomain, usize>>>,
+    remote: CanonicalDomain,
+}
+
+impl Drop for ListingPlace {
+    fn drop(&mut self) {
+        let mut domains = lock(&self.domains);
+        if let Some(held) = domains.get_mut(&self.remote) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                domains.remove(&self.remote);
+            }
+        }
+    }
+}
+
 fn kind_of(stanza: &Stanza, unseated: impl FnOnce() -> bool) -> Kind {
     match stanza {
         Stanza::Iq(_) => Kind::Request,
@@ -1688,13 +1714,15 @@ impl Inner {
     /// goes on with its rooms': the host reads the channel catalog and the
     /// grants of the rooms it lists, and asks rooms, which no room's
     /// requests wait behind. At most [`SERVICE_LISTINGS`] are built at
-    /// once; a request beyond them is answered with `resource-constraint`.
+    /// once, at most [`SERVICE_LISTINGS_PER_DOMAIN`] of them for one remote
+    /// domain; a request beyond either is answered with
+    /// `resource-constraint`.
     fn list_service_rooms(self: &Arc<Self>, request: LocalRoomRequest) {
         let pair = Pair {
             local: request.local.clone(),
             remote: request.remote.clone(),
         };
-        let Ok(place) = Arc::clone(&self.service_listings).try_acquire_owned() else {
+        let Some(place) = self.listing_place(&pair.remote) else {
             telemetry::service_listing_refused();
             self.refuse_kind(
                 &pair,
@@ -1709,6 +1737,24 @@ impl Inner {
             router.answer_service_listing(pair, request).await;
             drop(place);
         });
+    }
+
+    /// A place to build one room list for `remote`, within the replica's
+    /// places and the domain's share of them; `None` when either is taken.
+    fn listing_place(&self, remote: &CanonicalDomain) -> Option<ListingPlace> {
+        let mut domains = lock(&self.service_listing_domains);
+        if domains.get(remote).copied().unwrap_or(0) >= SERVICE_LISTINGS_PER_DOMAIN {
+            return None;
+        }
+        let permit = Arc::clone(&self.service_listings)
+            .try_acquire_owned()
+            .ok()?;
+        *domains.entry(remote.clone()).or_default() += 1;
+        Some(ListingPlace {
+            _permit: permit,
+            domains: Arc::clone(&self.service_listing_domains),
+            remote: remote.clone(),
+        })
     }
 
     /// Have the room host answer one request for the service's room list,
