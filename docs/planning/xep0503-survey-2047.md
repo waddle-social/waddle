@@ -55,7 +55,8 @@ fallback, and Movim and Slidge results are recorded without blocking.
   Experimental, Standards Track. The page has no implementations section
   (**read**).
 - The history of `xep-0503.xml` in xsf/xeps has three commits: promotion to
-  Experimental (2025-03-11), the rewrite onto PubSub (0.2.0, 2025-09-16) and
+  Experimental (2025-03-11), the rewrite onto PubSub (0.2.0, dated
+  2025-09-13 in the XEP's revision history and committed 2025-09-16) and
   0.3.0 (authored 2026-05-03). No open pull request touches the file
   (**read**).
 - Version 0.3.0 changes two things relative to 0.2.0: the room `disco#info`

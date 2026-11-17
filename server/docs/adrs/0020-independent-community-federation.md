@@ -591,9 +591,8 @@ Waddle Spaces will conform to XEP-0503 version 0.3.0 (xsf/xeps
 is unchanged from 0.2.0, and the room disco field that 0.3.0 specifies,
 `muc#roomconfig_pubsub`, is the field the current code emits
 ([`muc/roominfo.rs`](../../crates/waddle-xmpp/src/muc/roominfo.rs)). The
-[XEP-0503 module](../../crates/waddle-xmpp/src/xep/xep0503.rs) header named
-0.2.0 when this decision was made; the Spaces slice of the plan corrected it
-to 0.3.0.
+[XEP-0503 module](../../crates/waddle-xmpp/src/xep/xep0503.rs) names
+version 0.3.0 in its header.
 
 - XEP-0503 is experimental. It deliberately defines no access control,
   membership or inheritance for a Space's children, and does not describe a
