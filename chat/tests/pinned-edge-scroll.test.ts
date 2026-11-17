@@ -60,6 +60,68 @@ describe("pinned edge scroller", () => {
     scroller.disconnect();
   });
 
+  test("shares an in-flight virtual pin and lets the timeline follow resizes", async () => {
+    const originalObserver = globalThis.ResizeObserver;
+    let observers = 0;
+    globalThis.ResizeObserver = class {
+      constructor() { observers++; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+    const el = new ScrollHarness();
+    const pending = Promise.withResolvers<boolean>();
+    let scrolls = 0;
+    const scroller = createPinnedEdgeScroller({
+      element: ref(el as unknown as HTMLElement),
+      mode: ref("chat"),
+      virtualScroll: ref(() => {
+        scrolls++;
+        return pending.promise;
+      }),
+    });
+
+    try {
+      const load = scroller.scrollToPinnedEdge({ settle: true });
+      const mount = scroller.scrollToPinnedEdge({ settle: true });
+      pending.resolve(true);
+      expect(await Promise.all([load, mount])).toEqual([true, true]);
+      expect(scrolls).toBe(1);
+      expect(observers).toBe(0);
+    } finally {
+      scroller.disconnect();
+      globalThis.ResizeObserver = originalObserver;
+    }
+  });
+
+  test("ignores an earlier virtual pin after the scroll mode changes", async () => {
+    const el = new ScrollHarness();
+    const started = Promise.withResolvers<void>();
+    const oldPin = Promise.withResolvers<boolean>();
+    const mode = ref<"chat" | "social">("chat");
+    const scroller = createPinnedEdgeScroller({
+      element: ref(el as unknown as HTMLElement),
+      mode,
+      virtualScroll: ref((requestedMode: typeof mode.value) => {
+        if (requestedMode === "social") return false;
+        started.resolve();
+        return oldPin.promise;
+      }),
+    });
+
+    try {
+      const stale = scroller.scrollToPinnedEdge();
+      await started.promise;
+      mode.value = "social";
+      expect(await scroller.scrollToPinnedEdge()).toBe(true);
+      oldPin.resolve(false);
+      expect(await stale).toBe(false);
+      expect(el.scrollTop).toBe(0);
+    } finally {
+      scroller.disconnect();
+    }
+  });
+
   test("temporary disconnect can reattach pinned-state tracking to a new element", async () => {
     const first = new ScrollHarness();
     first.scrollTop = 800;

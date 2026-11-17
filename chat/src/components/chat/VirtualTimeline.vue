@@ -37,6 +37,7 @@ const emit = defineEmits<{
 }>();
 
 const scrollElement = ref<HTMLDivElement | null>(null);
+const preserveTopPinnedHistory = ref(false);
 const hasOlderSentinel = computed(() => props.hasOlder || props.loadingOlder);
 const rowCount = computed(() => props.items.length + (hasOlderSentinel.value ? 1 : 0));
 const sentinelIndex = computed(() => {
@@ -70,6 +71,9 @@ const virtualizer = useVirtualizer(computed(() => ({
   getScrollElement: () => scrollElement.value,
   estimateSize: (index: number) => (index === sentinelIndex.value ? 44 : 112),
   overscan: 8,
+  // In social mode new messages come in above the reader. Keep the
+  // visible row in place when the reader has left the live edge.
+  anchorTo: props.sentinelPosition !== "start" && preserveTopPinnedHistory.value ? "end" : "start",
   getItemKey: (index: number) => {
     const message = itemForVirtualIndex(index);
     return message ? timelineRowKey(message) : "older-history-sentinel";
@@ -141,6 +145,7 @@ async function scrollToMessageId(messageId: string, align: "start" | "center" | 
 const STICK_TOLERANCE_PX = 64;
 let followBottom = false;
 let bottomMode = false;
+let lastScrollTop = 0;
 const listElement = ref<HTMLDivElement | null>(null);
 
 function distanceFromBottom(el: HTMLElement): number {
@@ -149,7 +154,18 @@ function distanceFromBottom(el: HTMLElement): number {
 
 function onScroll(event: Event) {
   const el = scrollElement.value;
-  if (el && bottomMode) followBottom = distanceFromBottom(el) <= STICK_TOLERANCE_PX;
+  if (el && bottomMode) {
+    const scrollTop = el.scrollTop;
+    if (distanceFromBottom(el) <= STICK_TOLERANCE_PX) {
+      followBottom = true;
+    } else if (scrollTop < lastScrollTop) {
+      // A growing row can increase the bottom gap before the resize
+      // observer runs. Keep following unless the reader moves up.
+      followBottom = false;
+    }
+    lastScrollTop = scrollTop;
+  }
+  if (el) preserveTopPinnedHistory.value = props.sentinelPosition !== "start" && el.scrollTop > STICK_TOLERANCE_PX;
   emit("scroll", event);
   maybeLoadOlder();
 }
@@ -173,6 +189,8 @@ onBeforeUnmount(() => followObserver?.disconnect());
 function followEdge(mode: ScrollDirectionMode) {
   bottomMode = !isTopPinnedScrollDirection(mode);
   followBottom = bottomMode;
+  preserveTopPinnedHistory.value = false;
+  lastScrollTop = scrollElement.value?.scrollTop ?? 0;
 }
 
 async function scrollToPinnedEdge(mode: ScrollDirectionMode) {

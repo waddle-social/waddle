@@ -14,6 +14,7 @@ type ScrollTarget = {
   token: number;
   virtualScroll: EdgeScrollFn | null;
 };
+type PinResult = "virtual" | "dom" | false;
 
 function computeIsPinned(el: HTMLElement, mode: ScrollDirectionMode): boolean {
   const scrollTop = typeof el.scrollTop === "number" ? el.scrollTop : 0;
@@ -34,7 +35,7 @@ export function createPinnedEdgeScroller(options: {
   let settleObserver: ResizeObserver | null = null;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let generation = 0;
-  let settleGeneration = 0;
+  let pendingPin: { token: number; result: Promise<PinResult> } | null = null;
 
   const isPinnedAtEdge = ref(true);
 
@@ -100,32 +101,31 @@ export function createPinnedEdgeScroller(options: {
     };
   }
 
-  async function pinTarget(target: ScrollTarget): Promise<boolean> {
+  async function pinTarget(target: ScrollTarget): Promise<PinResult> {
     if (target.virtualScroll && await target.virtualScroll(target.mode)) {
       recomputePinned();
-      return target.token === generation;
+      return target.token === generation ? "virtual" : false;
     }
-    if (target.token !== generation) return false;
+    if (target.token !== generation || !target.element) return false;
 
-    if (!target.element) return false;
     target.element.scrollTop = getPinnedScrollTop(target.element, target.mode);
     recomputePinned();
-    return true;
+    return "dom";
   }
 
-  async function pinCurrent(token: number): Promise<boolean> {
+  async function pinCurrent(): Promise<PinResult> {
     const target = captureTarget();
-    if (target.virtualScroll && await target.virtualScroll(target.mode)) {
-      recomputePinned();
-      return target.token === generation && token === generation;
+    // The archive loader and the timeline mount watcher can request the same pin.
+    if (pendingPin?.token === target.token) {
+      return pendingPin.result;
     }
-    if (target.token !== generation || token !== generation) return false;
-
-    const currentElement = options.element.value;
-    if (!currentElement) return false;
-    currentElement.scrollTop = getPinnedScrollTop(currentElement, options.mode.value);
-    recomputePinned();
-    return true;
+    const result = pinTarget(target);
+    pendingPin = { token: target.token, result };
+    try {
+      return await result;
+    } finally {
+      if (pendingPin?.result === result) pendingPin = null;
+    }
   }
 
   function refreshSettleLock() {
@@ -133,10 +133,9 @@ export function createPinnedEdgeScroller(options: {
     if (!el || typeof ResizeObserver === "undefined") return;
 
     const target = captureTarget();
-    settleGeneration = target.token;
     settleObserver?.disconnect();
     settleObserver = new ResizeObserver(() => {
-      if (settleGeneration !== generation) return;
+      if (target.token !== generation) return;
       void pinTarget(target);
     });
     settleObserver.observe(el);
@@ -153,12 +152,13 @@ export function createPinnedEdgeScroller(options: {
     await nextTick();
     await nextTick();
     if (token !== generation) return false;
-    const didScroll = await pinCurrent(token);
+    const result = await pinCurrent();
     if (token !== generation) return false;
-    if (didScroll && optionsForScroll.settle) {
+    // VirtualTimeline follows size changes after the initial pin.
+    if (result === "dom" && optionsForScroll.settle) {
       refreshSettleLock();
     }
-    return didScroll;
+    return Boolean(result);
   }
 
   watch(
@@ -170,7 +170,8 @@ export function createPinnedEdgeScroller(options: {
     { flush: "sync", immediate: true },
   );
 
-  watch(() => options.mode.value, () => recomputePinned());
+  watch(options.mode, disconnectSettleLock, { flush: "sync" });
+  watch(options.mode, recomputePinned);
 
   function disconnect() {
     disconnectSettleLock();
