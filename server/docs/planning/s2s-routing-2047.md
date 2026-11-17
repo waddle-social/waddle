@@ -2437,7 +2437,12 @@ behaviour of the chat app, for the same runbook):
   discovered home service or a component the home domain lists cannot be
   placed: it is neither asked for its `disco#info`, listed nor joined, and
   waits for a later discovery, retried after 2 seconds and then at doubling
-  intervals up to a minute. Before,
+  intervals up to a minute, each spread by up to a fifth either way. The
+  retry runs only while a room is parked or cannot be placed, and stops
+  after ten tries a minute apart until the next session-ready. Every
+  discovery that reads the home domain's components or identifies the MUC
+  service, a retry's included, updates what the client counts as home.
+  Before,
   such bookmarks were asked for their `disco#info`, which fails with S2S
   off, and were not listed; while the home MUC service was undiscovered a
   room on another domain was taken for a home room, asked for its
@@ -2455,27 +2460,34 @@ behaviour of the chat app, for the same runbook):
 - A join of a room on another domain that the room's host answers by
   creating the room (status 201) is left at once, recorded in the browser
   as a missing room that nothing joins on its own again (a join the user
-  starts is still sent and ends the record, as does any seated join), and
-  the user's bookmark of it, if it joins at sign-in, is rewritten with
+  starts from the communities dialog is still sent and ends the record, as
+  does any seated join; a restored route, the focused room after a
+  reconnect, a retained room and a retry are refused without a request),
+  and the user's bookmark of it, if it joins at sign-in, is rewritten with
   `autojoin` off, once the stream is back if it was down. The record is the
-  account's in that browser, shared by its tabs and kept across sign-outs.
+  account's in that browser, shared by its tabs and kept across reconnects
+  and reloads; signing out clears it.
   The communities dialog shows
   "This room doesn't exist". Before, only the current page stopped joining
   it, and every later sign-in created and left it again.
 - Leaving a room on another domain turns `autojoin` off on the stored
   bookmark whatever this device last read of it; a room without a bookmark
   gets none. When a discovery reads that the home server no longer
-  advertises `urn:waddle:s2s:0`, and that identified the home MUC service
-  and read its catalog, the client leaves every room on another domain it
-  is in or joining; a discovery that could not does not count any room as
-  elsewhere. Before, leaving relied on this device's copy
+  advertises `urn:waddle:s2s:0`, the client leaves every room it has placed
+  on another domain that it is in or joining, and a lost stream rejoins
+  none of them until the home server advertises it again. Only a home MUC
+  service identified by some discovery places a room elsewhere, and a room
+  the last catalog read placed at home stays home. Before, leaving relied
+  on this device's copy
   of the bookmark, and rooms joined while the home server federated stayed
   joined.
 - Media in a message from a room whose host is not known yet (the home
   MUC service is not discovered, and the room is not on the account domain,
   a discovered home service or a component the home domain lists) waits
   for the user to load it, as media
-  from a room on another domain does. Before, it loaded.
+  from a room on another domain does. Before, it loaded. Media from a
+  sender on a discovered home service or listed component (an extension's
+  bot, for one) loads as a home sender's does.
 - An unfollow of a Space on another domain that this device could not
   finish is dropped when the joined-space list shows a follow written
   after it by another device (each write of an entry carries a new random
