@@ -1,6 +1,7 @@
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction } from "@/lib/reply-ux";
+import { searchRoomLinks, type RoomLinkCandidate } from "@/lib/room-links";
 import type { MentionCandidate } from "@/lib/mentions";
 import { parseSlashTrigger } from "@/lib/slash-trigger";
 import {
@@ -36,6 +37,7 @@ export function useComposerAutocomplete(input: {
   /** Underlying TipTap Editor instance (ProseMirror state + chains). */
   getTiptapEditor: () => any;
   mentionCandidates: () => MentionCandidate[];
+  roomCandidates?: () => RoomLinkCandidate[];
   /** Reports the active `@query` ("" when the mention popover closes) so
    * the room can add user-directory results to `mentionCandidates`. */
   searchMentionDirectory?: (query: string) => void;
@@ -48,6 +50,7 @@ export function useComposerAutocomplete(input: {
   runBuiltinSlash: (outcome: BuiltinSlashOutcome) => void;
 }) {
   const showMentions = ref(false);
+  const roomQuery = ref<string | null>(null);
   const showEmoji = ref(false);
   const showSlash = ref(false);
   const slashPrefix = ref("");
@@ -76,6 +79,10 @@ export function useComposerAutocomplete(input: {
     }).slice(0, 8);
   });
 
+  const roomResults = computed(() => roomQuery.value === null
+    ? []
+    : searchRoomLinks(input.roomCandidates?.() ?? [], roomQuery.value));
+
   const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 
   watch(
@@ -98,6 +105,7 @@ export function useComposerAutocomplete(input: {
   );
 
   const activeResults = computed(() => {
+    if (roomQuery.value !== null) return roomResults.value;
     if (showMentions.value) return mentionResults.value;
     if (showEmoji.value) return emojiResults.value;
     if (showSlash.value) return slashCandidates.value;
@@ -105,7 +113,7 @@ export function useComposerAutocomplete(input: {
   });
 
   const autocompleteAction = computed(() =>
-    getComposerAutocompleteAction({
+    roomResults.value.length ? "select-room" : getComposerAutocompleteAction({
       showMentions: showMentions.value,
       mentionCount: mentionResults.value.length,
       showEmoji: showEmoji.value,
@@ -118,6 +126,7 @@ export function useComposerAutocomplete(input: {
   );
 
   function clearAutocomplete() {
+    roomQuery.value = null;
     showMentions.value = false;
     showEmoji.value = false;
     showSlash.value = false;
@@ -150,6 +159,21 @@ export function useComposerAutocomplete(input: {
 
     const pos = selection.from;
     const textBefore = doc.textBetween(0, pos, "\n", "\uFFFC");
+
+    const roomMatch = textBefore.match(/(?:^|\s)#([\p{L}\p{N}_-]*)$/u);
+    if (input.roomCandidates && roomMatch
+      && !tiptapEditor.isActive("code") && !tiptapEditor.isActive("codeBlock") && !tiptapEditor.isActive("link")) {
+      roomQuery.value = roomMatch[1];
+      if (roomResults.value.length > 0) {
+        showMentions.value = false;
+        showEmoji.value = false;
+        showSlash.value = false;
+        selectedIndex.value = 0;
+        triggerRange.value = { from: pos - roomMatch[1].length - 1, to: pos };
+        return;
+      }
+    }
+    roomQuery.value = null;
 
     const mentionMatch = textBefore.match(/(?:^|\s)@(\S*)$/);
     if (mentionMatch) {
@@ -228,6 +252,17 @@ export function useComposerAutocomplete(input: {
     triggerRange.value = null;
   }
 
+  function insertRoomLink(room: RoomLinkCandidate) {
+    const editor = input.getTiptapEditor();
+    if (!editor || !triggerRange.value) return;
+    const range = triggerRange.value;
+    clearAutocomplete();
+    editor.chain().focus().insertContentAt(range, [
+      { type: "text", text: room.label, marks: [{ type: "link", attrs: { href: room.uri } }] },
+      { type: "text", text: " " },
+    ]).run();
+  }
+
   function insertEmoji(emoji: string) {
     const tiptapEditor = input.getTiptapEditor();
     if (!tiptapEditor || !triggerRange.value) return;
@@ -298,6 +333,12 @@ export function useComposerAutocomplete(input: {
   }
 
   function selectAutocompleteResult(action = autocompleteAction.value): boolean {
+    if (action === "select-room") {
+      const room = roomResults.value[selectedIndex.value];
+      if (room) insertRoomLink(room);
+      return true;
+    }
+
     if (action === "select-mention") {
       insertMention(mentionResults.value[selectedIndex.value]);
       return true;
@@ -337,7 +378,7 @@ export function useComposerAutocomplete(input: {
 
   function onKeydown(e: KeyboardEvent) {
     if (!isEditorKeyEvent(e)) return;
-    if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showSlash.value)) {
+    if (activeResults.value.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         e.stopPropagation();
@@ -368,6 +409,7 @@ export function useComposerAutocomplete(input: {
 
   return {
     showMentions,
+    roomResults,
     showEmoji,
     showSlash,
     slashPrefix,
@@ -381,6 +423,7 @@ export function useComposerAutocomplete(input: {
     clearAutocomplete,
     dismissSlash,
     insertMention,
+    insertRoomLink,
     insertEmoji,
     expandSlashCandidate,
     selectAutocompleteResult,

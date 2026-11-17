@@ -481,8 +481,9 @@ export function renderStyledBody(
   body: string,
   markup?: readonly MarkupSpan[],
   references?: readonly MessageReference[],
+  roomHref?: (roomJid: string) => string | null,
 ): string {
-  return renderRichMessageHtml({ body, markup, references });
+  return renderRichMessageHtml({ body, markup, references, roomHref });
 }
 
 export function extensionSurfaceLabel(kind: ExtensionSurfaceKind): string {

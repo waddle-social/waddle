@@ -5,7 +5,7 @@
 // suppresses interactive affordances that belong on the timeline only
 // (extension action buttons).
 //
-import { computed, reactive, ref, nextTick, watch } from "vue";
+import { computed, inject, reactive, ref, nextTick, watch } from "vue";
 import {
   Lock,
   AlertCircle,
@@ -28,6 +28,7 @@ import {
   type ExtensionAnnotation,
   type ExtensionAnnotationAction,
 } from "@/lib/chat-ui";
+import { roomLinksKey } from "@/lib/room-links";
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { parseMeAction } from "@/lib/me-command";
@@ -198,20 +199,39 @@ const isSticker = computed(() => !!props.message.isSticker && imageAttachments.v
 // "* Author action" line. Corrections (XEP-0308) replace `body`, so an
 // edited `/me` message follows the same path.
 const isMeAction = computed(() => parseMeAction(displayBody.value) !== null);
+const roomLinks = inject(roomLinksKey);
+function onBodyClick(event: MouseEvent) {
+  if (!roomLinks || !(event.target instanceof Element)
+    || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const link = event.target.closest<HTMLAnchorElement>("a[data-room-jid]");
+  const roomJid = link?.dataset.roomJid;
+  if (!roomJid) return;
+  event.preventDefault();
+  event.stopPropagation();
+  roomLinks.open(roomJid);
+}
+
 const styledHtml = computed(() =>
   isMeAction.value
     ? renderMeActionHtml({
         body: displayBody.value,
         markup: props.message.markup,
         references: props.message.references,
+        roomHref: roomLinks?.href,
         actor: props.message.author,
       })
-    : renderStyledBody(displayBody.value, props.message.markup, props.message.references),
+    : renderStyledBody(displayBody.value, props.message.markup, props.message.references, roomLinks?.href),
 );
 const shouldRenderTextBody = computed(() =>
   !!displayBody.value && !props.message.extensionBodyFallback,
 );
 const styledBodyRef = ref<HTMLDivElement | null>(null);
+
+watch(styledBodyRef, (body, _previous, onCleanup) => {
+  if (!body || !roomLinks) return;
+  body.addEventListener("click", onBodyClick);
+  onCleanup(() => body.removeEventListener("click", onBodyClick));
+});
 
 async function highlightMessageCodeBlocks() {
   const el = styledBodyRef.value;
