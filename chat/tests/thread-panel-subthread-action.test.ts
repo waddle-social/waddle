@@ -253,7 +253,7 @@ describe("ThreadPanel desktop sub-thread action", () => {
       '<div v-if="replyChildHasNestedThread(message)"',
     );
     expect(replyCard).toContain(':thread-action-thread-id="replyChildThreadId(message)"');
-    expect(replyCard).toContain(":thread-reply-count=\"replyChildThreadCount(message)\"");
+    expect(replyCard).toContain(":thread-reply-count=\"callThreadAnchorReplyCount(message, threadIndex) ?? replyChildThreadCount(message)\"");
 
     const childThreadAction = sourceBlock(
       threadPanelSource,
