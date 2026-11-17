@@ -944,9 +944,9 @@ impl Asked<'_> {
     /// XEP-0503, "Fetching spaces from a spaces service": the Spaces this
     /// asker would be answered about, of the at most [`MAX_LISTED_SPACES`]
     /// Spaces whose `federated` setting is on, sorted by node and paged
-    /// with XEP-0059. When more Spaces than that are on, the answer tells no
-    /// count. A node on the query asks for the Space's children
-    /// ([`Self::children`]).
+    /// with XEP-0059. When more Spaces than that are on, or a Space could
+    /// not be decided now, the answer tells no count. A node on the query
+    /// asks for the Space's children ([`Self::children`]).
     async fn disco_items(&self) -> Vec<Stanza> {
         let Iq::Get { payload, .. } = self.iq else {
             return self.refuse(bad_request());
@@ -964,13 +964,19 @@ impl Asked<'_> {
             return self.refuse(internal());
         };
         // One more than the bound is read to tell whether any was left out.
-        let complete = federated.len() <= MAX_LISTED_SPACES;
+        let mut complete = federated.len() <= MAX_LISTED_SPACES;
         federated.truncate(MAX_LISTED_SPACES);
         let mut items = Vec::new();
         for (node, enabled_for) in federated {
-            // A Space that cannot be decided now is left out of the list.
-            let Ok(Some(space)) = self.space_enabled_for(&node, enabled_for).await else {
-                continue;
+            let space = match self.space_enabled_for(&node, enabled_for).await {
+                Ok(Some(space)) => space,
+                Ok(None) => continue,
+                // A Space that cannot be decided now is left out of the
+                // list, which then tells no count.
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
             };
             if space.affiliation.is_outcast() {
                 continue;
