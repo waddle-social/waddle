@@ -569,6 +569,7 @@ impl Federated {
             {
                 InsertOutcome::Inserted => {}
                 InsertOutcome::QuotaExceeded => return stored,
+                InsertOutcome::RecipientRetired => panic!("{account} is not a retired account"),
             }
         }
         panic!("the offline store of the fixture has a quota");
