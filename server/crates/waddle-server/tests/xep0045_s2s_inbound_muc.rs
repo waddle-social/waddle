@@ -26,7 +26,8 @@
 //! The cases named for a managed room run the same wiring over one replica
 //! of the revocation fixture's deployment (`s2s_inbound_muc_support/managed.rs`):
 //! a remote member enters on its canonical grant and a stranger does not,
-//! messages pass the room's acceptance both ways, and a revoked member is
+//! the service lists the room only to a principal its grants admit to view
+//! it (§6.3), messages pass the room's acceptance both ways, and a revoked member is
 //! removed with status 321, told over S2S and unseated. They need
 //! PostgreSQL only and return early without it; a lane that sets
 //! `WADDLE_TEST_REQUIRE_POSTGRES=1` fails them instead. No SpiceDB or
@@ -81,6 +82,7 @@ const NS_SID: &str = "urn:xmpp:sid:0";
 const NS_REPLY: &str = "urn:xmpp:reply:0";
 const NS_MARKERS: &str = "urn:xmpp:chat-markers:0";
 const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
+const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
 
 fn no_change(_: &mut s2s_inbound_muc_support::Spec) {}
 
@@ -1403,6 +1405,71 @@ async fn managed_room_with_remote_member(
         .await
         .expect("the room's own presence for the remote member");
     (owner, own)
+}
+
+/// The rooms a `disco#items` answer lists, by their addresses.
+fn listed_rooms(answer: &Element) -> Vec<String> {
+    answer
+        .children()
+        .filter(|child| child.is("query", NS_DISCO_ITEMS))
+        .flat_map(Element::children)
+        .filter(|child| child.name() == "item")
+        .filter_map(|item| item.attr("jid").map(str::to_owned))
+        .collect()
+}
+
+/// XEP-0045 §6.3 for a managed room: the service lists it to a remote
+/// member whose canonical grants admit it to view the room, on the
+/// evidence of its stream, and to no stranger, for whom it is as absent as
+/// a room that does not exist; nor to anybody once the room is closed to
+/// other servers and the replica's reuse of its rooms has passed. A client
+/// without Spaces finds the room there by its plain JID.
+#[tokio::test]
+async fn a_managed_room_is_listed_only_to_a_remote_principal_its_grants_admit() {
+    let Some(managed) = Managed::start("s2s_in_listing", no_change).await else {
+        return;
+    };
+    let room = managed.room().to_string();
+    let items = || Element::builder("query", NS_DISCO_ITEMS).build();
+    managed
+        .hosted
+        .peer_sends(remote_get(GUEST_PHONE, MUC, "list-guest", items()))
+        .await;
+    let guest = managed.hosted.answered("list-guest").await;
+    assert_eq!(guest.attr("type"), Some("result"), "{guest:?}");
+    assert!(listed_rooms(&guest).contains(&room), "{guest:?}");
+
+    managed
+        .hosted
+        .peer_sends(remote_get(STRANGER_PHONE, MUC, "list-stranger", items()))
+        .await;
+    let stranger = managed.hosted.answered("list-stranger").await;
+    assert_eq!(stranger.attr("type"), Some("result"), "{stranger:?}");
+    assert!(!listed_rooms(&stranger).contains(&room), "{stranger:?}");
+
+    managed.deployment.replicas[0]
+        .federate(&managed.deployment.grants.scope.channel_id, false)
+        .await;
+    // The replica answers remote listings from what it read of its rooms a
+    // moment ago (at most two seconds), so the closed room leaves the
+    // listing once that has passed.
+    let mut attempt = 0;
+    let closed = loop {
+        let id = format!("list-closed-{attempt}");
+        managed
+            .hosted
+            .peer_sends(remote_get(GUEST_PHONE, MUC, &id, items()))
+            .await;
+        let answer = managed.hosted.answered(&id).await;
+        assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
+        if !listed_rooms(&answer).contains(&room) || attempt == 10 {
+            break answer;
+        }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(!listed_rooms(&closed).contains(&room), "{closed:?}");
+    managed.deployment.close().await;
 }
 
 #[tokio::test]

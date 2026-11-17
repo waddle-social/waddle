@@ -82,13 +82,25 @@ pub(super) fn room_request_overloaded() {
     );
 }
 
-/// The room host did not decide a remote principal's request in time, and
-/// the worker moved on without an answer.
+/// The room host did not decide a remote principal's request in time: the
+/// worker moved on, answering the request as its kind is.
 pub(super) fn room_request_timed_out() {
     counter_add!(
         "waddle.s2s.route.room_requests.timeouts",
         "{stanza}",
         "Requests of remote principals to the MUC service abandoned after the room host's deadline.",
+        1,
+    );
+}
+
+/// A remote entity's request for the MUC service's room list was answered
+/// with `resource-constraint`: as many lists as a replica builds at once,
+/// or as many as one remote domain's requests hold, were being built.
+pub(super) fn service_listing_refused() {
+    counter_add!(
+        "waddle.s2s.route.room_requests.listings_refused",
+        "{stanza}",
+        "Requests of remote principals for the MUC service's room list refused because the replica was building as many as it builds at once, or as many for the asker's domain as one domain may hold.",
         1,
     );
 }

@@ -6,7 +6,8 @@
 //!   to a remote asker only where the room's own host would describe it:
 //!   to a principal its canonical grants admit to view it, decided on the
 //!   evidence of the stream that carried the request. A stranger is not
-//!   told of it, in the Space's items as in the room's own discovery.
+//!   told of it, in the Space's items, in its node's `disco#items` or in
+//!   the room's own discovery.
 //! - The Space node of an enrolled scope is served to nobody: whatever its
 //!   `federated` setting says, it answers as a node that does not exist, in
 //!   every operation a remote principal may ask of a node, with the error a
@@ -114,6 +115,29 @@ fn items(from: &str, id: &str, node: &str) -> Iq {
     }
 }
 
+/// The `disco#items` request of `from` for the Space `node`'s children.
+fn children(from: &str, id: &str, node: &str) -> Iq {
+    Iq::Get {
+        from: Some(jid(from)),
+        to: Some(jid(SPACES)),
+        id: id.to_owned(),
+        payload: Element::builder("query", NS_DISCO_ITEMS)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+            .build(),
+    }
+}
+
+/// The `name` attributes of a `disco#items` result's items.
+fn item_names(answer: &Element) -> Vec<String> {
+    answer
+        .children()
+        .filter(|child| child.is("query", NS_DISCO_ITEMS))
+        .flat_map(Element::children)
+        .filter(|child| child.name() == "item")
+        .filter_map(|item| item.attr("name").map(ToOwned::to_owned))
+        .collect()
+}
+
 async fn ask(managed: &Managed, iq: Iq) -> Element {
     let id = iq.id().to_owned();
     managed.hosted.peer_sends_to(SPACES, iq).await;
@@ -168,6 +192,15 @@ async fn a_managed_rooms_bookmark_is_told_only_to_a_principal_its_grants_admit()
     assert_eq!(untold.attr("type"), Some("result"), "{untold:?}");
     assert!(item_ids(&untold).is_empty(), "{untold:?}");
 
+    // The node's `disco#items` tells the same: the room's JID as an item
+    // name to the guest, and nothing to the stranger.
+    let listed = ask(&managed, children(GUEST_PHONE, "managed-4", LOBBY)).await;
+    assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
+    assert_eq!(item_names(&listed), [room.to_string()]);
+    let unlisted = ask(&managed, children(STRANGER_PHONE, "managed-5", LOBBY)).await;
+    assert_eq!(unlisted.attr("type"), Some("result"), "{unlisted:?}");
+    assert!(item_names(&unlisted).is_empty(), "{unlisted:?}");
+
     // Nor is anybody while the room is not open to other servers.
     managed.deployment.replicas[0]
         .federate(&managed.deployment.grants.scope.channel_id, false)
@@ -175,6 +208,9 @@ async fn a_managed_rooms_bookmark_is_told_only_to_a_principal_its_grants_admit()
     let closed = ask(&managed, items(GUEST_PHONE, "managed-3", LOBBY)).await;
     assert_eq!(closed.attr("type"), Some("result"), "{closed:?}");
     assert!(item_ids(&closed).is_empty(), "{closed:?}");
+    let closed = ask(&managed, children(GUEST_PHONE, "managed-6", LOBBY)).await;
+    assert_eq!(closed.attr("type"), Some("result"), "{closed:?}");
+    assert!(item_names(&closed).is_empty(), "{closed:?}");
     managed.deployment.close().await;
 }
 

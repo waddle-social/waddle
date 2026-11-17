@@ -774,6 +774,13 @@ struct Inner {
     /// per room.
     room_queues: RoomQueues,
     completions: Arc<Semaphore>,
+    /// The places for the MUC service's room lists being built for remote
+    /// entities, apart from the room shards
+    /// ([`hosting::SERVICE_LISTINGS`]).
+    service_listings: Arc<Semaphore>,
+    /// How many of those places each remote domain holds
+    /// ([`hosting::SERVICE_LISTINGS_PER_DOMAIN`]).
+    service_listing_domains: Arc<Mutex<HashMap<CanonicalDomain, usize>>>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
 }
@@ -879,6 +886,8 @@ impl S2sRouter {
             verifications: Mutex::new(HashMap::new()),
             room_queues,
             completions: Arc::new(Semaphore::new(options.limits.completions)),
+            service_listings: Arc::new(Semaphore::new(hosting::SERVICE_LISTINGS)),
+            service_listing_domains: Arc::default(),
             tasks: TaskTracker::new(),
             shutdown,
         });

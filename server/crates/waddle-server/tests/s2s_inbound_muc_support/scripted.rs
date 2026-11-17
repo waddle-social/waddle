@@ -90,6 +90,9 @@ pub struct ScriptedRooms {
     /// Whether the room sends an occupant a message while it answers the
     /// occupant's join.
     greeting: AtomicBool,
+    /// Whether the host marks each request taken, as a room does before a
+    /// durable effect, before it waits for the gate.
+    taking: AtomicBool,
     /// Held while a case wants requests to wait in the host.
     gate: Arc<tokio::sync::RwLock<()>>,
     held: Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
@@ -106,6 +109,13 @@ impl ScriptedRooms {
     /// answered.
     pub fn greet(&self) {
         self.greeting.store(true, Ordering::Release);
+    }
+
+    /// Mark every request taken ([`RoomRequest::taken`]) before it waits
+    /// for [`Self::hold`]'s gate, as a room does when it begins a durable
+    /// effect that then takes longer than the router waits.
+    pub fn take_before_holding(&self) {
+        self.taking.store(true, Ordering::Release);
     }
 
     /// `room` is held by a replica that never answers.
@@ -339,6 +349,9 @@ impl LocalRooms for ScriptedRooms {
             joining: request.joining,
             session: request.seat.as_ref().map(|seat| seat.session),
         });
+        if self.taking.load(Ordering::Acquire) {
+            request.taken.take();
+        }
         let _open = self.gate.read().await;
         let Some(to) = to_of(&request.stanza) else {
             return RoomReplies::none();

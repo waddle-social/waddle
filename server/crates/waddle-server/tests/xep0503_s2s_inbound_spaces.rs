@@ -12,6 +12,10 @@
 //!   answered for an open Space with what a remote asker is told: no
 //!   address of an account of this deployment, and only the rooms that are
 //!   themselves open to other servers.
+//! - "Advertising space membership": the `disco#items` of a Space's node
+//!   lists the same rooms, as XEP-0060 §5.5 lists published items (the
+//!   service's address and the item ID, the room's JID, as its name), paged
+//!   with XEP-0059, so a client verifies that a room is part of the Space.
 //! - Peer admission is decided where the request is decided, under the
 //!   snapshot the replica runs.
 //!
@@ -42,6 +46,7 @@ use xmpp_parsers::stanza_error::DefinedCondition;
 const DEV: &str = "dev";
 const CLOSED: &str = "closed";
 const MISSING: &str = "nowhere";
+const NS_RSM: &str = "http://jabber.org/protocol/rsm";
 
 fn item_nodes(answer: &Element) -> Vec<String> {
     answer
@@ -49,6 +54,40 @@ fn item_nodes(answer: &Element) -> Vec<String> {
         .flat_map(Element::children)
         .filter(|child| child.name() == "item")
         .filter_map(|item| item.attr("node").map(ToOwned::to_owned))
+        .collect()
+}
+
+/// The `(jid, name)` of each item of a `disco#items` result, and whether
+/// any names a node.
+fn listed_items(answer: &Element) -> (Vec<(String, String)>, bool) {
+    let items: Vec<&Element> = answer
+        .children()
+        .filter(|child| child.is("query", NS_DISCO_ITEMS))
+        .flat_map(Element::children)
+        .filter(|child| child.name() == "item")
+        .collect();
+    let pairs = items
+        .iter()
+        .map(|item| {
+            (
+                item.attr("jid").unwrap_or_default().to_owned(),
+                item.attr("name").unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    (pairs, items.iter().any(|item| item.attr("node").is_some()))
+}
+
+/// The item IDs, the rooms' JIDs, a node's `disco#items` result lists.
+fn listed_children(answer: &Element) -> Vec<String> {
+    let (pairs, named_node) = listed_items(answer);
+    assert!(!named_node, "a published item names no node: {answer:?}");
+    pairs
+        .into_iter()
+        .map(|(jid, name)| {
+            assert_eq!(jid, SPACES, "{answer:?}");
+            name
+        })
         .collect()
 }
 
@@ -353,6 +392,18 @@ async fn a_private_space_is_told_only_to_an_asker_it_admits() {
     let read = ask(&federated, request(BOB_PHONE, "items-1", false, items(DEV))).await;
     assert_eq!(read.attr("type"), Some("result"), "{read:?}");
     assert_eq!(item_ids(&read), [room("lounge").to_string()]);
+    let children = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "children-1",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(children.attr("type"), Some("result"), "{children:?}");
+    assert_eq!(listed_children(&children), [room("lounge").to_string()]);
 }
 
 /// "Discovering the content of a space": the bookmarks of the rooms a
@@ -392,6 +443,26 @@ async fn a_space_lists_only_the_rooms_that_are_open_to_other_servers() {
     // The account that listed the room is not named.
     assert!(!String::from(&read).contains("victor@example.com"));
 
+    // "Advertising space membership": the node's `disco#items` lists the
+    // same room, and nothing else the node holds.
+    let children = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "children-2",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(children.attr("type"), Some("result"), "{children:?}");
+    assert_eq!(
+        descendant(&children, "query").and_then(|query| query.attr("node")),
+        Some(DEV)
+    );
+    assert_eq!(listed_children(&children), [room("lounge").to_string()]);
+    assert!(!String::from(&children).contains("victor@example.com"));
+
     // Asking for the closed room's item by id tells nothing more.
     let by_id = ask(
         &federated,
@@ -418,6 +489,133 @@ async fn a_space_lists_only_the_rooms_that_are_open_to_other_servers() {
     .await;
     assert_eq!(by_id.attr("type"), Some("result"), "{by_id:?}");
     assert!(item_ids(&by_id).is_empty());
+}
+
+/// The rooms a Space's node lists are paged with XEP-0059: the count and
+/// the first item's index are of the rooms this asker may be told of.
+#[tokio::test]
+async fn a_spaces_rooms_are_listed_in_pages() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    for (id, open) in [
+        ("alpha", true),
+        ("bravo", true),
+        ("charlie", true),
+        ("backroom", false),
+    ] {
+        channel(&federated, id, open).await;
+        list_in(&federated, DEV, id, None).await;
+    }
+    let paged = |after: Option<&str>| {
+        let mut set = Element::builder("set", NS_RSM)
+            .append(Element::builder("max", NS_RSM).append("2").build());
+        if let Some(after) = after {
+            set = set.append(Element::builder("after", NS_RSM).append(after).build());
+        }
+        Element::builder("query", NS_DISCO_ITEMS)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), DEV)
+            .append(set.build())
+            .build()
+    };
+    let rsm = |answer: &Element, name: &str| {
+        descendant(answer, "set")
+            .and_then(|set| set.get_child(name, NS_RSM))
+            .map(|child| (child.attr("index").map(ToOwned::to_owned), child.text()))
+    };
+
+    let first = ask(&federated, request(BOB_PHONE, "page-1", false, paged(None))).await;
+    assert_eq!(first.attr("type"), Some("result"), "{first:?}");
+    assert_eq!(
+        listed_children(&first),
+        [room("alpha").to_string(), room("bravo").to_string()]
+    );
+    assert_eq!(rsm(&first, "count"), Some((None, "3".to_owned())));
+    assert_eq!(
+        rsm(&first, "first"),
+        Some((Some("0".to_owned()), room("alpha").to_string()))
+    );
+    assert_eq!(rsm(&first, "last"), Some((None, room("bravo").to_string())));
+
+    let bravo = room("bravo").to_string();
+    let second = ask(
+        &federated,
+        request(BOB_PHONE, "page-2", false, paged(Some(&bravo))),
+    )
+    .await;
+    assert_eq!(listed_children(&second), [room("charlie").to_string()]);
+    assert_eq!(
+        rsm(&second, "first"),
+        Some((Some("2".to_owned()), room("charlie").to_string()))
+    );
+}
+
+/// A Space's node lists, to accounts at other servers, the rooms among its
+/// 256 most recently published items; a Space that holds more answers with
+/// a `<set/>` though none was asked for, and tells no count, since what the
+/// bounded read left out is not known.
+#[tokio::test]
+async fn a_spaces_listing_beyond_its_read_tells_no_count() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    let ids: Vec<String> = (0..257).map(|index| format!("room-{index:03}")).collect();
+    for id in &ids {
+        channel(&federated, id, true).await;
+        list_in(&federated, DEV, id, None).await;
+    }
+    let listed = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "beyond-1",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
+    let children = listed_children(&listed);
+    assert_eq!(children.len(), 256);
+    // The oldest item is the one the read left out.
+    assert!(!children.contains(&room(&ids[0]).to_string()));
+    assert!(children.contains(&room(&ids[256]).to_string()));
+    let set = descendant(&listed, "set").expect("the unasked <set/>");
+    assert!(set.get_child("count", NS_RSM).is_none(), "{listed:?}");
+    assert_eq!(
+        set.get_child("first", NS_RSM)
+            .and_then(|first| first.attr("index").map(ToOwned::to_owned)),
+        Some("0".to_owned())
+    );
+}
+
+/// An account banned from a public Space is refused its node's listing,
+/// as a read of its items is.
+#[tokio::test]
+async fn a_banned_account_is_refused_a_spaces_listing() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    channel(&federated, "lounge", true).await;
+    list_in(&federated, DEV, "lounge", None).await;
+    affiliate(&federated, DEV, BOB, Affiliation::Outcast).await;
+    let children = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "banned-children",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(error_condition(&children).as_deref(), Some("forbidden"));
+    let read = ask(
+        &federated,
+        request(BOB_PHONE, "banned-items", false, items(DEV)),
+    )
+    .await;
+    assert_eq!(error_condition(&read).as_deref(), Some("forbidden"));
 }
 
 /// A session's read of a Space publishes the bookmarks its linked rooms

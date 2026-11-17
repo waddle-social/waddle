@@ -1830,6 +1830,7 @@ async fn create_websocket_state(
     let websocket_state = Arc::new(WebSocketState {
         #[cfg(feature = "test-support")]
         sasl2_test_capability: false,
+        room_listings: Default::default(),
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),

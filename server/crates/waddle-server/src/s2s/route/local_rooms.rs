@@ -8,6 +8,8 @@
 //! decided for that principal on the evidence of its stream at each
 //! request ([`RoomRequest::principal`]). Reaching the host admits nothing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,6 +39,36 @@ pub struct RoomRequest {
     /// occupant under the seat's occupancy generation, and says in its
     /// answer whether it did ([`SeatChange`]).
     pub joining: bool,
+    /// Marked by the host just before it begins a durable effect of the
+    /// request ([`Taken::take`]).
+    pub taken: Taken,
+}
+
+/// Whether the host began a durable effect of a request: the commit of a
+/// message to the room, or a change an administration request applies.
+///
+/// The router reads it only when the host did not answer within the
+/// per-item budget, to tell an answer that is safe from one that is not.
+/// A request not taken changed nothing, and is answered as a refusal before
+/// it was taken is. A message taken is not answered: the room may have
+/// accepted it, and the ingress authority, not the router, recovers the
+/// effects of an accepted message, so an error would only invite the
+/// sender to send it again. An IQ taken is answered (RFC 6120 §8.2.3), with
+/// `internal-server-error` saying that it may have been applied. A join is
+/// answered by the seat opened for it and never needs the mark.
+#[derive(Debug, Clone, Default)]
+pub struct Taken(Arc<AtomicBool>);
+
+impl Taken {
+    /// The host begins a durable effect of the request now.
+    pub fn take(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether the host began a durable effect of the request.
+    pub fn is_taken(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 /// What a request did to the seat opened for it.
@@ -92,6 +124,14 @@ impl RoomReplies {
 /// not only by the router's timer, and a slow lookup is not taken for a
 /// silent holder.
 pub const HOLDER_ASK_LIMIT: Duration = Duration::from_millis(4_500);
+
+/// How long a host's answer to a request for the MUC service's room list
+/// (XEP-0045 §6.3) takes at most, the rooms read and every asker's grants
+/// decided. It is well below the router's budget for one request
+/// ([`super::RouterLimits::room_request_timeout`], 5 s by default), so the
+/// host answers with what it decided in time, leaving out a room it could
+/// not decide, before the router answers the request as undecided.
+pub const SERVICE_LISTING_LIMIT: Duration = Duration::from_millis(2_500);
 
 /// Where a request for a room is decided.
 #[derive(Debug)]

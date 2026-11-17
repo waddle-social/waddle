@@ -59,7 +59,7 @@ use crate::destination::{SeatAdoption, ServedService};
 use crate::permissions::host_grant::StreamEvidence;
 use crate::s2s::conn::{SinkVerdict, SinkWait, VerifiedPeerStream, Waited};
 use crate::s2s::route::local_rooms::{
-    CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd,
+    CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd, Taken,
 };
 use crate::s2s::route::placement::{Laned, Offered, Waiting};
 use crate::s2s::route::principal::RemotePrincipal;
@@ -100,6 +100,16 @@ const REFUSALS_PER_REQUEST: f64 = 0.1;
 /// Rooms whose seats one pass checks against the room.
 const RECONCILE_ROOMS: usize = 256;
 
+/// The MUC service's room lists that one replica builds for remote
+/// entities at once, apart from the room shards; a request for one more is
+/// answered with `resource-constraint`.
+pub(super) const SERVICE_LISTINGS: usize = 4;
+
+/// Of [`SERVICE_LISTINGS`], how many the requests of one remote domain hold
+/// at once, so that one domain's requests never take every place; a request
+/// beyond its domain's share is answered with `resource-constraint`.
+pub(super) const SERVICE_LISTINGS_PER_DOMAIN: usize = 2;
+
 /// How long a leave or an error that could not be placed is kept to be
 /// placed again.
 const PENDING_LEAVE_TTL: Duration = Duration::from_secs(120);
@@ -119,7 +129,9 @@ const RECENT_GHOSTS: usize = 4096;
 /// a seat's end is handed to the workers that end seats
 /// ([`serve_seat_ends`]) instead of being waited for here. So a slow room
 /// actor holds back its shard for at most that budget per item, well under
-/// the time a stream waits for a place.
+/// the time a stream waits for a place. A request for the service's room
+/// list is handed to a task of its own ([`Inner::list_service_rooms`]):
+/// the shard only takes it.
 pub(super) async fn serve_local_rooms(router: Arc<Inner>, shard: usize) {
     loop {
         let work = tokio::select! {
@@ -377,6 +389,17 @@ impl Kind {
         matches!(self, Self::Request | Self::Join)
     }
 
+    /// The kind of a stanza from a sender that holds a seat in the room:
+    /// presence that enters the room again is not answered with a refusal,
+    /// which would tell the occupant that it is not in the room while its
+    /// seat stands. Any other kind is unchanged.
+    fn seated(self) -> Self {
+        match self {
+            Self::Join => Self::PresenceChange,
+            kind => kind,
+        }
+    }
+
     /// Whether it counts against its room's share of the queues.
     fn in_room(self) -> bool {
         self != Self::Ending
@@ -396,6 +419,27 @@ fn enters(presence: &Presence) -> bool {
 /// hold no seat in the room it addresses, which only the replica that
 /// decides the room can tell; presence that does not carry the `muc`
 /// element enters the room only from such a sender.
+/// One of the places for the MUC service's room lists, held by the task
+/// that builds one for a remote domain; dropping it gives the place back to
+/// the replica and to the domain's share.
+struct ListingPlace {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    domains: Arc<Mutex<HashMap<CanonicalDomain, usize>>>,
+    remote: CanonicalDomain,
+}
+
+impl Drop for ListingPlace {
+    fn drop(&mut self) {
+        let mut domains = lock(&self.domains);
+        if let Some(held) = domains.get_mut(&self.remote) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                domains.remove(&self.remote);
+            }
+        }
+    }
+}
+
 fn kind_of(stanza: &Stanza, unseated: impl FnOnce() -> bool) -> Kind {
     match stanza {
         Stanza::Iq(_) => Kind::Request,
@@ -413,6 +457,24 @@ fn kind_of(stanza: &Stanza, unseated: impl FnOnce() -> bool) -> Kind {
 
 fn stanza_from(stanza: &Stanza) -> Option<&Jid> {
     replies::addresses(stanza).0
+}
+
+/// Whether `reply` is from the MUC service of the pair's local domain, a
+/// room of it or one of its occupant JIDs: only what the service sends the
+/// entity it answers leaves.
+fn from_service(reply: &Stanza, pair: &Pair) -> bool {
+    stanza_from(reply).is_some_and(|from| {
+        CanonicalDomain::from_domain(from.domain()).is_ok_and(|domain| domain == pair.local)
+    })
+}
+
+/// Whether `request` asks for the MUC service's room list: `disco#items`
+/// of the service's own address, with no node of a room.
+fn lists_service_rooms(request: &LocalRoomRequest) -> bool {
+    matches!(request.operation, RoomOperation::DiscoItems)
+        && replies::addresses(&request.stanza)
+            .1
+            .is_some_and(|to| to.node().is_none() && to.resource().is_none())
 }
 
 fn set_to(stanza: &mut Stanza, to: Jid) {
@@ -1311,6 +1373,10 @@ impl Inner {
         let Some(hosting) = self.hosting.get() else {
             return;
         };
+        if lists_service_rooms(&request) {
+            self.list_service_rooms(request);
+            return;
+        }
         let deadline = tokio::time::Instant::now() + self.limits.room_request_timeout;
         let LocalRoomRequest {
             principal,
@@ -1393,25 +1459,54 @@ impl Inner {
                     }
                 }
             }
+            let taken = Taken::default();
             let handled = hosting.host.handle(RoomRequest {
                 principal: principal.clone(),
                 operation,
                 stanza: stanza.clone(),
                 seat: seat.clone(),
                 joining,
+                taken: taken.clone(),
             });
             let Ok(answer) = tokio::time::timeout_at(deadline, handled).await else {
                 telemetry::room_request_timed_out();
-                // The room may have seated the occupant before the host was
-                // abandoned. A join is answered with an error, which tells
-                // its occupant that it is not in the room, and its seats
-                // end without telling it so again: it was never told that
-                // it entered.
-                if let Some(opened) = seat.filter(|_| joining) {
-                    if let Some(reply) = replies::error_reply(&stanza, self.join_failed()) {
-                        self.offer_room_reply(&pair, reply);
+                match seat {
+                    // The room may have seated the occupant before the host
+                    // was abandoned. A join is answered with an error,
+                    // which tells its occupant that it is not in the room,
+                    // and its seats end without telling it so again: it was
+                    // never told that it entered.
+                    Some(opened) if joining => {
+                        if let Some(reply) = replies::error_reply(&stanza, self.join_failed()) {
+                            self.offer_room_reply(&pair, reply);
+                        }
+                        self.end_seat_untold(opened, SeatEnd::Undeliverable);
                     }
-                    self.end_seat_untold(opened, SeatEnd::Undeliverable);
+                    // The host began a durable effect of the request
+                    // ([`Taken`]): only an IQ is answered, saying that it
+                    // may have been applied.
+                    _ if taken.is_taken() => self.answer_taken(&pair, &stanza),
+                    // Any other request is answered as its kind is, as a
+                    // refusal before it was taken is: an IQ or a message
+                    // that carries something with an error, presence that
+                    // enters the room only from a sender without a seat
+                    // (error presence would tell a seated occupant that it
+                    // is not in the room while its seat stands), and
+                    // nothing else.
+                    Some(_) => self.refuse_kind(
+                        &pair,
+                        &stanza,
+                        kind_of(&stanza, || false).seated(),
+                        self.undecided(operation, &to),
+                    ),
+                    None => {
+                        self.refuse_kind(
+                            &pair,
+                            &stanza,
+                            kind_of(&stanza, || true),
+                            self.undecided(operation, &to),
+                        );
+                    }
                 }
                 if let Some(left) = given_up {
                     self.end_seat_untold(left, SeatEnd::Refused);
@@ -1489,10 +1584,7 @@ impl Inner {
         let replied_by = self.reply_deadline(deadline);
         for mut reply in answer.stanzas {
             // Only what the MUC service sends the entity it answers leaves.
-            let from_service = stanza_from(&reply).is_some_and(|from| {
-                CanonicalDomain::from_domain(from.domain()).is_ok_and(|domain| domain == pair.local)
-            });
-            if !from_service {
+            if !from_service(&reply, &pair) {
                 telemetry::seat_traffic_refused();
                 continue;
             }
@@ -1571,6 +1663,151 @@ impl Inner {
     /// the item's budget.
     fn reply_deadline(&self, deadline: tokio::time::Instant) -> tokio::time::Instant {
         deadline.min(tokio::time::Instant::now() + self.limits.room_reply_wait)
+    }
+
+    /// The answer to a request `operation` for `to` that the room host did
+    /// not decide within the per-item budget. A self-ping (XEP-0410) is
+    /// answered with `remote-server-timeout`, the one error §4 has a client
+    /// take no decision from, as the host answers one it cannot decide: any
+    /// other error would tell a seated occupant that it is not joined.
+    fn undecided(&self, operation: RoomOperation, to: &Jid) -> StanzaError {
+        if matches!(operation, RoomOperation::Ping) && to.resource().is_some() {
+            return replies::error(
+                self.home(),
+                ErrorType::Wait,
+                DefinedCondition::RemoteServerTimeout,
+                "The room could not tell now whether you are joined.",
+            );
+        }
+        replies::error(
+            self.home(),
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "The request could not be decided now; try again later.",
+        )
+    }
+
+    /// Answer a request the host took ([`Taken`]) and did not answer within
+    /// the per-item budget. A message is not answered: the room may have
+    /// accepted it, and the ingress authority recovers the effects of an
+    /// accepted message, so an error would only have its sender send it
+    /// again. An IQ is answered, as every IQ request is (RFC 6120 §8.2.3),
+    /// with `internal-server-error` saying that it may have been applied,
+    /// and not that it may be tried again. Presence is never taken.
+    fn answer_taken(self: &Arc<Self>, pair: &Pair, stanza: &Stanza) {
+        if !matches!(stanza, Stanza::Iq(_)) {
+            return;
+        }
+        let error = replies::error(
+            self.home(),
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "The request may have been applied; its outcome could not be told in time.",
+        );
+        if let Some(reply) = replies::error_reply(stanza, error) {
+            self.offer_room_reply(pair, reply);
+        }
+    }
+
+    /// Build the MUC service's room list (XEP-0045 §6.3) for a remote
+    /// entity on a task of its own, so that the shard that took the request
+    /// goes on with its rooms': the host reads the channel catalog and the
+    /// grants of the rooms it lists, and asks rooms, which no room's
+    /// requests wait behind. At most [`SERVICE_LISTINGS`] are built at
+    /// once, at most [`SERVICE_LISTINGS_PER_DOMAIN`] of them for one remote
+    /// domain; a request beyond either is answered with
+    /// `resource-constraint`.
+    fn list_service_rooms(self: &Arc<Self>, request: LocalRoomRequest) {
+        let pair = Pair {
+            local: request.local.clone(),
+            remote: request.remote.clone(),
+        };
+        let Some(place) = self.listing_place(&pair.remote) else {
+            telemetry::service_listing_refused();
+            self.refuse_kind(
+                &pair,
+                &request.stanza,
+                Kind::Request,
+                self.busy("The room list is busy; try again later."),
+            );
+            return;
+        };
+        let router = Arc::clone(self);
+        self.tasks.spawn(async move {
+            router.answer_service_listing(pair, request).await;
+            drop(place);
+        });
+    }
+
+    /// A place to build one room list for `remote`, within the replica's
+    /// places and the domain's share of them; `None` when either is taken.
+    fn listing_place(&self, remote: &CanonicalDomain) -> Option<ListingPlace> {
+        let mut domains = lock(&self.service_listing_domains);
+        if domains.get(remote).copied().unwrap_or(0) >= SERVICE_LISTINGS_PER_DOMAIN {
+            return None;
+        }
+        let permit = Arc::clone(&self.service_listings)
+            .try_acquire_owned()
+            .ok()?;
+        *domains.entry(remote.clone()).or_default() += 1;
+        Some(ListingPlace {
+            _permit: permit,
+            domains: Arc::clone(&self.service_listing_domains),
+            remote: remote.clone(),
+        })
+    }
+
+    /// Have the room host answer one request for the service's room list,
+    /// within the per-item budget, and queue its answer. A list the host
+    /// does not answer in time is answered with `internal-server-error`
+    /// (type `wait`): the request is never left unanswered.
+    async fn answer_service_listing(self: &Arc<Self>, pair: Pair, request: LocalRoomRequest) {
+        let Some(hosting) = self.hosting.get() else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + self.limits.room_request_timeout;
+        let LocalRoomRequest {
+            principal,
+            operation,
+            stanza,
+            ..
+        } = request;
+        let sender = principal.address().clone();
+        let handled = hosting.host.handle(RoomRequest {
+            principal,
+            operation,
+            stanza: stanza.clone(),
+            seat: None,
+            joining: false,
+            taken: Taken::default(),
+        });
+        let answered = tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => return,
+            answered = tokio::time::timeout_at(deadline, handled) => answered,
+        };
+        let Ok(answer) = answered else {
+            telemetry::room_request_timed_out();
+            let error = replies::error(
+                self.home(),
+                ErrorType::Wait,
+                DefinedCondition::InternalServerError,
+                "The room list could not be built now; try again later.",
+            );
+            self.refuse_kind(&pair, &stanza, Kind::Request, error);
+            return;
+        };
+        let replied_by = self.reply_deadline(deadline);
+        for mut reply in answer.stanzas {
+            if !from_service(&reply, &pair) {
+                telemetry::seat_traffic_refused();
+                continue;
+            }
+            set_to(&mut reply, sender.clone());
+            if !self.queue_room_reply(&pair, reply, replied_by).await {
+                return;
+            }
+        }
     }
 
     /// The answer to a join whose seat could not be opened now.

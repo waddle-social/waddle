@@ -17,8 +17,9 @@ replicas, through `f6eea18f3a360e216b33d689395af8a7d487b8eb`, and with the
 placement of requests, the ends of a seat and the decisions that name a
 seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
-the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, and Spaces over S2S
-through `0ee8556e2eea373a6d7820b525b96f3e2188e540` (see the last refresh below); the original
+the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
+through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, and the MUC fallback listings through
+`6ee605e3d45ef31f686c92a1b458f1f412b8248c` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1531,6 +1532,128 @@ without the durable stream-management authority was removed from
 records there (`WriteTuple`, `EnrolledScopes` and
 `record_host_grant_affiliation`, two each) moved up with the lines removed;
 the scan still holds 1642 records, each unchanged in content.
+
+The thirty-sixth to fortieth refreshes were made on the branch of the MUC
+fallback slice (W7b) before it was merged, each from the one before it on
+that branch and the first from the twenty-ninth; their commits are that
+branch's. They are numbered here after the refreshes above, which were made
+on the integration branch meanwhile.
+
+The selected evidence was refreshed a thirty-sixth time, through
+`62c322f48601d00994d2fa6bc9ee85f7e3655782`, after reviewing the delta of the reviewed files since the
+twenty-ninth refresh. Two reviewed files changed (the room host
+`s2s_rooms.rs` and the Spaces host `s2s_spaces.rs`), one file was added to
+the reviewed set (`handlers/iq/disco_items.rs`), four anchors were added,
+fifteen anchors moved without a change to their text, and no anchor's text
+changed.
+
+- The MUC service's `disco#items` (`s2s-room-listing` added) lists rooms to
+  a remote principal, and the `disco#items` of a Space node
+  (`s2s-space-children` added) lists the rooms the Space holds through the
+  Spaces host's existing child-room rule (`s2s-space-room-visible` moved).
+  Both read and write nothing else. The session handler `disco_items.rs`
+  now reads grants for listings: a room an enrolled scope manages is listed
+  by the MUC service only to a subject whose canonical grants allow `view`,
+  read by the channel binding the enrolled set named, with the request's
+  stream evidence for a remote principal (`hg-muc-listing` added), and a
+  Space node's listing for a session withholds such a room from any other
+  subject and refuses an enrolled Space node (`hg-space-children-listing`
+  added). No writer changed and no grant is issued; only what is disclosed
+  changed, from never listing a managed room to listing it where its own
+  `disco#info` already describes it. The moved anchors in the two hosts
+  (`s2s-room-host`, `s2s-room-archive`, `s2s-room-message`,
+  `s2s-room-federated`, `s2s-room-admin`, `s2s-room-owner`,
+  `s2s-room-placement`, `s2s-unseated-removal`, `s2s-space-host`,
+  `s2s-space-open`, `s2s-space-honoured`, `s2s-space-change`,
+  `s2s-space-notify` and `s2s-space-federated-setting`) moved with the
+  lines added above them.
+- The raw scan holds 1640 records: one more `space_enrolled`, the Space
+  node listing's refusal of an enrolled node in `disco_items.rs`; every
+  other token's count is unchanged.
+
+The selected evidence was refreshed a thirty-seventh time, through
+`46373a1d91f97b475660dde07f4483fb1a52bdf9`. One reviewed file changed (`disco_items.rs`), in a
+comment of the instant-room scan that now says a managed room is listed
+only from its channel row, under its grants; no code changed, no anchor
+moved and the raw scan still holds 1640 records.
+
+The selected evidence was refreshed a thirty-eighth time, through
+`b68747c0924a8b77815b7f957ba46749bba17271`, after reviewing the delta of the reviewed files since the
+thirty-seventh refresh. Four reviewed files changed (the router's room host
+`router/hosting.rs`, the room host `s2s_rooms.rs`, the Spaces host
+`s2s_spaces.rs` and `handlers/iq/disco_items.rs`), no file was added to
+the reviewed set, one anchor's text changed and eighteen anchors moved
+without a change to their text.
+
+- The MUC service's listing decides a managed room as before, by the
+  subject's canonical grants on the request's evidence, read by the
+  channel binding the enrolled set named; it now reads the grants of
+  several rooms at once under one deadline and confirms each one that
+  allowed `view` with `HostGrantGate::still_allows` before the answer is
+  built, leaving out a room it cannot decide in time. The helper that read
+  one room's grants per call (`managed_room_listed`) is gone, so
+  `hg-muc-listing` now names `rooms_listed_to`, which reads the enrolled
+  set and decides the managed rooms. A Space node's listing for a session
+  (`hg-space-children-listing` moved) decides its managed rooms the same
+  way and no longer lists an item without a payload. What the catalog and
+  the rooms' actors say of the rooms, and nothing that depends on an asker,
+  is reused for remote askers for 2 s. No writer changed, no grant is
+  issued, and no room or Space is disclosed to a subject it was not
+  disclosed to before.
+- The router's room host (`s2s-seat-egress`, `s2s-adopted-seats` and
+  `s2s-seat-adoption` moved) hands a remote listing of the service's rooms
+  to a task of its own and answers a request the host did not decide in
+  time as its kind is; it decides nothing for a room. The room host
+  (`s2s-room-listing` and the anchors below it moved) and the Spaces host
+  (`s2s-space-children` and the anchors below it moved; a remote Space
+  node listing no longer lists an item without a payload and tells no
+  count beyond its bounded read) changed only around their listings.
+- The raw scan still holds 1640 records, each token's count unchanged;
+  its digest changed because matched lines moved.
+
+The selected evidence was refreshed a thirty-ninth time, through
+`cc7079cbad9d75b8f702bc9611714240690616d2`. One reviewed file changed (the router's room host
+`router/hosting.rs`): a self-ping the host did not decide in time is
+answered with `remote-server-timeout` rather than
+`internal-server-error`. It decides nothing for a room; three anchors
+(`s2s-seat-egress`, `s2s-adopted-seats` and `s2s-seat-adoption`) moved
+with the lines added above them, no anchor's text changed, and the raw
+scan still holds 1640 records.
+
+The selected evidence was refreshed a fortieth time, through
+`6ee605e3d45ef31f686c92a1b458f1f412b8248c`, after reviewing the delta of the reviewed files since the
+thirty-ninth refresh:
+
+- The router's room host (`router/hosting.rs`; `s2s-seat-egress`,
+  `s2s-carried-request`, `s2s-adopted-seats` and `s2s-seat-adoption`
+  moved) hands the room host a mark it sets before a durable effect, and
+  leaves a request the host marked unanswered when the host did not answer
+  in time, unless it is an IQ, which it answers with
+  `internal-server-error`. It holds at most two of the four places for
+  room lists for one remote domain. It decides nothing for a room.
+- The room host (`s2s_rooms.rs`; `s2s-room-host` and the anchors of the
+  room's surfaces moved) sets that mark just before a message's ingress
+  commit and before an administration, configuration or moderation
+  request that asks for a change is handed to its handler; the handlers
+  decide and write what they did before. The MUC service's listing
+  (`s2s-room-listing` moved) tells no count when it left a room out.
+- The MUC service's listing (`hg-muc-listing` moved) and a Space node's
+  listing for a session (`hg-space-children-listing` moved) decide a
+  managed room as before, by the subject's canonical grants and
+  `HostGrantGate::still_allows`, and now carry what they left out: a
+  session is answered with `internal-server-error` when a room was not
+  decided in time, rather than with a listing that lacks it. What the
+  catalog and the rooms' actors say is read at most once at a time per
+  audience; the read for remote askers names only the catalog rows they
+  may be listed, and a session reads only from a read that started after
+  its request arrived. No grant is read less, none is issued, and no room
+  or Space is disclosed to a subject it was not disclosed to before.
+- The Spaces host (`s2s_spaces.rs`; `s2s-space-host`, `s2s-space-change`,
+  `s2s-space-notify` and `s2s-space-children` moved) tells no count for
+  its listing when a Space could not be decided now. `server/http.rs`
+  builds the state with the listings' shared reads; no anchor there moved.
+- The raw scan still holds 1640 records, each token's count unchanged;
+  its digest changed because matched lines moved.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.

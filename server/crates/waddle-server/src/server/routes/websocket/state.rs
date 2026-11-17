@@ -1496,6 +1496,9 @@ fn canonical_domain_part(domain: &str) -> Option<DomainPart> {
 /// WebSocket route dependencies kept narrower than the full server graph.
 pub struct WebSocketState {
     pub deps: WebSocketDeps,
+    /// The rooms this replica's MUC service may list, read at most once at
+    /// a time for each audience of its `disco#items`.
+    pub(crate) room_listings: super::handlers::iq::RoomListings,
     /// Explicit SASL2 negotiation switch for isolated protocol fixtures.
     /// Production builds cannot set this field, and test fixtures default it
     /// off unless they opt into the dedicated SASL2 helper.

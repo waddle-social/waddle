@@ -910,6 +910,77 @@ async fn a_decision_with_stream_evidence_is_fenced_like_any_other() {
     fixture.close().await;
 }
 
+/// A room listing decides each managed room's `view` and confirms the
+/// decision just before it answers (`HostGrantGate::still_allows`). While
+/// the decision's fence ticket is current the decision itself is
+/// confirmed; once the replica has installed a newer generation of the
+/// scope, the grants are read again, so an account whose grant was revoked
+/// meanwhile is refused and one that still holds its grant is allowed, on
+/// a remote stream's evidence as on a session's.
+#[tokio::test]
+async fn a_stale_view_decision_is_confirmed_against_the_grants_read_now() {
+    let principals = Snapshot::trusting().principals().await;
+    let Some(fixture) = GrantFixture::active_under("hg_w7b_stale_view", principals.clone()).await
+    else {
+        return;
+    };
+    for account in [REMOTE_MEMBER, SERVED_CAROL] {
+        grant(
+            &fixture,
+            account,
+            RoomAffiliation::Member,
+            &issuance_policy(&[]),
+        )
+        .await;
+    }
+    let scopes = EnrolledScopes::watch(fixture.store.clone());
+    assert!(scopes.wait_loaded(Duration::from_secs(5)).await);
+    let gate = HostGrantGate::with_enrolled_scopes(fixture.store.clone(), scopes);
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(&fixture.store, &principals)
+            .await
+            .expect("attachment")
+    ));
+    let RoomGate::Managed(decided) = gate.room(RoomBinding::Room(&fixture.scope.room)).await else {
+        panic!("the managed room was not decided");
+    };
+    let view = HostGrantAction::View;
+    let session = PrincipalEvidence::NoStream;
+    assert!(decided.allows_as(&bare(REMOTE_MEMBER), &public_pkix(), view));
+    assert!(decided.allows_as(&bare(SERVED_CAROL), &session, view));
+    assert!(
+        gate.still_allows(&decided, &bare(REMOTE_MEMBER), &public_pkix(), view)
+            .await
+    );
+
+    // The remote member's grant is revoked after the listing decided it.
+    fixture
+        .set(OWNER, REMOTE_MEMBER, RoomAffiliation::None)
+        .await
+        .expect("revoke");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while decided.fence.is_current() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replica did not install the revoke"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !gate
+            .still_allows(&decided, &bare(REMOTE_MEMBER), &public_pkix(), view)
+            .await,
+        "a revoked member was confirmed from a stale decision"
+    );
+    assert!(
+        gate.still_allows(&decided, &bare(SERVED_CAROL), &session, view)
+            .await,
+        "a member that holds its grant was refused"
+    );
+    drop(gate);
+    fixture.close().await;
+}
+
 #[tokio::test]
 async fn work_from_a_domain_no_longer_admitted_is_refused() {
     let Some(fixture) = GrantFixture::active("hg_w5e_admission").await else {

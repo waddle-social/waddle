@@ -147,11 +147,11 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0410_s2s_self_ping` (5) | W6b, W6c | loopback | Run 5/5, run9 S2S head2 log |
 | `s2s_stream_end` (12) | W6b | loopback | Run 12/12, run9 S2S head2 log |
 | `xep0280_remote_room_carbons_ws` (7) | W6b | loopback (production `/ws` router in process) | Run 7/7, run9 S2S head2 log |
-| `xep0045_s2s_inbound_muc` (32) | W6a | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and five cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration) | Run 32/32, run9 S2S head2 log |
+| `xep0045_s2s_inbound_muc` (33) | W6a, W7b | loopback (production `/ws` router, S2S router and connection manager in process); in-memory SQLite, and six cases on PostgreSQL 17 that skip without `WADDLE_TEST_POSTGRES_URL` (the managed room: a member entering, a revoked member, a room that is not federated, a remote admin's affiliation change through the store, a member refused administration, the room listed only to its member) | Not run on this tree (W7b added `a_managed_room_is_listed_only_to_a_remote_principal_its_grants_admit`, which asks again until the replica's 2 s reuse of its rooms has passed for the room closed to other servers); the other 32 ran 32/32 in the run8 S2S rerun2 log |
 | `xep0045_s2s_inbound_muc_replicas` (9) | W6a | loopback; two replicas in one process, each with its own in-memory SQLite, S2S router and connection manager, and a carrier in place of the cluster's room claims and relay. Three cases hand the holder stanzas with what a dialback stream, or a public-CA certificate, would have proved. Compiled with and without `clustering` | Run 9/9, run9 S2S head2 log; 9/9 with `clustering`, run9 clustering final log |
-| `xep0045_s2s_inbound_muc_router` (31) | W6a | loopback; the production S2S router and connection manager with a scripted room host, a seat table whose inserts a case can hold, and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4.5 s; two bound another account's answer at 2 s behind one account's flood; one waits up to 15 s for a kept leave to be placed again, and one runs 14 s to pass a sweep of 12 s. The case for the lifecycle's stop wires the router and connection manager to a stop token as the server does | Run 31/31, run9 S2S head2 log; 31/31 with `clustering`, run9 clustering final log |
+| `xep0045_s2s_inbound_muc_router` (34) | W6a, W7b | loopback; the production S2S router and connection manager with a scripted room host, a seat table whose inserts a case can hold, and two remote domains (`s2s_inbound_muc_support/scripted.rs`); in-memory SQLite. Several cases depend on timers of 50 ms to 4.5 s; two bound another account's answer at 2 s behind one account's flood; one waits up to 15 s for a kept leave to be placed again, and one runs 14 s to pass a sweep of 12 s. The case for the lifecycle's stop wires the router and connection manager to a stop token as the server does. W7b's cases hold the host for 1 s budgets: one asserts that a room's request reaches the host within 800 ms of five room lists, one that a message the host marked taken is still unanswered 1 s after its budget | Not run on this tree (W7b added `a_room_list_or_request_the_host_does_not_decide_in_time_is_still_answered`, `one_domain_holds_at_most_two_of_the_places_for_room_lists` and `a_request_the_host_took_and_did_not_answer_in_time_is_answered_as_taken`, and made `a_slow_room_holds_no_stream_and_ends_no_seat` count only `resource-constraint` refusals as the immediate ones and expect every request answered); its 31 earlier cases, that one before the change, ran 31/31 in the run8 S2S rerun2 log and 31/31 with `clustering` in the run8 clustering rerun2 log |
 | `xep0313_s2s_inbound_mam` (5) | W6a | loopback; in-memory SQLite, and one case on PostgreSQL 17 that skips without `WADDLE_TEST_POSTGRES_URL` | Run 5/5, run9 S2S head2 log |
-| `xep0030_s2s_inbound_muc_discovery` (7) | W6a | loopback; in-memory SQLite | Run 7/7, run9 S2S head2 log |
+| `xep0030_s2s_inbound_muc_discovery` (16) | W6a, W7b | loopback; in-memory SQLite; one case holds the process's metrics lock and reads the listing build counter, and wedges a room actor for about 3 s | Not run on this tree (W7b replaced `disco_items_lists_neither_rooms_nor_occupants_to_remote_askers` with `the_service_lists_its_open_rooms_and_a_room_lists_no_occupants` and added `the_service_lists_no_room_a_remote_asker_may_not_reach`, `the_room_list_is_paged_for_a_remote_asker`, `the_room_list_pages_backward_and_from_an_index_for_a_remote_asker`, `an_anchor_naming_an_unlisted_room_is_answered_as_one_naming_no_room`, `a_room_list_beyond_one_answer_carries_its_set_unasked` (257 catalog rows), `rooms_a_remote_asker_may_not_reach_take_no_place_in_its_read` (12,000 rows), `a_room_list_beyond_its_read_tells_no_count` (4,097 rows), `a_room_not_read_in_time_leaves_a_remote_listing_without_count_and_fails_a_session` and `a_client_without_spaces_finds_a_spaces_room_and_enters_it_by_its_plain_jid`); the W6a cases ran 7/7 in the run8 S2S rerun2 log |
 | `xep0085_s2s_inbound_chat_states` (4) | W6a | loopback; in-memory SQLite. One case waits 2 s for a rate to refill | Run 4/4, run9 S2S head2 log |
 | `xep0115_s2s_inbound_caps` (1) | W6a | loopback; in-memory SQLite | Run 1/1, run9 S2S head2 log |
 | `xep0308_s2s_inbound_corrections` (2) | W6a | loopback; in-memory SQLite | Run 2/2, run9 S2S head2 log |
@@ -179,9 +179,9 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0308_s2s_account_corrections_ws` (3) | W6d | as `s2s_account_traffic_ws` | Run 3/3, run9 S2S head2 log |
 | `xep0353_s2s_account_call_threads_ws` (6) | W6d | as `s2s_account_traffic_ws`; five cases seed the replica's call state through test-support helpers, one of them to its capacity (4096 offers) | Run 6/6, run9 S2S head2 log |
 | `xep0511_s2s_account_link_metadata_ws` (5) | W6d | as `s2s_account_traffic_ws` | Run 5/5, run9 S2S head2 log |
-| `xep0503_s2s_inbound_spaces` (9) | W7a | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Run 9/9, run9 S2S head2 log |
+| `xep0503_s2s_inbound_spaces` (12) | W7a, W7b | loopback; in-memory SQLite; the account-traffic support serving `spaces.example.com` to the peer | Not run on this tree (W7b added `a_spaces_rooms_are_listed_in_pages`, `a_banned_account_is_refused_a_spaces_listing` and `a_spaces_listing_beyond_its_read_tells_no_count` (257 rooms and bookmarks), and a node listing to two cases); the W7a cases ran 9/9 in the run8 S2S rerun2 log |
 | `xep0060_s2s_inbound_spaces_pubsub` (22) | W7a | as `xep0503_s2s_inbound_spaces` | Run 22/22, run9 S2S head2 log |
-| `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Run 4/4, run9 S2S head2 log |
+| `xep0503_s2s_inbound_spaces_host_grant` (4) | W7a, W7b | PostgreSQL; loopback; every case returns early without `WADDLE_TEST_POSTGRES_URL` and fails under `WADDLE_TEST_REQUIRE_POSTGRES=1` | Not run on this tree (W7b added the node listing to `a_managed_rooms_bookmark_is_told_only_to_a_principal_its_grants_admit`); ran 4/4 in the run8 S2S rerun2 log before |
 | `xep0503_s2s_outbound_spaces_ws` (4) | W7a, integration | as `s2s_account_traffic_ws`, the peer also serving `spaces.home-b.test` and `conference.home-b.test` | Run 4/4, run9 S2S head2 log (one case added after the W6d merge: a Space's event notification loses what only the account's server states, through the shared sanitizer) |
 | `spaces_privileged_issuance` (10) | W7a | none (in-memory SQLite, the local permission backend; one case loads an S2S snapshot through the production loader from temporary files) | Run 10/10, run9 S2S head2 log |
 | `admin_spaces_ws` (edited, 22) | W7a | TestServer process | Run 22/22, run9 S2S head2 log (one case added: a privileged role refused for an account at another server) |
@@ -206,7 +206,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run9 host-grant log |
 | `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run9 host-grant log |
 | `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run9 host-grant log |
-| `xep0045_host_grant_fence` (29 in 2 modules) | W5c, integration, W5d | PostgreSQL 17; loopback | Run 29/29, run9 host-grant log |
+| `xep0045_host_grant_fence` (31 in 2 modules) | W5c, integration, W5d, W7b | PostgreSQL 17; loopback | Not run on this tree (W7b changed `sinks::the_enrolled_space_and_the_managed_room_are_not_described_by_the_services` and renamed it `sinks::the_enrolled_space_is_not_described_and_the_managed_room_is_listed_only_to_a_member`: the MUC service lists the managed room to a member and not to an ungranted account, and the enrolled Space node's `disco#items` is not found; it added `sinks::a_plain_spaces_listing_names_a_managed_room_only_to_a_member` and `sinks::a_managed_room_whose_grants_cannot_be_read_is_left_out_of_the_listings`, which also expects both listings to tell no count); ran 29/29 in the run8 host-grant rerun1 log before |
 | `host_grant_enrolled_set` (9) | W5c, integration | PostgreSQL 17 | Run 9/9, run9 host-grant log |
 | `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run9 host-grant log |
 | `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run9 host-grant log |
@@ -220,7 +220,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `xep0198_account_retirement_ws` (4) | W6d | loopback (production `/ws` router in process, in-memory test state); one case attaches the offline store startup attaches to the test state's database, reads the durable authority's retained frames and runs the recovery of ingress custody through a test-support helper | Run 4/4, run9 S2S head2 log |
 | `xep0060_space_fanout_fence` (2) | W5d | PostgreSQL 17 (the #2056 control) | Run 2/2, run9 host-grant log |
 | `xep0410_host_grant_self_ping` (2) | W5d | PostgreSQL 17; loopback | Run 2/2, run9 host-grant log |
-| `host_grant_remote_principals` (16; 3 `#[ignore]`) | W5e, integration, W6a | PostgreSQL 17; SpiceDB for the ignored cases | Run 16/16, run9 host-grant log |
+| `host_grant_remote_principals` (17; 3 `#[ignore]`) | W5e, integration, W6a, W7b | PostgreSQL 17; SpiceDB for the ignored cases | Not run on this tree (W7b added `a_stale_view_decision_is_confirmed_against_the_grants_read_now`); the other 16 ran 16/16 in the run8 host-grant rerun1 log |
 | `spicedb_architecture_guard` (edited, 4) | W5o | none (reads source; names SpiceDB variables only in messages) | Not run |
 | `ingress_relation_guard_lab` (edited, 8) | W5b | PostgreSQL (17 for the definer API pilot); skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
 | `migration_owner_lab` (edited, 5) | W5b | PostgreSQL; skips without `WADDLE_TEST_POSTGRES_URL` | Not run |
@@ -236,7 +236,7 @@ the Rust library unit tests of `waddle-server`, `bun test` for `chat`, or the
 | `rfc6121_roster_ws` (edited, 12) | W5i | TestServer process | Not run |
 | `xep0198_refused_stanza_ack_ws` (1) | W5i | TestServer process | Run 1/1, run9 S2S head2 log |
 | `xep0492_dm_bookmarks_ws` (edited, 6) | W5i | none | Not run |
-| `xep0503_spaces_ws` (edited, 11) | W5i, W7a | TestServer process | Run 11/11, run9 S2S head2 log (W7a added two cases: a session's Space and channel under the startup issuance policy, and `spaces:delete` destroying only the rooms whose parent the Space is) |
+| `xep0503_spaces_ws` (edited, 14) | W5i, W7a, W7b | TestServer process | Not run on this tree (W7b added `a_space_node_lists_its_rooms_and_a_client_without_spaces_enters_one`, `a_space_node_a_session_may_not_read_is_listed_as_one_that_does_not_exist` and `a_session_pages_a_space_nodes_rooms`); the other 11 ran 11/11 in the run8 S2S rerun2 log (W7a added two cases: a session's Space and channel under the startup issuance policy, and `spaces:delete` destroying only the rooms whose parent the Space is) |
 
 ### waddle-client-session
 
@@ -340,6 +340,34 @@ parent repair from a link (`websocket/tests/muc.rs`).
 | Test targets listed | 133 (105 integration targets, 26 library test modules, 2 chat test files) |
 | Run, with a cited log | 84 targets, 1,176 cases, all passed in their latest cited run |
 | Not run | 49 targets (26 of them library modules) |
+
+W7b (the MUC fallback) changed eight targets that had run, which are
+listed as not run on this tree: `xep0030_s2s_inbound_muc_discovery`,
+`xep0045_s2s_inbound_muc`, `xep0045_s2s_inbound_muc_router`,
+`xep0503_s2s_inbound_spaces`, `xep0503_s2s_inbound_spaces_host_grant`,
+`xep0503_spaces_ws`, `xep0045_host_grant_fence` and
+`host_grant_remote_principals`; it added no target. It added
+`Hosted::catalogued_room` to `s2s_inbound_muc_support`, and a knob that
+marks requests taken to the scripted room host, which every target that
+includes the support compiles with. It changed the production paths of
+the MUC service's `disco#items` for sessions (a managed room is listed to
+an account whose grants allow `view`; the catalog and live rooms are read
+once at a time for the sessions that arrived before the read started; a
+room not read or decided in time is answered with
+`internal-server-error`, and a listing that left a room out tells no
+count) and of a Space node's `disco#items` for sessions (the Space's rooms
+are listed where an empty list was answered), so the targets that
+exercise them should run again in verification although their cases did
+not change: `admin_channels_ws`, `group_dm_ws`,
+`xep0030_discovery_destination_ws`, the `websocket::tests::muc` and
+`websocket::tests::iq` library modules, and the local Spaces suites of the
+run8 S2S log. It also changed the router's answer to any request the room
+host did not decide within the per-item budget (answered as its kind is,
+where an IQ or a message was dropped, except a message the host took,
+which stays unanswered), bounded one domain's share of the room list
+places, and moved the service's room list off the room shards, so
+`xep0045_s2s_inbound_muc_replicas` and `clustering_remote_room_request`
+should run again with `clustering` too.
 
 W7a added six targets, listed `admin_spaces_ws` for the case it added
 there, added two cases to `xep0503_spaces_ws` and one to `s2s_reachability`.
@@ -603,6 +631,20 @@ implemented unless the text says so.
 
 ### Routing design (`s2s-routing-2047.md`)
 
+- MUC fallback (W7b), written and not run: the MUC service's
+  `disco#items` lists to remote askers the rooms that are public, open to
+  other servers and no group conversation, and a managed room only to a
+  principal its grants admit to view it; a Space node's `disco#items` lists
+  the rooms the Space holds that the asker may be told of; listings page
+  with XEP-0059 and tell no count once they left a room out; a session is
+  refused rather than answered with a listing that lacks a room not read
+  in time. Left open: `http://jabber.org/protocol/rsm` and a room's
+  parent Space are not told to remote askers in `disco#info` (gate G21); a
+  remote listing reads at most 4,096 catalog rows and a Space's at most 256
+  items; a listing's grant decisions are taken before the answer is sent
+  and not asked again after (as for the other room and Space listings); a
+  remote Space node listing still tells its count when a room's openness
+  or grants could not be read.
 - Spaces (W7a), written and not run: the Spaces service is reached for the
   operations reviewed for a remote principal, a Space only while its
   `federated` setting is on, and event notifications leave for the
