@@ -5,6 +5,13 @@ use super::{
     NotificationThreadId, StanzaId,
 };
 
+/// Message-intrinsic invitation data, independent of scheduler timestamps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationCall {
+    pub session_id: xmpp_parsers::jingle::SessionId,
+    pub video: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationCandidate {
     pub(super) recipient_bare_jid: BareJid,
@@ -13,6 +20,7 @@ pub struct NotificationCandidate {
     pub(super) thread_id: NotificationThreadId,
     pub(super) archive_stanza_id: StanzaId,
     pub(super) class: NotificationClass,
+    pub(super) call: Option<NotificationCall>,
     pub(super) reason: NotificationReason,
     pub(super) policy_error_count: i64,
     /// XEP-0513 `<noping/>` mention hint, message-frozen at T0. When
@@ -159,7 +167,35 @@ impl NotificationCandidate {
             last_message_body: None,
             reaction: hints.reaction,
             delivery_id: None,
+            call: None,
         })
+    }
+
+    pub fn call_with_hints(
+        recipient_bare_jid: BareJid,
+        sender_jid: Jid,
+        archive_stanza_id: StanzaId,
+        call: NotificationCall,
+        hints: NotificationMessageHints,
+    ) -> Result<Self, NotificationOutboxError> {
+        if call.session_id.0.is_empty() {
+            return Err(NotificationOutboxError::InvalidCallData);
+        }
+        let mut candidate = Self::direct_message_with_hints(
+            recipient_bare_jid,
+            sender_jid,
+            archive_stanza_id,
+            false,
+            hints,
+        )?;
+        candidate.class = NotificationClass::Call;
+        candidate.reason = NotificationReason::OfflineCall;
+        candidate.call = Some(call);
+        Ok(candidate)
+    }
+
+    pub fn call(&self) -> Option<&NotificationCall> {
+        self.call.as_ref()
     }
 
     pub fn groupchat(
@@ -206,7 +242,9 @@ impl NotificationCandidate {
                 NotificationReason::GroupchatActiveChannelMention
             }
             NotificationClass::NotifyAll => NotificationReason::GroupchatNotifyAll,
-            NotificationClass::DirectMessage | NotificationClass::DirectMessageMention => {
+            NotificationClass::DirectMessage
+            | NotificationClass::DirectMessageMention
+            | NotificationClass::Call => {
                 return Err(NotificationOutboxError::InvalidClass(
                     class.as_db_value().to_string(),
                 ));
@@ -227,6 +265,7 @@ impl NotificationCandidate {
             last_message_body: None,
             reaction: hints.reaction,
             delivery_id: None,
+            call: None,
         })
     }
 
@@ -240,7 +279,8 @@ impl NotificationCandidate {
     /// same hint precedence again when resolving the [`RichSummary`]
     /// (defense in depth + the XEP-defined T1 decision point).
     pub fn with_last_message_body(mut self, body: Option<String>) -> Self {
-        self.last_message_body = if self.no_store || self.no_permanent_store {
+        self.last_message_body = if self.no_store || self.no_permanent_store || self.call.is_some()
+        {
             None
         } else {
             body

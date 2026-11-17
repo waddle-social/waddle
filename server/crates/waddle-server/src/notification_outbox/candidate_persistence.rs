@@ -147,6 +147,18 @@ impl NotificationOutboxStore {
         &self,
         batch_size: usize,
     ) -> Result<Vec<NotificationCandidate>, NotificationOutboxError> {
+        Ok(self
+            .pending_candidate_rows(batch_size)
+            .await?
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect())
+    }
+
+    pub(super) async fn pending_candidate_rows(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<(NotificationCandidate, i64)>, NotificationOutboxError> {
         let batch_size = batch_size.clamp(1, 1_000);
         let mut rows = self
             .query(
@@ -165,7 +177,10 @@ impl NotificationOutboxStore {
                        no_permanent_store,
                        last_message_body,
                        reaction,
-                       delivery_id
+                       delivery_id,
+                       call_sid,
+                       call_video,
+                       created_at_ms
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
                   AND quarantined_at_ms IS NULL
@@ -186,7 +201,7 @@ impl NotificationOutboxStore {
         let mut candidates = Vec::new();
         while let Some(row) = rows.next().await? {
             match decode_candidate(&row) {
-                Ok(candidate) => candidates.push(candidate),
+                Ok(candidate) => candidates.push((candidate, row.get::<i64>(17)?)),
                 Err(error) => {
                     self.mark_malformed_candidate_outboxed(&row, &error).await?;
                 }

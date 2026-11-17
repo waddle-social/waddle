@@ -847,6 +847,67 @@ async fn unread_zero_job_is_suppressed_not_published() {
     );
 }
 
+#[tokio::test]
+async fn unread_zero_does_not_suppress_call_job() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(
+        &store,
+        &crate::calls::call_candidate("call-archive", "session", false),
+        &[target],
+    )
+    .await;
+    let claimed = store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("claim")
+        .into_iter()
+        .next()
+        .expect("claimed job");
+    // A read DM inbox entry must not suppress the independent invitation.
+    let inbox = inbox_with_read_entry(
+        &recipient,
+        &bare("bob@example.com"),
+        waddle_xmpp::inbox::ConversationKind::Direct,
+    )
+    .await;
+
+    let outcome = store
+        .publish_claimed_job(
+            &claimed,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("publish");
+
+    assert!(
+        matches!(outcome, NotificationOutboxPublishOutcome::Published { .. }),
+        "a call must publish independently of the inbox unread count: {outcome:?}"
+    );
+    assert_eq!(
+        push_service
+            .queued_publish_jobs()
+            .await
+            .expect("queued push jobs")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending jobs")
+            .is_empty(),
+        "published call job must not remain pending"
+    );
+}
+
 // #1126 safety valve: an ABSENT inbox entry is "no information", not
 // "read". The inbox projection is written on a separate path whose
 // failures are swallowed, so suppressing on absence would turn a

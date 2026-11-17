@@ -7,7 +7,7 @@ mod plan;
 use super::effects::direct::{external, DurableDirectEffect, ExternalDirectEffect};
 use super::{
     apply_retraction_tombstone, build_direct_archived_message, debug, effects, warn,
-    ArchiveIdRewrite, BareJid, Deps, Element, Message,
+    ArchiveIdRewrite, BareJid, Deps, Message,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, RetractionTombstoneMutation};
 use waddle_xmpp::mam::StoreOutcome;

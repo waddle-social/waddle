@@ -28,13 +28,27 @@ const APNS_PRIORITY: HeaderName = HeaderName::from_static("apns-priority");
 const APNS_EXPIRATION: HeaderName = HeaderName::from_static("apns-expiration");
 const APNS_COLLAPSE_ID: HeaderName = HeaderName::from_static("apns-collapse-id");
 const APNS_ID: HeaderName = HeaderName::from_static("apns-id");
-/// Every Waddle APNs push is a user-visible alert.
-const PUSH_TYPE_ALERT: &str = "alert";
 /// Per-attempt budget, matching the Web Push sender.
 const APNS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// APNs error bodies are a few dozen bytes of JSON; anything larger is
 /// not Apple's shape and is not read further.
 const MAX_ERROR_BODY_BYTES: usize = 4096;
+
+/// Apple's transport class, independent from notification content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApnsPushType {
+    Alert,
+    Voip,
+}
+
+impl ApnsPushType {
+    fn as_header(self) -> HeaderValue {
+        HeaderValue::from_static(match self {
+            Self::Alert => "alert",
+            Self::Voip => "voip",
+        })
+    }
+}
 
 /// `apns-priority`: `10` delivers immediately, `5` lets the device
 /// batch delivery to save power.
@@ -59,6 +73,11 @@ impl ApnsPriority {
 pub struct ApnsExpiration(u64);
 
 impl ApnsExpiration {
+    /// A fixed expiry supplied by the publisher, in UNIX seconds.
+    pub fn at(unix_seconds: u64) -> Self {
+        Self(unix_seconds)
+    }
+
     /// `now + ttl`, saturating.
     pub fn after(now_unix_seconds: u64, ttl: Duration) -> Self {
         Self(now_unix_seconds.saturating_add(ttl.as_secs()))
@@ -73,6 +92,7 @@ impl ApnsExpiration {
 #[derive(Debug, Clone, Copy)]
 pub struct ApnsRequest<'a> {
     pub environment: ApnsEnvironment,
+    pub push_type: ApnsPushType,
     pub device_token: &'a ApnsDeviceToken,
     pub topic: &'a ApnsTopic,
     pub provider_token: &'a ApnsProviderJwt,
@@ -201,7 +221,7 @@ impl ApnsSender for HttpApnsSender {
             .post(url)
             .header(AUTHORIZATION, authorization)
             .header(APNS_TOPIC, topic)
-            .header(APNS_PUSH_TYPE, HeaderValue::from_static(PUSH_TYPE_ALERT))
+            .header(APNS_PUSH_TYPE, request.push_type.as_header())
             .header(APNS_PRIORITY, request.priority.as_header())
             .header(
                 APNS_EXPIRATION,
@@ -337,6 +357,7 @@ mod tests {
                 node: "node-1",
                 badge_count: Some(2),
             })
+            .expect("alert class")
             .encode()
             .expect("payload");
             Self {
@@ -351,6 +372,7 @@ mod tests {
         fn request(&self, environment: ApnsEnvironment) -> ApnsRequest<'_> {
             ApnsRequest {
                 environment,
+                push_type: ApnsPushType::Alert,
                 device_token: &self.token,
                 topic: &self.topic,
                 provider_token: &self.jwt,
@@ -437,6 +459,34 @@ mod tests {
                 apns_id: ApnsId::parse(APNS_ID_VALUE)
             }
         );
+    }
+
+    #[tokio::test]
+    async fn sends_voip_headers_without_a_collapse_id() {
+        let mut server = mockito::Server::new_async().await;
+        let fixture = Fixture::new();
+        let topic = ApnsTopic::parse("social.waddle.app.voip").expect("voip topic");
+        let mock = server
+            .mock("POST", format!("/3/device/{TOKEN}").as_str())
+            .match_header("apns-topic", "social.waddle.app.voip")
+            .match_header("apns-push-type", "voip")
+            .match_header("apns-priority", "10")
+            .match_header("apns-expiration", "1700000045")
+            .match_header("apns-collapse-id", mockito::Matcher::Missing)
+            .with_status(200)
+            .create_async()
+            .await;
+        let outcome = sender_for(&server)
+            .send(ApnsRequest {
+                topic: &topic,
+                push_type: ApnsPushType::Voip,
+                expiration: ApnsExpiration::at(1_700_000_045),
+                collapse_id: None,
+                ..fixture.request(ApnsEnvironment::Production)
+            })
+            .await;
+        mock.assert_async().await;
+        assert!(matches!(outcome, ApnsOutcome::Sent { .. }));
     }
 
     #[tokio::test]

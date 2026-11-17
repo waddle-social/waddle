@@ -384,7 +384,7 @@ pub(super) async fn enqueue_jobs_for_test(
         .await
         .expect("insert candidate");
     let now_ms = crate::time::now_ms();
-    let context = build_waddle_context(candidate);
+    let context = build_waddle_context(candidate, 0);
     let mut tx =
         EnteredTransaction::from_fixture_transaction(store.db.begin().await.expect("begin tx"));
     mark_candidate_outboxed_tx(&mut tx, candidate, now_ms)

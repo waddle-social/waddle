@@ -20,7 +20,11 @@
 //!   optional typed [`xmpp_parsers::jingle::Reason`] child built via
 //!   the [`Reason`-into-`Element`] conversion (XEP-0353 §3.5 SHOULD).
 
+use minidom::Element;
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
+use xmpp_parsers::message::Message;
+
+use super::xep_waddle_call_thread::CallThreadMedia;
 pub use xmpp_parsers::jingle_message::JingleMI;
 
 use super::xep0167::{MediaKind, NS_JINGLE_RTP};
@@ -74,6 +78,39 @@ impl CallOffer {
         };
         audio.into_iter().chain(video)
     }
+}
+
+/// Recognize a top-level JMI proposal without the single-description
+/// limitation of `JingleMI::Propose`. A non-empty session id is required;
+/// unrecognized media do not discard the proposal identity.
+pub fn jmi_propose(message: &Message) -> Option<(SessionId, CallThreadMedia)> {
+    let propose = message.payloads.iter().find(|payload| {
+        payload.is("propose", NS_JINGLE_MESSAGE)
+            && payload.attr("id").is_some_and(|id| !id.is_empty())
+    })?;
+    let sid = propose.attr("id").filter(|id| !id.is_empty())?;
+    let media = jmi_media(propose).unwrap_or(CallThreadMedia {
+        audio: false,
+        video: false,
+    });
+    Some((SessionId(sid.to_owned()), media))
+}
+
+/// Collect all recognized RTP media descriptions on a JMI element.
+pub fn jmi_media(element: &Element) -> Option<CallThreadMedia> {
+    let mut audio = false;
+    let mut video = false;
+    for description in element
+        .children()
+        .filter(|child| child.is("description", NS_JINGLE_RTP))
+    {
+        match description.attr("media") {
+            Some("audio") => audio = true,
+            Some("video") => video = true,
+            _ => {}
+        }
+    }
+    (audio || video).then_some(CallThreadMedia { audio, video })
 }
 
 /// Build a `<propose/>` JMI for an A/V call (XEP-0353 §3). The propose

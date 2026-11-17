@@ -30,8 +30,8 @@ pub use identifiers::{
 };
 pub use outcome::{ApnsId, ApnsOutcome, ApnsReason, ApnsTransient};
 pub use payload::{
-    ApnsAlertLocKey, ApnsPayload, ApnsPayloadError, ApnsPayloadFields, EncodedApnsPayload,
-    MAX_APNS_PAYLOAD_BYTES,
+    ApnsAlertLocKey, ApnsCall, ApnsPayload, ApnsPayloadError, ApnsPayloadFields, ApnsVoipPayload,
+    ApnsVoipPayloadFields, EncodedApnsPayload, MAX_APNS_PAYLOAD_BYTES,
 };
 pub use provider_token::{
     ApnsClock, ApnsKeyError, ApnsProviderJwt, ApnsProviderTokenSource, ApnsSignError,
@@ -39,5 +39,6 @@ pub use provider_token::{
     APNS_PROVIDER_TOKEN_REUSE,
 };
 pub use sender::{
-    ApnsExpiration, ApnsPriority, ApnsRequest, ApnsSender, ApnsSenderBuildError, HttpApnsSender,
+    ApnsExpiration, ApnsPriority, ApnsPushType, ApnsRequest, ApnsSender, ApnsSenderBuildError,
+    HttpApnsSender,
 };

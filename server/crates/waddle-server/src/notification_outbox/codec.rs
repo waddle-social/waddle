@@ -44,6 +44,22 @@ pub(super) fn decode_candidate(
         .map_err(|_| NotificationOutboxError::InvalidConversationJid(conversation_raw))?;
     require_sender_matches_conversation(&sender_jid, &conversation_jid)?;
     let stanza_id_by_raw: String = row.get(4)?;
+    let class = NotificationClass::from_db_value(&row.get::<String>(6)?)?;
+    let call_sid: Option<String> = row.get(15)?;
+    let call_video: Option<i64> = row.get(16)?;
+    let call = match (class, call_sid, call_video) {
+        (NotificationClass::Call, Some(sid), Some(video))
+            if !sid.is_empty() && matches!(video, 0 | 1) =>
+        {
+            Some(super::NotificationCall {
+                session_id: xmpp_parsers::jingle::SessionId(sid),
+                video: video != 0,
+            })
+        }
+        (NotificationClass::Call, _, _) => return Err(NotificationOutboxError::InvalidCallData),
+        (_, None, None) => None,
+        _ => return Err(NotificationOutboxError::InvalidCallData),
+    };
     Ok(NotificationCandidate {
         recipient_bare_jid: recipient_raw
             .parse()
@@ -57,7 +73,8 @@ pub(super) fn decode_candidate(
                 .parse()
                 .map_err(|_| NotificationOutboxError::InvalidArchiveStanzaIdBy(stanza_id_by_raw))?,
         ),
-        class: NotificationClass::from_db_value(&row.get::<String>(6)?)?,
+        class,
+        call,
         reason: NotificationReason::from_db_value(&row.get::<String>(7)?)?,
         policy_error_count: row.get(8)?,
         noping: row.get::<i64>(9)? != 0,

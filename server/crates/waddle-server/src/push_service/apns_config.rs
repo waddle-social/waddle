@@ -104,6 +104,11 @@ pub struct ApnsConfig {
     pub topic: ApnsTopic,
 }
 
+/// Validate the PushKit topic once while constructing configured provider state.
+pub(super) fn voip_topic(topic: &ApnsTopic) -> Result<ApnsTopic, ApnsIdentifierError> {
+    ApnsTopic::parse(&format!("{}.voip", topic.as_str()))
+}
+
 #[derive(Default)]
 struct RawApnsVars {
     key_path: Option<String>,

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use jid::BareJid;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::pubsub::PubSubStorage;
-use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
+use waddle_xmpp::push::apns::{
+    ApnsIdentifierError, ApnsProviderTokenSource, ApnsSender, ApnsTopic,
+};
 use waddle_xmpp::push::fcm::{FcmAccessTokenSource, FcmAppId, FcmProjectId, FcmSender};
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
@@ -48,6 +50,9 @@ pub struct DatabasePushServiceStore {
     /// APNs provider (#529). `None` when `WADDLE_APNS_*` is unset:
     /// Apple devices then record `apns-not-configured`.
     pub(super) apns: Option<ApnsProvider>,
+    /// Node identity is independent from transport readiness. With all APNs
+    /// configuration unset there is no known VoIP topic; no suffix is inferred.
+    pub(super) apns_voip_topic: Option<ApnsTopic>,
     /// FCM provider (#530). `None` when `WADDLE_FCM_*` is unset:
     /// Android devices then record `fcm-not-configured`.
     pub(super) fcm: Option<FcmProvider>,
@@ -145,6 +150,7 @@ impl DatabasePushServiceStore {
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
+            apns_voip_topic: None,
             fcm: None,
         }
     }
@@ -247,13 +253,23 @@ impl DatabasePushServiceStore {
         tokens: Arc<dyn ApnsProviderTokenSource>,
         sender: Arc<dyn ApnsSender>,
         topic: ApnsTopic,
-    ) -> Self {
+    ) -> Result<Self, ApnsIdentifierError> {
+        let voip_topic = super::apns_config::voip_topic(&topic)?;
+        self.apns_voip_topic = Some(voip_topic.clone());
         self.apns = Some(ApnsProvider {
             tokens,
             sender,
             topic,
+            voip_topic,
         });
-        self
+        Ok(self)
+    }
+
+    /// Retain configured APNs node identity when transport is unavailable.
+    /// This does not enable sending or change environment configuration rules.
+    pub fn with_apns_topic(mut self, topic: ApnsTopic) -> Result<Self, ApnsIdentifierError> {
+        self.apns_voip_topic = Some(super::apns_config::voip_topic(&topic)?);
+        Ok(self)
     }
 
     /// Install the FCM OAuth access-token source, HTTP v1 transport, the

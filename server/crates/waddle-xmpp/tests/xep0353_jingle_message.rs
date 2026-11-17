@@ -28,7 +28,7 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0353::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_ringing,
-    CallOffer, JingleMI, NS_JINGLE_MESSAGE,
+    jmi_media, jmi_propose, CallOffer, JingleMI, NS_JINGLE_MESSAGE,
 };
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -313,4 +313,55 @@ fn xep_0353_jingle_mi_rejects_wrong_namespace() {
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), "c1")
         .build();
     assert!(JingleMI::try_from(elem).is_err());
+}
+
+#[test]
+fn xep_0353_raw_recognizer_preserves_audio_and_video_descriptions() {
+    for (offer, expected_video) in [
+        (CallOffer::audio_only(), false),
+        (CallOffer::audio_video(), true),
+    ] {
+        let mut message = Message::new_with_type(MessageType::Chat, None);
+        message
+            .payloads
+            .push(build_propose(SessionId("offer-1".into()), offer));
+        let (sid, media) = jmi_propose(&message).expect("valid propose");
+        assert_eq!(sid, SessionId("offer-1".into()));
+        assert!(media.audio);
+        assert_eq!(media.video, expected_video);
+        assert_eq!(jmi_media(&message.payloads[0]), Some(media));
+    }
+}
+
+#[test]
+fn xep_0353_raw_recognizer_requires_nonempty_sid_and_top_level_propose() {
+    for payload in [
+        build_propose(SessionId(String::new()), CallOffer::audio_only()),
+        Element::from(build_retract(SessionId("offer-1".into()))),
+        Element::from(build_proceed(SessionId("offer-1".into()))),
+        Element::builder("wrapper", NS_JINGLE_MESSAGE)
+            .append(build_propose(
+                SessionId("offer-1".into()),
+                CallOffer::audio_only(),
+            ))
+            .build(),
+    ] {
+        let mut message = Message::new_with_type(MessageType::Chat, None);
+        message.payloads.push(payload);
+        assert!(jmi_propose(&message).is_none());
+    }
+}
+
+#[test]
+fn xep_0353_raw_recognizer_keeps_sid_without_recognized_rtp_media() {
+    let mut message = Message::new_with_type(MessageType::Chat, None);
+    message.payloads.push(
+        Element::builder("propose", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "offer-1")
+            .build(),
+    );
+    let (sid, media) = jmi_propose(&message).expect("nonempty propose id");
+    assert_eq!(sid, SessionId("offer-1".into()));
+    assert!(!media.audio);
+    assert!(!media.video);
 }

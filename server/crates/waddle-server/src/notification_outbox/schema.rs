@@ -26,36 +26,39 @@ pub(super) const COALESCE_PREDICATE: &str =
 
 pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str =
     "notification_candidates_reason_check";
-pub(super) const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
+pub(super) const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 7] = [
     "offline_dm",
     "offline_dm_mention",
     "groupchat_personal_mention",
     "groupchat_channel_mention",
     "groupchat_active_channel_mention",
     "groupchat_notify_all",
+    "offline_call",
 ];
-pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all', 'offline_call')";
 pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str =
     "notification_candidates_class_check";
-pub(super) const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 7] = [
     "dm",
     "dm_mention",
     "personal_mention",
     "channel_mention",
     "active_channel_mention",
     "notify_all",
+    "call",
 ];
-pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all', 'call')";
 pub(super) const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
-const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
+const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 7] = [
     "dm",
     "dm_mention",
     "personal_mention",
     "channel_mention",
     "active_channel_mention",
     "notify_all",
+    "call",
 ];
-const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
+const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all', 'call')";
 pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
 pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 15] = [
@@ -115,6 +118,8 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             delivery_id TEXT,
             quarantined_at_ms {i64_type},
             quarantined_suppressed_reason TEXT,
+            call_sid TEXT,
+            call_video INTEGER,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -168,7 +173,7 @@ fn copy_notification_candidates_sql(old_table: &str) -> String {
         stanza_id_by, stanza_id, class, reason, created_at_ms, policy_error_count, \
         next_attempt_at_ms, outboxed_at_ms, suppressed_reason, noping, no_store, \
         no_permanent_store, last_message_body, reaction, delivery_id, \
-        quarantined_at_ms, quarantined_suppressed_reason";
+        quarantined_at_ms, quarantined_suppressed_reason, call_sid, call_video";
     format!("INSERT INTO notification_candidates ({columns}) SELECT {columns} FROM {old_table}")
 }
 
@@ -726,6 +731,10 @@ impl NotificationOutboxStore {
             "quarantined_suppressed_reason TEXT",
         )
         .await?;
+        self.add_column_if_missing("notification_candidates", "call_sid TEXT")
+            .await?;
+        self.add_column_if_missing("notification_candidates", "call_video INTEGER")
+            .await?;
         self.quarantine_legacy_candidates_before_checks().await?;
         self.migrate_notification_candidates_reason_constraint(i64_type)
             .await?;
@@ -1601,7 +1610,7 @@ mod tests {
 
     #[test]
     fn postgres_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'offline_dm_mention'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying])::text[])))";
+        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'offline_dm_mention'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying, 'offline_call'::character varying])::text[])))";
         assert!(notification_candidates_reason_constraint_matches_expected(
             postgres_definition
         ));
@@ -1617,7 +1626,7 @@ mod tests {
 
     #[test]
     fn postgres_class_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm'::character varying, 'dm_mention'::character varying, 'personal_mention'::character varying, 'channel_mention'::character varying, 'active_channel_mention'::character varying, 'notify_all'::character varying])::text[])))";
+        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm'::character varying, 'dm_mention'::character varying, 'personal_mention'::character varying, 'channel_mention'::character varying, 'active_channel_mention'::character varying, 'notify_all'::character varying, 'call'::character varying])::text[])))";
         assert!(notification_candidates_class_constraint_matches_expected(
             postgres_definition
         ));

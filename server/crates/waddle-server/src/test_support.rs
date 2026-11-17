@@ -1084,3 +1084,22 @@ pub async fn bind_live_resource(
         .expect("registered user resource");
     receiver
 }
+
+/// Exercise the production message-intrinsic classifier without starting a server.
+#[cfg(feature = "test-support")]
+pub fn direct_notification_candidate_from_envelope_for_test(
+    message: &xmpp_parsers::message::Message,
+    recipient: &jid::BareJid,
+    sender: &jid::Jid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+) -> Result<
+    crate::notification_outbox::NotificationCandidate,
+    crate::notification_outbox::NotificationOutboxError,
+> {
+    crate::notification_outbox::direct_candidate_from_envelope(
+        message,
+        recipient,
+        sender,
+        archive_stanza_id,
+    )
+}
