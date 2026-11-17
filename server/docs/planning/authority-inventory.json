@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "90ea03fb44a2a05cbf744e344f0922ceec147c17",
+  "baseline_commit": "d26e75636b5a6408c5dfd539abd3e8dd5a12ff41",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -101,7 +101,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/pubsub/node.rs",
-      "sha256": "e8f90ba96330a64ad000b2763b0edd1e9b488a8b5a3c9205f8e4620925a34256"
+      "sha256": "34897c51931fe7a4be38ca11bca7b49489ce13d17aa801f29044c8cbcd075d1d"
     },
     {
       "path": "server/crates/waddle-server/src/pubsub/tests.rs",
@@ -209,7 +209,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_dispatch.rs",
-      "sha256": "edc2f269ed413385071f757a30fe8a8975ff94d289c44052321ad4d7de71f61e"
+      "sha256": "770ae22746807a63038c4dd93fc3c3c1eb651ba94b98a106a21a9ef52516ce96"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/search.rs",

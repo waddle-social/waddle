@@ -1532,6 +1532,22 @@ records there (`WriteTuple`, `EnrolledScopes` and
 `record_host_grant_affiliation`, two each) moved up with the lines removed;
 the scan still holds 1642 records, each unchanged in content.
 
+The selected evidence was refreshed a thirty-sixth time, through
+`d26e75636b5a6408c5dfd539abd3e8dd5a12ff41`, after reviewing the delta of the reviewed files since the
+thirty-fifth refresh. `pubsub/node.rs` and `pubsub_dispatch.rs` changed. No
+grant writer or storage plane of the host-grant authority was added, no
+producer of stream evidence changed, and no decision of standing moved.
+
+- The configure clamp of PEP nodes (`bounded_node_config` in
+  `pubsub/node.rs`) also normalizes `urn:waddle:joined-spaces:0`: whitelist
+  access, publishers only, a bounded multi-item cap, persistent items and
+  no last-item delivery, whatever an owner submits. It only narrows who may
+  read the owner's own node.
+- The publish path reconciles that node's stored configuration to its
+  well-known defaults before a publish (`pubsub_dispatch.rs`), as it does
+  for the DND node. The anchors of both files are unchanged.
+- The raw scan holds 1642 records, unchanged in content and place.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
