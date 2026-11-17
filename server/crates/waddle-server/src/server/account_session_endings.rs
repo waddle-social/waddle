@@ -13,16 +13,17 @@
 //!   [`RetiredAccounts`] first, so that a binding of any of them is refused
 //!   from then on; then, for each request, it records that it observed the
 //!   request, ends the account's live streams and detached sessions on this
-//!   replica, empties the account's offline store, and records the request
-//!   as completed once none is left. A pass that leaves something behind,
-//!   or a statement that fails, leaves the request to the next poll, which
-//!   adds what it ends to what the earlier passes ended.
+//!   replica, checks that the account's offline store is empty, and records
+//!   the request as completed once none is left. A pass that leaves
+//!   something behind, or a statement that fails, leaves the request to the
+//!   next poll, which adds what it ends to what the earlier passes ended.
 //!
 //! For a short while after it took a request up the replica also closes
-//! any stream of the account it finds again, and empties its offline store
-//! again: a binding that checked the set just before the account was added
-//! can be published after the pass read the registry, and its teardown
-//! stores what it had not delivered.
+//! any stream of the account it finds again: a binding that checked the set
+//! just before the account was added can be published after the pass read
+//! the registry. What such a stream's teardown had not delivered is not
+//! stored: the offline store refuses every row for a retired account from
+//! the retirement's commit on.
 //!
 //! [`RetiredAccounts`]: crate::server::routes::websocket::RetiredAccounts
 //!
@@ -43,9 +44,7 @@ use crate::auth::session_endings::{
 };
 use crate::db::Database;
 use crate::permissions::host_grant::RateLimitedWarning;
-use crate::server::routes::websocket::{
-    close_live_streams, discard_offline_messages, end_account_sessions, WebSocketState,
-};
+use crate::server::routes::websocket::{close_live_streams, end_account_sessions, WebSocketState};
 
 /// How long after taking a request up the replica keeps closing the
 /// account's streams it finds again.
@@ -207,15 +206,12 @@ impl RequestedEndings {
             );
         }
         for account in retired.taken_up_within(RESWEEP_AFTER_TAKE_UP) {
-            let (closed, none_left) = close_live_streams(state, &account).await;
+            let (closed, _) = close_live_streams(state, &account).await;
             if closed > 0 {
                 debug!(
                     closed,
                     "closed streams a retired account bound while its request was taken up"
                 );
-            }
-            if none_left {
-                discard_offline_messages(state, &account).await;
             }
         }
         Ok(completed)

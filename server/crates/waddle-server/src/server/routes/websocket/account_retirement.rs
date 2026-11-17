@@ -19,14 +19,28 @@
 //!   its stream-management session without detaching it;
 //! - every stream-management session of the account that waits for a
 //!   resume is ended, in memory and on the durable authority, through the
-//!   terminal path an invalidated detached session takes, which also
-//!   broadcasts its unavailable presence and leaves its rooms. What such a
-//!   session held for the client is discarded, not moved to the offline
-//!   store: no session of the account will ever flush that store;
-//! - once neither is left, the account's offline store is emptied: the
-//!   retirement removed what it held then, and what the teardown of a live
-//!   stream moved there since is removed here. For a while after taking
-//!   the request up the replica empties it again on each pass.
+//!   terminal path a session a replacing bind invalidates takes: its
+//!   acknowledgements are settled, its retained stanzas promoted and its
+//!   durable rows removed under its claim, and it broadcasts its
+//!   unavailable presence and leaves its rooms. What such a session held
+//!   for the client, and the ingress custody of what it held, is discarded,
+//!   not moved to the offline store: the promotion reads the ledger of
+//!   retired JIDs before any sink, and ends a retired recipient's custody
+//!   without delivery, so that the recovery of orphaned custody hands
+//!   nothing on later;
+//! - the account's offline store stays empty. The retirement removed what
+//!   it held, and from its commit on the store refuses every row for the
+//!   account, whichever producer offers it (`crate::pending_delivery`'s
+//!   retired recipients); the pass checks that the store is empty.
+//!
+//! A live stream whose connection already has another detach queued (a
+//! stale actor's retirement, or an owner-managed one) ends by that detach:
+//! the retirement's request finds the queue busy, and the pass waits for
+//! the binding to go. If that detach keeps the session for a resume, the
+//! session is detached, and this replica ends it as a detached session,
+//! in the same pass if it detached before the pass read the session
+//! registry, otherwise in the next poll. Until then a resume of it is
+//! refused, since this replica holds the account.
 //!
 //! What this replica holds is the evidence: a stream counts as closed once
 //! the registry no longer holds its binding, and the detached sessions as
@@ -138,14 +152,15 @@ pub(crate) struct EndingPass {
 
 /// End every live stream and every detached session of the retired
 /// account `account` (canonical) that this replica holds, then, once none
-/// is left, empty the account's offline store. The caller holds the
-/// account in [`RetiredAccounts`] first, so no binding of it is published
-/// after this pass reads the registry.
+/// is left, check that the account's offline store is empty. The caller
+/// holds the account in [`RetiredAccounts`] first, so no binding of it is
+/// published after this pass reads the registry.
 pub(crate) async fn end_account_sessions(state: &WebSocketState, account: &BareJid) -> EndingPass {
     let (streams_closed, streams_complete) = close_live_streams(state, account).await;
     let (detached_sessions_ended, detached_complete) = end_detached_sessions(state, account).await;
-    // Only once the sessions are gone: the teardown of a live stream moves
-    // what it had not delivered to the store, and that is removed here too.
+    // Only once the sessions are gone. The store refuses the account's rows
+    // from the retirement on, so this finds nothing unless a store that
+    // does not read the ledger kept one; then it is removed.
     let complete =
         streams_complete && detached_complete && discard_offline_messages(state, account).await;
     EndingPass {
@@ -158,9 +173,11 @@ pub(crate) async fn end_account_sessions(state: &WebSocketState, account: &BareJ
 }
 
 /// Remove every message of the retired account `account`'s offline store,
-/// claimed or not: no session of the account will flush it. Returns whether
-/// the store could be read and every row removed.
-pub(crate) async fn discard_offline_messages(state: &WebSocketState, account: &BareJid) -> bool {
+/// claimed or not: no session of the account will flush it. A store that
+/// reads the ledger of retired JIDs holds none; one that does not (a
+/// disposable test store) is emptied here. Returns whether the store could
+/// be read and every row removed.
+async fn discard_offline_messages(state: &WebSocketState, account: &BareJid) -> bool {
     let storage = &state.deps.protocol.pending_delivery_storage;
     let rows = match storage.list(account).await {
         Ok(rows) => rows,
@@ -303,17 +320,28 @@ async fn end_detached_sessions(state: &WebSocketState, account: &BareJid) -> (u6
     for resource in &resources {
         match registry.invalidate_sessions_for_jid(resource).await {
             Ok(removed) if !removed.is_empty() => {
-                // Unlike a replacing bind, which moves what a session
-                // retained to the offline store, the retirement discards
-                // it: no session of the account will flush that store. The
-                // durable rows the invalidation kept for a promotion are
-                // deleted and the claim released; then each session leaves
-                // its rooms and its presence ends.
-                for detached in &removed {
-                    if !registry.confirm_drained(&detached.stream_id).await {
-                        debug!("a retired account's detached session kept its durable rows");
-                    }
-                }
+                // As a replacing bind does: the promotion settles each
+                // session's acknowledgements, ends the custody of what it
+                // retained and removes its durable rows under its claim.
+                // Where a replacing bind's promotion moves what a session
+                // retained to the offline store, a retired recipient's is
+                // discarded: no session of the account will flush that
+                // store. A session whose promotion fails is kept for a
+                // retry, and the check below leaves the request to the
+                // next poll. Then each session leaves its rooms and its
+                // presence ends.
+                crate::sm_promotion::promote_displaced_sessions(
+                    removed.clone(),
+                    crate::sm_promotion::DisplacedPromotionDeps {
+                        sm_registry: registry,
+                        connection_registry: &state.deps.protocol.connection_registry,
+                        user_registry: &state.deps.protocol.user_registry,
+                        pending_storage: &state.deps.protocol.pending_delivery_storage,
+                        blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                        server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                    },
+                )
+                .await;
                 for detached in removed {
                     super::cleanup::cleanup_invalidated_detached_session(state, detached, None)
                         .await;
