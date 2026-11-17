@@ -469,11 +469,13 @@ already stops every replica of the previous release
 ### PostgreSQL: migrations 2002 to 2014
 
 The migrations after the schema baseline (version 2000) are numbered without
-a gap. Migration 2001 (offline call notification candidates) belongs to the
-previous release; this release adds 2002 to 2014. The runner refuses a
-database that records a later version but not an earlier one, a version it
-does not know, and a version whose description or checksum differs from its
-own. There is no down migration.
+a gap. Migration 2001 (offline call notification candidates) is not part of
+this work: it reached `main`, whose image production runs, before this
+release, so a database a release from `main` served has applied it already.
+One that has not gets it in the same owner phase, before 2002. This release
+adds 2002 to 2014. The runner refuses a database that records a later version but not
+an earlier one, a version it does not know, and a version whose description
+or checksum differs from its own. There is no down migration.
 
 | Version | Creates | Runtime role (restricted runtime) | With S2S off |
 | --- | --- | --- | --- |
@@ -660,8 +662,9 @@ Prefer roll-forward. What a step changed decides how far back is possible:
 The limits:
 
 - **Migrations are forward-only.** The previous release refuses a ledger that
-  holds 2002 or later, so it cannot start against the migrated database. No
-  down migration exists. Going back means a PostgreSQL restore.
+  holds 2002 or later (or 2001, for a release from before it), so it cannot
+  start against the migrated database. No down migration exists. Going back
+  means a PostgreSQL restore.
 - **The SpiceDB markers are a fence.** The previous release cannot start
   against a marked store, and must not: never delete `waddle_authz_codec` or
   `waddle_authz_schema` by hand to get past the refusal

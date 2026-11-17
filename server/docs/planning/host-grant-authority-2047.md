@@ -1126,7 +1126,9 @@ projected subject are that canonical text.
 ### Rollout part (G24)
 
 - Migration 2002 is the first migration of this work after the schema
-  baseline; it follows 2001, which the previous release applies. Under the
+  baseline; it follows 2001, the offline call notification candidates,
+  which `main` applied before this work merged (an owner phase that finds
+  2001 missing applies it first). Under the
   restricted runtime the owner phase applies it and grants its relations
   from the matrix, and the runtime's ledger preflight refuses a database
   whose ledger lacks it; a PostgreSQL server that owns its schema applies it
