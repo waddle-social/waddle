@@ -2939,10 +2939,14 @@ A home never issues the JID of a retired account to a new holder
   account row), two reads of the account rows that carry no lookup key,
   the delete of the account's offline store (`pending_delivery`), taken
   after the advisory lock every insert into that store takes for the
-  account's canonical JID, and the three deletes of what remote senders
-  left for it: ten statements for a usual account, so a login can be held
-  up for 2 s of waiting plus up to 50 s, and is in practice for
-  milliseconds. From the commit on the store refuses every row for the
+  account's canonical JID, a read of the store's recipients that start
+  with the account's localpart, compared without letter case, and a
+  delete for each other spelling of the account's JID among them (a
+  U-label domain, a row written before recipients were prepared), and the
+  three deletes of what remote senders left for it: eleven statements for
+  a usual account, so a login can be held up for 2 s of waiting plus up to
+  55 s, and is in practice for milliseconds. The read of the recipients
+  scans the store. From the commit on the store refuses every row for the
   account (`InsertOutcome::RecipientRetired`), whichever producer offers
   it: an insert that held the lock first commits before the delete reads
   the store, and one that waits for it reads the ledger the retirement

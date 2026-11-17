@@ -262,10 +262,9 @@ async fn retire_in(
     // every row for the account (`crate::pending_delivery`'s retired
     // recipients), whichever producer offers it. An insert serialises with
     // this delete on the advisory lock keyed by the account's canonical
-    // JID: one that holds it commits first and its row is removed here,
-    // and one that waits for it reads the ledger this transaction wrote.
-    // Rows are keyed by the account's JID as stanzas name it, which is its
-    // canonical form.
+    // JID, which it takes whatever spelling of the JID its row names: one
+    // that holds it commits first and its row is removed here, and one that
+    // waits for it reads the ledger this transaction wrote.
     if tx.driver() == DatabaseDriver::Postgres {
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtext(?))",
@@ -278,12 +277,13 @@ async fn retire_in(
             "DELETE FROM pending_delivery WHERE recipient_jid = ?",
             crate::db_params![canonical.as_str()],
         )
-        .await?;
+        .await?
+        + delete_offline_spellings(tx, canonical, key).await?;
 
     // What remote senders left for the account (gate G18): their recorded
     // subscription requests, the account's records of remote PubSub
     // subscriptions, and the offline admissions of strangers' messages,
-    // keyed the same way.
+    // keyed by the account's canonical JID.
     for statement in [
         "DELETE FROM s2s_pending_subscriptions WHERE account_jid = ?",
         "DELETE FROM s2s_remote_pubsub_subscriptions WHERE account_jid = ?",
@@ -300,6 +300,64 @@ async fn retire_in(
         accounts,
         offline_messages,
     })
+}
+
+/// Remove the rows of the account's offline store kept under a spelling of
+/// its JID other than `canonical`: every row whose recipient has the
+/// ledger key `key`, the key under which the store refuses an insert for
+/// the account. A row names its recipient as the `jid` parser prepared it,
+/// which keeps a domain's U-labels, and a row written before recipients
+/// were prepared may differ in letter case as well. Every such spelling has
+/// the canonical localpart, so the candidates are the recipients that start
+/// with it, compared without letter case, and the key decides. The read
+/// scans the store's recipients under the retirement's statement bound.
+async fn delete_offline_spellings(
+    tx: &mut Transaction<'_>,
+    canonical: &BareJid,
+    key: &str,
+) -> Result<u64, DatabaseError> {
+    let Some(localpart) = canonical.node() else {
+        return Ok(0);
+    };
+    let mut pattern = String::new();
+    for character in localpart.as_str().chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push_str("@%");
+    let mut spellings = Vec::new();
+    let mut rows = tx
+        .query(
+            "SELECT DISTINCT recipient_jid FROM pending_delivery \
+             WHERE lower(recipient_jid) LIKE ? ESCAPE '\\'",
+            crate::db_params![pattern],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let stored: String = row.get(0)?;
+        let same_account = stored != canonical.as_str()
+            && stored
+                .parse::<BareJid>()
+                .ok()
+                .and_then(|stored| retirement_key_of(&stored))
+                .is_some_and(|stored| stored == key);
+        if same_account {
+            spellings.push(stored);
+        }
+    }
+    drop(rows);
+    let mut removed = 0;
+    for stored in spellings {
+        removed += tx
+            .execute(
+                "DELETE FROM pending_delivery WHERE recipient_jid = ?",
+                crate::db_params![stored],
+            )
+            .await?;
+    }
+    Ok(removed)
 }
 
 /// Whether the ledger holds `jid`. A JID without a canonical form names no

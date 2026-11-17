@@ -21,7 +21,8 @@ One transaction:
 - removes its account row (`users`) and, with it, its identity-provider
   links and its sessions;
 - removes the messages its offline store holds for its next session
-  (`pending_delivery`): the account has no next session. From the
+  (`pending_delivery`), under any spelling of its JID: the account has no
+  next session. From the
   commit on the store refuses every message for the account, whoever
   offers it: a sender, the end of one of its sessions, or the recovery of
   messages a session was holding. Such a message is discarded and its
