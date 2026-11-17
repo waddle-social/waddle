@@ -19,7 +19,6 @@ import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
 import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import { isForumChannel } from "@/lib/channel-types";
-import { selectUnreadRoomCandidates } from "@/lib/unread-overview-state";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 import { buildHref, type RouteMatch } from "@/router";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -42,8 +41,8 @@ const {
   waddles,
   messaging,
   connectionStore,
-  channelUnread,
   computedChannelUnreadMap,
+  inboxUnreadCount,
   groupDmConversations,
   dmConversations,
   notifications,
@@ -83,12 +82,6 @@ const activeView = computed<ViewId | null>(() => {
     default: return null;
   }
 });
-
-const inboxCount = computed(() =>
-  selectUnreadRoomCandidates(channelUnread.inboxState.value, waddles.sortedChannels.value)
-    .reduce((total, room) =>
-      total + room.channelUnread + room.threads.reduce((sum, thread) => sum + thread.unread, 0), 0),
-);
 
 const communityName = computed(() =>
   waddles.currentSpace.value?.name ?? waddles.sortedSpaces.value[0]?.name ?? "Waddle",
@@ -257,7 +250,7 @@ const dockClass = css({ flex: "none", padding: "{spacing.1.5} {spacing.2.5} 0", 
       >
         <component :is="view.icon" aria-hidden="true" />
         <span class="wd-room__name">{{ view.label }}</span>
-        <span v-if="view.id === 'inbox' && inboxCount > 0" :class="badge()" :aria-label="`${inboxCount} unread`">{{ inboxCount }}</span>
+        <span v-if="view.id === 'inbox' && inboxUnreadCount > 0" :class="badge()" :aria-label="`${inboxUnreadCount} unread`">{{ inboxUnreadCount }}</span>
       </a>
 
       <slot name="live" />

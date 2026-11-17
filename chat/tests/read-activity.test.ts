@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { effectScope, ref } from "vue";
+import { applyEntries, createInboxState, markReadInState } from "../src/services/inbox";
 import { useChatReadActivity } from "../src/shell/read-activity";
 
 function makeReadActivityHarness(options: {
@@ -11,13 +12,15 @@ function makeReadActivityHarness(options: {
 }) {
   const roomJid = "general@conference.example.com";
   const unread = ref(options.unread);
+  const groupJid = "group@conference.example.com";
+  const inboxState = ref(createInboxState());
   const latestRemoteMessageId = ref<string | null>(options.latestId);
   const markRead = mock(() => undefined);
   const clearChannelActivity = mock(() => undefined);
   const markDisplayed = mock(() => undefined);
   const scope = effectScope();
 
-  scope.run(() => {
+  const activity = scope.run(() =>
     useChatReadActivity({
       appReady: ref(true),
       session: ref({} as never),
@@ -25,8 +28,12 @@ function makeReadActivityHarness(options: {
       activePage: ref("chat"),
       sidebarMode: ref(options.sidebarMode ?? "channels"),
       activeChannelId: ref("general"),
-      channels: ref([{ id: "general", name: "General", jid: roomJid }]),
+      channels: ref([
+        { id: "general", name: "General", jid: roomJid },
+        { id: "group", name: "Group", jid: groupJid, isGroupDm: true },
+      ]),
       channelUnread: {
+        inboxState,
         totalUnreadCount: ref(0),
         channelUnreadMap: () => ({}),
         hydrateFromInbox: mock(async () => true),
@@ -51,11 +58,14 @@ function makeReadActivityHarness(options: {
       } as never,
       activeTarget: ref(options.emptyConversation ? null : { markDisplayed }),
       roomJidForChannelId: () => roomJid,
-    });
-  });
+    }),
+  )!;
 
   return {
     roomJid,
+    groupJid,
+    inboxState,
+    inboxUnreadCount: activity.inboxUnreadCount,
     clearChannelActivity,
     markDisplayed,
     markRead,
@@ -64,6 +74,24 @@ function makeReadActivityHarness(options: {
 }
 
 describe("useChatReadActivity", () => {
+  test("counts unread threads in Inbox rooms and excludes group DMs and unknown rooms", () => {
+    const h = makeReadActivityHarness({ unread: 0, latestId: null });
+    const entry = { kind: "muc" as const, lastStanzaId: "s", lastUpdated: 1 };
+    try {
+      h.inboxState.value = applyEntries(h.inboxState.value, [
+        { ...entry, partner: h.roomJid, thread: "t1", unread: 2 },
+        { ...entry, partner: h.groupJid, unread: 4 },
+        { ...entry, partner: "general@old.example.com", unread: 3 },
+      ]);
+      expect(h.inboxUnreadCount.value).toBe(2);
+
+      h.inboxState.value = markReadInState(h.inboxState.value, h.roomJid, "t1");
+      expect(h.inboxUnreadCount.value).toBe(0);
+    } finally {
+      h.stop();
+    }
+  });
+
   test("an empty DM view does not mark the previous channel as read", async () => {
     const h = makeReadActivityHarness({
       unread: 2, latestId: "remote-1", sidebarMode: "dms", emptyConversation: true,

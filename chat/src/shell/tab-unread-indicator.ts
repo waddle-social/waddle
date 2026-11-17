@@ -27,7 +27,8 @@ interface FaviconSnapshot {
 }
 
 export function useChatTabUnreadIndicator(
-  unreadCount: Readonly<Ref<number>>,
+  tabUnreadCount: Readonly<Ref<number>>,
+  appBadgeUnreadCount: Readonly<Ref<number>>,
   options: TabUnreadIndicatorOptions = {},
 ) {
   if (typeof window === "undefined" || typeof document === "undefined") {
@@ -42,31 +43,11 @@ export function useChatTabUnreadIndicator(
   let deferredLocalUnreadChanged = false;
   let disposed = false;
 
-  async function applyUnreadCount(value: number) {
-    if (disposed) return;
-    const count = normalizeUnreadCount(value);
-    document.title = count > 0 ? UNREAD_TITLE : BASE_TITLE;
-    void updateAppBadge(count);
-    await updateFavicons(
-      count,
-      faviconLinks,
-      () => ++faviconGeneration,
-      () => faviconGeneration,
-      () => disposed,
-    );
-  }
-
-  async function updateFavicons(
-    count: number,
-    links: FaviconSnapshot[],
-    nextGeneration: () => number,
-    currentGeneration: () => number,
-    isDisposed: () => boolean,
-  ) {
-    const generation = nextGeneration();
-    if (isDisposed()) return;
-    if (count <= 0) {
-      restoreFaviconLinks(links);
+  async function applyTabUnread(hasUnread: boolean) {
+    const generation = ++faviconGeneration;
+    document.title = hasUnread ? UNREAD_TITLE : BASE_TITLE;
+    if (!hasUnread) {
+      restoreFaviconLinks(faviconLinks);
       return;
     }
 
@@ -75,22 +56,27 @@ export function useChatTabUnreadIndicator(
     } catch {
       unreadFaviconHref = FAVICON_URL;
     }
-    if (isDisposed() || generation !== currentGeneration()) return;
-    for (const snapshot of links) {
+    if (disposed || generation !== faviconGeneration) return;
+    for (const snapshot of faviconLinks) {
       snapshot.link.href = unreadFaviconHref;
       snapshot.link.setAttribute("href", unreadFaviconHref);
       snapshot.link.setAttribute("type", "image/png");
     }
   }
 
-  const stopWatch = watch(
-    unreadCount,
+  const stopTabWatch = watch(
+    () => normalizeUnreadCount(tabUnreadCount.value) > 0,
+    applyTabUnread,
+    { immediate: true },
+  );
+  const stopAppBadgeWatch = watch(
+    appBadgeUnreadCount,
     (count) => {
       if (deferLocalUnreadUpdates) {
         deferredLocalUnreadChanged = true;
         return;
       }
-      void applyUnreadCount(count);
+      void updateAppBadge(normalizeUnreadCount(count));
     },
     { immediate: true },
   );
@@ -100,14 +86,14 @@ export function useChatTabUnreadIndicator(
     const data = event.data as { type?: string; unreadCount?: unknown } | undefined;
     if (data?.type !== MESSAGE_TYPE) return;
     if (options.shouldAcceptServiceWorkerUnreadCount && !options.shouldAcceptServiceWorkerUnreadCount()) {
-      void applyUnreadCount(unreadCount.value);
+      void updateAppBadge(normalizeUnreadCount(appBadgeUnreadCount.value));
       return;
     }
     const serviceWorkerUnreadCount = normalizeUnreadCount(data.unreadCount);
     const refreshId = ++serviceWorkerRefreshId;
     deferLocalUnreadUpdates = true;
     deferredLocalUnreadChanged = false;
-    void applyUnreadCount(serviceWorkerUnreadCount);
+    void updateAppBadge(serviceWorkerUnreadCount);
     void Promise.resolve(options.onServiceWorkerUnreadCount?.(serviceWorkerUnreadCount))
       .catch(() => false)
       .then((didRefresh) => {
@@ -116,7 +102,7 @@ export function useChatTabUnreadIndicator(
         deferLocalUnreadUpdates = false;
         deferredLocalUnreadChanged = false;
         if (shouldApplyLocalUnread) {
-          void applyUnreadCount(unreadCount.value);
+          void updateAppBadge(normalizeUnreadCount(appBadgeUnreadCount.value));
         }
       });
   };
@@ -130,7 +116,8 @@ export function useChatTabUnreadIndicator(
     serviceWorkerRefreshId += 1;
     deferLocalUnreadUpdates = false;
     deferredLocalUnreadChanged = false;
-    stopWatch();
+    stopTabWatch();
+    stopAppBadgeWatch();
     navigator.serviceWorker?.removeEventListener("message", handleServiceWorkerMessage);
     document.title = BASE_TITLE;
     restoreFaviconLinks(faviconLinks);

@@ -208,7 +208,7 @@ afterEach(() => {
 describe("useChatTabUnreadIndicator", () => {
   test("updates title, favicon, and app badge for unread counts", async () => {
     const count = ref(3);
-    const indicator = useChatTabUnreadIndicator(count);
+    const indicator = useChatTabUnreadIndicator(count, count);
 
     await flushPromises();
 
@@ -254,29 +254,35 @@ describe("useChatTabUnreadIndicator", () => {
     indicator.stop();
   });
 
-  test("uses service worker unread messages as a tab sync nudge", async () => {
-    const count = ref(0);
+  test("keeps the tab synced to the Inbox while app badge hydration is pending", async () => {
+    const inboxCount = ref(2);
+    const appBadgeCount = ref(5);
     const hydration = deferred<boolean>();
     const onServiceWorkerUnreadCount = mock((_count: number) => hydration.promise);
-    const indicator = useChatTabUnreadIndicator(count, { onServiceWorkerUnreadCount });
+    const indicator = useChatTabUnreadIndicator(inboxCount, appBadgeCount, { onServiceWorkerUnreadCount });
     await flushPromises();
 
     const event = Object.assign(new Event("message"), {
-      data: { type: "waddle:unread-count", unreadCount: 5 },
+      data: { type: "waddle:unread-count", unreadCount: 7 },
     });
     serviceWorker.dispatchEvent(event);
     await flushPromises();
 
-    expect(onServiceWorkerUnreadCount).toHaveBeenCalledWith(5);
+    expect(onServiceWorkerUnreadCount).toHaveBeenCalledWith(7);
     expect(document.title).toBe("* Waddle");
-    expect(setAppBadge).toHaveBeenCalledWith(5);
+    expect(setAppBadge).toHaveBeenLastCalledWith(7);
 
-    count.value = 5;
+    inboxCount.value = 0;
+    await flushPromises();
+    expect(document.title).toBe("Waddle");
+    expect(links[1]?.href).toBe("/favicon-32x32.png");
+    expect(setAppBadge).toHaveBeenLastCalledWith(7);
+
     hydration.resolve(true);
     await flushPromises();
 
-    expect(document.title).toBe("* Waddle");
-    expect(setAppBadge).toHaveBeenCalledWith(5);
+    expect(document.title).toBe("Waddle");
+    expect(setAppBadge).toHaveBeenLastCalledWith(5);
 
     indicator.stop();
   });
@@ -284,7 +290,7 @@ describe("useChatTabUnreadIndicator", () => {
   test("reconciles deferred local changes when inbox refresh does not complete", async () => {
     const count = ref(0);
     const hydration = deferred<boolean>();
-    const indicator = useChatTabUnreadIndicator(count, {
+    const indicator = useChatTabUnreadIndicator(count, count, {
       onServiceWorkerUnreadCount: mock((_count: number) => hydration.promise),
     });
     await flushPromises();
@@ -310,7 +316,7 @@ describe("useChatTabUnreadIndicator", () => {
     autoLoadImages = false;
     const count = ref(3);
     const hydration = deferred<boolean>();
-    const indicator = useChatTabUnreadIndicator(count, {
+    const indicator = useChatTabUnreadIndicator(count, count, {
       onServiceWorkerUnreadCount: mock((_count: number) => hydration.promise),
     });
     await nextTick();
@@ -344,7 +350,7 @@ describe("useChatTabUnreadIndicator", () => {
   test("ignores service worker unread messages when the app should not accept them", async () => {
     const count = ref(0);
     const onServiceWorkerUnreadCount = mock((_count: number) => true);
-    const indicator = useChatTabUnreadIndicator(count, {
+    const indicator = useChatTabUnreadIndicator(count, count, {
       shouldAcceptServiceWorkerUnreadCount: () => false,
       onServiceWorkerUnreadCount,
     });
