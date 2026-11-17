@@ -59,7 +59,7 @@ use crate::destination::{SeatAdoption, ServedService};
 use crate::permissions::host_grant::StreamEvidence;
 use crate::s2s::conn::{SinkVerdict, SinkWait, VerifiedPeerStream, Waited};
 use crate::s2s::route::local_rooms::{
-    CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd,
+    CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd, Taken,
 };
 use crate::s2s::route::placement::{Laned, Offered, Waiting};
 use crate::s2s::route::principal::RemotePrincipal;
@@ -1433,12 +1433,14 @@ impl Inner {
                     }
                 }
             }
+            let taken = Taken::default();
             let handled = hosting.host.handle(RoomRequest {
                 principal: principal.clone(),
                 operation,
                 stanza: stanza.clone(),
                 seat: seat.clone(),
                 joining,
+                taken: taken.clone(),
             });
             let Ok(answer) = tokio::time::timeout_at(deadline, handled).await else {
                 telemetry::room_request_timed_out();
@@ -1454,6 +1456,10 @@ impl Inner {
                         }
                         self.end_seat_untold(opened, SeatEnd::Undeliverable);
                     }
+                    // The host began a durable effect of the request
+                    // ([`Taken`]): only an IQ is answered, saying that it
+                    // may have been applied.
+                    _ if taken.is_taken() => self.answer_taken(&pair, &stanza),
                     // Any other request is answered as its kind is, as a
                     // refusal before it was taken is: an IQ or a message
                     // that carries something with an error, presence that
@@ -1655,6 +1661,28 @@ impl Inner {
         )
     }
 
+    /// Answer a request the host took ([`Taken`]) and did not answer within
+    /// the per-item budget. A message is not answered: the room may have
+    /// accepted it, and the ingress authority recovers the effects of an
+    /// accepted message, so an error would only have its sender send it
+    /// again. An IQ is answered, as every IQ request is (RFC 6120 §8.2.3),
+    /// with `internal-server-error` saying that it may have been applied,
+    /// and not that it may be tried again. Presence is never taken.
+    fn answer_taken(self: &Arc<Self>, pair: &Pair, stanza: &Stanza) {
+        if !matches!(stanza, Stanza::Iq(_)) {
+            return;
+        }
+        let error = replies::error(
+            self.home(),
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "The request may have been applied; its outcome could not be told in time.",
+        );
+        if let Some(reply) = replies::error_reply(stanza, error) {
+            self.offer_room_reply(pair, reply);
+        }
+    }
+
     /// Build the MUC service's room list (XEP-0045 §6.3) for a remote
     /// entity on a task of its own, so that the shard that took the request
     /// goes on with its rooms': the host reads the channel catalog and the
@@ -1705,6 +1733,7 @@ impl Inner {
             stanza: stanza.clone(),
             seat: None,
             joining: false,
+            taken: Taken::default(),
         });
         let answered = tokio::select! {
             biased;

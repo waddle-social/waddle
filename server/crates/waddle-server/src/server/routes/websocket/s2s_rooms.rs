@@ -1094,6 +1094,7 @@ impl Asked<'_> {
         let Some(requester) = self.request.principal.full() else {
             return self.refuse(forbidden("Operation not permitted."));
         };
+        self.take_if_change(iq);
         let batch = muc_admin_for_remote(self.state, iq, &requester, &self.evidence).await;
         self.answered(batch).await
     }
@@ -1104,6 +1105,7 @@ impl Asked<'_> {
         let Some(requester) = self.request.principal.full() else {
             return self.refuse(forbidden("Operation not permitted."));
         };
+        self.take_if_change(iq);
         let batch =
             muc_owner_or_moderation_for_remote(self.state, iq, &requester, &self.evidence).await;
         // The handler answers nothing to a moderation element that is no
@@ -1121,6 +1123,15 @@ impl Asked<'_> {
             ));
         }
         self.answered(batch).await
+    }
+
+    /// Mark the request taken ([`crate::s2s::route::Taken`]) when `iq` asks
+    /// for a change, which the handler may apply before it answers; a
+    /// request that only reads is never taken.
+    fn take_if_change(&self, iq: &Iq) {
+        if matches!(iq, Iq::Set { .. }) {
+            self.request.taken.take();
+        }
     }
 
     /// The answer of a handler written for sessions, for the remote
@@ -1297,6 +1308,9 @@ impl Asked<'_> {
             connection_generation: TransportGeneration::Host,
         };
         let authority = &self.state.deps.protocol.ingress;
+        // From here the room may accept the message: one the router gives
+        // up on is no longer answered with an error.
+        self.request.taken.take();
         let decision = authority.commit(&submission).await;
         if !decision.class.advances() {
             return self.refuse(internal());
