@@ -691,12 +691,12 @@ domains and redirects, refusal of local services not enabled for remote
 senders, bounded resource exhaustion, identity collisions, scoped and remote
 administration, room moderation by home and stream strength, revoke races and
 stale repair, concurrent replicas, partial failure, and each deployment
-restarting while the other remains live. Its certificate matrix includes serverAuth-only certificates
-issued by the harness CA, modelled on the public `le-tlsserver.badxmpp.eu`
-test endpoint, whose current behavior has not been verified for this design
-and which the native harness does not contact; they must authenticate in both
-roles. It also includes certificates from the wrong trust profile for a
-domain, which must fail.
+restarting while the other remains live. Its certificate matrix includes
+serverAuth-only certificates issued by the harness CA, modelled on the public
+`le-tlsserver.badxmpp.eu` test endpoint, whose current behavior has not been
+verified for this design and which the native harness does not contact; they
+must authenticate in both roles. It also includes certificates from the wrong
+trust profile for a domain, which must fail.
 
 The harness uses loopback addresses, `.test` domains and explicitly configured
 endpoints, which D3 exempts from discovery and its address checks. A dedicated

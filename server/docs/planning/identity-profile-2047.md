@@ -295,7 +295,9 @@ room only when an item under its canonical id is on that Space too.
 Accounts outside the account profile are kept rather than locked out: their
 names are Nodeprep fixed points, so no two of them fold together, and S2S is
 off. Before remote identities or grants are enrolled (W5a, W5b) each such
-account needs an operator decision; the rollout runbook records it. Renaming
+account needs an operator decision; the
+[rollout runbook](../../../docs/operations/federation-2047-rollout.md#activation-is-out-of-scope)
+records it. Renaming
 or migrating accounts is not part of this profile.
 
 ## How later slices use it

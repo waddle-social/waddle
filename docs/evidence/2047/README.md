@@ -13,6 +13,10 @@ that was unavailable is recorded as unverified, never as passed.
 | --- | --- |
 | [`unrun-tests.md`](unrun-tests.md) | The verification checklist: every test target added or changed on the branch, its owning slice, its prerequisites and its execution status, followed by the hardening and follow-up items the slices left open. |
 
+The rollout into main follows the
+[federation rollout runbook](../../operations/federation-2047-rollout.md); the
+results of its post-merge verification are recorded here as well.
+
 The evidence log for the gates in the plan's
 [gate table](../../planning/federation-2047.md#gate-ownership) is added here
 as the verification steps are run.
