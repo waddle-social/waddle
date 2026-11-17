@@ -16,10 +16,11 @@
 //! remote sender, whose request token it could not have issued.
 //!
 //! A remote room's archive answers a query the local resource sent it with
-//! `<result/>` messages from the room's bare JID (XEP-0313 §4.1.2), which a
-//! client matches to its query by `queryid`; they are kept, and what they
-//! forward is cleaned as any nested content is. A `<result/>` from any other
-//! address is removed.
+//! `<result/>` messages from the room's bare JID (XEP-0313 §4.2), which a
+//! client accepts only as answers to a query it has open with that entity,
+//! matching the stanza's `from` and the `queryid` (§8.2); they are kept, and
+//! what they forward is cleaned as any nested content is. A `<result/>` from
+//! any other address is removed.
 //!
 //! Presence and IQ payloads are not cleaned here: a client reads none of
 //! these payloads from them.

@@ -1364,7 +1364,7 @@ async fn an_archive_result_is_kept_only_from_the_rooms_bare_jid_and_what_it_forw
     let (a, _b, muc) = outbound_muc(&pki, RouterLimits::default()).await;
     join(&a, ALICE_PHONE, ROOM_ALICE).await;
 
-    // XEP-0313 §4.1.2: the room's archive answers with results from its
+    // XEP-0313 §4.2: the room's archive answers with results from its
     // bare JID; what one forwards carries forged statements of its own.
     let mut archived = message(
         ROOM_HOST,
