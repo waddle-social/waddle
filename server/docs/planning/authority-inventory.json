@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "ec108dd8dd950a97996cdcfb7890e73800d81513",
+  "baseline_commit": "00c79c85b1e719823720dc11face5244e02933ee",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "sha256": "88b30a16442489546fdbe69b1df4c9b7243d1534c3123004a432ad53d7a80c83"
+      "sha256": "c0abb381e1d3e67fa352dcbf83abe90e5717acba28165eb13241d84e495a9883"
     },
     {
       "path": "server/crates/waddle-server/src/clustering/route_bridge/mailbox.rs",
@@ -33,7 +33,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/ingress/principal.rs",
-      "sha256": "26bbd9cc69cc43d9023e1069816aec5d9deca8fad5df7121a1b1f0e742e58318"
+      "sha256": "05ac804925bb8859b3d99e90bbefc7e3aa6e2b8762adfbcdf97c0a97204f01d5"
     },
     {
       "path": "server/crates/waddle-server/src/ingress/room_manifest_replay.rs",
@@ -920,7 +920,7 @@
     },
     "account-retire": {
       "path": "server/crates/waddle-server/src/auth/retirement.rs",
-      "line": 127,
+      "line": 129,
       "text": "pub async fn retire_account("
     },
     "account-retired-native": {
@@ -1121,7 +1121,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "152ed53afaec3846eafa14a4307fcccd98e5dd85e91f756908305e86596e4e9e",
+    "sha256": "d069eda8769a3d1e0a00644f5e5bb67306ee27e3f539d3bd156102fd66c74ee3",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 20,

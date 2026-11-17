@@ -1212,10 +1212,10 @@ changed, and no decision of standing moved.
   `s2s-room-placement` and `s2s-unseated-removal` moved, sets) is
   unchanged. The account arm (`RemoteIngressTarget::Account`) admits a
   remote sender's direct message to a local account, with no room
-  execution: it checks the sender's domain against the S2S admission
-  policy the replica captured when it built the submission, and reads the
-  recipient's account row by its lookup key (`FOR KEY SHARE` on
-  PostgreSQL) and the ledger of retired JIDs in the acceptance transaction (`ingress_uow/remote_recipients.rs`, a new
+  execution: it decides the sender's domain from the S2S admission policy
+  of the replica that built the submission, and reads the recipient's
+  account row (`FOR SHARE` on PostgreSQL) and the ledger of retired JIDs
+  in the acceptance transaction (`ingress_uow/remote_recipients.rs`, a new
   read-only repository registered in `ingress_uow/mod.rs`). It honours no
   grant: the message reaches only the recipient account's archive, inbox,
   resources and offline store, and the plan is refused before commit when
@@ -1230,6 +1230,30 @@ changed, and no decision of standing moved.
 - The raw scan holds 1636 records, 3 more than before: the account arm's
   and the account side's uses of `RemoteOccupantPrincipal`. Other records
   in the changed files moved because those files gained lines.
+
+The selected evidence was refreshed a twenty-sixth time, through
+`00c79c85b1e719823720dc11face5244e02933ee`, after reviewing the delta of the reviewed files since the
+twenty-fifth refresh. `auth/retirement.rs` and `ingress/principal.rs`
+changed. No grant writer or storage plane of the host-grant authority was
+added, no producer of stream evidence changed, and no decision of standing
+moved.
+
+- The account arm of the remote principal's acceptance
+  (`remote-acceptance-principal`, its anchor unchanged) passes the served
+  account domains of the admission policy to the recipient assertion,
+  which now refuses a recipient at a domain the policy does not serve and
+  finds the account by the lookup keys every existence check reads
+  (`auth::directory::account_lookup_keys`: `users.localpart_key`,
+  `native_users.jid_key`), locking the row `FOR KEY SHARE` on PostgreSQL.
+  The D1 check is described as made against the snapshot captured when
+  the submission was built; what it decides is unchanged. The classifier
+  of the planned message (`classify_remote_direct_plan`, outside the
+  reviewed files) now classifies every intent as well as every effect.
+- Retirement (`account-retire` moved) also deletes the account's offline
+  store (`pending_delivery`) in its transaction. It writes no grant and
+  decides no standing.
+- The raw scan holds 1636 records, unchanged in content; records in the
+  changed files moved because those files gained lines.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
