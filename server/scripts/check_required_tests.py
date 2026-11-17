@@ -22,7 +22,13 @@ import sys
 import xml.etree.ElementTree as ElementTree
 
 NOT_EXECUTED = "skipped"
-FAILED = ("failure", "error", "flakyFailure", "flakyError", "rerunFailure", "rerunError")
+# nextest marks a test that failed every try with <failure> or <error> (its
+# earlier tries are <rerunFailure>/<rerunError>), and a test that passed on a
+# retry with only <flakyFailure>/<flakyError>. The first failed; the second
+# passed and is reported as flaky.
+FAILED = ("failure", "error")
+FLAKY = ("flakyFailure", "flakyError")
+RERUN = ("rerunFailure", "rerunError")
 LANE_ID = "server.required-postgres-multiprocess-websocket-nextest"
 
 # These anchors keep the release-evidence lane tied to its real service and
@@ -109,7 +115,7 @@ def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[T
                     raise InputError(f"{report}: testcase must be a direct child of testsuite")
                 if child.tag == "testsuite" and parent.tag not in {"testsuites", "testsuite"}:
                     raise InputError(f"{report}: testsuite must be inside testsuites or testsuite")
-                if child.tag in (NOT_EXECUTED, *FAILED) and parent.tag != "testcase":
+                if child.tag in (NOT_EXECUTED, *FAILED, *FLAKY, *RERUN) and parent.tag != "testcase":
                     raise InputError(f"{report}: test outcome must be a direct child of testcase")
         for case in root.iter("testcase"):
             binary, name = case.get("classname"), case.get("name")
@@ -123,6 +129,33 @@ def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[T
             if any(case.find(tag) is not None for tag in FAILED):
                 failed.add(test)
     return executed, failed, skipped, report_digests
+
+
+def flaky_tests(reports: list[Path]) -> set[TestId]:
+    """Return the tests that passed only on a retry, across JUnit reports."""
+    flaky: set[TestId] = set()
+    for report in reports:
+        try:
+            root = ElementTree.fromstring(report.read_bytes())
+        except (ElementTree.ParseError, OSError) as error:
+            raise InputError(f"{report}: unreadable JUnit report: {error}") from error
+        for case in root.iter("testcase"):
+            binary, name = case.get("classname"), case.get("name")
+            if not binary or not name:
+                raise InputError(f"{report}: testcase without classname or name")
+            if any(case.find(tag) is not None for tag in FAILED) or case.find(NOT_EXECUTED) is not None:
+                continue
+            if any(case.find(tag) is not None for tag in FLAKY):
+                flaky.add(TestId(binary, name))
+    return flaky
+
+
+def report_flaky(flaky: set[TestId]) -> None:
+    """List flaky tests as GitHub warning annotations, so a retry is never silent."""
+    for test in sorted(flaky):
+        print(f"::warning title=Flaky test::{test} failed and then passed on a retry")
+    if flaky:
+        print(f"{len(flaky)} flaky tests passed on a retry; fix them before they fail every try")
 
 
 EXECUTED_PER_BINARY_LIMIT = 500
@@ -185,11 +218,13 @@ def main() -> int:
     try:
         required, _ = parse_required(args.required)
         executed, failed, skipped, _ = executed_tests(args.reports)
+        flaky = flaky_tests(args.reports)
     except InputError as error:
         print(error, file=sys.stderr)
         return 2
     if args.executed_out:
         args.executed_out.write_text("".join(f"{test}\n" for test in sorted(executed)))
+    report_flaky(flaky)
     missing = [test for test in required if test not in executed or test in skipped]
     failing = [test for test in required if test in failed]
     if missing or failing:

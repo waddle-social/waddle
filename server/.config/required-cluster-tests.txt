@@ -11,9 +11,9 @@
 # `.ci/nextest-archive/executed-tests.txt` in the lane's diagnostics artifact
 # (uploaded on PRs always, on main only when the lane passes); on failure the
 # missing names and the executed names of their binaries are printed to the
-# job log. A test nextest reports as flaky (passed on retry) counts as failed;
-# the `ci` profile sets `retries = 0`, so keep that coupling in mind before
-# adding retries.
+# job log. A test nextest reports as flaky (passed on retry; the `ci` profile
+# retries twice) counts as passed, and is listed as a warning in the job log
+# and under `flaky_tests` in the evidence record.
 #
 # FORMAT: one test per line, `<binary-id> <test-name>`, separated by
 # whitespace, exactly as `cargo nextest list --workspace --all-features`

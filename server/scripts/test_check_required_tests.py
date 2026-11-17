@@ -108,6 +108,30 @@ class RequiredTestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("required test failed", result.stderr)
 
+    def test_required_test_that_passed_on_a_retry_passes_and_is_reported(self):
+        self.report.write_text(REPORT.format(
+            failures=0, failure='<flakyFailure type="test failure">panicked</flakyFailure>'))
+        self.required.write_text(
+            "waddle-server::clustering_cluster_e2e muc_join_routes_to_foreign_room_owner\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "::warning title=Flaky test::waddle-server::clustering_cluster_e2e "
+            "muc_join_routes_to_foreign_room_owner failed and then passed on a retry",
+            result.stdout)
+
+    def test_required_test_that_failed_every_try_fails_and_is_not_flaky(self):
+        self.report.write_text(REPORT.format(
+            failures=1,
+            failure='<failure type="test failure">panicked</failure>'
+                    '<rerunFailure type="test failure">panicked</rerunFailure>'))
+        self.required.write_text(
+            "waddle-server::clustering_cluster_e2e muc_join_routes_to_foreign_room_owner\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("required test failed", result.stderr)
+        self.assertNotIn("Flaky test", result.stdout)
+
     def test_names_from_several_shard_reports_are_combined(self):
         other = self.root / "shard-2.xml"
         other.write_text(

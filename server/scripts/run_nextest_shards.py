@@ -407,8 +407,10 @@ def build_record(candidate, run_id, source, identities, required_path, diagnosti
         required, required_digest = gate.parse_required(required_path)
         gate.validate_anchor_inventory(required)
         executed, failed, skipped, report_digests = gate.executed_tests(reports)
+        flaky = gate.flaky_tests(reports)
     except gate.InputError as error:
         raise InputError(str(error)) from error
+    gate.report_flaky(flaky)
     atomic_write_text(diagnostics / 'executed-tests.txt',
                       ''.join(f'{test}\n' for test in sorted(executed)))
     missing = [test for test in required if test not in executed or test in skipped]
@@ -437,6 +439,7 @@ def build_record(candidate, run_id, source, identities, required_path, diagnosti
         'required_test_gate': {
             'outcome': 'passed', 'required_count': len(required), 'executed_count': len(executed),
             'required_tests': outcomes, 'executed_inventory': [str(test) for test in sorted(executed)],
+            'flaky_tests': [str(test) for test in sorted(flaky)],
         },
         'prerequisite_anchors': anchors,
         'qualification': 'not_assessed',
