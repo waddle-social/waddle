@@ -2206,10 +2206,11 @@ runbook (G24):
   refusals are replaced once the account side is attached, inbound
   requests to local resources are registered for correlation, and the
   router refuses a message carrying a DM pin marker for a remote peer.
-  Remote senders' messages no resource takes are stored offline outside
-  the ingress commit, without archive, inbox or push; the ingress receipt
-  for a remote target, needed for those and for archiving local accounts'
-  messages to remote contacts, remains with a remote ingress producer.
+  Remote senders' direct messages are accepted through the ingress
+  authority as the recipient's half of a local direct message, with the
+  recipient's archive, inbox, push and carbons (G18-14); archiving local
+  accounts' messages to remote contacts, with S2S egress as transport
+  custody, remains.
 - Remote principals at protected effects (W7a): pass each
   `RemotePrincipal`'s evidence (`PrincipalEvidence::of`) to the host-grant
   decision of every protected effect a remote stanza reaches, and decide
