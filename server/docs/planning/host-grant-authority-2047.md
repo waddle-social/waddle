@@ -1427,7 +1427,7 @@ The sweep is lexical and the table is its review, not a call graph.
 | Join | The standing the grants honour: outcast is refused as banned, no grant as membership required; owner, admin and member enter with that affiliation. The room is members-only. A managed room without a channel row is not served. |
 | Archive (XEP-0313), mention audience, durable membership | `read` |
 | Room disco#info | `view`; anyone else is told the room does not exist. The room is advertised members-only. |
-| Service disco#items, Spaces disco#items | `view` (the deployment's owner chose this on 2026-11-17 over listing a managed room to nobody): the MUC service lists a managed room whose catalog row is public only to a subject its grants allow `view`, read by the channel binding the enrolled set named, and a Space node's `disco#items` lists a managed room's bookmark only to such a subject. For the MUC service's listing, and a Space node's listing for a session, each grant that allowed `view` is confirmed with `still_allows` just before the answer is built, and a room not decided and confirmed within the listing's time is not listed; a remote principal's Space node listing decides each room once, through the gate's `allows_as`. A room whose grants cannot be read is not listed. An enrolled Space node is never listed, and its own `disco#items` is not found ([MUC fallback](s2s-routing-2047.md#muc-fallback-w7b)). |
+| Service disco#items, Spaces disco#items | `view`, as the room's `disco#info` decides it: the MUC service lists a managed room whose catalog row is public only to a subject its grants allow `view`, read by the channel binding the enrolled set named, and a Space node's `disco#items` lists a managed room's bookmark only to such a subject. For the MUC service's listing, and a Space node's listing for a session, each grant that allowed `view` is confirmed with `still_allows` just before the answer is built, and a room not decided and confirmed within the listing's time is not listed: a session is then answered with `internal-server-error` (type `wait`), and a remote asker with the rest and no count. A remote principal's Space node listing decides each room once, through the gate's `allows_as`. A room whose grants cannot be read is not listed, and the listing tells no count. An enrolled Space node is never listed, and its own `disco#items` is not found ([MUC fallback](s2s-routing-2047.md#muc-fallback-w7b)). |
 | Affiliation change | The store's initiator rule (first slice): an owner grants and removes owner and admin standing, an owner or admin changes other standing, the room keeps an owner who can administer it, and issuance refuses an owner or admin grant to an account outside the served domains and the trusted homes. One change per request. |
 | Affiliation lists | The member list to anyone with `read`, every other list to a subject with `moderate`; the lists are the recorded grants. |
 | Role change | `moderate` |
@@ -3288,7 +3288,8 @@ them.
   session's request or a subject it names passes `NoStream`. The surfaces a
   remote principal reaches (the join, the archive read before and after the
   page is read, `disco#info` of the room, the MUC service's and a Space
-  node's `disco#items`, the self-ping, and the administration requests: the `muc#admin` lists and changes, the
+  node's `disco#items`, the self-ping, and the administration requests:
+  the `muc#admin` lists and changes, the
   `muc#owner` configuration and XEP-0425 moderation; see
   [inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)) pass the evidence of
   the stream that carried the request (`PrincipalEvidence::of`). The
