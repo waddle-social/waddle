@@ -19,8 +19,9 @@ seated remote occupant, through `ab055f27480da80b43e15087f17e699199cce190`, and
 with the bounds on that work, the takeover of a restored room's seats and
 the issuance check across replicas, through `99f30be6766e510672dbaa8c421a873ab758b9cd`, Spaces over S2S
 through `0ee8556e2eea373a6d7820b525b96f3e2188e540`, the MUC fallback listings through
-`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, and the joined-spaces node's gates through
-`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8` (see the last refresh below); the original
+`fe6123acd49da8d9f5d1a02dcc2d33fa1dc2c4fb`, the joined-spaces node's gates through
+`ace94a3ddd527acaaf0a3fbb18ca742b143a4ba8`, and the fixes before verification through
+`7a098688335c2264c6023e6136439e7cd6564fdc` (see the last refresh below); the original
 baseline and its limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
@@ -1802,6 +1803,56 @@ moved.
 - The raw scan holds 1643 records: the 1643 of the forty-third refresh,
   each unchanged in content; those in `pubsub_authz.rs` (its unit tests)
   and `pubsub_admin.rs` moved as on the slice's branch.
+
+The selected evidence was refreshed a forty-ninth time, through
+`7a098688335c2264c6023e6136439e7cd6564fdc`, the fixes made before verification and their merge
+with the integration branch at `3ef273961`. Sixteen reviewed files changed;
+what changed in each, for the authority this inventory maps:
+
+- `handlers/iq/muc_admin.rs`: an owner or admin standing written through
+  `muc#admin` is refused while a seat of the account in the room would not
+  honour it, read now from the seat table every replica shares as well as
+  from this replica's seats (`seats_honour_privilege_anywhere`, which the
+  channel administration command already used), and refused while that
+  table cannot be read. This only narrows issuance.
+- `admin/channels.rs`, `admin/spaces.rs`, `handlers/iq/spaces_publish.rs`,
+  `handlers/iq/spaces_bookmark_cleanup.rs`,
+  `handlers/iq/muc_owner_moderation.rs`, `server/http.rs`: once a Space
+  item's or a member's XEP-0402 bookmark's retraction stands, the node's
+  subscribers are notified through the ordinary fan-out
+  (`AppState::notify_space_retracted`, `notify_bookmark_retracted`, bound
+  to the WebSocket state at startup). The fan-out keeps its own checks
+  (an enrolled scope's Space node delivers nothing; remote subscribers are
+  decided on the Spaces host's task as before). No grant, relationship or
+  standing is written or read for a decision.
+- `s2s_spaces.rs`: a room's openness or grants that cannot be read now is
+  undecided rather than refused for a Space's listing to a remote asker;
+  the room is still not told, and the listing tells no count. The ban read
+  after a subscription commits logs a failed removal of the row; a
+  `test-support` gate can hold the subscription there.
+- `handlers/iq/disco_items.rs`: a live instant room not read in time is
+  left out of a session's listing that tells no count, where the listing
+  failed before; a managed room not decided in time still fails it.
+  Decisions of `view` are unchanged.
+- `s2s_rooms.rs`, `permissions/host_grant/gate.rs`: binding the attachment
+  gate for remote occupants logs another gate offered than the bound one
+  (`HostGrantGate::attachment_conflicts`, a read of the existing flag).
+- `permissions/host_grant/enrolled.rs`, `fence.rs`: a poisoned lock stops
+  the process instead of being read; the fence's drop leaves a poisoned
+  state's lease to lapse.
+- `auth/retirement.rs`, `server/lifecycle.rs`: startup reads
+  `retired_account_jids` once as the runtime role and refuses to start when
+  it cannot; retirement reads an account's other spellings in the offline
+  store through an index range.
+- `db/s2s_spaces.rs`: the migration numbers in its module documentation.
+
+Thirty-six anchors moved with the lines added above them; no anchor's text
+changed. No grant writer or storage plane of the host-grant authority was
+added, and no producer of stream evidence changed.
+
+- The raw scan holds 1643 records, the same number for every token as in
+  the forty-eighth refresh; its digest changed with the records that moved
+  in the changed files.
 
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
