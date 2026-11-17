@@ -46,7 +46,8 @@ public struct CallRingPlan: Hashable, Sendable {
     }
 
     /// Where the system rings for the app (an iPhone or iPad, through its
-    /// call screen) a ring needs nothing more. Elsewhere it is heard
+    /// call screen) the app never rings: a call the system would not take
+    /// shows in the dock without a sound. Elsewhere a ring is heard
     /// wherever the app is, and also seen as a notification when the app
     /// is not in front. Ringback is only ever heard.
     public init(alert: CallAlert?, isAppActive: Bool, systemRings: Bool) {

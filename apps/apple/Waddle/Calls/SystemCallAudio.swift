@@ -1,64 +1,76 @@
 #if os(iOS)
 import AVFoundation
 import LiveKit
+import WaddleKit
 
-/// Who owns the audio session on an iPhone or iPad.
+/// Runs the media engine for whoever owns audio on an iPhone or iPad
+/// (`SystemCallAudioOwner`).
 ///
-/// For a call the system's call screen manages, CallKit activates and
-/// deactivates the session, and the media engine may only run in between:
-/// started earlier it would have no session, and left running after it
-/// would hold one the system has taken back. For any other call the
-/// media engine configures the session itself, as it does by default.
+/// - The system: CallKit activates and deactivates the audio session, and
+///   the engine may only run in between. Started earlier it would have no
+///   session; left running after, it would hold one the system took back.
+/// - The app: the engine configures the session itself, as it does by
+///   default, and may run.
+/// - Nobody: the engine may not run. A call that is over cannot start its
+///   microphone again while its media is still being torn down.
 @MainActor
-enum SystemCallAudio {
-    private static var isManaged = false
-    private static var isActivated = false
-    private static var microphoneWait: Task<Void, Never>?
+final class SystemCallAudio {
+    private var owner = SystemCallAudioOwner.nobody
+    private var isActivated = false
+    private var microphoneWait: Task<Void, Never>?
 
-    /// Hands the session to the system, or takes it back for the app.
-    static func setManaged(_ managed: Bool) {
-        guard isManaged != managed else { return }
-        isManaged = managed
-        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = !managed
-        if managed {
-            if !isActivated { stopEngine() }
-        } else {
-            microphoneWait?.cancel()
-            try? AudioManager.shared.setEngineAvailability(.default)
-        }
+    init() {
+        apply()
+    }
+
+    func setOwner(_ next: SystemCallAudioOwner) {
+        guard owner != next else { return }
+        owner = next
+        apply()
     }
 
     /// CallKit activated the session for the call.
-    static func activated(_ session: AVAudioSession) {
+    func activated(_ session: AVAudioSession) {
         isActivated = true
-        guard isManaged else { return }
+        guard owner == .system else { return }
         try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.mixWithOthers])
-        startEngine()
+        apply()
     }
 
     /// CallKit took the session back.
-    static func deactivated() {
+    func deactivated() {
         isActivated = false
-        if isManaged { stopEngine() }
+        apply()
+    }
+
+    private func apply() {
+        // Off only while the system owns the session; otherwise the engine
+        // also releases the session when it stops.
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = owner != .system
+        switch owner {
+        case .system: isActivated ? startEngine() : stopEngine()
+        case .app: startEngine()
+        case .nobody: stopEngine()
+        }
     }
 
     /// The engine refuses to start with input while the microphone prompt
     /// is still up, so the call is heard at once and the microphone joins
     /// when the person has answered the prompt.
-    private static func startEngine() {
+    private func startEngine() {
         microphoneWait?.cancel()
         if (try? AudioManager.shared.setEngineAvailability(.default)) != nil { return }
         try? AudioManager.shared.setEngineAvailability(.init(isInputAvailable: false, isOutputAvailable: true))
-        microphoneWait = Task {
+        microphoneWait = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled, isManaged, isActivated else { return }
+                guard !Task.isCancelled, self != nil else { return }
                 if (try? AudioManager.shared.setEngineAvailability(.default)) != nil { return }
             }
         }
     }
 
-    private static func stopEngine() {
+    private func stopEngine() {
         microphoneWait?.cancel()
         try? AudioManager.shared.setEngineAvailability(.none)
     }

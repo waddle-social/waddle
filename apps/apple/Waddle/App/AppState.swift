@@ -108,11 +108,11 @@ final class AppState {
             await coordinator.markDisplayed(conversation)
         case let .answerCall(sid):
             // Only the call that rang: by now another may hold the slot.
-            guard case .incoming(let call) = coordinator.calls.state, call.sid == sid else { return }
-            _ = await coordinator.calls.acceptIncoming()
+            _ = await coordinator.calls.answer(sid: sid)
         case let .declineCall(sid):
-            guard case .incoming(let call) = coordinator.calls.state, call.sid == sid else { return }
-            _ = await coordinator.calls.declineIncoming()
+            // Decline is for a call still ringing, never one since answered.
+            guard case .incoming = coordinator.calls.state else { return }
+            await coordinator.calls.end(sid: sid)
         }
     }
 
@@ -142,34 +142,17 @@ final class AppState {
     }
 
     #if os(iOS)
-    /// What the system's call screen may do. Each acts only on the call it
-    /// names: by the time it runs another may hold the slot.
+    /// What the system's call screen may do, each to the call it names.
     private func systemCallHandlers(for active: ActiveSession) -> SystemCallCenter.Handlers {
         let calls = active.coordinator.calls
         return .init(
-            answer: { [weak active] sid in
-                guard active != nil, calls.state.sid == sid else { return false }
-                switch calls.state {
-                case .incoming(let call): return call.isAccepting ? true : await calls.acceptIncoming()
-                case .active: return true
-                case .idle, .outgoing, .joiningGroup, .inGroup, .ended: return false
-                }
-            },
-            end: { [weak active] sid in
-                guard active != nil, calls.state.sid == sid else { return }
-                if case .incoming(let call) = calls.state, !call.isAccepting {
-                    _ = await calls.declineIncoming()
-                } else if calls.state.isLive {
-                    await calls.hangUp()
-                }
-            },
+            answer: { sid in await calls.answer(sid: sid) },
+            end: { sid in await calls.end(sid: sid) },
             setMuted: { [weak active] sid, isMuted in
                 guard let active, calls.state.sid == sid else { return }
                 await active.callMedia.setMicrophone(!isMuted)
             },
-            name: { [weak active] call in
-                active?.coordinator.directory.title(for: call.isRoom ? .room(call.peer) : .direct(call.peer)) ?? ""
-            }
+            name: { [weak active] conversation in active?.coordinator.directory.title(for: conversation) ?? "" }
         )
     }
     #endif

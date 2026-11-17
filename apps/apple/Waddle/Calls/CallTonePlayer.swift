@@ -9,8 +9,10 @@ import WaddleKit
 /// is checked every second and started again if it has gone quiet.
 ///
 /// It never touches the audio session. On a Mac there is none. On an
-/// iPhone or iPad the only tone is ringback, for a call the system's call
-/// screen already owns the session of (`SystemCallAudio`).
+/// iPhone or iPad the only tone is ringback: for a call the system's call
+/// screen manages the session is the system's, and for one it does not
+/// the tone plays under the app's default category, which obeys the
+/// silent switch.
 @MainActor
 final class CallTonePlayer {
     private var player: AVAudioPlayer?

@@ -9,18 +9,26 @@ public struct SystemCall: Hashable, Sendable {
     public let sid: String
     public let direction: Direction
     /// The person, or the room whose call it is.
-    public let peer: BareJID
-    public let isRoom: Bool
+    public let conversation: ConversationID
     public let isVideo: Bool
 
-    public init(id: UUID, sid: String, direction: Direction, peer: BareJID, isRoom: Bool, isVideo: Bool) {
+    public init(id: UUID, sid: String, direction: Direction, conversation: ConversationID, isVideo: Bool) {
         self.id = id
         self.sid = sid
         self.direction = direction
-        self.peer = peer
-        self.isRoom = isRoom
+        self.conversation = conversation
         self.isVideo = isVideo
     }
+}
+
+/// Who may run the microphone and speaker for the slot's call.
+public enum SystemCallAudioOwner: Hashable, Sendable {
+    /// The system's call screen manages the call and its audio session.
+    case system
+    /// The call is live but the system is not told of it.
+    case app
+    /// No call, or one that is over as far as audio goes.
+    case nobody
 }
 
 /// Why a call left the system's call screen without the person ending it there.
@@ -44,12 +52,13 @@ public enum SystemCallUpdate: Hashable, Sendable {
 /// each thing once.
 ///
 /// One call at a time, as the slot holds. A call is *managed* from the
-/// moment it is reported until it ends or the system refuses it; whoever
-/// owns audio hands it to the system only for a managed call.
+/// moment it is reported until it ends or the system refuses it, and the
+/// system owns audio only for a managed call (`audioOwner`).
 ///
 /// Not every call is reported. One that arrives under Do Not Disturb stays
 /// off the system's screen for good, as does one first seen already
-/// answered, and one the system refused: those are left to the app.
+/// answered, and one the system refused: those are left to the app, which
+/// shows them in its dock without a ring.
 public struct SystemCallTracker {
     private enum Progress: Comparable { case started, connecting, connected }
 
@@ -63,6 +72,9 @@ public struct SystemCallTracker {
     private var managed: Managed?
     /// The slot's call that the system is not told about.
     private var unmanagedSid: String?
+    /// The slot's call that ended on the system's side; the slot may hold
+    /// it a moment longer while it is torn down.
+    private var endedSid: String?
 
     public init(newID: @escaping () -> UUID = { UUID() }) {
         self.newID = newID
@@ -72,27 +84,39 @@ public struct SystemCallTracker {
     public var isManaging: Bool { managed != nil }
     public var managedCall: SystemCall? { managed?.call }
 
+    public var audioOwner: SystemCallAudioOwner {
+        if managed != nil { return .system }
+        return unmanagedSid != nil && unmanagedSid != endedSid ? .app : .nobody
+    }
+
     /// Our session id for the system's call, while it lasts.
     public func sid(for id: UUID) -> String? {
         managed?.call.id == id ? managed?.call.sid : nil
     }
 
-    /// The person answered on the system's screen, so it need not be told.
+    /// The system knows the call is answered: the person answered on its
+    /// screen and the answer went out.
     public mutating func systemAnswered(_ id: UUID) {
         guard managed?.call.id == id else { return }
         managed?.isAnswerKnown = true
     }
 
-    /// The person ended the call on the system's screen, so it need not be told.
+    /// The call is over on the system's side: the person ended it there,
+    /// or the system dropped it. It need not be told, and the call's audio
+    /// is over even while the slot still holds it.
     public mutating func systemEnded(_ id: UUID) {
         guard let call = managed?.call, call.id == id else { return }
         managed = nil
         unmanagedSid = call.sid
+        endedSid = call.sid
     }
 
-    /// The system would not take the call: it is the app's alone now.
+    /// The system would not take the call, or lost track of it: it lives
+    /// on as the app's alone.
     public mutating func systemRefused(_ id: UUID) {
-        systemEnded(id)
+        guard let call = managed?.call, call.id == id else { return }
+        managed = nil
+        unmanagedSid = call.sid
     }
 
     public mutating func update(state: CallState, isMediaConnected: Bool, isDoNotDisturb: Bool = false) -> [SystemCallUpdate] {
@@ -102,7 +126,10 @@ public struct SystemCallTracker {
             updates.append(.end(current.call.id, Self.end(of: state, for: current.call)))
             managed = nil
         }
-        if unmanagedSid != live { unmanagedSid = nil }
+        if unmanagedSid != live {
+            unmanagedSid = nil
+            endedSid = nil
+        }
         guard let sid = live, unmanagedSid == nil else { return updates }
         if managed == nil {
             guard let call = newCall(for: state, sid: sid, isDoNotDisturb: isDoNotDisturb) else {
@@ -121,11 +148,11 @@ public struct SystemCallTracker {
     private func newCall(for state: CallState, sid: String, isDoNotDisturb: Bool) -> SystemCall? {
         switch state {
         case .incoming(let call) where !call.isAccepting && !isDoNotDisturb:
-            SystemCall(id: newID(), sid: sid, direction: .incoming, peer: call.from.bare, isRoom: false, isVideo: call.media.video)
+            SystemCall(id: newID(), sid: sid, direction: .incoming, conversation: .direct(call.from.bare), isVideo: call.media.video)
         case .outgoing(let call):
-            SystemCall(id: newID(), sid: sid, direction: .outgoing, peer: call.to, isRoom: false, isVideo: call.media.video)
+            SystemCall(id: newID(), sid: sid, direction: .outgoing, conversation: .direct(call.to), isVideo: call.media.video)
         case .joiningGroup(let call):
-            SystemCall(id: newID(), sid: sid, direction: .outgoing, peer: call.room, isRoom: true, isVideo: call.media.video)
+            SystemCall(id: newID(), sid: sid, direction: .outgoing, conversation: .room(call.room), isVideo: call.media.video)
         case .idle, .incoming, .active, .inGroup, .ended:
             nil
         }
@@ -136,9 +163,10 @@ public struct SystemCallTracker {
         defer { managed = current }
         let id = current.call.id
         if current.call.direction == .incoming {
-            // The system counts an answered call as connected by itself.
-            let isAnswered = if case .incoming(let call) = state { call.isAccepting } else { true }
-            guard isAnswered, !current.isAnswerKnown else { return [] }
+            // Told once the call is really answered: an accept still on its
+            // way can fail and leave the call ringing. The system counts an
+            // answered call as connected by itself.
+            guard !state.isIncoming, !current.isAnswerKnown else { return [] }
             current.isAnswerKnown = true
             return [.answer(id)]
         }

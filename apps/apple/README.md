@@ -136,9 +136,9 @@ back to the slot. The system owns the audio session of a call it manages:
 `Calls/SystemCallAudio.swift` starts the media engine when CallKit activates
 the session and stops it when CallKit takes it back. A call the system does
 not manage (it arrived under Do Not Disturb, or the system refused it) keeps
-the media engine's own session handling. Every call there is reported, a
-room's call too, as a call placed to the room. Only ringback is played by the
-app.
+the media engine's own session handling, and shows in the dock without a ring.
+A room's call is reported too, as a call placed to the room. Only ringback is
+played by the app.
 
 All of this needs the app to be running; ringing a closed or suspended app
 needs a VoIP push, which is not there yet.

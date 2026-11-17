@@ -32,35 +32,75 @@ import WaddleKit
 
     @Test func anIncomingCallIsReportedOnce() {
         var t = tracker()
-        let call = SystemCall(id: id1, sid: "s1", direction: .incoming, peer: peer.bare, isRoom: false, isVideo: true)
+        let call = SystemCall(id: id1, sid: "s1", direction: .incoming, conversation: .direct(peer.bare), isVideo: true)
         #expect(t.update(state: incoming(video: true), isMediaConnected: false) == [.reportIncoming(call)])
         #expect(t.update(state: incoming(video: true), isMediaConnected: false).isEmpty)
         #expect(t.isManaging)
     }
 
-    @Test func answeringInTheAppTellsTheSystemOnce() {
+    @Test func answeringInTheAppTellsTheSystemOnceTheCallIsReallyAnswered() {
         var t = tracker()
         _ = t.update(state: incoming(), isMediaConnected: false)
-        #expect(t.update(state: incoming(accepting: true), isMediaConnected: false) == [.answer(id1)])
-        #expect(t.update(state: active(), isMediaConnected: false).isEmpty)
+        // The answer is still on its way and may yet fail.
+        #expect(t.update(state: incoming(accepting: true), isMediaConnected: false).isEmpty)
+        #expect(t.update(state: active(), isMediaConnected: false) == [.answer(id1)])
         #expect(t.update(state: active(), isMediaConnected: true).isEmpty)
     }
 
     @Test func answeringOnTheSystemScreenIsNotEchoedBack() {
         var t = tracker()
         _ = t.update(state: incoming(), isMediaConnected: false)
+        _ = t.update(state: incoming(accepting: true), isMediaConnected: false)
         t.systemAnswered(id1)
-        #expect(t.update(state: incoming(accepting: true), isMediaConnected: false).isEmpty)
         #expect(t.update(state: active(), isMediaConnected: true).isEmpty)
     }
 
-    @Test func anAcceptThatFailedGoesBackToRingingAndCanBeAnsweredAgain() {
+    @Test func anAcceptThatFailedLeavesTheSystemStillRinging() {
         var t = tracker()
         _ = t.update(state: incoming(), isMediaConnected: false)
         _ = t.update(state: incoming(accepting: true), isMediaConnected: false)
         #expect(t.update(state: incoming(), isMediaConnected: false).isEmpty)
-        // The system already shows it answered; nothing more to say.
         #expect(t.update(state: incoming(accepting: true), isMediaConnected: false).isEmpty)
+        #expect(t.update(state: active(), isMediaConnected: false) == [.answer(id1)])
+    }
+
+    // MARK: - Who owns audio
+
+    @Test func theSystemOwnsAudioForACallItManages() {
+        var t = tracker()
+        #expect(t.audioOwner == .nobody)
+        _ = t.update(state: incoming(), isMediaConnected: false)
+        #expect(t.audioOwner == .system)
+        _ = t.update(state: active(), isMediaConnected: true)
+        #expect(t.audioOwner == .system)
+        _ = t.update(state: .ended(sid: "s1", reason: .finished(.success)), isMediaConnected: false)
+        #expect(t.audioOwner == .nobody)
+    }
+
+    @Test func theAppOwnsAudioForACallLeftToIt() {
+        var t = tracker()
+        _ = t.update(state: incoming(), isMediaConnected: false, isDoNotDisturb: true)
+        #expect(t.audioOwner == .app)
+        _ = t.update(state: .idle, isMediaConnected: false)
+        #expect(t.audioOwner == .nobody)
+        _ = t.update(state: incoming("s2"), isMediaConnected: false)
+        t.systemRefused(id1)
+        #expect(t.audioOwner == .app)
+    }
+
+    @Test func nobodyOwnsAudioOnceTheSystemEndedTheCall() {
+        var t = tracker()
+        _ = t.update(state: active(), isMediaConnected: false)
+        _ = t.update(state: .idle, isMediaConnected: false)
+        _ = t.update(state: outgoing("s2"), isMediaConnected: false)
+        t.systemEnded(id1)
+        // The slot still holds the call for a moment while it is torn
+        // down; its media must not start again.
+        #expect(t.update(state: outgoing("s2"), isMediaConnected: false).isEmpty)
+        #expect(t.audioOwner == .nobody)
+        _ = t.update(state: .idle, isMediaConnected: false)
+        _ = t.update(state: incoming("s3"), isMediaConnected: false)
+        #expect(t.audioOwner == .system)
     }
 
     @Test(arguments: [
@@ -123,7 +163,7 @@ import WaddleKit
 
     @Test func aPlacedCallIsStartedThenConnectingThenConnected() {
         var t = tracker()
-        let call = SystemCall(id: id1, sid: "s1", direction: .outgoing, peer: peer.bare, isRoom: false, isVideo: false)
+        let call = SystemCall(id: id1, sid: "s1", direction: .outgoing, conversation: .direct(peer.bare), isVideo: false)
         #expect(t.update(state: outgoing(), isMediaConnected: false) == [.startOutgoing(call)])
         #expect(t.update(state: outgoing(responder: peer), isMediaConnected: false) == [.connecting(id1)])
         #expect(t.update(state: active(), isMediaConnected: false).isEmpty)
@@ -148,7 +188,7 @@ import WaddleKit
     @Test func aRoomsCallIsAPlacedCallToTheRoom() {
         var t = tracker()
         let attempt = GroupCallAttempt(room: room, sid: "g1", media: CallMedia(audio: true, video: true), nick: "me")
-        let call = SystemCall(id: id1, sid: "g1", direction: .outgoing, peer: room, isRoom: true, isVideo: true)
+        let call = SystemCall(id: id1, sid: "g1", direction: .outgoing, conversation: .room(room), isVideo: true)
         #expect(t.update(state: .joiningGroup(attempt), isMediaConnected: false) == [.startOutgoing(call)])
         let joined = CallState.inGroup(GroupCall(room: room, sid: "g1", media: attempt.media, join: join, nick: "me"))
         #expect(t.update(state: joined, isMediaConnected: false) == [.connecting(id1)])
@@ -161,7 +201,7 @@ import WaddleKit
     @Test func aNewCallInTheSlotEndsTheOldOneFirst() {
         var t = tracker()
         _ = t.update(state: outgoing("s1"), isMediaConnected: false)
-        let next = SystemCall(id: id2, sid: "s2", direction: .incoming, peer: peer.bare, isRoom: false, isVideo: false)
+        let next = SystemCall(id: id2, sid: "s2", direction: .incoming, conversation: .direct(peer.bare), isVideo: false)
         // We lost a tie-break: ours ends and theirs rings.
         #expect(t.update(state: incoming("s2"), isMediaConnected: false) == [.end(id1, .remoteEnded), .reportIncoming(next)])
     }
