@@ -1049,16 +1049,17 @@ fn paged_disco_items(node: &str, max: usize, after: Option<&str>) -> Element {
         .build()
 }
 
-/// The `<set/>` of a `disco#items` answer: its count, its first item's
-/// index and its first and last items.
-fn disco_items_set(
-    frame: &str,
-) -> Option<(
+/// What a `<set/>` tells: its count, its first item's index and its first
+/// and last items.
+type ListingSet = (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
-)> {
+);
+
+/// The `<set/>` of a `disco#items` answer.
+fn disco_items_set(frame: &str) -> Option<ListingSet> {
     let response: Element = frame.parse().expect("disco#items response XML");
     let set = response
         .get_child("query", NS_DISCO_ITEMS)?
