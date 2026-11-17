@@ -1465,14 +1465,14 @@ impl Inner {
                         &pair,
                         &stanza,
                         kind_of(&stanza, || false).seated(),
-                        self.undecided(),
+                        self.undecided(operation, &to),
                     ),
                     None => {
                         self.refuse_kind(
                             &pair,
                             &stanza,
                             kind_of(&stanza, || true),
-                            self.undecided(),
+                            self.undecided(operation, &to),
                         );
                     }
                 }
@@ -1633,9 +1633,20 @@ impl Inner {
         deadline.min(tokio::time::Instant::now() + self.limits.room_reply_wait)
     }
 
-    /// The answer to a request the room host did not decide within the
-    /// per-item budget.
-    fn undecided(&self) -> StanzaError {
+    /// The answer to a request `operation` for `to` that the room host did
+    /// not decide within the per-item budget. A self-ping (XEP-0410) is
+    /// answered with `remote-server-timeout`, the one error §4 has a client
+    /// take no decision from, as the host answers one it cannot decide: any
+    /// other error would tell a seated occupant that it is not joined.
+    fn undecided(&self, operation: RoomOperation, to: &Jid) -> StanzaError {
+        if matches!(operation, RoomOperation::Ping) && to.resource().is_some() {
+            return replies::error(
+                self.home(),
+                ErrorType::Wait,
+                DefinedCondition::RemoteServerTimeout,
+                "The room could not tell now whether you are joined.",
+            );
+        }
         replies::error(
             self.home(),
             ErrorType::Wait,
@@ -1702,7 +1713,13 @@ impl Inner {
         };
         let Ok(answer) = answered else {
             telemetry::room_request_timed_out();
-            self.refuse_kind(&pair, &stanza, Kind::Request, self.undecided());
+            let error = replies::error(
+                self.home(),
+                ErrorType::Wait,
+                DefinedCondition::InternalServerError,
+                "The room list could not be built now; try again later.",
+            );
+            self.refuse_kind(&pair, &stanza, Kind::Request, error);
             return;
         };
         let replied_by = self.reply_deadline(deadline);
