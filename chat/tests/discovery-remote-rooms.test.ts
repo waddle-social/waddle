@@ -256,3 +256,84 @@ describe("home Spaces listing rooms on other servers", () => {
     });
   });
 });
+
+describe("identifying the home MUC service", () => {
+  /**
+   * A home deployment `example.test` listing a call mixer, the MUC service
+   * and, optionally, a component with a `conference/text` identity alone.
+   */
+  function componentsClient(options: { mucInfoFails: boolean; identityOnly?: boolean }) {
+    return {
+      async send_raw_iq(xml: string): Promise<string> {
+        if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+          if (xml.includes('to="example.test"')) {
+            return discoItemsXml([
+              { jid: "calls.example.test" },
+              ...(options.identityOnly ? [{ jid: "text.example.test" }] : []),
+              { jid: "muc.example.test" },
+            ]);
+          }
+          return discoItemsXml([]);
+        }
+        if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+          if (xml.includes('to="calls.example.test"')) {
+            return discoInfoXml({
+              identities: [{ category: "conference", type: "audio-video" }],
+              features: ["urn:xmpp:jingle:1"],
+            });
+          }
+          if (/to="[^"@]+@muc\.example\.test"/.test(xml)) {
+            return discoInfoXml({
+              identities: [{ category: "conference", type: "text" }],
+              features: ["http://jabber.org/protocol/muc"],
+            });
+          }
+          if (xml.includes('to="text.example.test"')) {
+            return discoInfoXml({ identities: [{ category: "conference", type: "text" }] });
+          }
+          if (xml.includes('to="muc.example.test"')) {
+            if (options.mucInfoFails) throw new Error("muc service did not answer");
+            return discoInfoXml({
+              identities: [{ category: "conference", type: "text" }],
+              features: ["http://jabber.org/protocol/muc"],
+            });
+          }
+          return discoInfoXml({ identities: [{ category: "server", type: "im" }], features: [HOME_FEDERATION_FEATURE] });
+        }
+        if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
+          return pubsubItemsXml([{ id: "general@muc.example.test", name: "General", autojoin: true }]);
+        }
+        throw new Error(`Unexpected IQ: ${xml}`);
+      },
+    };
+  }
+
+  test("the component advertising XEP-0045 is the MUC service, never the call mixer", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(componentsClient({ mucInfoFails: false }), "alice@example.test/web");
+      expect(topology.services).toMatchObject({ muc: "muc.example.test", mucDiscovered: true });
+      expect(topology.services?.components).toEqual(["calls.example.test", "muc.example.test"]);
+    });
+  });
+
+  test("when the MUC service does not answer, the mixer is not taken for it and its rooms stay home", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(componentsClient({ mucInfoFails: true }), "alice@example.test/web");
+      expect(topology.services?.muc).toBe("muc.example.test");
+      expect(topology.services?.mucDiscovered).toBe(false);
+      // The bookmark of a room on a listed component is placed at home.
+      expect(topology.rooms.some((room) => room.jid === "general@muc.example.test" && !room.remoteHost)).toBe(true);
+      expect(topology.unavailableRemoteRooms ?? []).toEqual([]);
+    });
+  });
+
+  test("a conference/text identity alone gives the service's address but does not identify it", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        componentsClient({ mucInfoFails: true, identityOnly: true }),
+        "alice@example.test/web",
+      );
+      expect(topology.services).toMatchObject({ muc: "text.example.test", mucDiscovered: false });
+    });
+  });
+});

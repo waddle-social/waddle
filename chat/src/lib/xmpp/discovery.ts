@@ -371,14 +371,35 @@ export function spacesServiceDomain(jid: string): string { return `spaces.${jidD
 export function mucServiceDomain(jid: string): string { return `muc.${jidDomain(jid)}`; }
 
 /**
+ * Whether a component's `disco#info` shows it is a MUC service: it lists
+ * the XEP-0045 feature. An identity alone is not enough, and a
+ * `conference/audio-video` identity (a call mixer such as `calls.<domain>`)
+ * never names the MUC service.
+ */
+function isMucServiceInfo(info: DiscoInfoData | null): boolean {
+  return hasDiscoFeature(info, NS_MUC) && !hasDiscoIdentity(info, "conference", "audio-video");
+}
+
+/**
  * The home deployment's MUC and Spaces services, with whether the MUC
- * service was discovered rather than assumed from the conventional name.
+ * service was identified by its feature rather than assumed, and the
+ * components the home server lists (`null` when the list was not read).
+ *
+ * The MUC service is the listed component that advertises the XEP-0045
+ * feature. A component with only a `conference/text` identity is used as
+ * the service's address when none advertises the feature, but does not
+ * count as identified: only an identified service lets rooms elsewhere be
+ * told apart from home rooms, and with them left or dropped.
  */
 async function discoverComponentServices(
   xmpp: HybridClient,
   domain: string,
   jid: string,
-): Promise<{ services: { muc: string; spaces: string }; mucDiscovered: boolean }> {
+): Promise<{
+  services: { muc: string; spaces: string };
+  mucDiscovered: boolean;
+  components: string[] | null;
+}> {
   const fallback = { muc: mucServiceDomain(jid), spaces: spacesServiceDomain(jid) };
   try {
     const items = await sendDiscoItems(xmpp, domain);
@@ -402,18 +423,20 @@ async function discoverComponentServices(
         ? entry.value
         : { serviceJid: candidates[index]!, info: null },
     );
-    const discoveredMuc = serviceInfo.find(({ info }) =>
-      hasDiscoFeature(info, NS_MUC)
-      || info?.identities.some((identity) => identity.category === "conference")
-    )?.serviceJid;
-    const muc = discoveredMuc ?? fallback.muc;
+    const identifiedMuc = serviceInfo.find(({ info }) => isMucServiceInfo(info))?.serviceJid;
+    const textConference = serviceInfo.find(({ info }) => hasDiscoIdentity(info, "conference", "text"))?.serviceJid;
+    const muc = identifiedMuc ?? textConference ?? fallback.muc;
     // A generic pubsub identity is not enough: the extensions component is
     // also pubsub. Keep the conventional Spaces fallback unless a component
     // explicitly advertises the XEP-0503 namespace.
     const spaces = serviceInfo.find(({ info }) => isSpacesServiceInfo(info))?.serviceJid ?? fallback.spaces;
-    return { services: { muc, spaces }, mucDiscovered: discoveredMuc !== undefined };
+    return {
+      services: { muc, spaces },
+      mucDiscovered: identifiedMuc !== undefined,
+      components: candidates.map((candidate) => barePeerJid(candidate)),
+    };
   } catch {
-    return { services: fallback, mucDiscovered: false };
+    return { services: fallback, mucDiscovered: false, components: null };
   }
 }
 
@@ -538,13 +561,16 @@ export async function discoverTopology(
   options: DiscoverTopologyOptions = {},
 ): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
-  const { services, mucDiscovered } = await discoverComponentServices(xmpp, domain, jid);
-  // Only a discovered MUC service tells home rooms from remote ones: the
-  // conventional name may not be this deployment's service.
+  const { services, mucDiscovered, components } = await discoverComponentServices(xmpp, domain, jid);
+  // Only an identified MUC service tells home rooms from remote ones: the
+  // conventional name may not be this deployment's service. A component
+  // the home server lists is home whether or not it answered its own
+  // `disco#info`.
   const home: HomeAddresses = {
     accountDomain: domain,
     mucService: mucDiscovered ? services.muc : null,
     spacesService: services.spaces,
+    components,
   };
   let rooms: DiscoveredChannel[] = [];
   let roomCatalogComplete = true;
@@ -840,7 +866,7 @@ export async function discoverTopology(
       roomFingerprints: authoritativeRoomFingerprints,
     },
     serverRole,
-    services: { ...services, mucDiscovered },
+    services: { ...services, mucDiscovered, ...(components ? { components } : {}) },
     federation: advertisedFederation,
     remoteRoomSuggestions,
     unavailableRemoteRooms,

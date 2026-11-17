@@ -169,6 +169,12 @@ export type ClientEvents = {
   sessionLifecycle: [event: SessionLifecycleEvent];
   catchupFailure: [failure: CatchupConversationFailure];
   roomAccessChanged: [event: RoomAccessChangedEvent];
+  /**
+   * A discovery placed rooms that an earlier one this epoch could not (it
+   * identified the home MUC service and read its catalog): a room list read
+   * from the earlier one is out of date.
+   */
+  roomPlacementChanged: [];
   roomIdAmbiguous: [channelId: string];
   // Observe-only telemetry hooks (multi-listener, error-isolated via
   // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health

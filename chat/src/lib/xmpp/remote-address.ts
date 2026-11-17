@@ -44,12 +44,20 @@ export interface HomeAddresses {
   accountDomain: string;
   mucService?: string | null;
   spacesService?: string | null;
+  /**
+   * The components the home server lists as its own items (XEP-0030
+   * `disco#items` of the account domain), as last read. A room on one of
+   * them is of this deployment even when the component did not answer its
+   * own `disco#info`.
+   */
+  components?: readonly string[] | null;
 }
 
 /**
  * Where a room is hosted, as far as the home deployment's discovered
  * services tell:
- * - `home`: on the account domain or a discovered home service;
+ * - `home`: on the account domain, a discovered home service or a component
+ *   the home server lists;
  * - `remote`: anywhere else, once the home MUC service is known;
  * - `unknown`: anywhere else while the home MUC service is not yet
  *   discovered. Callers decide what waiting means for them: timers and
@@ -181,14 +189,14 @@ export function communityAddressDomain(address: CommunityAddress): string {
 }
 
 /**
- * Whether a domain belongs to the home deployment: its account domain or one
- * of the services it discovered. Everything else is reached over
- * server-to-server federation.
+ * Whether a domain belongs to the home deployment: its account domain, one
+ * of the services it discovered, or a component its server lists. Everything
+ * else is reached over server-to-server federation.
  */
 export function isHomeDomain(domain: string, home: HomeAddresses): boolean {
   const canonical = canonicalDomain(domain);
   if (!canonical) return false;
-  return [home.accountDomain, home.mucService, home.spacesService]
+  return [home.accountDomain, home.mucService, home.spacesService, ...(home.components ?? [])]
     .some((candidate) => !!candidate && canonicalDomain(domainOf(candidate)) === canonical);
 }
 

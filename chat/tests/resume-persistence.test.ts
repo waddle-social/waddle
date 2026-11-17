@@ -2436,3 +2436,28 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(evil.loadCatchup()?.dmLastSeen.map(([key]) => key)).toEqual(["mallory@example.com.evil"]);
   });
 });
+
+describe("missing rooms on other servers", () => {
+  test("the record is the account's: every tab reads it and one tab's change keeps another's", () => {
+    const first = createLocalStorageResumePersistence("missing@example.com", "missing-first-tab");
+    const second = createLocalStorageResumePersistence("missing@example.com", "missing-second-tab");
+    first.addMissingRemoteRoom?.("Dev@Chat.Remote.Test");
+    second.addMissingRemoteRoom?.("ops@chat.remote.test");
+    expect(first.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test", "ops@chat.remote.test"]);
+
+    second.removeMissingRemoteRoom?.("dev@chat.remote.test");
+    expect(first.loadMissingRemoteRooms?.()).toEqual(["ops@chat.remote.test"]);
+    // Another account's record is its own.
+    expect(createLocalStorageResumePersistence("other@example.com", "missing-other").loadMissingRemoteRooms?.()).toEqual([]);
+  });
+
+  test("a later sign-in of the account in this browser still reads it", () => {
+    const before = createLocalStorageResumePersistence("missing-later@example.com", "missing-before");
+    before.addMissingRemoteRoom?.("dev@chat.remote.test");
+    before.clearJoinedRooms();
+    before.clearAutoJoinBlocks?.();
+    before.dispose();
+    const after = createLocalStorageResumePersistence("missing-later@example.com", "missing-after");
+    expect(after.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test"]);
+  });
+});

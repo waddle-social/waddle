@@ -11,6 +11,8 @@ import { RoomJoinError } from "../src/lib/xmpp/room-join-error";
 import { classifyRemoteError } from "../src/lib/xmpp/remote-outcome";
 import { HOME_FEDERATION_FEATURE } from "../src/lib/xmpp/discovery";
 import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { remoteMediaSource } from "../src/lib/remote-media";
+import type { TimelineMessage } from "../src/lib/chat-ui";
 import { discoInfoXml, discoItemsXml, pubsubItemsXml, withFakeDomParser } from "./helpers/disco-xml";
 
 const REMOTE_ROOM = "dev@chat.remote.test";
@@ -395,7 +397,12 @@ function sharedStorage(initial: { joinedRooms?: string[]; missingRemoteRooms?: s
     loadJoinedRooms: () => [...stored.joinedRooms],
     saveJoinedRooms: (roomJids) => { stored.joinedRooms = [...roomJids]; },
     loadMissingRemoteRooms: () => [...stored.missingRemoteRooms],
-    saveMissingRemoteRooms: (roomJids) => { stored.missingRemoteRooms = [...roomJids]; },
+    addMissingRemoteRoom: (roomJid) => {
+      if (!stored.missingRemoteRooms.includes(roomJid)) stored.missingRemoteRooms = [...stored.missingRemoteRooms, roomJid];
+    },
+    removeMissingRemoteRoom: (roomJid) => {
+      stored.missingRemoteRooms = stored.missingRemoteRooms.filter((candidate) => candidate !== roomJid);
+    },
   };
   return { stored, persistence };
 }
@@ -580,5 +587,223 @@ describe("the home server stops federating", () => {
     const left = deployment.leaveRoom.mock.calls.map((call) => (call as unknown[])[0]);
     expect(left).toEqual([REMOTE_ROOM]);
     expect(deployment.state.retainedJoinedRoomJids.has(REMOTE_ROOM)).toBe(false);
+  });
+});
+
+describe("a missing room the user asks for again", () => {
+  const bookmarks = [{ id: REMOTE_ROOM, name: "Dev", autojoin: true }];
+
+  test("a join the user asks for ends the record before the room answers", () => {
+    const storage = sharedStorage({ missingRemoteRooms: [REMOTE_ROOM] });
+    const { client } = homeDeployment({ persistence: storage.persistence, bookmarks });
+    client.forgetMissingRoom(REMOTE_ROOM.toUpperCase());
+    expect(storage.stored.missingRemoteRooms).toEqual([]);
+  });
+});
+
+/**
+ * A home deployment `example.com` that lists its MUC service and its call
+ * mixer `calls.example.com` (`conference/audio-video`, no XEP-0045
+ * feature). The MUC service's `disco#info` can be made to fail.
+ */
+function mixerDeployment(options: { persistence?: ResumePersistence; bookmarks?: Array<{ id: string; name?: string; autojoin?: boolean }> } = {}) {
+  const config = { federation: true, mucInfoFails: false };
+  const joinRoom = mock(async () => undefined);
+  const leaveRoom = mock(async () => undefined);
+  let onPresence: ((presence: Presence) => void) | null = null;
+  const xmpp = {
+    join_room: joinRoom,
+    leave_room: leaveRoom,
+    set_on_presence(cb: (presence: Presence) => void) {
+      onPresence = cb;
+    },
+    async send_raw_iq(xml: string): Promise<string> {
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+        if (xml.includes('to="example.com"')) {
+          return discoItemsXml([{ jid: "muc.example.com" }, { jid: "calls.example.com" }]);
+        }
+        if (xml.includes('to="muc.example.com"')) return discoItemsXml([{ jid: "general@muc.example.com", name: "General" }]);
+        return discoItemsXml([]);
+      }
+      if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+        if (xml.includes('to="example.com"')) {
+          return discoInfoXml({
+            identities: [{ category: "server", type: "im" }],
+            features: config.federation ? [HOME_FEDERATION_FEATURE] : [],
+          });
+        }
+        if (xml.includes('to="calls.example.com"')) {
+          return discoInfoXml({
+            identities: [{ category: "conference", type: "audio-video" }],
+            features: ["http://jabber.org/protocol/disco#info", "urn:xmpp:jingle:apps:rtp:1"],
+          });
+        }
+        if (xml.includes('to="muc.example.com"') && config.mucInfoFails) throw new Error("muc service did not answer");
+        return discoInfoXml({
+          identities: [{ category: "conference", type: "text" }],
+          features: ["http://jabber.org/protocol/muc"],
+        });
+      }
+      if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) return pubsubItemsXml(options.bookmarks ?? []);
+      throw new Error(`Unexpected IQ: ${xml}`);
+    },
+  };
+  const client = new BrowserXmppClient(session(), options.persistence);
+  const state = client as unknown as PrivateState & { parkedRetainedRoomJids: Set<string> };
+  state.xmpp = xmpp;
+  state.connected = true;
+  state.wireEvents(xmpp);
+  const discover = async () => {
+    let topology: Awaited<ReturnType<BrowserXmppClient["discoverTopology"]>> | null = null;
+    await withFakeDomParser(async () => {
+      topology = await client.discoverTopology();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    return topology!;
+  };
+  return {
+    client,
+    state,
+    config,
+    joinRoom,
+    leaveRoom,
+    joined: () => joinRoom.mock.calls.map((call) => (call as unknown[])[0] as string),
+    left: () => leaveRoom.mock.calls.map((call) => (call as unknown[])[0] as string),
+    discover,
+    deliver: (presence: Presence) => onPresence?.(presence),
+  };
+}
+
+/** Timers of the placement retry: doubling from two seconds to a minute. */
+const PLACEMENT_RETRY_DELAYS = new Set([2_000, 4_000, 8_000, 16_000, 32_000, 60_000]);
+function placementRetries(long: Array<{ delayMs: number; callback: () => void }>) {
+  return long.filter(({ delayMs }) => PLACEMENT_RETRY_DELAYS.has(delayMs));
+}
+
+describe("the MUC service does not answer and the call mixer does", () => {
+  const roomMessage = (roomJid: string) => ({
+    id: "m1",
+    author: "bob",
+    body: "https://images.example/cat.png",
+    createdAt: "2026-11-17T10:00:00Z",
+    createdAtSource: "archive",
+    isSelf: false,
+    authorOccupantJid: `${roomJid}/bob`,
+  }) as TimelineMessage;
+
+  test("no home room is left, dropped or has its media held", async () => {
+    const timers = captureLongTimers();
+    try {
+      const storage = sharedStorage({ joinedRooms: ["quiet@muc.example.com"] });
+      const deployment = mixerDeployment({
+        persistence: storage.persistence,
+        bookmarks: [{ id: "general@muc.example.com", name: "General", autojoin: true }],
+      });
+      // A first discovery identifies the MUC service; the user is in General.
+      const first = await deployment.discover();
+      expect(first.services?.mucDiscovered).toBe(true);
+      expect(first.services?.muc).toBe("muc.example.com");
+      deployment.deliver({ from: "general@muc.example.com/alice", presence_type: "available", muc_status_codes: [110] });
+
+      // The MUC service fails its disco#info once, the mixer answers, and
+      // the home server is read as not federating.
+      deployment.config.mucInfoFails = true;
+      deployment.config.federation = false;
+      const degraded = await deployment.discover();
+      // The mixer is never taken for the MUC service.
+      expect(degraded.services?.muc).not.toBe("calls.example.com");
+      expect(degraded.services?.mucDiscovered).toBe(false);
+      expect(deployment.state.homeMucService).toBe("muc.example.com");
+      expect(deployment.client.isRemoteRoom("general@muc.example.com")).toBe(false);
+      // Nothing of this deployment is left or stops being rejoined.
+      expect(deployment.left()).toEqual([]);
+      expect(deployment.state.retainedJoinedRoomJids.has("general@muc.example.com")).toBe(true);
+      expect(storage.stored.joinedRooms).toContain("quiet@muc.example.com");
+      // Media in a home room loads, by the components the server listed.
+      expect(remoteMediaSource(roomMessage("general@muc.example.com"), {
+        accountDomain: "example.com",
+        mucService: null,
+        components: degraded.services?.components ?? null,
+      })).toBeNull();
+    } finally {
+      timers.restore();
+    }
+  });
+
+  test("on a first discovery, a parked home room is joined and nothing is dropped", async () => {
+    const timers = captureLongTimers();
+    try {
+      const storage = sharedStorage({ joinedRooms: ["quiet@muc.example.com", "old@chat.elsewhere.test"] });
+      const deployment = mixerDeployment({ persistence: storage.persistence });
+      deployment.config.mucInfoFails = true;
+      deployment.config.federation = false;
+      const topology = await deployment.discover();
+      expect(topology.services?.mucDiscovered).toBe(false);
+      expect(deployment.state.homeMucService).toBeNull();
+      // The server lists the MUC service as its own: its room is home.
+      expect(deployment.joined()).toContain("quiet@muc.example.com");
+      // A room whose host is not known yet waits; it is neither joined nor dropped.
+      expect(deployment.joined()).not.toContain("old@chat.elsewhere.test");
+      expect(deployment.state.parkedRetainedRoomJids.has("old@chat.elsewhere.test")).toBe(true);
+      expect(storage.stored.joinedRooms).toContain("old@chat.elsewhere.test");
+      expect(deployment.left()).toEqual([]);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  test("discovery is tried again with backoff until it places rooms, then the room list is read again", async () => {
+    const timers = captureLongTimers();
+    try {
+      const storage = sharedStorage({ joinedRooms: ["old@chat.elsewhere.test"] });
+      const deployment = mixerDeployment({ persistence: storage.persistence });
+      let placementChanges = 0;
+      deployment.client.onRoomPlacementChanged(() => { placementChanges += 1; });
+      deployment.config.mucInfoFails = true;
+      await deployment.discover();
+      const fire = async () => {
+        const retries = placementRetries(timers.long);
+        const next = retries[retries.length - 1]!;
+        await withFakeDomParser(async () => {
+          next.callback();
+          for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      };
+      expect(placementRetries(timers.long).map(({ delayMs }) => delayMs)).toEqual([2_000]);
+      await fire();
+      expect(placementRetries(timers.long).map(({ delayMs }) => delayMs)).toEqual([2_000, 4_000]);
+      expect(placementChanges).toBe(0);
+
+      // The MUC service answers: the parked room is placed (elsewhere, so
+      // dropped), no further retry is armed, and listeners are told.
+      deployment.config.mucInfoFails = false;
+      await fire();
+      expect(placementRetries(timers.long)).toHaveLength(2);
+      expect(placementChanges).toBe(1);
+      expect(deployment.state.parkedRetainedRoomJids.size).toBe(0);
+      expect(storage.stored.joinedRooms).not.toContain("old@chat.elsewhere.test");
+    } finally {
+      timers.restore();
+    }
+  });
+
+  test("a new online epoch starts the backoff again at two seconds", async () => {
+    const timers = captureLongTimers();
+    try {
+      const deployment = mixerDeployment();
+      deployment.config.mucInfoFails = true;
+      await deployment.discover();
+      const first = placementRetries(timers.long)[0]!;
+      await withFakeDomParser(async () => {
+        first.callback();
+        for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(placementRetries(timers.long).map(({ delayMs }) => delayMs)).toEqual([2_000, 4_000]);
+      (deployment.client as unknown as { cancelPlacementRetry(): void }).cancelPlacementRetry();
+      await deployment.discover();
+      expect(placementRetries(timers.long).map(({ delayMs }) => delayMs)).toEqual([2_000, 4_000, 2_000]);
+    } finally {
+      timers.restore();
+    }
   });
 });

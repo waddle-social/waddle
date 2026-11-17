@@ -263,6 +263,7 @@ export function useChatAppController() {
         // Only a discovered MUC service tells home rooms from remote ones.
         mucService: waddles.homeMucService.value,
         spacesService: waddles.spacesServiceJid.value,
+        components: waddles.homeComponents.value,
       };
     }),
     federation: waddles.federationAvailable,

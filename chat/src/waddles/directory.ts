@@ -49,6 +49,11 @@ export function useWaddleDirectory(
   /** The home MUC service as discovered; `null` until a discovery found it. */
   const homeMucService = ref<string | null>(null);
   /**
+   * The components the home server lists as its own, from the last
+   * discovery that could read that list; `null` before any did.
+   */
+  const homeComponents = ref<string[] | null>(null);
+  /**
    * Whether the home server federates (it lists `urn:waddle:s2s:0`). Kept
    * from the last discovery that could read it.
    */
@@ -302,6 +307,7 @@ export function useWaddleDirectory(
       if (topology.services?.muc && topology.services.mucDiscovered) {
         homeMucService.value = topology.services.muc;
       }
+      if (topology.services?.components) homeComponents.value = topology.services.components;
       if (typeof topology.federation === "boolean") federationAvailable.value = topology.federation;
       remoteRoomSuggestions.value = topology.remoteRoomSuggestions ?? [];
       unavailableRemoteRooms.value = topology.unavailableRemoteRooms ?? [];
@@ -751,6 +757,7 @@ export function useWaddleDirectory(
     mucServiceJid.value = null;
     spacesServiceJid.value = null;
     homeMucService.value = null;
+    homeComponents.value = null;
     federationAvailable.value = false;
     remoteRoomSuggestions.value = [];
     unavailableRemoteRooms.value = [];
@@ -776,6 +783,7 @@ export function useWaddleDirectory(
     mucServiceJid,
     spacesServiceJid,
     homeMucService,
+    homeComponents,
     federationAvailable,
     remoteRoomSuggestions,
     unavailableRemoteRooms,

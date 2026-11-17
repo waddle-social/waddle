@@ -399,7 +399,11 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     const retryKey = `room:${canonical}`;
     clearRetry(retryKey);
     const intent = options.saveBookmark ? nextRoomIntent(key) : null;
-    if (options.saveBookmark) leftByUser.delete(key);
+    if (options.saveBookmark) {
+      leftByUser.delete(key);
+      // The user asked to join: a room recorded as missing is tried again.
+      deps.xmppClient.value?.forgetMissingRoom?.(canonical);
+    }
     const startedGeneration = generation;
     updateRoom(canonical, { status: { state: "working" }, departure: null, note: null, ...(name ? { name } : {}) });
     let context: ReturnType<typeof requireXmpp>;
@@ -630,13 +634,37 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     updateRoom(findRoom(canonical)?.roomJid ?? canonical, {
       status: { state: "failed", failure, retryAt: null },
     });
+    turnOffMissingRoomAutojoin(canonical, nextRoomIntent(key), 0);
+  }
+
+  /**
+   * Turn a missing room's bookmark `autojoin` off, while `intent` is still
+   * the user's latest for the room. Without a connection the write is tried
+   * again later, within the automatic retry bound, unless the user joined
+   * or left the room meanwhile.
+   */
+  function turnOffMissingRoomAutojoin(canonical: string, intent: number, attempt: number) {
+    const key = bareJidKey(canonical);
+    if (roomIntents.get(key) !== intent) return;
+    const retryKey = `autojoin-off:${key}`;
+    clearRetry(retryKey);
     let context: ReturnType<typeof requireXmpp>;
     try {
       context = requireXmpp();
     } catch {
+      if (attempt >= MAX_AUTOMATIC_RETRIES) {
+        updateRoom(canonical, {
+          note: "Your bookmark of this room still joins it at sign-in; your other devices will try it again.",
+        });
+        return;
+      }
+      const scheduledGeneration = generation;
+      retryTimers.set(retryKey, timer.setTimeout(() => {
+        retryTimers.delete(retryKey);
+        if (scheduledGeneration === generation) turnOffMissingRoomAutojoin(canonical, intent, attempt + 1);
+      }, roomJoinRetryDelayMs(attempt, random)));
       return;
     }
-    const intent = nextRoomIntent(key);
     const startedGeneration = generation;
     // The room list is read again only when a bookmark was rewritten: a
     // reload with nothing changed would only show the same list.
@@ -1110,6 +1138,9 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     const removeDeparture = client.onOwnRoomDeparture?.(handleDeparture);
     const removeJoinFailure = client.onRoomJoinFailed?.(handleJoinFailure);
     const removeJoinStarted = client.onRoomJoinStarted?.(handleJoinStarted);
+    // A later discovery placed rooms an earlier one could not: read the
+    // room list again.
+    const removePlacement = client.onRoomPlacementChanged?.(() => void deps.reloadRooms());
     const removeNick = client.addOwnOccupantNickHandler?.((roomJid, nick) => {
       if (!nick) return;
       markJoined(roomJid, true);
@@ -1120,6 +1151,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
       removeDeparture?.();
       removeJoinFailure?.();
       removeJoinStarted?.();
+      removePlacement?.();
       removeNick?.();
     });
   }, { immediate: true, flush: "sync" });

@@ -43,6 +43,8 @@ const SM_PREFIX = "waddle.chat.sm-resume";
 const JOINED_ROOMS_PREFIX = "waddle.chat.joined-rooms";
 const AUTO_JOIN_BLOCKS_PREFIX = "waddle.chat.auto-join-blocks";
 const MISSING_REMOTE_ROOMS_PREFIX = "waddle.chat.missing-remote-rooms";
+/** Bound of the missing-room record; the oldest entries go first. */
+const MAX_MISSING_REMOTE_ROOMS = 500;
 const OWNER_LEASE_PREFIX = `${SM_PREFIX}.owner-lease`;
 const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
 const OWN_RESUME_PREFIX = `${SM_PREFIX}.own-resume`;
@@ -225,11 +227,14 @@ export interface ResumePersistence {
   clearAutoJoinBlocks?(): void;
   /**
    * Rooms on other servers that a join found did not exist (their host
-   * created them for the join): nothing joins them on its own again.
+   * created them for the join): nothing joins them on its own again. The
+   * record is the account's in this browser, shared by its tabs and kept
+   * across sign-outs, so each change is one room's, applied to what is
+   * stored now.
    */
   loadMissingRemoteRooms?(): string[];
-  saveMissingRemoteRooms?(roomJids: readonly string[]): void;
-  clearMissingRemoteRooms?(): void;
+  addMissingRemoteRoom?(roomJid: string): void;
+  removeMissingRemoteRoom?(roomJid: string): void;
 }
 
 /** No-op persistence — used in tests / non-browser contexts. */
@@ -254,8 +259,8 @@ export const nullResumePersistence: ResumePersistence = {
   saveAutoJoinBlocks: () => undefined,
   clearAutoJoinBlocks: () => undefined,
   loadMissingRemoteRooms: () => [],
-  saveMissingRemoteRooms: () => undefined,
-  clearMissingRemoteRooms: () => undefined,
+  addMissingRemoteRoom: () => undefined,
+  removeMissingRemoteRoom: () => undefined,
 };
 
 export function createLocalStorageResumePersistence(
@@ -282,7 +287,9 @@ export function createLocalStorageResumePersistence(
   const ownResumeKey = (previd: string) => `${ownResumeKeyPrefix}${previd.length}:${previd}`;
   const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
   const autoJoinBlocksKey = `${AUTO_JOIN_BLOCKS_PREFIX}.${accountKey}.${owner.ownerId}`;
-  const missingRemoteRoomsKey = `${MISSING_REMOTE_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
+  // Keyed by account alone: every tab and later sign-in of the account in
+  // this browser reads the same record.
+  const missingRemoteRoomsKey = `${MISSING_REMOTE_ROOMS_PREFIX}.${accountKey.length}:${accountKey}`;
   gcOwnResumeMarkers(ownResumeKeyPrefix);
 
   return {
@@ -481,23 +488,31 @@ export function createLocalStorageResumePersistence(
     },
     loadMissingRemoteRooms() {
       if (disposed) return [];
-      const stored = readJson<string[]>(missingRemoteRoomsKey, isStringArray, "missing-remote-rooms") ?? [];
-      return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
+      return readMissingRemoteRooms(missingRemoteRoomsKey);
     },
-    saveMissingRemoteRooms(roomJids) {
+    addMissingRemoteRoom(roomJid) {
       if (disposed) return;
-      const normalized = [...new Set(roomJids.map(normalizeRoomJid).filter(Boolean))];
-      if (normalized.length === 0) {
-        removeKey(missingRemoteRoomsKey, "missing-remote-rooms");
-        return;
-      }
-      writeJson(missingRemoteRoomsKey, normalized, "missing-remote-rooms");
+      const room = normalizeRoomJid(roomJid);
+      if (!room) return;
+      const stored = readMissingRemoteRooms(missingRemoteRoomsKey);
+      if (stored.includes(room)) return;
+      writeJson(missingRemoteRoomsKey, [...stored, room].slice(-MAX_MISSING_REMOTE_ROOMS), "missing-remote-rooms");
     },
-    clearMissingRemoteRooms() {
+    removeMissingRemoteRoom(roomJid) {
       if (disposed) return;
-      removeKey(missingRemoteRoomsKey, "missing-remote-rooms");
+      const room = normalizeRoomJid(roomJid);
+      const stored = readMissingRemoteRooms(missingRemoteRoomsKey);
+      if (!room || !stored.includes(room)) return;
+      const remaining = stored.filter((candidate) => candidate !== room);
+      if (remaining.length === 0) removeKey(missingRemoteRoomsKey, "missing-remote-rooms");
+      else writeJson(missingRemoteRoomsKey, remaining, "missing-remote-rooms");
     },
   };
+}
+
+function readMissingRemoteRooms(key: string): string[] {
+  const stored = readJson<string[]>(key, isStringArray, "missing-remote-rooms") ?? [];
+  return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
 }
 
 function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeState | null {

@@ -34,8 +34,9 @@ function domainOf(jid: string | undefined): string | null {
  * - the user's own messages always load;
  * - a message in a room on another server waits, whoever sent it;
  * - a message in a room whose host is not known yet waits too: before the
- *   home MUC service is discovered only rooms on the account domain or a
- *   known home service count as home, and the others are placed once it is;
+ *   home MUC service is discovered only rooms on the account domain, a
+ *   known home service or a component the home server lists count as home,
+ *   and the others are placed once it is;
  * - a message whose sender's real address is on another domain waits.
  *
  * A sender in a room of this deployment whose real address the room does

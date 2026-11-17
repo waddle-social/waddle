@@ -93,6 +93,7 @@ provide(remoteMediaPolicyKey, (message) => {
     accountDomain,
     mucService: controller.waddles.homeMucService.value,
     spacesService: controller.waddles.spacesServiceJid.value,
+    components: controller.waddles.homeComponents.value,
   });
 });
 

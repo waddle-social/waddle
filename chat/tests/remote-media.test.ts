@@ -60,3 +60,12 @@ describe("media from other servers", () => {
     expect(remoteMediaSource(message({ authorOccupantJid: "general@muc.home.test/bob" }), HOME)).toBeNull();
   });
 });
+
+describe("rooms on a component the home server lists", () => {
+  test("load their media before the MUC service is identified", () => {
+    const home = { accountDomain: "home.test", mucService: null, components: ["muc.home.test", "calls.home.test"] };
+    expect(remoteMediaSource(message({ authorOccupantJid: "general@muc.home.test/bob" }), home)).toBeNull();
+    // A room anywhere else still waits.
+    expect(remoteMediaSource(message({ authorOccupantJid: "dev@chat.remote.test/bob" }), home)).toBe("chat.remote.test");
+  });
+});

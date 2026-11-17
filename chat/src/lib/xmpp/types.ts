@@ -629,8 +629,16 @@ export interface DiscoveredTopology {
   services?: {
     muc?: string;
     spaces?: string;
-    /** The MUC service was discovered, not assumed from its conventional name. */
+    /**
+     * The MUC service was identified by its XEP-0045 feature, not assumed
+     * from its conventional name or an identity alone.
+     */
     mucDiscovered?: boolean;
+    /**
+     * The components the home server lists as its own items; absent when
+     * that list could not be read.
+     */
+    components?: string[];
   };
   /**
    * Whether the home server's `disco#info` lists the federation feature;

@@ -97,6 +97,8 @@ function fakeClient(options: {
   const nicks: Array<(roomJid: string, nick: string | null) => void> = [];
   const joinErrors = [...(options.joinErrors ?? [])];
   const heldJoins: Array<() => void> = [];
+  const forgottenMissingRooms: string[] = [];
+  const placementListeners: Array<() => void> = [];
   const agent = {
     async send_raw_iq(xml: string): Promise<string> {
       sent.push(xml);
@@ -159,6 +161,13 @@ function fakeClient(options: {
       nicks.push(handler);
       return () => undefined;
     },
+    forgetMissingRoom(roomJid: string) {
+      forgottenMissingRooms.push(roomJid);
+    },
+    onRoomPlacementChanged(handler: () => void) {
+      placementListeners.push(handler);
+      return () => undefined;
+    },
   };
   return {
     client: client as unknown as BrowserXmppClient,
@@ -172,6 +181,11 @@ function fakeClient(options: {
     failJoin: (roomJid: string, error: RoomJoinError) => { for (const handler of joinFailures) handler(roomJid, error); },
     releaseJoins: () => { for (const release of heldJoins.splice(0)) release(); },
     startJoin: (roomJid: string) => { for (const handler of joinStarts) handler(roomJid); },
+    forgottenMissingRooms,
+    placementChanged: () => { for (const handler of placementListeners) handler(); },
+    /** The stream is down: raw requests cannot be sent until `reconnect`. */
+    disconnect: () => { (client as { agent: unknown }).agent = null; },
+    reconnect: () => { (client as { agent: unknown }).agent = agent; },
   };
 }
 
@@ -789,6 +803,64 @@ describe("an unfollow overtaken by a follow from another device", () => {
       expect(fake.sent.some((xml) => xml.includes("<unsubscribe "))).toBe(false);
       expect(intents.state.intents).toEqual([]);
       expect(remote.spaces.value[0]).toMatchObject({ following: true });
+    });
+  });
+});
+
+describe("a missing room while the stream is down", () => {
+  test("its bookmark's autojoin is turned off once the stream is back", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer } = setup({ storedBookmarks: { [ROOM]: STORED_AUTOJOIN } });
+      fake.disconnect();
+      fake.failJoin(ROOM, roomCreatedError());
+      await settle();
+      expect(fake.sent.some((xml) => xml.includes("<publish "))).toBe(false);
+      expect(timer.pending).toHaveLength(1);
+      expect(roomEntry(remote)?.status).toMatchObject({ state: "failed", failure: { roomMissing: true } });
+
+      fake.reconnect();
+      timer.runNext();
+      await settle();
+      expect(fake.storedBookmarks.get(ROOM)).not.toContain("autojoin=");
+    });
+  });
+
+  test("a join the user chose meanwhile wins over the pending write", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer } = setup({ storedBookmarks: { [ROOM]: STORED_AUTOJOIN } });
+      fake.disconnect();
+      fake.failJoin(ROOM, roomCreatedError());
+      await settle();
+      fake.reconnect();
+      await remote.joinRoom(ROOM);
+      // The join asked the client to try the missing room again.
+      expect(fake.forgottenMissingRooms).toEqual([ROOM]);
+      const autojoinOff = timer.pending.find(({ delayMs }) => delayMs > 0);
+      autojoinOff?.callback();
+      await settle();
+      expect(fake.storedBookmarks.get(ROOM)).toContain('autojoin="true"');
+    });
+  });
+
+  test("gives up after the automatic retries and says the bookmark still joins", async () => {
+    await withXml(async () => {
+      const { remote, fake, timer } = setup({ storedBookmarks: { [ROOM]: STORED_AUTOJOIN } });
+      fake.disconnect();
+      fake.failJoin(ROOM, roomCreatedError());
+      await settle();
+      for (let attempt = 0; attempt < 10 && timer.pending.length > 0; attempt += 1) timer.runNext();
+      expect(timer.pending).toHaveLength(0);
+      expect(roomEntry(remote)?.note).toContain("still joins it at sign-in");
+    });
+  });
+});
+
+describe("rooms placed by a later discovery", () => {
+  test("the room list is read again", async () => {
+    await withXml(async () => {
+      const { fake, reloads } = setup();
+      fake.placementChanged();
+      expect(reloads()).toBe(1);
     });
   });
 });
