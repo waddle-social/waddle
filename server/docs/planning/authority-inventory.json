@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "ff48b18cb72a97ef7680604e539966c12f13c40a",
+  "baseline_commit": "a7aa1036648efffd0d19635d4ece481229beb3fa",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -109,7 +109,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/pubsub_authz.rs",
-      "sha256": "1171ce843785c8b8f494cbc7f6d159dc83f9ff9a18e509d1e16fe86dffdd5619"
+      "sha256": "2c563e6da8984d5215f98a5ca60fd9dca061cba8e138615ce60a7e944719083b"
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
@@ -205,7 +205,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
-      "sha256": "76248f33bc45b12c07b78c99c6e949a083931114c941ebf9c01292f32d44e139"
+      "sha256": "5acc55c6cf875b07a5e98a1e01977a368ffc019073be9e6ce7c729ca27ad5cc2"
     },
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_dispatch.rs",
@@ -501,7 +501,7 @@
     },
     "pubsub-admin": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
-      "line": 647,
+      "line": 668,
       "text": ".set_affiliation(target_jid, &node, entity, *aff)"
     },
     "parent-publish": {
@@ -1096,7 +1096,7 @@
     },
     "d8-space-affiliations": {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
-      "line": 634,
+      "line": 655,
       "text": "space_affiliation_is_privileged(*affiliation)"
     },
     "s2s-space-host": {
@@ -1207,7 +1207,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "a189208b2462443df871ab69e00e11209082154d6ec842ee2ee3ca48dbb51187",
+    "sha256": "d2f18d9090da63603fe1c1628db15ae42748ce6875520be39e080c9d31d6eca8",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,
