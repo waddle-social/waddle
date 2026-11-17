@@ -432,6 +432,10 @@ export interface ChannelEditFormData {
    * through the GET-then-SET unchanged. Once the user picks an
    * option from the dialog, this carries that explicit choice. */
   pinPermission?: PinPermission;
+  /** Whether accounts on other servers may reach the room, as read from
+   * the room's owner form. `undefined` while unknown, `null` when the
+   * server does not offer the setting; only a boolean is written back. */
+  federated?: boolean | null;
 }
 
 // ── XEP-0392 Consistent Color Generation ────────────────────────────

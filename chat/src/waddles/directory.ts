@@ -13,6 +13,7 @@ import {
   moveMucToSpace,
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
+import { fetchRoomFederated } from "@/lib/xmpp/federated-settings";
 import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
 import { isRemoteRoomJid } from "@/lib/xmpp/remote-address";
 import { occupantJidDirectory } from "@/lib/avatars/author-jid";
@@ -558,6 +559,39 @@ export function useWaddleDirectory(
     }
   }
 
+  /** The room's `federated` setting as its server holds it, for the edit form. */
+  const loadedChannelFederated = ref<boolean | null | undefined>(undefined);
+  let federationRequestId = 0;
+
+  /**
+   * Read the selected room's `federated` setting from its owner form, so
+   * the edit dialog shows the server's value (and hides the setting when
+   * the server does not offer it).
+   */
+  async function loadChannelFederation(): Promise<void> {
+    const channel = currentChannel.value;
+    const agent = xmppClient.value?.agent;
+    const requestId = ++federationRequestId;
+    if (!channel?.jid || !agent || !canManageCurrentChannel.value) {
+      loadedChannelFederated.value = null;
+      editChannelForm.value = { ...editChannelForm.value, federated: null };
+      return;
+    }
+    loadedChannelFederated.value = undefined;
+    editChannelForm.value = { ...editChannelForm.value, federated: undefined };
+    try {
+      const federated = await fetchRoomFederated(agent, channel.jid);
+      if (requestId !== federationRequestId || currentChannel.value?.id !== channel.id) return;
+      loadedChannelFederated.value = federated;
+      editChannelForm.value = { ...editChannelForm.value, federated };
+    } catch (error) {
+      if (requestId !== federationRequestId) return;
+      console.warn("Unable to read the room's federation setting", error);
+      loadedChannelFederated.value = null;
+      editChannelForm.value = { ...editChannelForm.value, federated: null };
+    }
+  }
+
   async function updateChannel(): Promise<boolean> {
     const generation = clientGeneration;
     const channel = currentChannel.value;
@@ -573,12 +607,25 @@ export function useWaddleDirectory(
     isSubmitting.value = true;
     try {
       client.assertRoomIdAvailable?.(channel.id);
+      const requestedFederated = editChannelForm.value.federated;
+      const federatedChanged = typeof requestedFederated === "boolean"
+        && requestedFederated !== loadedChannelFederated.value;
       await configureMucRoom(client, channel.jid, {
         name: editChannelForm.value.name.trim(),
         description: editChannelForm.value.description.trim(),
         pinPermission: editChannelForm.value.pinPermission,
+        ...(federatedChanged ? { federated: requestedFederated } : {}),
       });
       if (generation !== clientGeneration) return false;
+      if (federatedChanged) {
+        // Show the value the server holds now, not the one submitted.
+        await loadChannelFederation();
+        if (generation !== clientGeneration) return false;
+        if (loadedChannelFederated.value !== requestedFederated) {
+          actionError.value = "The room's server did not apply the change to who can reach the room.";
+          return false;
+        }
+      }
       // Optimistically apply locally so the action-sheet visibility
       // updates without waiting for a re-fetch. The server is
       // authoritative — a subsequent owner-config GET would refresh.
@@ -723,6 +770,7 @@ export function useWaddleDirectory(
     canManageChannels,
     canManageCurrentChannel,
     currentChannelIsRemote,
+    loadChannelFederation,
     canManageMembers,
     loadSpace,
     loadStructure,

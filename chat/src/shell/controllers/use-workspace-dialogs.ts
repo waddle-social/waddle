@@ -1,4 +1,4 @@
-import type { Ref } from "vue";
+import { watch, type Ref } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useWaddleDirectory } from "@/waddles/directory";
 import type { useWaddleMembers } from "@/waddles/members";
@@ -22,6 +22,12 @@ interface WorkspaceDialogsDeps {
  */
 export function useWorkspaceDialogs(deps: WorkspaceDialogsDeps) {
   const { ui, connectionStore, waddles, messaging, members, activeExtensionRouteKey } = deps;
+
+  // The room's federation setting lives in its owner form, which is read
+  // only when the owner opens the room's settings.
+  watch(ui.showEditChannel, (open) => {
+    if (open) void waddles.loadChannelFederation();
+  });
 
   let setupPromptShown = false;
 

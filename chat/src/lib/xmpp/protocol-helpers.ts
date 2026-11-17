@@ -15,6 +15,8 @@ type HybridClient = Partial<WaddleClient> & {
 };
 
 export const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
+/** Whether accounts on other servers may reach the room (owner form, off by default). */
+export const FIELD_ROOM_FEDERATED = "urn:waddle:roomconfig:federated";
 const FIELD_ROOM_NAME = "muc#roomconfig_roomname";
 const FIELD_ROOM_DESC = "muc#roomconfig_roomdesc";
 
@@ -31,6 +33,8 @@ interface ConfigureMucRoomParams {
   description?: string;
   /** #415: per-room pin permission. */
   pinPermission?: PinPermission;
+  /** Whether accounts on other servers may reach the room; written only when the form offers the field. */
+  federated?: boolean;
 }
 interface CreateSpaceNodeParams { nodeId?: string; name: string; description?: string; }
 interface PublishMucToSpaceParams { name: string; autojoin?: boolean; }
@@ -116,6 +120,9 @@ export async function configureMucRoom(
   current.set(FIELD_ROOM_NAME, params.name);
   if (params.description !== undefined) current.set(FIELD_ROOM_DESC, params.description);
   if (params.pinPermission) current.set(FIELD_PIN_PERMISSION, params.pinPermission);
+  if (params.federated !== undefined && current.has(FIELD_ROOM_FEDERATED)) {
+    current.set(FIELD_ROOM_FEDERATED, params.federated ? "1" : "0");
+  }
   current.set("FORM_TYPE", NS_MUC_ROOMCONFIG);
   const fieldsXml = Array.from(current.entries())
     .map(([name, value]) => `<field var="${escapeXml(name)}"><value>${escapeXml(value)}</value></field>`)
