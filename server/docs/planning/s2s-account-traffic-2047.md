@@ -334,10 +334,12 @@ inbox and archive only as the conversation's peer.
   account with no resource) is not committed either. Chat states and
   markers follow the classifier of local direct messages: they reach a
   live resource and are neither archived, projected nor stored.
-- **Bounds.** A stranger's message whose route is a detached session or
-  the offline store is admitted within the strangers' bounds after its
-  plan is classified and before it is committed, as before; one beyond
-  them, or one the store would not keep, is dropped unanswered.
+- **Bounds.** A stranger's message whose plan hands it to a detached
+  session or the offline store is admitted within the strangers' bounds
+  after the plan is classified and before it is committed, as before; one
+  beyond them, or one the store would not keep, is dropped unanswered.
+  The plan decides, not the resource selected before it: a resource that
+  left meanwhile sends the message to the store, within the bounds.
 - **Retractions.** The recipient pass replaces the message a XEP-0424
   retraction names in the recipient's archive with a tombstone; for a
   local sender its own server checks first that the sender wrote it. For

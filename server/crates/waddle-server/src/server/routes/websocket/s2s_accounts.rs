@@ -971,20 +971,20 @@ async fn receive_direct(
     };
     let deps = build_interpret_deps(state, None);
     let plan = plan_remote_direct_message(&deps, route.address(account), message.clone()).await;
-    match classify_remote_direct_plan(&plan, account) {
-        RemoteDirectPlan::Recipient => {}
+    let held = match classify_remote_direct_plan(&plan, account) {
+        RemoteDirectPlan::Recipient { held } => held,
         RemoteDirectPlan::Empty => return,
         RemoteDirectPlan::Refused => {
             telemetry::direct_refused();
             return;
         }
-    }
+    };
     // What a detached session holds goes to the offline store when its
     // resume window closes, so a stranger's message is held by one only as
-    // it would be stored.
-    if !matches!(route, DirectRoute::Live(_))
-        && !admit_offline(state, account, &sender, &message).await
-    {
+    // it would be stored. The plan, not the route selected before it,
+    // decides: a resource that left meanwhile sends the message to the
+    // store.
+    if held && !admit_offline(state, account, &sender, &message).await {
         return;
     }
     if work.abandoned() {

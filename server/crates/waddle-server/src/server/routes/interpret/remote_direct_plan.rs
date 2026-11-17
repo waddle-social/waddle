@@ -61,8 +61,10 @@ pub(crate) async fn plan_remote_direct_message(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteDirectPlan {
     /// Every effect is the recipient account's own, and something is to be
-    /// done: the plan may be committed.
-    Recipient,
+    /// done: the plan may be committed. `held` when the plan hands the
+    /// message to a detached session or to the offline store, which keep
+    /// it for a later session.
+    Recipient { held: bool },
     /// Nothing is to be done (a chat state alone to an account with no
     /// resource): nothing is committed.
     Empty,
@@ -106,7 +108,16 @@ pub(crate) fn classify_remote_direct_plan(
     if plan.plan.is_empty() && plan.intents.is_empty() {
         return RemoteDirectPlan::Empty;
     }
-    RemoteDirectPlan::Recipient
+    let held = plan.plan.iter().any(|planned| {
+        matches!(
+            planned.effect,
+            Effect::External(ExternalEffect::Delivery(
+                ExternalDeliveryEffect::QueueDetached { .. }
+                    | ExternalDeliveryEffect::QueueOfflineDelivery { .. }
+            ))
+        )
+    });
+    RemoteDirectPlan::Recipient { held }
 }
 
 /// Whether `effect` acts on `recipient`'s account only.
