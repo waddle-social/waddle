@@ -1,10 +1,10 @@
-//! XEP-0353 (0.6.0) call threads for direct messages from remote accounts
+//! XEP-0353 (0.8.0) call threads for direct messages from remote accounts
 //! across S2S (ADR-0020 D7; gate G18). A remote sender's message is
 //! accepted through the ingress authority as the recipient's half of a
 //! local direct message, and the replica's call state follows its JMI
 //! payloads for the conversation between the two:
 //!
-//! - a `finish` (§3.5) of an active call ends the call thread in the local
+//! - a `finish` (§3.7) of an active call ends the call thread in the local
 //!   account's inbox alone, and is not refused for the remote peer's
 //!   inbox, which is its own server's;
 //! - a `propose` (§3.1) records a pending offer only within bounds: a
@@ -146,10 +146,11 @@ async fn a_remote_initiators_pending_offers_are_bounded() {
                 ),
             ))
             .await;
-        // Every proposal is delivered, the ninth too.
+        // Every proposal is delivered, the ninth too, and its acceptance
+        // has run before the next is sent.
         receive(&mut phone, "message", &id).await;
+        federated.peer_barrier(BOB_PHONE, ALICE).await;
     }
-    federated.peer_barrier(BOB_PHONE, ALICE).await;
     let bob = bare(BOB);
     assert!(
         support::routing::wait_for_async(support::ARRIVES, || async {
@@ -188,6 +189,7 @@ async fn an_accounts_pending_offers_from_remote_initiators_are_bounded() {
             ))
             .await;
         receive(&mut phone, "message", &id).await;
+        federated.peer_barrier(&caller, ALICE).await;
     }
     let remote_offers = || {
         federated

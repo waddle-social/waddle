@@ -2,7 +2,8 @@
 //! (ADR-0020 D7; gate G18): a remote sender's correction is accepted
 //! through the ingress authority as the recipient's half of a local direct
 //! message. A correction may replace only a message its sender wrote
-//! (§5); a local sender's own server checks that, and for a remote sender
+//! (Business Rules: in a direct conversation the bare JIDs must match); a
+//! local sender's own server checks that, and for a remote sender
 //! this deployment checks it against the recipient's archive. A correction
 //! that names a message another sender wrote, the local account's own
 //! among them, is not delivered or archived, and nothing answers its

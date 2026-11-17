@@ -1,9 +1,10 @@
-//! XEP-0511 (0.1.0) link metadata on direct messages from remote accounts
+//! XEP-0511 (0.1.1) link metadata on direct messages from remote accounts
 //! across S2S (ADR-0020 D7; gate G18). This server stamps a link card on a
 //! local sender's message after removing any card and any link-preview
 //! request (`urn:waddle:link-preview:0`) the client put there, and a
 //! recipient client trusts a card as the server's: it plays an inline
-//! video only from a URL a card names. A remote sender's message therefore
+//! video only from a URL a card names. Senders can inject metadata that
+//! does not represent what is at the link (Security Considerations). A remote sender's message therefore
 //! loses both before it is delivered, archived or stored, and no card is
 //! stamped in their place. Through the production `/ws` router, the real
 //! S2S router and a loopback peer.
