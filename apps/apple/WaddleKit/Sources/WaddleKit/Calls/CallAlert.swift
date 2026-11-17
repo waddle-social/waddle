@@ -45,14 +45,14 @@ public struct CallRingPlan: Hashable, Sendable {
         self.notifies = notifies
     }
 
-    /// A ring is heard in front, and seen as a notification when the app
-    /// is not. A Mac app rings from the background too; an iPhone or iPad
-    /// app may not start audio there, so its notification's sound rings.
-    /// Ringback is only ever heard.
-    public init(alert: CallAlert?, isAppActive: Bool, ringsInBackground: Bool) {
+    /// Where the system rings for the app (an iPhone or iPad, through its
+    /// call screen) a ring needs nothing more. Elsewhere it is heard
+    /// wherever the app is, and also seen as a notification when the app
+    /// is not in front. Ringback is only ever heard.
+    public init(alert: CallAlert?, isAppActive: Bool, systemRings: Bool) {
         switch alert {
         case .ring:
-            self.init(tone: isAppActive || ringsInBackground ? .ring : nil, notifies: !isAppActive)
+            self.init(tone: systemRings ? nil : .ring, notifies: !systemRings && !isAppActive)
         case .ringback:
             self.init(tone: .ringback, notifies: false)
         case nil:

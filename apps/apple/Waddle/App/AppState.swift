@@ -43,6 +43,9 @@ final class AppState {
 
     let notifications = NotificationController()
     @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
+    #if os(iOS)
+    @ObservationIgnored private lazy var systemCalls = SystemCallCenter()
+    #endif
     let preferences = Preferences()
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -113,25 +116,63 @@ final class AppState {
         }
     }
 
-    /// Keeps the ringer in step with `active`'s call slot for as long as it
-    /// is the session; whoever ends the session stops the ringer.
-    private func ringForCalls(of active: ActiveSession) {
+    /// Keeps the ringer, and on an iPhone or iPad the system's call screen,
+    /// in step with `active`'s call slot for as long as it is the session;
+    /// whoever ends the session stops both.
+    private func followCalls(of active: ActiveSession) {
         let coordinator = active.coordinator
-        let alert = withObservationTracking {
-            CallAlert(state: coordinator.calls.state, isDoNotDisturb: coordinator.status.availability == .doNotDisturb)
+        let (state, isDoNotDisturb, isMediaConnected) = withObservationTracking {
+            (coordinator.calls.state, coordinator.status.availability == .doNotDisturb, active.callMedia.phase == .connected)
         } onChange: { [weak self, weak active] in
             Task { @MainActor in
                 guard let self, let active else { return }
-                self.ringForCalls(of: active)
+                self.followCalls(of: active)
             }
         }
         guard session === active else { return }
-        ringer.show(alert.map { alert in
+        #if os(iOS)
+        systemCalls.handlers = systemCallHandlers(for: active)
+        systemCalls.update(state: state, isMediaConnected: isMediaConnected, isDoNotDisturb: isDoNotDisturb)
+        #endif
+        ringer.show(CallAlert(state: state, isDoNotDisturb: isDoNotDisturb).map { alert in
             var callerName = ""
             if case .ring(let ring) = alert { callerName = coordinator.directory.title(for: .direct(ring.from)) }
             return .init(alert: alert, account: coordinator.account.jid, callerName: callerName)
         })
     }
+
+    #if os(iOS)
+    /// What the system's call screen may do. Each acts only on the call it
+    /// names: by the time it runs another may hold the slot.
+    private func systemCallHandlers(for active: ActiveSession) -> SystemCallCenter.Handlers {
+        let calls = active.coordinator.calls
+        return .init(
+            answer: { [weak active] sid in
+                guard active != nil, calls.state.sid == sid else { return false }
+                switch calls.state {
+                case .incoming(let call): return call.isAccepting ? true : await calls.acceptIncoming()
+                case .active: return true
+                case .idle, .outgoing, .joiningGroup, .inGroup, .ended: return false
+                }
+            },
+            end: { [weak active] sid in
+                guard active != nil, calls.state.sid == sid else { return }
+                if case .incoming(let call) = calls.state, !call.isAccepting {
+                    _ = await calls.declineIncoming()
+                } else if calls.state.isLive {
+                    await calls.hangUp()
+                }
+            },
+            setMuted: { [weak active] sid, isMuted in
+                guard let active, calls.state.sid == sid else { return }
+                await active.callMedia.setMicrophone(!isMuted)
+            },
+            name: { [weak active] call in
+                active?.coordinator.directory.title(for: call.isRoom ? .room(call.peer) : .direct(call.peer)) ?? ""
+            }
+        )
+    }
+    #endif
 
     // MARK: - Lifecycle
 
@@ -170,9 +211,6 @@ final class AppState {
 
     func sceneActivityChanged(isActive: Bool) {
         notifications.isAppActive = isActive
-        #if os(iOS)
-        ringer.isAppActive = isActive
-        #endif
         if isActive { notifications.refreshAuthorizationStatus() }
         guard let coordinator = session?.coordinator else { return }
         if isActive {
@@ -305,7 +343,7 @@ final class AppState {
         }
         session = active
         phase = .signedIn
-        ringForCalls(of: active)
+        followCalls(of: active)
         active.coordinator.start()
         notifications.requestAuthorizationIfNeeded()
         // Actions queued for another account (a failed restore followed by
@@ -366,6 +404,9 @@ final class AppState {
         await finishPendingPushRegistration?(active.coordinator)
         session = nil
         ringer.show(nil)
+        #if os(iOS)
+        systemCalls.update(state: .idle, isMediaConnected: false, isDoNotDisturb: false)
+        #endif
         pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()
         if signingOut {

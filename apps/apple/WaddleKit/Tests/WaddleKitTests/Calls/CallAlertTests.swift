@@ -110,26 +110,29 @@ extension UnansweredCallTests {
     private let ring = CallAlert.ring(.init(sid: "s1", from: BareJID(parsing: "bob@waddle.test")!, isVideo: false))
 
     @Test func inFrontARingIsOnlyHeard() {
-        #expect(CallRingPlan(alert: ring, isAppActive: true, ringsInBackground: true) == .init(tone: .ring, notifies: false))
-        #expect(CallRingPlan(alert: ring, isAppActive: true, ringsInBackground: false) == .init(tone: .ring, notifies: false))
+        #expect(CallRingPlan(alert: ring, isAppActive: true, systemRings: false) == .init(tone: .ring, notifies: false))
     }
 
-    @Test func behindAnotherAppAMacRingsAndNotifies() {
-        #expect(CallRingPlan(alert: ring, isAppActive: false, ringsInBackground: true) == .init(tone: .ring, notifies: true))
+    @Test func behindAnotherAppARingIsHeardAndNotified() {
+        #expect(CallRingPlan(alert: ring, isAppActive: false, systemRings: false) == .init(tone: .ring, notifies: true))
     }
 
-    @Test func inTheBackgroundAPhoneLeavesTheRingToItsNotification() {
-        #expect(CallRingPlan(alert: ring, isAppActive: false, ringsInBackground: false) == .init(tone: nil, notifies: true))
+    @Test func whereTheSystemRingsTheAppStaysQuiet() {
+        for active in [true, false] {
+            #expect(CallRingPlan(alert: ring, isAppActive: active, systemRings: true) == .init(tone: nil, notifies: false))
+        }
     }
 
     @Test func ringbackIsHeardWhereverTheAppIs() {
         for active in [true, false] {
-            #expect(CallRingPlan(alert: .ringback(sid: "s2"), isAppActive: active, ringsInBackground: false)
-                == .init(tone: .ringback, notifies: false))
+            for systemRings in [true, false] {
+                #expect(CallRingPlan(alert: .ringback(sid: "s2"), isAppActive: active, systemRings: systemRings)
+                    == .init(tone: .ringback, notifies: false))
+            }
         }
     }
 
     @Test func noAlertIsSilence() {
-        #expect(CallRingPlan(alert: nil, isAppActive: false, ringsInBackground: true) == .init(tone: nil, notifies: false))
+        #expect(CallRingPlan(alert: nil, isAppActive: false, systemRings: false) == .init(tone: nil, notifies: false))
     }
 }

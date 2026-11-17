@@ -70,6 +70,7 @@ public struct SystemCallTracker {
 
     /// The system knows about the slot's call.
     public var isManaging: Bool { managed != nil }
+    public var managedCall: SystemCall? { managed?.call }
 
     /// Our session id for the system's call, while it lasts.
     public func sid(for id: UUID) -> String? {
