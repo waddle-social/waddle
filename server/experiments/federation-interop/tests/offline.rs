@@ -4,10 +4,17 @@
 //! start any service.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use minidom::Element;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 use waddle_federation_interop::evidence::{scrub, settle, Outcome, Status, Unverifiable};
 use waddle_federation_interop::manifest::{self, Drive, Slice};
 use waddle_federation_interop::net::tls_hello::parse_server_hello;
+use waddle_federation_interop::pki::{self, LeafSpec, Pki};
+use waddle_federation_interop::s2s::initiator::{self, Plan, Stage};
 use waddle_federation_interop::scenarios::support::count_matching;
 use waddle_federation_interop::watch::OpenWatch;
 use waddle_federation_interop::xml::framer::{Framer, Item};
@@ -200,5 +207,159 @@ fn an_open_watch_sees_reads_of_watched_files_only() {
     assert!(watch.touched().expect("events").is_empty());
     std::fs::read(&watched).expect("read");
     assert_eq!(watch.touched().expect("events"), vec!["watched".to_owned()]);
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// Read from `socket` until the framer yields an item `accept` takes.
+async fn read_item<S: AsyncRead + Unpin>(
+    socket: &mut S,
+    framer: &mut Framer,
+    accept: impl Fn(&Item) -> bool,
+) -> Item {
+    let mut chunk = vec![0u8; 4096];
+    loop {
+        while let Some(item) = framer.next_item().expect("well-formed") {
+            if accept(&item) {
+                return item;
+            }
+        }
+        let read = socket.read(&mut chunk).await.expect("read");
+        assert!(read > 0, "the initiator closed early");
+        framer.push(chunk.get(..read).unwrap_or_default());
+    }
+}
+
+fn is_header(item: &Item) -> bool {
+    matches!(item, Item::Header(_))
+}
+
+fn is_element(name: &'static str) -> impl Fn(&Item) -> bool {
+    move |item| matches!(item, Item::Element(element) if element.name() == name)
+}
+
+/// The response header and `features` as one write, as receiving servers
+/// commonly send them.
+fn header_with(features: Element) -> Vec<u8> {
+    let mut bytes = StreamOpen::server(Some("home-a.test"), "peer-raw.test")
+        .with_id("s1")
+        .encode()
+        .expect("a header");
+    bytes.extend(header::element_bytes(&features));
+    bytes
+}
+
+#[tokio::test]
+async fn the_raw_peer_reads_what_follows_a_response_header_in_the_same_read() {
+    let directory = std::env::temp_dir().join(format!(
+        "federation-interop-initiator-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let pki = Pki::generate(&directory).expect("a PKI");
+    let receiving = pki
+        .issue(&LeafSpec::new("home-a", &["home-a.test"]))
+        .expect("a leaf");
+    let initiating = pki
+        .issue(&LeafSpec::new("peer-raw", &["peer-raw.test"]))
+        .expect("a leaf");
+    let acceptor = TlsAcceptor::from(Arc::new(
+        pki.server_config(&receiving, true, &pki::all_versions())
+            .expect("server settings"),
+    ));
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("a listener");
+    let port = listener.local_addr().expect("an address").port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("a connection");
+        let mut framer = Framer::new();
+        read_item(&mut socket, &mut framer, is_header).await;
+        let starttls = Element::builder("features", ns::STREAM)
+            .append(Element::builder("starttls", ns::TLS).build())
+            .build();
+        socket
+            .write_all(&header_with(starttls))
+            .await
+            .expect("write");
+        read_item(&mut socket, &mut framer, is_element("starttls")).await;
+        let proceed = Element::builder("proceed", ns::TLS).build();
+        socket
+            .write_all(&header::element_bytes(&proceed))
+            .await
+            .expect("write");
+        let mut tls = acceptor.accept(socket).await.expect("TLS");
+        let mut framer = Framer::new();
+        read_item(&mut tls, &mut framer, is_header).await;
+        let external = Element::builder("features", ns::STREAM)
+            .append(
+                Element::builder("mechanisms", ns::SASL)
+                    .append(
+                        Element::builder("mechanism", ns::SASL)
+                            .append("EXTERNAL")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        tls.write_all(&header_with(external)).await.expect("write");
+        read_item(&mut tls, &mut framer, is_element("auth")).await;
+        let success = Element::builder("success", ns::SASL).build();
+        tls.write_all(&header::element_bytes(&success))
+            .await
+            .expect("write");
+        let mut framer = Framer::new();
+        read_item(&mut tls, &mut framer, is_header).await;
+        let none = Element::builder("features", ns::STREAM).build();
+        tls.write_all(&header_with(none)).await.expect("write");
+        tls.flush().await.expect("flush");
+        // Hold the stream until the initiator closes it.
+        let mut rest = Vec::new();
+        let _ = tls.read_to_end(&mut rest).await;
+    });
+    let plan = Plan::external("peer-raw.test", "home-a.test", &initiating);
+    let attempt = initiator::attempt(&pki, port, &plan)
+        .await
+        .expect("an attempt");
+    assert_eq!(attempt.stage, Stage::Established, "{}", attempt.describe());
+    if let Some(stream) = attempt.stream {
+        stream.close().await;
+    }
+    server.await.expect("the receiving side");
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[tokio::test]
+async fn the_raw_peer_sees_a_stream_error_written_with_the_response_header() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("a listener");
+    let port = listener.local_addr().expect("an address").port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("a connection");
+        let mut framer = Framer::new();
+        read_item(&mut socket, &mut framer, is_header).await;
+        let error = Element::builder("error", ns::STREAM)
+            .append(Element::builder("bad-format", ns::STREAM_ERRORS).build())
+            .build();
+        let mut bytes = header_with(error);
+        bytes.extend_from_slice(header::STREAM_CLOSE);
+        socket.write_all(&bytes).await.expect("write");
+    });
+    let directory = std::env::temp_dir().join(format!(
+        "federation-interop-initiator-error-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let pki = Pki::generate(&directory).expect("a PKI");
+    let initiating = pki
+        .issue(&LeafSpec::new("peer-raw", &["peer-raw.test"]))
+        .expect("a leaf");
+    let plan = Plan::external("peer-raw.test", "home-a.test", &initiating);
+    let attempt = initiator::attempt(&pki, port, &plan)
+        .await
+        .expect("an attempt");
+    assert_eq!(attempt.stage, Stage::BeforeTls);
+    assert_eq!(attempt.stream_error.as_deref(), Some("bad-format"));
+    server.await.expect("the receiving side");
     std::fs::remove_dir_all(&directory).ok();
 }

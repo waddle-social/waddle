@@ -146,6 +146,10 @@ async fn step<S: AsyncRead + Unpin>(
                 if accept(&item) {
                     return Step::Item(item);
                 }
+                // A receiving server often writes its response header and
+                // what follows it (features, or a stream error) in one
+                // write: take every buffered item before reading again.
+                continue;
             }
             Ok(None) => {}
             Err(_) => return Step::Closed,
