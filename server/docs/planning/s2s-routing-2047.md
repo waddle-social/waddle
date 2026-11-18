@@ -1929,14 +1929,15 @@ as the effect boundary honours any standing (`honoured` in the host):
 | `disco#items` of the service | The Spaces the asker would be answered about, of at most 256 federated Spaces, sorted by node and paged with XEP-0059 |
 | `disco#items` of a node | The rooms the Space lists that the asker may be told of (below), as XEP-0060 §5.5 lists published items: the service's address, and the item ID, the room's JID, as the name; at most 256 of the Space's items are read, sorted by item ID and paged with XEP-0059 ([MUC fallback](#muc-fallback-w7b)). `forbidden` for an account that may not read the Space, as for `<items/>` |
 | Ping of the service | An empty result |
-| `<items/>` | The XEP-0402 bookmarks of the rooms the asker may be told of (below), at most 256, without the publisher's address. `forbidden` for an account that may not read the Space. The store is read and nothing is written: a session's read also publishes bookmarks a Space lacks and repairs a room's parent, and a remote principal's read does neither |
+| `<items/>` | The XEP-0402 bookmarks of the rooms the asker may be told of (below) and the Space's avatar and banner items, at most 256, without the publisher's address. `forbidden` for an account that may not read the Space. The store is read and nothing is written: a session's read also publishes bookmarks a Space lacks and repairs a room's parent, and a remote principal's read does neither |
 | `<subscribe/>` | For the sender's own account, named by its bare JID or one of its full JIDs: recorded in the PubSub service's subscriptions and in `s2s_space_subscriptions` with what the stream proved, within the bounds (below); `resource-constraint` (type `wait`) beyond one. The service keeps one subscription for an account, under its bare JID, as it does for sessions; the answer names that bare JID and notifications are addressed to it. A Space closed to other servers while the request was decided answers `item-not-found`, and neither record is left |
 | `<unsubscribe/>` | For the sender's own account: both records removed; `unexpected-request` (type `cancel`) with the PubSub condition `<not-subscribed/>` when the account holds no subscription (XEP-0060 §6.2.3.2). Leaving only reduces what an account receives, so the records are removed even for a node that is no longer a Space open to the account; the answer is then `item-not-found`, as for every other request about such a node |
 | `<publish/>`, `<retract/>` and every `pubsub#owner` request | `forbidden` unless the principal's privilege is honoured (a trusted home on a `pkix` stream); then decided by the checks a session's request meets, for the remote account as their subject (below) |
 | `<create/>` | `forbidden`: no Space is created for a remote principal, since creating one makes its creator the owner |
 | Anything else in the two namespaces | `feature-not-implemented` where the parser names the feature, otherwise `service-unavailable` |
 
-**The rooms a Space lists.** A Space's items are bookmarks of rooms. A
+**The rooms a Space lists.** A Space's items are bookmarks of rooms, and
+its avatar and banner ([Spaces images](#spaces-images)). A
 remote principal is told of a room only where the room's own host would
 describe it to that principal ([Inbound MUC](#inbound-muc-w6a)): the room is
 open to other servers and is no group conversation, read as the room host
@@ -1947,10 +1948,16 @@ room an enrolled host-grant scope manages is told only to a principal
 its canonical grants admit to view it, decided through the evidence-naming
 form of the gate (`HostGrantGate::allows_as`) on the evidence of the stream
 that carried the request, behind the revocation fence's ticket. A room that
-cannot be decided now is not told. Nothing else a Space node holds is
-served to a remote principal: an item that is no bookmark of a room of this
-deployment's MUC service is left out. The same rule decides which event
-notifications a remote subscriber receives.
+cannot be decided now is not told. A Space's avatar and banner items
+(0.3.0, "Spaces images", `urn:xmpp:spaces:avatar:metadata:0` and
+`urn:xmpp:spaces:banner:metadata:0`) are no rooms: an asker that may read
+the Space reads them with its items, where the stored payload is an
+image's XEP-0084 metadata, and the node's `disco#items` leaves them out.
+Nothing else a Space node holds is served to a remote principal: an item
+that is neither a bookmark of a room of this deployment's MUC service nor
+one of the Space's images is left out. The same rule decides which event
+notifications a remote subscriber receives. Nothing an image item names is
+fetched, by the server or by the web pilot (ADR-0020 D4).
 
 Being told of a room admits nothing in it. Entering it is a join of the
 room, decided by the room for the principal and its stream.
@@ -1971,7 +1978,10 @@ session's request runs through (`spaces_change_for_remote`):
   over the room, for the remote account as the subject of those checks. No
   writer issues the Space `owner` relationship to a remote account, so a
   remote principal's PubSub affiliation alone places no room: the request
-  is `forbidden`.
+  is `forbidden`. A publish or a retract of the Space's avatar or banner
+  item names no room and is decided by the Space's `owner` relationship or
+  the deployment's right to create Spaces alone, as a session's is
+  ([Spaces images](#spaces-images)).
 - An affiliation change is subject to D8 issuance whoever asks (below).
 - An owner's change of subscriptions may record an address at another
   server. Nothing is sent for it (below).
@@ -2004,6 +2014,51 @@ effect either. Three writers apply it:
 
 Membership, a ban and the removal of a standing are written for any
 account.
+
+#### Spaces images
+
+XEP-0503 0.3.0 lets a Space carry its avatar and banner as items of its
+node, `urn:xmpp:spaces:avatar:metadata:0` and
+`urn:xmpp:spaces:banner:metadata:0`, each holding a XEP-0084 `<metadata/>`
+element. The Spaces service accepts them from whoever may change the Space
+(the Space's `owner` relationship or the deployment's right to create
+Spaces), for a session and for a remote principal with honoured privilege
+alike. Every other item id names a room and keeps the bookmark rules.
+
+- **What an image item may carry** (`xep0503::space_image_payload`):
+  exactly one payload element, as XEP-0060 §7.1.3.5 requires of an item.
+  XEP-0503 allows several `<metadata/>` elements in one item; they are
+  refused rather than cut to the first, and one `<metadata/>` lists every
+  format in its `<info/>` elements. The `<metadata/>` has no attributes or
+  text and holds one to eight `<info/>` elements and nothing else: an empty
+  one, XEP-0084's way to stop an avatar, names no image (an image is removed
+  by retracting its item), and a `<pointer/>`, which names a third-party
+  service, is refused. Each `<info/>` is empty and carries only the
+  attributes XEP-0084 defines: `bytes` (u32), `id` (at most 128 bytes) and
+  `type` (an `image/` or `video/` content type) are required, `height` and
+  `width` (u16) and `url` (an absolute `http:` or `https:` URL of at most
+  2,048 bytes) optional. XEP-0084's requirements that one format be
+  `image/png` and that `id` be a SHA-1 hash are not applied, since
+  XEP-0503's own example meets neither. A missing payload is answered
+  `bad-request` with `<payload-required/>`, any other refusal `bad-request`
+  with `<invalid-payload/>`.
+- **What it does.** The item is stored as given under the image's id,
+  without a publisher the request names, and the Space's subscribers are
+  notified as for any publication. It names no room: no channel, link,
+  parent relationship or other Space is touched. The same id is every
+  Space's image, so the single-membership cleanup that moves a room's
+  bookmark out of other Spaces never runs for it.
+- **Retracting it** removes the item and nothing else; retracting an image
+  the Space does not hold is answered `item-not-found`. Deleting a Space
+  takes its images with it and counts none of them among its rooms.
+- **Reading it.** A session reads the images with the Space's items. A
+  remote principal reads them as above. The node's `disco#items` lists
+  rooms only.
+- **No fetch.** Neither the server nor the web pilot requests a URL an
+  image item names (ADR-0020 D4). The web pilot records only whether a
+  Space has an image (`chat/src/lib/xmpp/remote-community.ts`,
+  `parseSpaceContent`); its local Space listing and the Rust client's read
+  only `<conference/>` items.
 
 #### What a remote owner of a Space can do
 
@@ -2111,7 +2166,9 @@ server only where all of this holds when it is handed over:
   notifications at an address that never asked;
 - the subscriber's domain is admitted now, and its affiliation, honoured
   for the evidence its subscription recorded, still lets it read the Space;
-- the room the event names is one the subscriber may be told of.
+- the room the event names is one the subscriber may be told of, or the
+  event names one of the Space's images, which every subscriber that reads
+  the Space is told of.
 
 The notification is the event local subscribers get, addressed to the
 subscribed account's bare JID, from the service's bare JID and naming the
