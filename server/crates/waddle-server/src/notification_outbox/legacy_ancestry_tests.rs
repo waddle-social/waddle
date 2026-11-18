@@ -1318,10 +1318,10 @@ async fn retract_ancestry_uses_new_class(fixture: IngressFixture) {
         .expect("candidates");
     let dm = rows.next().await.expect("read DM").expect("DM");
     assert_eq!(dm.get::<String>(0).expect("class"), "dm");
-    assert!(
-        dm.get::<Option<i64>>(1).expect("quarantine").is_some(),
-        "historical DM over retract must fail pure classification"
-    );
+    // A historical DM candidate over a retract no longer matches its
+    // envelope's class. Like any class mismatch it is left unbridged, not
+    // quarantined.
+    assert!(dm.get::<Option<i64>>(1).expect("quarantine").is_none());
     let missed = rows
         .next()
         .await
@@ -1333,7 +1333,7 @@ async fn retract_ancestry_uses_new_class(fixture: IngressFixture) {
         fixture
             .count("ingress_effect_descendants WHERE settled_at IS NULL")
             .await,
-        2
+        1
     );
     drop(rows);
     drop(store);

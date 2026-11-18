@@ -186,7 +186,8 @@ async fn a_complete_retired_sqlite_ledger_is_stamped_then_upgraded() {
         "a stamp applies the post-baseline migration"
     );
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
-    assert_eq!(sqlite_table_count(&db).await, objects);
+    // Migration 2002 adds the one-per-call index for missed-call candidates.
+    assert_eq!(sqlite_table_count(&db).await, objects + 1);
 
     // A second run finds the baseline and changes nothing.
     assert!(MigrationRunner::deployment(BaselineAction::Stamp)
@@ -331,7 +332,7 @@ async fn a_ledger_version_this_binary_does_not_know_is_refused() {
         .expect("guard")
         .execute(
             "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-            crate::db_params![BASELINE_VERSION + 2, "from a newer release", "0".repeat(64)],
+            crate::db_params![BASELINE_VERSION + 3, "from a newer release", "0".repeat(64)],
         )
         .await
         .expect("record a newer migration");

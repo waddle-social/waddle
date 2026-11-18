@@ -16,6 +16,9 @@ use xmpp_parsers::jingle::SessionId;
 
 impl NotificationOutboxStore {
     /// Resolve invitation evidence against the original retract receipt, including on recovery.
+    /// Only the lower bound is checked: the invitation's time comes from the
+    /// database clock and the receipt from this process, so an upper bound
+    /// would drop a quick cancel under clock skew.
     pub(crate) async fn has_recent_call_candidate(
         &self,
         recipient: &BareJid,
@@ -26,14 +29,13 @@ impl NotificationOutboxStore {
         let receipt_ms = receipt_at.timestamp_millis();
         let mut rows = self
             .query(
-                "SELECT 1 FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND class = ? AND call_sid = ? AND quarantined_at_ms IS NULL AND created_at_ms >= ? AND created_at_ms <= ? LIMIT 1",
+                "SELECT 1 FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND class = ? AND call_sid = ? AND quarantined_at_ms IS NULL AND created_at_ms >= ? LIMIT 1",
                 crate::db_params![
                     recipient.to_string(),
                     caller.to_string(),
                     NotificationClass::Call.as_db_value(),
                     session_id.0.clone(),
                     receipt_ms.saturating_sub(MISSED_CALL_WINDOW_SECONDS * 1_000),
-                    receipt_ms,
                 ],
             )
             .await?;
@@ -484,7 +486,8 @@ mod tests {
             ("lower-bound", 940_000, false, false, false, true),
             ("upper-bound", 1_000_000, false, false, false, true),
             ("expired", 939_999, false, false, false, false),
-            ("future", 1_000_001, false, false, false, false),
+            // The database clock may run ahead of this process.
+            ("clock-ahead", 1_000_001, false, false, false, true),
             ("outboxed", 980_000, true, false, false, true),
             ("suppressed", 980_000, true, true, false, true),
             ("quarantined", 980_000, false, false, true, false),
