@@ -15,11 +15,13 @@
 //! - §7.1: an event notification leaves for a subscriber at another server
 //!   only for a subscription that account made itself, only while its
 //!   domain is admitted and its standing still lets it read the Space, and
-//!   only about a room it may be told of; one stanza for each subscribed
+//!   only about a room it may be told of or one of the Space's images
+//!   (XEP-0503 0.3.0, "Spaces images"); one stanza for each subscribed
 //!   account. Notifications are decided off the publisher's request, so
 //!   each case waits for the Spaces host to settle before it reads them.
-//! - §8: publishing, retracting and everything of the `pubsub#owner`
-//!   namespace need a standing that is honoured for the request's stream:
+//! - §8: publishing, retracting (a room's bookmark or one of the Space's
+//!   images) and everything of the `pubsub#owner` namespace need a
+//!   standing that is honoured for the request's stream:
 //!   an account of a trusted home on a certificate-authenticated stream.
 //!   Owner and publisher affiliations are written only for accounts of
 //!   this deployment and of trusted homes, and an owner's standing is not
@@ -41,10 +43,11 @@ mod s2s_spaces_support;
 use minidom::Element;
 use s2s_spaces_support::{
     affiliate, affiliation, ask, channel, configure, descendant, disco, error_condition, federate,
-    federated_space, field, form_value, hosting, hosting_with, is_event, item_ids, items, jid,
-    of_node, owner_of, owner_subscription, owner_subscription_as, publish, pubsub, request,
-    retract, room, rows, space, spaces, subscription, Adjust, Federated, Pki, BOB, BOB_PHONE,
-    FIELD_FEDERATED, LOCAL, MALLORY, NS_DISCO_ITEMS, NS_PUBSUB_OWNER, PEER, SPACES,
+    federated_space, fetched, field, form_value, hosting, hosting_with, image_host, image_metadata,
+    is_event, item_ids, items, jid, of_node, owner_of, owner_subscription, owner_subscription_as,
+    publish, publish_item, pubsub, request, retract, retract_item, room, rows, space, spaces,
+    subscription, Adjust, Federated, Pki, BOB, BOB_PHONE, FIELD_FEDERATED, LOCAL, MALLORY,
+    NS_AVATAR_METADATA, NS_DISCO_ITEMS, NS_PUBSUB_OWNER, PEER, SPACES,
 };
 use waddle_server::db::actor::DbExecute;
 use waddle_server::db::s2s_spaces::{
@@ -68,6 +71,7 @@ use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::stanza::{is_error, is_result, set};
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::pubsub::{Affiliation, NodeConfig};
+use waddle_xmpp::xep::xep0503::{ITEM_SPACE_AVATAR_METADATA, ITEM_SPACE_BANNER_METADATA};
 use xmpp_parsers::stanza_error::DefinedCondition;
 
 const DEV: &str = "dev";
@@ -700,6 +704,88 @@ async fn a_remote_subscriber_is_notified_of_the_rooms_it_may_be_told_of() {
     assert_eq!(retract.attr("id"), Some(room("lounge").as_str()));
 }
 
+/// "Spaces images": a subscriber is notified of the Space's avatar as
+/// published, without its publisher, and of its retraction. An image names
+/// no room, so no room's openness decides it. An image that is refused
+/// tells nothing, and nothing the image names is requested.
+#[tokio::test]
+async fn a_remote_subscriber_is_notified_of_a_spaces_images() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    let subscribed = subscribe(&federated, "img-sub", BOB_PHONE, BOB).await;
+    assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
+    let (host, url) = image_host("/avatar.png").await;
+
+    let published = round_trip(
+        &mut victor,
+        set(
+            "img-pub-1",
+            SPACES,
+            publish_item(DEV, ITEM_SPACE_AVATAR_METADATA, image_metadata(&url)),
+        ),
+    )
+    .await;
+    assert!(is_result(&published), "{published:?}");
+    let event = federated
+        .peer_receives_matching(|stanza| {
+            is_event(stanza, DEV, BOB) && item_ids(stanza) == [ITEM_SPACE_AVATAR_METADATA]
+        })
+        .await;
+    assert_eq!(event.attr("type"), Some("headline"));
+    let item = descendant(&event, "item").expect("the item");
+    assert_eq!(item.attr("publisher"), None);
+    let info = descendant(item, "info").expect("the image's metadata");
+    assert_eq!(info.ns(), NS_AVATAR_METADATA);
+    assert_eq!(info.attr("url"), Some(url.as_str()));
+    assert!(!String::from(&event).contains(VICTOR));
+
+    let refused = round_trip(
+        &mut victor,
+        set(
+            "img-pub-2",
+            SPACES,
+            publish_item(
+                DEV,
+                ITEM_SPACE_BANNER_METADATA,
+                Element::builder("metadata", NS_AVATAR_METADATA).build(),
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&refused, DefinedCondition::BadRequest),
+        "{refused:?}"
+    );
+
+    let retracted = round_trip(
+        &mut victor,
+        set(
+            "img-ret-1",
+            SPACES,
+            retract_item(DEV, ITEM_SPACE_AVATAR_METADATA),
+        ),
+    )
+    .await;
+    assert!(is_result(&retracted), "{retracted:?}");
+    let retraction = federated
+        .peer_receives_matching(|stanza| {
+            is_event(stanza, DEV, BOB) && descendant(stanza, "retract").is_some()
+        })
+        .await;
+    assert_eq!(
+        descendant(&retraction, "retract").and_then(|retract| retract.attr("id")),
+        Some(ITEM_SPACE_AVATAR_METADATA)
+    );
+
+    let received = settled(&federated, "img-barrier").await;
+    assert_eq!(events_for(&received, BOB).len(), 2, "{received:?}");
+    assert!(!received
+        .iter()
+        .any(|stanza| item_ids(stanza).contains(&ITEM_SPACE_BANNER_METADATA.to_owned())));
+    assert!(!fetched(&host).await, "nothing requests the image");
+}
+
 #[tokio::test]
 async fn a_notification_leaves_only_for_a_subscription_the_remote_account_made() {
     let pki = Pki::new();
@@ -840,6 +926,20 @@ fn changes(tag: &str) -> Vec<(String, bool, Element)> {
     [
         ("publish", true, publish(DEV, "lounge")),
         ("retract", true, retract(DEV, "lounge")),
+        (
+            "publish-image",
+            true,
+            publish_item(
+                DEV,
+                ITEM_SPACE_AVATAR_METADATA,
+                image_metadata("https://images.home-b.test/avatar.png"),
+            ),
+        ),
+        (
+            "retract-image",
+            true,
+            retract_item(DEV, ITEM_SPACE_AVATAR_METADATA),
+        ),
         ("configure", false, own("configure")),
         (
             "configure-set",
@@ -1011,6 +1111,91 @@ async fn a_trusted_homes_owner_administers_a_space() {
     )
     .await;
     assert!(descendant(&gone, "item").is_none(), "{gone:?}");
+}
+
+/// "Spaces images" from a trusted home's owner: setting or removing the
+/// Space's avatar is decided by the Space's `owner` relationship, as
+/// placing a room is, and asks for no authority over a room, since an
+/// image names none. An Owner affiliation without that relationship sets
+/// nothing, and a malformed image is refused.
+#[tokio::test]
+async fn a_trusted_homes_owner_sets_a_spaces_images_by_its_owner_relationship() {
+    let pki = Pki::new();
+    let federated = hosting_with(&pki, trusting_the_peer()).await;
+    let _victor = space_with_owner(&federated).await;
+    affiliate(&federated, DEV, BOB, Affiliation::Owner).await;
+    let (host, url) = image_host("/avatar.png").await;
+    let avatar = || publish_item(DEV, ITEM_SPACE_AVATAR_METADATA, image_metadata(&url));
+    let stored = || async {
+        federated
+            .loopback
+            .state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_items(
+                &spaces(),
+                DEV,
+                None,
+                &[ITEM_SPACE_AVATAR_METADATA.to_owned()],
+            )
+            .await
+            .expect("the items are read")
+            .len()
+    };
+
+    let refused = ask(
+        &federated,
+        request(BOB_PHONE, "remote-img-1", true, avatar()),
+    )
+    .await;
+    assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
+    assert_eq!(stored().await, 0);
+
+    s2s_spaces_support::relate(
+        &federated,
+        Object::new(ObjectType::Space, DEV),
+        "owner",
+        BOB,
+    )
+    .await;
+    let published = ask(
+        &federated,
+        request(BOB_PHONE, "remote-img-2", true, avatar()),
+    )
+    .await;
+    assert_eq!(published.attr("type"), Some("result"), "{published:?}");
+    assert_eq!(stored().await, 1);
+
+    let malformed = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "remote-img-3",
+            true,
+            publish_item(
+                DEV,
+                ITEM_SPACE_BANNER_METADATA,
+                Element::builder("metadata", NS_AVATAR_METADATA).build(),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(error_condition(&malformed).as_deref(), Some("bad-request"));
+
+    let retracted = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "remote-img-4",
+            true,
+            retract_item(DEV, ITEM_SPACE_AVATAR_METADATA),
+        ),
+    )
+    .await;
+    assert_eq!(retracted.attr("type"), Some("result"), "{retracted:?}");
+    assert_eq!(stored().await, 0);
+    assert!(!fetched(&host).await, "nothing requests the image");
 }
 
 /// D8 at issuance for a session's request: a Space's owner writes the

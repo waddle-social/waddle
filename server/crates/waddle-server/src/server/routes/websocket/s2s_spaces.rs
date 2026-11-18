@@ -38,6 +38,13 @@
 //! subscription to a Space is no grant in any of those rooms: entering one
 //! is a join of the room, decided by the room.
 //!
+//! A Space may also hold its avatar and banner items (XEP-0503 0.3.0,
+//! "Spaces images"). They are no rooms: a principal that may read the
+//! Space reads them with its items and is notified of them, while the
+//! Space's `disco#items` lists its rooms alone. Only an item whose payload
+//! is a Space image's metadata ([`validate_space_image_metadata`]) is
+//! served; the image URLs it names are never fetched.
+//!
 //! A Space's publications are handed to [`WebSocketLocalSpaces`] once they
 //! are stored, within the Space's allowance of notified publications, on a
 //! bounded queue, and a task of its own sends their event notifications to
@@ -61,6 +68,7 @@ use waddle_xmpp::pubsub::{
 };
 use waddle_xmpp::xep::build_spaces_metadata_form_for_remote;
 use waddle_xmpp::xep::xep0402::NS_BOOKMARKS2;
+use waddle_xmpp::xep::xep0503::{validate_space_image_metadata, SpaceImage};
 use waddle_xmpp::Stanza;
 use xmpp_parsers::disco::{
     DiscoInfoQuery, DiscoInfoResult, DiscoItemsQuery, DiscoItemsResult, Feature, Identity,
@@ -715,6 +723,15 @@ fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) 
         .then_some(room)
 }
 
+/// Whether a Space item is one of the Space's images (XEP-0503 0.3.0,
+/// "Spaces images") that a remote principal who may read the Space is told
+/// of: its id names an image, and its payload, where it carries one, is
+/// that image's metadata. A retraction carries none.
+fn space_image(id: &str, payload: Option<&Element>) -> bool {
+    SpaceImage::from_item_id(id).is_some()
+        && payload.is_none_or(|payload| validate_space_image_metadata(payload).is_ok())
+}
+
 /// Whether `room` is open to accounts at other servers at all, read as the
 /// room's own host reads it for every request
 /// ([`super::s2s_rooms::room_open_to_other_servers`]): from the room's
@@ -876,11 +893,12 @@ impl Asked<'_> {
         }
     }
 
-    /// Whether this asker may be told of the Space item `item`: a bookmark
-    /// of a room it may be told of. Nothing else a Space holds is served to
-    /// a remote principal. `None` when whether the room is open to other
-    /// servers, or its grants, cannot be read now: the item is not told,
-    /// and a listing that left it out tells no count.
+    /// Whether this asker may be told of the Space item `item` as a room of
+    /// the Space: a bookmark of a room it may be told of. A Space's images
+    /// are no rooms ([`space_image`]); a read of its items serves them
+    /// besides. `None` when whether the room is open to other servers, or
+    /// its grants, cannot be read now: the item is not told, and a listing
+    /// that left it out tells no count.
     async fn child_visible(&self, id: &str, payload: Option<&Element>) -> Option<bool> {
         match bookmarked_room(self.state, id, payload) {
             Some(room) => room_visible(self.state, &room, &self.account, &self.evidence).await,
@@ -1151,10 +1169,11 @@ impl Asked<'_> {
     }
 
     /// XEP-0503, "Discovering the content of a space": the bookmarks of the
-    /// Space's rooms this asker may be told of, read from the store and
-    /// nothing else. A session's read also publishes bookmarks the Space
-    /// lacks and repairs a room's parent; a remote principal's read writes
-    /// nothing.
+    /// Space's rooms this asker may be told of, and the Space's avatar and
+    /// banner items ("Spaces images", [`space_image`]), read from the store
+    /// and nothing else. A session's read also publishes bookmarks the
+    /// Space lacks and repairs a room's parent; a remote principal's read
+    /// writes nothing.
     async fn items(&self, node: &str, max_items: Option<u32>, item_ids: &[String]) -> Vec<Stanza> {
         if !matches!(self.iq, Iq::Get { .. }) {
             return self.refuse(bad_request());
@@ -1178,6 +1197,9 @@ impl Asked<'_> {
         for item in &stored {
             let item = item.to_pubsub_item();
             let told = match item.id.as_deref() {
+                Some(id) if SpaceImage::from_item_id(id).is_some() => {
+                    item.payload.is_some() && space_image(id, item.payload.as_ref())
+                }
                 Some(id) => self.child_visible(id, item.payload.as_ref()).await == Some(true),
                 None => false,
             };
@@ -1522,7 +1544,8 @@ impl LocalSpaces for WebSocketLocalSpaces {
 }
 
 /// The item a Space's event notification names, and so the room a
-/// subscriber must be allowed to learn of to receive it.
+/// subscriber must be allowed to learn of to receive it, or the Space's
+/// image it names.
 fn event_item(event: &Message) -> Option<(String, Option<Element>)> {
     let items = event
         .payloads
@@ -1600,7 +1623,9 @@ pub(crate) fn queue_remote_notification(
 /// - the subscriber's domain is admitted now (D1) and its standing in the
 ///   Space, honoured for the evidence its subscription recorded (D8),
 ///   still lets it read the Space;
-/// - the room the event names is one the subscriber may be told of.
+/// - the room the event names is one the subscriber may be told of, or the
+///   event names one of the Space's images ([`space_image`]), which any
+///   subscriber that reads the Space is told of.
 ///
 /// One publication, queued within the Space's allowance of notified
 /// publications, sends at most one stanza to each of at most 256 remote
@@ -1657,14 +1682,20 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
     let Some((item_id, item_payload)) = event_item(event) else {
         return;
     };
-    let Some(room) = bookmarked_room(state, &item_id, item_payload.as_ref()) else {
-        return;
+    // The room the event names; an image of the Space names none.
+    let room = if space_image(&item_id, item_payload.as_ref()) {
+        None
+    } else {
+        let Some(room) = bookmarked_room(state, &item_id, item_payload.as_ref()) else {
+            return;
+        };
+        // Whether the room is open to other servers is the same for every
+        // subscriber: a room that is not is told to none of them.
+        if room_open(state, &room).await != Some(true) {
+            return;
+        }
+        Some(room)
     };
-    // Whether the room is open to other servers is the same for every
-    // subscriber: a room that is not is told to none of them.
-    if room_open(state, &room).await != Some(true) {
-        return;
-    }
     // The service's own record, read for this publication just before the
     // first hand-over: a subscription removed, or an account banned, since
     // the remote subscription was recorded receives nothing.
@@ -1689,7 +1720,10 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
         let sent = !state.serves(account)
             && deliverable.contains(account)
             && subscriber_reads(state, service, &node, account, &evidence).await
-            && room_admits(state, &room, account, &evidence).await == Some(true)
+            && match &room {
+                Some(room) => room_admits(state, room, account, &evidence).await == Some(true),
+                None => true,
+            }
             && state.deps.remote_route.space_event(
                 service,
                 &subscriber,

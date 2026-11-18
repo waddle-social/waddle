@@ -10,8 +10,10 @@
 //! - "Fetching spaces from a spaces service", "Fetching the metadata
 //!   associated to a space" and "Discovering the content of a space" are
 //!   answered for an open Space with what a remote asker is told: no
-//!   address of an account of this deployment, and only the rooms that are
-//!   themselves open to other servers.
+//!   address of an account of this deployment, only the rooms that are
+//!   themselves open to other servers, and the Space's avatar and banner
+//!   items ("Spaces images") where their payload is an image's metadata.
+//!   Nothing those items name is fetched.
 //! - "Advertising space membership": the `disco#items` of a Space's node
 //!   lists the same rooms, as XEP-0060 §5.5 lists published items (the
 //!   service's address and the item ID, the room's JID, as its name), paged
@@ -30,16 +32,18 @@ mod s2s_spaces_support;
 use minidom::Element;
 use s2s_spaces_support::{
     affiliate, affiliation, ask, channel, configure, descendant, disco, error_condition, error_of,
-    federate, federated_space, field, form_value, hosting, hosting_with, item_ids, items, list_in,
-    of_node, owner_subscription, publish, pubsub, request, retract, room, rows, space, spaces,
-    subscription, Adjust, Federated, Pki, BOB, BOB_PHONE, FIELD_FEDERATED, NS_DISCO_INFO,
-    NS_DISCO_ITEMS, NS_PUBSUB, NS_PUBSUB_OWNER, PEER, SPACES,
+    federate, federated_space, fetched, field, form_value, hosting, hosting_with, image_host,
+    image_metadata, item_ids, items, list_in, of_node, owner_subscription, publish, pubsub,
+    request, retract, room, rows, space, spaces, store_item, subscription, Adjust, Federated, Pki,
+    BOB, BOB_PHONE, FIELD_FEDERATED, NS_AVATAR_METADATA, NS_DISCO_INFO, NS_DISCO_ITEMS, NS_PUBSUB,
+    NS_PUBSUB_OWNER, PEER, SPACES,
 };
 use waddle_server::channel_space_links::ChannelSpaceLink;
 use waddle_server::space_identity::{space_jid_for_node, SpaceNode};
 use waddle_ws_test_support::iq::round_trip;
 use waddle_ws_test_support::stanza::{get, is_error, is_result, result_payload, set};
 use waddle_xmpp::pubsub::{Affiliation, NodeConfig, PubSubItem};
+use waddle_xmpp::xep::xep0503::{ITEM_SPACE_AVATAR_METADATA, ITEM_SPACE_BANNER_METADATA};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
@@ -407,7 +411,8 @@ async fn a_private_space_is_told_only_to_an_asker_it_admits() {
 }
 
 /// "Discovering the content of a space": the bookmarks of the rooms a
-/// remote asker may be told of, and nothing else the node holds.
+/// remote asker may be told of, and no other item that is no room's
+/// bookmark or Space image.
 #[tokio::test]
 async fn a_space_lists_only_the_rooms_that_are_open_to_other_servers() {
     let pki = Pki::new();
@@ -418,8 +423,9 @@ async fn a_space_lists_only_the_rooms_that_are_open_to_other_servers() {
     channel(&federated, "backroom", false).await;
     list_in(&federated, DEV, "lounge", Some(&victor)).await;
     list_in(&federated, DEV, "backroom", Some(&victor)).await;
-    // A bookmark of a room that has no catalog row, and an item that is no
-    // room's bookmark, as version 0.3.0's image items are.
+    // A bookmark of a room that has no catalog row, and an image item
+    // whose payload names no image (stored without a publish, which would
+    // refuse it).
     list_in(&federated, DEV, "ghost", None).await;
     let avatar = PubSubItem::new(
         Some("urn:xmpp:spaces:avatar:metadata:0".to_owned()),
@@ -489,6 +495,130 @@ async fn a_space_lists_only_the_rooms_that_are_open_to_other_servers() {
     .await;
     assert_eq!(by_id.attr("type"), Some("result"), "{by_id:?}");
     assert!(item_ids(&by_id).is_empty());
+}
+
+/// "Spaces images": a remote asker that may read a Space reads its avatar
+/// and banner items with its rooms, as published and without their
+/// publisher, by the Space's items and by their ids. They are no rooms of
+/// the Space: its node's `disco#items` lists its rooms alone. Nothing the
+/// images name is requested.
+#[tokio::test]
+async fn a_remote_reader_reads_a_spaces_images_with_its_rooms() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    federated_space(&federated, DEV).await;
+    let victor = federated.account("victor").await;
+    channel(&federated, "lounge", true).await;
+    list_in(&federated, DEV, "lounge", Some(&victor)).await;
+    let (avatar_host, avatar_url) = image_host("/avatar.png").await;
+    let (banner_host, banner_url) = image_host("/banner.png").await;
+    store_item(
+        &federated,
+        DEV,
+        ITEM_SPACE_AVATAR_METADATA,
+        image_metadata(&avatar_url),
+    )
+    .await;
+    store_item(
+        &federated,
+        DEV,
+        ITEM_SPACE_BANNER_METADATA,
+        image_metadata(&banner_url),
+    )
+    .await;
+
+    let read = ask(
+        &federated,
+        request(BOB_PHONE, "images-1", false, items(DEV)),
+    )
+    .await;
+    assert_eq!(read.attr("type"), Some("result"), "{read:?}");
+    let mut told = item_ids(&read);
+    told.sort();
+    let mut expected = vec![
+        room("lounge").to_string(),
+        ITEM_SPACE_AVATAR_METADATA.to_owned(),
+        ITEM_SPACE_BANNER_METADATA.to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(told, expected);
+    let avatar = read
+        .children()
+        .flat_map(Element::children)
+        .flat_map(Element::children)
+        .find(|item| item.attr("id") == Some(ITEM_SPACE_AVATAR_METADATA))
+        .expect("the avatar item");
+    assert_eq!(avatar.attr("publisher"), None);
+    assert_eq!(
+        avatar
+            .get_child("metadata", NS_AVATAR_METADATA)
+            .and_then(|metadata| metadata.get_child("info", NS_AVATAR_METADATA))
+            .and_then(|info| info.attr("url")),
+        Some(avatar_url.as_str())
+    );
+    assert!(!String::from(&read).contains("victor@example.com"));
+
+    // By its id.
+    let by_id = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "images-2",
+            false,
+            pubsub(
+                NS_PUBSUB,
+                Element::builder("items", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), DEV)
+                    .append(
+                        Element::builder("item", NS_PUBSUB)
+                            .attr(
+                                minidom::rxml::xml_ncname!("id").to_owned(),
+                                ITEM_SPACE_BANNER_METADATA,
+                            )
+                            .build(),
+                    )
+                    .build(),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(by_id.attr("type"), Some("result"), "{by_id:?}");
+    assert_eq!(item_ids(&by_id), [ITEM_SPACE_BANNER_METADATA]);
+
+    // The Space's rooms are its rooms alone.
+    let children = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "images-3",
+            false,
+            disco(NS_DISCO_ITEMS, Some(DEV)),
+        ),
+    )
+    .await;
+    assert_eq!(children.attr("type"), Some("result"), "{children:?}");
+    assert_eq!(listed_children(&children), [room("lounge").to_string()]);
+
+    // A Space that is not open to other servers tells nothing of its
+    // images.
+    space(&federated, CLOSED, NodeConfig::spaces_public()).await;
+    store_item(
+        &federated,
+        CLOSED,
+        ITEM_SPACE_AVATAR_METADATA,
+        image_metadata(&avatar_url),
+    )
+    .await;
+    let closed = ask(
+        &federated,
+        request(BOB_PHONE, "images-4", false, items(CLOSED)),
+    )
+    .await;
+    assert_eq!(error_condition(&closed).as_deref(), Some("item-not-found"));
+    assert!(item_ids(&closed).is_empty(), "{closed:?}");
+
+    assert!(!fetched(&avatar_host).await, "nothing requests the avatar");
+    assert!(!fetched(&banner_host).await, "nothing requests the banner");
 }
 
 /// The rooms a Space's node lists are paged with XEP-0059: the count and

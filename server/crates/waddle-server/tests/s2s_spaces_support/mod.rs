@@ -38,6 +38,7 @@ pub const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 pub const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
 pub const NS_DATA: &str = "jabber:x:data";
 pub const NS_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+pub const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 
 /// The field of a Space's configuration form that opens it to other
 /// servers.
@@ -300,6 +301,89 @@ pub fn retract(node: &str, id: &str) -> Element {
             )
             .build(),
     )
+}
+
+/// The XEP-0084 `<metadata/>` of a Space image (XEP-0503 0.3.0, "Spaces
+/// images") at `url`.
+pub fn image_metadata(url: &str) -> Element {
+    Element::builder("metadata", NS_AVATAR_METADATA)
+        .append(
+            Element::builder("info", NS_AVATAR_METADATA)
+                .attr(minidom::rxml::xml_ncname!("bytes").to_owned(), "420")
+                .attr(minidom::rxml::xml_ncname!("height").to_owned(), "64")
+                .attr(minidom::rxml::xml_ncname!("width").to_owned(), "64")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "image/png")
+                .attr(minidom::rxml::xml_ncname!("url").to_owned(), url)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "image-hash")
+                .build(),
+        )
+        .build()
+}
+
+/// Store the image item `item_id` holding `payload` in the Space `node`
+/// directly, without a publish.
+pub async fn store_item(federated: &Federated, node: &str, item_id: &str, payload: Element) {
+    federated
+        .loopback
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(
+            &spaces(),
+            node,
+            &PubSubItem::new(Some(item_id.to_owned()), Some(payload)),
+            None,
+            false,
+        )
+        .await
+        .expect("the stored item");
+}
+
+/// `<publish/>` of the item `item_id` holding `payload` to `node`.
+pub fn publish_item(node: &str, item_id: &str, payload: Element) -> Element {
+    pubsub(
+        NS_PUBSUB,
+        Element::builder("publish", NS_PUBSUB)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+            .append(
+                Element::builder("item", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                    .append(payload)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+/// `<retract/>` of the item `item_id` from `node`.
+pub fn retract_item(node: &str, item_id: &str) -> Element {
+    pubsub(
+        NS_PUBSUB,
+        Element::builder("retract", NS_PUBSUB)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+            .append(
+                Element::builder("item", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+/// A listener on a loopback port that no one is expected to connect to,
+/// and the `http:` URL of an image on it.
+pub async fn image_host(path: &str) -> (tokio::net::TcpListener, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener");
+    let port = listener.local_addr().expect("listener address").port();
+    (listener, format!("http://127.0.0.1:{port}{path}"))
+}
+
+/// Whether anything connects to `listener` within a quiet period.
+pub async fn fetched(listener: &tokio::net::TcpListener) -> bool {
+    tokio::time::timeout(QUIET, listener.accept()).await.is_ok()
 }
 
 /// A field of a submitted data form.
