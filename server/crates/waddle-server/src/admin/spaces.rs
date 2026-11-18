@@ -1335,8 +1335,10 @@ pub(crate) async fn unlink_space_rooms(
             .get_items(service.spaces_jid, node, None, &[])
             .await
             .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
+        // The Space's avatar and banner items name no room.
         let rooms: BTreeSet<BareJid> = items
             .iter()
+            .filter(|stored| SpaceImage::from_item_id(&stored.id).is_none())
             .filter_map(|stored| stored.id.parse::<BareJid>().ok())
             .collect();
         for room_jid in &rooms {
