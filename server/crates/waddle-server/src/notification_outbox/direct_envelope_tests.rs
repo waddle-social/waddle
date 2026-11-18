@@ -220,3 +220,37 @@ fn xep0372_dm_mention_count_exceeded_downgrades_is_mention() {
          recipient's XEP-0513 mention carries `<noping/>`)"
     );
 }
+
+#[test]
+fn bodyless_retract_is_a_missed_call_with_session_but_no_invitation_media() {
+    use super::direct_candidate_from_envelope;
+    use crate::notification_outbox::{NotificationClass, NotificationReason};
+    use waddle_xmpp::xep::xep0353::build_retract;
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::jingle::SessionId;
+
+    let recipient = bare("alice@example.com");
+    let sender = "bob@example.com/laptop".parse().expect("sender");
+    let archive = StanzaId::new("retract-archive", Jid::from(recipient.clone()));
+    let mut message = Message::new(None::<Jid>);
+    message
+        .payloads
+        .push(build_retract(SessionId("session".into())).into());
+    let candidate = direct_candidate_from_envelope(&message, &recipient, &sender, &archive)
+        .expect("missed call");
+    assert_eq!(candidate.class(), NotificationClass::MissedCall);
+    assert_eq!(candidate.reason(), NotificationReason::CallRetracted);
+    assert_eq!(
+        candidate.call_session_id(),
+        Some(&SessionId("session".into()))
+    );
+    assert!(candidate.call().is_none());
+    assert!(candidate.call_video().is_none());
+    message.bodies.insert("".into(), "call ended".into());
+    assert_eq!(
+        direct_candidate_from_envelope(&message, &recipient, &sender, &archive)
+            .expect("body-bearing message")
+            .class(),
+        NotificationClass::DirectMessage
+    );
+}

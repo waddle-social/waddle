@@ -378,6 +378,39 @@ fn expired_live_call_candidate_is_discarded_without_rebuilding_a_candidate() {
 }
 
 #[test]
+fn expired_live_missed_call_candidate_is_discarded_without_rebuilding() {
+    let candidate = live_call_candidate_intent();
+    let recorded = [
+        route_intent(&["juliet@example.com/phone"]),
+        archive(),
+        candidate.clone(),
+    ];
+    let mut message = envelope("").message().clone();
+    message.bodies.clear();
+    message.payloads.push(
+        waddle_xmpp::xep::xep0353::build_retract(xmpp_parsers::jingle::SessionId(
+            "missed-session".to_owned(),
+        ))
+        .into(),
+    );
+    let envelope = MessageEnvelope::new(message);
+    let result = run_at(
+        &envelope,
+        &recorded,
+        std::slice::from_ref(&candidate),
+        Utc::now() - chrono::Duration::seconds(61),
+    );
+    assert!(result.decision.external.is_empty());
+    assert!(result.unrecoverable.is_empty());
+    assert!(result.unsupported_receipts.is_empty());
+    assert_eq!(result.discarded_receipts, result.decision.receipts_pending);
+    assert_eq!(result.discarded_receipts.len(), 1);
+    assert!(run(&envelope, &recorded, std::slice::from_ref(&candidate))
+        .discarded_receipts
+        .is_empty());
+}
+
+#[test]
 fn live_call_candidate_discard_requires_expiry_and_a_recorded_live_route() {
     let candidate = live_call_candidate_intent();
     let pending = std::slice::from_ref(&candidate);

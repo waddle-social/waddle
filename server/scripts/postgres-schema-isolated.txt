@@ -56,3 +56,4 @@ crates/waddle-server/tests/notification_activity_commit_unknown.rs  # unique per
 crates/waddle-server/tests/push_registrations_catalog.rs  # unique per-test database and UUID roles
 crates/waddle-xmpp/tests/p3_joint_identity_pg.rs  # unique UUID schema per fixture; no shared lock assertions
 crates/waddle-server/tests/notification_call_migration.rs  # unique notification_call_<uuid> schema; no shared lock assertions
+crates/waddle-server/tests/notification_missed_call_migration.rs  # unique notification_missed_call_<uuid> schema

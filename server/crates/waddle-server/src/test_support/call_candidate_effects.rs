@@ -10,7 +10,10 @@ use std::io::Write;
 use crate::notification_outbox::{NotificationCandidate, NotificationClass};
 
 pub(crate) fn record(candidate: &NotificationCandidate) {
-    if candidate.class() != NotificationClass::Call {
+    if !matches!(
+        candidate.class(),
+        NotificationClass::Call | NotificationClass::MissedCall
+    ) {
         return;
     }
     let Some(path) = std::env::var_os("WADDLE_TEST_CALL_CANDIDATE_EFFECTS_FILE") else {

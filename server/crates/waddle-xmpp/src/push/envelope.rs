@@ -31,6 +31,9 @@ pub enum PushClass {
     /// covers most DM bodies without splitting; `Urgency::High`; longer
     /// TTL — DMs are user-personal and should survive offline periods.
     DirectMessage,
+    /// Missed 1:1 call alert. Uses DM delivery policy with a separate
+    /// topic so it cannot replace a pending message notification.
+    MissedCall,
     /// Mention in a multi-user room. Small bucket (256 bytes); high
     /// urgency; medium TTL — mentions are time-sensitive and shouldn't
     /// fan out a 1 KiB body for every device.
@@ -46,7 +49,7 @@ impl PushClass {
     /// length.
     pub fn bucket_size(self) -> usize {
         match self {
-            PushClass::DirectMessage => DM_PLAINTEXT_BUCKET,
+            PushClass::DirectMessage | PushClass::MissedCall => DM_PLAINTEXT_BUCKET,
             PushClass::Mention | PushClass::Room => DEFAULT_PLAINTEXT_BUCKET,
         }
     }
@@ -55,9 +58,9 @@ impl PushClass {
     /// should hold the message if the device is offline.
     pub fn ttl(self) -> u32 {
         match self {
-            PushClass::DirectMessage => 7 * 24 * 60 * 60, // 7 days
-            PushClass::Mention => 24 * 60 * 60,           // 1 day
-            PushClass::Room => 4 * 60 * 60,               // 4 hours
+            PushClass::DirectMessage | PushClass::MissedCall => 7 * 24 * 60 * 60, // 7 days
+            PushClass::Mention => 24 * 60 * 60,                                   // 1 day
+            PushClass::Room => 4 * 60 * 60,                                       // 4 hours
         }
     }
 
@@ -65,7 +68,7 @@ impl PushClass {
     /// general room traffic stays at normal so battery-saver delays it.
     pub fn urgency(self) -> Urgency {
         match self {
-            PushClass::DirectMessage | PushClass::Mention => Urgency::High,
+            PushClass::DirectMessage | PushClass::MissedCall | PushClass::Mention => Urgency::High,
             PushClass::Room => Urgency::Normal,
         }
     }
@@ -73,6 +76,7 @@ impl PushClass {
     fn discriminant_byte(self) -> u8 {
         match self {
             PushClass::DirectMessage => b'd',
+            PushClass::MissedCall => b'c',
             PushClass::Mention => b'm',
             PushClass::Room => b'r',
         }
@@ -88,6 +92,8 @@ impl PushClass {
 pub enum NotificationClass {
     /// Incoming XEP-0353 call invitation; delivered only to PushKit nodes.
     Call,
+    /// Missed 1:1 call; delivered through ordinary alert nodes.
+    MissedCall,
     /// 1:1 direct message.
     Dm,
     /// 1:1 direct message that explicitly @-mentions the recipient.
@@ -113,6 +119,7 @@ impl NotificationClass {
     pub fn from_db_value(s: &str) -> Result<Self, NotificationClassParseError> {
         match s {
             "call" => Ok(Self::Call),
+            "missed_call" => Ok(Self::MissedCall),
             "dm" => Ok(Self::Dm),
             "dm_mention" => Ok(Self::DmMention),
             "personal_mention" => Ok(Self::PersonalMention),
@@ -126,6 +133,7 @@ impl NotificationClass {
     pub fn as_db_value(self) -> &'static str {
         match self {
             Self::Call => "call",
+            Self::MissedCall => "missed_call",
             Self::Dm => "dm",
             Self::DmMention => "dm_mention",
             Self::PersonalMention => "personal_mention",
@@ -143,6 +151,7 @@ impl NotificationClass {
         match self {
             // VoIP expiry is carried in the call metadata, never derived from this TTL.
             Self::Call | Self::Dm | Self::DmMention => PushClass::DirectMessage,
+            Self::MissedCall => PushClass::MissedCall,
             Self::PersonalMention | Self::ChannelMention | Self::ActiveChannelMention => {
                 PushClass::Mention
             }
@@ -258,6 +267,35 @@ mod tests {
         assert_eq!(class, NotificationClass::Call);
         assert_eq!(class.as_db_value(), "call");
         assert_eq!(class.transport_policy().urgency(), Urgency::High);
+    }
+
+    #[test]
+    fn missed_call_keeps_dm_policy_with_a_separate_topic() {
+        let class = NotificationClass::from_db_value("missed_call").expect("missed call class");
+        assert_eq!(class, NotificationClass::MissedCall);
+        assert_eq!(class.as_db_value(), "missed_call");
+        let policy = class.transport_policy();
+        assert_eq!(policy.bucket_size(), PushClass::DirectMessage.bucket_size());
+        assert_eq!(policy.ttl(), PushClass::DirectMessage.ttl());
+        assert_eq!(policy.urgency(), PushClass::DirectMessage.urgency());
+        let topic = push_topic_for(policy, "alice@example.com");
+        for message in [NotificationClass::Dm, NotificationClass::DmMention] {
+            assert_ne!(
+                topic,
+                push_topic_for(message.transport_policy(), "alice@example.com")
+            );
+        }
+        let envelope = PushEnvelope::new(
+            class.as_db_value(),
+            "alice@example.com",
+            None,
+            "retract-1",
+            Some(7),
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&envelope.to_plaintext()).expect("JSON");
+        assert_eq!(value["class"], "missed_call");
+        assert_eq!(value["unread"], 7);
     }
 
     #[test]

@@ -488,12 +488,18 @@ impl RecoveryReceiptRepository {
                 tx.recorded_notification_candidates
                     .push((candidate.archive_stanza_id().clone(), candidate.class()));
             }
+            let scheduling_candidate =
+                NotificationOutboxStore::candidate_for_lineage_in_transaction(
+                    tx.transaction_mut(),
+                    candidate,
+                )
+                .await?;
             for source in &fresh.sources {
                 Self::attach_candidate_lineage(
                     tx,
                     source.message,
                     &source.intent.semantic_key(),
-                    candidate,
+                    &scheduling_candidate,
                 )
                 .await?;
             }
@@ -549,8 +555,18 @@ impl RecoveryReceiptRepository {
             created_at_ms,
         )
         .await?;
-        Self::attach_candidate_lineage(tx, message_key, &authority.semantic_key(), candidate)
-            .await?;
+        let scheduling_candidate = NotificationOutboxStore::candidate_for_lineage_in_transaction(
+            tx.transaction_mut(),
+            candidate,
+        )
+        .await?;
+        Self::attach_candidate_lineage(
+            tx,
+            message_key,
+            &authority.semantic_key(),
+            &scheduling_candidate,
+        )
+        .await?;
         if outcome == NotificationCandidateInsertOutcome::Inserted {
             tx.recorded_notification_candidates
                 .push((candidate.archive_stanza_id().clone(), candidate.class()));

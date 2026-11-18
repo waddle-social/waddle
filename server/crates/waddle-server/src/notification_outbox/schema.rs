@@ -26,7 +26,7 @@ pub(super) const COALESCE_PREDICATE: &str =
 
 pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str =
     "notification_candidates_reason_check";
-pub(super) const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 7] = [
+pub(super) const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 9] = [
     "offline_dm",
     "offline_dm_mention",
     "groupchat_personal_mention",
@@ -34,11 +34,13 @@ pub(super) const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 7] = [
     "groupchat_active_channel_mention",
     "groupchat_notify_all",
     "offline_call",
+    "call_retracted",
+    "call_unanswered",
 ];
-pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all', 'offline_call')";
+pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all', 'offline_call', 'call_retracted', 'call_unanswered')";
 pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str =
     "notification_candidates_class_check";
-pub(super) const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 7] = [
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 8] = [
     "dm",
     "dm_mention",
     "personal_mention",
@@ -46,10 +48,11 @@ pub(super) const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 7] = [
     "active_channel_mention",
     "notify_all",
     "call",
+    "missed_call",
 ];
-pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all', 'call')";
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all', 'call', 'missed_call')";
 pub(super) const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
-const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 7] = [
+const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 8] = [
     "dm",
     "dm_mention",
     "personal_mention",
@@ -57,8 +60,9 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 7] = [
     "active_channel_mention",
     "notify_all",
     "call",
+    "missed_call",
 ];
-const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all', 'call')";
+const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all', 'call', 'missed_call')";
 pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
 pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 15] = [
@@ -79,9 +83,10 @@ pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 15] = 
     "xep0444_reaction",
 ];
 const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish', 'policy_retries_exhausted', 'xep0444_reaction')";
-pub(super) const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
+pub(super) const NOTIFICATION_CANDIDATES_INDEXES: [&str; 5] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
+    "idx_notification_candidates_missed_call",
     "idx_notification_candidates_pending_worker",
     "idx_notification_candidates_outboxed_prune",
 ];
@@ -751,6 +756,13 @@ impl NotificationOutboxStore {
         self.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_candidates_identity \
              ON notification_candidates (recipient_bare_jid, conversation_jid, thread_id, stanza_id, class)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_candidates_missed_call \
+             ON notification_candidates (recipient_bare_jid, conversation_jid, call_sid) \
+             WHERE class = 'missed_call'",
             (),
         )
         .await?;
@@ -1610,9 +1622,30 @@ mod tests {
 
     #[test]
     fn postgres_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'offline_dm_mention'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying, 'offline_call'::character varying])::text[])))";
+        let postgres_definition = "CHECK (((reason)::text = ANY ((ARRAY['offline_dm'::character varying, 'offline_dm_mention'::character varying, 'groupchat_personal_mention'::character varying, 'groupchat_channel_mention'::character varying, 'groupchat_active_channel_mention'::character varying, 'groupchat_notify_all'::character varying, 'offline_call'::character varying, 'call_retracted'::character varying, 'call_unanswered'::character varying])::text[])))";
         assert!(notification_candidates_reason_constraint_matches_expected(
             postgres_definition
+        ));
+    }
+
+    #[test]
+    fn postgres_reason_constraint_match_rejects_pre_missed_call_definition() {
+        let definition = NOTIFICATION_CANDIDATES_REASON_CHECK_SQL
+            .replace(", 'call_retracted'", "")
+            .replace(", 'call_unanswered'", "");
+        assert!(!notification_candidates_reason_constraint_matches_expected(
+            &definition
+        ));
+    }
+
+    #[test]
+    fn postgres_class_constraint_match_rejects_pre_missed_call_definition() {
+        let definition = NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL.replace(", 'missed_call'", "");
+        assert!(!notification_candidates_class_constraint_matches_expected(
+            &definition
+        ));
+        assert!(!notification_outbox_class_constraint_matches_expected(
+            &definition
         ));
     }
 
@@ -1626,7 +1659,7 @@ mod tests {
 
     #[test]
     fn postgres_class_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm'::character varying, 'dm_mention'::character varying, 'personal_mention'::character varying, 'channel_mention'::character varying, 'active_channel_mention'::character varying, 'notify_all'::character varying, 'call'::character varying])::text[])))";
+        let postgres_definition = "CHECK (((class)::text = ANY ((ARRAY['dm'::character varying, 'dm_mention'::character varying, 'personal_mention'::character varying, 'channel_mention'::character varying, 'active_channel_mention'::character varying, 'notify_all'::character varying, 'call'::character varying, 'missed_call'::character varying])::text[])))";
         assert!(notification_candidates_class_constraint_matches_expected(
             postgres_definition
         ));

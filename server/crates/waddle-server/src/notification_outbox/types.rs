@@ -89,6 +89,7 @@ pub enum NotificationClass {
     ActiveChannelMention,
     NotifyAll,
     Call,
+    MissedCall,
 }
 
 impl NotificationClass {
@@ -101,6 +102,7 @@ impl NotificationClass {
             Self::ActiveChannelMention => "active_channel_mention",
             Self::NotifyAll => "notify_all",
             Self::Call => "call",
+            Self::MissedCall => "missed_call",
         }
     }
 
@@ -113,6 +115,7 @@ impl NotificationClass {
             "active_channel_mention" => Ok(Self::ActiveChannelMention),
             "notify_all" => Ok(Self::NotifyAll),
             "call" => Ok(Self::Call),
+            "missed_call" => Ok(Self::MissedCall),
             _ => Err(NotificationOutboxError::InvalidClass(value.to_string())),
         }
     }
@@ -127,6 +130,9 @@ pub enum NotificationReason {
     GroupchatActiveChannelMention,
     GroupchatNotifyAll,
     OfflineCall,
+    CallRetracted,
+    /// Reserved for the durable unanswered-call timer.
+    CallUnanswered,
 }
 
 impl NotificationReason {
@@ -139,6 +145,8 @@ impl NotificationReason {
             Self::GroupchatActiveChannelMention => "groupchat_active_channel_mention",
             Self::GroupchatNotifyAll => "groupchat_notify_all",
             Self::OfflineCall => "offline_call",
+            Self::CallRetracted => "call_retracted",
+            Self::CallUnanswered => "call_unanswered",
         }
     }
 
@@ -151,6 +159,8 @@ impl NotificationReason {
             "groupchat_active_channel_mention" => Ok(Self::GroupchatActiveChannelMention),
             "groupchat_notify_all" => Ok(Self::GroupchatNotifyAll),
             "offline_call" => Ok(Self::OfflineCall),
+            "call_retracted" => Ok(Self::CallRetracted),
+            "call_unanswered" => Ok(Self::CallUnanswered),
             _ => Err(NotificationOutboxError::InvalidReason(value.to_string())),
         }
     }

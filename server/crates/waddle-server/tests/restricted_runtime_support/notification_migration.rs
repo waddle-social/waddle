@@ -56,6 +56,11 @@ pub async fn seed_notification_rows(db: &Database) {
 }
 
 pub async fn assert_rows_preserved_and_insert_call(db: &Database) {
+    assert_notification_rows_preserved(db).await;
+    insert_call_rows(db).await;
+}
+
+pub async fn assert_notification_rows_preserved(db: &Database) {
     let conn = db
         .guard()
         .await
@@ -68,6 +73,10 @@ pub async fn assert_rows_preserved_and_insert_call(db: &Database) {
         let row = rows.next().await.expect("count row").expect("count exists");
         assert_eq!(row.get::<i64>(0).expect("count"), expected);
     }
+}
+
+async fn insert_call_rows(db: &Database) {
+    let conn = db.guard().await.expect("call seed connection");
     conn.execute(
         "INSERT INTO notification_candidates (recipient_bare_jid, conversation_jid, sender_jid, stanza_id_by, stanza_id, class, reason, created_at_ms, call_sid, call_video) VALUES ('bob@example.com', 'alice@example.com', 'alice@example.com/phone', 'bob@example.com', 'call-stanza', 'call', 'offline_call', 6000, 'call-session', 1)",
         (),

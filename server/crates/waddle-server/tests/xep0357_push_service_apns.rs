@@ -1368,6 +1368,82 @@ fn call_context_child(sid: &str, video: &str, expires: &str) -> Element {
 }
 
 #[tokio::test]
+async fn missed_call_is_an_alert_on_ordinary_nodes_and_not_applicable_to_fcm() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let alert = store
+        .ensure_node(&owner, BUNDLE_ID)
+        .await
+        .expect("alert node");
+    let voip = store
+        .ensure_node(&owner, "p4x.waddle.social.voip")
+        .await
+        .expect("VoIP node");
+    register_apple_device(&store, &owner, alert.node(), "iphone", "prod", TOKEN_A).await;
+    register_apple_device(&store, &owner, voip.node(), "pushkit", "prod", TOKEN_B).await;
+    store
+        .upsert_device(
+            &owner,
+            PushDeviceRegistration::new("android", alert.node(), PushDevicePlatform::Fcm, "prod"),
+        )
+        .await
+        .expect("FCM device");
+    seed_unread_entries(&store, &owner, "bob@example.com", 3).await;
+    seed_unread_entries(&store, &owner, "carol@example.com", 2).await;
+    for (node, item) in [(alert.node(), "missed-alert"), (voip.node(), "missed-voip")] {
+        publish(
+            &store,
+            &owner,
+            node,
+            item_with_call_context(item, "missed_call", None),
+        )
+        .await;
+    }
+    let calls = sender.calls_for(TOKEN_A);
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.push_type, ApnsPushType::Alert);
+    assert_eq!(call.topic, BUNDLE_ID);
+    assert_eq!(call.priority, ApnsPriority::Immediate);
+    assert_eq!(
+        call.payload,
+        serde_json::json!({
+            "aps": {
+                "alert": { "loc-key": "WADDLE_PUSH_MISSED_CALL" },
+                "badge": 5, "sound": "default", "thread-id": "bob@example.com"
+            },
+            "waddle": {
+                "v": 1, "class": "missed_call", "conversation": "bob@example.com",
+                "item": "call-stanza", "node": alert.node()
+            }
+        })
+    );
+    assert!(
+        sender.calls_for(TOKEN_B).is_empty(),
+        "missed call never reaches PushKit"
+    );
+    assert_eq!(
+        attempt_statuses(&store, alert.node()).await,
+        vec![
+            ("android".to_owned(), "not-applicable".to_owned()),
+            (
+                "iphone".to_owned(),
+                ATTEMPT_STATUS_APNS_DELIVERED.to_owned()
+            ),
+        ]
+    );
+    assert!(attempt_statuses(&store, voip.node()).await.is_empty());
+    for item in ["missed-alert", "missed-voip"] {
+        assert_eq!(job_status(&store, item).await, "published");
+    }
+    assert_eq!(
+        device_status(&store, alert.node(), "android").await,
+        DEVICE_STATUS_ACTIVE
+    );
+}
+
+#[tokio::test]
 async fn malformed_call_metadata_fails_without_sending_or_disabling_devices() {
     let sender = FakeApnsSender::default();
     let store = store_with_apns(sender.clone(), counting_tokens()).await;

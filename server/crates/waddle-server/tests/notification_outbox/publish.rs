@@ -2020,3 +2020,140 @@ async fn bounded_parked_probes_rotate_past_unresolved_owners_across_restarts() {
         2
     );
 }
+
+#[tokio::test]
+async fn missed_call_publishes_with_real_unread_count_including_zero() {
+    for unread in [0, 3] {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+        enqueue_jobs_for_test(
+            &store,
+            &crate::calls::missed_call_candidate("retract-archive", "session"),
+            &[target],
+        )
+        .await;
+        let claimed = store
+            .claim_due_outbox_jobs(DrainScope::All, 16)
+            .await
+            .expect("claim")
+            .remove(0);
+        let inbox = if unread == 0 {
+            inbox_with_read_entry(
+                &recipient,
+                &bare("bob@example.com"),
+                waddle_xmpp::inbox::ConversationKind::Direct,
+            )
+            .await
+        } else {
+            inbox_with_unread(&recipient, &bare("bob@example.com"), unread).await
+        };
+        let outcome = store
+            .publish_claimed_job(
+                &claimed,
+                &push_service,
+                &push_store,
+                &inbox,
+                &blocking,
+                &bare("push.example.com"),
+            )
+            .await
+            .expect("publish");
+        assert!(matches!(
+            outcome,
+            NotificationOutboxPublishOutcome::Published { .. }
+        ));
+        let jobs = push_service
+            .queued_publish_jobs()
+            .await
+            .expect("queued publish");
+        assert_eq!(jobs.len(), 1);
+        let db = push_service.database();
+        let conn = db.guard().await.expect("database");
+        let mut rows = conn
+            .query(
+                "SELECT payload_xml FROM push_publish_jobs WHERE item_id = ?",
+                waddle_server::db_params![jobs[0].item_id()],
+            )
+            .await
+            .expect("approved payload");
+        let payload: minidom::Element = rows
+            .next()
+            .await
+            .expect("read row")
+            .expect("job")
+            .get::<String>(0)
+            .expect("XML")
+            .parse()
+            .expect("payload");
+        let summary = payload
+            .get_child("x", waddle_xmpp::xep::NS_DATA_FORMS)
+            .expect("summary");
+        let count = summary
+            .children()
+            .find(|field| field.attr("var") == Some("message-count"))
+            .expect("count")
+            .get_child("value", waddle_xmpp::xep::NS_DATA_FORMS)
+            .expect("value")
+            .text();
+        assert_eq!(count, unread.to_string());
+        assert!(payload
+            .get_child("context", WADDLE_PUSH_CONTEXT_NS)
+            .expect("context")
+            .get_child("call", WADDLE_PUSH_CONTEXT_NS)
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn missed_call_blocked_after_drain_does_not_publish() {
+    for blocked_jid in ["bob@example.com", "bob@example.com/laptop", "example.com"] {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+        enqueue_jobs_for_test(
+            &store,
+            &crate::calls::missed_call_candidate("blocked-retract", "session"),
+            &[target],
+        )
+        .await;
+        let claimed = store
+            .claim_due_outbox_jobs(DrainScope::All, 16)
+            .await
+            .expect("claim")
+            .remove(0);
+        // The block arrives after candidate admission and the T1 drain.
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        blocking.set_blocklist_jids(
+            recipient.clone(),
+            vec![blocked_jid.parse().expect("blocked JID")],
+        );
+        let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 3).await;
+        let outcome = store
+            .publish_claimed_job(
+                &claimed,
+                &push_service,
+                &push_store,
+                &inbox,
+                &blocking,
+                &bare("push.example.com"),
+            )
+            .await
+            .expect("publish gate");
+        assert!(
+            matches!(outcome, NotificationOutboxPublishOutcome::Failed { .. }),
+            "{blocked_jid}: {outcome:?}"
+        );
+        assert!(push_service
+            .queued_publish_jobs()
+            .await
+            .expect("publish jobs")
+            .is_empty());
+        assert!(store
+            .pending_outbox_jobs()
+            .await
+            .expect("pending outbox")
+            .is_empty());
+    }
+}

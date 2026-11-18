@@ -8,10 +8,13 @@ use std::time::Duration;
 use jid::{BareJid, Jid};
 use minidom::Element;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
+use waddle_xmpp::ingress::IngressEffectKind;
 use waddle_xmpp::stream_management::SM_NS;
 use waddle_xmpp::xep::xep0191::NS_BLOCKING;
 use waddle_xmpp::xep::xep0334::{add_hint, remove_hint, Hint};
-use waddle_xmpp::xep::xep0353::{build_propose, build_retract, jmi_propose, CallOffer};
+use waddle_xmpp::xep::xep0353::{
+    build_propose, build_retract, jmi_propose, CallOffer, NS_JINGLE_MESSAGE,
+};
 use waddle_xmpp::xep::xep0492::build_notify_element;
 use waddle_xmpp::xep::xep_waddle_dm_bookmarks::{
     build_dm_bookmark_element, PEP_NODE_WADDLE_DM_BOOKMARKS,
@@ -219,6 +222,106 @@ impl Fixture {
         barrier(sender).await;
         self.one_call_for(&control_recipient, CONTROL_CALL_ID, false)
             .await;
+    }
+
+    async fn one_missed_call(&self) -> CandidateRow {
+        let rows = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let rows = self.candidates().await;
+                if rows.iter().any(|row| row.class == "missed_call") {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("missed-call candidate committed");
+        assert_eq!(
+            rows.len(),
+            2,
+            "one invitation and one missed call: {rows:?}"
+        );
+        let row = rows
+            .into_iter()
+            .find(|row| row.class == "missed_call")
+            .expect("one missed-call candidate");
+        assert_eq!(row.reason, "call_retracted");
+        assert_eq!(row.stanza_id_by, recipient().as_str());
+        assert_eq!(row.call_sid.as_deref(), Some(CALL_ID));
+        assert_eq!(
+            row.call_video, None,
+            "missed calls have no invitation media"
+        );
+        assert!(row.delivery_id.is_some(), "canonical notification custody");
+        let observations = std::fs::read_to_string(&self.effects_file)
+            .expect("candidate effect observer must have run");
+        let effect_count = observations
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<(String, String)>(line).expect("candidate observation")
+            })
+            .filter(|(owner, stanza_id)| {
+                owner == recipient().as_str() && stanza_id == &row.stanza_id
+            })
+            .count();
+        assert_eq!(
+            effect_count, 1,
+            "one raw missed-call candidate effect per recipient pass"
+        );
+        row
+    }
+
+    async fn control_after_retract(&self, sender: &mut WsXmppClient) {
+        let to: BareJid = "charlie@localhost".parse().expect("control recipient");
+        send(
+            sender,
+            proposal_with_sid(to.into(), CallOffer::audio_only(), CONTROL_CALL_ID).into(),
+        )
+        .await;
+        barrier(sender).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if self
+                    .candidates()
+                    .await
+                    .iter()
+                    .any(|row| row.call_sid.as_deref() == Some(CONTROL_CALL_ID))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("positive control committed after retract");
+    }
+
+    async fn no_missed_call(&self, sender: &mut WsXmppClient) {
+        self.control_after_retract(sender).await;
+        assert!(self
+            .candidates()
+            .await
+            .iter()
+            .all(|row| row.class != "missed_call"));
+    }
+
+    async fn notification_effects_settled(&self) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pending: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM ingress_effect_intents i WHERE i.kind = ? AND NOT EXISTS \
+                     (SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key \
+                      AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash)",
+                ).bind(IngressEffectKind::NotificationActivityPreview.storage_tag())
+                    .fetch_one(&self.pool).await.expect("notification effect receipts");
+                if pending == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("every notification effect, including duplicate retract, settles");
     }
 
     async fn pending_count(&self) -> i64 {
@@ -550,4 +653,293 @@ async fn origin_id_retry_reuses_the_live_call_candidate_archive_identity() {
     barrier(&mut bob).await;
     assert_eq!(fixture.one_call(false).await, first);
     assert_eq!(fixture.pending_count().await, 0);
+}
+
+fn retract(id: &str) -> Message {
+    let mut message = Message::new(Some(recipient().into()));
+    message.type_ = MessageType::Chat;
+    message.id = Some(Id(id.to_owned()));
+    message
+        .payloads
+        .push(build_retract(SessionId(CALL_ID.to_owned())).into());
+    add_hint(&mut message, Hint::Store);
+    message
+}
+
+async fn propose_then_retract(fixture: &Fixture) {
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_video()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(true).await;
+    send(&mut alice, retract("missed-call-retract").into()).await;
+    barrier(&mut alice).await;
+    fixture.one_missed_call().await;
+    fixture.notification_effects_settled().await;
+}
+
+#[tokio::test]
+async fn connected_recipient_gets_one_missed_call_candidate() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    propose_then_retract(&fixture).await;
+    assert_eq!(fixture.pending_count().await, 0);
+}
+
+#[tokio::test]
+async fn detached_recipient_gets_one_missed_call_candidate() {
+    let fixture = Fixture::start().await;
+    fixture.detach("phone").await;
+    propose_then_retract(&fixture).await;
+    assert_eq!(fixture.pending_count().await, 0);
+}
+
+#[tokio::test]
+async fn headless_recipient_gets_one_missed_call_candidate() {
+    let fixture = Fixture::start().await;
+    propose_then_retract(&fixture).await;
+    assert_eq!(fixture.pending_count().await, 2);
+}
+
+#[tokio::test]
+async fn propose_immediately_followed_by_retract_on_one_stream_gets_missed_call() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    // Deliberately no barrier or database wait between the two stanzas.
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    send(&mut alice, retract("immediate-retract").into()).await;
+    barrier(&mut alice).await;
+    fixture.one_missed_call().await;
+    fixture.notification_effects_settled().await;
+}
+
+#[tokio::test]
+async fn retract_from_another_caller_resource_gets_one_missed_call() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    let mut other_resource = fixture.connect(0, "other-resource").await;
+    send(
+        &mut other_resource,
+        retract("other-resource-retract").into(),
+    )
+    .await;
+    barrier(&mut other_resource).await;
+    fixture.one_missed_call().await;
+}
+
+#[tokio::test]
+async fn retract_without_prior_call_candidate_gets_no_missed_call() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(&mut alice, retract("no-prior-retract").into()).await;
+    fixture.no_missed_call(&mut alice).await;
+}
+
+#[tokio::test]
+async fn different_account_cannot_retract_another_call_for_a_missed_call_alert() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    let mut charlie = fixture.connect(2, "forger").await;
+    send(&mut charlie, retract("forged-retract").into()).await;
+    barrier(&mut charlie).await;
+    fixture.no_missed_call(&mut alice).await;
+}
+
+#[tokio::test]
+async fn tie_break_retract_gets_no_missed_call() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    let mut message = retract("tie-break-retract");
+    message.payloads[0].append_child(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
+    send(&mut alice, message.into()).await;
+    fixture.no_missed_call(&mut alice).await;
+}
+
+#[tokio::test]
+async fn retract_more_than_sixty_seconds_after_call_candidate_gets_no_missed_call() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    // Move only the durable invitation's receipt time; avoid a minute-long sleep.
+    sqlx::query("UPDATE notification_candidates SET created_at_ms = created_at_ms - 61000 WHERE class = 'call'")
+        .execute(&fixture.pool).await.expect("age the invitation");
+    send(&mut alice, retract("late-retract").into()).await;
+    fixture.no_missed_call(&mut alice).await;
+}
+
+#[tokio::test]
+async fn second_distinct_retract_is_duplicate_and_its_canonical_receipt_settles() {
+    let fixture = Fixture::start().await;
+    let _bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    send(&mut alice, retract("first-retract").into()).await;
+    barrier(&mut alice).await;
+    let first = fixture.one_missed_call().await;
+    fixture.notification_effects_settled().await;
+    send(&mut alice, retract("second-retract").into()).await;
+    fixture.control_after_retract(&mut alice).await;
+    fixture.notification_effects_settled().await;
+    let missed = fixture
+        .candidates()
+        .await
+        .into_iter()
+        .filter(|row| row.class == "missed_call")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        missed,
+        vec![first],
+        "the first candidate and delivery identity are retained"
+    );
+    let observations =
+        std::fs::read_to_string(&fixture.effects_file).expect("candidate observations");
+    let recipient_effects = observations
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).expect("candidate observation"))
+        .filter(|(owner, _)| owner == recipient().as_str())
+        .count();
+    assert_eq!(
+        recipient_effects, 3,
+        "proposal and both distinct retracts were planned"
+    );
+}
+
+async fn mute_caller(client: &mut WsXmppClient) {
+    let publish = PubSub::Publish {
+        publish: Publish {
+            node: NodeName(PEP_NODE_WADDLE_DM_BOOKMARKS.to_owned()),
+            items: vec![Item {
+                id: Some(ItemId("alice@localhost".to_owned())),
+                publisher: None,
+                payload: Some(build_dm_bookmark_element(&build_notify_element(
+                    NotificationLevel::Never,
+                ))),
+            }],
+        },
+        publish_options: None,
+    };
+    send(client, Iq::from_set("mute-before-retract", publish).into()).await;
+    let response = client
+        .recv_matching(|frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.attr("id") == Some("mute-before-retract"))
+        })
+        .await
+        .expect("mute caller response");
+    assert_eq!(
+        response.parse::<Element>().expect("mute XML").attr("type"),
+        Some("result")
+    );
+}
+
+#[tokio::test]
+async fn muted_conversation_gets_no_missed_call_even_with_prior_call_candidate() {
+    let fixture = Fixture::start().await;
+    let mut bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    mute_caller(&mut bob).await;
+    send(&mut alice, retract("muted-retract").into()).await;
+    fixture.no_missed_call(&mut alice).await;
+}
+
+#[tokio::test]
+async fn caller_blocked_after_proposal_gets_no_missed_call() {
+    let fixture = Fixture::start().await;
+    let mut bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    let block = Element::builder("iq", xmpp_parsers::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "block-before-retract",
+        )
+        .append(
+            Element::builder("block", NS_BLOCKING)
+                .append(
+                    Element::builder("item", NS_BLOCKING)
+                        .attr(
+                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                            "alice@localhost",
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    send(&mut bob, block).await;
+    let response = bob
+        .recv_matching(|frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.attr("id") == Some("block-before-retract"))
+        })
+        .await
+        .expect("block caller response");
+    assert_eq!(
+        response.parse::<Element>().expect("block XML").attr("type"),
+        Some("result")
+    );
+    send(&mut alice, retract("blocked-retract").into()).await;
+    fixture.no_missed_call(&mut alice).await;
 }

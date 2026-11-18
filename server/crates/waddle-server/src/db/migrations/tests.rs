@@ -132,7 +132,7 @@ async fn sqlite_retired_history_database(name: &str) -> Database {
 async fn a_fresh_sqlite_database_is_built_from_the_baseline() {
     let db = Database::in_memory("baseline-fresh").await.expect("sqlite");
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION, 2001]);
+    assert_eq!(applied, vec![BASELINE_VERSION, 2001, 2002]);
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
     let conn = db.guard().await.expect("guard");
     for table in [
@@ -182,11 +182,12 @@ async fn a_complete_retired_sqlite_ledger_is_stamped_then_upgraded() {
         .expect("stamp");
     assert_eq!(
         applied,
-        vec![2001],
+        vec![2001, 2002],
         "a stamp applies the post-baseline migration"
     );
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
-    assert_eq!(sqlite_table_count(&db).await, objects);
+    // Migration 2002 adds the one-per-call index for missed-call candidates.
+    assert_eq!(sqlite_table_count(&db).await, objects + 1);
 
     // A second run finds the baseline and changes nothing.
     assert!(MigrationRunner::deployment(BaselineAction::Stamp)
@@ -331,7 +332,7 @@ async fn a_ledger_version_this_binary_does_not_know_is_refused() {
         .expect("guard")
         .execute(
             "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-            crate::db_params![BASELINE_VERSION + 2, "from a newer release", "0".repeat(64)],
+            crate::db_params![BASELINE_VERSION + 3, "from a newer release", "0".repeat(64)],
         )
         .await
         .expect("record a newer migration");
@@ -339,7 +340,7 @@ async fn a_ledger_version_this_binary_does_not_know_is_refused() {
     assert!(matches!(
         error,
         DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version, .. })
-            if version == BASELINE_VERSION + 2
+            if version == BASELINE_VERSION + 3
     ));
 }
 
@@ -398,7 +399,7 @@ async fn postgres_fresh_database_is_built_from_the_baseline_in_any_schema() {
     let schema = unique_postgres_schema_name("baseline_fresh");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION, 2001]);
+    assert_eq!(applied, vec![BASELINE_VERSION, 2001, 2002]);
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Postgres));
     // The template functions name the schema they were rendered for.
     let attach: String = sqlx::query_scalar(&format!(

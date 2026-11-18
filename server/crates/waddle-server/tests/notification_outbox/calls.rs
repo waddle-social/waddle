@@ -33,6 +33,18 @@ pub(super) fn call_candidate(item: &str, sid: &str, video: bool) -> Notification
     .expect("call candidate")
 }
 
+pub(super) fn missed_call_candidate(item: &str, sid: &str) -> NotificationCandidate {
+    let recipient = bare("alice@example.com");
+    NotificationCandidate::missed_call_with_hints(
+        recipient.clone(),
+        "bob@example.com/laptop".parse().expect("sender"),
+        StanzaId::new(item, Jid::from(recipient)),
+        SessionId(sid.into()),
+        NotificationMessageHints::none(),
+    )
+    .expect("missed call candidate")
+}
+
 #[tokio::test]
 async fn latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_expiry() {
     let store = store().await;
@@ -91,81 +103,91 @@ impl DndReader for FixedDnd {
 }
 
 #[tokio::test]
-async fn calls_respect_never_dnd_blocking_and_pass_on_mention() {
-    for (mode, dnd, blocked, expected) in [
-        (
-            NotificationLevel::Never,
-            false,
-            false,
-            Some("xep0492_never"),
-        ),
-        (NotificationLevel::OnMention, false, false, None),
-        (NotificationLevel::Always, true, false, Some("waddle_dnd")),
-        (
-            NotificationLevel::Always,
-            false,
-            true,
-            Some("xep0191_blocked"),
-        ),
-    ] {
-        let store = store().await;
-        let call = call_candidate("call-policy", "session", false);
-        let settings = settings_projection().await;
-        settings
-            .upsert(&NotificationSettingsProjection {
-                owner_bare_jid: call.recipient_bare_jid().clone(),
-                conversation_jid: call.conversation_jid().clone(),
-                conversation_kind: ConversationKind::Direct,
-                mode,
-                source: NotificationSettingsSource::Xep0402Bookmarks,
-                source_item_jid: call.conversation_jid().clone(),
-                updated_at_ms: 1,
-                rich_payload_opt_in: false,
-                source_version: 1,
-            })
-            .await
-            .expect("notification level");
-        let push = InMemoryPushStore::new();
-        register_push_target(&push, call.recipient_bare_jid(), &target()).await;
-        let blocking = InMemoryBlockingStorage::new();
-        if blocked {
-            blocking.set_blocklist_jids(
-                call.recipient_bare_jid().clone(),
-                vec![Jid::from(call.conversation_jid().clone())],
+async fn calls_and_missed_calls_respect_never_dnd_blocking_and_pass_on_mention() {
+    for missed in [false, true] {
+        for (mode, dnd, blocked, expected) in [
+            (
+                NotificationLevel::Never,
+                false,
+                false,
+                Some("xep0492_never"),
+            ),
+            (NotificationLevel::OnMention, false, false, None),
+            (NotificationLevel::Always, true, false, Some("waddle_dnd")),
+            (
+                NotificationLevel::Always,
+                false,
+                true,
+                Some("xep0191_blocked"),
+            ),
+        ] {
+            let store = store().await;
+            let call = if missed {
+                missed_call_candidate("missed-call-policy", "session")
+            } else {
+                call_candidate("call-policy", "session", false)
+            };
+            let settings = settings_projection().await;
+            settings
+                .upsert(&NotificationSettingsProjection {
+                    owner_bare_jid: call.recipient_bare_jid().clone(),
+                    conversation_jid: call.conversation_jid().clone(),
+                    conversation_kind: ConversationKind::Direct,
+                    mode,
+                    source: NotificationSettingsSource::Xep0402Bookmarks,
+                    source_item_jid: call.conversation_jid().clone(),
+                    updated_at_ms: 1,
+                    rich_payload_opt_in: false,
+                    source_version: 1,
+                })
+                .await
+                .expect("notification level");
+            let push = InMemoryPushStore::new();
+            register_push_target(&push, call.recipient_bare_jid(), &target()).await;
+            let blocking = InMemoryBlockingStorage::new();
+            if blocked {
+                blocking.set_blocklist_jids(
+                    call.recipient_bare_jid().clone(),
+                    vec![Jid::from(call.conversation_jid().clone())],
+                );
+            }
+            store.insert_candidate(&call).await.expect("insert call");
+            let room_policy = StubRoomPolicy::new();
+            store
+                .drain_pending_candidates_into_outbox(
+                    &push,
+                    &blocking,
+                    &settings,
+                    drain_deps_with_noop_activity(
+                        &room_policy,
+                        &FixedDnd(dnd),
+                        noop_activity_reader(),
+                    ),
+                    &bare("push.example.com"),
+                    DrainBatch {
+                        scope: DrainScope::All,
+                        batch_size: 16,
+                    },
+                )
+                .await
+                .expect("drain");
+            assert_eq!(
+                store.pending_outbox_jobs().await.expect("jobs").len(),
+                usize::from(expected.is_none())
             );
+            let mut rows = store
+                .query("SELECT suppressed_reason FROM notification_candidates", ())
+                .await
+                .expect("audit");
+            let audit = rows
+                .next()
+                .await
+                .expect("row")
+                .expect("candidate")
+                .get::<Option<String>>(0)
+                .expect("reason");
+            assert_eq!(audit.as_deref(), expected);
         }
-        store.insert_candidate(&call).await.expect("insert call");
-        let room_policy = StubRoomPolicy::new();
-        store
-            .drain_pending_candidates_into_outbox(
-                &push,
-                &blocking,
-                &settings,
-                drain_deps_with_noop_activity(&room_policy, &FixedDnd(dnd), noop_activity_reader()),
-                &bare("push.example.com"),
-                DrainBatch {
-                    scope: DrainScope::All,
-                    batch_size: 16,
-                },
-            )
-            .await
-            .expect("drain");
-        assert_eq!(
-            store.pending_outbox_jobs().await.expect("jobs").len(),
-            usize::from(expected.is_none())
-        );
-        let mut rows = store
-            .query("SELECT suppressed_reason FROM notification_candidates", ())
-            .await
-            .expect("audit");
-        let audit = rows
-            .next()
-            .await
-            .expect("row")
-            .expect("candidate")
-            .get::<Option<String>>(0)
-            .expect("reason");
-        assert_eq!(audit.as_deref(), expected);
     }
 }
 
@@ -175,7 +197,7 @@ fn direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call() {
     use waddle_server::test_support::direct_notification_candidate_from_envelope_for_test as direct_candidate_from_envelope;
     use xmpp_parsers::message::Message;
 
-    use waddle_xmpp::xep::xep0353::{build_proceed, build_propose, build_retract, CallOffer};
+    use waddle_xmpp::xep::xep0353::{build_proceed, build_propose, CallOffer};
     use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::jingle::SessionId;
     let recipient = bare("alice@example.com");
@@ -220,7 +242,6 @@ fn direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call() {
     for payload in [
         build_propose(SessionId("".into()), CallOffer::audio_only()),
         build_proceed(SessionId("session".into())).into(),
-        build_retract(SessionId("session".into())).into(),
     ] {
         let mut message = Message::new(None::<Jid>);
         message.payloads.push(payload);
@@ -288,16 +309,28 @@ async fn offline_call_signals_preserve_pending_delivery_without_generic_alerts()
             1,
         ),
         (
+            "offline-missed-call",
+            build_retract(sid.clone()).into(),
+            false,
+            2,
+        ),
+        (
+            "offline-missed-call-duplicate",
+            build_retract(sid.clone()).into(),
+            false,
+            2,
+        ),
+        (
             "offline-retract-with-body",
             build_retract(sid).into(),
             true,
-            2,
+            3,
         ),
         (
             "offline-future-signal",
             Element::builder("future-signal", NS_JINGLE_MESSAGE).build(),
             false,
-            3,
+            4,
         ),
     ] {
         let mut submission = fixture.submission(Some(origin), "call ended");
@@ -379,10 +412,10 @@ async fn offline_call_signals_preserve_pending_delivery_without_generic_alerts()
             "{origin}"
         );
     }
-    assert_eq!(fixture.count("pending_delivery").await, 4);
+    assert_eq!(fixture.count("pending_delivery").await, 6);
     assert_eq!(
         fixture.count("mam_messages").await,
-        8,
+        12,
         "both personal archives retained"
     );
     assert_eq!(
@@ -397,6 +430,98 @@ async fn offline_call_signals_preserve_pending_delivery_without_generic_alerts()
             .await,
         2
     );
+    assert_eq!(
+        fixture
+            .count("notification_candidates WHERE class = 'missed_call'")
+            .await,
+        1
+    );
     drop(state);
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn missed_call_uses_normal_drain_and_never_merges_with_dm_or_invitation() {
+    let store = store().await;
+    let target = target();
+    for candidate in [
+        missed_call_candidate("missed-archive", "session"),
+        candidate("dm-archive"),
+        call_candidate("call-archive", "session", false),
+    ] {
+        store.insert_candidate(&candidate).await.expect("candidate");
+    }
+    let push = InMemoryPushStore::new();
+    register_push_target(&push, &bare("alice@example.com"), &target).await;
+    let settings = settings_projection().await;
+    let blocking = InMemoryBlockingStorage::new();
+    let room_policy = StubRoomPolicy::new();
+    store
+        .drain_pending_candidates_into_outbox(
+            &push,
+            &blocking,
+            &settings,
+            drain_deps_with_noop_activity(&room_policy, &FixedDnd(false), noop_activity_reader()),
+            &bare("push.example.com"),
+            DrainBatch {
+                scope: DrainScope::CallsOnly,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("call drain");
+    let pending = store
+        .pending_candidates(16)
+        .await
+        .expect("normal candidates remain");
+    assert_eq!(pending.len(), 2);
+    assert!(pending
+        .iter()
+        .any(|candidate| candidate.class() == NotificationClass::MissedCall));
+    assert_eq!(
+        store
+            .pending_outbox_jobs()
+            .await
+            .expect("only invitation outboxed")
+            .len(),
+        1
+    );
+    store
+        .drain_pending_candidates_into_outbox(
+            &push,
+            &blocking,
+            &settings,
+            drain_deps_with_noop_activity(&room_policy, &FixedDnd(false), noop_activity_reader()),
+            &bare("push.example.com"),
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("normal drain");
+    let jobs = store.pending_outbox_jobs().await.expect("jobs");
+    assert_eq!(jobs.len(), 3);
+    let missed = jobs
+        .iter()
+        .find(|job| job.class() == NotificationClass::MissedCall)
+        .expect("missed job");
+    assert!(missed
+        .context()
+        .get_child("call", WADDLE_PUSH_CONTEXT_NS)
+        .is_none());
+    let calls = store
+        .claim_due_outbox_jobs(DrainScope::CallsOnly, 16)
+        .await
+        .expect("call claims");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].class(), NotificationClass::Call);
+    let normal = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("normal claims");
+    assert_eq!(normal.len(), 2);
+    assert!(normal
+        .iter()
+        .any(|job| job.class() == NotificationClass::MissedCall));
 }

@@ -76,9 +76,10 @@ anchor a retry.
 
 During a rolling update, an older binary cannot settle a DM candidate intent
 without a pending row and may report it as an unrecoverable obligation. A newer
-binary's maintenance settles that expired obligation. No persisted encoding or
-schema changes are required. After a full rollback to a binary without this
-change, ingress rows with recorded but unexecuted live candidate obligations
+binary's maintenance settles that expired obligation. This invitation-recovery
+path needs no persisted encoding change; the missed-call class described below
+requires migration 2002. After a full rollback to a binary without live candidate
+recovery, ingress rows with recorded but unexecuted live candidate obligations
 stay non-terminal and raise the non-terminal backlog alert.
 
 A newly inserted `call` candidate wakes this process's notification outbox loop
@@ -92,13 +93,41 @@ wakes. These are local scheduling hints, with no cross-replica signalling:
 another replica can claim the work first, and timers remain the fallback for
 recovery, retries and ambiguous queue acceptance. Call work triggers both wakes.
 
-Bodyless messages with a top-level `urn:xmpp:jingle-message:0` child named
-`retract`, `proceed`, `reject`, `finish`, `ringing` or legacy `accept` and no
-top-level JMI `propose` create no notification candidate or candidate
-activity-preview intent.
-Their XEP-0160 pending delivery, `OfflineDelivery` marker and MAM storage remain
-intact. Messages with a body, with a proposal, or with only unknown JMI children
-follow normal notification policy. Signal suppression uses the existing result.
+An archived plain XEP-0353 `<retract/>` creates class `missed_call`, reason
+`call_retracted`, only when an unquarantined `call` candidate for the same
+recipient, caller bare JID and SID was created within the preceding 60 seconds.
+The comparison uses the retract's original server receipt time, including
+recovery; already outboxed or suppressed invitations qualify. Another caller
+resource may cancel. A partial unique index permits one missed-call candidate
+per recipient, conversation and SID, even for repeated distinct retracts.
+`call_unanswered` is reserved for slice 2 and is never emitted here.
+
+Missed calls carry the SID without video and no `<call/>` context, so they use
+ordinary APNs alert nodes and Web Push, never VoIP nodes. APNs uses
+`WADDLE_PUSH_MISSED_CALL`; Web Push uses `class: "missed_call"`, ordinary DM
+TTL/urgency and a separate topic. FCM devices are not applicable until Android
+supports the class. The published summary carries the conversation's real
+unread count, including zero; APNs reads the account-wide badge immediately
+before dispatch. Zero unread does not suppress the alert. Missed calls
+remain on the ordinary timer drain and do not trigger the call wake path.
+Mute at T0, DND/blocking at T1, and blocking at publish apply as for call invitations.
+An unexecuted live missed-call receipt expires after the same 60-second
+maintenance grace as a live invitation receipt.
+
+Other bodyless JMI signals (`proceed`, `reject`, `finish`, `ringing`, legacy
+`accept`, and ineligible or tie-break retracts) create no notification candidate
+or candidate activity preview. Their XEP-0160 pending delivery,
+`OfflineDelivery` marker and MAM storage remain intact. Messages with a body,
+with a proposal, or with only unknown JMI children follow normal notification
+policy.
+
+This slice does not alert when the caller crashes without retracting. An answer
+or decline crossing the retract may still alert; a retract planned before the
+proposal candidate commits may miss eligibility. The durable answer/decline
+record and 45-second unanswered timer are deferred to slice 2. Deploy only after
+Apple adds the loc-key and conversation tap route and the web service worker
+adds its “Missed call” title. Migration 2002 requires the owner Job at zero
+replicas using `server/docs/runbooks/restricted-runtime-cutover.md`.
 
 Call jobs apply only to the node whose app ID exactly matches the configured
 APNs bundle ID plus `.voip`; other notification classes apply only to other
