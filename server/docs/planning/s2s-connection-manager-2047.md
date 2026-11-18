@@ -12,9 +12,11 @@ pre-authentication and post-authentication decoding limits. It also records
 the owner's decisions of 2026-11-14 that followed the G4 transport review,
 where they concern the connection manager, and the gate G7 decisions on
 per-peer budgets, headroom and eviction, source addresses, traffic, backoff,
-one stream per pair, header spellings and trusted homes on the public
+streams per pair, header spellings and trusted homes on the public
 profile; the codec and standards-profile parts are recorded in
 [the handshake design](s2s-handshake-2047.md#decisions-after-the-g4-review).
+The owner's decision of 2026-11-18 replaced one stream per pair in the
+inbound direction with several (see [Streams per pair](#streams-per-pair)).
 
 Nothing here is executed evidence. The evidence is
 `crates/waddle-server/tests/s2s_connection_manager.rs` (configuration,
@@ -164,8 +166,8 @@ wiring in `server/lifecycle.rs`.
   certificate is checked again for currency before EXTERNAL succeeds on an
   inbound stream and at establishment on an outbound one. A clock that
   cannot tell the time denies authorization.
-- **Registration.** A stream joins the registry, where it can replace a
-  pair's stream or evict another, only when the post-SASL stream header
+- **Registration.** A stream joins the registry, where it can replace or
+  join a pair's streams or evict another, only when the post-SASL stream header
   completes negotiation, in both directions; a peer that stops after SASL
   displaces nothing. Before SASL EXTERNAL succeeds, the receiving role asks
   the registry, without changing it, whether the stream could be
@@ -203,33 +205,60 @@ wiring in `server/lifecycle.rs`.
   within the write deadline, was never taken (returned unwritten because
   the stream was replaced or closing), or has an unknown outcome. Stanza
   addresses are written with U-label domains, as stream headers are.
-- **Duplicate pairs.** A new fully authenticated stream for a directional
-  pair replaces the existing one, which closes with `conflict` (owner
-  decision). To prevent two peers making a pair flap, a stream younger than
-  `replacement_interval` (30 seconds by default) is kept and the new stream
-  is refused with `conflict` instead. A stream never replaces one of
-  greater authentication strength: while the pair has a `pkix` stream, a
-  `dialback` stream for it is refused with `conflict` whatever the
-  existing stream's age, and the check runs before any verification
-  connection is opened for it. A `pkix` stream may replace a `dialback`
-  one under the replacement interval like any other
-  ([dialback design](s2s-dialback-2047.md#authentication-strength)).
-- **One stream per pair is a restriction.** RFC 6120 allows more than one
+
+## Streams per pair
+
+Owner decision of 2026-11-18, replacing the earlier rule of one stream
+per directional pair in both directions, under which a new inbound stream
+replaced the pair's stream or was refused with `conflict`.
+
+- **Inbound: several streams per pair.** RFC 6120 allows more than one
   stream for a pair, and a pooled or clustered peer opens several, for
-  example ejabberd with `max_s2s_connections` above one. Such a peer's
-  streams replace each other: each new stream displaces the pair's stream
-  once that is older than the replacement interval, so the pair's stream
-  changes about once per `replacement_interval`, and a stream refused with
-  `conflict` in between is retried by the peer. The harness slice (W10)
-  tests clustered ejabberd with `max_s2s_connections` above one.
+  example ejabberd with `max_s2s_connections` above one, or two replicas of
+  another Waddle deployment. Up to `max_inbound_streams_per_peer` (4 by
+  default, ceiling 8) verified inbound streams for one directional pair are
+  registered side by side, and each delivers the stanzas it carries to the
+  sink. Each is admitted (D1), verified and registered on its own, and each
+  counts against the stream and peer caps and is subject to eviction for
+  them like any other stream: its traffic, not the pair's, decides when it
+  is quiet enough to evict.
+- **Beyond the per-pair cap.** One stream more takes the place of the
+  pair's inbound stream that has carried no traffic the longest, if that
+  stream has had none for the eviction idle time; the displaced stream
+  closes with `resource-constraint`, as an eviction. Otherwise the new
+  stream is refused with `resource-constraint` before SASL succeeds, and
+  the refusal counts `resource="peer_streams"`. Busy streams are never
+  displaced, so a peer cannot make the pair flap, and a peer whose earlier
+  streams went quiet without closing still reaches this server after the
+  eviction idle time instead of the idle timeout.
+- **Strength.** A stream never joins or replaces one of greater
+  authentication strength: while the pair has a `pkix` stream in the same
+  direction, a `dialback` stream for it is refused with `conflict`, and the
+  check runs before any verification connection is opened for it. A `pkix`
+  stream may join the pair's `dialback` streams. Each stream's principals
+  carry that stream's strength
+  ([dialback design](s2s-dialback-2047.md#authentication-strength)).
+- **Outbound: one stream per pair.** This server dials one stream per
+  directional pair: a request finds the pair's established outbound stream
+  or the dial in progress for it, and replies and egress to the peer always
+  leave on that stream, whichever inbound stream carried the request. A new
+  outbound stream for a pair replaces the existing one, which closes with
+  `conflict`, only once the existing stream is older than
+  `replacement_interval` (30 seconds by default); within it the new stream
+  is refused with `conflict` instead.
+- **Peers that keep one stream per pair.** A peer that keeps one inbound
+  stream per pair may still refuse or replace a second replica's stream of
+  this deployment with `conflict`; that is the peer's restriction, recorded
+  under "Several replicas" in [the routing design](s2s-routing-2047.md).
 
 ## Resource model
 
 Configuration may set any value from one up to its ceiling, never beyond.
 Rates and most caps default to their ceilings, so they can only be lowered;
 the unauthenticated sockets per source address (2, ceiling 4), the
-negotiating streams per remote domain (3, ceiling 4) and the router's pair
-queues (64, ceiling 256) default below them, as do the idle timeout,
+negotiating streams per remote domain (3, ceiling 4), the inbound streams
+per directional pair (4, ceiling 8) and the router's pair queues (64,
+ceiling 256) default below them, as do the idle timeout,
 connection age, eviction idle time, replacement interval and the two
 backoff durations, and can be raised to them. The input
 rates (`input_per_second`, `input_burst`, `input_per_socket_per_second`,
@@ -250,6 +279,7 @@ below the per-socket one. The values are bounds, not measured capacity.
 | Verifier workers | One per handshake slot and as many waiters, per direction, and one per verification slot for verification connections | A waiting handshake is bounded by its stage deadline; a refused one is treated like an exhausted handshake cap. Inbound handshakes, outbound handshakes and verification handshakes can never occupy each other's workers. |
 | Established streams | 24: the socket cap less the unauthenticated cap, so negotiation always has sockets. In `open` mode, 18 (all but a quarter) for peers that are neither allowlisted nor trusted homes | Evict the stream without traffic the longest if it has had none for the eviction idle time. A peer outside the reserve evicts only streams outside it, whether its general share or the whole cap is full. Otherwise refuse the new stream with `resource-constraint`. |
 | Peers (remote domains with an established stream) | 12, below each direction's socket cap. In `open` mode, 9 for peers that are neither allowlisted nor trusted homes | Evict every stream of the peer whose latest traffic is oldest if none of its streams has had traffic for the eviction idle time, as for streams, and a peer outside the reserve only a peer outside it; otherwise refuse with `resource-constraint`. |
+| Inbound streams per directional pair (`max_inbound_streams_per_peer`) | 4 (ceiling 8); outbound, always one per pair | Evict the pair's inbound stream without traffic the longest if it has had none for the eviction idle time, closing it with `resource-constraint`; otherwise refuse the new stream with `resource-constraint` before SASL succeeds (`resource="peer_streams"`). See [Streams per pair](#streams-per-pair). |
 | Negotiating streams per remote domain | 3 in each direction (ceiling 4), counted separately | An inbound connection counts only once TLS has verified the remote domain, and is closed with `resource-constraint` if the domain's inbound budget is full. Outbound: the attempt fails. |
 | Outbound attempts in progress | 8, one per directional pair | `ConnectError::Busy` or `InProgress`. |
 | New outbound connections | 4/s burst 8, outbound attempts only; the token is taken before the endpoints are looked up | `ConnectError::RateLimited`. No backoff. A domain whose lookup found no endpoint is answered from memory for 30 s without a token (G6). |
@@ -435,8 +465,9 @@ only (`S2sDirection`, `S2sOutcome`, `S2sResource`, `S2sTransport`,
 never a domain, address, JID or stream id: `waddle.s2s.connections` (ended
 connections by direction and outcome, including dialback refusals and
 completed verification connections), `waddle.s2s.capacity.refusals` (by
-direction and resource, including the dial rate and the verification
-cap and rate), `waddle.s2s.established`
+direction and resource, including the dial rate, the verification
+cap and rate, and `peer_streams` for the inbound streams of one pair),
+`waddle.s2s.established`
 (by direction, transport and strength), `waddle.s2s.negotiation.duration`
 (milliseconds, by direction), the `waddle.s2s.streams` gauge (by
 direction), `waddle.s2s.dialback` (by role and result) and
@@ -452,7 +483,7 @@ id, codes and counts; certificate failures log `VerifyError::code` only.
   strength, the dialback list's use and when an absent client certificate
   may reach dialback in the [dialback design](s2s-dialback-2047.md).
 - The harness slice (W10): clustered ejabberd with `max_s2s_connections`
-  above one, for the one-stream-per-pair restriction; a stanza whose `to`
+  above one, for several inbound streams per pair; a stanza whose `to`
   domain is in mixed case; and whether Prosody or ejabberd ever sends
   whitespace before a stream header, which this profile refuses.
 - Measurement: the time a stanza at the 512 KiB ceiling takes when many

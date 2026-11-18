@@ -7,8 +7,8 @@
 //! `server/docs/planning/s2s-connection-manager-2047.md`. Every rate and
 //! most caps default to their ceilings, so those can only be lowered; the
 //! unauthenticated sockets per source address, the negotiating streams
-//! per peer and the router's pair queues default below their ceilings and
-//! can also be raised. Six
+//! per peer, the inbound streams per peer and the router's pair queues
+//! default below their ceilings and can also be raised. Six
 //! deadlines default below their ceilings and can also be raised: the
 //! established-stream idle timeout, the maximum connection age, the
 //! eviction idle time, the replacement interval and the two backoff
@@ -119,6 +119,14 @@ pub struct ResourceLimits {
     /// verified its remote domain; before that it counts against the
     /// global and per-address unauthenticated caps alone.
     pub max_negotiating_per_peer: usize,
+    /// Established inbound streams for one directional domain pair. A
+    /// pooled or clustered peer opens several streams for a pair, and each
+    /// carries its stanzas; outbound there is always one stream per pair.
+    /// A stream beyond this takes the place of the pair's inbound stream
+    /// that has carried no traffic the longest, if that has lasted the
+    /// eviction idle time, and is refused with `resource-constraint`
+    /// otherwise.
+    pub max_inbound_streams_per_peer: usize,
     /// New inbound connections, all sources together.
     pub accept_rate: RateLimit,
     /// New inbound connections from one source address. An IPv6 source is
@@ -169,11 +177,12 @@ pub struct ResourceLimits {
 
 impl ResourceLimits {
     /// The defaults: every value at its ceiling except the unauthenticated
-    /// sockets per source address, the negotiating streams per peer and the
-    /// router's pair queues.
+    /// sockets per source address, the negotiating streams per peer, the
+    /// inbound streams per peer and the router's pair queues.
     pub const DEFAULT: Self = Self {
         max_unauthenticated_per_address: 2,
         max_negotiating_per_peer: 3,
+        max_inbound_streams_per_peer: 4,
         max_pair_queues: 64,
         ..Self::CEILING
     };
@@ -190,6 +199,7 @@ impl ResourceLimits {
         max_streams: 24,
         max_peers: 12,
         max_negotiating_per_peer: 4,
+        max_inbound_streams_per_peer: 8,
         accept_rate: RateLimit {
             per_second: 8,
             burst: 8,
@@ -265,11 +275,13 @@ pub struct Deadlines {
     /// either direction, before it can be evicted for a new one. Whitespace
     /// keepalives do not count.
     pub eviction_idle: Duration,
-    /// How long the stream of one directional pair is kept before a newer
-    /// one may replace it. A new authenticated stream replaces the existing
-    /// one, which closes with `conflict`, unless the existing stream was
-    /// registered less than this long ago; the new stream is then refused
-    /// with `conflict` instead, so two peers cannot make a pair flap.
+    /// How long the outbound stream of one directional pair is kept before
+    /// a newer one may replace it. A new authenticated outbound stream
+    /// replaces the existing one, which closes with `conflict`, unless the
+    /// existing stream was registered less than this long ago; the new
+    /// stream is then refused with `conflict` instead, so the pair cannot
+    /// flap. Inbound streams are bounded per pair instead
+    /// ([`ResourceLimits::max_inbound_streams_per_peer`]).
     pub replacement_interval: Duration,
     /// Wait after the first failed outbound attempt to a domain.
     pub backoff_initial: Duration,

@@ -146,6 +146,8 @@ pub enum S2sResource {
     /// Streams negotiating with one remote domain in one direction; an
     /// inbound stream counts once TLS has verified the domain.
     PerPeer,
+    /// Established inbound streams for one directional domain pair.
+    PeerStreams,
     /// The global rate of new outbound connections.
     DialRate,
     /// Dialback verification connections in progress.
@@ -156,7 +158,7 @@ pub enum S2sResource {
 
 impl S2sResource {
     /// Every value, for zero-registration and tests.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Sockets,
         Self::Unauthenticated,
         Self::SourceAddress,
@@ -165,6 +167,7 @@ impl S2sResource {
         Self::Streams,
         Self::Peers,
         Self::PerPeer,
+        Self::PeerStreams,
         Self::DialRate,
         Self::Verifications,
         Self::VerificationRate,
@@ -187,6 +190,7 @@ impl MetricAttribute for S2sResource {
             Self::Streams => "streams",
             Self::Peers => "peers",
             Self::PerPeer => "per_peer",
+            Self::PeerStreams => "peer_streams",
             Self::DialRate => "dial_rate",
             Self::Verifications => "verifications",
             Self::VerificationRate => "verification_rate",

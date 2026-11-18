@@ -1339,7 +1339,7 @@ sender of the request it answers.
 | Cause | What happens |
 | --- | --- |
 | The room's own presence ends the occupancy (leave, kick, ban, revocation sweep, room destroyed) | The presence is sent to the occupant with its status codes; the seat is released and its row removed. Presence that did not come as the answer to the occupant's own request is sent only once the room confirms that it no longer seats that generation, asked within the per-item budget; a room that cannot say ends the seat as for an undeliverable stanza |
-| A stream between the room's domain and the occupant's domain is lost (`StreamEnd::Lost`, as [stream ends](#outbound-muc-w6b) are classified) | Every seat of that pair this replica holds ends: the room removes the occupant and tells those who stay with status 333 (XEP-0045 §11.1). Nothing is sent to the removed occupant; its server saw the stream fail. Seats of the pair that another replica holds are marked in the table, and their owner ends them at its next sweep, within five seconds: it gives each seat up before it queues the seat's end, so a marked row that is read again before that end removed it queues nothing more. A stream that is closed in order ends no seat |
+| A stream between the room's domain and the occupant's domain is lost (`StreamEnd::Lost`, as [stream ends](#outbound-muc-w6b) are classified) | Every seat of that pair this replica holds ends: the room removes the occupant and tells those who stay with status 333 (XEP-0045 §11.1). Nothing is sent to the removed occupant; its server saw the stream fail. Seats of the pair that another replica holds are marked in the table, and their owner ends them at its next sweep, within five seconds: it gives each seat up before it queues the seat's end, so a marked row that is read again before that end removed it queues nothing more. A stream that is closed in order ends no seat. |
 | A stanza of the room cannot be queued for the seat, no stream can be established for it, or the stream does not take it | The seat ends at once, so nothing more is queued for it; the room removes the occupant with status 333; the occupant is sent its own unavailable presence with statuses 110 and 333 if a place is free for it |
 | The occupant's server answers the room with a delivery error | The room removes the occupant with status 333 (§17.1.2, "ghost users") |
 | A stanza of the occupant arrives on a stream that proved something else | As for a stanza that cannot be queued |
@@ -2924,9 +2924,11 @@ behaviour of the chat app, for the same runbook):
   accounts on its own domain names a `server` identity there and its
   accounts are refused, and an account at a service domain that answers
   as an account is refused too.
-- **Two replicas dialling one peer.** A peer that keeps one stream per
-  directional pair, as Waddle does, refuses a second replica's new stream
-  with `conflict` within its replacement interval. Room stanzas a second
+- **Two replicas dialling one peer.** A peer that keeps one inbound stream
+  per directional pair refuses a second replica's new stream with
+  `conflict` (a Waddle peer holds up to four, see
+  [streams per pair](s2s-connection-manager-2047.md#streams-per-pair)).
+  Room stanzas a second
   replica sends in that window fail like any of its stanzas (see
   "Several replicas, one stream per pair"): a join or message is answered
   with `remote-server-timeout`, and the leave sent when a resource ends is
@@ -2951,7 +2953,7 @@ behaviour of the chat app, for the same runbook):
 - **A request arrives on one replica and is answered from another.** A
   stanza for a room another replica holds is carried to that replica, which
   answers on its own stream to the occupant's domain. A peer that keeps one
-  stream per directional pair, as Waddle does, then sees this deployment's
+  inbound stream per directional pair then sees this deployment's
   stream to it come from the holder; when two replicas hold rooms with
   occupants at one domain, or the carrying replica answers a refusal while
   the holder sends traffic, both dial that peer and alternate as described
@@ -3161,10 +3163,13 @@ behaviour of the chat app, for the same runbook):
   side; this waits for gate G21 like the other features.
 
 - **Several replicas, one stream per pair.** Each replica dials its own
-  outbound stream to a peer, and the connection manager keeps one stream
-  per directional pair per process. A peer that also keeps one stream per
-  pair, as Waddle does with a replacement interval of 30 s by default,
-  alternates between the replicas when both send to it:
+  outbound stream to a peer, and the connection manager keeps one outbound
+  stream per directional pair per process. A Waddle peer holds each
+  replica's stream side by side, up to its per-pair cap of inbound streams
+  ([streams per pair](s2s-connection-manager-2047.md#streams-per-pair)). A
+  peer that keeps one inbound stream per pair, refusing a newer one for a
+  replacement interval and replacing the older one after it, alternates
+  between the replicas when both send to it:
   - while one replica's stream is younger than the peer's replacement
     interval, the peer refuses the other replica's new stream with
     `conflict`; that replica answers the requests waiting on the dial, and

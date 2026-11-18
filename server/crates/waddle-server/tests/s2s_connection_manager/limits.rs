@@ -1,7 +1,7 @@
 //! The resource model: socket caps, per-peer budgets, deadlines and the
 //! input rates, eviction and its reserve, outbound eviction only once a
-//! TCP connection is open, replacement of a pair's stream, backoff and the
-//! shutdown join.
+//! TCP connection is open, several inbound streams for one pair and their
+//! cap, backoff and the shutdown join.
 //!
 //! Every connection in these tests comes from 127.0.0.1, so a test that
 //! opens more than four in a row waits for the per-address accept rate (two
@@ -19,9 +19,11 @@ use tokio::net::{TcpListener, TcpStream};
 use waddle_server::s2s::config::{
     Deadlines, ResourceLimits, MAX_INCOMPLETE_ELEMENT_TIME, STREAM_CODEC_LIMITS,
 };
-use waddle_server::s2s::conn::{ConnectError, ServiceOptions, StreamDirection};
+use waddle_server::s2s::conn::{
+    ConnectError, ServiceOptions, SinkVerdict, StanzaSink, StreamDirection, VerifiedPeerStream,
+};
 use waddle_xmpp::disco::items::DISCO_ITEMS_NS;
-use waddle_xmpp::ns::JABBER_SERVER;
+use waddle_xmpp::ns::{JABBER_CLIENT, JABBER_SERVER};
 use waddle_xmpp::s2s::StreamErrorCondition;
 use waddle_xmpp::telemetry::attributes::S2sOutcome;
 use waddle_xmpp::telemetry::test_support::MetricsTestGuard;
@@ -715,98 +717,237 @@ async fn open_mode_reserves_a_quarter_of_the_peer_cap_for_allowlisted_peers() {
     holds_streams(&b, 4).await;
 }
 
-/// Two deployments that both authenticate as `home-a.test`, dialling
-/// `home-b.test`.
-async fn twins(pki: &Pki, limits: Vec<String>) -> (Deployment, Deployment, Deployment) {
+/// A sink that takes every stanza and records the connection that carried
+/// it and the stanza's id.
+#[derive(Debug, Default)]
+struct CarriedBy(std::sync::Mutex<Vec<(u64, String)>>);
+
+impl CarriedBy {
+    fn carried(&self) -> Vec<(u64, String)> {
+        match self.0.lock() {
+            Ok(carried) => carried.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+impl StanzaSink for CarriedBy {
+    fn offer(&self, stream: &VerifiedPeerStream, stanza: Element) -> SinkVerdict {
+        let entry = (
+            stream.connection(),
+            stanza.attr("id").unwrap_or_default().to_owned(),
+        );
+        match self.0.lock() {
+            Ok(mut carried) => carried.push(entry),
+            Err(poisoned) => poisoned.into_inner().push(entry),
+        }
+        SinkVerdict::Accepted
+    }
+}
+
+/// `home-b.test` with `limits` and `sink`, and `nodes` deployments that all
+/// authenticate as `home-a.test` and dial it, as the nodes of a clustered
+/// peer each open their own stream for one directional pair.
+async fn clustered(
+    pki: &Pki,
+    limits: Vec<String>,
+    nodes: usize,
+    sink: Arc<dyn StanzaSink>,
+) -> (Vec<Deployment>, Deployment) {
     let (listener_b, address_b) = listener().await;
     let mut spec_b = Spec::new(HOME_B, HOME_A);
     spec_b.limits = limits;
-    let b = start(pki, &spec_b, listener_b).await;
+    let options = ServiceOptions {
+        sink,
+        ..ServiceOptions::default()
+    };
+    let b = start_with(pki, &spec_b, listener_b, options).await;
     let mut spec = Spec::new(HOME_A, HOME_B);
     spec.endpoints = vec![(HOME_B, address_b)];
-    let (first_listener, _) = listener().await;
-    let first = start(pki, &spec, first_listener).await;
-    let (second_listener, _) = listener().await;
-    let second = start(pki, &spec, second_listener).await;
-    (first, second, b)
+    let mut members = Vec::new();
+    for _ in 0..nodes {
+        let (node_listener, _) = listener().await;
+        members.push(start(pki, &spec, node_listener).await);
+    }
+    (members, b)
 }
 
-/// The connection carrying `deployment`'s only inbound stream, once it has
-/// exactly one.
-async fn inbound_connection(deployment: &Deployment) -> u64 {
-    let only = || {
-        let inbound: Vec<u64> = deployment
-            .handle
-            .streams()
-            .into_iter()
-            .filter(|stream| stream.direction() == StreamDirection::Inbound)
-            .map(|stream| stream.connection())
-            .collect();
-        match inbound.as_slice() {
-            [connection] => Some(*connection),
-            _ => None,
-        }
-    };
-    assert!(eventually(WAIT, || only().is_some()).await);
-    only().expect("one inbound stream")
+/// The connections carrying `deployment`'s inbound streams.
+fn inbound_connections(deployment: &Deployment) -> BTreeSet<u64> {
+    deployment
+        .handle
+        .streams()
+        .into_iter()
+        .filter(|stream| stream.direction() == StreamDirection::Inbound)
+        .map(|stream| stream.connection())
+        .collect()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_new_stream_for_a_pair_replaces_the_old_one_with_conflict() {
-    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let pki = Pki::new();
-    let (first, second, b) = twins(&pki, vec!["replacement_interval_ms = 1".to_owned()]).await;
-    first
-        .handle
-        .connect(&domain(HOME_A), &domain(HOME_B))
-        .await
-        .expect("the first stream");
-    let old = inbound_connection(&b).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let new = second
-        .handle
-        .connect(&domain(HOME_A), &domain(HOME_B))
-        .await
-        .expect("the replacing stream");
-    // home-b closed the replaced stream with `conflict`, and its peer saw
-    // it end.
-    assert!(eventually(WAIT, || inbound_endings(&metrics, "conflict") == 1).await);
-    assert!(eventually(WAIT, || first.handle.streams().is_empty()).await);
-    // The new stream carries the pair on both sides.
-    assert_ne!(inbound_connection(&b).await, old);
-    assert_eq!(second.handle.streams(), vec![new]);
+/// A message from home-a to home-b with `id`.
+fn message(id: &str) -> Element {
+    Element::builder("message", JABBER_CLIENT)
+        .attr(xml_ncname!("id").to_owned(), id)
+        .attr(xml_ncname!("from").to_owned(), "alice@home-a.test/phone")
+        .attr(xml_ncname!("to").to_owned(), "bob@home-b.test")
+        .build()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stream_younger_than_the_replacement_interval_is_kept() {
+async fn several_inbound_streams_from_one_peer_are_kept_and_each_carries_stanzas() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let pki = Pki::new();
-    let (first, second, b) = twins(&pki, Vec::new()).await;
-    first
-        .handle
-        .connect(&domain(HOME_A), &domain(HOME_B))
-        .await
-        .expect("the first stream");
-    let kept = inbound_connection(&b).await;
-    let refused = second
+    let sink = Arc::new(CarriedBy::default());
+    let (nodes, b) = clustered(&pki, Vec::new(), 3, sink.clone()).await;
+    let mut streams = Vec::new();
+    for node in &nodes {
+        streams.push(
+            node.handle
+                .connect(&domain(HOME_A), &domain(HOME_B))
+                .await
+                .expect("each node's own stream"),
+        );
+    }
+    // home-b holds all three for the one directional pair, within the
+    // default of four, and none was refused or replaced.
+    assert!(eventually(WAIT, || inbound_connections(&b).len() == 3).await);
+    for node in &nodes {
+        assert_eq!(node.handle.streams().len(), 1);
+    }
+    assert_eq!(inbound_endings(&metrics, "conflict"), 0);
+    assert_eq!(inbound_refusals(&metrics, "peer_streams"), 0);
+
+    // Each stream carries its own node's stanzas to the sink.
+    for (index, (node, stream)) in nodes.iter().zip(&streams).enumerate() {
+        node.handle
+            .transmit(stream, message(&format!("from-node-{index}")))
+            .await
+            .expect("the stanza is written");
+    }
+    assert!(eventually(WAIT, || sink.carried().len() == 3).await);
+    let carried = sink.carried();
+    let carriers: BTreeSet<u64> = carried.iter().map(|(connection, _)| *connection).collect();
+    assert_eq!(carriers, inbound_connections(&b));
+    let ids: BTreeSet<String> = carried.into_iter().map(|(_, id)| id).collect();
+    assert_eq!(
+        ids,
+        (0..3).map(|index| format!("from-node-{index}")).collect()
+    );
+
+    // One node's stream ending leaves the others carrying the pair.
+    let mut nodes = nodes.into_iter();
+    let first = nodes.next().expect("the first node");
+    assert!(first.service.shutdown(WAIT).await.joined);
+    assert!(eventually(WAIT, || inbound_connections(&b).len() == 2).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inbound_stream_beyond_the_per_pair_cap_is_refused_while_the_others_are_busy() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let pki = Pki::new();
+    let sink = Arc::new(CarriedBy::default());
+    // The default eviction idle time is far longer than this test, so
+    // neither established stream can make room.
+    let (nodes, b) = clustered(
+        &pki,
+        vec!["max_inbound_streams_per_peer = 2".to_owned()],
+        3,
+        sink,
+    )
+    .await;
+    for node in &nodes[..2] {
+        node.handle
+            .connect(&domain(HOME_A), &domain(HOME_B))
+            .await
+            .expect("a stream within the cap");
+    }
+    assert!(eventually(WAIT, || inbound_connections(&b).len() == 2).await);
+    let kept = inbound_connections(&b);
+    let refused = nodes[2]
         .handle
         .connect(&domain(HOME_A), &domain(HOME_B))
         .await;
-    // The peer's `conflict` ends the attempt like a local one.
-    assert_eq!(refused, Err(ConnectError::Failed(S2sOutcome::Conflict)));
-    // home-b refused the newcomer with `conflict`.
-    assert!(eventually(WAIT, || inbound_endings(&metrics, "conflict") == 1).await);
-    assert_eq!(first.handle.streams().len(), 1);
-    assert_eq!(inbound_connection(&b).await, kept);
-    // It says nothing about the peer's health, so the domain does not back
-    // off: the next attempt dials again and is refused the same way.
-    assert_eq!(
-        second
-            .handle
-            .connect(&domain(HOME_A), &domain(HOME_B))
-            .await,
-        Err(ConnectError::Failed(S2sOutcome::Conflict))
+    // home-b refused the newcomer with `resource-constraint` before SASL
+    // succeeded, for the per-pair cap.
+    assert_eq!(refused, Err(ConnectError::Failed(S2sOutcome::PeerError)));
+    assert!(
+        eventually(WAIT, || inbound_refusals(&metrics, "peer_streams") == 1
+            && inbound_endings(&metrics, "capacity") == 1)
+        .await
     );
+    assert_eq!(inbound_connections(&b), kept);
+    assert_eq!(inbound_endings(&metrics, "conflict"), 0);
+    assert_eq!(inbound_endings(&metrics, "evicted"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inbound_stream_beyond_the_per_pair_cap_takes_a_quiet_ones_place() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let pki = Pki::new();
+    let sink = Arc::new(CarriedBy::default());
+    let (nodes, b) = clustered(
+        &pki,
+        vec![
+            "max_inbound_streams_per_peer = 1".to_owned(),
+            "eviction_idle_ms = 1".to_owned(),
+        ],
+        2,
+        sink,
+    )
+    .await;
+    nodes[0]
+        .handle
+        .connect(&domain(HOME_A), &domain(HOME_B))
+        .await
+        .expect("the first stream");
+    assert!(eventually(WAIT, || inbound_connections(&b).len() == 1).await);
+    let old = inbound_connections(&b);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let new = nodes[1]
+        .handle
+        .connect(&domain(HOME_A), &domain(HOME_B))
+        .await
+        .expect("the newcomer takes the quiet stream's place");
+    // The quiet stream was evicted with `resource-constraint`, and its
+    // node saw it end; the newcomer carries the pair.
+    assert!(eventually(WAIT, || inbound_endings(&metrics, "evicted") == 1).await);
+    assert!(eventually(WAIT, || nodes[0].handle.streams().is_empty()).await);
+    assert!(
+        eventually(WAIT, || {
+            let now = inbound_connections(&b);
+            now.len() == 1 && now != old
+        })
+        .await
+    );
+    assert_eq!(nodes[1].handle.streams(), vec![new]);
+    assert_eq!(inbound_endings(&metrics, "conflict"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_extra_inbound_streams_stay_within_the_stream_cap() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let pki = Pki::new();
+    let sink = Arc::new(CarriedBy::default());
+    // Room for four streams of the pair, but only two streams at all.
+    let (nodes, b) = clustered(&pki, vec!["max_streams = 2".to_owned()], 3, sink).await;
+    for node in &nodes[..2] {
+        node.handle
+            .connect(&domain(HOME_A), &domain(HOME_B))
+            .await
+            .expect("a stream within the caps");
+    }
+    holds_streams(&b, 2).await;
+    let refused = nodes[2]
+        .handle
+        .connect(&domain(HOME_A), &domain(HOME_B))
+        .await;
+    assert_eq!(refused, Err(ConnectError::Failed(S2sOutcome::PeerError)));
+    assert!(
+        eventually(WAIT, || inbound_refusals(&metrics, "streams") == 1
+            && inbound_endings(&metrics, "capacity") == 1)
+        .await
+    );
+    assert_eq!(inbound_refusals(&metrics, "peer_streams"), 0);
+    holds_streams(&b, 2).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

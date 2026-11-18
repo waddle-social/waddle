@@ -844,6 +844,11 @@ fn resource_limits(document: &LimitsDocument) -> Result<ResourceLimits, ConfigEr
             document.max_negotiating_per_peer,
             |l| l.max_negotiating_per_peer,
         )?,
+        max_inbound_streams_per_peer: cap(
+            "max_inbound_streams_per_peer",
+            document.max_inbound_streams_per_peer,
+            |l| l.max_inbound_streams_per_peer,
+        )?,
         max_verifications: cap("max_verifications", document.max_verifications, |l| {
             l.max_verifications
         })?,

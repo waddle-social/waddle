@@ -878,10 +878,9 @@ pub async fn outbound_muc_on(
 /// table and remote room occupancies), and `home-b.test` serving
 /// `muc.home-b.test` with a [`FakeMuc`]. Both replicas dial
 /// `home-b.test`; `home-b.test` dials only the second, so every answer
-/// from the room arrives there. `home-b.test` keeps one stream per
-/// directional domain pair, so it lets a replica's new stream replace the
-/// other's at once instead of refusing it with `conflict` for the
-/// replacement interval.
+/// from the room arrives there. `home-b.test` holds both replicas' inbound
+/// streams for the directional pair, as it holds several streams of any
+/// clustered peer.
 pub async fn outbound_muc_replicas(
     pki: &Pki,
     limits: RouterLimits,
@@ -893,10 +892,7 @@ pub async fn outbound_muc_replicas(
     let spec = spec_a(address_b);
     let a1 = start_routed(pki, &spec, listener_a1, database.clone(), limits).await;
     let a2 = start_routed(pki, &spec, listener_a2, database, limits).await;
-    let (b, muc) = start_muc(pki, listener_b, address_a2, |spec_b| {
-        spec_b.limits = vec!["replacement_interval_ms = 1".to_owned()];
-    })
-    .await;
+    let (b, muc) = start_muc(pki, listener_b, address_a2, |_| {}).await;
     (a1, a2, b, muc)
 }
 

@@ -291,11 +291,13 @@ The strength travels with the stream to the routing slice and the
 protected-effect witness (G17); D8 forbids privileged authority and room
 moderation on `dialback` streams, which those slices enforce.
 
-A weaker proof never displaces a stronger one: while a directional pair
-has a `pkix` stream, a `dialback` stream for the same pair is refused with
-`conflict`, whatever the existing stream's age, before its key is
-verified. A `pkix` stream may replace a `dialback` stream under the
-connection manager's replacement interval, like any replacement.
+A weaker proof never displaces or joins a stronger one: while a
+directional pair has a `pkix` stream, a `dialback` stream for the same pair
+is refused with `conflict`, whatever the existing stream's age, before its
+key is verified. A `pkix` stream may join a pair's inbound `dialback`
+streams up to the per-pair cap, or replace an outbound `dialback` stream
+under the connection manager's replacement interval
+([streams per pair](s2s-connection-manager-2047.md#streams-per-pair)).
 
 ## Residual risk
 

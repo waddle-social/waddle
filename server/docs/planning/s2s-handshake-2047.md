@@ -657,17 +657,18 @@ and accepted as part of the activation decision (gate G22).
   (RFC 6120 §4.7.5 reads it as version 0.9, which this profile does not
   speak), and one without `to` with `bad-format`. Both are restrictions of
   this profile.
-- A duplicate stream for a directional pair replaces the existing one,
-  which closes with `conflict`, rate limited as the connection-manager
-  design records; the earlier rule above, which refused the duplicate and
-  kept the incumbent, is superseded.
-- One stream per directional pair is a restriction: RFC 6120 allows more,
-  and a pooled or clustered peer, such as ejabberd with
-  `max_s2s_connections` above one, opens several. Its streams replace one
-  another about once per replacement interval (30 seconds by default), and
-  a stream refused with `conflict` in between is retried by the peer. The
-  harness slice (W10) tests clustered ejabberd with `max_s2s_connections`
-  above one.
+- A duplicate outbound stream for a directional pair replaces the
+  existing one, which closes with `conflict`, rate limited as the
+  connection-manager design records; the earlier rule above, which refused
+  the duplicate and kept the incumbent, is superseded.
+- Inbound, a directional pair may hold several streams, as RFC 6120
+  allows: a pooled or clustered peer, such as ejabberd with
+  `max_s2s_connections` above one, opens several, and up to a configured
+  number (4 by default) are kept side by side and each carries its stanzas
+  (owner decision of 2026-11-18,
+  [connection-manager design](s2s-connection-manager-2047.md#streams-per-pair)).
+  The harness slice (W10) tests clustered ejabberd with
+  `max_s2s_connections` above one.
 - ASCII uppercase letters in a stream header address or a SASL
   authorization identity are mapped to lowercase, more liberal than the
   identity profile's exact-spelling rule and safe because DNS does not

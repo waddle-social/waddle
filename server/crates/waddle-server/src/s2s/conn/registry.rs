@@ -1,13 +1,20 @@
 //! Established streams, per-peer negotiation counts, outbound dials in
 //! progress and outbound backoff (ADR-0020 gate G7).
 //!
-//! One stream per exact directional domain pair: a new authenticated stream
-//! for a pair replaces the existing one, which closes with `conflict`,
-//! unless the existing one is younger than the replacement interval, in
-//! which case the new one is refused with `conflict`. A stream never
-//! replaces one of greater authentication strength: a `dialback` stream
-//! is refused with `conflict` while the pair has a `pkix` one, whatever
-//! its age, so a weaker identity proof can never displace a stronger one.
+//! Outbound, one stream per exact directional domain pair: a new
+//! authenticated outbound stream for a pair replaces the existing one,
+//! which closes with `conflict`, unless the existing one is younger than
+//! the replacement interval, in which case the new one is refused with
+//! `conflict`. Inbound, a pair may hold up to
+//! [`ResourceLimits::max_inbound_streams_per_peer`] streams, since a pooled
+//! or clustered peer opens several and each carries its stanzas; one more
+//! takes the place of the pair's inbound stream that has carried no
+//! traffic the longest, if that has lasted the eviction idle time, and is
+//! refused with `resource-constraint` otherwise. A stream never replaces
+//! or joins one of greater authentication strength: a `dialback` stream is
+//! refused with `conflict` while the pair has a `pkix` one in the same
+//! direction, whatever its age, so a weaker identity proof can never
+//! displace or sit beside a stronger one.
 //!
 //! When the stream or peer cap is reached, the stream (or, for the peer
 //! cap, every stream of the peer) that has carried no traffic the longest
@@ -96,8 +103,8 @@ impl Activity {
 /// Why a stream could not be registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RegisterRefusal {
-    /// Another stream carries the same directional pair and is too young
-    /// to be replaced.
+    /// Another stream carries the same directional pair and is stronger, or
+    /// is an outbound stream too young to be replaced.
     Conflict,
     /// A cap is reached and nothing can be evicted.
     Full(S2sResource),
@@ -108,14 +115,28 @@ struct StreamKey {
     direction: StreamDirection,
     local: CanonicalDomain,
     remote: CanonicalDomain,
+    /// The connection carrying the stream: a pair has at most one outbound
+    /// stream but may have several inbound ones.
+    connection: u64,
+}
+
+impl StreamKey {
+    /// Whether `other` carries the same directional pair.
+    fn same_pair(&self, other: &StreamKey) -> bool {
+        self.direction == other.direction
+            && self.local == other.local
+            && self.remote == other.remote
+    }
 }
 
 /// How the registry ends a registered stream's life early.
 #[derive(Debug, Clone, Default)]
 pub(super) struct StreamTokens {
-    /// Cancelled when the stream is evicted for capacity.
+    /// Cancelled when the stream is evicted for capacity, including for a
+    /// newer inbound stream of the same pair beyond the per-pair cap.
     pub(super) evict: CancellationToken,
-    /// Cancelled when a newer stream for the same pair replaces it.
+    /// Cancelled when a newer outbound stream for the same pair replaces
+    /// it.
     pub(super) replace: CancellationToken,
 }
 
@@ -148,7 +169,7 @@ struct Entry {
 /// What registering a stream would do to the registered ones.
 #[derive(Debug, Default)]
 struct Plan {
-    /// The pair's existing stream, which the new one replaces.
+    /// The pair's existing outbound stream, which the new one replaces.
     replaced: Option<StreamKey>,
     /// Streams evicted to stay within the caps.
     evicted: BTreeSet<StreamKey>,
@@ -302,10 +323,13 @@ impl Registry {
         strength: AuthenticationStrength,
         reserved: bool,
     ) -> Result<(), RegisterRefusal> {
+        // The connection is not registered yet; its id plays no part in
+        // the plan beyond telling its key apart from registered ones.
         let key = StreamKey {
             direction,
             local: local.clone(),
             remote: remote.clone(),
+            connection: u64::MAX,
         };
         let state = self.state();
         self.plan(&state, &key, strength, reserved, Instant::now())
@@ -313,7 +337,7 @@ impl Registry {
     }
 
     /// Register an authenticated stream, replacing the pair's existing
-    /// stream or evicting idle ones if a cap requires it.
+    /// outbound stream or evicting idle ones if a cap requires it.
     pub(super) fn register(
         self: &Arc<Self>,
         registration: Registration,
@@ -323,6 +347,7 @@ impl Registry {
             direction: stream.direction(),
             local: stream.local().clone(),
             remote: stream.remote().clone(),
+            connection: stream.connection(),
         };
         let now = Instant::now();
         let mut state = self.state();
@@ -341,7 +366,6 @@ impl Registry {
                 evicted.tokens.evict.cancel();
             }
         }
-        let connection = registration.stream.connection();
         state.streams.insert(
             key.clone(),
             Entry {
@@ -357,14 +381,16 @@ impl Registry {
         Ok(StreamSlot {
             registry: Arc::clone(self),
             key,
-            connection,
         })
     }
 
     /// Decide what registering `key` with `strength` replaces and evicts,
-    /// or why it is refused. The pair's existing stream is replaced only by
-    /// a stream at least as strong, and only once it is older than the
-    /// replacement interval.
+    /// or why it is refused. A pair's existing outbound stream is replaced
+    /// only by a stream at least as strong, and only once it is older than
+    /// the replacement interval. A pair's inbound streams are joined by one
+    /// at least as strong as each of them, up to the per-pair cap; at the
+    /// cap, the one without traffic the longest makes room if it has had
+    /// none for the eviction idle time.
     fn plan(
         &self,
         state: &State,
@@ -374,15 +400,40 @@ impl Registry {
         now: Instant,
     ) -> Result<Plan, RegisterRefusal> {
         let mut plan = Plan::default();
-        if let Some(existing) = state.streams.get(key) {
-            if strength.is_weaker_than(existing.stream.strength()) {
-                return Err(RegisterRefusal::Conflict);
+        let pair: Vec<(&StreamKey, &Entry)> = state
+            .streams
+            .iter()
+            .filter(|(existing, _)| existing.same_pair(key))
+            .collect();
+        if pair
+            .iter()
+            .any(|(_, existing)| strength.is_weaker_than(existing.stream.strength()))
+        {
+            return Err(RegisterRefusal::Conflict);
+        }
+        match key.direction {
+            StreamDirection::Outbound => {
+                if let Some((existing_key, existing)) = pair.first() {
+                    let age = now.saturating_duration_since(existing.registered_at);
+                    if age < self.deadlines.replacement_interval {
+                        return Err(RegisterRefusal::Conflict);
+                    }
+                    plan.replaced = Some((*existing_key).clone());
+                }
             }
-            let age = now.saturating_duration_since(existing.registered_at);
-            if age < self.deadlines.replacement_interval {
-                return Err(RegisterRefusal::Conflict);
+            StreamDirection::Inbound => {
+                if pair.len() >= self.limits.max_inbound_streams_per_peer {
+                    let victim = pair
+                        .iter()
+                        .filter(|(_, entry)| self.evictable(entry, now))
+                        .max_by_key(|(_, entry)| entry.activity.quiet(now))
+                        .map(|(existing, _)| (*existing).clone());
+                    let Some(victim) = victim else {
+                        return Err(RegisterRefusal::Full(S2sResource::PeerStreams));
+                    };
+                    plan.evicted.insert(victim);
+                }
             }
-            plan.replaced = Some(key.clone());
         }
         // Each pass evicts at least one stream or ends, so this terminates.
         loop {
@@ -555,11 +606,11 @@ impl Registry {
             direction: StreamDirection::Outbound,
             local: stream.local().clone(),
             remote: stream.remote().clone(),
+            connection: stream.connection(),
         };
         self.state()
             .streams
             .get(&key)
-            .filter(|entry| entry.stream.connection() == stream.connection())
             .and_then(|entry| entry.outbox.clone())
     }
 
@@ -593,12 +644,12 @@ impl Registry {
         now: Instant,
     ) -> Result<DialStart, DialRefusal> {
         let mut state = self.state();
-        let key = StreamKey {
-            direction: StreamDirection::Outbound,
-            local: local.clone(),
-            remote: remote.clone(),
-        };
-        if let Some(entry) = state.streams.get(&key) {
+        let established = state.streams.iter().find(|(key, _)| {
+            key.direction == StreamDirection::Outbound
+                && &key.local == local
+                && &key.remote == remote
+        });
+        if let Some((_, entry)) = established {
             return Ok(DialStart::Established(entry.stream.clone()));
         }
         if state
@@ -767,24 +818,17 @@ impl Drop for NegotiationSlot {
 }
 
 /// A registered stream; dropping it unregisters the stream unless it was
-/// replaced or evicted.
+/// replaced or evicted. Its key names its own connection, so only it is
+/// removed.
 #[derive(Debug)]
 pub(super) struct StreamSlot {
     registry: Arc<Registry>,
     key: StreamKey,
-    connection: u64,
 }
 
 impl Drop for StreamSlot {
     fn drop(&mut self) {
-        let mut state = self.registry.state();
-        let owned = state
-            .streams
-            .get(&self.key)
-            .is_some_and(|entry| entry.stream.connection() == self.connection);
-        if owned {
-            state.streams.remove(&self.key);
-        }
+        self.registry.state().streams.remove(&self.key);
     }
 }
 
