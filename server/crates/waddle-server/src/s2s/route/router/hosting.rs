@@ -57,7 +57,7 @@ use super::{
 };
 use crate::destination::{SeatAdoption, ServedService};
 use crate::permissions::host_grant::StreamEvidence;
-use crate::s2s::conn::{SinkVerdict, SinkWait, VerifiedPeerStream, Waited};
+use crate::s2s::conn::{SinkVerdict, SinkWait, StreamDirection, VerifiedPeerStream, Waited};
 use crate::s2s::route::local_rooms::{
     CarriedRoomOutcome, CarriedRoomRequest, RoomPlacement, RoomRequest, SeatChange, SeatEnd, Taken,
 };
@@ -2409,8 +2409,25 @@ impl Inner {
     /// ends, since stanzas either way may be lost (XEP-0045 §11.1). Seats
     /// this replica holds end here; those another replica holds are marked
     /// for it.
+    ///
+    /// A peer may hold several inbound streams for a pair, and each carries
+    /// its stanzas. When a failed inbound stream leaves another stream of
+    /// the pair on this process, inbound or outbound, the pair is still
+    /// carried and its seats are kept: the occupants' traffic continues on
+    /// the remaining streams, and the room's traffic to them leaves on the
+    /// outbound one. A failed outbound stream, the pair's only path to the
+    /// occupants, always ends them.
     pub(super) fn lose_seats(self: &Arc<Self>, stream: &VerifiedPeerStream) {
         if self.hosting.get().is_none() {
+            return;
+        }
+        if stream.direction() == StreamDirection::Inbound
+            && self
+                .transport
+                .get()
+                .is_some_and(|transport| transport.carries(stream.local(), stream.remote()))
+        {
+            telemetry::seats_kept_pair_carried();
             return;
         }
         let room_domain = stream.local().as_domain_ref().as_str().to_owned();

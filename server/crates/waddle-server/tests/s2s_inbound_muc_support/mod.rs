@@ -135,6 +135,8 @@ pub struct Hosted {
     peer: Option<Deployment>,
     /// What `home-b.test` received.
     pub captured: Arc<CapturingSink>,
+    /// The specification `home-b.test` runs, for another node of it.
+    peer_spec: Spec,
     /// The WebSocket endpoint this fixture serves for `example.com`, when
     /// the state is its own.
     web: Option<(String, tokio::task::JoinHandle<()>)>,
@@ -203,7 +205,7 @@ impl Hosted {
         let Wiring {
             pki,
             config,
-            peer,
+            peer: peer_spec,
             listener,
             peer_listener,
         } = wiring;
@@ -238,7 +240,7 @@ impl Hosted {
         let captured = Arc::new(CapturingSink::default());
         let peer = routing::transport::start_with(
             &pki,
-            &peer,
+            &peer_spec,
             peer_listener,
             ServiceOptions {
                 sink: captured.clone(),
@@ -256,6 +258,7 @@ impl Hosted {
             },
             peer: Some(peer),
             captured,
+            peer_spec,
             web: None,
             _pki: pki,
         }
@@ -301,6 +304,23 @@ impl Hosted {
     pub async fn peer_sends_to(&self, service: &str, stanza: impl Into<Element>) {
         let peer = self.peer.as_ref().expect("the peer is running");
         send(peer, HOME_B, service, stanza).await;
+    }
+
+    /// Another node of `home-b.test`, as a clustered peer runs: it opens
+    /// its own streams for the pair beside the first node's, and what it
+    /// receives is kept with what the first receives. Nothing dials it.
+    pub async fn second_peer(&self) -> Deployment {
+        let (peer_listener, _) = listener().await;
+        routing::transport::start_with(
+            &self._pki,
+            &self.peer_spec,
+            peer_listener,
+            ServiceOptions {
+                sink: self.captured.clone(),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Shut `home-b.test` down: its streams end with a stream error.

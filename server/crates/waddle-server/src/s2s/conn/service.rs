@@ -419,6 +419,12 @@ impl S2sHandle {
         self.shared.registry.streams()
     }
 
+    /// Whether an established stream, inbound or outbound, carries the
+    /// pair of `local` and `remote` on this process.
+    pub fn carries(&self, local: &CanonicalDomain, remote: &CanonicalDomain) -> bool {
+        self.shared.registry.carries(local, remote)
+    }
+
     /// Open S2S sockets in every stage.
     pub fn open_sockets(&self) -> usize {
         self.shared.capacity.open_sockets()

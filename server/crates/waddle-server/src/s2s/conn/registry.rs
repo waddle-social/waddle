@@ -614,6 +614,15 @@ impl Registry {
             .and_then(|entry| entry.outbox.clone())
     }
 
+    /// Whether a stream between `local` and `remote` is registered, in
+    /// either direction.
+    pub(super) fn carries(&self, local: &CanonicalDomain, remote: &CanonicalDomain) -> bool {
+        self.state()
+            .streams
+            .keys()
+            .any(|key| &key.local == local && &key.remote == remote)
+    }
+
     /// Established streams in `direction`.
     pub(super) fn count(&self, direction: StreamDirection) -> usize {
         self.state()

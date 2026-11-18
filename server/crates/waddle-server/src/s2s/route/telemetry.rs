@@ -139,6 +139,17 @@ pub(super) fn seat_ended_stream_lost() {
     );
 }
 
+/// An inbound stream failed while another stream of its domain pair still
+/// carried the pair, so the pair's seats were kept.
+pub(super) fn seats_kept_pair_carried() {
+    counter_add!(
+        "waddle.s2s.route.seats.kept_pair_carried",
+        "{stream}",
+        "Failed inbound streams whose domain pair another stream still carried, so the seats of the pair's remote occupants were kept.",
+        1,
+    );
+}
+
 /// A remote occupant's seat ended because its room stopped being open to
 /// accounts at other servers.
 pub(super) fn seat_ended_room_closed() {

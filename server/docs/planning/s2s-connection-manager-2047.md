@@ -250,6 +250,10 @@ replaced the pair's stream or was refused with `conflict`.
   stream per pair may still refuse or replace a second replica's stream of
   this deployment with `conflict`; that is the peer's restriction, recorded
   under "Several replicas" in [the routing design](s2s-routing-2047.md).
+- **Lost streams and seats.** A failed inbound stream while another stream
+  of the pair, inbound or outbound, is still registered on the process does
+  not end the seats of the pair's remote occupants
+  ([routing design, inbound MUC](s2s-routing-2047.md#inbound-muc-w6a)).
 
 ## Resource model
 

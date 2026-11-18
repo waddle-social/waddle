@@ -57,12 +57,12 @@ use s2s_inbound_muc_support::{
     body, error_condition, error_of, federated_form, full, item, jid, local_groupchat, local_join,
     local_receives, local_receives_payload, local_set, naming, not_federating, owner_form,
     presence_between, remote_get, remote_groupchat, remote_join, remote_leave, remote_payload,
-    remote_set, room_with_remote_occupant, stanza_id, statuses, Hosted, Wiring, ARRIVES, BOB,
-    HOME_B, MUC, QUIET, ROOM,
+    remote_set, room_with_remote_occupant, send, stanza_id, statuses, wait_for, Hosted, Wiring,
+    ARRIVES, BOB, HOME_B, MUC, QUIET, ROOM,
 };
 use waddle_server::db::{Database, MigrationRunner};
 use waddle_server::permissions::host_grant::{RoomAffiliation, SeatEvidence, StreamEvidence};
-use waddle_server::s2s::conn::AuthenticationStrength;
+use waddle_server::s2s::conn::{AuthenticationStrength, StreamDirection};
 use waddle_server::s2s::route::{
     RouterLimits, Seat, SeatInsert, SeatLimits, SeatStore, SqlSeatStore,
 };
@@ -1377,6 +1377,70 @@ async fn a_lost_stream_removes_the_occupants_of_its_domain_with_status_333() {
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
     // The peer shuts down: its streams end with a stream error, so stanzas
     // either way may be lost (XEP-0045 §11.1).
+    hosted.stop_peer().await;
+    removed_with_333(&mut alice).await;
+    assert!(hosted.unseated(ROOM, BOB).await);
+}
+
+#[tokio::test]
+async fn a_lost_stream_beside_another_of_its_pair_keeps_the_seats() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let (mut hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    // A second node of the clustered home-b.test opens its own stream for
+    // the pair and carries the occupant's message on it.
+    let second = hosted.second_peer().await;
+    send(
+        &second,
+        HOME_B,
+        MUC,
+        remote_groupchat(BOB, ROOM, "via-second", "from the other node"),
+    )
+    .await;
+    let carried = local_receives(&mut alice, ARRIVES, |stanza| {
+        stanza.name() == "message" && stanza.attr("from") == Some(BOB_OCCUPANT)
+    })
+    .await
+    .expect("the message the second stream carried");
+    assert_eq!(body(&carried).as_deref(), Some("from the other node"));
+    let inbound_streams = || {
+        hosted
+            .service
+            .handle
+            .streams()
+            .iter()
+            .filter(|stream| {
+                stream.direction() == StreamDirection::Inbound
+                    && stream.local().as_str() == MUC
+                    && stream.remote().as_str() == HOME_B
+            })
+            .count()
+    };
+    assert_eq!(inbound_streams(), 2);
+
+    // That node stops: its stream ends with a stream error, but the first
+    // node's stream and this deployment's own stream to home-b.test still
+    // carry the pair, so the occupant keeps its seat.
+    let _ = second.service.shutdown(Duration::from_secs(5)).await;
+    assert!(wait_for(ARRIVES, || (inbound_streams() == 1).then_some(()))
+        .await
+        .is_some());
+    assert!(wait_for(ARRIVES, || (metrics
+        .counter_sum("waddle.s2s.route.seats.kept_pair_carried", &[])
+        .unwrap_or(0)
+        == 1)
+        .then_some(()))
+    .await
+    .is_some());
+    tokio::time::sleep(QUIET).await;
+    assert!(hosted.seat(ROOM, BOB).is_some());
+    assert!(local_receives(&mut alice, QUIET, |stanza| {
+        stanza.name() == "presence" && stanza.attr("from") == Some(BOB_OCCUPANT)
+    })
+    .await
+    .is_none());
+
+    // Once the whole peer is gone, the seat ends as for any lost stream.
     hosted.stop_peer().await;
     removed_with_333(&mut alice).await;
     assert!(hosted.unseated(ROOM, BOB).await);
