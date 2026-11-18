@@ -107,6 +107,7 @@ package(waddle-server) & (
     | binary(restricted_runtime_startup)
     | binary(restricted_clustered_startup)
     | binary(xep0045_host_grant_audience)
+    | binary(xep0045_host_grant_admission)
     | test(joins_beyond_the_bound_per_account_are_refused_whichever_resource_sends_them_on_postgresql)
     | test(concurrent_joins_of_one_account_hold_its_bound_exactly_on_postgresql)
     | test(clustering::)
