@@ -1441,6 +1441,7 @@ scope.
 | Join parent repair (`presence/muc/access.rs`) | Refused: a managed room is resolved from the store before any repair. For any other channel a join fills a parent only when the channel has none, its link names the Space and that Space lists its bookmark; it never adds a second parent or removes one. |
 | Spaces items backfill (`iq/spaces_items.rs`) | Refused for an enrolled Space node (PubSub refusal). In any other Space a linked channel is skipped unless the enrolled set decides it unmanaged: a managed room's bookmark is never published there, nor while its enrollment cannot be told. For any other channel a read backfills a bookmark and a parent only when no Space other than the read one is the channel's parent; it never removes a parent or another Space's bookmark. |
 | Extension route reads (`iq/extension_route_items.rs` member affiliation on room-bound nodes) | Refused for a managed room: it serves no extension state. |
+| Private event workspace (`iq/event_planning.rs`, every PubSub request a session addresses to a room JID, routed there by `iq/pubsub_dispatch.rs`; the room actor's snapshot in `iq/event_planning_access.rs` and its relay `waddle.clustering.relay.event_planning_access.v1`) | Gate (B2), on the replica that received the request. The snapshot, local or relayed from the room's owner, only selects the room incarnation's backing node; its affiliation decides nothing. It writes no grant, affiliation or subscription. |
 | Extension PubSub publication (`extension_commands/pubsub.rs`) | Refused for a managed room's channel, and for one whose enrollment cannot be told: such a room serves no extension state. |
 | Extension bot seating (`interpret/bot.rs`) | Refused: no grant is an extension bot's, so a bot is never seated in a managed room. |
 | Legacy permission reads (`CheckPermission`, `ListRelations`, `ListSubjects`, `LookupSubjects`, `LookupResources`) | Answer nothing for an enrolled object, decided from the enrolled set; fail before it has loaded. |
@@ -1477,6 +1478,7 @@ The sweep is lexical and the table is its review, not a call graph.
 | Muji call presence (starting, joining or preparing a call, and the call-thread anchor it starts) | `send_message`, on the local path and the relayed ordered delivery alike; unreadable grants refuse it with `internal-server-error`. Leaving a call is always accepted. |
 | Channel-wide mention (XEP-0513 `#channel` push) | `moderate`, decided before dispatch for a message that carries a channel mention and passed to the room chain; the role the room actor mirrors decides nothing, and unreadable grants broadcast nothing. A message without one reads no grants. |
 | Pin list | `read` |
+| Private event workspace (XEP-0060 storage under a room's JID) | Retrieving it `read`; publishing or retracting one's own objects `send_message`; the organizer's rights (publishing the `event` object, editing another member's shared object, retracting another member's object) `manage`, which only owner and admin standing confer, as they were the only affiliations that conferred them before. Every other request is refused as before. Unreadable grants answer `internal-server-error` (type `wait`); anyone the grants do not admit is answered `forbidden`. Decided without stream evidence: the MUC service's S2S handlers do not reach it. |
 | Room system messages (pin and unpin notices, call-thread anchors and endings) | Archived as the room's own; delivered to the seated occupants whose grants allow `read`. An interpreter without the WebSocket state, whose gate alone tells whether a scope manages the room, delivers none. |
 | Channel search | `view`, read by the channel binding; nobody else is shown the room. |
 | Admin channel listing | `view`; the community-owner role the command needs is not a grant. A listed room shows members-only and its recorded grants as counts. |
@@ -1488,6 +1490,17 @@ The sweep is lexical and the table is its review, not a call graph.
 Extension observers in a managed room observe nothing: the acceptance drops
 them like any other unadmitted reader (first slice), its room-bound
 extension nodes are not served, and extension bots hold no grant.
+
+Private event rooms. A room's private event workspace is the one PubSub
+storage served under a room's JID. In a managed room the room actor's
+snapshot is still asked for the incarnation whose backing node the request
+reads or writes, so a room recreated at the same JID cannot reach an
+earlier incarnation's objects; whether the requester may act is decided
+only from the grants. The room `disco#info` of an event room
+(`disco_info/muc.rs`) decides `view` from the grants first; its further
+check that the snapshot names the requester a member can only hide the
+room's description from a grantee whose mirror is behind, never show it
+to anyone else.
 
 Channel placement in a Space (every room no scope manages). Publishing a
 room's bookmark to a Space node moves the channel's link to the node and
@@ -1618,6 +1631,19 @@ change stays recorded, and it is what every admission reads.
   newer generation, invitation rollbacks do not write
   it, and a room re-seated after a claim move seats only occupants whose
   grants allow `read`, with their canonical standing.
+- **Private event workspace.** The grants are read before the room's
+  snapshot is asked, so a request the grants refuse learns nothing of the
+  room. The standing a request is decided with is confirmed with
+  `still_allows` after its last await and before its effect: a retrieval
+  after the items were read and before the response is built, a
+  publication after the lookups and node preparation it needs and just
+  before the conditional write, a retraction just before the retraction;
+  an organizer's request confirms `manage` as well. A revoke that commits
+  before that confirmation is honoured; one that commits after it may still
+  see the write land, as already accepted work. The workspace configures
+  its node with no notifications, no payload delivery and no last-item
+  delivery, and accepts no subscription, so nothing fans out from it and no
+  PubSub admission identity is needed for it.
 - **Room-bound extension nodes of unmanaged rooms** are decided by the room
   as it stands: subscribe and event delivery need the channel's `view` and
   no ban, publication its `send_message`, whatever PubSub affiliation an
@@ -1679,7 +1705,8 @@ With no scope enrolled, these changes alter behaviour for every room:
   administration IQs, moderation, call setup, room system messages,
   invitations, Spaces publish and retract, Spaces PubSub and its fan-out,
   extension host tools, extension bots and state, admin channel and Space
-  commands) decides an unmanaged room in memory, with no PostgreSQL read,
+  commands, private event workspaces) decides an unmanaged room in memory,
+  with no PostgreSQL read,
   and keeps its existing checks; it fails closed only while the set has
   never loaded. A room address that is not canonical and reaches no
   enrolled room keeps its existing checks too.
@@ -1768,7 +1795,18 @@ The suites, all under `crates/waddle-server/tests/`:
   nothing whatever the request's PEP classification, the moderator role
   refused to a seated remote occupant, the topology bootstrap leaving
   an enrolled default channel and General Space alone, and the enrollment
-  of a group direct-message room refused.
+  of a group direct-message room refused. Its `event_workspace` cases cover
+  a managed room's private event workspace: an account without a grant
+  that the room actor's list names an owner reads and writes nothing, a
+  member the list names an owner gains no organizer right, a member the
+  list does not name reads it, a revoked member reads and retracts
+  nothing, the owner maintains the `event` object and retracts another
+  member's object, and a replica without an attachment answers
+  `internal-server-error` while a room no scope enrolls keeps deciding its
+  workspace from the room actor's list.
+- `s2s_reachability.rs`: a PubSub request to a room JID on an inbound S2S
+  stream is refused before any room handler, so the event workspace
+  decides sessions only.
 - `host_grant_enrolled_set.rs` (PostgreSQL): loading, refresh after an
   enrollment, a failed refresh and vanished relations keeping the set, the
   set's age growing while refreshes fail and resetting on a reload, the
@@ -1807,7 +1845,11 @@ only, and each case creates and drops its own database;
 on the in-memory test state. The set was last executed on 2026-11-15 at
 commit `ef5205cf2`, against PostgreSQL 17.11 and SpiceDB 1.56.1 (memory
 datastore) with nextest's default parallelism, and passed 64 of 64 cases.
-Only this document has changed since that commit.
+Since then the private event workspace was put behind the gate:
+`xep0045_host_grant_fence` alone, with its `event_workspace` cases, was
+executed on 2026-11-18 at commit `9a1120d89` with `cargo test` against a
+local PostgreSQL cluster and `WADDLE_TEST_REQUIRE_POSTGRES=1`, and passed 33
+of 33 cases; the other binaries of the set were not run again.
 
 The recovery pass a replica runs when it attaches is covered by the first
 slice's suites (`xep0045_host_grant_admission.rs`, `host_grant_projection.rs`).

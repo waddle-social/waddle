@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "60dd0aea40b014d8cc6b3cfe917ae40e78b3cb06",
+  "baseline_commit": "9a1120d89369ace0fbe1dc0c503b823cf17efb48",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -350,6 +350,10 @@
     {
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
       "sha256": "5b6241bbbaf01bd75a1ac4ee122aef14d5b771274d1abb84972808b28decc815"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/event_planning.rs",
+      "sha256": "e0b038ec3aa5cf6a82ed55b0a0acb1cbc0e0c967d1f9bc7f89944569ebdc4478"
     }
   ],
   "anchors": {
@@ -1172,6 +1176,16 @@
       "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/disco_items.rs",
       "line": 1698,
       "text": "async fn space_children_for_session("
+    },
+    "hg-event-workspace": {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/event_planning.rs",
+      "line": 174,
+      "text": ".room(RoomBinding::Room(room))"
+    },
+    "hg-event-workspace-confirm": {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/event_planning.rs",
+      "line": 117,
+      "text": "async fn still_holds("
     }
   },
   "lexical_tokens": [
@@ -1231,7 +1245,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "8336abe7d71638369e8ad1ecee2d409d354fd62511dc4498d041b4f1b25d8a4c",
+    "sha256": "dc2f0e72466a607c1372bd60b44576c9d3d7214f785e27b366438d35d87767a7",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,

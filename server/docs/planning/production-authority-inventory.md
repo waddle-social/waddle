@@ -1912,6 +1912,42 @@ command now ends the account's sessions before it sweeps; that file is not
 in the inventory. No anchor moved, and the raw scan holds the same 1665
 records.
 
+The selected evidence was refreshed a fifty-second time, through
+`9a1120d89369ace0fbe1dc0c503b823cf17efb48`. One reviewed file was added and none of the
+reviewed files changed:
+
+- `handlers/iq/event_planning.rs` is now reviewed (anchors
+  `hg-event-workspace` and `hg-event-workspace-confirm`). The private event
+  workspace decides a room an enrolled scope manages through
+  `HostGrantGate::room`, on the replica that received the request and before
+  the room actor's snapshot is asked: `read` to retrieve the workspace,
+  `send_message` to publish or retract one's own objects, and `manage` as
+  well for the organizer's rights (the `event` object, editing another
+  member's shared object, retracting another member's object). Grants that
+  cannot be read answer `internal-server-error`. The standing is confirmed
+  with `still_allows` after the last await before each effect
+  (`still_holds`). In such a room the snapshot's affiliation, local or relayed
+  as `waddle.clustering.relay.event_planning_access.v1`, decides nothing; it
+  only selects the room incarnation's backing node. A room no scope manages
+  is decided from the snapshot as before. This closes the decision of
+  standing outside the authority that the fiftieth refresh recorded as open.
+  The workspace is reached by sessions only: a PubSub request to a room JID
+  on an inbound S2S stream is refused (`Refusal::RoomRequest`), so it is
+  decided without stream evidence. It writes no grant, affiliation or
+  subscription.
+- `handlers/iq/event_planning_access.rs` and the room `disco#info` of an
+  event room (`disco_info/muc.rs`, not reviewed files) are unchanged. The
+  latter decides `view` from the grants before its snapshot check, which
+  can only narrow it.
+
+No grant writer or storage plane of the host-grant authority was added, and
+no producer of stream evidence changed.
+
+- The raw scan holds 1665 records, the same number for every token as in
+  the fifty-first refresh; its digest changed because six records moved
+  with the lines added above them: the workspace handler's `retract_item`
+  and five `ChangeAffiliation` records of its unit tests.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
