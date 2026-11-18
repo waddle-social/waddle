@@ -1145,7 +1145,7 @@ async fn unanswered_sweep_waits_for_deadline_and_advances_watermark() {
 }
 
 #[tokio::test]
-async fn full_unanswered_batch_stops_before_its_last_row_and_processes_tied_timestamps() {
+async fn one_sweep_pages_through_tied_timestamps_at_batch_size_one() {
     let fixture = Fixture::start().await;
     let (mut alice, _bob) = live_invitation(&fixture).await;
     fixture.control_after_retract(&mut alice).await;
@@ -1156,16 +1156,10 @@ async fn full_unanswered_batch_stops_before_its_last_row_and_processes_tied_time
         .await
         .expect("tie invitation timestamps");
     let mut watermark = created - 300_000;
-    for _ in 0..2 {
-        fixture
-            .sweep_unanswered_at(&mut watermark, created + 55_000, 1)
-            .await;
-        assert_eq!(
-            watermark,
-            created - 1,
-            "a full batch stops just before its last row"
-        );
-    }
+    fixture
+        .sweep_unanswered_at(&mut watermark, created + 55_000, 1)
+        .await;
+    assert_eq!(watermark, created, "a completed sweep advances the bound");
     assert_eq!(
         fixture
             .candidates()
@@ -1175,8 +1169,4 @@ async fn full_unanswered_batch_stops_before_its_last_row_and_processes_tied_time
             .count(),
         2
     );
-    fixture
-        .sweep_unanswered_at(&mut watermark, created + 55_000, 1)
-        .await;
-    assert_eq!(watermark, created, "empty follow-up advances the bound");
 }

@@ -79,8 +79,9 @@ so the triggering retract cannot suppress itself. Query errors and incomplete
 
 The process-local scan watermark begins five minutes before startup. Pending
 and recently outboxed invitations use the existing partial indices. A successful
-non-full batch advances to its due-time bound; a full batch advances to just
-before its last row, so later calls are not held back. An error retains the
+sweep reads every due page in `(created_at_ms, recipient, conversation, stanza
+id)` order, so calls that need no alert cannot hold later ones back whatever
+the batch size, then advances to its due-time bound. An error retains the
 watermark, but never further back than five minutes. For the timer a plain
 caller retract is not an outcome: either the retract path already wrote the
 missed-call row, or it lost the race with the invitation and the timer alerts.

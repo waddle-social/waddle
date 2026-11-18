@@ -583,6 +583,18 @@ async fn unanswered_scan_bounds_and_insert(store: &crate::support::TestStore) {
         .await
         .expect("empty interval")
         .is_empty());
+    // The page after a row continues in the full ordering key.
+    let next = store
+        .due_unanswered_calls_after(100_000, &due[0], 110_000, 16)
+        .await
+        .expect("next page");
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].candidate.archive_stanza_id().id, "outboxed-due");
+    assert!(store
+        .due_unanswered_calls_after(100_000, &due[1], 110_000, 16)
+        .await
+        .expect("page after the last row")
+        .is_empty());
     let call = &due[0].candidate;
     let missed = call.unanswered_call().expect("derived missed call");
     assert_eq!(missed.reason(), NotificationReason::CallUnanswered);
@@ -873,14 +885,17 @@ mod unanswered_sweep {
     }
 
     #[tokio::test]
-    async fn a_full_batch_of_answered_calls_does_not_hold_back_a_later_call() {
+    async fn an_answered_call_does_not_hold_back_later_calls_at_batch_size_one() {
         let mut fixture = Fixture::new().await;
-        fixture.invitation("session", DUE_MS - 2_000).await;
+        // Answered, so it stays eligible for the scan on every sweep.
+        fixture.invitation("session", DUE_MS).await;
         fixture.outcome("proceed", false, true).await;
-        fixture.invitation("later", DUE_MS).await;
-        assert!(fixture.sweep(2).await);
-        assert_eq!(fixture.missed_count().await, 1);
-        assert_eq!(fixture.watermark, DUE_MS - 1);
+        // One call tied on the timestamp and one before it.
+        fixture.invitation("tied", DUE_MS).await;
+        fixture.invitation("zz-earlier", DUE_MS - 2_000).await;
+        assert!(fixture.sweep(1).await);
+        assert_eq!(fixture.missed_count().await, 2);
+        assert_eq!(fixture.watermark, DUE_MS);
     }
 
     #[tokio::test]
@@ -909,18 +924,13 @@ mod unanswered_sweep {
     }
 
     #[tokio::test]
-    async fn full_batches_stop_before_their_last_row_and_handle_timestamp_ties() {
+    async fn a_sweep_pages_through_timestamp_ties_with_any_batch_size() {
         let mut fixture = Fixture::new().await;
         fixture.invitation("first", DUE_MS).await;
         fixture.invitation("second", DUE_MS).await;
-        for count in [1, 2] {
-            assert!(fixture.sweep(1).await);
-            assert_eq!(fixture.missed_count().await, count);
-            assert_eq!(fixture.watermark, DUE_MS - 1);
-        }
         assert!(fixture.sweep(1).await);
-        assert_eq!(fixture.watermark, DUE_MS);
         assert_eq!(fixture.missed_count().await, 2);
+        assert_eq!(fixture.watermark, DUE_MS);
     }
 
     #[tokio::test]
