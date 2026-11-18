@@ -1948,6 +1948,23 @@ no producer of stream evidence changed.
   with the lines added above them: the workspace handler's `retract_item`
   and five `ChangeAffiliation` records of its unit tests.
 
+The selected evidence was refreshed a fifty-third time, through
+`26140482c16973f53e02fb77e978bb703b57a798`. One reviewed file changed, and only in a test:
+`websocket/tests/muc.rs`, whose owner configuration form case now expects
+the `urn:waddle:roomconfig:federated` field and its default `0`. No
+production code among the reviewed files changed, the anchor `e-repair`
+moved with the nine lines added above it, and no grant writer, storage
+plane or producer of stream evidence was added.
+
+- The raw scan holds 1665 records, the same number for every token as in
+  the fifty-second refresh; its digest changed because 21 records moved:
+  nineteen `WriteTuple`, `ChangeAffiliation`, `publish_item` and
+  `UpdateConfig` records of `websocket/tests/muc.rs`, and the two
+  `DeleteTuple` records of the parent-move characterization
+  (`permissions/parent_move_native_tests/harness.rs`), whose operator is
+  now made the deployment owner through the existing tuple helper before
+  the first placement.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
