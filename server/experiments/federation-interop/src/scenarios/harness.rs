@@ -203,6 +203,9 @@ impl Harness {
             }
             view.services
                 .insert(RAW_PEER.to_owned(), ports.raw_receiver());
+            if let Server::Ejabberd(_) = source {
+                view.srv_target = Some("localhost".to_owned());
+            }
             dns.push(StubDns::start(port, view).await?);
         }
         let mut fronts = Vec::new();

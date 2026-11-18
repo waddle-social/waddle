@@ -3,9 +3,12 @@
 //! `.test` domains.
 //!
 //! Each third-party server gets its own view: `_xmpp-server._tcp.<domain>`
-//! answers one SRV record whose target is the domain itself and whose port
-//! is that server's relay towards the domain, and the domain's A record is
-//! `127.0.0.1`. `_xmpps-server` answers no record, so no peer attempts
+//! answers one SRV record whose port is that server's relay towards the
+//! domain, and whose target is the domain itself, whose A record is
+//! `127.0.0.1`, or `localhost` in a view whose server resolves SRV targets
+//! with the operating system's resolver instead of this stub (ejabberd's
+//! `xmpp_stream_out` looks SRV records up with `inet_res` but their targets
+//! with `getaddrinfo`, which cannot see the `.test` names). `_xmpps-server` answers no record, so no peer attempts
 //! direct TLS, which Waddle does not accept inbound. Every other name does
 //! not exist. Waddle itself never uses this server: it reaches its peers
 //! through configured endpoints, and its DNS discovery is covered by the
@@ -26,6 +29,8 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, Default)]
 pub struct View {
     pub services: BTreeMap<String, u16>,
+    /// The SRV target for every service, or the domain itself when `None`.
+    pub srv_target: Option<String>,
 }
 
 /// A running stub server and the questions it was asked.
@@ -119,17 +124,20 @@ fn answer(view: &View, name: &str, query: &Query) -> (ResponseCode, Vec<Record>)
     }
     if let Some(domain) = name.strip_prefix("_xmpp-server._tcp.") {
         return match (view.services.get(domain), query.query_type()) {
-            (Some(port), RecordType::SRV) => match Name::from_ascii([domain, "."].concat()) {
-                Ok(target) => (
-                    ResponseCode::NoError,
-                    vec![Record::from_rdata(
-                        owner,
-                        TTL,
-                        RData::SRV(SRV::new(0, 0, *port, target)),
-                    )],
-                ),
-                Err(_) => (ResponseCode::ServFail, Vec::new()),
-            },
+            (Some(port), RecordType::SRV) => {
+                match Name::from_ascii([view.srv_target.as_deref().unwrap_or(domain), "."].concat())
+                {
+                    Ok(target) => (
+                        ResponseCode::NoError,
+                        vec![Record::from_rdata(
+                            owner,
+                            TTL,
+                            RData::SRV(SRV::new(0, 0, *port, target)),
+                        )],
+                    ),
+                    Err(_) => (ResponseCode::ServFail, Vec::new()),
+                }
+            }
             (Some(_), _) => (ResponseCode::NoError, Vec::new()),
             (None, _) => (ResponseCode::NXDomain, Vec::new()),
         };
