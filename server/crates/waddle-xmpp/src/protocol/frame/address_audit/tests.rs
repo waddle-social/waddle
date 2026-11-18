@@ -1,5 +1,8 @@
 use super::inspect_stanza_addresses;
-use crate::protocol::frame::{parse_frame_with_metadata, InboundFrame, CLIENT_STANZA_NS};
+use crate::identity::IdentityError;
+use crate::protocol::frame::{
+    parse_frame_with_metadata, InboundFrame, ParseError, CLIENT_STANZA_NS,
+};
 use crate::Stanza;
 use xmpp_parsers::minidom::rxml::xml_ncname;
 use xmpp_parsers::minidom::Element;
@@ -18,6 +21,27 @@ fn decoded_character_reference_is_captured_before_preparation() {
     );
     assert!(audit.from.original.is_none());
     assert!(audit.from.prepared.is_none());
+    // The audit reports the folding the JID parser would apply; the live
+    // parser applies the identity profile to the decoded address instead,
+    // and refuses a localpart that preparation would change rather than
+    // folding it.
+    assert!(matches!(
+        parse_frame_with_metadata(frame),
+        Err(ParseError::IdentityProfile {
+            kind: "message",
+            error: IdentityError::NonCanonicalLocalpart,
+        })
+    ));
+}
+
+#[test]
+fn decoded_character_reference_of_a_canonical_address_matches_the_live_parser() {
+    let frame = "<message xmlns='jabber:client' to='fu&#x62;ball@home.example.test' type='chat'/>";
+    let audit = inspect_stanza_addresses(frame).expect("audit");
+    assert_eq!(
+        audit.to.original.as_ref().expect("original").as_str(),
+        "fubball@home.example.test"
+    );
     let parsed = parse_frame_with_metadata(frame).expect("live parser");
     let InboundFrame::Stanza(stanza) = parsed.frame else {
         panic!("stanza")
