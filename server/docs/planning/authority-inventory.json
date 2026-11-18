@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "baseline_commit": "4ecbf0e3dcc3eb19d5625dbb6e4cdbec2f4cad51",
+  "baseline_commit": "b3e8a4e1e6184242886bc29e319a6e84c59874c9",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
   "sources": [
     {
@@ -13,7 +13,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/admin/spaces.rs",
-      "sha256": "ed23b17c1841b5208f216904b8fe6ae32e41925bd57c0696fb651fdf7fd75343"
+      "sha256": "9eb76d4cb9cc42c34c6fc1740d146a4a102e651febc89e3d76619fc63b709ce9"
     },
     {
       "path": "server/crates/waddle-server/src/auth/native.rs",
@@ -113,7 +113,7 @@
     },
     {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "sha256": "de0ffbdfa93cd0fa079c0813e5507b74fed99ab22f778e5fee88ed41e2f40e68"
+      "sha256": "f63b6482b0d9a6b57e3880dfbdbfed4f5a557467457e26b04a33531f5f6cca76"
     },
     {
       "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
@@ -464,12 +464,12 @@
     },
     "space-admin": {
       "path": "server/crates/waddle-server/src/admin/spaces.rs",
-      "line": 1847,
+      "line": 1854,
       "text": "async fn run_set_role("
     },
     "space-delete": {
       "path": "server/crates/waddle-server/src/admin/spaces.rs",
-      "line": 1139,
+      "line": 1146,
       "text": "async fn run_delete("
     },
     "group-dm": {
@@ -1069,7 +1069,7 @@
     },
     "s2s-adopted-seats": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2745,
+      "line": 2762,
       "text": "pub(super) fn end_adopted_seats(&self, room: &BareJid, occupants: &[FullJid]) {"
     },
     "hg-seats-honour-anywhere": {
@@ -1079,7 +1079,7 @@
     },
     "s2s-seat-adoption": {
       "path": "server/crates/waddle-server/src/s2s/route/router/hosting.rs",
-      "line": 2678,
+      "line": 2695,
       "text": "pub(super) async fn adopt_seat("
     },
     "s2s-unseated-removal": {
@@ -1099,7 +1099,7 @@
     },
     "d8-space-set-role": {
       "path": "server/crates/waddle-server/src/admin/spaces.rs",
-      "line": 1862,
+      "line": 1869,
       "text": "if matches!(args.role, SpaceRole::Owner | SpaceRole::Admin) {"
     },
     "d8-space-affiliations": {
@@ -1245,7 +1245,7 @@
     "CarriedPrincipal"
   ],
   "lexical_snapshot": {
-    "sha256": "549913ec05f0d23ecdac29a230596dc49f64ea0fd6b62c472a51190900602a5a",
+    "sha256": "fdcf169a2e99f44e31aa4ee056df50f6950e9fe2809bbfa6c0cabe5c7ff66bd1",
     "occurrences": {
       "WriteTuple": 67,
       "DeleteTuple": 21,

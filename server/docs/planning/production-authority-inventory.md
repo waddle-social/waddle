@@ -1982,6 +1982,19 @@ storage plane or producer of stream evidence was added.
   exactly as a room item is stored; every other token has the same number
   of records as in the fifty-third refresh, some at new lines.
 
+The selected evidence was refreshed a fifty-fifth time, through
+`b3e8a4e1e6184242886bc29e319a6e84c59874c9`. Two reviewed files changed. `admin/spaces.rs` now counts
+a Space's Channels in `spaces:list` without its XEP-0503 image items, a
+read that writes nothing. `s2s/route/router/hosting.rs` keeps the seats of
+a pair's remote occupants when a lost inbound stream leaves another stream
+of the pair on the replica, since a peer may hold several inbound streams
+per pair (owner decision of 2026-11-18); the seats it keeps were admitted
+as before, and it adds no grant writer, storage plane or producer of
+stream evidence. Five anchors moved with the lines added above them.
+
+- The raw scan holds 1666 records, the same number of each token as in
+  the fifty-fourth refresh, some at new lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
