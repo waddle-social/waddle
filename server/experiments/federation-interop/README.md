@@ -25,7 +25,7 @@ bash server/experiments/federation-interop/run-native.sh
 bash server/experiments/federation-interop/run-native.sh --only flow.,obs.
 bash server/experiments/federation-interop/run-native.sh --port-base 48100 --keep
 
-# A later tree on which more slices have landed:
+# A tree on which the table lists slices as missing that have landed:
 INTEROP_LANDED=W6a,W6b,W6c bash server/experiments/federation-interop/run-native.sh
 ```
 
@@ -75,12 +75,13 @@ Every row of the plan's tables is in `src/manifest.rs`. A row is PASS only
 when every check it ran passed; a row whose slices have not landed, whose
 peer did not start, or that the harness cannot drive is UNVERIFIED with the
 reason. `manifest::LANDED` says which slices are on the tree; on
-`integration/2047` as written, W5d, W5e, W5r, W6a, W6b, W6c, W7a, W7b and W8
-have not landed.
+`integration/2047` every slice the rows depend on has landed (W5d, W5e,
+W5r, W6a, W6b, W6c, W7a, W7b and W8), and `INTEROP_LANDED` adds slices to
+a table that lists some as missing.
 
-Until W6c lands, what crosses S2S in both directions is server-domain
-traffic: a local account's IQ to a remote entity is routed and a remote IQ
-to the server domain is answered. The transport rows use it.
+The transport rows use server-domain traffic, which crosses S2S in both
+directions whatever else has landed: a local account's IQ to a remote
+entity is routed and a remote IQ to the server domain is answered.
 
 | Row | What drives it |
 | --- | --- |

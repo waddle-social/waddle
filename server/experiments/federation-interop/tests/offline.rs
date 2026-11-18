@@ -121,7 +121,24 @@ fn manifest_ids_are_unique_and_unlanded_slices_gate_rows() {
             assert!(!reason.is_empty(), "row {} gives no reason", row.id);
         }
     }
-    assert!(!manifest::landed(Slice::W6c) || std::env::var("INTEROP_LANDED").is_ok());
+    // Every slice a row names is in the table, so a row is gated only by
+    // what the table (or INTEROP_LANDED) says about it.
+    for row in manifest::ROWS {
+        for slice in row.requires.iter().chain(row.waddle_also_requires) {
+            assert!(
+                manifest::LANDED.iter().any(|(listed, _)| listed == slice),
+                "row {} needs {}, which the table does not list",
+                row.id,
+                slice.name()
+            );
+        }
+    }
+    for (slice, landed) in manifest::LANDED {
+        if *landed {
+            assert!(manifest::landed(*slice));
+        }
+    }
+    assert!(manifest::landed(Slice::W6c));
 }
 
 #[test]

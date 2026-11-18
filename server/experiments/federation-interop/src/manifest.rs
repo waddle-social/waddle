@@ -77,18 +77,21 @@ impl Slice {
     }
 }
 
-/// Whether each slice is on the tree this harness was written against
-/// (integration/2047 with W0–W4d, W5a–W5c, W5i and W5o merged).
+/// Whether each slice is on the tree the harness runs against. On
+/// integration/2047 every slice the rows depend on is merged (W5d, W5e,
+/// W5r, W6a, W6b, W6c, W7a, W7b and W8, on top of W0–W4d, W5a–W5c, W5i and
+/// W5o), so no row is held back for a missing slice; `INTEROP_LANDED` can
+/// still add slices to a table that lists some as missing.
 pub const LANDED: &[(Slice, bool)] = &[
-    (Slice::W5d, false),
-    (Slice::W5e, false),
-    (Slice::W5r, false),
-    (Slice::W6a, false),
-    (Slice::W6b, false),
-    (Slice::W6c, false),
-    (Slice::W7a, false),
-    (Slice::W7b, false),
-    (Slice::W8, false),
+    (Slice::W5d, true),
+    (Slice::W5e, true),
+    (Slice::W5r, true),
+    (Slice::W6a, true),
+    (Slice::W6b, true),
+    (Slice::W6c, true),
+    (Slice::W7a, true),
+    (Slice::W7b, true),
+    (Slice::W8, true),
 ];
 
 pub fn landed(slice: Slice) -> bool {
