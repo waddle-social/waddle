@@ -1,0 +1,109 @@
+# Kept separate from cuenv-generated CI so validation runs never receive the
+# Android signing key. This workflow runs only after the main-branch default
+# pipeline succeeds; SDK and Rust prerequisites run in a step without signing
+# values, and the key is exposed only to the final publish step.
+name: waddle-android-publish
+
+on:
+  workflow_run:
+    workflows: [waddle-android-default]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: waddle-android-publish
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    name: waddle-android-publish
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Cache Android SDK and Gradle on Namespace volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: |-
+            /home/runner/.android-sdk
+            /home/runner/.gradle
+
+      - name: Bound CUE evaluator memory
+        run: |-
+          printf '%s\n' 'GOGC=100' >> "$GITHUB_ENV"
+
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: '900'
+          upstream-cache-filter: 'true'
+          version: v2.0.0
+
+      - name: Setup cuenv (release)
+        run: |-
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+            aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+            *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+          esac
+          cuenv_version="0.57.3"
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+          curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url"
+          chmod +x /usr/local/bin/cuenv
+
+      - name: Prepare Android SDK and Rust libraries
+        working-directory: apps/android
+        run: >-
+          cuenv exec --path . env ANDROID_HOME=/home/runner/.android-sdk bash -c
+          'bash ../../scripts/setup-android-sdk.sh &&
+          bash ../../scripts/build-android-rust.sh --skip-bindings'
+
+      - name: Confirm validated commit is still main
+        id: main_tip
+        run: |-
+          current_main_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ -z "$current_main_sha" ]; then
+            echo "Could not resolve the current main commit" >&2
+            exit 1
+          fi
+          if [ "$current_main_sha" = "$VALIDATED_SHA" ]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping stale validation run $VALIDATED_SHA; main is now $current_main_sha"
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          VALIDATED_SHA: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Sign and publish preview APK
+        if: steps.main_tip.outputs.current == 'true'
+        run: cuenv task publishApk --skip-dependencies --path apps/android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_ANDROID_PREVIEW_KEYSTORE_B64: ${{ secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_B64 }}
+          CI_ANDROID_PREVIEW_KEYSTORE_PASSWORD: ${{ secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_PASSWORD }}
