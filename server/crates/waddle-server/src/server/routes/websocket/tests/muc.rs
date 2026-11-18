@@ -3824,8 +3824,17 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
             waddle_xmpp::xep::FIELD_FORUM_MODE,
             "muc#roomconfig_allowpm",
             waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
+            waddle_xmpp::muc::owner::FIELD_FEDERATED,
         ]
     );
+    // A room is closed to other servers until an owner turns its federated
+    // setting on.
+    let federated = form
+        .children()
+        .find(|field| field.attr("var") == Some(waddle_xmpp::muc::owner::FIELD_FEDERATED))
+        .and_then(|field| field.get_child("value", waddle_xmpp::muc::DATA_FORMS_NS))
+        .map(|value| value.text());
+    assert_eq!(federated.as_deref(), Some("0"));
 }
 
 #[tokio::test]
