@@ -86,7 +86,10 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     h.redirect.clear();
     let key = uuid::Uuid::new_v4().simple().to_string();
     h.redirect.issue_key(&key);
-    let admission = support::LogMark::new(h, Home::A, &["s2s connection ended", "\"admission\""]);
+    // redirect.test is admitted, so the refusal is not an admission
+    // outcome: home-a ends the stream with its own stream error, which it
+    // logs as the `Protocol` outcome.
+    let ended = support::LogMark::new(h, Home::A, &["s2s connection ended", "\"protocol\""]);
     let attempt = initiator::attempt(
         &h.pki,
         h.ports.waddle_s2s(Home::A),
@@ -94,7 +97,7 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     )
     .await?;
     let verified = verifications(&h.redirect);
-    let logged = admission.settled(h, 1).await;
+    let logged = ended.settled(h, 1).await;
     // Admitted, so the refusal comes after TLS, when dialback is offered.
     outcome.check(
         "dialback refused after TLS by the list, before any verification",
@@ -103,7 +106,7 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
             && verified == 0
             && logged > 0,
         format!(
-            "{}; verification requests to redirect.test {verified}; home-a logged {logged} connections ended for admission",
+            "{}; verification requests to redirect.test {verified}; home-a logged {logged} connections ended with its own stream error",
             attempt.describe()
         ),
     );
@@ -146,6 +149,8 @@ pub async fn after_certificate_failure(h: &mut Harness, _peer: Peer) -> Result<O
 pub async fn unsolicited(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer on an EXTERNAL-authenticated stream");
     support::raw_control(h).await?;
+    // An unsolicited request and an answer nothing asked for: both end the
+    // stream (XEP-0220 sections 2.2 and 4.1).
     for (name, element) in [
         (
             "unsolicited db:result",
@@ -156,24 +161,16 @@ pub async fn unsolicited(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
                 .build(),
         ),
         (
-            "uncorrelated db:verify",
+            "uncorrelated db:verify answer",
             Element::builder("verify", ns::DIALBACK)
                 .attr(xml_ncname!("from").to_owned(), RAW_PEER)
                 .attr(xml_ncname!("to").to_owned(), HOME_A)
-                .attr(xml_ncname!("id").to_owned(), "no-such-stream")
-                .append("0123456789abcdef")
+                .attr(xml_ncname!("id").to_owned(), "no-such-request")
+                .attr(xml_ncname!("type").to_owned(), "valid")
                 .build(),
         ),
     ] {
-        let mut plan = Plan::external(RAW_PEER, HOME_A, &h.leaf(RAW_PEER)?);
-        plan.open = plan.open.with_dialback();
-        let attempt = initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), &plan).await?;
-        let Some(mut stream) = attempt.stream else {
-            outcome.check(
-                name,
-                false,
-                ["could not establish: ", &attempt.describe()].concat(),
-            );
+        let Some(mut stream) = external_stream(h, &mut outcome, name).await? else {
             continue;
         };
         stream.send(&element).await?;
@@ -193,8 +190,61 @@ pub async fn unsolicited(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
             ),
         );
         stream.close().await;
+        tokio::time::sleep(PAIR_RELEASE).await;
+    }
+    // A verification request is a request home-a answers as the
+    // Authoritative Server on any stream from the pair; it holds no state
+    // to correlate it with (XEP-0185 keys), so a key it did not issue is
+    // answered `invalid`, never `valid`.
+    let name = "a verification request for a key home-a did not issue";
+    if let Some(mut stream) = external_stream(h, &mut outcome, name).await? {
+        let request = Element::builder("verify", ns::DIALBACK)
+            .attr(xml_ncname!("from").to_owned(), RAW_PEER)
+            .attr(xml_ncname!("to").to_owned(), HOME_A)
+            .attr(xml_ncname!("id").to_owned(), "no-such-stream")
+            .append("0123456789abcdef")
+            .build();
+        stream.send(&request).await?;
+        let ending = stream.watch(QUIET).await;
+        let answers: Vec<Option<&str>> = ending
+            .elements
+            .iter()
+            .filter(|element| element.is("verify", ns::DIALBACK))
+            .map(|element| element.attr("type"))
+            .collect();
+        outcome.check(
+            [name, " is answered invalid"].concat(),
+            answers == [Some("invalid")],
+            format!(
+                "answers {answers:?}, stream error {:?}, closed {}",
+                ending.stream_error, ending.closed
+            ),
+        );
+        stream.close().await;
+        tokio::time::sleep(PAIR_RELEASE).await;
     }
     Ok(outcome)
+}
+
+/// An EXTERNAL-authenticated peer-raw.test stream that declares the
+/// dialback namespace, or a failed check named `name` when it does not
+/// establish.
+async fn external_stream(
+    h: &Harness,
+    outcome: &mut Outcome,
+    name: &str,
+) -> Result<Option<RawStream>> {
+    let mut plan = Plan::external(RAW_PEER, HOME_A, &h.leaf(RAW_PEER)?);
+    plan.open = plan.open.with_dialback();
+    let attempt = initiator::attempt(&h.pki, h.ports.waddle_s2s(Home::A), &plan).await?;
+    if attempt.stream.is_none() {
+        outcome.check(
+            name,
+            false,
+            ["could not establish: ", &attempt.describe()].concat(),
+        );
+    }
+    Ok(attempt.stream)
 }
 
 /// A stream of each kind the row covers, authenticated as peer-raw.test.
