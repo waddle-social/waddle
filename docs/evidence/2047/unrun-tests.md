@@ -691,7 +691,7 @@ implemented unless the text says so.
 ### Connection manager design (`s2s-connection-manager-2047.md`)
 
 - W10 harness cases: a clustered ejabberd with `max_s2s_connections` above
-  one, for the one-stream-per-pair restriction; a stanza whose `to` domain
+  one, for several inbound streams per pair; a stanza whose `to` domain
   is in mixed case; and whether Prosody or ejabberd ever sends whitespace
   before a stream header, which this profile refuses.
 - Measure the time a stanza at the 512 KiB ceiling takes when many streams

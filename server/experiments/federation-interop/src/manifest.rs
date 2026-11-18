@@ -216,7 +216,7 @@ pub const ROWS: &[Row] = &[
     row("obs.mixed-case-to", Observation,
         "A stanza from the peer whose `to` domain is in mixed case is accepted, the domain mapped to lowercase", ALL),
     row("obs.ejabberd-cluster-streams", Observation,
-        "Clustered ejabberd with max_s2s_connections above one against one stream per directional pair", EJABBERD_ONLY),
+        "Clustered ejabberd with max_s2s_connections above one against Waddle's several inbound streams per directional pair", EJABBERD_ONLY),
     // Negative matrix: certificates and trust.
     g20(row("neg.cert.wrong-name", Negative, "A certificate for another name is refused", ALL)),
     g20(row("neg.cert.unknown-issuer", Negative, "A certificate from an untrusted CA is refused", ALL)),

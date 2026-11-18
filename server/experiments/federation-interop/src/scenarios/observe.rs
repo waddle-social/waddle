@@ -1,7 +1,8 @@
 //! The W10 observations of each peer's wire behavior: a pre-TLS `from`,
 //! whitespace before stream headers, ejabberd's effective STARTTLS
 //! setting, a mixed-case `to` domain, and the clustered ejabberd's
-//! streams against Waddle's one stream per directional pair. An
+//! streams against Waddle's several inbound streams per directional pair.
+//! An
 //! observation row is PASS when the behavior was observed and recorded and
 //! Waddle's handling of it was as specified.
 
@@ -255,6 +256,13 @@ pub async fn ejabberd_cluster_streams(h: &mut Harness, _peer: Peer) -> Result<Ou
     relay.cut();
     relay.restore();
     relay.reset_records();
+    // home-a holds several inbound streams for one pair: none of the
+    // cluster's streams may be refused or replaced with `conflict`.
+    let conflicts = support::LogMark::new(
+        h,
+        Home::A,
+        &["s2s connection ended", "\"Inbound\"", "\"Conflict\""],
+    );
     let mut sessions = Vec::new();
     for node in [1u8, 2] {
         for index in 0..2 {
@@ -290,9 +298,15 @@ pub async fn ejabberd_cluster_streams(h: &mut Harness, _peer: Peer) -> Result<Ou
     let connections = relay.connection_count();
     let concurrent = relay.max_active();
     outcome.check(
-        "every ping answered while the cluster's streams replace each other",
+        "every ping answered while the cluster holds several streams",
         answered == asked,
         format!("{answered} of {asked} answered"),
+    );
+    let refused = conflicts.added(h);
+    outcome.check(
+        "home-a refused or replaced none of the cluster's streams with conflict",
+        refused == 0,
+        format!("{refused} inbound streams ended with conflict"),
     );
     if concurrent > 1 {
         outcome.check(
@@ -303,7 +317,7 @@ pub async fn ejabberd_cluster_streams(h: &mut Harness, _peer: Peer) -> Result<Ou
     } else {
         outcome.unverified(
             "the cluster opened more than one stream for the pair",
-            format!("ejabberd kept one stream ({connections} connections in total); replacement was not exercised"),
+            format!("ejabberd kept one stream ({connections} connections in total); several streams were not exercised"),
         );
     }
     if let Some(waddle) = h.waddle.get(&Home::A) {

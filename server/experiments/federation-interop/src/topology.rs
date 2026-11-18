@@ -313,7 +313,7 @@ pub fn s2s_port(ports: Ports, server: Server) -> u16 {
 /// The relay a source uses to reach a destination, if the harness routes
 /// that path. Both ejabberd nodes share node 1's relay towards Waddle: the
 /// stub DNS cannot tell the nodes apart, and the relay counts streams per
-/// pair, which is what the one-stream-per-pair case observes.
+/// pair, which is what the clustered-streams case observes.
 pub fn relay_for(from: Server, to: Server) -> Option<Link> {
     let from = match from {
         Server::Ejabberd(_) => Server::Ejabberd(1),
