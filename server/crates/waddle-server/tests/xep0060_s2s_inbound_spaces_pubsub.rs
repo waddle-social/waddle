@@ -739,6 +739,18 @@ async fn a_remote_subscriber_is_notified_of_a_spaces_images() {
     assert_eq!(info.ns(), NS_AVATAR_METADATA);
     assert_eq!(info.attr("url"), Some(url.as_str()));
     assert!(!String::from(&event).contains(VICTOR));
+    // What the owner published is what the subscriber reads.
+    let read = ask(
+        &federated,
+        request(BOB_PHONE, "img-read", false, items(DEV)),
+    )
+    .await;
+    assert_eq!(read.attr("type"), Some("result"), "{read:?}");
+    assert_eq!(item_ids(&read), [ITEM_SPACE_AVATAR_METADATA]);
+    assert_eq!(
+        descendant(&read, "info").and_then(|info| info.attr("url")),
+        Some(url.as_str())
+    );
 
     let refused = round_trip(
         &mut victor,
@@ -1364,6 +1376,21 @@ async fn a_remote_owners_deletion_unlinks_the_rooms_and_leaves_nothing_of_the_sp
     // Space and its link to it.
     let placed = round_trip(&mut victor, set("del-1", SPACES, publish(DEV, "lounge"))).await;
     assert!(is_result(&placed), "{placed:?}");
+    // The Space's avatar, which names no room, goes with the Space.
+    let pictured = round_trip(
+        &mut victor,
+        set(
+            "del-1-image",
+            SPACES,
+            publish_item(
+                DEV,
+                ITEM_SPACE_AVATAR_METADATA,
+                image_metadata("https://images.example.com/avatar.png"),
+            ),
+        ),
+    )
+    .await;
+    assert!(is_result(&pictured), "{pictured:?}");
     let links = &state.deps.app_state.channel_space_link_store;
     assert!(links
         .get(&room("lounge"))
@@ -1449,6 +1476,21 @@ async fn a_remote_owners_purge_takes_the_rooms_out_of_the_space() {
     let mut victor = space_with_owner(&federated).await;
     let placed = round_trip(&mut victor, set("purge-1", SPACES, publish(DEV, "lounge"))).await;
     assert!(is_result(&placed), "{placed:?}");
+    // The Space's banner names no room; the purge takes it with the rest.
+    let pictured = round_trip(
+        &mut victor,
+        set(
+            "purge-1-image",
+            SPACES,
+            publish_item(
+                DEV,
+                ITEM_SPACE_BANNER_METADATA,
+                image_metadata("https://images.example.com/banner.png"),
+            ),
+        ),
+    )
+    .await;
+    assert!(is_result(&pictured), "{pictured:?}");
     let subscribed = subscribe(&federated, "purge-2", MALLORY, "mallory@home-b.test").await;
     assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
     affiliate(&federated, DEV, BOB, Affiliation::Owner).await;
@@ -1466,6 +1508,7 @@ async fn a_remote_owners_purge_takes_the_rooms_out_of_the_space() {
     .await;
     assert_eq!(purged.attr("type"), Some("result"), "{purged:?}");
     let read = ask(&federated, request(MALLORY, "purge-4", false, items(DEV))).await;
+    assert_eq!(read.attr("type"), Some("result"), "{read:?}");
     assert!(item_ids(&read).is_empty(), "{read:?}");
     assert!(parents(&federated, "lounge").await.is_empty());
     assert!(federated
