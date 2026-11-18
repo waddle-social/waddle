@@ -202,10 +202,14 @@ impl Ejabberd {
         ]
         .concat();
         std::fs::write(dir.join("ejabberdctl.cfg"), ctl)?;
+        // Erlang applies the entries in order, and `{resolv_conf, ""}`
+        // resets the resolver's name servers to what the (empty) file
+        // lists, so it comes before the stub's `nameserver` entry; written
+        // after it, the node is left with no name server at all.
         let inetrc = [
-            "{host, {127,0,0,1}, [\"localhost\"]}.\n{nameserver, {127,0,0,1}, ",
+            "{host, {127,0,0,1}, [\"localhost\"]}.\n{resolv_conf, \"\"}.\n{hosts_file, \"\"}.\n{nameserver, {127,0,0,1}, ",
             &self.ports.dns_for_ejabberd().to_string(),
-            "}.\n{resolv_conf, \"\"}.\n{hosts_file, \"\"}.\n{lookup, [file, dns]}.\n",
+            "}.\n{lookup, [file, dns]}.\n",
         ]
         .concat();
         std::fs::write(dir.join("inetrc"), inetrc)?;

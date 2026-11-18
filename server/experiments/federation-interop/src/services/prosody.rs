@@ -3,6 +3,11 @@
 //! via libunbound's forwarder, and the `.test` CA as its S2S trust with
 //! secure authentication required, except on `insecure.prosody.test`,
 //! which trusts only an unrelated CA and so negotiates dialback.
+//!
+//! libunbound refuses to query a forwarder on a loopback address and
+//! answers the special-use `test.` zone itself (NXDOMAIN) unless told
+//! otherwise, so the stub is reached only with `do-not-query-localhost:
+//! no` and `test.` made a transparent local zone.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -141,7 +146,7 @@ impl Prosody {
             [
                 "unbound = { forward = ",
                 &lua(&["127.0.0.1@", &self.ports.dns_for_prosody().to_string()].concat()),
-                "; resolvconf = false; hoststxt = false }",
+                "; resolvconf = false; hoststxt = false; options = { [\"do-not-query-localhost\"] = \"no\"; [\"local-zone\"] = \"test. transparent\" } }",
             ]
             .concat(),
             ["ssl = ", &self.ssl(leaf(PROSODY), &self.ca, variant.tls)].concat(),
