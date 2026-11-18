@@ -858,6 +858,50 @@ async fn a_trusted_homes_occupant_on_a_pkix_stream_may_be_made_moderator() {
 }
 
 #[tokio::test]
+async fn a_trusted_homes_moderator_without_affiliation_kicks_but_does_not_devoice_its_equal() {
+    let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await;
+    let answer = local_set(&mut alice, ROOM, "role-mod", role_item("moderator", "bob")).await;
+    assert_eq!(answer.attr("type"), Some("result"), "{answer:?}");
+    let mut carol = hosted.client("carol", "desk").await;
+    let joined = local_join(&mut carol, ROOM, "carol").await;
+    // Carol and the remote moderator both hold no affiliation.
+    assert_eq!(
+        item(&joined),
+        Some(("participant".to_owned(), "none".to_owned()))
+    );
+
+    // XEP-0045 §8.4: a moderator may not revoke voice from an occupant
+    // whose affiliation is at or above its own.
+    hosted
+        .peer_sends(remote_set(
+            BOB,
+            ROOM,
+            "devoice-1",
+            role_item("visitor", "carol"),
+        ))
+        .await;
+    let devoice = hosted.answered("devoice-1").await;
+    assert_eq!(error_condition(&devoice).as_deref(), Some("not-allowed"));
+
+    // §8.2: it may kick one whose affiliation is not higher than its own.
+    hosted
+        .peer_sends(remote_set(BOB, ROOM, "kick-1", role_item("none", "carol")))
+        .await;
+    let kick = hosted.answered("kick-1").await;
+    assert_eq!(kick.attr("type"), Some("result"), "{kick:?}");
+    let kicked = local_receives(&mut carol, ARRIVES, |stanza| {
+        stanza.name() == "presence"
+            && stanza.attr("type") == Some("unavailable")
+            && statuses(stanza).contains(&"307".to_owned())
+    })
+    .await;
+    assert!(kicked.is_some(), "carol was not told she was kicked");
+}
+
+#[tokio::test]
 async fn private_messages_are_refused_to_remote_occupants() {
     let (hosted, _alice, _own) =
         room_with_remote_occupant(RouterLimits::default(), no_change).await;
