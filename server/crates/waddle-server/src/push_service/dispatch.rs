@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use jid::{BareJid, FullJid};
+use jid::BareJid;
 use minidom::Element;
 use url::Url;
 use waddle_xmpp::push::apns::ApnsCall;
@@ -222,27 +222,10 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
             .attr("expires")
             .and_then(|value| value.parse::<u64>().ok())
             .ok_or_else(|| XmppError::internal("call metadata has invalid expiry"))?;
-        let from = call
-            .attr("from")
-            .map(|value| {
-                value
-                    .parse::<FullJid>()
-                    .map_err(|_| XmppError::internal("call metadata has invalid full sender JID"))
-            })
-            .transpose()?;
-        if from
-            .as_ref()
-            .is_some_and(|from| from.to_bare() != conversation)
-        {
-            return Err(XmppError::internal(
-                "call metadata sender does not match conversation",
-            ));
-        }
         Some(ApnsCall {
             sid: xmpp_parsers::jingle::SessionId(sid.to_owned()),
             video,
             expires,
-            from,
         })
     } else {
         None
@@ -634,42 +617,6 @@ mod tests {
             ctx = ctx.attr(minidom::rxml::xml_ncname!("thread").to_owned(), t);
         }
         ctx.build()
-    }
-
-    #[test]
-    fn parse_publish_payload_validates_optional_call_sender() {
-        for (from, valid) in [
-            (None, true),
-            (Some("alice@example.com/phone"), true),
-            (Some("alice@example.com"), false),
-            (Some("bob@example.com/phone"), false),
-            (Some("not a jid"), false),
-        ] {
-            let call = Element::builder("call", NS_WADDLE_PUSH_CONTEXT)
-                .attr(minidom::rxml::xml_ncname!("sid").to_owned(), "call-1")
-                .attr(minidom::rxml::xml_ncname!("video").to_owned(), "false")
-                .attr(
-                    minidom::rxml::xml_ncname!("expires").to_owned(),
-                    "1700000045",
-                )
-                .attr(minidom::rxml::xml_ncname!("from").to_owned(), from)
-                .build();
-            let mut context = build_context_element("call", "alice@example.com", None);
-            context.append_child(call);
-            let notification = Element::builder("notification", NS_PUSH)
-                .append(context)
-                .build();
-            let parsed = parse_publish_payload(&String::from(&notification));
-            if valid {
-                let call = parsed.expect("valid payload").call.expect("call metadata");
-                assert_eq!(call.from, from.map(|jid| jid.parse().expect("full JID")));
-                assert_eq!(call.sid.0, "call-1");
-                assert!(!call.video);
-                assert_eq!(call.expires, 1_700_000_045);
-            } else {
-                assert!(parsed.is_err(), "invalid sender {from:?} accepted");
-            }
-        }
     }
 
     /// Fixture with the #779 typed `stanza-id` context attribute.

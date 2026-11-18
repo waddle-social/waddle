@@ -1257,10 +1257,7 @@ async fn offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_to
             "waddle": {
                 "v": 1, "class": "call", "conversation": "romeo@example.com",
                 "item": "offline-call-archive", "node": voip_node.node(),
-                "call": {
-                    "sid": "call-session-1", "video": true, "expires": expires,
-                    "from": "romeo@example.com/phone"
-                }
+                "call": { "sid": "call-session-1", "video": true, "expires": expires }
             }
         })
     );
@@ -1396,17 +1393,6 @@ async fn malformed_call_metadata_fails_without_sending_or_disabling_devices() {
         ),
     ]
     .into_iter()
-    .chain(
-        ["bob@example.com", "alice@example.com/phone", "not a jid"].map(|from| {
-            let mut call = call_context_child("sid", "false", &expires);
-            call.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("from").to_owned(),
-                from,
-            );
-            Some(call)
-        }),
-    )
     .enumerate()
     {
         let item_id = format!("invalid-call-{index}");
