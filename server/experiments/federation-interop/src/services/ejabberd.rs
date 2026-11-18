@@ -113,8 +113,12 @@ impl Ejabberd {
             "certfiles": certfiles,
             "ca_file": self.ca.display().to_string(),
             "s2s_use_starttls": "required",
+            // ejabberd's resolver makes `s2s_dns_retries` attempts in all
+            // (xmpp_stream_out), so zero would fail every lookup with
+            // `timeout` before asking the stub; one attempt keeps a missing
+            // answer quick.
             "s2s_dns_timeout": 2,
-            "s2s_dns_retries": 0,
+            "s2s_dns_retries": 1,
             "outgoing_s2s_families": ["ipv4"],
             "listen": [
                 {
