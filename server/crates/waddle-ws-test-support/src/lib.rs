@@ -327,10 +327,17 @@ impl TestServer {
         for (key, value) in extra_envs {
             command.env(*key, *value);
         }
+        // The server's stderr goes to a file, so a server that exits before
+        // it is ready can say why in the test's panic. The file is removed
+        // once the server is listening.
+        let stderr_file =
+            std::env::temp_dir().join(format!("waddle-test-stderr-{}", uuid::Uuid::new_v4()));
         if std::env::var("WADDLE_TEST_SERVER_STDIO").as_deref() == Ok("inherit") {
             command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         } else {
-            command.stdout(Stdio::null()).stderr(Stdio::null());
+            let stderr =
+                std::fs::File::create(&stderr_file).map_or_else(|_| Stdio::null(), Stdio::from);
+            command.stdout(Stdio::null()).stderr(stderr);
         }
         let mut child = command
             .spawn()
@@ -340,9 +347,19 @@ impl TestServer {
         let deadline = Instant::now() + SERVER_STARTUP_TIMEOUT;
         let http_port = loop {
             if let Some(status) = child.try_wait().expect("poll server startup status") {
+                let stderr = std::fs::read_to_string(&stderr_file).unwrap_or_default();
+                let _ = std::fs::remove_file(&stderr_file);
+                // The startup error is at the end; keep the panic readable.
+                let tail: Vec<&str> = stderr.lines().rev().take(40).collect();
+                let tail: Vec<&str> = tail.into_iter().rev().collect();
+                if tail.is_empty() {
+                    // Inherited stdio already printed the error above.
+                    panic!("Server exited before writing its port file: {status}");
+                }
                 panic!(
                     "Server exited before writing its port file: {status}; \
-                     set WADDLE_TEST_SERVER_STDIO=inherit to see the startup error"
+                     last lines of its stderr:\n{}",
+                    tail.join("\n")
                 );
             }
             if Instant::now() > deadline {
@@ -352,6 +369,8 @@ impl TestServer {
             }
             if let Ok(contents) = std::fs::read_to_string(&port_file) {
                 if let Ok(port) = contents.trim().parse::<u16>() {
+                    // The server keeps its open handle; only the name goes.
+                    let _ = std::fs::remove_file(&stderr_file);
                     break port;
                 }
             }
@@ -802,7 +821,16 @@ impl WsXmppClient {
         }
     }
 
-    pub async fn close(mut self) -> Result<(), String> {
+    pub async fn close(self) -> Result<(), String> {
+        self.close_within(Duration::from_secs(2)).await
+    }
+
+    /// Close the stream, waiting up to `budget` for the server's `<close/>`.
+    ///
+    /// The server answers a close after the stanzas this client sent before
+    /// it. A client that sent stanzas whose handling can wait on another
+    /// cluster node needs more than [`Self::close`]'s two seconds.
+    pub async fn close_within(mut self, budget: Duration) -> Result<(), String> {
         let close =
             xmpp_parsers::minidom::Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing")
                 .build();
@@ -813,7 +841,7 @@ impl WsXmppClient {
         let close_xml = String::from_utf8(close_xml)
             .map_err(|error| format!("XMPP close serialization emitted invalid UTF-8: {error}"))?;
         self.send(&close_xml).await?;
-        timeout(Duration::from_secs(2), async {
+        timeout(budget, async {
             while let Some(message) = self.ws.next().await {
                 match message {
                     Ok(tungstenite::Message::Text(text)) if text.contains("<close") => {

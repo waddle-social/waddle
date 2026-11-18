@@ -157,8 +157,13 @@ threads-required = 'num-cpus'
 # Show every failure in one run instead of cancelling on the first one,
 # matching the old `cargo test` per-binary behavior.
 fail-fast = false
-# Flaky tests must fail loudly; retries mask flakiness.
-retries = 0
+# One flaky test out of about 12,700 must not fail the run and block the
+# deploy, so a failed test is tried up to twice more after a short pause. A
+# test that needed a retry is never silent: nextest prints it as FLAKY, the
+# JUnit report records it, and the shard lane lists every one as a warning
+# (`scripts/check_required_tests.py`). A test that fails all three tries
+# fails the run.
+retries = { backoff = "fixed", count = 2, delay = "2s" }
 # A hung test fails by name instead of consuming the 55-minute shard lane
 # (`nixTestLocal`) or the 60-minute PR job. Ordinary tests, including the
 # serialized `postgres` group (time counts from each test's own start, not
