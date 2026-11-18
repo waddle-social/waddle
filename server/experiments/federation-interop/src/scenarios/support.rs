@@ -307,15 +307,6 @@ pub async fn follow_up_on_tap(
     Ok(())
 }
 
-/// The newest tapped connection's decrypted bytes from Waddle.
-pub fn waddle_said(relay: &Relay) -> String {
-    relay
-        .connections()
-        .last()
-        .map(|connection| String::from_utf8_lossy(&connection.receiver_tls).into_owned())
-        .unwrap_or_default()
-}
-
 /// Whether the newest relayed connection has closed.
 pub fn newest_closed(relay: &Relay) -> bool {
     relay

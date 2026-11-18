@@ -20,7 +20,7 @@ use crate::manifest::Peer;
 use crate::process;
 use crate::s2s::initiator::{self, Plan, RawStream};
 use crate::scenarios::harness::{Harness, ANSWER, QUIET};
-use crate::scenarios::support::{self, ask, describe, is_result, newest_closed, waddle_said};
+use crate::scenarios::support::{self, ask, describe, is_result};
 use crate::topology::{Home, Server, HOME_A, RAW_PEER};
 use crate::xml::header::{self, StreamOpen};
 use crate::xml::{ns, stanza};
@@ -34,12 +34,36 @@ fn tap_driven(peer: Peer) -> String {
     .concat()
 }
 
-/// Whether home-a refused the tapped stream with a stream error, and
-/// what it said. A closure without a stream error is not counted: it
-/// could be the tap's own failure.
-async fn stream_refused(relay: &crate::net::relay::Relay) -> (bool, String) {
-    let ended = process::eventually(QUIET, || async { newest_closed(relay) }).await;
-    let said = waddle_said(relay);
+/// How long home-a may take to refuse an element whose head is small:
+/// it decides once the element is complete.
+const SMALL_REFUSAL: Duration = QUIET;
+
+/// How long home-a may take to refuse a stanza over its size limit: it
+/// reads up to the limit at the stream's input rate first, and an element
+/// may stay unfinished for at most 30 seconds.
+const LARGE_REFUSAL: Duration = Duration::from_secs(45);
+
+/// Whether home-a refused the tapped connection `connection`, the one
+/// the bytes were injected into, with a stream error within `window`, and
+/// what it said. The peer opens a new stream as soon as home-a closes
+/// one, so the refused connection is looked up by its index, never as
+/// the newest. A closure without a stream error is not counted: it could
+/// be the tap's own failure.
+async fn stream_refused(
+    relay: &crate::net::relay::Relay,
+    connection: usize,
+    window: Duration,
+) -> (bool, String) {
+    let ended = process::eventually(window, || async {
+        relay
+            .connection(connection)
+            .is_some_and(|record| record.closed_after.is_some())
+    })
+    .await;
+    let said = relay
+        .connection(connection)
+        .map(|record| String::from_utf8_lossy(&record.receiver_tls).into_owned())
+        .unwrap_or_default();
     let condition = [
         "improper-addressing",
         "invalid-from",
@@ -75,8 +99,8 @@ pub async fn spoofed_from(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         Some(HOME_A),
         Some(stanza::ping_payload()),
     );
-    relay.inject(header::element_bytes(&iq))?;
-    let (refused, detail) = stream_refused(relay).await;
+    let connection = relay.inject(header::element_bytes(&iq))?;
+    let (refused, detail) = stream_refused(relay, connection, SMALL_REFUSAL).await;
     outcome.check("a stanza from another domain is refused", refused, detail);
     let recovered =
         support::ping_until_result(h, peer, false, HOME_A, Duration::from_secs(60)).await?;
@@ -249,7 +273,7 @@ pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         &["alice@", third].concat(),
         Some("relay through home-a"),
     );
-    relay.inject(header::element_bytes(&message))?;
+    let connection = relay.inject(header::element_bytes(&message))?;
     let absent = watcher
         .absent(QUIET, |element| {
             element.attr("id") == Some(message_id.as_str())
@@ -258,7 +282,7 @@ pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     // home-a either refuses the stream with a stream error, its own
     // record of the refusal, or drops the stanza; for a dropped stanza the
     // follow-up on the same stream shows home-a read past it.
-    let (refused, detail) = stream_refused(relay).await;
+    let (refused, detail) = stream_refused(relay, connection, SMALL_REFUSAL).await;
     outcome.check(
         ["nothing relayed to ", third].concat(),
         absent,
@@ -503,8 +527,8 @@ async fn injected_refusal(
     name: &str,
 ) -> Result<()> {
     let relay = support::tap_peer_stream(h, peer).await?;
-    relay.inject(header::element_bytes(&element))?;
-    let (refused, detail) = stream_refused(relay).await;
+    let connection = relay.inject(header::element_bytes(&element))?;
+    let (refused, detail) = stream_refused(relay, connection, LARGE_REFUSAL).await;
     outcome.check([name, " refused"].concat(), refused, detail);
     let recovered =
         support::ping_until_result(h, peer, false, HOME_A, Duration::from_secs(60)).await?;

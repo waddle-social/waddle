@@ -104,8 +104,9 @@ struct Shared {
     max_active: AtomicUsize,
     started: Instant,
     cut: watch::Sender<u64>,
-    /// Bytes to write into the newest tapped stream, towards the receiver.
-    inject: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    /// The newest tapped stream, by its index in `connections`, and the
+    /// bytes to write into it towards the receiver.
+    inject: Mutex<Option<(usize, mpsc::UnboundedSender<Vec<u8>>)>>,
 }
 
 /// A running relay.
@@ -202,21 +203,31 @@ impl Relay {
     }
 
     /// Write `bytes` into the newest tapped stream as if the initiating
-    /// server had sent them, between two of its own writes.
-    pub fn inject(&self, bytes: Vec<u8>) -> Result<()> {
-        let sender = lock(&self.shared.inject)
+    /// server had sent them, between two of its own writes, and return
+    /// that connection's index for [`Self::connection`]. The index stays
+    /// that connection's when the initiating server opens another one
+    /// afterwards, as it does at once after a refusal.
+    pub fn inject(&self, bytes: Vec<u8>) -> Result<usize> {
+        let (index, sender) = lock(&self.shared.inject)
             .clone()
             .context("no tapped stream on this relay")?;
         sender
             .send(bytes)
-            .map_err(|_| anyhow::anyhow!("the tapped stream has ended"))
+            .map_err(|_| anyhow::anyhow!("the tapped stream has ended"))?;
+        Ok(index)
     }
 
     /// Whether a tapped stream is open for injection.
     pub fn tapped(&self) -> bool {
         lock(&self.shared.inject)
             .as_ref()
-            .is_some_and(|sender| !sender.is_closed())
+            .is_some_and(|(_, sender)| !sender.is_closed())
+    }
+
+    /// The record of the connection at `index`, as [`Self::inject`]
+    /// returned it, until [`Self::reset_records`].
+    pub fn connection(&self, index: usize) -> Option<Connection> {
+        lock(&self.shared.connections).get(index).cloned()
     }
 
     pub fn reset_records(&self) {
@@ -490,7 +501,7 @@ async fn tap(
     let (client_read, client_write) = tokio::io::split(client_tls);
     let (server_read, server_write) = tokio::io::split(server_tls);
     let (inject, injected) = mpsc::unbounded_channel();
-    *lock(&shared.inject) = Some(inject);
+    *lock(&shared.inject) = Some((index, inject));
     let up = pump_injecting(
         Arc::clone(shared),
         index,
