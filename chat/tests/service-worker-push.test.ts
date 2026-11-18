@@ -76,6 +76,16 @@ function makeNotificationClickEvent(data: Record<string, unknown>) {
   };
 }
 
+/// Delivers one v=1 envelope to a fresh worker and returns what it showed.
+async function showPush(envelope: Record<string, unknown>) {
+  const worker = loadServiceWorker();
+  const event = makePushEvent({ json: () => ({ v: 1, item: "item-1", ...envelope }) });
+  worker.dispatch("push", event);
+  await event.done();
+  const [title, options] = worker.showNotification.mock.calls[0] ?? [];
+  return { worker, title, options: options as NotificationOptions & { data: { url: string } } };
+}
+
 describe("service worker push handling", () => {
   test("minimal v=1 payload renders default count title with no body preview, updates badge", async () => {
     // Canonical v=1 envelope from
@@ -387,25 +397,13 @@ describe("service worker push handling", () => {
   });
 
   test("v=1 envelope: a missed call says so, keeps the unread badge and its own banner", async () => {
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        v: 1,
-        class: "missed_call",
-        conversation: "alice@muc.example.com",
-        item: "stanza-id-002",
-        unread: 3,
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
+    const conversation = "alice@muc.example.com";
+    const { worker, title, options } = await showPush({ class: "missed_call", conversation, unread: 3 });
 
     expect(worker.setAppBadge).toHaveBeenCalledWith(3);
-    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
     expect(title).toBe("Missed call");
-    const shown = options as NotificationOptions & { data: { url: string } };
-    expect(shown.tag).toBe("alice@muc.example.com#missed-call");
-    expect(shown.data.url).toBe("/dm/alice%40muc.example.com");
+    expect(options.tag).toBe(`${conversation}#missed-call`);
+    expect(options.data.url).toBe("/dm/alice%40muc.example.com");
   });
 
   test("v=1 envelope: channel mention routes to /r/{channelId}?thread=…", async () => {
