@@ -1924,9 +1924,9 @@ reviewed files changed:
   `send_message` to publish or retract one's own objects, and `manage` as
   well for the organizer's rights (the `event` object, editing another
   member's shared object, retracting another member's object). Grants that
-  cannot be read answer `internal-server-error`. The standing is confirmed
-  with `still_allows` after the last await before each effect
-  (`still_holds`). In such a room the snapshot's affiliation, local or relayed
+  cannot be read at the first decision answer `internal-server-error`. The
+  standing is confirmed with `still_allows` after the last await before each
+  effect (`still_holds`), and refused when it cannot be confirmed. In such a room the snapshot's affiliation, local or relayed
   as `waddle.clustering.relay.event_planning_access.v1`, decides nothing; it
   only selects the room incarnation's backing node. A room no scope manages
   is decided from the snapshot as before. This closes the decision of

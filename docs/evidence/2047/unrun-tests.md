@@ -178,7 +178,7 @@ chat log.
 | `xep0368_s2s_discovery` (37 in 5 modules) | W4d | loopback; `SystemDnsLookup` cases use a loopback name server | Run 37/37, run10 head S2S log |
 | `s2s_routing` (15) | W5a, integration, W6b | loopback | Run 15/15, run10 head S2S log |
 | `s2s_iq_correlation` (13) | W5a | loopback | Run 13/13, run10 head S2S log |
-| `s2s_reachability` (9) | W5a, W6b, W6a, W6c, W7a | loopback | Run 9/9, run10 head S2S log (W7a added one case for the Spaces classes, renamed one and extended the `Reachable` literal of another) |
+| `s2s_reachability` (9) | W5a, W6b, W6a, W6c, W7a, event workspace gate | loopback | Run 9/9, run10 head S2S log (W7a added one case for the Spaces classes, renamed one and extended the `Reachable` literal of another); the event workspace gate extended the MUC refusals with room PubSub, run 9/9 locally at `9a1120d89` |
 | `s2s_d7_refusal` (4) | W5a, W6c (header only) | none | Run 4/4, run10 head S2S log |
 | `xep0030_s2s_server_discovery` (6) | W5a, W6b | loopback | Run 6/6, run10 head S2S log |
 | `xep0199_s2s_ping` (3) | W5a | loopback | Run 3/3, run10 head S2S log |
@@ -246,7 +246,7 @@ chat log.
 | `authz_id_codec` (12; 1 `#[ignore]`) | W1, W5o, W5i, integration | SpiceDB for the ignored case | Run 12/12, run10 head host-grant log |
 | `authz_codec_incarnation` (11; 5 `#[ignore]`) | W1, W5o | SpiceDB for the ignored cases | Run 11/11, run10 head host-grant log |
 | `channel_outcast_precedence` (13; 5 `#[ignore]`) | W5o, W5b | SpiceDB for the ignored cases | Run 13/13, run10 head host-grant log |
-| `xep0045_host_grant_fence` (31 in 2 modules) | W5c, integration, W5d, W7b | PostgreSQL 17; loopback | Run 31/31, run10 head host-grant log |
+| `xep0045_host_grant_fence` (33 in 3 modules) | W5c, integration, W5d, W7b, event workspace gate | PostgreSQL; loopback | Run 31/31, run10 head host-grant log; with the two `event_workspace` cases, run 33/33 locally at `9a1120d89` (`cargo test`, `WADDLE_TEST_REQUIRE_POSTGRES=1`) |
 | `host_grant_enrolled_set` (9) | W5c, integration, pre-verification (an attachment gate conflict is told apart from offering the bound gate again) | PostgreSQL 17 | Run 9/9, prever rerun1 host-grant log |
 | `spaces_pubsub_owner_seed` (9) | W5c, W5e | none (in-memory state) | Run 9/9, run10 head host-grant log |
 | `xep0503_channel_placement` (6) | W5c | none (in-memory state, loopback) | Run 6/6, run10 head host-grant log |

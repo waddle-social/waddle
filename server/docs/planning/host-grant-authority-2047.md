@@ -1478,7 +1478,7 @@ The sweep is lexical and the table is its review, not a call graph.
 | Muji call presence (starting, joining or preparing a call, and the call-thread anchor it starts) | `send_message`, on the local path and the relayed ordered delivery alike; unreadable grants refuse it with `internal-server-error`. Leaving a call is always accepted. |
 | Channel-wide mention (XEP-0513 `#channel` push) | `moderate`, decided before dispatch for a message that carries a channel mention and passed to the room chain; the role the room actor mirrors decides nothing, and unreadable grants broadcast nothing. A message without one reads no grants. |
 | Pin list | `read` |
-| Private event workspace (XEP-0060 storage under a room's JID) | Retrieving it `read`; publishing or retracting one's own objects `send_message`; the organizer's rights (publishing the `event` object, editing another member's shared object, retracting another member's object) `manage`, which only owner and admin standing confer, as they were the only affiliations that conferred them before. Every other request is refused as before. Unreadable grants answer `internal-server-error` (type `wait`); anyone the grants do not admit is answered `forbidden`. Decided without stream evidence: the MUC service's S2S handlers do not reach it. |
+| Private event workspace (XEP-0060 storage under a room's JID) | Retrieving it `read`; publishing or retracting one's own objects `send_message`; the organizer's rights (publishing the `event` object, editing another member's shared object, retracting another member's object) `manage`, which only owner and admin standing confer. Every other request is refused. Grants that cannot be read when the request is first decided answer `internal-server-error` (type `wait`); anyone the grants do not admit is answered `forbidden`, as is a request whose standing cannot be confirmed before its effect (B5). Decided without stream evidence: the MUC service's S2S handlers do not reach it. |
 | Room system messages (pin and unpin notices, call-thread anchors and endings) | Archived as the room's own; delivered to the seated occupants whose grants allow `read`. An interpreter without the WebSocket state, whose gate alone tells whether a scope manages the room, delivers none. |
 | Channel search | `view`, read by the channel binding; nobody else is shown the room. |
 | Admin channel listing | `view`; the community-owner role the command needs is not a grant. A listed room shows members-only and its recorded grants as counts. |
@@ -1632,13 +1632,14 @@ change stays recorded, and it is what every admission reads.
   it, and a room re-seated after a claim move seats only occupants whose
   grants allow `read`, with their canonical standing.
 - **Private event workspace.** The grants are read before the room's
-  snapshot is asked, so a request the grants refuse learns nothing of the
-  room. The standing a request is decided with is confirmed with
+  snapshot is asked, so a request the grants refuse is answered before the
+  room actor is asked. The standing a request is decided with is confirmed with
   `still_allows` after its last await and before its effect: a retrieval
   after the items were read and before the response is built, a
   publication after the lookups and node preparation it needs and just
   before the conditional write, a retraction just before the retraction;
-  an organizer's request confirms `manage` as well. A revoke that commits
+  an organizer's request confirms `manage` as well. A confirmation that
+  cannot read the grants refuses with `forbidden`. A revoke that commits
   before that confirmation is honoured; one that commits after it may still
   see the write land, as already accepted work. The workspace configures
   its node with no notifications, no payload delivery and no last-item
