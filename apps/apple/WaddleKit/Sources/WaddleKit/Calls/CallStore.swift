@@ -40,8 +40,7 @@ import Observation
     /// Abort history is bounded because reductions can outpace the effects queue.
     @ObservationIgnored private(set) var recentlyAbortedSids: [String] = []
     @ObservationIgnored private var finishedSids: [String] = []
-    @ObservationIgnored private var pendingPushedRinging: CallEvent?
-    @ObservationIgnored private var pushedCallsOnline = false
+    @ObservationIgnored private var declinedBeforeProposalSids: [String] = []
     @ObservationIgnored private(set) var generation = 0
     @ObservationIgnored private var effectTask: Task<Void, Never>?
     @ObservationIgnored private var effects: [@MainActor () async -> Void] = []
@@ -75,11 +74,22 @@ import Observation
 
     /// Reduce arrivals synchronously; only remote-originated effects enter the serial queue.
     public func handle(_ event: CallEvent) {
-        handle(event, retryRingingWhenOnline: false)
-    }
-
-    func handle(_ event: CallEvent, retryRingingWhenOnline: Bool) {
-        if case .propose = event.kind, isFinished(sid: event.sid) { return }
+        if case .propose = event.kind, isFinished(sid: event.sid) {
+            if let index = declinedBeforeProposalSids.firstIndex(of: event.sid) {
+                declinedBeforeProposalSids.remove(at: index)
+                // Only the stream proposal can supply the reject's destination.
+                if event.from.bare != ownBareJID, event.from.resource != nil {
+                    let epoch = generation
+                    enqueue { [weak self] in
+                        guard let self else { return }
+                        _ = await self.send(epoch: epoch, error: "call reject failed") {
+                            await self.port.sendCallReject(to: event.from, sid: event.sid, tieBreak: false)
+                        }
+                    }
+                }
+            }
+            return
+        }
         if fulfillGroupAccept(event) { return }
         if endGroupFromRemote(event) { return }
         let before = state
@@ -105,12 +115,9 @@ import Observation
             enqueue { [weak self] in
                 // A decline that ran while this effect was queued already answered the proposer.
                 guard let self, self.isRinging(sid: event.sid) else { return }
-                let sent = await self.send(epoch: epoch, error: "call ringing failed") {
+                _ = await self.send(epoch: epoch, error: "call ringing failed") {
                     await self.port.sendCallRinging(to: event.from.bare, sid: event.sid)
                 }
-                guard retryRingingWhenOnline, !sent, self.generation == epoch, self.isRinging(sid: event.sid) else { return }
-                self.pendingPushedRinging = event
-                self.retryPushedRingingIfOnline()
             }
         }
         enqueue { [weak self] in
@@ -124,37 +131,26 @@ import Observation
         guard !finishedSids.contains(sid) else { return }
         finishedSids.append(sid)
         if finishedSids.count > 32 { finishedSids.removeFirst() }
-        if pendingPushedRinging?.sid == sid { pendingPushedRinging = nil }
     }
 
     public func isFinished(sid: String) -> Bool { finishedSids.contains(sid) }
 
-    func pushedCallConnectionChanged(isOnline: Bool) {
-        pushedCallsOnline = isOnline
-        retryPushedRingingIfOnline()
+    /// An early decline waits for the stream proposal to address its reject.
+    /// Like finished calls, the last 32 distinct declines survive session clear.
+    /// An adopted call uses `end(sid:)` instead.
+    public func declinePushedCall(sid: String) -> Bool {
+        guard state.sid != sid || !state.isLive else { return false }
+        markFinished(sid: sid)
+        if !declinedBeforeProposalSids.contains(sid) {
+            declinedBeforeProposalSids.append(sid)
+            if declinedBeforeProposalSids.count > 32 { declinedBeforeProposalSids.removeFirst() }
+        }
+        return true
     }
 
     private func isRinging(sid: String) -> Bool {
         guard case .incoming(let call) = state else { return false }
         return call.sid == sid && !call.isAccepting && !isFinished(sid: sid)
-    }
-
-    private func retryPushedRingingIfOnline() {
-        guard pushedCallsOnline, let event = pendingPushedRinging else { return }
-        // Claim the one retry before its send can suspend or another online
-        // event can arrive. It runs behind the first attempt in the queue.
-        pendingPushedRinging = nil
-        let epoch = generation
-        enqueue { [weak self] in
-            guard let self, self.generation == epoch, self.isRinging(sid: event.sid) else { return }
-            guard self.pushedCallsOnline else {
-                self.pendingPushedRinging = event
-                return
-            }
-            _ = await self.send(epoch: epoch, error: "call ringing failed") {
-                await self.port.sendCallRinging(to: event.from.bare, sid: event.sid)
-            }
-        }
     }
 
     /// Claim the one slot before the propose send can suspend.
@@ -217,8 +213,6 @@ import Observation
         sessionTimer?.cancel()
         sessionTimer = nil
         recentlyAbortedSids.removeAll()
-        pendingPushedRinging = nil
-        pushedCallsOnline = false
         acceptInFlight?.outcome.cancel()
         acceptInFlight = nil
         generation += 1

@@ -55,7 +55,6 @@ final class AppState {
     @ObservationIgnored private var pushDeadlines: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var finishedCallPushes: [CallPush] = []
     @ObservationIgnored private var pendingCallDeclines: [String: CallPush] = [:]
-    @ObservationIgnored private var pendingDeclineSends: Set<String> = []
     #endif
     let preferences = Preferences()
 
@@ -196,9 +195,6 @@ final class AppState {
         // between two online states was not observed.
         if isOnline {
             restartPushRegistration?()
-            #if os(iOS)
-            sendPendingCallDeclines(for: active)
-            #endif
         }
     }
 
@@ -300,7 +296,6 @@ final class AppState {
                     return
                 }
                 self.transferFinishedCallPushes(to: active)
-                self.sendPendingCallDeclines(for: active)
                 guard !active.coordinator.calls.isFinished(sid: push.sid) else {
                     self.expireCallPush(push)
                     return
@@ -311,7 +306,8 @@ final class AppState {
                     self.expireCallPush(push)
                     return
                 }
-                if push.from != nil { active.coordinator.receivePushedCall(push) }
+                // CallKit waits for the stream proposal to fill the slot;
+                // push metadata never establishes protocol state.
                 return
             }
         }
@@ -333,6 +329,10 @@ final class AppState {
     private func transferFinishedCallPushes(to active: ActiveSession) {
         for push in finishedCallPushes where owns(push, in: active) {
             active.coordinator.calls.markFinished(sid: push.sid)
+        }
+        for (sid, push) in pendingCallDeclines where owns(push, in: active) {
+            _ = active.coordinator.calls.declinePushedCall(sid: sid)
+            pendingCallDeclines[sid] = nil
         }
     }
 
@@ -360,32 +360,16 @@ final class AppState {
     private func finishSystemCall(sid: String, decline: Bool) {
         if let push = pendingCallPushes.removeValue(forKey: sid) {
             rememberFinished(push)
-            if decline, push.from?.resource != nil { pendingCallDeclines[sid] = push }
+            if decline {
+                if let active = session {
+                    if owns(push, in: active) { _ = active.coordinator.calls.declinePushedCall(sid: sid) }
+                } else {
+                    pendingCallDeclines[sid] = push
+                }
+            }
             pushDeadlines.removeValue(forKey: sid)?.cancel()
         } else {
             session?.coordinator.calls.markFinished(sid: sid)
-        }
-        if let active = session { sendPendingCallDeclines(for: active) }
-    }
-
-    private func sendPendingCallDeclines(for active: ActiveSession) {
-        guard session === active, active.coordinator.connection == .online else { return }
-        for (sid, push) in pendingCallDeclines where owns(push, in: active) && !pendingDeclineSends.contains(sid) {
-            pendingDeclineSends.insert(sid)
-            Task { [weak self] in
-                guard let self else { return }
-                defer {
-                    if self.session === active { self.pendingDeclineSends.remove(sid) }
-                }
-                guard self.session === active, active.coordinator.connection == .online,
-                      self.pendingCallDeclines[sid] == push, self.owns(push, in: active),
-                      let from = push.from, from.resource != nil
-                else { return }
-                let sent = await active.coordinator.calls.declinePushedCall(sid: sid, from: from)
-                if sent, self.session === active, self.pendingCallDeclines[sid] == push {
-                    self.pendingCallDeclines[sid] = nil
-                }
-            }
         }
     }
     #endif
@@ -677,7 +661,6 @@ final class AppState {
         for task in pushDeadlines.values { task.cancel() }
         pushDeadlines.removeAll()
         pendingCallDeclines.removeAll()
-        pendingDeclineSends.removeAll()
         #endif
         guard let active = session else { return }
         await finishPendingPushRegistration?(active.coordinator)

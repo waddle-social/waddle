@@ -27,16 +27,6 @@ extension SessionCoordinator {
 }
 
 public extension SessionCoordinator {
-    /// Hands a pushed invitation to the same slot as a stream proposal.
-    /// The caller checks that the push node belongs to this account first.
-    @discardableResult
-    func receivePushedCall(_ push: CallPush) -> Bool {
-        guard let from = push.from, !push.isExpired(at: .now), !calls.isFinished(sid: push.sid) else { return false }
-        return receiveCall(
-            CallEvent(from: from, sid: push.sid, kind: .propose(CallMedia(audio: true, video: push.isVideo))),
-            isPushed: true)
-    }
-
     /// A room's call is joined by announcing it in the room, so only an
     /// occupant can: the room has let us in, we are online, and the one call
     /// slot is free.

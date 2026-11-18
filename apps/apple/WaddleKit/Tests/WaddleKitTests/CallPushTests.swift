@@ -5,19 +5,17 @@ import Testing
 
 @Suite("VoIP call push parsing")
 struct CallPushTests {
-    @Test func parsesCallWithResource() throws {
+    @Test func parsesCall() throws {
         let push = try #require(CallPush(userInfo: payload()))
         #expect(push.conversation == jid("bob@waddle.test").bare)
-        #expect(push.from == jid("bob@waddle.test/phone"))
         #expect(push.sid == "call-1")
         #expect(!push.isVideo)
         #expect(push.expires == Date(timeIntervalSince1970: 2_000_000_000))
         #expect(push.node == "voip-node")
     }
 
-    @Test func parsesCallWithoutResource() throws {
-        let push = try #require(CallPush(userInfo: payload(call: ["from": nil, "video": true])))
-        #expect(push.from == nil)
+    @Test func parsesVideoCall() throws {
+        let push = try #require(CallPush(userInfo: payload(call: ["video": true])))
         #expect(push.isVideo)
     }
 
@@ -54,9 +52,10 @@ struct CallPushTests {
         #expect(CallPush(userInfo: payload(waddle: ["conversation": "bob@waddle.test/phone"])) == nil)
     }
 
-    @Test func rejectsInvalidSender() {
-        for sender in ["bob@waddle.test", "alice@waddle.test/phone", "bob@waddle.test/", 42, NSNull()] as [Any] {
-            #expect(CallPush(userInfo: payload(call: ["from": sender])) == nil)
+    @Test func ignoresLegacySender() throws {
+        let expected = try #require(CallPush(userInfo: payload()))
+        for sender in ["bob@waddle.test/phone", "alice@waddle.test/phone", "not a jid@", 42, NSNull()] as [Any] {
+            #expect(CallPush(userInfo: payload(call: ["from": sender])) == expected)
         }
     }
 
@@ -78,7 +77,7 @@ struct CallPushTests {
 
     private func payload(waddle changes: [String: Any?] = [:], call callChanges: [String: Any?] = [:]) -> [AnyHashable: Any] {
         var call: [String: Any] = [
-            "sid": "call-1", "video": false, "expires": 2_000_000_000, "from": "bob@waddle.test/phone",
+            "sid": "call-1", "video": false, "expires": 2_000_000_000,
         ]
         for (key, value) in callChanges { call[key] = value }
         var waddle: [String: Any] = [

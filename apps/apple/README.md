@@ -186,36 +186,35 @@ The server also supports PushKit tokens registered as `platform=apns` with
 APNs push type `voip`, priority 10, and that `.voip` topic. Their payload has
 only a `waddle` object (no `aps`): `v`, `class=call`, caller bare JID in
 `conversation`, stanza `item`, `node`, and `call` containing `sid`, `video`,
-Unix-second `expires` (receipt time plus 45 seconds), and optional `from`, the
-caller's full JID for addressing XEP-0353 `<proceed/>`. `from` is omitted for
-bare-JID senders and may be absent from older queued jobs; `conversation` stays
-the caller's bare JID. It carries no display name or body. Ordinary notifications
-stay on the alert node.
+Unix-second `expires` (receipt time plus 45 seconds). The server may also send
+`call.from`, which the app ignores; only the XMPP stream proposal supplies
+the caller's full JID for protocol responses. It carries no display name or
+body. Ordinary notifications stay on the alert node.
 
 On iPhone and iPad the app creates its PushKit registry at process launch,
 registers the VoIP token beside the alert token, and reports every VoIP push
 to CallKit immediately, even before a scene or session exists. It then shares
 session restoration with the UI, retries temporary failures (including a
 keychain locked before first unlock) until the push deadline, validates the
-node's server and account, and hands the invitation to the normal call slot.
-Answer waits for that slot
-and an online connection; an early decline remembers the finished call and
-sends XEP-0353 reject when online if the push includes the caller's full JID;
-otherwise the decline stays local. Sign-out retires both registrations and
-turns off VoIP push types. The Mac keeps its existing alert registration and
-running-app call notifications.
+node's server and account, and waits for the XMPP stream proposal to fill
+the normal call slot. Answer waits for that slot and an online connection;
+an early decline remembers the finished call without sending anything. When
+its stream proposal arrives, the app rejects it once to the proposer's full
+JID without ringing; a bare-JID or self-originated proposal gets no response.
+Sign-out retires both registrations and turns off VoIP push types. The Mac
+keeps its existing alert registration and running-app call notifications.
 
-There is no cancel push: if the caller hangs up or another device answers
-before reconnection, the phone rings until the push deadline. This ends the
-push's system screen without suppressing a later stream proposal's own ring
-window. A pending system answer uses the answer action's deadline instead,
-and survives adoption under Do Not Disturb. Answering that stale invitation
-can show a connecting call until the 45-second session
-timeout. Once the slot adopts a call, its 60-second unanswered timer applies
-instead of the push deadline. Before the session loads, the caller name is
-the JID's local part (or domain); there is no contact cache. APNs environment
-selection follows `DEBUG`, as for alerts, so signing and server configuration
-must match the build.
+There is no cancel push: the system screen waits for stream delivery or the
+push deadline. The server delivers the proposal and any later retract in
+order after the restored session sends presence, so a cancelled call cannot
+remain answerable from push metadata. The push deadline ends the system
+screen without suppressing a later stream proposal's own ring window. A
+pending system answer uses the answer action's deadline instead, and survives
+adoption under Do Not Disturb. Once the slot adopts a call, its 60-second
+unanswered timer applies instead of the push deadline. Before the session
+loads, the caller name is the JID's local part (or domain); there is no contact
+cache. APNs environment selection follows `DEBUG`, as for alerts, so signing
+and server configuration must match the build.
 
 PushKit delivery requires a device. Before release, check:
 

@@ -1,17 +1,15 @@
 import CoreFoundation
 import Foundation
 
-/// A VoIP push's call invitation, before the XMPP session is connected.
+/// CallKit reporting metadata while the XMPP stream's proposal is pending.
 public struct CallPush: Hashable, Sendable {
     public let conversation: BareJID
-    public let from: JID?
     public let sid: String
     public let isVideo: Bool
     public let expires: Date
     public let node: String
 
-    /// Parses the Push Service's versioned `waddle` object. A sender, when
-    /// present, must name a resource of the conversation's bare JID.
+    /// Parses the Push Service's versioned `waddle` object for system reporting.
     public init?(userInfo: [AnyHashable: Any]) {
         guard let waddle = userInfo["waddle"] as? [String: Any],
               let version = Self.number(waddle["v"]), version.doubleValue == 1,
@@ -26,17 +24,7 @@ public struct CallPush: Hashable, Sendable {
               let expires = Self.number(call["expires"]), expires.doubleValue.isFinite
         else { return nil }
 
-        let from: JID?
-        if let sender = call["from"] {
-            guard let address = sender as? String, let jid = JID(parsing: address),
-                  jid.resource != nil, jid.bare == conversation
-            else { return nil }
-            from = jid
-        } else {
-            from = nil
-        }
         self.conversation = conversation
-        self.from = from
         self.sid = sid
         self.isVideo = video.boolValue
         self.expires = Date(timeIntervalSince1970: expires.doubleValue)
