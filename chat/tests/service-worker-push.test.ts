@@ -386,6 +386,28 @@ describe("service worker push handling", () => {
     );
   });
 
+  test("v=1 envelope: a missed call says so, keeps the unread badge and its own banner", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "missed_call",
+        conversation: "alice@muc.example.com",
+        item: "stanza-id-002",
+        unread: 3,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    expect(worker.setAppBadge).toHaveBeenCalledWith(3);
+    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect(title).toBe("Missed call");
+    const shown = options as NotificationOptions & { data: { url: string } };
+    expect(shown.tag).toBe("alice@muc.example.com#missed-call");
+    expect(shown.data.url).toBe("/dm/alice%40muc.example.com");
+  });
+
   test("v=1 envelope: channel mention routes to /r/{channelId}?thread=…", async () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
