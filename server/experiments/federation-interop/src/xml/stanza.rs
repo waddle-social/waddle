@@ -155,6 +155,65 @@ pub fn muc_role(id: &str, room: &str, nick: &str, role: &str) -> Element {
     )
 }
 
+/// A `pubsub#owner` read of `node` at `service`: `what` is `configure`
+/// (XEP-0060 section 8.2), `subscriptions` (8.8.1) or `affiliations`
+/// (8.9.1).
+pub fn pubsub_owner_get(id: &str, service: &str, what: &str, node: &str) -> Element {
+    let child = Element::builder(what, ns::PUBSUB_OWNER)
+        .attr(xml_ncname!("node").to_owned(), node)
+        .build();
+    get(
+        id,
+        service,
+        Element::builder("pubsub", ns::PUBSUB_OWNER)
+            .append(child)
+            .build(),
+    )
+}
+
+/// Change affiliations with `node` at `service` (XEP-0060 section 8.9.2):
+/// `(jid, affiliation)` pairs.
+pub fn pubsub_affiliations_set(
+    id: &str,
+    service: &str,
+    node: &str,
+    changes: &[(&str, &str)],
+) -> Element {
+    let mut list = Element::builder("affiliations", ns::PUBSUB_OWNER)
+        .attr(xml_ncname!("node").to_owned(), node);
+    for (jid, affiliation) in changes {
+        list = list.append(
+            Element::builder("affiliation", ns::PUBSUB_OWNER)
+                .attr(xml_ncname!("jid").to_owned(), *jid)
+                .attr(xml_ncname!("affiliation").to_owned(), *affiliation)
+                .build(),
+        );
+    }
+    set(
+        id,
+        Some(service),
+        Element::builder("pubsub", ns::PUBSUB_OWNER)
+            .append(list.build())
+            .build(),
+    )
+}
+
+/// The first element at or below `element` named `name` in `namespace`
+/// that `matches` accepts.
+pub fn find<'a>(
+    element: &'a Element,
+    name: &str,
+    namespace: &str,
+    matches: &dyn Fn(&Element) -> bool,
+) -> Option<&'a Element> {
+    if element.is(name, namespace) && matches(element) {
+        return Some(element);
+    }
+    element
+        .children()
+        .find_map(|child| find(child, name, namespace, matches))
+}
+
 /// Change the affiliation of `jid` with a room (XEP-0045 sections 9 and
 /// 10).
 pub fn muc_affiliation(id: &str, room: &str, jid: &str, affiliation: &str) -> Element {

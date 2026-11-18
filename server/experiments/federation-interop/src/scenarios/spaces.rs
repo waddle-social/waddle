@@ -340,28 +340,14 @@ pub async fn community_admin(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
         .login_waddle(Home::A, "admin", &support::id("owner"))
         .await?;
     waddle_space(&mut owner, &node, &[]).await?;
-    let affiliation = Element::builder("affiliation", "http://jabber.org/protocol/pubsub#owner")
-        .attr(
-            minidom::rxml::xml_ncname!("jid").to_owned(),
-            ["admin@", topology::HOME_B].concat(),
-        )
-        .attr(
-            minidom::rxml::xml_ncname!("affiliation").to_owned(),
-            "owner",
-        )
-        .build();
-    let affiliations = Element::builder("affiliations", "http://jabber.org/protocol/pubsub#owner")
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
-        .append(affiliation)
-        .build();
+    let remote_jid = ["admin@", topology::HOME_B].concat();
     let granted = ask(
         &mut owner,
-        stanza::set(
+        stanza::pubsub_affiliations_set(
             &support::id("affiliate"),
-            Some(&service),
-            Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
-                .append(affiliations)
-                .build(),
+            &service,
+            &node,
+            &[(remote_jid.as_str(), "owner")],
         ),
     )
     .await?;
@@ -373,14 +359,88 @@ pub async fn community_admin(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut remote = h
         .login_waddle(Home::B, "admin", &support::id("remote"))
         .await?;
+    // A trusted home's owner administers the Space (XEP-0060 section 8):
+    // it reads the configuration, without whether the Space is open to
+    // other servers, which only home-a's own sessions read or change.
+    let form = ask(
+        &mut remote,
+        stanza::pubsub_owner_get(&support::id("form"), &service, "configure", &node),
+    )
+    .await?;
+    let field = |var: &str| {
+        stanza::find(&form, "field", ns::DATA_FORMS, &|field| {
+            field.attr("var") == Some(var)
+        })
+        .is_some()
+    };
+    outcome.check(
+        "the remote owner reads the configuration (section 8.2)",
+        is_result(&form) && field("pubsub#access_model") && !field(ns::WADDLE_SPACE_FEDERATED),
+        describe(&form),
+    );
+    let listed = ask(
+        &mut remote,
+        stanza::pubsub_owner_get(
+            &support::id("affiliations"),
+            &service,
+            "affiliations",
+            &node,
+        ),
+    )
+    .await?;
+    let lists_itself = stanza::find(&listed, "affiliation", ns::PUBSUB_OWNER, &|entry| {
+        entry.attr("jid") == Some(remote_jid.as_str()) && entry.attr("affiliation") == Some("owner")
+    })
+    .is_some();
+    outcome.check(
+        "the remote owner reads the affiliations (section 8.9.1)",
+        is_result(&listed) && lists_itself,
+        describe(&listed),
+    );
+    let member = ["alice@", HOME_A].concat();
+    let membership = ask(
+        &mut remote,
+        stanza::pubsub_affiliations_set(
+            &support::id("member"),
+            &service,
+            &node,
+            &[(member.as_str(), "member")],
+        ),
+    )
+    .await?;
+    outcome.check(
+        "the remote owner grants a membership (section 8.9.2)",
+        is_result(&membership),
+        describe(&membership),
+    );
+    let subscriptions = ask(
+        &mut remote,
+        stanza::pubsub_owner_get(
+            &support::id("subscriptions"),
+            &service,
+            "subscriptions",
+            &node,
+        ),
+    )
+    .await?;
+    outcome.check(
+        "the remote owner reads the subscriptions (section 8.8.1)",
+        is_result(&subscriptions),
+        describe(&subscriptions),
+    );
+    // Placing a room in a Space is decided by the Space's `owner`
+    // relationship and by authority over the room, which no writer issues
+    // to an account at another server: the remote owner's affiliation
+    // places nothing, and the publish is refused (XEP-0060 section
+    // 7.1.3.1; the routing design, "What a remote owner of a Space can
+    // do"). The room exists on home-a and is open to other servers, so
+    // nothing else refuses it.
     let room = [
         support::id("added").as_str(),
         "@",
         &topology::muc_domain(HOME_A),
     ]
     .concat();
-    // The room the remote owner adds exists on home-a and is open to
-    // other servers; a Space lists only rooms of its own deployment.
     muc::join(&mut owner, &room, "owner").await?;
     let published = ask(
         &mut remote,
@@ -394,8 +454,8 @@ pub async fn community_admin(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     )
     .await?;
     outcome.check(
-        "the remote owner adds a room to the community",
-        is_result(&published),
+        "the remote owner places no room in the Space",
+        stanza::error_condition(&published).as_deref() == Some("forbidden"),
         describe(&published),
     );
     remote.close().await;
