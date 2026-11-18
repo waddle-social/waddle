@@ -41,7 +41,7 @@ extension CallStore {
 
     /// The cause of a moved slot decides whether the winning proposal still rings.
     func answerAfterTieBreakSlotMoved(_ event: CallEvent, media: CallMedia, previous: OutgoingCall, epoch: Int) async {
-        guard generation == epoch, !recentlyAbortedSids.contains(event.sid) else { return }
+        guard generation == epoch, !recentlyAbortedSids.contains(event.sid), !isFinished(sid: event.sid) else { return }
         if case .ended(sid: previous.sid, reason: .expired) = state {
             cancelTimers()
             transition(.incoming(IncomingCall(from: event.from, sid: event.sid, media: media)))
@@ -62,7 +62,7 @@ extension CallStore {
     }
 
     func installIncoming(_ event: CallEvent, media: CallMedia, expected: CallState, accepting: Bool = false, epoch: Int) -> Bool {
-        guard generation == epoch, slotStillMatches(expected), !recentlyAbortedSids.contains(event.sid) else { return false }
+        guard generation == epoch, slotStillMatches(expected), !recentlyAbortedSids.contains(event.sid), !isFinished(sid: event.sid) else { return false }
         cancelTimers()
         transition(.incoming(IncomingCall(from: event.from, sid: event.sid, media: media, isAccepting: accepting)))
         return true

@@ -141,8 +141,8 @@ the media engine's own session handling, and shows in the dock without a ring.
 A room's call is reported too, as a call placed to the room. Only ringback is
 played by the app.
 
-All of this needs the app to be running; ringing a closed or suspended app
-needs a VoIP push, which is not there yet.
+On iPhone and iPad, PushKit wakes a closed or suspended app and reports the
+incoming call to CallKit before restoring the XMPP session (see Push notifications).
 
 A room's call (XEP-0272) shows in the same dock as `GroupCallDockView`, staged
 by `GroupCallStage`: the room, the people in it from `GroupCallRoster` (the
@@ -186,17 +186,51 @@ The server also supports PushKit tokens registered as `platform=apns` with
 APNs push type `voip`, priority 10, and that `.voip` topic. Their payload has
 only a `waddle` object (no `aps`): `v`, `class=call`, caller bare JID in
 `conversation`, stanza `item`, `node`, and `call` containing `sid`, `video`,
-Unix-second `expires` (receipt time plus 45 seconds), and optional `from`, the
-caller's full JID for addressing XEP-0353 `<proceed/>`. `from` is omitted for
-bare-JID senders and may be absent from older queued jobs; `conversation` stays
-the caller's bare JID. It carries no display name or body. Ordinary notifications
-stay on the alert node. Client PushKit registration and incoming-call UI are
-separate follow-up work.
+Unix-second `expires` (receipt time plus 45 seconds). Only the XMPP stream
+proposal supplies the caller's full JID for protocol responses. It carries no
+display name or body. Ordinary notifications stay on the alert node.
+
+On iPhone and iPad the app creates its PushKit registry at process launch,
+registers the VoIP token beside the alert token, and reports every VoIP push
+to CallKit immediately, even before a scene or session exists. It then shares
+session restoration with the UI, retries temporary failures (including a
+keychain locked before first unlock) until the push deadline, validates the
+node's server and account, and waits for the XMPP stream proposal to fill
+the normal call slot. Answer waits for that slot and an online connection;
+an early decline remembers the finished call without sending anything. When
+its stream proposal arrives, the app rejects it once to the proposer's full
+JID without ringing; a bare-JID or self-originated proposal gets no response.
+Sign-out retires both registrations and turns off VoIP push types. The Mac
+keeps its existing alert registration and running-app call notifications.
+
+There is no cancel push: the system screen waits for stream delivery or the
+push deadline. The server delivers the proposal and any later retract in
+order after the restored session sends presence, so a cancelled call cannot
+remain answerable from push metadata. The push deadline ends the system
+screen without suppressing a later stream proposal's own ring window. A
+pending system answer uses the answer action's deadline instead, and survives
+adoption under Do Not Disturb. Once the slot adopts a call, its 60-second
+unanswered timer applies instead of the push deadline. Before the session
+loads, the caller name is the JID's local part (or domain); there is no contact
+cache. APNs environment selection follows `DEBUG`, as for alerts, so signing
+and server configuration must match the build.
+
+PushKit delivery requires a device. Before release, check:
+
+- A killed app rings, and answering on the lock screen gives audio.
+- A stream-first duplicate push preserves the call; a second call's push
+  reports then ends while the first keeps ringing.
+- Repeated report-then-end pushes are not throttled or terminated by iOS.
+- Answer works when microphone permission has never been granted.
+- A TestFlight build receives production VoIP pushes.
+- Offline sign-out disables VoIP delivery and retires both registrations
+  on the next opportunity.
 
 Call pushes are also emitted when the account has connected or hibernated
 sessions, so a client may receive both the XMPP proposal and its VoIP push.
-A client already showing the call must ignore a push with the same `call.sid`
-(the XEP-0353 call id), keeping a single incoming-call surface. The server's
+A client already showing the call re-reports a push with the same `call.sid`
+(the XEP-0353 call id) under the existing CallKit id, ignoring the duplicate
+report's result and keeping a single incoming-call surface. The server's
 persisted reason remains `offline_call` for these invitations too.
 
 ## Xcode Cloud and TestFlight

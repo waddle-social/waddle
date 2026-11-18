@@ -427,7 +427,7 @@ public final class SessionCoordinator {
                 scheduleReconnect()
             }
         case let .call(event):
-            if handlesCalls, !isStopped { calls.handle(event) }
+            _ = receiveCall(event)
         case let .message(message):
             route(message)
         case let .presence(wirePresence):
@@ -468,6 +468,13 @@ public final class SessionCoordinator {
             status.connection = .authenticationFailed
             onAuthenticationFailed?()
         }
+    }
+
+    /// Stream arrivals follow the host's call-handling policy.
+    func receiveCall(_ event: CallEvent) -> Bool {
+        guard handlesCalls, !isStopped else { return false }
+        calls.handle(event)
+        return calls.state.isLive && calls.state.sid == event.sid
     }
 
     /// The ready pipeline: presence, directory, joins, read state, queue.

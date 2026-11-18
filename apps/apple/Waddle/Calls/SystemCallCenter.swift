@@ -1,6 +1,7 @@
 #if os(iOS)
 import AVFoundation
 import CallKit
+import Foundation
 import WaddleKit
 
 /// Calls on an iPhone or iPad, as the system knows them: the call screen
@@ -17,7 +18,14 @@ final class SystemCallCenter: NSObject {
         /// Answers the call; true when its answer has gone out.
         var answer: @MainActor (String) async -> Bool
         var end: @MainActor (String) async -> Void
+        /// Records the ending before any task can restore or adopt the call.
+        var finish: @MainActor (String, Bool) -> Void
+        /// Releases push metadata after an answer action fails.
+        var expirePush: @MainActor (String) -> Void
         var setMuted: @MainActor (String, Bool) async -> Void
+        var isReady: @MainActor (String) -> Bool
+        var state: @MainActor () -> CallState
+        var isFinished: @MainActor (String) -> Bool
         /// The name to show for a person or a room.
         var name: @MainActor (ConversationID) -> String
     }
@@ -42,6 +50,53 @@ final class SystemCallCenter: NSObject {
         provider.setDelegate(self, queue: .main)
     }
 
+    /// Every push is reported before restoration or any other asynchronous work.
+    @discardableResult
+    func receive(_ push: CallPush?, callerName: String, completion: @escaping @MainActor () -> Void) -> PushedCall.Verdict {
+        guard let push else {
+            let id = UUID()
+            let update = CXCallUpdate()
+            update.localizedCallerName = callerName
+            provider.reportNewIncomingCall(with: id, update: update) { [weak self] _ in
+                // The queue of a report's completion is not documented.
+                Task { @MainActor in
+                    self?.provider.reportCall(with: id, endedAt: nil, reason: .unanswered)
+                    completion()
+                }
+            }
+            return .dismissed
+        }
+        let result = tracker.pushed(
+            sid: push.sid, conversation: push.conversation, isVideo: push.isVideo,
+            isExpired: push.isExpired(at: .now), isFinished: handlers?.isFinished(push.sid) ?? false,
+            state: handlers?.state() ?? .idle)
+        for update in result.updates { tell(update, callerName: callerName, completion: completion) }
+        audio.setOwner(tracker.audioOwner)
+        return result.verdict
+    }
+
+    /// True while a system answer still needs the pushed call's owner.
+    @discardableResult
+    func pushExpired(sid: String, cancellingAnswer: Bool = false) -> Bool {
+        if cancellingAnswer, tracker.isAwaitingSlot, let call = tracker.managedCall, call.sid == sid {
+            tracker.systemAnswerFailed(call.id)
+        }
+        for update in tracker.pushExpired(sid: sid) { tell(update) }
+        audio.setOwner(tracker.audioOwner)
+        return tracker.isAwaitingSlot && tracker.managedCall?.sid == sid
+    }
+
+    func sessionEnded() {
+        for update in tracker.sessionEnded() { tell(update) }
+        audio.setOwner(tracker.audioOwner)
+    }
+
+    /// The directory can name a call after the push has already reported it.
+    func refreshName() {
+        guard let call = tracker.managedCall else { return }
+        provider.reportCall(with: call.id, updated: describe(call))
+    }
+
     /// The call slot, its media or Do Not Disturb changed.
     func update(state: CallState, isMediaConnected: Bool, isMuted: Bool, isDoNotDisturb: Bool) {
         let updates = tracker.update(
@@ -52,11 +107,26 @@ final class SystemCallCenter: NSObject {
         audio.setOwner(tracker.audioOwner)
     }
 
-    private func tell(_ update: SystemCallUpdate) {
+    private func tell(_ update: SystemCallUpdate, callerName: String? = nil, completion: @escaping @MainActor () -> Void = {}) {
         switch update {
         case .reportIncoming(let call):
-            provider.reportNewIncomingCall(with: call.id, update: describe(call)) { [weak self] error in
-                Task { @MainActor in self?.settled(call, error: error) }
+            provider.reportNewIncomingCall(with: call.id, update: describe(call, callerName: callerName)) { [weak self] error in
+                Task { @MainActor in
+                    self?.settled(call, error: error)
+                    completion()
+                }
+            }
+        case .reportDuplicate(let call):
+            // A duplicate-report error says nothing about the original report.
+            provider.reportNewIncomingCall(with: call.id, update: describe(call, callerName: callerName)) { _ in
+                Task { @MainActor in completion() }
+            }
+        case .reportDismissed(let call, let end):
+            provider.reportNewIncomingCall(with: call.id, update: describe(call, callerName: callerName)) { [weak self] _ in
+                Task { @MainActor in
+                    self?.provider.reportCall(with: call.id, endedAt: nil, reason: Self.reason(end))
+                    completion()
+                }
             }
         case .startOutgoing(let call):
             let action = CXStartCallAction(call: call.id, handle: handle(for: call))
@@ -106,6 +176,14 @@ final class SystemCallCenter: NSObject {
         audio.setOwner(tracker.audioOwner)
     }
 
+    private func refuseAnswer(_ id: UUID, sid: String) {
+        refused(id)
+        // The push deadline may have passed while answering. No later
+        // deadline remains to clear an awaiting refusal or its owner.
+        pushExpired(sid: sid)
+        handlers?.expirePush(sid)
+    }
+
     /// Takes a call the system knows off its screen and leaves it to the app.
     private func abandon(_ id: UUID) {
         guard tracker.managedCall?.id == id else { return }
@@ -117,10 +195,11 @@ final class SystemCallCenter: NSObject {
         CXHandle(type: .generic, value: call.conversation.jid.description)
     }
 
-    private func describe(_ call: SystemCall) -> CXCallUpdate {
+    private func describe(_ call: SystemCall, callerName: String? = nil) -> CXCallUpdate {
         let update = CXCallUpdate()
         update.remoteHandle = handle(for: call)
-        update.localizedCallerName = handlers?.name(call.conversation)
+        update.localizedCallerName = callerName ?? handlers?.name(call.conversation)
+            ?? DirectoryStore().title(for: call.conversation)
         update.hasVideo = call.isVideo
         update.supportsHolding = false
         update.supportsGrouping = false
@@ -129,7 +208,7 @@ final class SystemCallCenter: NSObject {
         return update
     }
 
-    private static func reason(_ end: SystemCallEnd) -> CXCallEndedReason {
+    nonisolated private static func reason(_ end: SystemCallEnd) -> CXCallEndedReason {
         switch end {
         case .remoteEnded: .remoteEnded
         case .unanswered: .unanswered
@@ -146,9 +225,16 @@ extension SystemCallCenter: CXProviderDelegate {
             // The system dropped every call it knew; ours ends with them.
             audio.deactivated()
             guard let call = tracker.managedCall else { return }
+            let awaiting = tracker.isAwaitingSlot && !(handlers?.state().sid == call.sid && handlers?.state().isLive == true)
             tracker.systemEnded(call.id)
+            if awaiting {
+                // A provider reset is not the person's decline.
+                handlers?.expirePush(call.sid)
+            } else {
+                handlers?.finish(call.sid, false)
+                Task { await handlers?.end(call.sid) }
+            }
             audio.setOwner(tracker.audioOwner)
-            Task { await handlers?.end(call.sid) }
         }
     }
 
@@ -161,14 +247,42 @@ extension SystemCallCenter: CXProviderDelegate {
         MainActor.assumeIsolated {
             let id = action.callUUID
             guard let sid = tracker.sid(for: id), let handlers else { return action.fail() }
+            tracker.systemAnswering(id)
             Task {
-                if await handlers.answer(sid) {
+                // A transport send need not honour cancellation. The action's
+                // deadline still takes its screen and audio ownership back.
+                var settled = false
+                let deadline = Task { @MainActor in
+                    do { try await Task.sleep(for: .seconds(max(0, action.timeoutDate.timeIntervalSinceNow))) }
+                    catch { return }
+                    guard !settled else { return }
+                    settled = true
+                    refuseAnswer(id, sid: sid)
+                    action.fail()
+                }
+                defer {
+                    deadline.cancel()
+                    tracker.systemAnswerFailed(id)
+                }
+                while tracker.sid(for: id) == sid && !handlers.isReady(sid) && !settled {
+                    do { try await Task.sleep(for: .milliseconds(50)) } catch { break }
+                }
+                guard !settled else { return }
+                guard tracker.sid(for: id) == sid, Date.now < action.timeoutDate, handlers.isReady(sid) else {
+                    settled = true
+                    refuseAnswer(id, sid: sid)
+                    action.fail()
+                    return
+                }
+                let answered = await handlers.answer(sid)
+                guard !settled else { return }
+                settled = true
+                if answered, tracker.sid(for: id) == sid, Date.now < action.timeoutDate {
                     tracker.systemAnswered(id)
                     action.fulfill()
                 } else {
-                    // The system takes a failed call off its screen; the
-                    // slot may still ring, and is the app's alone now.
-                    refused(id)
+                    // The slot may still ring, and is the app's alone now.
+                    refuseAnswer(id, sid: sid)
                     action.fail()
                 }
             }
@@ -180,9 +294,11 @@ extension SystemCallCenter: CXProviderDelegate {
             // Over for the system at once: telling the other side can take
             // as long as the network does.
             if let sid = tracker.sid(for: action.callUUID), let handlers {
+                let awaiting = tracker.isAwaitingSlot && !(handlers.state().sid == sid && handlers.state().isLive)
                 tracker.systemEnded(action.callUUID)
+                handlers.finish(sid, awaiting)
                 audio.setOwner(tracker.audioOwner)
-                Task { await handlers.end(sid) }
+                if !awaiting { Task { await handlers.end(sid) } }
             }
             action.fulfill()
         }

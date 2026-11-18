@@ -5,7 +5,7 @@ extension CallStore {
         switch event.kind {
         case .propose(let media):
             // A redelivered proposal for the slot's own session needs no answer.
-            guard before.sid != event.sid, !recentlyAbortedSids.contains(event.sid) else { return }
+            guard before.sid != event.sid, !recentlyAbortedSids.contains(event.sid), !isFinished(sid: event.sid) else { return }
             if case .outgoing(let call) = before, call.to == event.from.bare {
                 await tieBreak(event, media: media, previous: call, epoch: epoch)
             } else if case .active(let call) = before, call.peer.bare == event.from.bare {
