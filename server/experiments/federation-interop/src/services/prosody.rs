@@ -1,13 +1,22 @@
 //! The pinned Prosody (`prosody.test`): one configuration file in Lua,
 //! accounts registered with `prosodyctl`, DNS through the harness's stub
 //! via libunbound's forwarder, and the `.test` CA as its S2S trust with
-//! secure authentication required, except on `insecure.prosody.test`,
-//! which trusts only an unrelated CA and so negotiates dialback.
+//! secure authentication required, except with home-a on
+//! `insecure.prosody.test`, which trusts only an unrelated CA and so
+//! negotiates dialback.
 //!
-//! libunbound refuses to query a forwarder on a loopback address and
-//! answers the special-use `test.` zone itself (NXDOMAIN) unless told
-//! otherwise, so the stub is reached only with `do-not-query-localhost:
-//! no` and `test.` made a transparent local zone.
+//! Two Prosody details shape the configuration. libunbound refuses to
+//! query a forwarder on a loopback address and answers the special-use
+//! `test.` zone itself (NXDOMAIN) unless told otherwise, so the stub is
+//! reached only with `do-not-query-localhost: no` and `test.` made a
+//! transparent local zone. And `mod_s2s` is a global module: its
+//! `s2s_secure_auth` is one setting for every host, keyed by the remote
+//! domain, which a VirtualHost cannot relax. Secure authentication stays
+//! on, and home-a is listed in `s2s_insecure_domains` so that
+//! `insecure.prosody.test`, which cannot verify home-a's certificate,
+//! may use dialback with it; `prosody.test` still offers SASL EXTERNAL
+//! only for a valid chain and identity, and the flows check that home-a
+//! established `pkix` streams with it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +27,7 @@ use tokio::process::Command;
 
 use crate::pki::Leaf;
 use crate::process::{self, StopSignal, Supervised};
-use crate::topology::{Ports, PROSODY, PROSODY_INSECURE, PROSODY_MUC, PROSODY_PUBSUB};
+use crate::topology::{Ports, HOME_A, PROSODY, PROSODY_INSECURE, PROSODY_MUC, PROSODY_PUBSUB};
 
 pub const ACCOUNTS: [&str; 4] = ["admin", "alice", "bob", "caseprobe"];
 
@@ -139,6 +148,7 @@ impl Prosody {
             "c2s_require_encryption = true".to_owned(),
             "s2s_require_encryption = true".to_owned(),
             "s2s_secure_auth = true".to_owned(),
+            ["s2s_insecure_domains = { ", &lua(HOME_A), " }"].concat(),
             "use_dane = false".to_owned(),
             "authentication = \"internal_hashed\"".to_owned(),
             "storage = \"internal\"".to_owned(),
@@ -156,7 +166,6 @@ impl Prosody {
             String::new(),
             ["VirtualHost ", &lua(PROSODY_INSECURE)].concat(),
             ["  ssl = ", &self.ssl(leaf(PROSODY_INSECURE), &self.other_ca, variant.tls)].concat(),
-            "  s2s_secure_auth = false".to_owned(),
             String::new(),
             ["Component ", &lua(PROSODY_MUC), " \"muc\""].concat(),
             ["  ssl = ", &self.ssl(leaf(PROSODY_MUC), &self.ca, variant.tls)].concat(),
