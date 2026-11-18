@@ -193,43 +193,53 @@ pub async fn mixed_case_to(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         outcome.driven_by = ["stock ", peer.label()].concat();
     } else {
         // The peer normalized it; write one into its own authenticated
-        // stream instead.
+        // stream instead. The injected stanza is a message to an account
+        // of home-a, seen by that account's own client: an IQ request
+        // would not do, since its answer goes back to a peer that never
+        // sent it, and a Waddle peer drops such an uncorrelated response
+        // before its client sees it.
+        let mut local = h
+            .login_waddle(Home::A, "alice", &support::id("case-local"))
+            .await?;
         let injected_id = support::id("case-injected");
-        let iq = stanza::iq(
+        let message = stanza::message(
             ns::SERVER,
-            "get",
+            "chat",
             &injected_id,
             Some(&session.jid),
-            Some(mixed),
-            Some(stanza::ping_payload()),
+            &["alice@", mixed].concat(),
+            Some("mixed-case domain"),
         );
-        relay.inject(crate::xml::header::element_bytes(&iq))?;
-        let reply = session
+        relay.inject(crate::xml::header::element_bytes(&message))?;
+        let delivered = local
             .wait_for(ANSWER, |element: &Element| {
                 element.attr("id") == Some(injected_id.as_str())
             })
             .await;
-        match reply {
-            Ok(reply) => outcome.check(
-                "Waddle accepts the mixed-case `to` and answers from the lowercase domain",
-                is_result(&reply) && reply.attr("from") == Some(HOME_A),
-                [
-                    describe(&reply),
-                    " from ".to_owned(),
-                    reply.attr("from").unwrap_or_default().to_owned(),
-                ]
-                .concat(),
-            ),
+        let name =
+            "Waddle accepts the mixed-case `to` and delivers to the account at the lowercase domain";
+        match delivered {
+            Ok(delivered) => {
+                let to = delivered.attr("to").unwrap_or_default().to_owned();
+                outcome.check(
+                    name,
+                    delivered.name() == "message"
+                        && delivered.attr("type") != Some("error")
+                        && to.split('/').next() == Some(["alice@", HOME_A].concat().as_str()),
+                    ["delivered to ", to.as_str()].concat(),
+                );
+            }
             Err(error) => outcome.check(
-                "Waddle accepts the mixed-case `to`",
+                name,
                 false,
-                format!("no answer to the injected stanza: {error:#}"),
+                format!("not delivered to alice@{HOME_A}: {error:#}"),
             ),
         }
+        local.close().await;
         outcome.driven_by = [
-            "tap injection into stock ",
+            "tap injection of a message into stock ",
             peer.label(),
-            "'s authenticated stream (the peer normalizes `to` itself)",
+            "'s authenticated stream (the peer normalizes `to` itself), seen by a home-a client",
         ]
         .concat();
     }
