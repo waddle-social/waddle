@@ -1965,6 +1965,23 @@ plane or producer of stream evidence was added.
   now made the deployment owner through the existing tuple helper before
   the first placement.
 
+The selected evidence was refreshed a fifty-fourth time, through
+`4ecbf0e3dcc3eb19d5625dbb6e4cdbec2f4cad51`. Five reviewed files changed, all
+for XEP-0503 Space images (the avatar and banner metadata items):
+`admin/spaces.rs`, `spaces_publish.rs`, `spaces_retract.rs`,
+`spaces_remote.rs` and `s2s_spaces.rs`. An image item is stored, served and
+retracted under the same `spaces_node_mutation_allowed` decision and, for a
+remote principal, the same honoured-standing and owner-relationship checks
+as a room item; it writes no relationship, channel link or parent tuple,
+and purges and deletions never count it among the Space's rooms. Seventeen
+anchors moved with the lines added above them, and no grant writer,
+storage plane or producer of stream evidence was added.
+
+- The raw scan holds 1666 records: one more `publish_item`, the image
+  branch of `spaces_publish.rs`, which stores the item in the Space node
+  exactly as a room item is stored; every other token has the same number
+  of records as in the fifty-third refresh, some at new lines.
+
 The checker establishes only that these exact files, anchors and raw matches
 are the ones reviewed.
 
