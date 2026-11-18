@@ -309,9 +309,19 @@ pub struct Material {
 /// and the negotiating streams per peer are therefore at their ceilings
 /// (4 each); the per-address accept rate is already at its ceiling, and
 /// the harness's own raw connections keep to it.
+///
+/// The harness also opens more directional domain pairs than the 24
+/// established streams a deployment keeps: three local domains against
+/// the domains of three peers, in both directions. Rows run back to back,
+/// so a stream an earlier row used is quiet for seconds, not the default
+/// 30 s eviction idle time, and a full stream cap would refuse a row's own
+/// new stream. The eviction idle time is 5 s, so a row's streams take the
+/// place of earlier rows' quiet ones; streams with traffic are still never
+/// evicted.
 fn loopback_limits() -> BTreeMap<String, u64> {
     BTreeMap::from([
         ("max_unauthenticated_per_address".to_owned(), 4),
         ("max_negotiating_per_peer".to_owned(), 4),
+        ("eviction_idle_ms".to_owned(), 5_000),
     ])
 }
