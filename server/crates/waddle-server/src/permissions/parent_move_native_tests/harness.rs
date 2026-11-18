@@ -215,6 +215,23 @@ impl Harness {
             .expect("PG connection");
         connection.execute("INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'text', 0, 0)", crate::db_params![&channel, "Moving", "test-only"]).await.expect("actual channel catalog row");
         drop(connection);
+        // Placing a channel in a Space is the channel's decision: owning the
+        // Space alone does not authorise the first publish that places it.
+        // The operator is the deployment owner, who may place any channel, so
+        // the channel itself carries no direct grant and every access to it
+        // is inherited through its parent Space.
+        write(
+            &observer,
+            Tuple::new(
+                Object::new(
+                    ObjectType::Server,
+                    crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID,
+                ),
+                Relation::new("owner"),
+                Subject::user("operator@example.com"),
+            ),
+        )
+        .await;
         for node in &nodes {
             database
                 .get_or_create_node(&owner, node)
@@ -278,7 +295,7 @@ impl Harness {
             ..
         } = reply
         else {
-            panic!("expected production publish result")
+            panic!("expected production publish result, got {}", replies[0])
         };
         let publish = payload
             .get_child("publish", PUBSUB_NS)
