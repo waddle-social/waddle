@@ -169,7 +169,7 @@ impl Profile {
             endpoints,
             dialback_inbound: true,
             dialback_outbound: true,
-            limits: BTreeMap::new(),
+            limits: loopback_limits(),
         }
     }
 
@@ -300,4 +300,18 @@ pub struct Material {
     pub ca: PathBuf,
     pub crl: PathBuf,
     pub dialback_secret: PathBuf,
+}
+
+/// Every peer of the harness reaches a deployment from 127.0.0.1 through
+/// its relay, so the limits Waddle keeps per source address would act as
+/// one cap shared by every peer at once, and a clustered ejabberd opens up
+/// to four streams for one pair. The unauthenticated sockets per address
+/// and the negotiating streams per peer are therefore at their ceilings
+/// (4 each); the per-address accept rate is already at its ceiling, and
+/// the harness's own raw connections keep to it.
+fn loopback_limits() -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        ("max_unauthenticated_per_address".to_owned(), 4),
+        ("max_negotiating_per_peer".to_owned(), 4),
+    ])
 }
