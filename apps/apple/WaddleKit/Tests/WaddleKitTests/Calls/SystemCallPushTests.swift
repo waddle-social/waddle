@@ -210,6 +210,164 @@ import WaddleKit
         #expect(push(&t, state: incoming()).verdict == .dismissed)
     }
 
+    @Test func answeringBeforeAdoptionSurvivesDoNotDisturb() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.update(state: incoming(), isMediaConnected: false, isDoNotDisturb: true).isEmpty)
+        #expect(t.managedCall == call(id1))
+        #expect(t.audioOwner == .system)
+        t.systemAnswered(id1)
+        #expect(t.update(state: active(), isMediaConnected: true).isEmpty)
+    }
+
+    @Test func anAnswerPendingWhileAwaitingUsesTheAnswerActionsDeadline() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        #expect(t.isAwaitingSlot)
+        #expect(t.managedCall == call(id1))
+        t.systemAnswerFailed(id1)
+        #expect(t.pushExpired(sid: "s1") == [.end(id1, .unanswered)])
+        #expect(t.audioOwner == .nobody)
+    }
+
+    @Test func anAnswerTimingOutAfterPushExpiryCleansUpTheRefusedWait() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        t.systemAnswerFailed(id1)
+        t.systemRefused(id1)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        #expect(t.audioOwner == .nobody)
+        #expect(push(&t).verdict == .awaiting)
+    }
+
+    @Test func decliningAnAnswerPendingPastPushExpiryKeepsTheCallEnded() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        t.systemEnded(id1)
+        #expect(!t.isManaging)
+        #expect(t.audioOwner == .nobody)
+        #expect(t.sid(for: id1) == nil)
+        // The late proposal stays off the system's screen even before the
+        // app's finished-sid guard processes the person's decline.
+        #expect(t.update(state: incoming(), isMediaConnected: false).isEmpty)
+        #expect(t.audioOwner == .nobody)
+        #expect(push(&t, state: incoming()).verdict == .dismissed)
+    }
+
+    @Test func anOwnerOrSessionChangeCanEndAnAnswerPendingPastPushExpiry() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        // A session-generation or owner mismatch must cancel the answer's
+        // protection before ending the awaiting system call.
+        t.systemAnswerFailed(id1)
+        #expect(t.pushExpired(sid: "s1") == [.end(id1, .unanswered)])
+        #expect(!t.isManaging)
+        #expect(t.audioOwner == .nobody)
+    }
+
+    @Test func aStaleAnswersCompletionCannotClearTheNextCallsPendingAnswer() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.sessionEnded() == [.end(id1, .failed)])
+        _ = push(&t, sid: "s2")
+        t.systemAnswering(id2)
+        t.systemAnswerFailed(id1)
+        t.systemAnswered(id1)
+        t.systemEnded(id1)
+        #expect(t.pushExpired(sid: "s2").isEmpty)
+        #expect(t.isAwaitingSlot)
+        #expect(t.managedCall == call(id2, sid: "s2"))
+        #expect(t.update(state: incoming("s2"), isMediaConnected: false, isDoNotDisturb: true).isEmpty)
+        #expect(t.managedCall == call(id2, sid: "s2"))
+        #expect(t.audioOwner == .system)
+    }
+
+    @Test func anotherIdentifiersAnswerDoesNotProtectTheAwaitingCall() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id2)
+        #expect(t.pushExpired(sid: "s1") == [.end(id1, .unanswered)])
+    }
+
+    @Test func anotherIdentifiersFailureDoesNotClearAPendingAnswer() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        t.systemAnswerFailed(id2)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        #expect(t.isAwaitingSlot)
+    }
+
+    @Test func aSuccessfulAnswerClearsThePendingAnswer() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        t.systemAnswered(id1)
+        #expect(t.pushExpired(sid: "s1") == [.end(id1, .unanswered)])
+    }
+
+    @Test func aFailedAnswerDoesNotBypassDoNotDisturbAtAdoption() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        t.systemAnswerFailed(id1)
+        #expect(t.update(state: incoming(), isMediaConnected: false, isDoNotDisturb: true) == [.end(id1, .unanswered)])
+        #expect(t.audioOwner == .app)
+    }
+
+    @Test func anEndedCallDoesNotLeaveAnAnswerPendingForTheNextCall() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemAnswering(id1)
+        #expect(t.sessionEnded() == [.end(id1, .failed)])
+        _ = push(&t, sid: "s2")
+        #expect(t.pushExpired(sid: "s2") == [.end(id2, .unanswered)])
+    }
+
+    @Test(arguments: [false, true])
+    func aRefusedOrEndedAwaitingPushExpiresWithoutASystemUpdate(ended: Bool) {
+        var t = tracker()
+        _ = push(&t)
+        if ended { t.systemEnded(id1) } else { t.systemRefused(id1) }
+        #expect(t.audioOwner == .nobody)
+        #expect(t.pushExpired(sid: "other").isEmpty)
+        #expect(push(&t).verdict == .dismissed)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        #expect(t.audioOwner == .nobody)
+        #expect(push(&t).verdict == .awaiting)
+    }
+
+    @Test(arguments: [false, true])
+    func aSessionEndingClearsARefusedOrEndedAwaitingPush(ended: Bool) {
+        var t = tracker()
+        _ = push(&t)
+        if ended { t.systemEnded(id1) } else { t.systemRefused(id1) }
+        #expect(t.sessionEnded().isEmpty)
+        #expect(t.audioOwner == .nobody)
+        #expect(push(&t).verdict == .awaiting)
+    }
+
+    @Test func expiryAndSessionEndDoNotClearAnAdoptedUnmanagedCall() {
+        var t = tracker()
+        _ = push(&t)
+        t.systemRefused(id1)
+        #expect(t.update(state: incoming(), isMediaConnected: false).isEmpty)
+        #expect(t.pushExpired(sid: "s1").isEmpty)
+        #expect(t.sessionEnded().isEmpty)
+        #expect(t.audioOwner == .app)
+        #expect(push(&t, state: incoming()).verdict == .dismissed)
+    }
+
     @Test func aRefusedPushRemainsUnmanagedWhenItsProposalArrives() {
         var t = tracker()
         _ = push(&t)
@@ -218,7 +376,7 @@ import WaddleKit
         t.systemRefused(id1)
         #expect(!t.isManaging)
         #expect(t.sid(for: id1) == nil)
-        #expect(t.audioOwner == .app)
+        #expect(t.audioOwner == .nobody)
         #expect(t.update(state: .idle, isMediaConnected: false).isEmpty)
         #expect(push(&t).verdict == .dismissed)
         #expect(t.update(state: incoming(), isMediaConnected: false).isEmpty)

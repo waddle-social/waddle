@@ -79,6 +79,7 @@ public struct SystemCallTracker {
     private struct Managed {
         var call: SystemCall
         var isAnswerKnown = false
+        var isAnswerPending = false
         var progress = Progress.started
         /// What the system's screen shows for the microphone.
         var isMuted = false
@@ -122,15 +123,28 @@ public struct SystemCallTracker {
         return PushedCall(verdict: .awaiting, updates: [.reportIncoming(call)])
     }
 
-    /// The push's deadline bounds only the wait for its proposal.
+    /// The push's deadline bounds only the wait for its proposal. An answer
+    /// already underway is bounded by the system answer action's deadline.
     public mutating func pushExpired(sid: String) -> [SystemCallUpdate] {
-        guard let current = managed, current.isAwaitingSlot, current.call.sid == sid else { return [] }
+        if unmanagedIsAwaitingSlot, unmanagedSid == sid {
+            unmanagedSid = nil
+            unmanagedIsAwaitingSlot = false
+            if endedSid == sid { endedSid = nil }
+        }
+        guard let current = managed, current.isAwaitingSlot, current.call.sid == sid,
+            !current.isAnswerPending
+        else { return [] }
         managed = nil
         return [.end(current.call.id, .unanswered)]
     }
 
     /// A call waiting for a session cannot survive that session going away.
     public mutating func sessionEnded() -> [SystemCallUpdate] {
+        if unmanagedIsAwaitingSlot {
+            if endedSid == unmanagedSid { endedSid = nil }
+            unmanagedSid = nil
+            unmanagedIsAwaitingSlot = false
+        }
         guard let current = managed, current.isAwaitingSlot else { return [] }
         managed = nil
         return [.end(current.call.id, .failed)]
@@ -138,7 +152,7 @@ public struct SystemCallTracker {
 
     public var audioOwner: SystemCallAudioOwner {
         if managed != nil { return .system }
-        return unmanagedSid != nil && unmanagedSid != endedSid ? .app : .nobody
+        return unmanagedSid != nil && !unmanagedIsAwaitingSlot && unmanagedSid != endedSid ? .app : .nobody
     }
 
     /// Our session id for the system's call, while it lasts.
@@ -146,11 +160,24 @@ public struct SystemCallTracker {
         managed?.call.id == id ? managed?.call.sid : nil
     }
 
+    /// The person answered on the system's screen; the proposal or online
+    /// connection may still be on its way. The answer action owns its deadline.
+    public mutating func systemAnswering(_ id: UUID) {
+        guard managed?.call.id == id else { return }
+        managed?.isAnswerPending = true
+    }
+
+    public mutating func systemAnswerFailed(_ id: UUID) {
+        guard managed?.call.id == id else { return }
+        managed?.isAnswerPending = false
+    }
+
     /// The system knows the call is answered: the person answered on its
     /// screen and the answer went out.
     public mutating func systemAnswered(_ id: UUID) {
         guard managed?.call.id == id else { return }
         managed?.isAnswerKnown = true
+        managed?.isAnswerPending = false
     }
 
     /// The person muted or unmuted on the system's screen, so it need not
@@ -194,7 +221,7 @@ public struct SystemCallTracker {
                 managed = nil
             } else {
                 managed?.isAwaitingSlot = false
-                if state.isIncoming, isDoNotDisturb {
+                if state.isIncoming, isDoNotDisturb, !current.isAnswerPending {
                     updates.append(.end(current.call.id, .unanswered))
                     managed = nil
                     unmanagedSid = current.call.sid

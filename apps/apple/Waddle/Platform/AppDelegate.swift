@@ -6,208 +6,62 @@ import UIKit
 import AppKit
 #endif
 
-/// Receives the APNs device token and registers it with `push.<domain>`
-/// (XEP-0357 + the Waddle register-device XEP-0050 command).
+/// Owns token delivery for the lifetime of the process, including scene-less launches.
 @MainActor
 final class AppDelegate: NSObject {
-    private enum RegistrationAttempt: Equatable {
-        case registered
-        case failed
-        case superseded
-    }
-
     weak var appState: AppState?
-    private var pendingDeviceToken: Data?
-    private var registrationTask: Task<Void, Never>?
-    private var registrationCoordinator: SessionCoordinator?
-    private var registrationGeneration = 0
-    private var isFinishingRegistration = false
-    private var registrationRetryRequested = false
-    private weak var registrationFencedCoordinator: SessionCoordinator?
+    private lazy var alertRegistrar = PushTokenRegistrar(kind: .alert) { [weak self] status in
+        self?.appState?.pushRegistrationStatus = status
+    }
+    #if os(iOS)
+    private let voipRegistrar = PushTokenRegistrar(kind: .voip)
+    private var voipRegistry: VoIPPushRegistry?
+    #endif
 
     func attach(_ appState: AppState) {
         self.appState = appState
+        alertRegistrar.attach(appState)
+        #if os(iOS)
+        voipRegistrar.attach(appState)
+        #endif
         appState.finishPendingPushRegistration = { [weak self] coordinator in
             guard let self else { return }
-            await self.finishPendingRegistration(for: coordinator)
+            await self.alertRegistrar.finishPendingRegistration(for: coordinator)
+            #if os(iOS)
+            await self.voipRegistrar.finishPendingRegistration(for: coordinator)
+            #endif
         }
-        startPendingRegistrationIfPossible()
-    }
-
-    fileprivate func didRegister(deviceToken: Data) {
-        if registrationTask != nil { registrationRetryRequested = true }
-        pendingDeviceToken = deviceToken
-        startPendingRegistrationIfPossible()
-    }
-
-    private func startPendingRegistrationIfPossible() {
-        guard registrationTask == nil,
-              !isFinishingRegistration,
-              let deviceToken = pendingDeviceToken,
-              let appState,
-              let coordinator = appState.session?.coordinator,
-              coordinator.connection == .online
-        else { return }
-        guard registrationFencedCoordinator !== coordinator else { return }
-        registrationFencedCoordinator = nil
-        guard let appID = Bundle.main.bundleIdentifier else { return }
-        appState.pushRegistrationStatus = .registering
-        let generation = registrationGeneration
-        let environment = Self.apnsEnvironment
-        registrationCoordinator = coordinator
-        registrationTask = Task { [weak self, weak appState] in
+        appState.restartPushRegistration = { [weak self] in
             guard let self else { return }
-            guard let appState else {
-                if self.registrationGeneration == generation {
-                    self.registrationTask = nil
-                    self.registrationCoordinator = nil
-                }
-                return
+            Self.registerForRemoteNotifications()
+            self.alertRegistrar.startPendingRegistrationIfPossible()
+            #if os(iOS)
+            if let token = self.voipRegistry?.token {
+                self.voipRegistrar.didRegister(deviceToken: token)
             }
-            let outcome = await self.register(
-                deviceToken: deviceToken,
-                environment: environment,
-                appID: appID,
-                appState: appState,
-                coordinator: coordinator,
-                generation: generation
-            )
-            guard self.registrationGeneration == generation else { return }
-            let retryRequested = self.registrationRetryRequested
-            self.registrationRetryRequested = false
-            self.registrationTask = nil
-            self.registrationCoordinator = nil
-            if outcome == .superseded || retryRequested || self.pendingDeviceToken != deviceToken {
-                self.startPendingRegistrationIfPossible()
-            }
+            self.voipRegistrar.startPendingRegistrationIfPossible()
+            #endif
         }
-    }
-
-    private func register(
-        deviceToken: Data,
-        environment: PushEnvironment,
-        appID: String,
-        appState: AppState,
-        coordinator: SessionCoordinator,
-        generation: Int
-    ) async -> RegistrationAttempt {
-        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        let owner = PushRegistrationStore.Owner(server: appState.server, account: coordinator.account.jid)
-
-        guard isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) else { return .superseded }
-        var couldNotRetirePreviousRegistration = false
-        for retirement in PushRegistrationStore.pendingRetirements(for: owner) {
-            if await coordinator.disablePush(retirement) {
-                PushRegistrationStore.removePendingRetirement(retirement, for: owner)
-            } else {
-                couldNotRetirePreviousRegistration = true
-            }
-        }
-
-        if let registration = PushRegistrationStore.registration(for: owner),
-           PushRegistrationStore.contextMatches(token: token, environment: environment, appID: appID, for: owner) {
-            guard await coordinator.enablePush(registration) else {
-                if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
-                    appState.pushRegistrationStatus = .failed("Push re-registration with the XMPP server failed. It will retry after reconnecting.")
-                }
-                return isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) ? .failed : .superseded
-            }
-            if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
-                pendingDeviceToken = nil
-                if couldNotRetirePreviousRegistration {
-                    appState.pushRegistrationStatus = .failed("A previous push registration could not be retired. It will retry after reconnecting.")
-                    return .failed
-                }
-                appState.pushRegistrationStatus = .registered
-                return .registered
-            }
-            return .superseded
-        }
-
-        guard !couldNotRetirePreviousRegistration else {
-            appState.pushRegistrationStatus = .failed("A previous push registration could not be retired. It will retry after reconnecting.")
-            return .failed
-        }
-
-        // A stored registration from an earlier environment or bundle topic
-        // must be retired before replacing it; otherwise it can remain an
-        // active server-side device after the local cache is overwritten.
-        if let registration = PushRegistrationStore.registration(for: owner) {
-            PushRegistrationStore.enqueueRetirement(registration, for: owner)
-            guard await coordinator.disablePush(registration) else {
-                if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
-                    appState.pushRegistrationStatus = .failed("The previous push registration could not be retired. It will retry after reconnecting.")
-                }
-                return isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) ? .failed : .superseded
-            }
-            PushRegistrationStore.removePendingRetirement(registration, for: owner)
-            PushRegistrationStore.forget(owner)
-        }
-
-        guard isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) else { return .superseded }
-        guard let registration = await coordinator.registerPush(deviceToken: token, environment: environment, appID: appID) else {
-            if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
-                appState.pushRegistrationStatus = .failed("Push registration with the XMPP server failed. It will retry after reconnecting.")
-            }
-            return isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) ? .failed : .superseded
-        }
-        guard isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) else {
-            PushRegistrationStore.enqueueRetirement(registration, for: owner)
-            if await coordinator.disablePush(registration) {
-                PushRegistrationStore.removePendingRetirement(registration, for: owner)
-                return .superseded
-            }
-            if self.appState === appState {
-                appState.pushRegistrationStatus = .failed("A new push registration needs cleanup. It will retry after reconnecting.")
-            }
-            return .failed
-        }
-        PushRegistrationStore.save(registration, token: token, environment: environment, appID: appID, for: owner)
-        pendingDeviceToken = nil
-        appState.pushRegistrationStatus = .registered
-        return .registered
-    }
-
-    private func isCurrent(
-        _ generation: Int,
-        deviceToken: Data,
-        appState: AppState,
-        coordinator: SessionCoordinator
-    ) -> Bool {
-        registrationGeneration == generation
-            && pendingDeviceToken == deviceToken
-            && self.appState === appState
-            && appState.session?.coordinator === coordinator
-            && coordinator.connection == .online
-    }
-
-    private static var apnsEnvironment: PushEnvironment {
-        #if DEBUG
-        .sandbox
-        #else
-        .production
-        #endif
-    }
-
-    private var inputCornerRadius: CGFloat {
         #if os(iOS)
-        28
-        #else
-        Theme.Radius.large
+        appState.setVoIPPushEnabled = { [weak self] enabled in
+            guard let self else { return }
+            self.voipRegistrar.setEnabled(enabled)
+            self.voipRegistry?.setEnabled(enabled)
+        }
         #endif
     }
 
-    private func finishPendingRegistration(for coordinator: SessionCoordinator) async {
-        registrationFencedCoordinator = coordinator
-        guard registrationCoordinator === coordinator, let registrationTask else { return }
-        isFinishingRegistration = true
-        registrationRetryRequested = false
-        registrationGeneration += 1
-        registrationTask.cancel()
-        await registrationTask.value
-        self.registrationTask = nil
-        registrationCoordinator = nil
-        isFinishingRegistration = false
+    private func launched() {
+        guard !AppState.isHostingTests else { return }
+        attach(AppState.shared)
+        #if os(iOS)
+        if voipRegistry == nil {
+            voipRegistry = VoIPPushRegistry(
+                onToken: { [weak self] token in self?.voipRegistrar.didRegister(deviceToken: token) },
+                onInvalidated: { [weak self] in self?.voipRegistrar.invalidate() }
+            )
+        }
+        #endif
     }
 
     /// Asks APNs for a token. Called once a session is online.
@@ -226,11 +80,13 @@ final class AppDelegate: NSObject {
 /// (offline sign-out, expired session) is retried the next time that
 /// account signs out.
 enum PushRegistrationStore {
-    struct Owner: Hashable {
+    struct Owner: Hashable, Sendable {
         let server: URL
         let account: BareJID
 
-        fileprivate var key: String { "\(server.absoluteString)|\(account)" }
+        fileprivate func key(for kind: PushTokenKind) -> String {
+            "\(server.absoluteString)|\(account)" + (kind == .voip ? "|voip" : "")
+        }
     }
 
     private struct Context: Codable, Equatable {
@@ -253,75 +109,97 @@ enum PushRegistrationStore {
     private static let legacyTokensKey = "waddle.apple.push-tokens"
     private static let retirementsKey = "waddle.apple.push-retirements"
 
-    static func registration(for owner: Owner) -> PushRegistration? {
-        guard let data = registrations[owner.key] else { return nil }
+    static func registration(for owner: Owner, kind: PushTokenKind = .alert) -> PushRegistration? {
+        guard let data = registrations[owner.key(for: kind)] else { return nil }
         return try? JSONDecoder().decode(PushRegistration.self, from: data)
     }
 
-    static func contextMatches(token: String, environment: PushEnvironment, appID: String, for owner: Owner) -> Bool {
-        guard let data = contexts[owner.key],
+    static func contextMatches(token: String, environment: PushEnvironment, appID: String, for owner: Owner, kind: PushTokenKind = .alert) -> Bool {
+        guard let data = contexts[owner.key(for: kind)],
               let context = try? JSONDecoder().decode(Context.self, from: data)
         else { return false }
         return context == Context(token: token, environment: environment, appID: appID)
     }
 
-    static func save(_ registration: PushRegistration, token: String, environment: PushEnvironment, appID: String, for owner: Owner) {
+    static func save(_ registration: PushRegistration, token: String, environment: PushEnvironment, appID: String, for owner: Owner, kind: PushTokenKind = .alert) {
         guard let encoded = try? JSONEncoder().encode(registration) else { return }
         var all = registrations
-        all[owner.key] = encoded
+        all[owner.key(for: kind)] = encoded
         UserDefaults.standard.set(all, forKey: registrationsKey)
         var allContexts = contexts
-        allContexts[owner.key] = try? JSONEncoder().encode(Context(token: token, environment: environment, appID: appID))
+        allContexts[owner.key(for: kind)] = try? JSONEncoder().encode(Context(token: token, environment: environment, appID: appID))
         UserDefaults.standard.set(allContexts, forKey: contextsKey)
     }
 
     /// The account whose registration owns a push node, for routing a
     /// tapped APNs push on an install with several accounts.
-    static func account(forNode node: String) -> BareJID? {
+    static func account(forNode node: String) -> Owner? {
+        var owners = Set<Owner>()
         for (key, data) in registrations {
             guard let registration = try? JSONDecoder().decode(PushRegistration.self, from: data),
-                  registration.node == node,
-                  let separator = key.lastIndex(of: "|")
+                  registration.node == node
             else { continue }
-            return BareJID(parsing: String(key[key.index(after: separator)...]))
+            guard let owner = owner(forKey: key) else { continue }
+            owners.insert(owner)
         }
-        return nil
+        // An ambiguous node must never route a push as an arbitrary account.
+        return owners.count == 1 ? owners.first : nil
     }
 
-    static func forget(_ owner: Owner) {
+    /// A token invalidation applies to every account that used this topic.
+    static func retireAll(kind: PushTokenKind) {
+        for (key, data) in registrations {
+            guard let owner = owner(forKey: key), owner.key(for: kind) == key,
+                  let registration = try? JSONDecoder().decode(PushRegistration.self, from: data)
+            else { continue }
+            enqueueRetirement(registration, for: owner, kind: kind)
+            forget(owner, kind: kind)
+        }
+    }
+
+    private static func owner(forKey key: String) -> Owner? {
+        let ownerKey = key.hasSuffix("|voip") ? String(key.dropLast("|voip".count)) : key
+        guard let separator = ownerKey.firstIndex(of: "|"),
+              let server = URL(string: String(ownerKey[..<separator])),
+              let account = BareJID(parsing: String(ownerKey[ownerKey.index(after: separator)...]))
+        else { return nil }
+        return Owner(server: server, account: account)
+    }
+
+    static func forget(_ owner: Owner, kind: PushTokenKind = .alert) {
         var all = registrations
-        all[owner.key] = nil
+        all[owner.key(for: kind)] = nil
         UserDefaults.standard.set(all, forKey: registrationsKey)
         var allContexts = contexts
-        allContexts[owner.key] = nil
+        allContexts[owner.key(for: kind)] = nil
         UserDefaults.standard.set(allContexts, forKey: contextsKey)
         var legacyTokens = UserDefaults.standard.dictionary(forKey: legacyTokensKey) as? [String: String] ?? [:]
-        legacyTokens[owner.key] = nil
+        legacyTokens[owner.key(for: kind)] = nil
         UserDefaults.standard.set(legacyTokens, forKey: legacyTokensKey)
     }
 
-    static func pendingRetirements(for owner: Owner) -> [PushRegistration] {
-        guard let data = retirements[owner.key] else { return [] }
+    static func pendingRetirements(for owner: Owner, kind: PushTokenKind = .alert) -> [PushRegistration] {
+        guard let data = retirements[owner.key(for: kind)] else { return [] }
         return (try? JSONDecoder().decode([PushRegistration].self, from: data)) ?? []
     }
 
-    static func enqueueRetirement(_ registration: PushRegistration, for owner: Owner) {
-        var items = pendingRetirements(for: owner)
+    static func enqueueRetirement(_ registration: PushRegistration, for owner: Owner, kind: PushTokenKind = .alert) {
+        var items = pendingRetirements(for: owner, kind: kind)
         guard !items.contains(registration) else { return }
         items.append(registration)
         var all = retirements
-        all[owner.key] = try? JSONEncoder().encode(items)
+        all[owner.key(for: kind)] = try? JSONEncoder().encode(items)
         UserDefaults.standard.set(all, forKey: retirementsKey)
     }
 
-    static func removePendingRetirement(_ registration: PushRegistration, for owner: Owner) {
-        var items = pendingRetirements(for: owner)
+    static func removePendingRetirement(_ registration: PushRegistration, for owner: Owner, kind: PushTokenKind = .alert) {
+        var items = pendingRetirements(for: owner, kind: kind)
         items.removeAll { $0 == registration }
         var all = retirements
         if items.isEmpty {
-            all[owner.key] = nil
+            all[owner.key(for: kind)] = nil
         } else {
-            all[owner.key] = try? JSONEncoder().encode(items)
+            all[owner.key(for: kind)] = try? JSONEncoder().encode(items)
         }
         UserDefaults.standard.set(all, forKey: retirementsKey)
     }
@@ -341,8 +219,13 @@ enum PushRegistrationStore {
 
 #if os(iOS)
 extension AppDelegate: UIApplicationDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        launched()
+        return true
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        didRegister(deviceToken: deviceToken)
+        alertRegistrar.didRegister(deviceToken: deviceToken)
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
@@ -351,8 +234,12 @@ extension AppDelegate: UIApplicationDelegate {
 }
 #elseif os(macOS)
 extension AppDelegate: NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        launched()
+    }
+
     func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        didRegister(deviceToken: deviceToken)
+        alertRegistrar.didRegister(deviceToken: deviceToken)
     }
 
     func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {

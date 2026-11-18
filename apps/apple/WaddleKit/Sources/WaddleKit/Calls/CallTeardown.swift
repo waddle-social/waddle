@@ -83,6 +83,22 @@ extension CallStore {
 /// Answer and End from outside the dock (the system's call screen, a
 /// notification) name the call they were shown for.
 extension CallStore {
+    /// Declines a pushed invitation before it holds the slot. Remember it
+    /// before sending, so a late proposal cannot ring while the reject is
+    /// on its way. Without a full sender, the decline stays local: the Rust
+    /// bridge requires a full JID for reject. True also means handled locally.
+    /// An adopted call uses `end(sid:)` instead.
+    public func declinePushedCall(sid: String, from: JID?) async -> Bool {
+        guard state.sid != sid || !state.isLive else { return false }
+        markFinished(sid: sid)
+        guard let from, from.resource != nil else { return true }
+        let epoch = generation
+        let sent = await port.sendCallReject(to: from, sid: sid, tieBreak: false)
+        guard generation == epoch else { return false }
+        if !sent { reportError("call reject failed", epoch: epoch) }
+        return sent
+    }
+
     /// Answers the ringing call `sid`. True when its answer has gone out,
     /// by this or by an earlier answer; false when that call is not
     /// ringing here or the answer could not be sent.
