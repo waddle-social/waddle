@@ -65,7 +65,16 @@ pub struct Settings {
 
 struct Shared {
     settings: Mutex<Settings>,
-    inbound: Mutex<Vec<Inbound>>,
+    /// The connections accepted since the last [`Receiver::clear`], by a
+    /// number no other connection of this receiver ever has, so a
+    /// connection accepted before a clear never writes into the record of
+    /// one accepted after it.
+    inbound: Mutex<Vec<(u64, Inbound)>>,
+    next_connection: std::sync::atomic::AtomicU64,
+    /// Every stanza received since the last [`Receiver::clear`], on any
+    /// connection, including one accepted before the clear: Waddle keeps
+    /// an outbound stream open and sends later stanzas on it.
+    stanzas: Mutex<Vec<Element>>,
     /// Dialback keys the harness sent as an initiating server; a
     /// verification request for one of them is valid.
     issued_keys: Mutex<BTreeSet<String>>,
@@ -96,6 +105,8 @@ impl Receiver {
         let shared = Arc::new(Shared {
             settings: Mutex::new(settings),
             inbound: Mutex::new(Vec::new()),
+            next_connection: std::sync::atomic::AtomicU64::new(0),
+            stanzas: Mutex::new(Vec::new()),
             issued_keys: Mutex::new(BTreeSet::new()),
             disconnect: watch::channel(0u64).0,
         });
@@ -109,11 +120,10 @@ impl Receiver {
                 let shared = Arc::clone(&accept_shared);
                 let pki = Arc::clone(&accept_pki);
                 tokio::spawn(async move {
-                    let index = {
-                        let mut inbound = lock(&shared.inbound);
-                        inbound.push(Inbound::default());
-                        inbound.len() - 1
-                    };
+                    let index = shared
+                        .next_connection
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    lock(&shared.inbound).push((index, Inbound::default()));
                     let mut disconnect = shared.disconnect.subscribe();
                     let served = tokio::select! {
                         served = serve(&shared, &pki, socket, index) => served,
@@ -121,9 +131,9 @@ impl Receiver {
                         _ = disconnect.changed() => Ok(()),
                     };
                     if let Err(error) = served {
-                        if let Some(record) = lock(&shared.inbound).get_mut(index) {
+                        with_record(&shared, index, |record| {
                             record.error = Some(format!("{error:#}"));
-                        }
+                        });
                     }
                 });
             }
@@ -151,8 +161,12 @@ impl Receiver {
         lock(&self.shared.issued_keys).insert(key.to_owned());
     }
 
+    /// The connections accepted since the last [`Self::clear`].
     pub fn inbound(&self) -> Vec<Inbound> {
-        lock(&self.shared.inbound).clone()
+        lock(&self.shared.inbound)
+            .iter()
+            .map(|(_, record)| record.clone())
+            .collect()
     }
 
     /// Close every open connection, so Waddle's next stanza for a harness
@@ -163,16 +177,17 @@ impl Receiver {
             .send_modify(|generation| *generation += 1);
     }
 
+    /// Forget the connections accepted and the stanzas received so far.
+    /// Connections still open stay open, and what they receive from now
+    /// on is in [`Self::stanzas`].
     pub fn clear(&self) {
         lock(&self.shared.inbound).clear();
+        lock(&self.shared.stanzas).clear();
     }
 
-    /// Every stanza received so far.
+    /// Every stanza received since the last [`Self::clear`].
     pub fn stanzas(&self) -> Vec<Element> {
-        lock(&self.shared.inbound)
-            .iter()
-            .flat_map(|inbound| inbound.stanzas.iter().cloned())
-            .collect()
+        lock(&self.shared.stanzas).clone()
     }
 
     /// Wait up to `timeout` for a stanza `matches` accepts.
@@ -264,23 +279,32 @@ fn response_header(local: &str, remote: Option<&str>, id: &str) -> Result<Vec<u8
     Ok(open.with_id(id).encode()?)
 }
 
-fn mark_redirected(shared: &Shared, index: usize) {
-    if let Some(record) = lock(&shared.inbound).get_mut(index) {
-        record.redirected = true;
+/// Update the record of connection `index`, if it was accepted since the
+/// last clear.
+fn with_record(shared: &Shared, index: u64, update: impl FnOnce(&mut Inbound)) {
+    if let Some((_, record)) = lock(&shared.inbound)
+        .iter_mut()
+        .find(|(connection, _)| *connection == index)
+    {
+        update(record);
     }
 }
 
-async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: usize) -> Result<()> {
+fn mark_redirected(shared: &Shared, index: u64) {
+    with_record(shared, index, |record| record.redirected = true);
+}
+
+async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: u64) -> Result<()> {
     let mut framer = Framer::new();
     let Read::Item(Item::Header(opening)) = next(&mut socket, &mut framer).await? else {
         anyhow::bail!("no stream header");
     };
     let to = opening.attribute("to").unwrap_or_default();
     let from = opening.attribute("from");
-    if let Some(record) = lock(&shared.inbound).get_mut(index) {
+    with_record(shared, index, |record| {
         record.header_from = from.clone();
         record.header_to = Some(to.clone());
-    }
+    });
     let (behaviour, leaf, versions) = {
         let settings = lock(&shared.settings);
         (
@@ -326,9 +350,9 @@ async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: us
         .1
         .peer_certificates()
         .is_some_and(|certificates| !certificates.is_empty());
-    if let Some(record) = lock(&shared.inbound).get_mut(index) {
+    with_record(shared, index, |record| {
         record.client_certificate = client_certificate;
-    }
+    });
     let mut framer = Framer::new();
     let Read::Item(Item::Header(_)) = next(&mut tls, &mut framer).await? else {
         anyhow::bail!("no stream header after TLS");
@@ -372,9 +396,9 @@ async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: us
                 )
                 .await?;
                 framer = Framer::new();
-                if let Some(record) = lock(&shared.inbound).get_mut(index) {
+                with_record(shared, index, |record| {
                     record.authenticated = Some("external".to_owned());
-                }
+                });
             } else {
                 let failure = Element::builder("failure", ns::SASL)
                     .append(Element::builder("not-authorized", ns::SASL).build())
@@ -385,9 +409,9 @@ async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: us
             // Waddle, as a Receiving Server, asks whether the harness issued a key.
             let key = element.text();
             let valid = lock(&shared.issued_keys).contains(key.trim());
-            if let Some(record) = lock(&shared.inbound).get_mut(index) {
+            with_record(shared, index, |record| {
                 record.verification_requests += 1;
-            }
+            });
             let answer = Element::builder("verify", ns::DIALBACK)
                 .attr(xml_ncname!("from").to_owned(), to.as_str())
                 .attr(
@@ -436,12 +460,13 @@ async fn serve(shared: &Arc<Shared>, pki: &Pki, mut socket: TcpStream, index: us
                 .build();
             write(&mut tls, &header::element_bytes(&answer)).await?;
             if valid {
-                if let Some(record) = lock(&shared.inbound).get_mut(index) {
+                with_record(shared, index, |record| {
                     record.authenticated = Some("dialback".to_owned());
-                }
+                });
             }
-        } else if let Some(record) = lock(&shared.inbound).get_mut(index) {
-            record.stanzas.push(element);
+        } else {
+            lock(&shared.stanzas).push(element.clone());
+            with_record(shared, index, |record| record.stanzas.push(element));
         }
     }
 }
