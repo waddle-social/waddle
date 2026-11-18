@@ -159,9 +159,11 @@ final class AppState {
         guard session === active else { return }
         #if os(iOS)
         // A proposal and its end can both arrive before this observer runs.
-        // A finished invitation must not keep the pre-session screen ringing.
+        // A finished invitation must not keep the pre-session screen ringing,
+        // nor an answer given before the session waiting on it: the stream
+        // has said the call is over, unlike a push deadline passing.
         for (sid, push) in pendingCallPushes where coordinator.calls.isFinished(sid: sid) {
-            expireCallPush(push)
+            expireCallPush(push, cancellingAnswer: true)
         }
         systemCalls.update(state: state, isMediaConnected: isMediaConnected, isMuted: isMuted, isDoNotDisturb: isDoNotDisturb)
         systemCalls.refreshName()
