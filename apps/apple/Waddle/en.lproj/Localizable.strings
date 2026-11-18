@@ -1,5 +1,6 @@
 /* APNs banners. The Push Service sends only a class-specific loc-key, never the sender or the message. */
 "WADDLE_PUSH_DM" = "New direct message";
+"WADDLE_PUSH_MISSED_CALL" = "Missed call";
 "WADDLE_PUSH_DM_MENTION" = "You were mentioned in a direct message";
 "WADDLE_PUSH_PERSONAL_MENTION" = "You were mentioned in a channel";
 "WADDLE_PUSH_CHANNEL_MENTION" = "New message for everyone in a channel";
