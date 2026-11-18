@@ -1420,6 +1420,41 @@ async fn websocket_rejects_spoofed_muc_domain_presence() {
         ))
         .await
         .expect("send spoofed MUC presence");
+    // The domain only ends like the MUC service's, so it is not served and
+    // the join is never handled as one for a local room. Presence to an
+    // unserved domain that the remote route does not take is answered with
+    // `remote-server-not-found` (RFC 6120 §10.4.3); with S2S disabled no
+    // route exists.
+    let frame = client
+        .recv_matching(|frame| frame.contains("muc.localhost.evil"))
+        .await
+        .expect("presence error for the unserved domain");
+    let error: Element = frame.parse().expect("presence error XML");
+    assert_eq!(error.name(), "presence", "{frame}");
+    assert_eq!(error.attr("type"), Some("error"), "{frame}");
+    assert_eq!(
+        error.attr("from"),
+        Some(format!("{room}/admin").as_str()),
+        "{frame}"
+    );
+    assert!(
+        error
+            .get_child("error", CLIENT_NS)
+            .and_then(|error| {
+                error.get_child(
+                    "remote-server-not-found",
+                    "urn:ietf:params:xml:ns:xmpp-stanzas",
+                )
+            })
+            .is_some(),
+        "{frame}"
+    );
+    assert!(
+        error
+            .get_child("x", "http://jabber.org/protocol/muc#user")
+            .is_none(),
+        "no occupant presence: {frame}"
+    );
     assert_no_frame_matching(
         &mut client,
         Duration::from_millis(250),
