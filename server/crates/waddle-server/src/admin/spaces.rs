@@ -733,7 +733,14 @@ async fn counts_for_space(state: &AppState, node: &SpaceNode) -> Result<(u32, u3
         .list_node_affiliations(&state.spaces_jid, node)
         .await
         .map_err(|e| internal_err(format!("pubsub list_node_affiliations failed: {e}")))?;
-    let channel_count = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    // A Space's items are its Channels' bookmarks and, at the reserved
+    // XEP-0503 image ids, its avatar and banner metadata, which are not
+    // Channels.
+    let channels = items
+        .iter()
+        .filter(|item| SpaceImage::from_item_id(&item.id).is_none())
+        .count();
+    let channel_count = u32::try_from(channels).unwrap_or(u32::MAX);
     let member_count = u32::try_from(
         affiliations
             .iter()
