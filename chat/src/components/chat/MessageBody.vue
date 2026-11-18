@@ -518,6 +518,21 @@ const c = {
     "&[data-muted]": { bg: "surface.2", color: "fg.muted" },
   }),
   muted: css({ color: "fg.muted" }),
+  /** Media from another server, named until the user asks to load it. */
+  withheld: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "1.5",
+    width: "min(100%, 448px)",
+    maxWidth: "100%",
+    p: "3",
+    bg: "surface",
+    border: "1px dashed {colors.border}",
+    borderRadius: "control",
+  }),
+  withheldList: css({ display: "flex", flexDirection: "column", gap: "0.5", margin: 0, padding: 0, listStyle: "none" }),
+  withheldLoad: css({ alignSelf: "flex-start" }),
+  truncate: css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
 };
 </script>
 
@@ -798,27 +813,19 @@ const c = {
     </div>
 
     <!-- Media from another server, named until the user asks to load it -->
-    <div
-      v-if="withheldMedia.length > 0"
-      class="chat-attachment-card flex max-w-xl flex-col gap-1.5 rounded-lg border border-dashed border-border bg-muted/30 p-3"
-      @click.stop
-    >
-      <span class="type-caption text-muted-foreground">
+    <div v-if="withheldMedia.length > 0" :class="c.withheld" @click.stop>
+      <span :class="c.fileMeta">
         Images and files from {{ remoteMediaHost }} aren't loaded until you choose to.
       </span>
-      <ul class="flex flex-col gap-0.5">
+      <ul :class="c.withheldList">
         <li
           v-for="item in withheldMedia"
           :key="item.key"
-          class="type-meta truncate text-muted-foreground"
+          :class="[c.fileMeta, c.truncate]"
           :title="item.url || undefined"
         >{{ item.label }}</li>
       </ul>
-      <button
-        type="button"
-        class="type-caption self-start rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
-        @click.stop="remoteMediaRequested = true"
-      >
+      <button type="button" :class="[c.smallButton, c.withheldLoad]" @click.stop="remoteMediaRequested = true">
         Load
       </button>
     </div>
