@@ -186,10 +186,9 @@ The server also supports PushKit tokens registered as `platform=apns` with
 APNs push type `voip`, priority 10, and that `.voip` topic. Their payload has
 only a `waddle` object (no `aps`): `v`, `class=call`, caller bare JID in
 `conversation`, stanza `item`, `node`, and `call` containing `sid`, `video`,
-Unix-second `expires` (receipt time plus 45 seconds). The server may also send
-`call.from`, which the app ignores; only the XMPP stream proposal supplies
-the caller's full JID for protocol responses. It carries no display name or
-body. Ordinary notifications stay on the alert node.
+Unix-second `expires` (receipt time plus 45 seconds). Only the XMPP stream
+proposal supplies the caller's full JID for protocol responses. It carries no
+display name or body. Ordinary notifications stay on the alert node.
 
 On iPhone and iPad the app creates its PushKit registry at process launch,
 registers the VoIP token beside the alert token, and reports every VoIP push
