@@ -1134,3 +1134,24 @@ pub fn spawn_notification_loops(
         ),
     ]
 }
+
+/// Drive the production unanswered-call scan without waiting for the ring deadline.
+#[cfg(feature = "test-support")]
+pub async fn sweep_unanswered_calls_for_test(
+    outbox: &crate::notification_outbox::NotificationOutboxStore,
+    mam: &dyn waddle_xmpp::mam::MamStorage,
+    settings: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    watermark_ms: &mut i64,
+    now: chrono::DateTime<chrono::Utc>,
+    batch_size: usize,
+) -> bool {
+    crate::notification_outbox::sweep_unanswered_calls(
+        outbox,
+        mam,
+        settings,
+        watermark_ms,
+        now,
+        batch_size,
+    )
+    .await
+}

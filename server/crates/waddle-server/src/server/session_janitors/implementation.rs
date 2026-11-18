@@ -3836,6 +3836,8 @@ pub(crate) async fn run_notification_outbox_loop(
 ) {
     let mut pending_notification_cursor =
         routes::interpret::PendingNotificationRecoveryCursor::default();
+    let mut unanswered_call_watermark_ms = crate::time::now_ms()
+        .saturating_sub(crate::notification_outbox::UNANSWERED_CALL_LOOKBACK_MS);
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
     loop {
@@ -3853,6 +3855,7 @@ pub(crate) async fn run_notification_outbox_loop(
                 retention_days,
                 prune_batch_size,
                 &mut pending_notification_cursor,
+                &mut unanswered_call_watermark_ms,
             )
             .await;
         } else {
@@ -3862,6 +3865,7 @@ pub(crate) async fn run_notification_outbox_loop(
                 retention_days,
                 prune_batch_size,
                 &mut pending_notification_cursor,
+                &mut unanswered_call_watermark_ms,
                 false,
             )
             .await;
@@ -4100,6 +4104,7 @@ pub(crate) async fn run_notification_outbox_sweep(
     retention_days: u32,
     prune_batch_size: usize,
     pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
+    unanswered_call_watermark_ms: &mut i64,
 ) {
     run_notification_outbox_sweep_inner(
         state,
@@ -4107,6 +4112,7 @@ pub(crate) async fn run_notification_outbox_sweep(
         retention_days,
         prune_batch_size,
         pending_notification_cursor,
+        unanswered_call_watermark_ms,
         true,
     )
     .await;
@@ -4118,6 +4124,7 @@ async fn run_notification_outbox_sweep_inner(
     retention_days: u32,
     prune_batch_size: usize,
     pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
+    unanswered_call_watermark_ms: &mut i64,
     timed: bool,
 ) {
     async {
@@ -4171,6 +4178,17 @@ async fn run_notification_outbox_sweep_inner(
                     "Notification outbox janitor recovered XEP-0357 groupchat candidates from inbox projections"
                 );
             }
+        }
+        if timed {
+            sweep_failed |= !crate::notification_outbox::sweep_unanswered_calls(
+                &state.deps.protocol.notification_outbox,
+                state.deps.protocol.mam_storage.as_ref(),
+                state.deps.protocol.notification_settings_projection.as_ref(),
+                unanswered_call_watermark_ms,
+                chrono::Utc::now(),
+                batch_size,
+            )
+            .await;
         }
         let scope = if timed {
             DrainScope::All

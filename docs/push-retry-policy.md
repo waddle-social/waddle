@@ -100,7 +100,14 @@ The comparison uses the retract's original server receipt time, including
 recovery; already outboxed or suppressed invitations qualify. Another caller
 resource may cancel. A partial unique index permits one missed-call candidate
 per recipient, conversation and SID, even for repeated distinct retracts.
-`call_unanswered` is reserved for slice 2 and is never emitted here.
+A call that rings out creates the same class with reason `call_unanswered`:
+the timed outbox sweep (both replicas) finds `call` candidates created more
+than 55 seconds ago with no missed-call row and no outcome in the callee's own
+archive, and inserts one candidate without ingress lineage. An outcome is any
+archived `proceed`, `accept`, `reject`, `finish` or `retract` for the SID with
+the caller, tie-break included. The deadline is 55 seconds so the caller's own
+45-second retract wins. Each process looks back at most 5 minutes, so calls
+that rang out during a longer outage get no alert.
 
 Missed calls carry the SID without video and no `<call/>` context, so they use
 ordinary APNs alert nodes and Web Push, never VoIP nodes. APNs uses
@@ -121,10 +128,12 @@ or candidate activity preview. Their XEP-0160 pending delivery,
 with a proposal, or with only unknown JMI children follow normal notification
 policy.
 
-This slice does not alert when the caller crashes without retracting. An answer
-or decline crossing the retract may still alert; a retract planned before the
-proposal candidate commits may miss eligibility. The durable answer/decline
-record and 45-second unanswered timer are deferred to slice 2. Deploy only after
+A retract is suppressed when the callee's archive already holds its own
+`proceed`, `accept`, `reject` or `finish` for the SID. An answer and a retract
+committed at the same instant may still both miss each other; a retract planned
+before the proposal candidate commits may miss eligibility. A JMI reply sent
+without the `<store/>` hint is not archived and cannot suppress an alert;
+Waddle's clients always add it. Deploy only after
 Apple adds the loc-key and conversation tap route and the web service worker
 adds its “Missed call” title. Migration 2002 requires the owner Job at zero
 replicas using `server/docs/runbooks/restricted-runtime-cutover.md`.

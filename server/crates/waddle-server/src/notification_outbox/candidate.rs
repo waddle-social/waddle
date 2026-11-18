@@ -8,6 +8,7 @@ use super::{
 use xmpp_parsers::jingle::SessionId;
 
 pub const CALL_RING_DURATION_SECONDS: i64 = 45;
+pub const CALL_UNANSWERED_DEADLINE_SECONDS: i64 = CALL_RING_DURATION_SECONDS + 10;
 /// Retracts remain eligible for a short grace period after ringing expires.
 pub const MISSED_CALL_WINDOW_SECONDS: i64 = CALL_RING_DURATION_SECONDS + 15;
 
@@ -235,6 +236,27 @@ impl NotificationCandidate {
             NotificationCallData::Incoming(call) => Some(call),
             NotificationCallData::Missed(_) => None,
         }
+    }
+
+    /// Derive the timer's missed-call alert from the original invitation.
+    pub fn unanswered_call(&self) -> Result<Self, NotificationOutboxError> {
+        let call = self
+            .call()
+            .ok_or(NotificationOutboxError::InvalidCallData)?;
+        let mut candidate = Self::missed_call_with_hints(
+            self.recipient_bare_jid.clone(),
+            self.sender_jid.clone(),
+            self.archive_stanza_id.clone(),
+            call.session_id.clone(),
+            NotificationMessageHints {
+                noping: self.noping,
+                no_store: self.no_store,
+                no_permanent_store: self.no_permanent_store,
+                reaction: self.reaction,
+            },
+        )?;
+        candidate.reason = NotificationReason::CallUnanswered;
+        Ok(candidate)
     }
 
     pub fn call_session_id(&self) -> Option<&SessionId> {

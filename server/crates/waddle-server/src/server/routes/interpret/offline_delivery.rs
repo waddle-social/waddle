@@ -523,6 +523,29 @@ async fn prepare_notification_candidate_for_message(
                 return PreparedOfflineNotification::RetryLater;
             }
         }
+        match crate::notification_outbox::call_outcome_recorded(
+            state.deps.protocol.mam_storage.as_ref(),
+            recipient,
+            sender,
+            &sid,
+            // The eligible invitation can predate this retract by the full
+            // missed-call window; include its preceding 60 seconds of
+            // evidence, and a minute after for archive clock skew.
+            (received_at
+                - chrono::Duration::seconds(
+                    crate::notification_outbox::MISSED_CALL_WINDOW_SECONDS + 60,
+                ))..(received_at + chrono::Duration::seconds(60)),
+            crate::notification_outbox::OutcomeAuthor::Callee,
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => return PreparedOfflineNotification::Suppressed,
+            Err(error) => {
+                warn!(%recipient, %sender, %error, "callee call-outcome lookup failed; deferring candidate");
+                return PreparedOfflineNotification::RetryLater;
+            }
+        }
     } else if waddle_xmpp::xep::xep0353::is_bodyless_jmi_signal(original_message) {
         return PreparedOfflineNotification::Suppressed;
     }

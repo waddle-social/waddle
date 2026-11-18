@@ -48,7 +48,7 @@ push_publish_jobs  (durable row, Push Service queue; provider
                    fanout in #528/#529/#530)
 ```
 
-## Missed-call alerts (issue #2514, slice 1)
+## Missed-call alerts (issue #2514)
 
 An archived plain XEP-0353 `<retract/>` creates class `missed_call` with reason
 `call_retracted`, including connected, detached and headless recipients. The
@@ -65,8 +65,29 @@ Migration 2002 widens the class/reason CHECKs and makes
 `(recipient_bare_jid, conversation_jid, call_sid)` unique for `missed_call`.
 Repeated retracts, including distinct stanza IDs, share one candidate and retain
 canonical notification custody. Missed calls store a typed SID without video or
-a `<call/>` push-context child. `call_unanswered` is accepted in storage and
-codecs but is reserved for slice 2 and is never produced here.
+a `<call/>` push-context child.
+
+On timed notification sweeps, an invitation with no archived outcome after 55
+seconds (the 45-second ring duration plus a 10-second grace period) creates
+reason `call_unanswered`. The timer queries the callee's personal MAM archive
+with the caller as the peer, starting 60 seconds before the invitation. Any
+matching `proceed`, legacy `accept`, `reject`, `finish` or `retract` from either
+party counts as an outcome, including tie-break and reason children. Retract
+eligibility checks the same evidence but counts only callee-authored outcomes,
+so the triggering retract cannot suppress itself. Query errors and incomplete
+200-message pages fail closed and create no alert.
+
+The process-local scan watermark begins five minutes before startup. Pending
+and recently outboxed invitations use the existing partial indices. A successful
+non-full batch advances to its due-time bound; a full batch advances to just
+before its last row, so later calls are not held back. An error retains the
+watermark, but never further back than five minutes. For the timer a plain
+caller retract is not an outcome: either the retract path already wrote the
+missed-call row, or it lost the race with the invitation and the timer alerts.
+Timer candidates use the invitation's identity and have no
+ingress lineage. Timer and retract alerts share the existing per-call unique
+index, so either ordering produces at most one missed-call row. This adds no
+schema or migration.
 
 Missed calls use direct-conversation policy and count as mentions: mute applies
 at T0, DND and blocking are checked at T1, and blocking is checked again at
@@ -83,11 +104,15 @@ pending message push cannot replace the missed-call alert. FCM devices record
 not-applicable until Android supports the class, without sending a silent data
 message. Push text is the fixed phrase “Missed call” and names nobody.
 
-Accepted limits: no retract after a caller crash means no alert in this slice;
-an answer or decline crossing the retract can still alert; and a retract
-planned before the proposal's candidate commits can miss eligibility. The
-ordinary back-to-back same-stream case is covered. A durable answer/decline
-record and the 45-second unanswered-call timer belong to slice 2.
+Accepted limits: an outcome that is not archived cannot be used as evidence;
+an answer or decline crossing the evidence read and insert can still alert.
+A retract planned before the proposal's candidate commits can miss immediate
+eligibility; the unanswered timer then alerts at 55 seconds, because a plain
+caller retract is not an outcome for the timer. The
+ordinary back-to-back same-stream case is covered. The bounded startup window
+covers five minutes of invitations; older invitations are not revisited. An
+invitation candidate committed more than 55 seconds after its receipt time
+(deferred insert or recovery) is behind the watermark and gets no timer alert.
 
 Before deployment, separate client changes must add Apple's
 `WADDLE_PUSH_MISSED_CALL` string and conversation tap route, and the web service
@@ -117,6 +142,9 @@ replicas following `docs/runbooks/restricted-runtime-cutover.md`.
 | Caller cancellation produces exactly one missed-call candidate for connected, detached and headless recipients | XEP-0353 plain retract, XEP-0334 store hint, XEP-0313 recipient archive, XEP-0198 detached routing, XEP-0359 canonical identity | `connected_recipient_gets_one_missed_call_candidate`, `detached_recipient_gets_one_missed_call_candidate`, `headless_recipient_gets_one_missed_call_candidate`, `propose_immediately_followed_by_retract_on_one_stream_gets_missed_call` (`tests/xep0353_live_push_ws.rs`); positives count raw candidate effects before deduplication |
 | Missed-call eligibility rejects forged, old, glare and muted/blocked cancellations | XEP-0353 session and tie-break semantics, receipt-time 60-second window, XEP-0492 mute, XEP-0191 blocking | `retract_without_prior_call_candidate_gets_no_missed_call`, `different_account_cannot_retract_another_call_for_a_missed_call_alert`, `tie_break_retract_gets_no_missed_call`, `retract_more_than_sixty_seconds_after_call_candidate_gets_no_missed_call`, `muted_conversation_gets_no_missed_call_even_with_prior_call_candidate`, `caller_blocked_after_proposal_gets_no_missed_call` (`tests/xep0353_live_push_ws.rs`) |
 | Another caller resource can cancel; a repeated retract retains one alert and settles its receipt | XEP-0353 caller bare-JID identity; canonical ingress ancestry and SID uniqueness | `retract_from_another_caller_resource_gets_one_missed_call`, `second_distinct_retract_is_duplicate_and_its_canonical_receipt_settles` (`tests/xep0353_live_push_ws.rs`) |
+| Unanswered invitations produce exactly one lineage-free missed-call candidate after 55 seconds | XEP-0353 session identity, XEP-0313 callee personal archive, existing missed-call uniqueness | `unanswered_call_yields_exactly_one_lineage_free_missed_call` (`tests/xep0353_live_push_ws.rs`) drives the production sweep with an explicit clock; scan and persistence tests in `tests/notification_outbox/` cover both index branches, bounds, quarantine, duplicates and pruning |
+| Callee outcomes, including another device and glare rejection, suppress unanswered alerts | XEP-0353 top-level `proceed`, `accept`, `reject`, `finish`, `retract`; permissive child handling; XEP-0313 outgoing and incoming peer queries | `callee_proceed_prevents_unanswered_missed_call`, `callee_reject_prevents_unanswered_missed_call`, `callee_tie_break_reject_prevents_unanswered_missed_call`, `answer_from_second_callee_device_prevents_unanswered_missed_call` (`tests/xep0353_live_push_ws.rs`); recognizer tests in `crates/waddle-xmpp/tests/xep0353_jingle_message.rs` |
+| Timer and retract share one alert, while a prior callee rejection and mute suppress both paths | XEP-0353 author-filtered MAM evidence, SID uniqueness, XEP-0492 T0 mute | `timer_then_retract_retains_exactly_one_missed_call`, `retract_then_timer_retains_exactly_one_missed_call`, `retract_after_callee_reject_creates_no_missed_call` (`tests/xep0353_live_push_ws.rs`); `muted_conversation_has_no_timer_candidate`, `plain_caller_retract_without_a_missed_call_row_leaves_the_alert_to_the_timer` (`tests/notification_outbox/calls.rs`) |
 | Lost live call candidate obligations expire cleanly | Canonical ingress custody and fixed 45-second call expiry; 60-second maintenance grace | `sqlite_expired_live_call_candidate_settles_without_late_push_or_unrecoverable_metric` (`ingress/maintenance_tests.rs`); executor replay and restamp tests in `ingress/execute_notification_tests.rs` and `ingress/restamp/tests.rs` |
 | Other bodyless call signals stay deliverable without generic alerts | XEP-0353 top-level `proceed`, `reject`, `finish`, `ringing` or legacy `accept`, and retracts without an eligible prior invitation; XEP-0160 pending delivery and MAM retained | `offline_call_signals_preserve_pending_delivery_without_generic_alerts` (`tests/notification_outbox/calls.rs`); predicate unit tests and `tests/xep0353_jingle_message.rs` |
 | Calls honor mute, DND and blocking while passing on-mention | XEP-0492 (`never`, `on-mention`), XEP-0191, Waddle DND | `calls_and_missed_calls_respect_never_dnd_blocking_and_pass_on_mention` (`tests/notification_outbox/calls.rs`) |
