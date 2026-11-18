@@ -493,14 +493,28 @@ pub async fn own_edit_delete(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
+/// A transport failure, not an answer from the room's host.
+fn transport_condition(answer: &Element) -> bool {
+    matches!(
+        stanza::error_condition(answer).as_deref(),
+        Some("remote-server-not-found" | "remote-server-timeout")
+    )
+}
+
 pub async fn private_discovery_and_mam(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
         [
             peer.label(),
-            " client probing a members-only home-a room it is not in",
+            " client probing a members-only home-a room it is not in, after reading an open one",
         ]
         .concat(),
     );
+    let open = [
+        room_name("open").as_str(),
+        "@",
+        &topology::muc_domain(HOME_A),
+    ]
+    .concat();
     let room = [
         room_name("private").as_str(),
         "@",
@@ -510,10 +524,38 @@ pub async fn private_discovery_and_mam(h: &mut Harness, peer: Peer) -> Result<Ou
     let mut owner = h
         .login_waddle(Home::A, "admin", &support::id("owner"))
         .await?;
-    join(&mut owner, &room, "owner").await?;
+    join(&mut owner, &open, "owner").await?;
+    send_messages(&mut owner, &open, 1).await?;
+    join_with(
+        &mut owner,
+        &room,
+        "owner",
+        &[("muc#roomconfig_membersonly", "1")],
+    )
+    .await?;
     let mut outsider = h
         .login_peer(peer, "alice", &support::id("outsider"))
         .await?;
+    // Control: on the same path, the room's host answers this client about
+    // an open room, so a refusal below is the room's, not a transport
+    // failure or a room the host would not name to anybody.
+    let info = ask(
+        &mut outsider,
+        stanza::disco_info(&support::id("info"), &open),
+    )
+    .await?;
+    outcome.check(
+        "control: disco#info of an open room is answered",
+        is_result(&info),
+        describe(&info),
+    );
+    join(&mut outsider, &open, "outsider").await?;
+    let (messages, _) = page_archive(&mut outsider, &open).await?;
+    outcome.check(
+        "control: an occupant reads the open room's archive",
+        messages >= 1,
+        format!("{messages} messages"),
+    );
     let items = ask(
         &mut outsider,
         stanza::disco_items(&support::id("items"), &room),
@@ -521,10 +563,11 @@ pub async fn private_discovery_and_mam(h: &mut Harness, peer: Peer) -> Result<Ou
     .await?;
     outcome.check(
         "private discovery denied",
-        !is_result(&items)
-            || items
-                .children()
-                .all(|query| query.children().next().is_none()),
+        !transport_condition(&items)
+            && (!is_result(&items)
+                || items
+                    .children()
+                    .all(|query| query.children().next().is_none())),
         describe(&items),
     );
     let mam_id = support::id("mam");
@@ -533,7 +576,11 @@ pub async fn private_discovery_and_mam(h: &mut Harness, peer: Peer) -> Result<Ou
         stanza::mam_query(&mam_id, Some(&room), 10, None),
     )
     .await?;
-    outcome.check("MAM denied", !is_result(&mam), describe(&mam));
+    outcome.check(
+        "MAM denied by the room's host",
+        !is_result(&mam) && !transport_condition(&mam),
+        describe(&mam),
+    );
     outsider.close().await;
     owner.close().await;
     Ok(outcome)

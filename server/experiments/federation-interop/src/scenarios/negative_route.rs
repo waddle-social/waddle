@@ -371,6 +371,26 @@ pub async fn no_error_to_error(h: &mut Harness, _peer: Peer) -> Result<Outcome> 
     Ok(outcome)
 }
 
+/// A vCard request (XEP-0054), a handler for local accounts that W6c's
+/// reviewed set does not open to remote requesters: an IQ request to an
+/// account's bare JID is answered `service-unavailable` on the account's
+/// behalf whatever it asks (RFC 6121 section 8.5.2.1.3), exactly as for an
+/// account that does not exist (section 8.5.1).
+fn vcard_request(id: &str, from: Option<&str>, to: &str) -> Element {
+    stanza::iq(
+        if from.is_some() {
+            ns::SERVER
+        } else {
+            ns::CLIENT
+        },
+        "get",
+        id,
+        from,
+        Some(to),
+        Some(Element::builder("vCard", "vcard-temp").build()),
+    )
+}
+
 pub async fn account_handler_refused(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     match peer {
         Peer::Waddle => {
@@ -379,23 +399,46 @@ pub async fn account_handler_refused(h: &mut Harness, peer: Peer) -> Result<Outc
             );
             let mut stream = raw_stream(h).await?;
             h.receiver.clear();
+            // Control: the same stream reaches home-a and its answers come
+            // back, so the refusals below are home-a's, not a lost path.
+            let control_id = support::id("d7-control");
+            stream
+                .send(&stanza::iq(
+                    ns::SERVER,
+                    "get",
+                    &control_id,
+                    Some(&from_raw()),
+                    Some(HOME_A),
+                    Some(stanza::ping_payload()),
+                ))
+                .await?;
+            let control = h
+                .receiver
+                .wait_stanza(ANSWER, |element| {
+                    element.attr("id") == Some(control_id.as_str())
+                })
+                .await;
+            outcome.check(
+                "control: a ping to home-a is answered on the same path",
+                control.as_ref().is_some_and(is_result),
+                control
+                    .map(|element| describe(&element))
+                    .unwrap_or_else(|| "no answer".to_owned()),
+            );
             let mut conditions = BTreeMap::new();
             for account in ["alice", "nobody-here"] {
-                let message_id = support::id("d7");
+                let request_id = support::id("d7");
                 stream
-                    .send(&stanza::message(
-                        ns::SERVER,
-                        "chat",
-                        &message_id,
+                    .send(&vcard_request(
+                        &request_id,
                         Some(&from_raw()),
                         &[account, "@", HOME_A].concat(),
-                        Some("hello"),
                     ))
                     .await?;
                 let answer = h
                     .receiver
                     .wait_stanza(ANSWER, |element| {
-                        element.attr("id") == Some(message_id.as_str())
+                        element.attr("id") == Some(request_id.as_str())
                     })
                     .await;
                 conditions.insert(account, answer.as_ref().and_then(stanza::error_condition));
@@ -407,22 +450,28 @@ pub async fn account_handler_refused(h: &mut Harness, peer: Peer) -> Result<Outc
         Peer::Prosody | Peer::Ejabberd => {
             let mut outcome = Outcome::new(["a client of stock ", peer.label()].concat());
             let mut session = h.login_peer(peer, "alice", &support::id("d7")).await?;
+            // Control: home-a answers this client through its server.
+            let control = ask(
+                &mut session,
+                stanza::ping(&support::id("d7-control"), HOME_A),
+            )
+            .await;
+            outcome.check(
+                "control: a ping to home-a is answered on the same path",
+                control.as_ref().is_ok_and(is_result),
+                control
+                    .map(|answer| describe(&answer))
+                    .unwrap_or_else(|error| error.to_string()),
+            );
             let mut conditions = BTreeMap::new();
             for account in ["alice", "nobody-here"] {
-                let message_id = support::id("d7");
-                session
-                    .send(&stanza::chat(
-                        &message_id,
-                        &[account, "@", HOME_A].concat(),
-                        "hello",
-                    ))
-                    .await?;
-                let answer = session
-                    .wait_for(ANSWER, |element| {
-                        element.attr("id") == Some(message_id.as_str())
-                    })
-                    .await
-                    .ok();
+                let request_id = support::id("d7");
+                let answer = ask(
+                    &mut session,
+                    vcard_request(&request_id, None, &[account, "@", HOME_A].concat()),
+                )
+                .await
+                .ok();
                 conditions.insert(account, answer.as_ref().and_then(stanza::error_condition));
             }
             session.close().await;
@@ -436,8 +485,8 @@ fn compare_conditions(outcome: &mut Outcome, conditions: &BTreeMap<&str, Option<
     let existing = conditions.get("alice").cloned().flatten();
     let missing = conditions.get("nobody-here").cloned().flatten();
     outcome.check(
-        "an existing account is refused",
-        existing.is_some(),
+        "an existing account is refused with service-unavailable",
+        existing.as_deref() == Some("service-unavailable"),
         format!("{existing:?}"),
     );
     outcome.check(
