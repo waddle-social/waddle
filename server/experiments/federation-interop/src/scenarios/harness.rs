@@ -452,7 +452,8 @@ impl Harness {
     /// Put every service a row changed back on its standard
     /// configuration, and every relay and harness peer back to normal. A
     /// service that does not come back is marked down, so later rows
-    /// report UNVERIFIED instead of failing on the environment.
+    /// report UNVERIFIED instead of failing on the environment. A stock
+    /// peer that was restarted is then settled ([`Harness::settle_stock`]).
     pub async fn restore_standard(&mut self) -> Result<()> {
         for relay in self.relays.values() {
             relay.restore();
@@ -467,6 +468,7 @@ impl Harness {
         }
         let dirty = std::mem::take(&mut self.dirty);
         let mut failures = Vec::new();
+        let mut restarted = Vec::new();
         for component in dirty {
             match component {
                 Component::Waddle(home) => {
@@ -483,6 +485,8 @@ impl Harness {
                         let reason = format!("Prosody did not restart: {error:#}");
                         self.prosody_down = Some(reason.clone());
                         failures.push(reason);
+                    } else {
+                        restarted.push(Peer::Prosody);
                     }
                 }
                 Component::Ejabberd if self.ejabberd_down.is_none() => {
@@ -491,12 +495,56 @@ impl Harness {
                         let reason = format!("ejabberd did not restart: {error:#}");
                         self.ejabberd_down = Some(reason.clone());
                         failures.push(reason);
+                    } else {
+                        restarted.push(Peer::Ejabberd);
                     }
                 }
                 Component::Prosody | Component::Ejabberd => {}
             }
         }
+        if self.waddle_down.is_none() {
+            for peer in restarted {
+                if let Err(reason) = self.settle_stock(peer).await {
+                    failures.push(reason);
+                }
+            }
+        }
         anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
+        Ok(())
+    }
+
+    /// After a stock peer restarted, wait until home-a reaches it and it
+    /// reaches home-a. While the peer was down or presented another
+    /// certificate, home-a backed off the traffic it failed to deliver
+    /// (from one second, doubling) and the peer may have bounced its own
+    /// traffic to home-a for a while; the restart clears the peer's state,
+    /// and this waits out home-a's, so later rows inherit neither. A peer
+    /// that is not reached both ways within [`SETTLE`] is reported, not
+    /// marked down.
+    async fn settle_stock(&self, peer: Peer) -> Result<(), String> {
+        let host = Self::peer_domain(peer);
+        for (from_home_a, to) in [(true, host), (false, topology::HOME_A)] {
+            let answer =
+                crate::scenarios::support::ping_until_result(self, peer, from_home_a, to, SETTLE)
+                    .await;
+            match answer {
+                Ok(element) if crate::scenarios::support::is_result(&element) => {}
+                other => {
+                    let direction = if from_home_a {
+                        ["home-a -> ", host].concat()
+                    } else {
+                        [peer.label(), " -> home-a"].concat()
+                    };
+                    return Err(format!(
+                        "{direction} not answered within {} s after the restart: {}",
+                        SETTLE.as_secs(),
+                        other
+                            .map(|element| crate::scenarios::support::describe(&element))
+                            .unwrap_or_else(|error| format!("{error:#}"))
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -663,3 +711,8 @@ pub enum Component {
 pub const ANSWER: Duration = Duration::from_secs(20);
 /// How long a negative check waits for something that must not happen.
 pub const QUIET: Duration = Duration::from_secs(5);
+
+/// How long [`Harness::settle_stock`] waits for each direction after a
+/// stock peer restarted: home-a's backoff after a few failed dials, and
+/// the peer's own start.
+const SETTLE: Duration = Duration::from_secs(90);

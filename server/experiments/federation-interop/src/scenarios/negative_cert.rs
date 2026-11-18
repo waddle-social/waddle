@@ -376,58 +376,109 @@ async fn stock_serving(h: &Harness, peer: Peer, outcome: &mut Outcome) -> Result
     }
 }
 
-/// Traffic between home-a and the stock peer must fail in each direction
-/// in which the peer's relay shows that an S2S connection was attempted,
-/// with home-a logging the certificate refusal with `code`.
-async fn both_directions_fail(
+/// How long the outbound probe waits for home-a to dial the stock peer.
+/// home-a backs a failing destination off, starting at one second and
+/// doubling, and the peer's restart on the bad certificate can fail a dial
+/// of home-a's own traffic while the peer is down; the probe waits that
+/// out instead of reading a backoff as a refusal.
+const DIAL_WAIT: Duration = Duration::from_secs(70);
+
+/// What the peer-to-home-a direction is compared against, taken before the
+/// stock peer restarts on the bad certificate: a peer that opens S2S as it
+/// starts (ejabberd probes the presence of its accounts' contacts at
+/// home-a) is refused then, and backs off before the row's own ping.
+struct InboundMark {
+    connections: usize,
+    streams: usize,
+    refusals: Refusals,
+}
+
+impl InboundMark {
+    async fn take(h: &Harness, peer: Peer, code: &str) -> Result<Self> {
+        let inbound = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A))?;
+        Ok(Self {
+            connections: inbound.connection_count(),
+            streams: support::established(h, Home::A, "inbound", "").await,
+            refusals: Refusals::mark(h, Some(code)),
+        })
+    }
+}
+
+/// Traffic from the stock peer to home-a must fail if the peer's relay
+/// shows that it attempted S2S since `mark`, with home-a logging the
+/// certificate refusal with `code`.
+async fn peer_to_home_a_fails(
+    h: &Harness,
+    peer: Peer,
+    outcome: &mut Outcome,
+    mark: InboundMark,
+) -> Result<()> {
+    let inbound = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A))?;
+    let back = support::ping_from_peer(h, peer, "alice", HOME_A).await;
+    let attempted = inbound.connection_count() > mark.connections;
+    let counts = mark.refusals.settled(h).await;
+    let opened = support::established(h, Home::A, "inbound", "").await > mark.streams;
+    let name = [peer.label(), " -> home-a refused for the certificate"].concat();
+    let detail = [
+        back.as_ref()
+            .map(describe)
+            .unwrap_or_else(|error| error.to_string()),
+        format!("; inbound streams established: {opened}"),
+    ]
+    .concat();
+    if attempted {
+        let failed = !opened && back.as_ref().is_ok_and(|answer| !is_result(answer));
+        judge_stock(outcome, name, failed, &mark.refusals, counts, detail);
+    } else {
+        outcome.unverified(name, ["the peer did not attempt S2S: ", &detail].concat());
+    }
+    Ok(())
+}
+
+/// Traffic from home-a to the stock peer must fail once home-a dials it,
+/// with home-a logging the certificate refusal with `code`. A probe home-a
+/// answers without dialling (it is backing the peer off) is repeated until
+/// [`DIAL_WAIT`] passes.
+async fn home_a_to_peer_fails(
     h: &Harness,
     peer: Peer,
     outcome: &mut Outcome,
     peer_host: &str,
     code: &str,
-) -> Result<()> {
+) {
     let outbound = outbound_relays(h, peer);
-    let before = dials(&outbound);
-    let refusals = Refusals::mark(h, Some(code));
-    let out = disco_from_home_a(h, peer_host, Duration::ZERO).await;
-    let dialled = dials(&outbound) > before;
-    let counts = refusals.settled(h).await;
     let name = ["home-a -> ", peer_host, " refused for the certificate"].concat();
-    let detail = out
-        .as_ref()
-        .map(describe)
-        .unwrap_or_else(|error| error.to_string());
-    if dialled {
-        let failed = out.as_ref().is_ok_and(|answer| !is_result(answer));
-        judge_stock(outcome, name, failed, &refusals, counts, detail);
-    } else {
-        outcome.unverified(name, ["home-a did not dial the peer: ", &detail].concat());
-    }
-    if peer_host == Harness::peer_domain(peer) {
-        let inbound = h.relay(Harness::peer_server(peer), Server::Waddle(Home::A))?;
-        let before = inbound.connection_count();
-        let streams = support::established(h, Home::A, "inbound", "").await;
+    let deadline = tokio::time::Instant::now() + DIAL_WAIT;
+    loop {
+        let before = dials(&outbound);
         let refusals = Refusals::mark(h, Some(code));
-        let back = support::ping_from_peer(h, peer, "alice", HOME_A).await;
-        let attempted = inbound.connection_count() > before;
-        let counts = refusals.settled(h).await;
-        let opened = support::established(h, Home::A, "inbound", "").await > streams;
-        let name = [peer.label(), " -> home-a refused for the certificate"].concat();
-        let detail = [
-            back.as_ref()
-                .map(describe)
-                .unwrap_or_else(|error| error.to_string()),
-            format!("; inbound streams established: {opened}"),
-        ]
-        .concat();
-        if attempted {
-            let failed = !opened && back.as_ref().is_ok_and(|answer| !is_result(answer));
+        let out = disco_from_home_a(h, peer_host, Duration::ZERO).await;
+        let dialled = dials(&outbound) > before;
+        let detail = out
+            .as_ref()
+            .map(describe)
+            .unwrap_or_else(|error| error.to_string());
+        if dialled {
+            let counts = refusals.settled(h).await;
+            let failed = out.as_ref().is_ok_and(|answer| !is_result(answer));
             judge_stock(outcome, name, failed, &refusals, counts, detail);
-        } else {
-            outcome.unverified(name, ["the peer did not attempt S2S: ", &detail].concat());
+            return;
         }
+        if tokio::time::Instant::now() >= deadline {
+            outcome.unverified(
+                name,
+                [
+                    "home-a did not dial the peer within ",
+                    &DIAL_WAIT.as_secs().to_string(),
+                    " s: ",
+                    &detail,
+                ]
+                .concat(),
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    Ok(())
 }
 
 /// Restart the stock peer presenting `leaf` for `host`.
@@ -465,7 +516,12 @@ fn fresh_streams(h: &Harness, peer: Peer) {
 }
 
 /// The stock-peer column: control with the good certificate, swap, check
-/// the peer is serving, then both directions must fail with `code`.
+/// the peer is serving, then traffic must fail with `code` in each
+/// direction in which the peer's relays show an S2S attempt: from the peer
+/// (when `host` is its account domain) since before the swap, and from
+/// home-a once its backoff lets it dial. After the row the harness restarts
+/// the peer on its standard certificate and waits until traffic flows both
+/// ways again ([`Harness::restore_standard`]).
 async fn stock_bad_certificate(
     h: &mut Harness,
     peer: Peer,
@@ -475,10 +531,19 @@ async fn stock_bad_certificate(
     outcome: &mut Outcome,
 ) -> Result<()> {
     stock_control(h, peer, host, outcome).await?;
+    let inbound = if host == Harness::peer_domain(peer) {
+        Some(InboundMark::take(h, peer, code).await?)
+    } else {
+        None
+    };
     swap_stock_certificate(h, peer, host, leaf).await?;
     stock_serving(h, peer, outcome).await?;
     fresh_streams(h, peer);
-    both_directions_fail(h, peer, outcome, host, code).await
+    if let Some(mark) = inbound {
+        peer_to_home_a_fails(h, peer, outcome, mark).await?;
+    }
+    home_a_to_peer_fails(h, peer, outcome, host, code).await;
+    Ok(())
 }
 
 pub async fn bad_certificate(h: &mut Harness, peer: Peer, bad: Bad) -> Result<Outcome> {
