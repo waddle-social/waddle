@@ -827,7 +827,7 @@ const SASL_NOT_AUTHORIZED: &[u8] =
 
 #[test]
 fn the_initiating_server_sends_its_key_after_external_is_refused() {
-    // XEP-0178 §3 step 9b: a receiving server that cannot verify home-a's
+    // XEP-0178 §3 step 11b: a receiving server that cannot verify home-a's
     // certificate refuses EXTERNAL and may continue with dialback on the
     // same stream; here it advertised dialback by the feature.
     let (mut stream, _) = initiator_after_tls(enabled());
@@ -893,6 +893,24 @@ fn a_refused_external_closes_where_dialback_cannot_follow() {
         close_reason(&out),
         Some(CloseReason::SaslFailure(
             SaslFailureCondition::NotAuthorized
+        ))
+    );
+
+    // A failure other than not-authorized is not the refusal XEP-0178
+    // continues with dialback after: no key, the stream closes.
+    let (mut stream, _) = initiator_after_tls(enabled());
+    stream.receive(&concat(&[RESPONSE, FEATURES_EXTERNAL_AND_DIALBACK]));
+    let out = stream.receive(
+        b"<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><temporary-auth-failure/></failure>",
+    );
+    let (_, elements) = decode(&transmitted(&out));
+    assert!(!elements
+        .iter()
+        .any(|element| element.ns() == JABBER_SERVER_DIALBACK));
+    assert_eq!(
+        close_reason(&out),
+        Some(CloseReason::SaslFailure(
+            SaslFailureCondition::TemporaryAuthFailure
         ))
     );
 

@@ -165,9 +165,10 @@ Initiating role (outbound):
 - After TLS has verified the receiving server, post-TLS features that
   offer SASL EXTERNAL are always tried first; dialback is used only when
   they do not offer it, or when the receiving server answers EXTERNAL
-  with a SASL `<failure/>` (a server that cannot verify Waddle's
-  certificate does so and may continue with dialback on the same stream,
-  XEP-0178 §3 step 9b), and in either case only when `outbound` is on and
+  with a SASL `<not-authorized/>` failure (a server that cannot verify
+  Waddle's certificate does so and may continue with dialback on the same
+  stream, XEP-0178 §3 step 11b; any other failure condition closes the
+  stream), and in either case only when `outbound` is on and
   the receiving server advertised dialback, by declaring the dialback
   namespace on its post-TLS response header (XEP-0220 §2.4.1) or by the
   dialback stream feature (§2.4.2). This is Waddle being verified by a

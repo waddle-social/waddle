@@ -1,7 +1,7 @@
 //! Initiating-role negotiation: STARTTLS or XEP-0368 direct TLS, then SASL
 //! EXTERNAL and the authenticated restart, or XEP-0220 dialback as the
 //! Initiating Server, either where EXTERNAL is not offered or after the
-//! receiving server refused it (XEP-0178 §3, step 9b); and verification
+//! receiving server refused it (XEP-0178 §3, step 11b); and verification
 //! connections, on which a Receiving Server asks an Authoritative Server
 //! about one dialback key.
 
@@ -301,17 +301,22 @@ impl Initiating {
     }
 
     /// The receiving server refused SASL EXTERNAL. A receiving server that
-    /// cannot verify this server's certificate answers EXTERNAL with a
-    /// failure and may continue with dialback on the same stream (XEP-0178
-    /// §3, step 9b; RFC 6120 §6.4.5 leaves the stream open after a SASL
-    /// failure). Where the Initiating Server role runs and the receiving
-    /// server advertised dialback, its key is sent once, exactly as when
-    /// EXTERNAL is not offered: TLS has verified the receiving server, so
-    /// this is not the inbound case ADR-0020 D2 rules out, where a
-    /// certificate the peer presented failed this server's verification.
-    /// Otherwise the stream closes with the failure.
+    /// cannot match this server's certificate to its domain answers
+    /// EXTERNAL with `not-authorized` and may then continue with dialback
+    /// on the same stream instead of closing it (XEP-0178 §3, step 11b).
+    /// After that failure, where the Initiating Server role runs and the
+    /// receiving server advertised dialback, the key is sent once, exactly
+    /// as when EXTERNAL is not offered: TLS has verified the receiving
+    /// server, so this is not the inbound case ADR-0020 D2 rules out,
+    /// where a certificate the peer presented failed this server's
+    /// verification. Any other failure condition, or no dialback, closes
+    /// the stream with the failure. A receiving server that closes its
+    /// stream right after the failure ends the attempt there all the same.
     fn on_sasl_failure(&mut self, condition: SaslFailureCondition, steps: &mut Vec<Step>) {
-        if self.config.dialback.keys().is_some() && self.dialback_advertised() {
+        if condition == SaslFailureCondition::NotAuthorized
+            && self.config.dialback.keys().is_some()
+            && self.dialback_advertised()
+        {
             self.weak_identity_fallback(steps);
         } else {
             self.close(steps, CloseReason::SaslFailure(condition));

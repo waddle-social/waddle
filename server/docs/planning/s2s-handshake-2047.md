@@ -530,9 +530,11 @@ feature list that still offers STARTTLS or a final feature list that offers
 STARTTLS or SASL, and accepts SASL success only without additional data.
 
 **Dialback.** Received dialback elements, a receiving-side TLS peer without a
-usable certificate, and an initiating side whose peer offers no EXTERNAL are
-explicit decision points. While dialback is disabled each closes with
-`policy-violation`; the dialback slice decides their behavior under gate G5.
+usable certificate, and an initiating side whose peer offers no EXTERNAL or
+refuses it with `not-authorized` are explicit decision points. While
+dialback is disabled each closes (`policy-violation`, or the SASL failure
+for a refused EXTERNAL); the dialback slice decides their behavior under
+gate G5 ([the dialback design](s2s-dialback-2047.md)).
 
 **Carried to the connection manager (G7).** Implemented and recorded in
 [the connection-manager design](s2s-connection-manager-2047.md). The codec builds the full tree of
@@ -694,7 +696,9 @@ and accepted as part of the activation decision (gate G22).
   refused with `not-well-formed`, although XML 1.0 allows whitespace before
   the root element of a document without an XML declaration. The harness
   slice (W10) confirms that Prosody and ejabberd send none.
-- A failed SASL EXTERNAL exchange closes the stream. RFC 6120 §6.4.5 says
+- On the receiving side, a failed SASL EXTERNAL exchange closes the
+  stream (the initiating side may continue with dialback after a
+  `not-authorized` failure, see the dialback design). RFC 6120 §6.4.5 says
   the receiving entity SHOULD allow a reasonable number of retries where
   appropriate for the mechanism; a certificate that failed once fails
   again, so this profile allows none. Replacement and abort within the

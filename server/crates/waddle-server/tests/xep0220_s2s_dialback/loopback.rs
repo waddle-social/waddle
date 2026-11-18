@@ -361,7 +361,7 @@ enum PostTlsOffer {
     Dialback,
     /// SASL EXTERNAL beside dialback, refused with `not-authorized` as a
     /// server that cannot verify the initiator's certificate refuses it
-    /// (XEP-0178 §3, step 9b); dialback follows on the same stream.
+    /// (XEP-0178 §3, step 11b); dialback follows on the same stream.
     RefusedExternal,
 }
 
