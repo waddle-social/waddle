@@ -90,9 +90,10 @@ fn the_two_image_ids_name_the_avatar_and_the_banner_and_no_other_id_does() {
     }
 }
 
-/// XEP-0503's example avatar, the W10 interoperability harness's image (an
-/// `http:` URL on a loopback port and an id that is no hash) and an image
-/// without a URL are accepted. One `<metadata/>` lists several formats.
+/// XEP-0503's example avatar, the federation interoperability harness's
+/// image (an `http:` URL on a loopback port and an id that is no hash) and
+/// an image without a URL are accepted. One `<metadata/>` lists several
+/// formats.
 #[test]
 fn the_specifications_example_and_other_well_formed_metadata_are_accepted() {
     let spec = item(vec![metadata(vec![spec_avatar_info()])]);
