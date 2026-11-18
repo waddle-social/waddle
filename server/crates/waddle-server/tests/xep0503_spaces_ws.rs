@@ -1,5 +1,6 @@
 //! XEP-0503 Spaces wire-conformance integration tests over WebSocket,
-//! including the identity profile for XEP-0402 room item ids.
+//! including the identity profile for XEP-0402 room item ids and the
+//! avatar and banner items of version 0.3.0 ("Spaces images").
 
 use waddle_ws_test_support as ws_common;
 
@@ -10,6 +11,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use tokio::sync::Mutex;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
+use waddle_xmpp::xep::xep0503::{ITEM_SPACE_AVATAR_METADATA, ITEM_SPACE_BANNER_METADATA};
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::iq::Iq;
@@ -1254,4 +1256,468 @@ async fn a_session_pages_a_space_nodes_rooms() {
     assert_eq!(disco_item_pairs(&whole).len(), 2, "{whole}");
     assert_eq!(disco_items_set(&whole), None, "{whole}");
     let _ = admin.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// XEP-0503 0.3.0, "Spaces images": a Space's avatar and banner are items of
+// its node holding XEP-0084 metadata. They are stored and read as items,
+// name no room, and nothing fetches the URLs they carry (ADR-0020 D4).
+// ---------------------------------------------------------------------------
+
+const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
+const NS_PUBSUB_ERRORS: &str = "http://jabber.org/protocol/pubsub#errors";
+
+/// A XEP-0084 `<metadata/>` naming one image at `url`.
+fn image_metadata(url: &str) -> Element {
+    Element::builder("metadata", NS_AVATAR_METADATA)
+        .append(
+            Element::builder("info", NS_AVATAR_METADATA)
+                .attr(minidom::rxml::xml_ncname!("bytes").to_owned(), "420")
+                .attr(minidom::rxml::xml_ncname!("height").to_owned(), "64")
+                .attr(minidom::rxml::xml_ncname!("width").to_owned(), "64")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "image/png")
+                .attr(minidom::rxml::xml_ncname!("url").to_owned(), url)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "image-hash")
+                .build(),
+        )
+        .build()
+}
+
+/// A `<publish/>` of the item `item_id` holding `payloads` to `node`.
+fn item_publish(node: &str, item_id: &str, payloads: Vec<Element>) -> Element {
+    let mut item = Element::builder("item", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id);
+    for payload in payloads {
+        item = item.append(payload);
+    }
+    Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            Element::builder("publish", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(item.build())
+                .build(),
+        )
+        .build()
+}
+
+/// The `<item/>` `item_id` of an items answer.
+fn answered_item(frame: &str, item_id: &str) -> Option<Element> {
+    let response: Element = frame.parse().expect("items response XML");
+    response
+        .get_child("pubsub", NS_PUBSUB)?
+        .get_child("items", NS_PUBSUB)?
+        .children()
+        .find(|item| item.attr("id") == Some(item_id))
+        .cloned()
+}
+
+/// The pubsub-specific condition of an error answer.
+fn pubsub_condition(frame: &str) -> Option<String> {
+    let response: Element = frame.parse().ok()?;
+    response
+        .get_child("error", "jabber:client")?
+        .children()
+        .find(|child| child.ns() == NS_PUBSUB_ERRORS)
+        .map(|condition| condition.name().to_owned())
+}
+
+fn is_item_not_found(frame: &str) -> bool {
+    frame.parse::<Element>().is_ok_and(|response| {
+        response
+            .get_child("error", "jabber:client")
+            .is_some_and(|error| {
+                error
+                    .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+                    .is_some()
+            })
+    })
+}
+
+/// A listener on a loopback port that no one is expected to connect to,
+/// and the `http:` URL of an image on it.
+async fn image_host(path: &str) -> (tokio::net::TcpListener, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener");
+    let port = listener.local_addr().expect("listener address").port();
+    (listener, format!("http://127.0.0.1:{port}{path}"))
+}
+
+/// Whether anything connects to `listener` within a quiet period.
+async fn connected_within_quiet_period(listener: &tokio::net::TcpListener) -> bool {
+    tokio::time::timeout(Duration::from_millis(750), listener.accept())
+        .await
+        .is_ok()
+}
+
+/// The Space's owner publishes its avatar and banner beside its rooms: a
+/// read of the Space's items returns them as published with the rooms, the
+/// rooms keep their Space, the `disco#items` of the Space lists rooms only,
+/// another Space keeps its own image under the same item id, and nothing
+/// requests the image URLs.
+#[tokio::test]
+async fn an_owner_publishes_a_spaces_images_beside_its_rooms_and_nothing_fetches_them() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-space-images").await;
+    let (avatar_host, avatar_url) = image_host("/avatar.png").await;
+    let (banner_host, banner_url) = image_host("/banner.png").await;
+
+    for (item_id, url) in [
+        (ITEM_SPACE_AVATAR_METADATA, &avatar_url),
+        (ITEM_SPACE_BANNER_METADATA, &banner_url),
+    ] {
+        let published = iq_set_to(
+            &mut admin,
+            &format!("publish-{item_id}"),
+            "spaces.localhost",
+            item_publish("general", item_id, vec![image_metadata(url)]),
+        )
+        .await;
+        assert!(is_result(&published), "publishing {item_id}: {published}");
+        assert!(
+            published.contains(item_id),
+            "the result names the item: {published}"
+        );
+    }
+
+    let items = space_items(&mut admin, "general-items-with-images", "general").await;
+    let ids = item_ids(&items);
+    for expected in [
+        "chat@muc.localhost",
+        "announcements@muc.localhost",
+        ITEM_SPACE_AVATAR_METADATA,
+        ITEM_SPACE_BANNER_METADATA,
+    ] {
+        assert!(
+            ids.iter().any(|id| id == expected),
+            "{expected} is listed: {items}"
+        );
+    }
+    let avatar = answered_item(&items, ITEM_SPACE_AVATAR_METADATA).expect("the avatar item");
+    let info = avatar
+        .get_child("metadata", NS_AVATAR_METADATA)
+        .and_then(|metadata| metadata.get_child("info", NS_AVATAR_METADATA))
+        .expect("the avatar's metadata");
+    assert_eq!(info.attr("url"), Some(avatar_url.as_str()));
+    assert_eq!(info.attr("bytes"), Some("420"));
+    assert!(answered_item(&items, "chat@muc.localhost")
+        .and_then(|chat| chat
+            .get_child("conference", "urn:xmpp:bookmarks:1")
+            .cloned())
+        .is_some());
+
+    // The rooms keep their Space, and the Space's listing of its rooms
+    // names no image.
+    let info = iq_get_to(
+        &mut admin,
+        "chat-info-with-images",
+        "chat@muc.localhost",
+        Element::builder("query", "http://jabber.org/protocol/disco#info").build(),
+    )
+    .await;
+    assert!(
+        info.contains("xmpp:spaces.localhost?;node=general"),
+        "chat keeps its general parent: {info}"
+    );
+    let children = iq_get_to(
+        &mut admin,
+        "general-children-with-images",
+        "spaces.localhost",
+        disco_items(Some("general")),
+    )
+    .await;
+    let names: Vec<_> = disco_item_pairs(&children)
+        .into_iter()
+        .filter_map(|(_, name)| name)
+        .collect();
+    assert!(
+        names.contains(&"chat@muc.localhost".to_owned()),
+        "{children}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("urn:xmpp:spaces:")),
+        "an image is no room of the Space: {children}"
+    );
+
+    // Every Space holds its avatar under the same item id; publishing one
+    // moves nothing out of another Space.
+    create_space_node(&mut admin, "second").await;
+    let second = iq_set_to(
+        &mut admin,
+        "publish-second-avatar",
+        "spaces.localhost",
+        item_publish(
+            "second",
+            ITEM_SPACE_AVATAR_METADATA,
+            vec![image_metadata(&avatar_url)],
+        ),
+    )
+    .await;
+    assert!(is_result(&second), "{second}");
+    let general = space_items(&mut admin, "general-items-after-second", "general").await;
+    assert!(
+        item_ids(&general).contains(&ITEM_SPACE_AVATAR_METADATA.to_owned()),
+        "general keeps its avatar: {general}"
+    );
+    let second = space_items(&mut admin, "second-items", "second").await;
+    assert_eq!(
+        item_ids(&second),
+        vec![ITEM_SPACE_AVATAR_METADATA.to_owned()]
+    );
+
+    assert!(
+        !connected_within_quiet_period(&avatar_host).await,
+        "nothing requests the avatar"
+    );
+    assert!(
+        !connected_within_quiet_period(&banner_host).await,
+        "nothing requests the banner"
+    );
+    let _ = admin.close().await;
+}
+
+/// An image item whose payload is not a Space image's XEP-0084 metadata is
+/// refused with `<bad-request/>` and stores nothing; an item under any
+/// other id that is no room's bookmark is refused as before.
+#[tokio::test]
+async fn a_malformed_space_image_is_refused_and_any_other_id_stays_a_room() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-space-images-refused").await;
+    let url = "https://images.example.com/avatar.png";
+    let info = |attributes: &[(&'static str, &'static str)]| {
+        let mut info = Element::builder("info", NS_AVATAR_METADATA);
+        for (name, value) in attributes {
+            info = info.attr(
+                minidom::rxml::NcName::try_from(*name).expect("an attribute name"),
+                *value,
+            );
+        }
+        Element::builder("metadata", NS_AVATAR_METADATA)
+            .append(info.build())
+            .build()
+    };
+    let refused: Vec<(&str, Vec<Element>, &str)> = vec![
+        ("no-payload", Vec::new(), "payload-required"),
+        (
+            "empty-metadata",
+            vec![Element::builder("metadata", NS_AVATAR_METADATA).build()],
+            "invalid-payload",
+        ),
+        (
+            "two-metadata",
+            vec![image_metadata(url), image_metadata(url)],
+            "invalid-payload",
+        ),
+        (
+            "conference",
+            vec![Element::builder("conference", "urn:xmpp:bookmarks:1").build()],
+            "invalid-payload",
+        ),
+        (
+            "no-bytes",
+            vec![info(&[("id", "a"), ("type", "image/png")])],
+            "invalid-payload",
+        ),
+        (
+            "not-an-image",
+            vec![info(&[("bytes", "1"), ("id", "a"), ("type", "text/html")])],
+            "invalid-payload",
+        ),
+        (
+            "ftp-url",
+            vec![info(&[
+                ("bytes", "1"),
+                ("id", "a"),
+                ("type", "image/png"),
+                ("url", "ftp://images.example.com/a.png"),
+            ])],
+            "invalid-payload",
+        ),
+        (
+            "pointer",
+            vec![Element::builder("metadata", NS_AVATAR_METADATA)
+                .append(
+                    image_metadata(url)
+                        .get_child("info", NS_AVATAR_METADATA)
+                        .cloned()
+                        .expect("an info"),
+                )
+                .append(
+                    Element::builder("pointer", NS_AVATAR_METADATA)
+                        .append(Element::builder("x", "urn:example:service").build())
+                        .build(),
+                )
+                .build()],
+            "invalid-payload",
+        ),
+    ];
+    for (case, payloads, condition) in refused {
+        let response = iq_set_to(
+            &mut admin,
+            &format!("refused-image-{case}"),
+            "spaces.localhost",
+            item_publish("general", ITEM_SPACE_BANNER_METADATA, payloads),
+        )
+        .await;
+        assert!(
+            is_bad_request_error(&response),
+            "{case} is refused with <bad-request/>: {response}"
+        );
+        assert_eq!(
+            pubsub_condition(&response).as_deref(),
+            Some(condition),
+            "{case}: {response}"
+        );
+    }
+    let items = space_items(&mut admin, "general-after-refused-images", "general").await;
+    assert!(
+        !item_ids(&items).contains(&ITEM_SPACE_BANNER_METADATA.to_owned()),
+        "no refused image is stored: {items}"
+    );
+
+    // An id that names neither an image nor a room is refused as a room
+    // item that is no bookmark is, whatever it holds.
+    let other = iq_set_to(
+        &mut admin,
+        "refused-other-id",
+        "spaces.localhost",
+        item_publish(
+            "general",
+            "urn:example:spaces:logo",
+            vec![image_metadata(url)],
+        ),
+    )
+    .await;
+    assert!(is_bad_request_error(&other), "{other}");
+    assert_eq!(pubsub_condition(&other), None, "{other}");
+    let items = space_items(&mut admin, "general-after-other-id", "general").await;
+    assert!(
+        !item_ids(&items).contains(&"urn:example:spaces:logo".to_owned()),
+        "{items}"
+    );
+    let _ = admin.close().await;
+}
+
+/// Retracting a Space's image removes its item and nothing else: the rooms
+/// keep their items, parent relationships and links; retracting it again
+/// finds no item.
+#[tokio::test]
+async fn retracting_a_spaces_image_leaves_its_rooms_in_place() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-space-image-retract").await;
+    let links = || async {
+        sqlx::query("SELECT COUNT(*) FROM channel_space_links")
+            .fetch_one(&pool)
+            .await
+            .expect("count links")
+            .get::<i64, _>(0)
+    };
+    let (host, url) = image_host("/avatar.png").await;
+
+    let published = iq_set_to(
+        &mut admin,
+        "retract-image-publish",
+        "spaces.localhost",
+        item_publish(
+            "general",
+            ITEM_SPACE_AVATAR_METADATA,
+            vec![image_metadata(&url)],
+        ),
+    )
+    .await;
+    assert!(is_result(&published), "{published}");
+    let links_before = links().await;
+    assert_eq!(chat_parent_tuples(&pool, "general").await, 1);
+
+    let retracted = iq_set_to(
+        &mut admin,
+        "retract-image",
+        "spaces.localhost",
+        space_retract("general", ITEM_SPACE_AVATAR_METADATA),
+    )
+    .await;
+    assert!(is_result(&retracted), "{retracted}");
+    assert_eq!(
+        stored_space_items(&pool, "general", ITEM_SPACE_AVATAR_METADATA).await,
+        0
+    );
+    assert_eq!(
+        stored_space_items(&pool, "general", "chat@muc.localhost").await,
+        1
+    );
+    assert_eq!(chat_parent_tuples(&pool, "general").await, 1);
+    assert_eq!(links().await, links_before);
+    let items = space_items(&mut admin, "general-after-image-retract", "general").await;
+    let ids = item_ids(&items);
+    assert!(ids.contains(&"chat@muc.localhost".to_owned()), "{items}");
+    assert!(
+        !ids.contains(&ITEM_SPACE_AVATAR_METADATA.to_owned()),
+        "{items}"
+    );
+
+    let again = iq_set_to(
+        &mut admin,
+        "retract-image-again",
+        "spaces.localhost",
+        space_retract("general", ITEM_SPACE_AVATAR_METADATA),
+    )
+    .await;
+    assert!(is_item_not_found(&again), "{again}");
+    assert!(!connected_within_quiet_period(&host).await);
+    let _ = admin.close().await;
+    pool.close().await;
+}
+
+/// `spaces:delete` of a Space holding an image takes the image with the
+/// Space and destroys only the rooms the Space was the parent of.
+#[tokio::test]
+async fn spaces_delete_takes_a_spaces_image_with_it() {
+    let _serial = TEST_SERIAL.lock().await;
+    let directory = tempfile::tempdir().expect("database directory");
+    let (server, pool) = persistent_server(&directory).await;
+    let mut admin = admin_client(&server, "xep0503-space-image-delete").await;
+    space_holding_a_new_room(&mut admin, "pictured", "gallery").await;
+    let published = iq_set_to(
+        &mut admin,
+        "pictured-banner",
+        "spaces.localhost",
+        item_publish(
+            "pictured",
+            ITEM_SPACE_BANNER_METADATA,
+            vec![image_metadata("https://images.example.com/banner.png")],
+        ),
+    )
+    .await;
+    assert!(is_result(&published), "{published}");
+
+    let delete = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:waddle:admin:spaces:delete:0",
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(
+            DataForm::new(FormType::Submit)
+                .add_field(Field::form_type("urn:waddle:admin:spaces:delete:0"))
+                .add_field(Field::text_single("space_jid", "pictured@spaces.localhost"))
+                .add_field(Field::text_single("confirm", "yes"))
+                .to_element(),
+        )
+        .build();
+    let response = iq_set_to(&mut admin, "delete-pictured", DOMAIN, delete).await;
+    assert!(is_result(&response), "spaces:delete succeeds: {response}");
+    assert_eq!(catalog_channels(&pool, "gallery").await, 0);
+    assert_eq!(
+        stored_space_items(&pool, "pictured", ITEM_SPACE_BANNER_METADATA).await,
+        0
+    );
+    assert_eq!(catalog_channels(&pool, "chat").await, 1);
+    let _ = admin.close().await;
+    pool.close().await;
 }

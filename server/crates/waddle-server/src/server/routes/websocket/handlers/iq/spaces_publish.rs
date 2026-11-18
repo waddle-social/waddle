@@ -13,6 +13,9 @@ use crate::permissions::{ListRelations, Subject};
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
+use minidom::Element;
+use waddle_xmpp::pubsub::NS_PUBSUB;
+use waddle_xmpp::xep::xep0503::{space_image_payload, SpaceImage, SpaceImageError};
 
 pub(super) async fn handle_spaces_publish(
     iq: &xmpp_parsers::iq::Iq,
@@ -52,6 +55,9 @@ pub(super) async fn handle_spaces_publish(
     let Some(item_id) = item.id.as_deref() else {
         return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
+    if let Some(image) = SpaceImage::from_item_id(item_id) {
+        return publish_space_image(iq, state, &spaces_jid, node, image).await;
+    }
     let Some(payload) = item.payload.as_ref() else {
         return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
     };
@@ -369,6 +375,80 @@ pub(super) async fn handle_spaces_publish(
             vec![build_pubsub_error(iq, PubSubError::InternalServerError)]
         }
     }
+}
+
+/// Publish the item of one of the Space's images (XEP-0503 0.3.0, "Spaces
+/// images") to the Space `node`, for a publisher the caller has found may
+/// change the Space.
+///
+/// The item is no room: it places no channel, writes no channel-space link
+/// or parent relationship, and moves nothing out of another Space, where
+/// an item under the same id is that Space's own image. Its payload is
+/// checked as [`space_image_payload`] checks it, read from the request
+/// itself so that a second payload element is refused rather than dropped,
+/// and stored as given under the image's id, without the publisher the
+/// request may name. Nothing the payload names is fetched. Subscribers are
+/// notified as for any publication to the Space.
+async fn publish_space_image(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    spaces_jid: &BareJid,
+    node: &str,
+    image: SpaceImage,
+) -> Vec<xmpp_parsers::iq::Iq> {
+    let Some(requested) = published_item(iq) else {
+        return vec![build_pubsub_error(iq, PubSubError::BadRequest)];
+    };
+    let payload = match space_image_payload(requested) {
+        Ok(payload) => payload.clone(),
+        Err(SpaceImageError::MissingPayload) => {
+            return vec![build_pubsub_error(iq, PubSubError::PayloadRequired)];
+        }
+        Err(error) => {
+            warn!(node, item_id = image.item_id(), error = %error, "Invalid Space image item");
+            return vec![build_pubsub_error(iq, PubSubError::InvalidPayload)];
+        }
+    };
+    let item = PubSubItem::new(Some(image.item_id().to_owned()), Some(payload));
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(spaces_jid, node, &item, None, false)
+        .await
+    {
+        Ok(result) => {
+            pubsub_fanout::fan_out_publish(
+                state,
+                pubsub_fanout::FanOutRequest {
+                    owner: spaces_jid,
+                    node,
+                    published_item: &item,
+                    item_id: &result.item_id,
+                    publisher: None,
+                    publisher_full: None,
+                    is_pep: false,
+                },
+            )
+            .await;
+            vec![build_pubsub_publish_result(iq, node, &result.item_id)]
+        }
+        Err(error) => {
+            warn!(node, item_id = image.item_id(), error = %error, "Failed to publish Space image item");
+            vec![build_pubsub_error(iq, PubSubError::InternalServerError)]
+        }
+    }
+}
+
+/// The `<item/>` of the `<publish/>` a PubSub set request carries, as the
+/// request holds it.
+fn published_item(iq: &xmpp_parsers::iq::Iq) -> Option<&Element> {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    payload
+        .get_child("publish", NS_PUBSUB)?
+        .get_child("item", NS_PUBSUB)
 }
 
 /// Whether the publisher may place the existing channel `channel_id` in the

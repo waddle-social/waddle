@@ -26,7 +26,9 @@ use crate::server::routes::websocket::ResolvedPrincipal;
 /// - A publish or a retract places a room in the Space or takes it out. It
 ///   is decided by the Space's `owner` relationship or the deployment's
 ///   right to create Spaces, and by authority over the room, for `account`
-///   as the subject of those checks.
+///   as the subject of those checks. A publish or a retract of the Space's
+///   avatar or banner item (XEP-0503 0.3.0, "Spaces images") names no room
+///   and is decided by the first of those alone.
 /// - A request of the `pubsub#owner` namespace is decided by the node's
 ///   Owner affiliation. It is made without a session, so it neither reads
 ///   nor changes whether the Space is open to other servers.

@@ -40,6 +40,7 @@ use waddle_xmpp::muc::room_actor::GetConfig;
 use waddle_xmpp::muc::room_registry_actor::GetRoom;
 use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
+use waddle_xmpp::xep::xep0503::SpaceImage;
 use waddle_xmpp::{ChannelInfo, ChannelType, XmppError};
 
 use crate::admin::channels::{forget_extension_bot_room, restore_channel_catalog_record};
@@ -1453,6 +1454,10 @@ async fn cascade_delete(
         .await
         .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
     for stored in &items {
+        // The Space's avatar and banner items name no room.
+        if SpaceImage::from_item_id(&stored.id).is_some() {
+            continue;
+        }
         if let Ok(room_jid) = stored.id.parse::<BareJid>() {
             targets.insert(room_jid);
         }

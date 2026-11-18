@@ -7,6 +7,7 @@ use crate::channel_space_links::ChannelSpaceLink;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::identity::CanonicalBareJid;
+use waddle_xmpp::xep::xep0503::SpaceImage;
 
 /// A retract of one item of a Space node: the node, the item and whether
 /// the request asked for subscribers to be notified (XEP-0060 §7.2.2.1,
@@ -46,9 +47,13 @@ pub(super) async fn handle_spaces_retract(
         }
     }
 
+    // The item of one of the Space's images names no room: retracting it
+    // removes the item and nothing else.
+    let image = SpaceImage::from_item_id(item_id).is_some();
     // The item id keys the stored item, the channel-space link and the
     // channel's parent grant; only the room's canonical text names all three.
     let exact_grant = match waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id) {
+        _ if image => None,
         Ok(room_jid) => {
             if room_jid.domain().as_str() != muc_domain {
                 return vec![build_pubsub_error(iq, PubSubError::InvalidJid)];
@@ -88,7 +93,7 @@ pub(super) async fn handle_spaces_retract(
     {
         Ok(items) => match items.into_iter().next() {
             Some(item) => item.to_pubsub_item(),
-            None if exact_grant.is_some() => {
+            None if image || exact_grant.is_some() => {
                 return vec![build_pubsub_error(iq, PubSubError::ItemNotFound)];
             }
             // A non-canonical id is accepted only as the exact id of a
@@ -102,6 +107,7 @@ pub(super) async fn handle_spaces_retract(
     };
     let grant = match exact_grant {
         Some(grant) => Some(grant),
+        None if image => None,
         None => match folded_parent_grant(state, &spaces_jid, muc_domain, node, item_id).await {
             Ok(grant) => grant,
             Err(error) => {
