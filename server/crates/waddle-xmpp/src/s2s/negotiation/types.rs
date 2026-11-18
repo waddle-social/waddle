@@ -91,8 +91,10 @@ pub trait DialbackKeys: Send + Sync {
 ///   initiating side, and dialback elements on the wire.
 /// - [`Self::Enabled`]: in the initiating role, authenticate by dialback
 ///   (Initiating Server) when the receiving server does not offer SASL
-///   EXTERNAL; in the receiving role, answer `<db:verify/>` requests for
-///   keys this deployment issued (Authoritative Server). Whether a
+///   EXTERNAL or refuses it (XEP-0178 §3, step 9b), in either case only
+///   where it advertised dialback; in the receiving role, answer
+///   `<db:verify/>` requests for keys this deployment issued
+///   (Authoritative Server). Whether a
 ///   receiving stream may itself authenticate its peer by dialback
 ///   (Receiving Server) is decided per pair by
 ///   [`InboundAdmission::permits_dialback`], independently of this mode.

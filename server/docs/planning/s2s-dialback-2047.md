@@ -163,16 +163,22 @@ Receiving role (inbound):
 Initiating role (outbound):
 
 - After TLS has verified the receiving server, post-TLS features that
-  offer SASL EXTERNAL are always used; dialback is used only when they do
-  not, `outbound` is on, and the receiving server advertised dialback,
-  by declaring the dialback namespace on its post-TLS response header
-  (XEP-0220 §2.4.1) or by the dialback stream feature (§2.4.2). A server
-  that advertised neither never receives a key: the stream ends with
-  `policy-violation`, as when no dialback role runs. Waddle then sends
-  `<db:result/>` with the key
-  for the remote domain, itself and the stream ID of the receiving
-  server's post-TLS header, and accepts only the typed `<db:result/>` for
-  that pair. `valid` establishes the stream with the `dialback` strength;
+  offer SASL EXTERNAL are always tried first; dialback is used only when
+  they do not offer it, or when the receiving server answers EXTERNAL
+  with a SASL `<failure/>` (a server that cannot verify Waddle's
+  certificate does so and may continue with dialback on the same stream,
+  XEP-0178 §3 step 9b), and in either case only when `outbound` is on and
+  the receiving server advertised dialback, by declaring the dialback
+  namespace on its post-TLS response header (XEP-0220 §2.4.1) or by the
+  dialback stream feature (§2.4.2). This is Waddle being verified by a
+  weaker peer, not the inbound case D2 rules out: TLS has already verified
+  the receiving server, and a key goes only to it, once per stream. A
+  server that advertised neither never receives a key: without EXTERNAL
+  the stream ends with `policy-violation`, as when no dialback role runs,
+  and after a refused EXTERNAL it ends with that SASL failure. Waddle then
+  sends `<db:result/>` with the key for the remote domain, itself and the
+  stream ID of the receiving server's post-TLS header, and accepts only
+  the typed `<db:result/>` for that pair. `valid` establishes the stream with the `dialback` strength;
   `invalid` or `error` closes it, which backs the domain off like any
   peer failure.
 

@@ -3,7 +3,9 @@
 //! certificate that authenticates to home-b.test by dialback while the real
 //! home-a.test answers home-b's verification request as the Authoritative
 //! Server, and a receiving server for home-b.test that offers no SASL
-//! EXTERNAL, so that home-a.test authenticates itself by dialback. The
+//! EXTERNAL, or offers it and refuses it as a server that cannot verify
+//! home-a's certificate does, so that home-a.test authenticates itself by
+//! dialback. The
 //! verification connection's outcomes are covered too: an Authoritative
 //! Server whose certificate fails, a DNS-derived address in a blocked
 //! class, and the verification budget; and a `dialback` stream never
@@ -348,10 +350,23 @@ async fn a_failed_certificate_is_never_downgraded_to_dialback() {
 struct ReceivingServerReport {
     /// The type of home-a's answer on the verification connection.
     verified: Option<String>,
+    /// Whether home-a tried SASL EXTERNAL first.
+    tried_external: bool,
 }
 
-/// A receiving server for home-b.test on `listener` that offers no SASL
-/// EXTERNAL after TLS, takes home-a's dialback key, verifies it with
+/// What the hand-written receiving server offers after TLS.
+#[derive(Clone, Copy)]
+enum PostTlsOffer {
+    /// Dialback only.
+    Dialback,
+    /// SASL EXTERNAL beside dialback, refused with `not-authorized` as a
+    /// server that cannot verify the initiator's certificate refuses it
+    /// (XEP-0178 §3, step 9b); dialback follows on the same stream.
+    RefusedExternal,
+}
+
+/// A receiving server for home-b.test on `listener` that offers
+/// `post_tls` after TLS, takes home-a's dialback key, verifies it with
 /// home-a at `authoritative` on a connection without a client
 /// certificate, and answers home-a with the result. It keeps the stream
 /// open until `release` fires.
@@ -359,6 +374,7 @@ fn receiving_server(
     pki: &Pki,
     listener: TcpListener,
     authoritative: SocketAddr,
+    post_tls: PostTlsOffer,
     release: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<ReceivingServerReport> {
     let acceptor = TlsAcceptor::from(Arc::new(pki.server_config(HOME_B, &[])));
@@ -390,10 +406,29 @@ fn receiving_server(
         let dialback = Element::builder("dialback", DIALBACK_FEATURES)
             .append(Element::builder("errors", DIALBACK_FEATURES).build())
             .build();
-        let features = Element::builder("features", STREAM)
-            .append(dialback)
-            .build();
+        let mut features = Element::builder("features", STREAM);
+        if let PostTlsOffer::RefusedExternal = post_tls {
+            let mechanisms = Element::builder("mechanisms", SASL)
+                .append(
+                    Element::builder("mechanism", SASL)
+                        .append("EXTERNAL")
+                        .build(),
+                )
+                .build();
+            features = features.append(mechanisms);
+        }
+        let features = features.append(dialback).build();
         write_element(&mut tls, &mut encoder, &features).await;
+        let mut tried_external = false;
+        if let PostTlsOffer::RefusedExternal = post_tls {
+            let auth = await_element(&mut tls, &mut decoder, "auth", SASL).await;
+            assert_eq!(auth.attr("mechanism"), Some("EXTERNAL"));
+            tried_external = true;
+            let failure = Element::builder("failure", SASL)
+                .append(Element::builder("not-authorized", SASL).build())
+                .build();
+            write_element(&mut tls, &mut encoder, &failure).await;
+        }
         let result = await_element(&mut tls, &mut decoder, "result", JABBER_SERVER_DIALBACK).await;
         assert_eq!(result.attr("from"), Some(HOME_A));
         assert_eq!(result.attr("to"), Some(HOME_B));
@@ -436,7 +471,10 @@ fn receiving_server(
         write_element(&mut tls, &mut encoder, &reply).await;
         let _ = release.await;
         drop(tls);
-        ReceivingServerReport { verified }
+        ReceivingServerReport {
+            verified,
+            tried_external,
+        }
     })
 }
 
@@ -452,7 +490,13 @@ async fn a_deployment_authenticates_itself_by_dialback_where_external_is_not_off
     assert_eq!(a.address, address_a);
 
     let (release, released) = tokio::sync::oneshot::channel();
-    let server = receiving_server(&pki, peer_listener, address_a, released);
+    let server = receiving_server(
+        &pki,
+        peer_listener,
+        address_a,
+        PostTlsOffer::Dialback,
+        released,
+    );
     let stream = tokio::time::timeout(WAIT, a.handle.connect(&domain(HOME_A), &domain(HOME_B)))
         .await
         .expect("the attempt ends in time")
@@ -464,6 +508,44 @@ async fn a_deployment_authenticates_itself_by_dialback_where_external_is_not_off
 
     let _ = release.send(());
     let report = server.await.expect("the receiving server");
+    assert_eq!(report.verified.as_deref(), Some("valid"));
+    assert!(!report.tried_external);
+}
+
+/// A receiving server that cannot verify home-a's certificate still offers
+/// SASL EXTERNAL, refuses it, and expects dialback on the same stream, as
+/// ejabberd does: home-a sends its key after the failure and authenticates
+/// itself by dialback.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deployment_authenticates_itself_by_dialback_after_external_is_refused() {
+    let pki = Pki::new();
+    let (peer_listener, peer_address) = listener().await;
+    let (listener_a, address_a) = listener().await;
+    let mut spec_a = Spec::new(HOME_A, HOME_B);
+    spec_a.endpoints = vec![(HOME_B, peer_address)];
+    spec_a.tables = outbound_dialback(&pki);
+    let a = start(&pki, &spec_a, listener_a).await;
+    assert_eq!(a.address, address_a);
+
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = receiving_server(
+        &pki,
+        peer_listener,
+        address_a,
+        PostTlsOffer::RefusedExternal,
+        released,
+    );
+    let stream = tokio::time::timeout(WAIT, a.handle.connect(&domain(HOME_A), &domain(HOME_B)))
+        .await
+        .expect("the attempt ends in time")
+        .expect("a stream authenticated by dialback after the refusal");
+    assert_eq!(stream.strength(), AuthenticationStrength::Dialback);
+    assert_eq!(stream.direction(), StreamDirection::Outbound);
+    assert_eq!(stream.trust_profile(), Some(TrustProfileKind::PrivateCa));
+
+    let _ = release.send(());
+    let report = server.await.expect("the receiving server");
+    assert!(report.tried_external, "EXTERNAL is tried first");
     assert_eq!(report.verified.as_deref(), Some("valid"));
 }
 

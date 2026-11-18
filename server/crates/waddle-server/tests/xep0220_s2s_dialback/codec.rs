@@ -1,8 +1,9 @@
 //! The codec's dialback roles, driven byte by byte without sockets: the
 //! Receiving Server (inbound dialback), the Authoritative Server (answers to
 //! `db:verify`, at a bounded rate per stream), the Initiating Server
-//! (outbound dialback, only to a receiving server that advertised it),
-//! verification connections and the XEP-0368 direct-TLS entry.
+//! (outbound dialback, only to a receiving server that advertised it,
+//! where SASL EXTERNAL is not offered or was refused), verification
+//! connections and the XEP-0368 direct-TLS entry.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,8 +16,8 @@ use waddle_xmpp::ns::{DIALBACK_FEATURES, JABBER_SERVER_DIALBACK, SASL, STANZAS, 
 use waddle_xmpp::s2s::{
     AuthorizationDecision, CloseReason, CodecLimits, DestinationStatus, DialbackError, DialbackKey,
     DialbackKeys, DialbackMode, DialbackOutcome, DialbackRequest, Inbound, InboundAdmission,
-    InitiatingConfig, NegotiationClock, Output, ReceivingConfig, S2sStream, SaslLimits,
-    StreamAuthentication, StreamDecoder, StreamErrorCondition, StreamHeader, StreamId,
+    InitiatingConfig, NegotiationClock, Output, ReceivingConfig, S2sStream, SaslFailureCondition,
+    SaslLimits, StreamAuthentication, StreamDecoder, StreamErrorCondition, StreamHeader, StreamId,
     StreamLanguage, TlsEntry, TlsPeer, VerifyRequest, VerifyVerdict,
 };
 
@@ -816,6 +817,99 @@ fn the_initiating_server_refuses_unsolicited_and_uncorrelated_answers() {
             StreamErrorCondition::PolicyViolation,
         );
     }
+}
+
+const FEATURES_EXTERNAL_AND_DIALBACK: &[u8] = b"<stream:features><mechanisms \
+xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>EXTERNAL</mechanism></mechanisms>\
+<dialback xmlns='urn:xmpp:features:dialback'><errors/></dialback></stream:features>";
+const SASL_NOT_AUTHORIZED: &[u8] =
+    b"<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>";
+
+#[test]
+fn the_initiating_server_sends_its_key_after_external_is_refused() {
+    // XEP-0178 §3 step 9b: a receiving server that cannot verify home-a's
+    // certificate refuses EXTERNAL and may continue with dialback on the
+    // same stream; here it advertised dialback by the feature.
+    let (mut stream, _) = initiator_after_tls(enabled());
+    let out = stream.receive(&concat(&[
+        RESPONSE_WITHOUT_DIALBACK,
+        FEATURES_EXTERNAL_AND_DIALBACK,
+    ]));
+    let (_, elements) = decode(&transmitted(&out));
+    assert!(elements.iter().any(|element| element.is("auth", SASL)));
+    assert!(!elements
+        .iter()
+        .any(|element| element.ns() == JABBER_SERVER_DIALBACK));
+
+    let out = stream.receive(SASL_NOT_AUTHORIZED);
+    assert_eq!(close_reason(&out), None, "the stream stays open");
+    let result = dialback_element(&out, "result");
+    assert_eq!(result.attr("from"), Some(HOME_A));
+    assert_eq!(result.attr("to"), Some(HOME_B));
+    let expected = keys()
+        .key(
+            &domain(HOME_B),
+            &domain(HOME_A),
+            &StreamId::parse("s2s-2").expect("an ID"),
+        )
+        .expect("a key");
+    assert_eq!(result.text(), expected.as_str());
+    // This header declared no `db` prefix, so the answer declares its
+    // namespace itself.
+    let out = stream.receive(
+        b"<result xmlns='jabber:server:dialback' from='home-b.test' to='home-a.test' \
+type='valid'/>",
+    );
+    let established = out.iter().find_map(|output| match output {
+        Output::Established(stream) => Some(stream.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        established.expect("an established stream").authentication,
+        StreamAuthentication::Dialback
+    );
+
+    // The namespace on the post-TLS header advertises dialback as well
+    // (XEP-0220 §2.4.1); a refused key then closes the stream.
+    let (mut stream, _) = initiator_after_tls(enabled());
+    stream.receive(&concat(&[RESPONSE, FEATURES_EXTERNAL]));
+    let out = stream.receive(SASL_NOT_AUTHORIZED);
+    assert_eq!(dialback_element(&out, "result").attr("to"), Some(HOME_B));
+    let out = stream.receive(b"<db:result from='home-b.test' to='home-a.test' type='invalid'/>");
+    assert_eq!(close_reason(&out), Some(CloseReason::DialbackRefused));
+}
+
+#[test]
+fn a_refused_external_closes_where_dialback_cannot_follow() {
+    // The receiving server advertised no dialback: no key is sent.
+    let (mut stream, _) = initiator_after_tls(enabled());
+    stream.receive(&concat(&[RESPONSE_WITHOUT_DIALBACK, FEATURES_EXTERNAL]));
+    let out = stream.receive(SASL_NOT_AUTHORIZED);
+    let (_, elements) = decode(&transmitted(&out));
+    assert!(!elements
+        .iter()
+        .any(|element| element.ns() == JABBER_SERVER_DIALBACK));
+    assert_eq!(
+        close_reason(&out),
+        Some(CloseReason::SaslFailure(
+            SaslFailureCondition::NotAuthorized
+        ))
+    );
+
+    // The Initiating Server role does not run: no key either.
+    let (mut stream, _) = initiator_after_tls(DialbackMode::Disabled);
+    stream.receive(&concat(&[RESPONSE, FEATURES_EXTERNAL_AND_DIALBACK]));
+    let out = stream.receive(SASL_NOT_AUTHORIZED);
+    let (_, elements) = decode(&transmitted(&out));
+    assert!(!elements
+        .iter()
+        .any(|element| element.ns() == JABBER_SERVER_DIALBACK));
+    assert_eq!(
+        close_reason(&out),
+        Some(CloseReason::SaslFailure(
+            SaslFailureCondition::NotAuthorized
+        ))
+    );
 }
 
 #[test]

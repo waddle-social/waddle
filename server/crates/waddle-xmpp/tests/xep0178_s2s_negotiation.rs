@@ -1197,6 +1197,9 @@ xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>EXTERNAL</mechanism></mechan
     }
 }
 
+/// With dialback disabled a refused EXTERNAL ends the stream; where the
+/// Initiating Server role runs, dialback may follow instead (covered by the
+/// XEP-0220 suite, `xep0220_s2s_dialback`).
 #[test]
 fn initiator_sasl_outcomes() {
     let mut stream = initiator_after_tls();

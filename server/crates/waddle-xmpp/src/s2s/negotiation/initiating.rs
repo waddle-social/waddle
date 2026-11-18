@@ -1,12 +1,14 @@
 //! Initiating-role negotiation: STARTTLS or XEP-0368 direct TLS, then SASL
 //! EXTERNAL and the authenticated restart, or XEP-0220 dialback as the
-//! Initiating Server; and verification connections, on which a Receiving
-//! Server asks an Authoritative Server about one dialback key.
+//! Initiating Server, either where EXTERNAL is not offered or after the
+//! receiving server refused it (XEP-0178 §3, step 9b); and verification
+//! connections, on which a Receiving Server asks an Authoritative Server
+//! about one dialback key.
 
 use minidom::Element;
 
 use crate::ns::{DIALBACK_FEATURES, SASL, TLS};
-use crate::s2s::condition::StreamErrorCondition;
+use crate::s2s::condition::{SaslFailureCondition, StreamErrorCondition};
 use crate::s2s::decoder::DecodeError;
 use crate::s2s::header::{HeaderAddress, StreamHeader, StreamId, StreamVersion};
 
@@ -71,6 +73,9 @@ pub(crate) struct Initiating {
     /// Whether the receiving server's post-TLS response header declared
     /// the dialback namespace (XEP-0220 §2.4.1).
     header_declares_dialback: bool,
+    /// Whether the receiving server's post-TLS features offered dialback
+    /// with error handling (XEP-0220 §2.4.2).
+    features_offer_dialback: bool,
 }
 
 impl Initiating {
@@ -100,6 +105,7 @@ impl Initiating {
             state: State::AwaitHeader(Stage::PreTls),
             stream_id: None,
             header_declares_dialback: false,
+            features_offer_dialback: false,
         };
         let steps = match entry {
             TlsEntry::StartTls => vec![Step::Open(machine.header())],
@@ -255,7 +261,7 @@ impl Initiating {
                 self.state = State::AwaitHeader(Stage::Authenticated);
             }
             (State::AwaitSaslOutcome, TopLevel::SaslFailure(condition)) => {
-                self.close(steps, CloseReason::SaslFailure(condition))
+                self.on_sasl_failure(condition, steps)
             }
             (State::AwaitFeatures(Stage::Authenticated), TopLevel::Features(features)) => {
                 self.on_final_features(features, steps)
@@ -285,12 +291,38 @@ impl Initiating {
             self.state = State::AwaitVerifyResult;
             return;
         }
+        self.features_offer_dialback = offers_dialback(&features);
         if offered_mechanisms(&features).any(|mechanism| mechanism == EXTERNAL) {
             steps.push(Step::Send(elements::external_auth()));
             self.state = State::AwaitSaslOutcome;
         } else {
-            self.weak_identity_fallback(&features, steps);
+            self.weak_identity_fallback(steps);
         }
+    }
+
+    /// The receiving server refused SASL EXTERNAL. A receiving server that
+    /// cannot verify this server's certificate answers EXTERNAL with a
+    /// failure and may continue with dialback on the same stream (XEP-0178
+    /// §3, step 9b; RFC 6120 §6.4.5 leaves the stream open after a SASL
+    /// failure). Where the Initiating Server role runs and the receiving
+    /// server advertised dialback, its key is sent once, exactly as when
+    /// EXTERNAL is not offered: TLS has verified the receiving server, so
+    /// this is not the inbound case ADR-0020 D2 rules out, where a
+    /// certificate the peer presented failed this server's verification.
+    /// Otherwise the stream closes with the failure.
+    fn on_sasl_failure(&mut self, condition: SaslFailureCondition, steps: &mut Vec<Step>) {
+        if self.config.dialback.keys().is_some() && self.dialback_advertised() {
+            self.weak_identity_fallback(steps);
+        } else {
+            self.close(steps, CloseReason::SaslFailure(condition));
+        }
+    }
+
+    /// Whether the receiving server advertised dialback, by declaring its
+    /// namespace on the post-TLS response header (XEP-0220 §2.4.1) or by
+    /// the dialback stream feature (§2.4.2).
+    fn dialback_advertised(&self) -> bool {
+        self.header_declares_dialback || self.features_offer_dialback
     }
 
     /// Post-SASL features: neither STARTTLS nor a SASL mechanism may still
@@ -327,19 +359,19 @@ impl Initiating {
         }
     }
 
-    /// Decision point for XEP-0220 when SASL EXTERNAL is not offered: send a
-    /// dialback key as the Initiating Server (XEP-0220 §2.1.1), computed
-    /// for the stream ID of the receiving server's post-TLS header, but
-    /// only to a receiving server that advertised dialback, by declaring
-    /// its namespace on that header or by the dialback stream feature
-    /// (XEP-0220 §2.4). A key is never sent to a server that did not ask
-    /// for one. TLS has already verified the receiving server's
-    /// certificate.
-    fn weak_identity_fallback(&mut self, features: &Element, steps: &mut Vec<Step>) {
+    /// Decision point for XEP-0220 when SASL EXTERNAL is not offered, or
+    /// was refused: send a dialback key as the Initiating Server (XEP-0220
+    /// §2.1.1), computed for the stream ID of the receiving server's
+    /// post-TLS header, but only to a receiving server that advertised
+    /// dialback, by declaring its namespace on that header or by the
+    /// dialback stream feature (XEP-0220 §2.4). A key is never sent to a
+    /// server that did not ask for one. TLS has already verified the
+    /// receiving server's certificate.
+    fn weak_identity_fallback(&mut self, steps: &mut Vec<Step>) {
         let Some(keys) = self.config.dialback.keys() else {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         };
-        if !self.header_declares_dialback && !offers_dialback(features) {
+        if !self.dialback_advertised() {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
         let Some(stream_id) = self.stream_id.as_ref() else {
