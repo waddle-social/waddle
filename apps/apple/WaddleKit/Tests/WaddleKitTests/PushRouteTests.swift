@@ -17,6 +17,8 @@ struct PushRouteTests {
         }
         let dmMention = try #require(PushRoute(version: 1, node: "n1", conversation: "bob@waddle.test", notificationClass: "dm_mention"))
         #expect(!dmMention.conversation.isRoom)
+        let missedCall = try #require(PushRoute(version: 1, node: "n1", conversation: "bob@waddle.test", notificationClass: "missed_call"))
+        #expect(missedCall.conversation == .direct(jid("bob@waddle.test").bare))
     }
 
     @Test func unknownShapesAreIgnored() {
