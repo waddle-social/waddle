@@ -24,6 +24,16 @@ pub const MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 pub const MAM: &str = "urn:xmpp:mam:2";
 pub const RSM: &str = "http://jabber.org/protocol/rsm";
 pub const DATA_FORMS: &str = "jabber:x:data";
+pub const MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+pub const MUC_ROOMCONFIG: &str = "http://jabber.org/protocol/muc#roomconfig";
+pub const PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+pub const PUBSUB_NODE_CONFIG: &str = "http://jabber.org/protocol/pubsub#node_config";
+/// Waddle's owner-config field that opens a room to accounts at other
+/// servers (`urn:waddle:roomconfig:federated`); off by default.
+pub const WADDLE_ROOM_FEDERATED: &str = "urn:waddle:roomconfig:federated";
+/// Waddle's Space configuration field that opens a Space to accounts at
+/// other servers (`urn:waddle:spaces:federated`); off by default.
+pub const WADDLE_SPACE_FEDERATED: &str = "urn:waddle:spaces:federated";
 pub const PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 pub const PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 pub const BOOKMARKS: &str = "urn:xmpp:bookmarks:1";

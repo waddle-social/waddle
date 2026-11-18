@@ -14,9 +14,33 @@ use crate::scenarios::support::{self, ask, describe, is_result};
 use crate::topology::{self, Home, HOME_A, HOME_B};
 use crate::xml::{ns, stanza};
 
+/// Whether `room` (a bare room JID) is on one of the Waddle deployments'
+/// MUC services.
+pub fn on_waddle(room: &str) -> bool {
+    let domain = room.rsplit('@').next().unwrap_or_default();
+    [HOME_A, HOME_B]
+        .iter()
+        .any(|home| domain == topology::muc_domain(home))
+}
+
 /// Join `room/nick` and wait for the self-presence; a room created by the
-/// join is unlocked with the default configuration.
+/// join is unlocked as its owner would: a stock server's with the default
+/// configuration, a Waddle room by submitting its owner form with the
+/// room opened to accounts at other servers
+/// (`urn:waddle:roomconfig:federated`), since a Waddle room is closed to
+/// them until an owner opens it.
 pub async fn join(session: &mut Session, room: &str, nick: &str) -> Result<Element> {
+    join_with(session, room, nick, &[]).await
+}
+
+/// [`join`], with `fields` added to the owner form when the join creates a
+/// Waddle room.
+pub async fn join_with(
+    session: &mut Session,
+    room: &str,
+    nick: &str,
+    fields: &[(&str, &str)],
+) -> Result<Element> {
     session
         .send(&stanza::muc_join(&[room, "/", nick].concat()))
         .await?;
@@ -37,7 +61,14 @@ pub async fn join(session: &mut Session, room: &str, nick: &str) -> Result<Eleme
         .flat_map(|x| x.children())
         .any(|child| child.name() == "status" && child.attr("code") == Some("201"));
     if created {
-        let unlocked = ask(session, stanza::muc_instant(&support::id("instant"), room)).await?;
+        let request = if on_waddle(room) {
+            let mut form = vec![(ns::WADDLE_ROOM_FEDERATED, "1")];
+            form.extend_from_slice(fields);
+            stanza::muc_configure(&support::id("configure"), room, &form)
+        } else {
+            stanza::muc_instant(&support::id("instant"), room)
+        };
+        let unlocked = ask(session, request).await?;
         anyhow::ensure!(
             is_result(&unlocked),
             "room configuration refused: {}",

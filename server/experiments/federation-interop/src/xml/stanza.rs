@@ -313,8 +313,59 @@ pub fn muc_instant(id: &str, room: &str) -> Element {
     set(
         id,
         Some(room),
-        Element::builder("query", "http://jabber.org/protocol/muc#owner")
+        Element::builder("query", ns::MUC_OWNER)
             .append(form)
+            .build(),
+    )
+}
+
+/// A submitted data form (XEP-0004) of `form_type` with `fields`, each a
+/// variable and its single value.
+fn submitted_form(form_type: &str, fields: &[(&str, &str)]) -> Element {
+    let field = |var: &str, value: &str| {
+        Element::builder("field", ns::DATA_FORMS)
+            .attr(xml_ncname!("var").to_owned(), var)
+            .append(
+                Element::builder("value", ns::DATA_FORMS)
+                    .append(value)
+                    .build(),
+            )
+            .build()
+    };
+    let mut form = Element::builder("x", ns::DATA_FORMS)
+        .attr(xml_ncname!("type").to_owned(), "submit")
+        .append(field("FORM_TYPE", form_type));
+    for (var, value) in fields {
+        form = form.append(field(var, value));
+    }
+    form.build()
+}
+
+/// Submit the owner configuration form of `room` with `fields` (XEP-0045
+/// section 10.2), as an owner does for a newly created room it configures
+/// instead of accepting the defaults.
+pub fn muc_configure(id: &str, room: &str, fields: &[(&str, &str)]) -> Element {
+    set(
+        id,
+        Some(room),
+        Element::builder("query", ns::MUC_OWNER)
+            .append(submitted_form(ns::MUC_ROOMCONFIG, fields))
+            .build(),
+    )
+}
+
+/// Submit the node configuration form of `node` on `service` with
+/// `fields` (XEP-0060 section 8.2.4).
+pub fn pubsub_configure(id: &str, service: &str, node: &str, fields: &[(&str, &str)]) -> Element {
+    let configure = Element::builder("configure", ns::PUBSUB_OWNER)
+        .attr(xml_ncname!("node").to_owned(), node)
+        .append(submitted_form(ns::PUBSUB_NODE_CONFIG, fields))
+        .build();
+    set(
+        id,
+        Some(service),
+        Element::builder("pubsub", ns::PUBSUB_OWNER)
+            .append(configure)
             .build(),
     )
 }

@@ -21,7 +21,31 @@ fn room_item(name: &str) -> Element {
     stanza::bookmark(name, "harness")
 }
 
-/// Create a Space node on home-a with `rooms` as items.
+/// Open the Space `node` on a Waddle Spaces `service` to accounts at
+/// other servers, as its owner does with the Space configuration field
+/// `urn:waddle:spaces:federated`: a Waddle Space is closed to them until
+/// then.
+async fn federate_space(owner: &mut Session, service: &str, node: &str) -> Result<()> {
+    let configured = ask(
+        owner,
+        stanza::pubsub_configure(
+            &support::id("configure"),
+            service,
+            node,
+            &[(ns::WADDLE_SPACE_FEDERATED, "1")],
+        ),
+    )
+    .await?;
+    anyhow::ensure!(
+        is_result(&configured),
+        "opening the Space to other servers refused: {}",
+        describe(&configured)
+    );
+    Ok(())
+}
+
+/// Create a Space node on home-a, open it to accounts at other servers and
+/// publish `rooms`, which exist and are open to them too, as its items.
 async fn waddle_space(owner: &mut Session, node: &str, rooms: &[String]) -> Result<()> {
     let service = topology::spaces_domain(HOME_A);
     let created = ask(
@@ -34,6 +58,7 @@ async fn waddle_space(owner: &mut Session, node: &str, rooms: &[String]) -> Resu
         "Space creation refused: {}",
         describe(&created)
     );
+    federate_space(owner, &service, node).await?;
     for room in rooms {
         let published = ask(
             owner,
@@ -179,6 +204,13 @@ pub async fn space_on_peer_pubsub(h: &mut Harness, peer: Peer) -> Result<Outcome
         "node creation refused: {}",
         describe(&created)
     );
+    let room = [support::id("room").as_str(), "@", &Harness::peer_muc(peer)].concat();
+    if peer == Peer::Waddle {
+        // A Waddle Space lists rooms of its own deployment that exist, and
+        // other servers reach both only once their owner opens them.
+        federate_space(&mut owner, &service, &node).await?;
+        muc::join(&mut owner, &room, "owner").await?;
+    }
     let mut local = h
         .login_waddle(Home::A, "alice", &support::id("local"))
         .await?;
@@ -193,7 +225,6 @@ pub async fn space_on_peer_pubsub(h: &mut Harness, peer: Peer) -> Result<Outcome
         is_result(&subscribed),
         describe(&subscribed),
     );
-    let room = [support::id("room").as_str(), "@", &Harness::peer_muc(peer)].concat();
     let published = ask(
         &mut owner,
         stanza::pubsub_publish(
@@ -348,6 +379,9 @@ pub async fn community_admin(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
         &topology::muc_domain(HOME_A),
     ]
     .concat();
+    // The room the remote owner adds exists on home-a and is open to
+    // other servers; a Space lists only rooms of its own deployment.
+    muc::join(&mut owner, &room, "owner").await?;
     let published = ask(
         &mut remote,
         stanza::pubsub_publish(
