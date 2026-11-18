@@ -771,9 +771,13 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
         response.contains("type='error'") || response.contains("type='error'"),
         "expected push enable error for invalid service jid, got: {response}"
     );
+    // The `jid` attribute of `<enable/>` names an entity, so the identity
+    // profile checks it with every other payload `jid` before any handler
+    // runs: an address outside the profile refuses the stanza with
+    // `<jid-malformed/>` (RFC 6120 §8.3.3.8), type `modify`.
     assert!(
-        response.contains("bad-request"),
-        "expected bad-request for invalid service jid, got: {response}"
+        response.contains("jid-malformed") && response.contains("type='modify'"),
+        "expected jid-malformed for invalid service jid, got: {response}"
     );
 
     let _ = client.close().await;
