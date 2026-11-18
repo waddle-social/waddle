@@ -39,7 +39,7 @@ pub(super) fn build_waddle_context(
             minidom::rxml::xml_ncname!("stanza-id").to_owned(),
             candidate.archive_stanza_id.id.as_str(),
         );
-    if let Some(call) = &candidate.call {
+    if let Some(call) = candidate.call() {
         builder = builder.append(
             Element::builder("call", WADDLE_PUSH_CONTEXT_NS)
                 .attr(
@@ -52,7 +52,8 @@ pub(super) fn build_waddle_context(
                 )
                 .attr(
                     minidom::rxml::xml_ncname!("expires").to_owned(),
-                    (created_at_ms / 1_000 + 45).to_string(),
+                    (created_at_ms / 1_000 + super::candidate::CALL_RING_DURATION_SECONDS)
+                        .to_string(),
                 )
                 .attr(
                     minidom::rxml::xml_ncname!("from").to_owned(),
@@ -213,5 +214,33 @@ mod tests {
             assert_eq!(call.attr("expires"), Some("1700000045"));
             assert_eq!(call.attr("from"), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod missed_call_tests {
+    use super::{build_waddle_context, WADDLE_PUSH_CONTEXT_NS};
+    use crate::notification_outbox::{NotificationCandidate, NotificationMessageHints};
+    use jid::{BareJid, Jid};
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::jingle::SessionId;
+
+    #[test]
+    fn missed_call_context_has_no_voip_invitation_child() {
+        let recipient: BareJid = "alice@example.com".parse().expect("recipient");
+        let candidate = NotificationCandidate::missed_call_with_hints(
+            recipient.clone(),
+            "bob@example.com/phone".parse().expect("sender"),
+            StanzaId::new("retract-archive", Jid::from(recipient)),
+            SessionId("session".into()),
+            NotificationMessageHints::none(),
+        )
+        .expect("missed call");
+        let context = build_waddle_context(&candidate, 1_700_000_000_123);
+        assert_eq!(context.attr("class"), Some("missed_call"));
+        assert_eq!(context.attr("conversation"), Some("bob@example.com"));
+        assert_eq!(context.attr("stanza-id"), Some("retract-archive"));
+        assert!(context.get_child("call", WADDLE_PUSH_CONTEXT_NS).is_none());
+        assert_eq!(context.children().count(), 0);
     }
 }

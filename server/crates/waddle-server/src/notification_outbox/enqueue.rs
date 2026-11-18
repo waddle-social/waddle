@@ -1,8 +1,9 @@
 //! T0 candidate persistence: idempotent inserts and counts.
 
 use super::{
-    decode_candidate, DatabaseError, NotificationCandidate, NotificationCandidateInsertOutcome,
-    NotificationOutboxError, NotificationOutboxStore, SuppressedReason,
+    decode_candidate, BareJid, DatabaseError, NotificationCandidate,
+    NotificationCandidateInsertOutcome, NotificationClass, NotificationOutboxError,
+    NotificationOutboxStore, SuppressedReason, MISSED_CALL_WINDOW_SECONDS,
 };
 use crate::db::DatabaseDriver;
 use crate::db::Transaction;
@@ -10,8 +11,35 @@ use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_uow::EffectDescendantRepository;
 use crate::ingress_uow::IngressUowError;
+use chrono::{DateTime, Utc};
+use xmpp_parsers::jingle::SessionId;
 
 impl NotificationOutboxStore {
+    /// Resolve invitation evidence against the original retract receipt, including on recovery.
+    pub(crate) async fn has_recent_call_candidate(
+        &self,
+        recipient: &BareJid,
+        caller: &BareJid,
+        session_id: &SessionId,
+        receipt_at: DateTime<Utc>,
+    ) -> Result<bool, NotificationOutboxError> {
+        let receipt_ms = receipt_at.timestamp_millis();
+        let mut rows = self
+            .query(
+                "SELECT 1 FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND class = ? AND call_sid = ? AND quarantined_at_ms IS NULL AND created_at_ms >= ? AND created_at_ms <= ? LIMIT 1",
+                crate::db_params![
+                    recipient.to_string(),
+                    caller.to_string(),
+                    NotificationClass::Call.as_db_value(),
+                    session_id.0.clone(),
+                    receipt_ms.saturating_sub(MISSED_CALL_WINDOW_SECONDS * 1_000),
+                    receipt_ms,
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     pub async fn insert_candidate(
         &self,
         candidate: &NotificationCandidate,
@@ -76,11 +104,8 @@ impl NotificationOutboxStore {
                     candidate.last_message_body.clone(),
                     i64::from(candidate.reaction),
                     uuid::Uuid::new_v4().to_string(),
-                    candidate
-                        .call
-                        .as_ref()
-                        .map(|call| call.session_id.0.clone()),
-                    candidate.call.as_ref().map(|call| i64::from(call.video)),
+                    candidate.call_session_id().map(|sid| sid.0.clone()),
+                    candidate.call_video().map(i64::from),
                 ],
             )
             .await?;
@@ -88,9 +113,8 @@ impl NotificationOutboxStore {
             // Adopt missing scheduling identity without changing approval.
             Self::candidate_delivery_id_in_transaction(tx, candidate).await?;
             // UNIQUE-constraint collision. `notification_candidates`
-            // carries TWO intentional unique constraints, both of
-            // which the `ON CONFLICT DO NOTHING` (no target)
-            // suppresses:
+            // carries stanza-identity constraints and a missed-call SID
+            // constraint, all suppressed by untargeted `ON CONFLICT DO NOTHING`:
             //
             // 1. The PRIMARY KEY on `(recipient_bare_jid,
             //    conversation_jid, thread_id, stanza_id_by,
@@ -101,10 +125,13 @@ impl NotificationOutboxStore {
             //    dedup for the same logical stanza minted under
             //    different `by=` JIDs (XEP-0359).
             //
-            // Both are intended Duplicate triggers, so the
-            // counter increments on either path. If a third
-            // unique constraint is ever added with different
-            // dedup semantics, the SQL needs an explicit chained
+            // 3. The missed-call index on `(recipient_bare_jid,
+            //    conversation_jid, call_sid)` — repeated retracts may
+            //    have distinct stanza identities but share one alert.
+            //
+            // All are intended Duplicate triggers. Canonical callers resolve
+            // the stored SID identity before attaching scheduling custody.
+            // Any future constraint with different dedup semantics needs explicit
             // `ON CONFLICT (cols) DO NOTHING` for each path
             // (Greptile review on PR #758).
             waddle_xmpp::telemetry::reliability::increment_push_candidate_coalesced();
@@ -122,6 +149,46 @@ impl NotificationOutboxStore {
             "push pipeline transition"
         );
         Ok(NotificationCandidateInsertOutcome::Inserted)
+    }
+
+    /// A new retract owns its own receipt while sharing the first alert's custody.
+    /// Keep the incoming archive authority outside this scheduling-only resolution.
+    pub(crate) async fn candidate_for_lineage_in_transaction(
+        tx: &mut Transaction<'_>,
+        candidate: &NotificationCandidate,
+    ) -> Result<NotificationCandidate, IngressUowError> {
+        if candidate.class != NotificationClass::MissedCall {
+            return Ok(candidate.clone());
+        }
+        let session_id = candidate
+            .call_session_id()
+            .ok_or(IngressUowError::EffectIntentConflict)?;
+        let query = if tx.driver() == DatabaseDriver::Postgres {
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,call_sid,call_video,quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND class = ? AND call_sid = ? FOR UPDATE NOWAIT"
+        } else {
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,call_sid,call_video,quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND class = ? AND call_sid = ?"
+        };
+        let mut rows = tx
+            .query(
+                query,
+                crate::db_params![
+                    candidate.recipient_bare_jid.to_string(),
+                    candidate.conversation_jid.to_string(),
+                    candidate.class.as_db_value(),
+                    session_id.0.clone(),
+                ],
+            )
+            .await
+            .map_err(crate::ingress_uow::canonical_nowait_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(crate::ingress_uow::canonical_nowait_error)?
+            .ok_or(IngressUowError::EffectIntentConflict)?;
+        if row.get::<Option<i64>>(17)?.is_some() {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        decode_candidate(&row).map_err(|_| IngressUowError::EffectIntentConflict)
     }
 
     /// Read the stable host identity after inserting a canonical candidate.
@@ -397,5 +464,130 @@ fn pending_descendant_sql(api: Option<&DefinerApiCandidateContext<'_>>) -> Strin
         )
     } else {
         "EXISTS(SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL)".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notification_outbox::test_support::{bare, store};
+    use crate::notification_outbox::{NotificationCall, NotificationMessageHints, StanzaId};
+
+    #[tokio::test]
+    async fn recent_call_evidence_uses_receipt_window_and_original_scope() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let caller = bare("bob@example.com");
+        // Long before the current wall clock: recovery must use this frozen receipt.
+        let receipt = DateTime::from_timestamp_millis(1_000_000).expect("receipt");
+        for (sid, created_at, outboxed, suppressed, quarantined, expected) in [
+            ("lower-bound", 940_000, false, false, false, true),
+            ("upper-bound", 1_000_000, false, false, false, true),
+            ("expired", 939_999, false, false, false, false),
+            ("future", 1_000_001, false, false, false, false),
+            ("outboxed", 980_000, true, false, false, true),
+            ("suppressed", 980_000, true, true, false, true),
+            ("quarantined", 980_000, false, false, true, false),
+        ] {
+            let session_id = SessionId(sid.to_owned());
+            let candidate = NotificationCandidate::call_with_hints(
+                recipient.clone(),
+                "bob@example.com/phone".parse().expect("sender"),
+                StanzaId::new(sid, recipient.clone().into()),
+                NotificationCall {
+                    session_id: session_id.clone(),
+                    video: true,
+                },
+                NotificationMessageHints::none(),
+            )
+            .expect("call");
+            let mut tx = store.db.begin().await.expect("insert transaction");
+            NotificationOutboxStore::insert_candidate_in_transaction(
+                &mut tx, &candidate, created_at,
+            )
+            .await
+            .expect("insert evidence");
+            tx.execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = ?, suppressed_reason = ?, quarantined_at_ms = ? WHERE stanza_id = ?",
+                crate::db_params![
+                    outboxed.then_some(created_at),
+                    suppressed.then_some("waddle_dnd"),
+                    quarantined.then_some(created_at),
+                    sid,
+                ],
+            )
+            .await
+            .expect("evidence state");
+            tx.commit().await.expect("evidence commit");
+            assert_eq!(
+                store
+                    .has_recent_call_candidate(&recipient, &caller, &session_id, receipt)
+                    .await
+                    .expect("evidence lookup"),
+                expected,
+                "{sid}",
+            );
+        }
+        for (recipient, caller, sid) in [
+            (bare("other@example.com"), caller.clone(), "upper-bound"),
+            (recipient.clone(), bare("other@example.com"), "upper-bound"),
+            (recipient.clone(), caller.clone(), "unknown"),
+        ] {
+            assert!(!store
+                .has_recent_call_candidate(&recipient, &caller, &SessionId(sid.into()), receipt)
+                .await
+                .expect("scope lookup"));
+        }
+    }
+
+    #[tokio::test]
+    async fn missed_call_sid_resolution_preserves_first_candidate_and_rejects_quarantine() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let candidate = |stanza: &str| {
+            NotificationCandidate::missed_call_with_hints(
+                recipient.clone(),
+                "bob@example.com/phone".parse().expect("sender"),
+                StanzaId::new(stanza, recipient.clone().into()),
+                SessionId("shared-call".into()),
+                NotificationMessageHints::none(),
+            )
+            .expect("missed call")
+        };
+        let first = candidate("first-retract");
+        let duplicate = candidate("second-retract");
+        let mut tx = store.db.begin().await.expect("transaction");
+        assert_eq!(
+            NotificationOutboxStore::insert_candidate_in_transaction(&mut tx, &first, 1)
+                .await
+                .expect("first"),
+            NotificationCandidateInsertOutcome::Inserted
+        );
+        assert_eq!(
+            NotificationOutboxStore::insert_candidate_in_transaction(&mut tx, &duplicate, 2)
+                .await
+                .expect("duplicate"),
+            NotificationCandidateInsertOutcome::Duplicate
+        );
+        let stored =
+            NotificationOutboxStore::candidate_for_lineage_in_transaction(&mut tx, &duplicate)
+                .await
+                .expect("resolve duplicate custody");
+        assert_eq!(stored.archive_stanza_id(), first.archive_stanza_id());
+        assert!(stored.call().is_none());
+        assert_eq!(stored.call_session_id(), duplicate.call_session_id());
+        assert!(stored.delivery_id.is_some());
+        tx.execute(
+            "UPDATE notification_candidates SET quarantined_at_ms = 3",
+            (),
+        )
+        .await
+        .expect("quarantine");
+        assert!(matches!(
+            NotificationOutboxStore::candidate_for_lineage_in_transaction(&mut tx, &duplicate)
+                .await,
+            Err(IngressUowError::EffectIntentConflict)
+        ));
+        tx.commit().await.expect("commit");
     }
 }

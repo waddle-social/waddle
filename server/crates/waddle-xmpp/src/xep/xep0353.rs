@@ -21,8 +21,8 @@
 //!   the [`Reason`-into-`Element`] conversion (XEP-0353 §3.5 SHOULD).
 
 use minidom::Element;
-use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
-use xmpp_parsers::message::Message;
+use xmpp_parsers::jingle::{Reason as JingleReason, ReasonElement, SessionId};
+use xmpp_parsers::message::{Message, MessageType};
 
 use super::xep_waddle_call_thread::CallThreadMedia;
 pub use xmpp_parsers::jingle_message::JingleMI;
@@ -94,6 +94,44 @@ pub fn jmi_propose(message: &Message) -> Option<(SessionId, CallThreadMedia)> {
         video: false,
     });
     Some((SessionId(sid.to_owned()), media))
+}
+
+/// Recognize a well-formed caller cancellation, excluding glare tie-breaking.
+/// A JMI message contains one action; a retract may carry an optional
+/// XEP-0166 reason. A tie-breaking retract joins the peer's call instead
+/// of representing a missed call (XEP-0353 §4.1).
+pub fn jmi_retract(message: &Message) -> Option<SessionId> {
+    if message.type_ != MessageType::Chat {
+        return None;
+    }
+    let mut actions = message
+        .payloads
+        .iter()
+        .filter(|payload| payload.ns() == NS_JINGLE_MESSAGE);
+    let retract = actions.next()?;
+    if actions.next().is_some() || !retract.is("retract", NS_JINGLE_MESSAGE) {
+        return None;
+    }
+    let sid = retract.attr("id").filter(|sid| !sid.is_empty())?;
+    if retract
+        .attrs()
+        .iter()
+        .any(|((namespace, name), _)| (namespace.as_ref(), name.as_ref()) != ("", "id"))
+        || !retract.text().trim().is_empty()
+    {
+        return None;
+    }
+    let mut reason_seen = false;
+    for child in retract.children() {
+        if !child.is("reason", NS_JINGLE)
+            || reason_seen
+            || ReasonElement::try_from(child.clone()).is_err()
+        {
+            return None;
+        }
+        reason_seen = true;
+    }
+    Some(SessionId(sid.to_owned()))
 }
 
 /// Recognize a bodyless message with a top-level JMI `retract`, `proceed`,

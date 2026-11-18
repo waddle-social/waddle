@@ -132,7 +132,7 @@ async fn sqlite_retired_history_database(name: &str) -> Database {
 async fn a_fresh_sqlite_database_is_built_from_the_baseline() {
     let db = Database::in_memory("baseline-fresh").await.expect("sqlite");
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION, 2001]);
+    assert_eq!(applied, vec![BASELINE_VERSION, 2001, 2002]);
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
     let conn = db.guard().await.expect("guard");
     for table in [
@@ -182,7 +182,7 @@ async fn a_complete_retired_sqlite_ledger_is_stamped_then_upgraded() {
         .expect("stamp");
     assert_eq!(
         applied,
-        vec![2001],
+        vec![2001, 2002],
         "a stamp applies the post-baseline migration"
     );
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Sqlite));
@@ -398,7 +398,7 @@ async fn postgres_fresh_database_is_built_from_the_baseline_in_any_schema() {
     let schema = unique_postgres_schema_name("baseline_fresh");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let applied = MigrationRunner::single().run(&db).await.expect("migrate");
-    assert_eq!(applied, vec![BASELINE_VERSION, 2001]);
+    assert_eq!(applied, vec![BASELINE_VERSION, 2001, 2002]);
     assert_eq!(ledger(&db).await, catalog_rows(DatabaseDriver::Postgres));
     // The template functions name the schema they were rendered for.
     let attach: String = sqlx::query_scalar(&format!(

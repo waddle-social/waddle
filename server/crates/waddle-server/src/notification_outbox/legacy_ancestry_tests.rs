@@ -39,6 +39,21 @@ async fn legacy_parent_for_conversation(
     candidate: &NotificationCandidate,
     recorded_conversation: &BareJid,
 ) -> MessageKey {
+    let mut message = Message::new(Some(Jid::from(candidate.recipient_bare_jid.clone())));
+    message.from = Some(candidate.sender_jid.clone());
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::from(""),
+        "original approved message".to_string(),
+    );
+    legacy_parent_with_message(fixture, candidate, recorded_conversation, message).await
+}
+
+async fn legacy_parent_with_message(
+    fixture: &IngressFixture,
+    candidate: &NotificationCandidate,
+    recorded_conversation: &BareJid,
+    message: Message,
+) -> MessageKey {
     let key = MessageKey::new();
     let intent = IngressEffectIntent::NotificationActivityPreview {
         owner: candidate.recipient_bare_jid.clone(),
@@ -48,12 +63,6 @@ async fn legacy_parent_for_conversation(
             outcome: NotificationCandidateOutcome::Inserted,
         },
     };
-    let mut message = Message::new(Some(Jid::from(candidate.recipient_bare_jid.clone())));
-    message.from = Some(candidate.sender_jid.clone());
-    message.bodies.insert(
-        xmpp_parsers::message::Lang::from(""),
-        "original approved message".to_string(),
-    );
     let mut tx = fixture.uow.begin().await.expect("legacy canonical intent");
     CanonicalMessageRepository::record_message(
         &mut tx,
@@ -1264,5 +1273,81 @@ async fn sqlite_malformed_cross_archive_alias_keeps_exact_quarantine_identity() 
 async fn postgres_malformed_cross_archive_alias_keeps_exact_quarantine_identity() {
     if let Some(f) = IngressFixture::postgres("malformed_cross_archive").await {
         malformed_cross_archive_candidate_retains_exact_row_and_parents(f).await;
+    }
+}
+
+async fn retract_ancestry_uses_new_class(fixture: IngressFixture) {
+    use crate::notification_outbox::NotificationMessageHints;
+    use waddle_xmpp::xep::xep0353::build_retract;
+    use xmpp_parsers::jingle::SessionId;
+
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let historical_dm = candidate("legacy-retract-dm");
+    let missed = NotificationCandidate::missed_call_with_hints(
+        historical_dm.recipient_bare_jid.clone(),
+        historical_dm.sender_jid.clone(),
+        crate::notification_outbox::StanzaId::new(
+            "legacy-retract-missed",
+            Jid::from(historical_dm.recipient_bare_jid.clone()),
+        ),
+        SessionId("missed-session".into()),
+        NotificationMessageHints::none(),
+    )
+    .expect("missed call");
+    for item in [&historical_dm, &missed] {
+        let mut message = Message::new(Some(Jid::from(item.recipient_bare_jid.clone())));
+        message.from = Some(item.sender_jid.clone());
+        message
+            .payloads
+            .push(build_retract(SessionId("missed-session".into())).into());
+        legacy_parent_with_message(&fixture, item, &item.conversation_jid, message).await;
+        store.insert_candidate(item).await.expect("legacy row");
+    }
+    store
+        .adopt_legacy_ancestry()
+        .await
+        .expect("ancestry preflight");
+    let mut rows = store
+        .query(
+            "SELECT class,quarantined_at_ms FROM notification_candidates ORDER BY class",
+            (),
+        )
+        .await
+        .expect("candidates");
+    let dm = rows.next().await.expect("read DM").expect("DM");
+    assert_eq!(dm.get::<String>(0).expect("class"), "dm");
+    assert!(
+        dm.get::<Option<i64>>(1).expect("quarantine").is_some(),
+        "historical DM over retract must fail pure classification"
+    );
+    let missed = rows
+        .next()
+        .await
+        .expect("read missed call")
+        .expect("missed call");
+    assert_eq!(missed.get::<String>(0).expect("class"), "missed_call");
+    assert!(missed.get::<Option<i64>>(1).expect("quarantine").is_none());
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        2
+    );
+    drop(rows);
+    drop(store);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_retract_legacy_ancestry_uses_missed_call_class() {
+    retract_ancestry_uses_new_class(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_retract_legacy_ancestry_uses_missed_call_class() {
+    if let Some(fixture) = IngressFixture::postgres("retract_ancestry").await {
+        retract_ancestry_uses_new_class(fixture).await;
     }
 }

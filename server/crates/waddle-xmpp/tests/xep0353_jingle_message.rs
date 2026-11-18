@@ -28,7 +28,8 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0353::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_ringing,
-    is_bodyless_jmi_signal, jmi_media, jmi_propose, CallOffer, JingleMI, NS_JINGLE_MESSAGE,
+    is_bodyless_jmi_signal, jmi_media, jmi_propose, jmi_retract, CallOffer, JingleMI,
+    NS_JINGLE_MESSAGE,
 };
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -181,6 +182,78 @@ fn xep_0353_retract_round_trips_through_typed_jingle_mi() {
         JingleMI::try_from(elem).expect("retract reparses"),
         JingleMI::Retract(_)
     ));
+}
+
+#[test]
+fn xep_0353_retract_recognizes_plain_cancellation_with_optional_reason() {
+    let mut message = Message::new_with_type(MessageType::Chat, None);
+    message
+        .payloads
+        .push(build_retract(SessionId("call-1".into())).into());
+    assert_eq!(jmi_retract(&message), Some(SessionId("call-1".into())));
+    message.payloads[0].append_child(
+        Element::builder("reason", NS_JINGLE)
+            .append(Element::from(JingleReason::Cancel))
+            .build(),
+    );
+    assert_eq!(jmi_retract(&message), Some(SessionId("call-1".into())));
+}
+
+#[test]
+fn xep_0353_retract_excludes_glare_tie_breaking() {
+    let mut message = Message::new_with_type(MessageType::Chat, None);
+    message.payloads.push(
+        Element::builder("retract", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+            .append(
+                Element::builder("reason", NS_JINGLE)
+                    .append(Element::from(JingleReason::Expired))
+                    .build(),
+            )
+            .append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build())
+            .build(),
+    );
+    assert!(jmi_retract(&message).is_none());
+}
+
+#[test]
+fn xep_0353_retract_rejects_malformed_actions() {
+    let retract: Element = build_retract(SessionId("call-1".into())).into();
+    for payload in [
+        Element::builder("retract", NS_JINGLE_MESSAGE).build(),
+        Element::from(build_retract(SessionId(String::new()))),
+        Element::builder("retract", NS_JINGLE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+            .build(),
+        Element::builder("wrapper", NS_JINGLE_MESSAGE)
+            .append(retract.clone())
+            .build(),
+        Element::builder("retract", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+            .append(Element::builder("reason", NS_JINGLE).build())
+            .build(),
+        Element::builder("retract", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+            .append(Element::builder("unknown", NS_JINGLE_MESSAGE).build())
+            .build(),
+        Element::builder("retract", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+            .append("unexpected text")
+            .build(),
+    ] {
+        let mut message = Message::new_with_type(MessageType::Chat, None);
+        message.payloads.push(payload);
+        assert!(jmi_retract(&message).is_none());
+    }
+    let mut message = Message::new_with_type(MessageType::Chat, None);
+    message.payloads.extend([retract.clone(), retract.clone()]);
+    assert!(
+        jmi_retract(&message).is_none(),
+        "multiple JMI actions are ambiguous"
+    );
+    message.payloads.pop();
+    message.type_ = MessageType::Groupchat;
+    assert!(jmi_retract(&message).is_none(), "JMI requires type=chat");
 }
 
 // ── §3.5 finish — optional typed reason child ─────────────────────────

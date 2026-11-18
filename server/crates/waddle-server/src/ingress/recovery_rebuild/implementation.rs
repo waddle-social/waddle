@@ -217,10 +217,14 @@ pub(in crate::ingress) fn rebuild(
 /// call lifetime, so discharge its recorded candidate without ringing late.
 /// Keep the age check here too: other rebuild callers must not discard a fresh
 /// call merely because they lack the frozen in-memory candidate.
+// Best-effort live call and missed-call alerts expire together. Offline delivery
+// keeps its own durable notification custody and is excluded below.
 fn expired_live_notification_receipts(
     input: &RecoveryInput<'_>,
 ) -> Result<Vec<decision::EffectReceiptKey>, IngressUowError> {
-    if Utc::now() - input.created_at < chrono::Duration::seconds(60) {
+    if Utc::now() - input.created_at
+        < chrono::Duration::seconds(crate::notification_outbox::MISSED_CALL_WINDOW_SECONDS)
+    {
         return Ok(Vec::new());
     }
     input

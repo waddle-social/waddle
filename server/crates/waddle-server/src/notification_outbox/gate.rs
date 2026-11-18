@@ -248,9 +248,9 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
 
     let (conversation_kind, is_mention) = match candidate.class() {
         NotificationClass::DirectMessage => (ConversationKind::Direct, false),
-        NotificationClass::DirectMessageMention | NotificationClass::Call => {
-            (ConversationKind::Direct, true)
-        }
+        NotificationClass::DirectMessageMention
+        | NotificationClass::Call
+        | NotificationClass::MissedCall => (ConversationKind::Direct, true),
         NotificationClass::PersonalMention
         | NotificationClass::ChannelMention
         | NotificationClass::ActiveChannelMention => {
@@ -1092,5 +1092,87 @@ mod tests {
                 .expect("block check"),
             "publish-time XEP-0191 checks must apply to groupchat notification classes"
         );
+    }
+}
+
+#[cfg(test)]
+mod missed_call_tests {
+    use super::{
+        evaluate_push_gate_at_dispatch, PushEvalCaches, PushEvalStage, T1PushDispatchOutcome,
+    };
+    use crate::notification_outbox::test_support::{
+        bare, eval_deps_for_test, fresh_eval_caches, noop_activity_reader, settings_projection,
+    };
+    use crate::notification_outbox::{
+        NoopDndReader, NoopRoomPolicy, NotificationCandidate, NotificationMessageHints,
+        SuppressedReason,
+    };
+    use crate::notification_settings_projection::{
+        ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
+    };
+    use jid::Jid;
+    use waddle_xmpp::xep::NotificationLevel;
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::jingle::SessionId;
+
+    #[tokio::test]
+    async fn missed_call_is_direct_and_counts_as_a_mention_at_both_stages() {
+        let recipient = bare("alice@example.com");
+        let caller = bare("bob@example.com");
+        let candidate = NotificationCandidate::missed_call_with_hints(
+            recipient.clone(),
+            "bob@example.com/phone".parse().expect("sender"),
+            StanzaId::new("retract", Jid::from(recipient.clone())),
+            SessionId("session".into()),
+            NotificationMessageHints::none(),
+        )
+        .expect("missed call");
+        for mode in [NotificationLevel::Never, NotificationLevel::OnMention] {
+            let projection = settings_projection().await;
+            projection
+                .upsert(&NotificationSettingsProjection {
+                    owner_bare_jid: recipient.clone(),
+                    conversation_jid: caller.clone(),
+                    conversation_kind: ConversationKind::Direct,
+                    mode,
+                    source: NotificationSettingsSource::Xep0402Bookmarks,
+                    source_item_jid: caller.clone(),
+                    updated_at_ms: 1,
+                    rich_payload_opt_in: false,
+                    source_version: 1,
+                })
+                .await
+                .expect("settings");
+            for stage in [PushEvalStage::T0Emit, PushEvalStage::T1Drain] {
+                let (mut room_policy, mut dnd, mut activity) = fresh_eval_caches();
+                let outcome = evaluate_push_gate_at_dispatch(
+                    stage,
+                    eval_deps_for_test(
+                        &projection,
+                        &NoopRoomPolicy,
+                        &NoopDndReader,
+                        noop_activity_reader(),
+                    ),
+                    &candidate,
+                    &mut PushEvalCaches {
+                        room_policy: &mut room_policy,
+                        dnd: &mut dnd,
+                        activity: &mut activity,
+                    },
+                )
+                .await
+                .expect("gate");
+                if mode == NotificationLevel::Never {
+                    assert_eq!(
+                        outcome,
+                        T1PushDispatchOutcome::Suppressed {
+                            reason: SuppressedReason::Xep0492Never
+                        }
+                    );
+                } else {
+                    assert!(matches!(outcome, T1PushDispatchOutcome::Deliver { .. }));
+                }
+            }
+        }
     }
 }

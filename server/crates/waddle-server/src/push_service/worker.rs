@@ -985,7 +985,10 @@ impl DatabasePushServiceStore {
         let fcm_provider = match (self.fcm.as_ref(), parsed) {
             (Some(provider), Some(parsed)) => {
                 let access_token = if has_fcm_device
-                    && parsed.class != NotificationClass::Call
+                    && !matches!(
+                        parsed.class,
+                        NotificationClass::Call | NotificationClass::MissedCall
+                    )
                     && provider.serves_app_id(job.app_id)
                 {
                     Some(provider.tokens.current().await)
@@ -1015,6 +1018,23 @@ impl DatabasePushServiceStore {
                 let fcm_provider = fcm_provider.clone();
                 let log_context = Arc::clone(&log_context);
                 async move {
+                    if log_context
+                        .as_ref()
+                        .as_ref()
+                        .is_some_and(|parsed| parsed.class == NotificationClass::MissedCall)
+                        && device.platform == PushDevicePlatform::Fcm
+                    {
+                        return DispatchedAttempt {
+                            device_id: device.device_id.clone(),
+                            platform: device.platform,
+                            status: ATTEMPT_STATUS_NOT_APPLICABLE,
+                            last_error: Some(
+                                "missed call alerts are not supported by Android yet".to_string(),
+                            ),
+                            retry_after: None,
+                            retry: None,
+                        };
+                    }
                     if log_context
                         .as_ref()
                         .as_ref()
@@ -2208,6 +2228,62 @@ mod tests {
         let store = store().await.with_inbox_storage(inbox);
 
         assert_eq!(store.current_apns_badge_count(&recipient).await, Some(5));
+    }
+
+    #[tokio::test]
+    async fn missed_call_does_not_send_to_configured_fcm() {
+        let (store, fcm) = store_with_fake_fcm().await;
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android", node.node()))
+            .await
+            .expect("device");
+        let item = waddle_xmpp::pubsub::PubSubItem::new(
+            Some("missed-call".to_owned()),
+            Some(
+                minidom::Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH)
+                    .append(
+                        minidom::Element::builder(
+                            "context",
+                            crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS,
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("conversation").to_owned(),
+                            "bob@example.com",
+                        )
+                        .attr(
+                            minidom::rxml::xml_ncname!("class").to_owned(),
+                            NotificationClass::MissedCall.as_db_value(),
+                        )
+                        .build(),
+                    )
+                    .build(),
+            ),
+        );
+        store
+            .enqueue_notification_publish_job_from_user_server(node.node(), &item, &owner)
+            .await
+            .expect("enqueue");
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain");
+        assert_eq!(fcm.sent(), 0, "Android cannot render this class yet");
+        let attempts = store
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status(), ATTEMPT_STATUS_NOT_APPLICABLE);
+        assert!(store
+            .queued_publish_jobs()
+            .await
+            .expect("queued")
+            .is_empty());
     }
 
     #[tokio::test]

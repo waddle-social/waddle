@@ -843,6 +843,11 @@ fn expected_index(name: &str) -> (bool, Vec<&'static str>, &'static str) {
             ],
             "",
         ),
+        "idx_notification_candidates_missed_call" => (
+            true,
+            vec!["recipient_bare_jid", "conversation_jid", "call_sid"],
+            "class = 'missed_call'",
+        ),
         "idx_notification_candidates_pending_worker" => (
             false,
             vec![

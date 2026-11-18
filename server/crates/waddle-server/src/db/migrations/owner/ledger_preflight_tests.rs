@@ -1151,7 +1151,11 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     assert!(exclusive, "rollback must release the shared lock");
     other.rollback().await.expect("end owner");
 
-    for (predicate, missing) in [("version = 2000", 2000)] {
+    for (predicate, missing) in [
+        ("version = 2000", 2000),
+        ("version = 2001", 2001),
+        ("version = 2002", 2002),
+    ] {
         sqlx::query(&format!(
             "DELETE FROM {}._migrations WHERE {predicate}",
             fixture.schema

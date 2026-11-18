@@ -159,3 +159,47 @@ async fn call_candidate_round_trips_intrinsic_data_without_affecting_dm_identity
     assert_eq!(pending[0].class(), NotificationClass::Call);
     assert!(candidate("dm-archive").call().is_none());
 }
+
+#[tokio::test]
+async fn missed_call_round_trips_sid_without_video_and_deduplicates_across_retracts() {
+    use crate::calls::missed_call_candidate;
+    use waddle_server::notification_outbox::{
+        NotificationCandidateInsertOutcome, NotificationClass, NotificationReason,
+    };
+    use xmpp_parsers::jingle::SessionId;
+
+    let store = store().await;
+    let missed = missed_call_candidate("first-retract", "session");
+    assert_eq!(
+        store.insert_candidate(&missed).await.expect("insert"),
+        NotificationCandidateInsertOutcome::Inserted
+    );
+    let duplicate = missed_call_candidate("second-retract", "session");
+    assert_eq!(
+        store
+            .insert_candidate(&duplicate)
+            .await
+            .expect("duplicate session"),
+        NotificationCandidateInsertOutcome::Duplicate
+    );
+    let rows = store.pending_candidates(16).await.expect("pending");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].class(), NotificationClass::MissedCall);
+    assert_eq!(rows[0].reason(), NotificationReason::CallRetracted);
+    assert_eq!(
+        rows[0].call_session_id(),
+        Some(&SessionId("session".into()))
+    );
+    assert!(rows[0].call_video().is_none());
+    assert!(rows[0].call().is_none());
+    let mut raw = store
+        .query(
+            "SELECT call_sid,call_video FROM notification_candidates",
+            (),
+        )
+        .await
+        .expect("raw row");
+    let row = raw.next().await.expect("read").expect("row");
+    assert_eq!(row.get::<String>(0).expect("sid"), "session");
+    assert!(row.get::<Option<i64>>(1).expect("video").is_none());
+}

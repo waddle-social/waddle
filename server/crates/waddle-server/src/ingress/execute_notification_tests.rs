@@ -13,20 +13,32 @@ use waddle_xmpp::ingress::{
     DigestContext, DigestInput, IngressEffectIntent, NotificationActivityMutation,
     NotificationCandidateOutcome,
 };
-use waddle_xmpp::xep::xep0353::{build_propose, CallOffer};
+use waddle_xmpp::xep::xep0353::{build_propose, build_retract, CallOffer};
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 use xmpp_parsers::jingle::SessionId;
 
 async fn call_decision(fixture: &IngressFixture) -> (IngressDecision, IngressEffectIntent) {
-    let mut submission = fixture.submission(Some("live-call-effect-replay"), "");
+    notification_decision(fixture, "live-call-effect-replay", false).await
+}
+
+async fn notification_decision(
+    fixture: &IngressFixture,
+    id: &str,
+    missed_call: bool,
+) -> (IngressDecision, IngressEffectIntent) {
+    let mut submission = fixture.submission(Some(id), "");
     let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
     let message = &mut submission.plan.sanitized_message;
     message.bodies.clear();
-    message.payloads.push(build_propose(
-        SessionId("live-call-effect-replay".into()),
-        CallOffer::audio_only(),
-    ));
-    let stamp = StanzaId::new("live-call-effect-archive", recipient.clone().into());
+    message.payloads.push(if missed_call {
+        build_retract(SessionId("live-call-effect-replay".into())).into()
+    } else {
+        build_propose(
+            SessionId("live-call-effect-replay".into()),
+            CallOffer::audio_only(),
+        )
+    });
+    let stamp = StanzaId::new(id, recipient.clone().into());
     let candidate = direct_candidate_from_envelope(
         message,
         &recipient,
@@ -211,6 +223,79 @@ async fn sqlite_live_call_lost_commit_ack_is_uncertain_and_replay_does_not_dupli
     assert_eq!(fixture.count("notification_candidates").await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert_eq!(fixture.count("ingress_effect_descendants").await, 1);
+    drop(store);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_distinct_retracts_share_candidate_custody_and_keep_independent_receipts() {
+    let fixture = IngressFixture::sqlite().await;
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
+        .await
+        .expect("notification schema");
+    for (index, id) in [
+        "first-retract",
+        "duplicate-retract",
+        "settled-duplicate-retract",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (decision, _) = notification_decision(&fixture, id, true).await;
+        let ExternalEffect::Delivery(effect) = &decision.external[0] else {
+            panic!("notification effect");
+        };
+        let EffectOutcome::Settled(outcome) = execute(&fixture.uow, &decision, 0, effect).await
+        else {
+            panic!("notification must settle");
+        };
+        assert_eq!(outcome.completion, SettledCompletion::Complete, "{id}");
+        let receipt = &decision.external_receipts[0][0];
+        let mut tx = fixture.uow.begin().await.expect("receipt transaction");
+        assert!(EffectReceiptRepository::contains(
+            &mut tx,
+            decision.message_key.expect("message key"),
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await
+        .expect("independent receipt"));
+        tx.commit().await.expect("receipt commit");
+        assert_eq!(fixture.count("notification_candidates").await, 1);
+        assert_eq!(
+            fixture.count("ingress_effect_receipts").await,
+            (index + 1) as i64
+        );
+        assert_eq!(
+            fixture.count("ingress_effect_descendants").await,
+            (index + 1) as i64
+        );
+        assert_eq!(
+            fixture.count("ingress_effect_descendants AS descendant JOIN notification_candidates AS candidate ON descendant.descendant_key = candidate.delivery_id").await,
+            (index + 1) as i64,
+        );
+        if index == 1 {
+            // A terminal first alert must also settle the next retract's custody.
+            fixture.execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = 1, suppressed_reason = 'waddle_dnd'",
+                (),
+            ).await;
+            fixture
+                .execute(
+                    "UPDATE ingress_effect_descendants SET settled_at = ?",
+                    crate::db_params![chrono::Utc::now().to_rfc3339()],
+                )
+                .await;
+        }
+        if index == 2 {
+            assert_eq!(
+                fixture
+                    .count("ingress_effect_descendants WHERE settled_at IS NULL")
+                    .await,
+                0
+            );
+        }
+    }
     drop(store);
     fixture.close().await;
 }

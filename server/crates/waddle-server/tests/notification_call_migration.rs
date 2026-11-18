@@ -19,14 +19,17 @@ async fn sqlite_baseline_notification_rows_survive_call_migration() {
     assert_eq!(indexes.len(), 8);
     assert_eq!(
         MigrationRunner::single().run(&db).await.expect("upgrade"),
-        [2001]
+        [2001, 2002]
     );
     assert_rows_preserved_and_insert_call(&db).await;
-    assert_eq!(
-        sqlite_indexes(&db).await,
-        indexes,
-        "all explicit index definitions survive"
-    );
+    let upgraded_indexes = sqlite_indexes(&db).await;
+    assert_eq!(upgraded_indexes.len(), indexes.len() + 1);
+    for index in indexes {
+        assert!(
+            upgraded_indexes.contains(&index),
+            "existing index survives: {index:?}"
+        );
+    }
     assert!(MigrationRunner::single()
         .run(&db)
         .await
@@ -70,7 +73,7 @@ async fn postgres_baseline_notification_rows_survive_call_migration() {
     seed_notification_rows(&db).await;
     assert_eq!(
         MigrationRunner::single().run(&db).await.expect("upgrade"),
-        [2001]
+        [2001, 2002]
     );
     assert_rows_preserved_and_insert_call(&db).await;
     assert!(MigrationRunner::single()

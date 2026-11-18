@@ -1,5 +1,6 @@
 //! Row/JSON codecs between durable storage and typed values.
 
+use super::candidate::NotificationCallData;
 use super::{
     require_full_sender_jid, require_full_sender_jid_set, require_sender_matches_conversation,
     require_sender_set_contains_scalar, require_sender_set_matches_conversation, BareJid, Element,
@@ -51,12 +52,17 @@ pub(super) fn decode_candidate(
         (NotificationClass::Call, Some(sid), Some(video))
             if !sid.is_empty() && matches!(video, 0 | 1) =>
         {
-            Some(super::NotificationCall {
+            Some(NotificationCallData::Incoming(super::NotificationCall {
                 session_id: xmpp_parsers::jingle::SessionId(sid),
                 video: video != 0,
-            })
+            }))
         }
-        (NotificationClass::Call, _, _) => return Err(NotificationOutboxError::InvalidCallData),
+        (NotificationClass::MissedCall, Some(sid), None) if !sid.is_empty() => Some(
+            NotificationCallData::Missed(xmpp_parsers::jingle::SessionId(sid)),
+        ),
+        (NotificationClass::Call | NotificationClass::MissedCall, _, _) => {
+            return Err(NotificationOutboxError::InvalidCallData);
+        }
         (_, None, None) => None,
         _ => return Err(NotificationOutboxError::InvalidCallData),
     };
@@ -169,4 +175,67 @@ pub(super) fn decode_outbox_job(
         policy_error_count: row.get(13)?,
         claim_token: row.get(14)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_candidate;
+    use crate::notification_outbox::test_support::store;
+    use crate::notification_outbox::{
+        NotificationClass, NotificationOutboxError, NotificationReason,
+    };
+
+    #[tokio::test]
+    async fn call_row_codec_requires_media_only_for_invitations() {
+        let store = store().await;
+        for (class, sid, video, valid) in [
+            ("missed_call", Some("session"), None, true),
+            ("missed_call", None, None, false),
+            ("missed_call", Some(""), None, false),
+            ("missed_call", Some("session"), Some(0_i64), false),
+            ("missed_call", Some("session"), Some(1), false),
+            ("call", Some("session"), None, false),
+            ("call", Some("session"), Some(1), true),
+            ("call", Some("session"), Some(2), false),
+            ("dm", Some("session"), None, false),
+            ("dm", None, Some(0), false),
+        ] {
+            let mut rows = store.query(
+                "SELECT 'alice@example.com','bob@example.com','bob@example.com/phone','','alice@example.com','archive',?,'call_retracted',0,0,0,0,NULL,0,NULL,?,?",
+                crate::db_params![class, sid, video],
+            ).await.expect("row fixture");
+            let row = rows.next().await.expect("read row").expect("row");
+            let decoded = decode_candidate(&row);
+            if valid {
+                let candidate = decoded.expect("valid call data");
+                assert_eq!(candidate.call_session_id().expect("sid").0, "session");
+                if class == "missed_call" {
+                    assert_eq!(candidate.class(), NotificationClass::MissedCall);
+                    assert!(candidate.call_video().is_none());
+                }
+            } else {
+                assert!(
+                    matches!(decoded, Err(NotificationOutboxError::InvalidCallData)),
+                    "{class} {sid:?} {video:?}: {decoded:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missed_call_class_and_reserved_reasons_round_trip() {
+        assert_eq!(
+            NotificationClass::from_db_value("missed_call").expect("class"),
+            NotificationClass::MissedCall
+        );
+        for reason in [
+            NotificationReason::CallRetracted,
+            NotificationReason::CallUnanswered,
+        ] {
+            assert_eq!(
+                NotificationReason::from_db_value(reason.as_db_value()).expect("reason"),
+                reason
+            );
+        }
+    }
 }

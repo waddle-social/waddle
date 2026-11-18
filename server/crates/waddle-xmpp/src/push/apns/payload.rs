@@ -33,6 +33,7 @@ const DEFAULT_SOUND: &str = "default";
 /// message", "You were mentioned") and never carries message content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApnsAlertLocKey {
+    MissedCall,
     Dm,
     DmMention,
     PersonalMention,
@@ -45,6 +46,7 @@ impl ApnsAlertLocKey {
     pub fn for_class(class: NotificationClass) -> Result<Self, ApnsPayloadError> {
         Ok(match class {
             NotificationClass::Call => return Err(ApnsPayloadError::InvalidAlertClass),
+            NotificationClass::MissedCall => Self::MissedCall,
             NotificationClass::Dm => Self::Dm,
             NotificationClass::DmMention => Self::DmMention,
             NotificationClass::PersonalMention => Self::PersonalMention,
@@ -56,6 +58,7 @@ impl ApnsAlertLocKey {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::MissedCall => "WADDLE_PUSH_MISSED_CALL",
             Self::Dm => "WADDLE_PUSH_DM",
             Self::DmMention => "WADDLE_PUSH_DM_MENTION",
             Self::PersonalMention => "WADDLE_PUSH_PERSONAL_MENTION",
@@ -333,6 +336,15 @@ mod tests {
     }
 
     #[test]
+    fn missed_call_has_exact_alert_shape_and_real_badge() {
+        let json = encode_to_string(fields(NotificationClass::MissedCall, Some(7)));
+        assert_eq!(
+            json,
+            r#"{"aps":{"alert":{"loc-key":"WADDLE_PUSH_MISSED_CALL"},"badge":7,"sound":"default","thread-id":"alice@example.com"},"waddle":{"v":1,"class":"missed_call","conversation":"alice@example.com","item":"stanza-1","node":"node-1"}}"#
+        );
+    }
+
+    #[test]
     fn badge_and_thread_are_omitted_when_absent() {
         let json = encode_to_string(fields(NotificationClass::Dm, None));
         assert_eq!(
@@ -364,6 +376,7 @@ mod tests {
     #[test]
     fn loc_key_per_class() {
         for (class, key) in [
+            (NotificationClass::MissedCall, "WADDLE_PUSH_MISSED_CALL"),
             (NotificationClass::Dm, "WADDLE_PUSH_DM"),
             (NotificationClass::DmMention, "WADDLE_PUSH_DM_MENTION"),
             (
