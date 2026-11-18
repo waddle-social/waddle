@@ -1239,9 +1239,15 @@ async fn room_pin_preview_lookup_failure(fixture: IngressFixture) {
     mam.store_message(&room, &target)
         .await
         .expect("archive target");
+    // The pin's notice is a room's own message, which is delivered only
+    // through the WebSocket state's host-grant gate.
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    crate::server::routes::websocket::test_bindings::sync_registry_bindings(&state, &registry)
+        .await;
     let mut deps = Deps::registry_only(&registry);
     deps.room_registry = Some(&rooms);
     deps.mam_storage = Some(&mam);
+    deps.web_socket_state = Some(&state);
     let mut submission = fixture.submission(Some("pin-preview-retry"), "pin");
     let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("pin-preview-stream");
     let mut tx = fixture.uow.begin().await.expect("stream transaction");
