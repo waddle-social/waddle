@@ -7,7 +7,7 @@ use waddle_xmpp_core::event_planning::{PlanningItem, PlanningKind, NODE_EVENT_PL
 use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::iq::Iq;
 
-use super::{can_publish_kind, handle_room_pubsub};
+use super::{can_publish_kind, handle_room_pubsub, Standing};
 use crate::server::routes::websocket::cleanup::get_or_create_room_actor;
 use crate::server::routes::websocket::test_state::{
     create_test_websocket_state_with_extension_manager, empty_extension_manager, TestStateOverrides,
@@ -94,12 +94,28 @@ async fn workspace(
 fn metadata_and_personal_identifiers_cannot_be_impersonated() {
     let alice: BareJid = "alice@example.com".parse().expect("alice");
     let metadata = PlanningItem::new("event", PlanningKind::Event, "London");
-    assert!(!can_publish_kind(&metadata, &alice, Affiliation::Member));
-    assert!(can_publish_kind(&metadata, &alice, Affiliation::Owner));
+    assert!(!can_publish_kind(
+        &metadata,
+        &alice,
+        Standing::of(Affiliation::Member)
+    ));
+    assert!(can_publish_kind(
+        &metadata,
+        &alice,
+        Standing::of(Affiliation::Owner)
+    ));
     let forged = PlanningItem::new("attendance:bob@example.com", PlanningKind::Attendance, "");
-    assert!(!can_publish_kind(&forged, &alice, Affiliation::Owner));
+    assert!(!can_publish_kind(
+        &forged,
+        &alice,
+        Standing::of(Affiliation::Owner)
+    ));
     let reserved = PlanningItem::new("event", PlanningKind::Link, "Link");
-    assert!(!can_publish_kind(&reserved, &alice, Affiliation::Owner));
+    assert!(!can_publish_kind(
+        &reserved,
+        &alice,
+        Standing::of(Affiliation::Owner)
+    ));
 }
 
 #[tokio::test]

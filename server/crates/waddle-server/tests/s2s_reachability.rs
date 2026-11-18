@@ -288,6 +288,10 @@ fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_
         request(query("vcard-temp")),
         request(query("urn:waddle:pin:0")),
         request(Element::builder("moderate", NS_MODERATE).build()),
+        // A room's private event workspace is served to sessions only.
+        request(Element::builder("pubsub", NS_PUBSUB).build()),
+        set(Element::builder("pubsub", NS_PUBSUB).build()),
+        set(Element::builder("pubsub", NS_PUBSUB_OWNER).build()),
         response,
     ] {
         assert_eq!(
