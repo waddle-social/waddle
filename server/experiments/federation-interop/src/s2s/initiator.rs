@@ -25,6 +25,35 @@ use crate::xml::{ns, stanza};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The least time between two of the harness's own connections to a
+/// Waddle S2S listener. Every connection in the harness comes from
+/// 127.0.0.1, and Waddle accepts at most two new sockets a second from one
+/// address after a burst of four (`accept_rate_per_address`), closing any
+/// other without XML; rows that open several connections in a row would
+/// otherwise see that rate limit instead of the refusal they test.
+const CONNECTION_SPACING: Duration = Duration::from_millis(750);
+
+static LAST_CONNECTION: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Wait until [`CONNECTION_SPACING`] has passed since the harness's
+/// previous connection to a Waddle S2S listener, and connect to `port`.
+pub async fn connect(port: u16) -> Result<TcpStream> {
+    let wait = {
+        let mut last = match LAST_CONNECTION.lock() {
+            Ok(last) => last,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let now = Instant::now();
+        let next = last.map_or(now, |last| (last + CONNECTION_SPACING).max(now));
+        *last = Some(next);
+        next
+    };
+    tokio::time::sleep_until(wait).await;
+    TcpStream::connect(("127.0.0.1", port))
+        .await
+        .with_context(|| format!("connect S2S listener {port}"))
+}
+
 /// How the raw peer authenticates after TLS.
 #[derive(Debug, Clone)]
 pub enum Auth {
@@ -190,9 +219,7 @@ fn refused(stage: Stage, outcome: Step, waiting_for: &str) -> Attempt {
 /// Run `plan` against the S2S listener on `port`.
 pub async fn attempt(pki: &Pki, port: u16, plan: &Plan) -> Result<Attempt> {
     let deadline = Instant::now() + STEP_TIMEOUT;
-    let mut socket = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .with_context(|| format!("connect S2S listener {port}"))?;
+    let mut socket = connect(port).await?;
     let sni = plan.open.to.clone().unwrap_or_default();
     if plan.direct_tls {
         let connector = TlsConnector::from(Arc::new(

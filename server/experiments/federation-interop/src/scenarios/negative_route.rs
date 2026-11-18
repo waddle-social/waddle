@@ -13,7 +13,6 @@ use std::time::Duration;
 use anyhow::Result;
 use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
@@ -623,7 +622,7 @@ pub async fn preauth_large_element(h: &mut Harness, _peer: Peer) -> Result<Outco
     let mut outcome =
         Outcome::new("harness raw peer writing a large non-control element before TLS");
     support::raw_control(h).await?;
-    let mut socket = TcpStream::connect(("127.0.0.1", h.ports.waddle_s2s(Home::A))).await?;
+    let mut socket = initiator::connect(h.ports.waddle_s2s(Home::A)).await?;
     socket
         .write_all(&StreamOpen::server(Some(RAW_PEER), HOME_A).encode()?)
         .await?;

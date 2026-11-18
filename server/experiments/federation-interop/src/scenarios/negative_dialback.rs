@@ -9,7 +9,6 @@ use anyhow::Result;
 use minidom::rxml::xml_ncname;
 use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
@@ -298,7 +297,7 @@ pub async fn extra_domains(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
 pub async fn verify_over_plaintext(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new("harness raw peer sending db:verify before STARTTLS");
     support::raw_control(h).await?;
-    let mut socket = TcpStream::connect(("127.0.0.1", h.ports.waddle_s2s(Home::A))).await?;
+    let mut socket = initiator::connect(h.ports.waddle_s2s(Home::A)).await?;
     socket
         .write_all(
             &StreamOpen::server(Some(RAW_PEER), HOME_A)

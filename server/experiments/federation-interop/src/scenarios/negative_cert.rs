@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::process::Command;
 
 use crate::evidence::{Outcome, Unverifiable};
@@ -680,7 +680,7 @@ pub async fn tls_version_outside_profile(h: &mut Harness, _peer: Peer) -> Result
         ("TLS 1.1", "-tls1_1", false),
         ("TLS 1.0", "-tls1", false),
     ] {
-        let mut socket = TcpStream::connect(("127.0.0.1", h.ports.waddle_s2s(Home::A))).await?;
+        let mut socket = initiator::connect(h.ports.waddle_s2s(Home::A)).await?;
         socket
             .write_all(&StreamOpen::server(Some(RAW_PEER), HOME_A).encode()?)
             .await?;
