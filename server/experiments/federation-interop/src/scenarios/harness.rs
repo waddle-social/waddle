@@ -116,6 +116,9 @@ pub struct Harness {
     fronts: Vec<TlsFront>,
     /// Services a row left on a non-standard configuration.
     pub dirty: BTreeSet<Component>,
+    /// How many times ejabberd's relay to home-a had been cut when the
+    /// standard configuration was last restored.
+    ejabberd_cuts: u64,
     pub git_sha: String,
 }
 
@@ -352,6 +355,7 @@ impl Harness {
             fetches,
             fronts,
             dirty: BTreeSet::new(),
+            ejabberd_cuts: 0,
             git_sha,
         })
     }
@@ -466,6 +470,16 @@ impl Harness {
         for (domain, leaf) in self.leaves.clone() {
             self.receiver.set_leaf(&domain, leaf);
         }
+        // ejabberd bounces a pair's traffic for minutes after a stream to
+        // home-a closes before it is established, which a cut of its relay
+        // (a tap row, a fresh-stream control) can cause; a row that cut it
+        // leaves a cluster restarted and settled for the next one.
+        if let Ok(relay) = self.relay(Server::Ejabberd(1), Server::Waddle(Home::A)) {
+            let cuts = relay.cuts();
+            if cuts != self.ejabberd_cuts {
+                self.dirty.insert(Component::Ejabberd);
+            }
+        }
         let dirty = std::mem::take(&mut self.dirty);
         let mut failures = Vec::new();
         let mut restarted = Vec::new();
@@ -509,6 +523,9 @@ impl Harness {
                 }
             }
         }
+        if let Ok(relay) = self.relay(Server::Ejabberd(1), Server::Waddle(Home::A)) {
+            self.ejabberd_cuts = relay.cuts();
+        }
         anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
         Ok(())
     }
@@ -521,7 +538,7 @@ impl Harness {
     /// and this waits out home-a's, so later rows inherit neither. A peer
     /// that is not reached both ways within [`SETTLE`] is reported, not
     /// marked down.
-    async fn settle_stock(&self, peer: Peer) -> Result<(), String> {
+    pub async fn settle_stock(&self, peer: Peer) -> Result<(), String> {
         let host = Self::peer_domain(peer);
         for (from_home_a, to) in [(true, host), (false, topology::HOME_A)] {
             let answer =

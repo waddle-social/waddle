@@ -11,11 +11,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use minidom::Element;
 
-use crate::evidence::Outcome;
+use crate::evidence::{Outcome, Unverifiable};
 use crate::manifest::Peer;
 use crate::net::relay::Connection;
 use crate::s2s::initiator::{self, Auth, Plan};
-use crate::scenarios::harness::{Harness, ANSWER};
+use crate::scenarios::harness::{Component, Harness, ANSWER};
 use crate::scenarios::support::{self, ask, describe, is_result};
 use crate::services::ejabberd::MAX_S2S_CONNECTIONS;
 use crate::topology::{Home, Server, EJABBERD, HOME_A, RAW_PEER};
@@ -252,9 +252,17 @@ pub async fn ejabberd_cluster_streams(h: &mut Harness, _peer: Peer) -> Result<Ou
     let mut outcome = Outcome::new(
         "clients on both ejabberd nodes pinging home-a at once (max_s2s_connections 4, 2 per node)",
     );
+    // A freshly started cluster, settled both ways, instead of cutting the
+    // relay: ejabberd bounces a pair's traffic for minutes after a stream
+    // closes before it is established, and a cut can catch one there, so
+    // half the cluster's slots would bounce every ping of this row.
+    let variant = h.ejabberd_variant();
+    h.dirty.insert(Component::Ejabberd);
+    h.ejabberd.restart(&variant).await?;
+    h.settle_stock(Peer::Ejabberd).await.map_err(|reason| {
+        Unverifiable(["the restarted cluster did not settle: ", &reason].concat())
+    })?;
     let relay = h.relay(Server::Ejabberd(1), Server::Waddle(Home::A))?;
-    relay.cut();
-    relay.restore();
     relay.reset_records();
     // home-a holds several inbound streams for one pair: none of the
     // cluster's streams may be refused or replaced with `conflict`.

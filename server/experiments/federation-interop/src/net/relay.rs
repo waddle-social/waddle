@@ -165,6 +165,11 @@ impl Relay {
         }
     }
 
+    /// How many times the path has been cut since the relay started.
+    pub fn cuts(&self) -> u64 {
+        *self.shared.cut.borrow()
+    }
+
     /// Cut the path: refuse new connections and end open ones.
     pub fn cut(&self) {
         self.set_mode(Mode::Cut);
