@@ -94,6 +94,7 @@ const groupDmSeed = computed(() => {
       :is-submitting="waddles.isSubmitting.value"
       :spaces="waddles.sortedSpaces.value"
       :can-move-channel="waddles.canManageCurrentChannel.value"
+      :federation-available="waddles.federationAvailable.value"
       @update:form="waddles.editChannelForm.value = $event"
       @save="handleUpdateChannel"
       @delete="handleDeleteChannel"

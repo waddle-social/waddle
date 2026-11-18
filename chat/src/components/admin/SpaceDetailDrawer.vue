@@ -20,6 +20,9 @@ const props = defineProps<{
   open: boolean;
   xmppClient: BrowserXmppClient | null;
   space: WasmAdminSpaceListEntry;
+  /** Whether the home server federates with other servers. The Space's
+   * setting for who from other servers can reach it is offered only then. */
+  federationAvailable: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -94,7 +97,7 @@ async function loadFederated() {
 
 async function changeFederated(next: boolean) {
   const agent = props.xmppClient?.agent;
-  if (!agent || federatedSaving.value) return;
+  if (!agent || federatedSaving.value || !props.federationAvailable) return;
   const requestId = ++federatedRequestId;
   federatedSaving.value = true;
   federatedError.value = "";
@@ -273,8 +276,9 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
         {{ editing ? "Saving…" : "Save changes" }}
       </button>
 
-      <!-- Other servers: shown when the Space's configure form offers the setting -->
-      <section v-if="federated !== null || federatedError" :class="a.section">
+      <!-- Other servers: offered only while the home server federates, and then
+           when the Space's configure form carries the setting -->
+      <section v-if="federationAvailable && (federated !== null || federatedError)" :class="a.section">
         <h3>Other servers</h3>
         <div :class="a.checks">
           <p v-if="federated === undefined">Loading…</p>

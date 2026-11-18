@@ -642,8 +642,11 @@ export function useWaddleDirectory(
     isSubmitting.value = true;
     try {
       client.assertRoomIdAvailable?.(channel.id);
+      // The setting is submitted only while the dialog offers it. Left out,
+      // the room's server keeps the value it holds.
       const requestedFederated = editChannelForm.value.federated;
-      const federatedChanged = typeof requestedFederated === "boolean"
+      const federatedChanged = federationAvailable.value
+        && typeof requestedFederated === "boolean"
         && requestedFederated !== loadedChannelFederated.value;
       await configureMucRoom(client, channel.jid, {
         name: editChannelForm.value.name.trim(),

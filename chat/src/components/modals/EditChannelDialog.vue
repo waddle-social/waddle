@@ -27,6 +27,9 @@ const props = defineProps<{
    * spaces. Falls back to the same `canManageChannels` gate as
    * editing other channel attributes. */
   canMoveChannel: boolean;
+  /** Whether the home server federates with other servers. The setting for
+   * who from other servers can reach the room is offered only then. */
+  federationAvailable: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -109,9 +112,10 @@ const strong = css({ color: "fg", fontWeight: 700 });
         />
       </div>
 
-      <!-- Whether accounts on other servers can reach this room. Shown
-           only when the room's owner form offers the setting. -->
-      <div v-if="typeof form.federated === 'boolean'" :class="f.field">
+      <!-- Whether accounts on other servers can reach this room. Offered only
+           while the home server federates, and then only when the room's
+           owner form carries the setting. -->
+      <div v-if="federationAvailable && typeof form.federated === 'boolean'" :class="f.field">
         <span :class="f.label">Other servers</span>
         <label for="edit-channel-federated" :class="checkRow">
           <input
@@ -131,7 +135,7 @@ const strong = css({ color: "fg", fontWeight: 700 });
           from another server who is in the room.
         </p>
       </div>
-      <p v-else-if="form.federated === undefined && channel?.jid" :class="f.caption">
+      <p v-else-if="federationAvailable && form.federated === undefined && channel?.jid" :class="f.caption">
         Checking whether this room is open to other servers…
       </p>
 

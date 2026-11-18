@@ -18,6 +18,8 @@ const props = defineProps<{
   xmppClient: BrowserXmppClient | null;
   /** Slug of the currently-rendered admin panel; defaults to "users". */
   activePanel: AdminPanel;
+  /** Whether the home server federates with other servers. */
+  federationAvailable: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -103,7 +105,7 @@ onMounted(() => {
       <UsersPanel :load-page="loadUsers" />
     </template>
     <template #spaces>
-      <SpacesPanel :xmpp-client="xmppClient" />
+      <SpacesPanel :xmpp-client="xmppClient" :federation-available="federationAvailable" />
     </template>
     <template #channels>
       <ChannelsPanel :xmpp-client="xmppClient" />

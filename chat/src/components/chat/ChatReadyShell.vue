@@ -846,6 +846,7 @@ async function recoverSupersededFromShell() {
         :class="adminViewClass"
         :xmpp-client="xmppClient"
         :active-panel="adminPanelFromUrl"
+        :federation-available="waddles.federationAvailable.value"
         @navigate="onAdminNavigate"
         @back="onAdminBack"
       />

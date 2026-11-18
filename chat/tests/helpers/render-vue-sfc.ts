@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createSSRApp, h, type App } from "vue";
 import { parse, compileScript } from "vue/compiler-sfc";
-import { renderToString } from "vue/server-renderer";
+import { renderToString, type SSRContext } from "vue/server-renderer";
 import ts from "typescript";
 
 /**
@@ -37,6 +37,28 @@ export async function renderVueComponent(
   const app = createSSRApp({ render: () => h(component, props) });
   configureApp?.(app);
   return renderToString(app);
+}
+
+/**
+ * Like `renderVueComponent`, but also returns the markup of content a
+ * component teleports out of its tree (dialogs and drawers render into
+ * `<body>`), keyed by teleport target. `renderToString` leaves that markup
+ * out of its result.
+ */
+export async function renderVueComponentWithTeleports(
+  path: string,
+  props: Record<string, unknown> = {},
+  importMetaUrl: string,
+  configureApp?: (app: App<Element>) => void,
+): Promise<{ html: string; teleports: Record<string, string> }> {
+  const outDir = mkdtempSync(join(tmpdir(), "waddle-vue-sfc-"));
+  const moduleUrl = await compileSfcModule(new URL(path, importMetaUrl), outDir, new Map());
+  const component = (await import(moduleUrl)).default;
+  const app = createSSRApp({ render: () => h(component, props) });
+  configureApp?.(app);
+  const context: SSRContext = {};
+  const html = await renderToString(app, context);
+  return { html, teleports: context.teleports ?? {} };
 }
 
 export async function renderVueComponentSource(
