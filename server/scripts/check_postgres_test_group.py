@@ -37,7 +37,12 @@ The filter grammar understood here is what the file uses today:
 `binary(name)` or `test(substring)`. Anything else is rejected so the check
 cannot silently drift from nextest's semantics. Group assignments are limited
 to platform-independent `postgres` overrides in `profile.default`, and the
-group must have `max-threads = 1`; other assignments fail closed until their
+group must have `max-threads = 1`. Nextest gives each test the group of the
+first override in order whose filter matches it, and a named profile's
+overrides come before the default profile's. So an override in
+`profile.default` that assigns another group is accepted only after the last
+`postgres` assignment: it cannot take a test the `postgres` filters match, and
+its filter is not parsed. Any other placement fails closed until its
 precedence can be modeled.
 """
 from __future__ import annotations
@@ -116,20 +121,41 @@ def group_filters(nextest_toml: Path) -> list[Filter]:
         raise CheckError(f"{nextest_toml}: {GROUP} group must set max-threads = 1")
     filters = []
     for name, profile in config.get("profile", {}).items():
-        for override in profile.get("overrides", []):
-            group = override.get("test-group")
-            if group is None:
-                continue
-            # Nextest resolves settings per key using the first matching
-            # override, and a named profile can override the default profile.
-            # Until this checker models arbitrary filter precedence, reject
-            # any alternate group assignment rather than unioning filters and
-            # silently accepting tests that a later profile can ungroup.
-            if name != "default" or group != GROUP:
+        # Nextest resolves settings per key using the first matching
+        # override, and a named profile's overrides come before the default
+        # profile's. Until this checker models arbitrary filter precedence,
+        # reject any group assignment that could take a test the postgres
+        # filters match, rather than unioning filters and silently accepting
+        # tests that an earlier override or another profile can ungroup.
+        assignments = [
+            (index, override)
+            for index, override in enumerate(profile.get("overrides", []))
+            if override.get("test-group") is not None
+        ]
+        if name != "default":
+            if assignments:
+                group = assignments[0][1]["test-group"]
                 raise CheckError(
                     f"profile.{name}: unsupported test-group assignment {group!r}; "
                     "the postgres guard requires all group assignments in profile.default"
                 )
+            continue
+        last_postgres = max(
+            (index for index, override in assignments if override["test-group"] == GROUP),
+            default=-1,
+        )
+        for index, override in assignments:
+            group = override["test-group"]
+            if group != GROUP:
+                # After the last postgres assignment, another group's filter
+                # can only claim tests no postgres filter matched.
+                if index < last_postgres:
+                    raise CheckError(
+                        f"profile.{name}: test-group assignment {group!r} precedes a "
+                        f"'{GROUP}' assignment; the postgres guard requires other groups "
+                        f"after every '{GROUP}' assignment in profile.default"
+                    )
+                continue
             if "platform" in override or "filter" not in override:
                 raise CheckError(
                     f"profile.{name}: postgres group assignment requires a platform-independent filter"

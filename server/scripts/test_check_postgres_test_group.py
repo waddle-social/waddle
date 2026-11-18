@@ -261,7 +261,7 @@ class PostgresGroupCheckTests(unittest.TestCase):
 
     def test_nondefault_group_override_is_rejected(self):
         path = self.server / ".config/nextest.toml"
-        for group in ("@global", "postgres"):
+        for group in ("@global", "postgres", "spicedb-live"):
             with self.subTest(group=group):
                 self.write_filter("")
                 with path.open("a") as config:
@@ -269,11 +269,55 @@ class PostgresGroupCheckTests(unittest.TestCase):
                 with self.assertRaisesRegex(check.CheckError, "profile.ci"):
                     check.group_filters(path)
 
-    def test_other_default_group_override_is_rejected(self):
+    def test_other_default_group_override_before_postgres_is_rejected(self):
+        # The first matching override decides a test's group, so an earlier
+        # assignment could take tests the postgres filter names.
+        path = self.server / ".config/nextest.toml"
+        for group in ("@global", "spicedb-live"):
+            with self.subTest(group=group):
+                self.write_filter("")
+                config = path.read_text().replace(
+                    "[[profile.default.overrides]]",
+                    f"[[profile.default.overrides]]\nfilter = 'all()'\ntest-group = '{group}'\n\n"
+                    "[[profile.default.overrides]]",
+                    1,
+                )
+                path.write_text(config)
+                with self.assertRaisesRegex(check.CheckError, "precedes"):
+                    check.group_filters(path)
+
+    def test_other_default_group_override_after_postgres_is_accepted(self):
+        # A later assignment only claims tests no postgres filter matched, so
+        # its filter is not parsed and the postgres filters stand unchanged.
+        path = self.server / ".config/nextest.toml"
+        for group in ("@global", "spicedb-live"):
+            with self.subTest(group=group):
+                self.write_filter("")
+                with path.open("a") as config:
+                    config.write(
+                        "\n[[profile.default.overrides]]\n"
+                        "filter = 'package(demo) & binary(plain_e2e) & test(/^live_/)'\n"
+                        f"test-group = '{group}'\n"
+                    )
+                filters = check.group_filters(path)
+                self.assertEqual(len(filters), 1)
+                self.assertEqual(filters[0].binaries, ["cluster_e2e"])
+                self.assertEqual(filters[0].tests, ["shielded::"])
+                # Tests the later assignment names are still reported when no
+                # postgres filter covers them.
+                result = self.run_check()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("demo::plain_e2e uses_support", result.stderr)
+
+    def test_postgres_override_after_another_group_assignment_is_rejected(self):
         path = self.server / ".config/nextest.toml"
         with path.open("a") as config:
-            config.write("\n[[profile.default.overrides]]\nfilter = 'all()'\ntest-group = '@global'\n")
-        with self.assertRaisesRegex(check.CheckError, "profile.default"):
+            config.write(
+                "\n[[profile.default.overrides]]\nfilter = 'all()'\ntest-group = 'spicedb-live'\n"
+                "\n[[profile.default.overrides]]\nfilter = 'package(demo) & binary(plain_e2e)'\n"
+                "test-group = 'postgres'\n"
+            )
+        with self.assertRaisesRegex(check.CheckError, "precedes"):
             check.group_filters(path)
 
     def test_parse_filter_atoms(self):
