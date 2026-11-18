@@ -766,7 +766,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
         8,
         2,
         &mut cursor,
-        &mut crate::time::now_ms(),
+        &mut crate::notification_outbox::UnansweredCallScan::default(),
     )
     .await;
     assert!(!notification_marker(&fixture, &recovery.row.id).await);
@@ -785,7 +785,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
         8,
         2,
         &mut cursor,
-        &mut crate::time::now_ms(),
+        &mut crate::notification_outbox::UnansweredCallScan::default(),
     )
     .await;
     assert!(
@@ -806,7 +806,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
         8,
         2,
         &mut cursor,
-        &mut crate::time::now_ms(),
+        &mut crate::notification_outbox::UnansweredCallScan::default(),
     )
     .await;
     let mut newer = Vec::new();
@@ -827,7 +827,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
             8,
             2,
             &mut cursor,
-            &mut crate::time::now_ms(),
+            &mut crate::notification_outbox::UnansweredCallScan::default(),
         )
         .await;
     }

@@ -82,7 +82,8 @@ pub use types::{
     NotificationOutboxTarget, NotificationReason, NotificationThreadId, PushServiceNodeName,
 };
 pub use unanswered::DueUnansweredCall;
-pub(crate) use unanswered_sweep::{sweep_unanswered_calls, UNANSWERED_CALL_LOOKBACK_MS};
+pub(crate) use unanswered_sweep::sweep_unanswered_calls;
+pub use unanswered_sweep::UnansweredCallScan;
 
 // Internal wiring: children import shared sibling items through this facade.
 use candidate::{
@@ -95,6 +96,7 @@ use payload::build_waddle_context;
 use publish::policy_retry_delay_ms;
 use publisher_persistence::{lock_outbox_ancestry_tx, settle_outbox_if_unowned_tx};
 use types::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
+use unanswered::DueCallKey;
 
 #[derive(Clone)]
 pub struct NotificationOutboxStore {

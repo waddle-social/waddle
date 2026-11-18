@@ -3836,8 +3836,7 @@ pub(crate) async fn run_notification_outbox_loop(
 ) {
     let mut pending_notification_cursor =
         routes::interpret::PendingNotificationRecoveryCursor::default();
-    let mut unanswered_call_watermark_ms = crate::time::now_ms()
-        .saturating_sub(crate::notification_outbox::UNANSWERED_CALL_LOOKBACK_MS);
+    let mut unanswered_call_scan = crate::notification_outbox::UnansweredCallScan::default();
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
     loop {
@@ -3855,7 +3854,7 @@ pub(crate) async fn run_notification_outbox_loop(
                 retention_days,
                 prune_batch_size,
                 &mut pending_notification_cursor,
-                &mut unanswered_call_watermark_ms,
+                &mut unanswered_call_scan,
             )
             .await;
         } else {
@@ -3865,7 +3864,7 @@ pub(crate) async fn run_notification_outbox_loop(
                 retention_days,
                 prune_batch_size,
                 &mut pending_notification_cursor,
-                &mut unanswered_call_watermark_ms,
+                &mut unanswered_call_scan,
                 false,
             )
             .await;
@@ -4104,7 +4103,7 @@ pub(crate) async fn run_notification_outbox_sweep(
     retention_days: u32,
     prune_batch_size: usize,
     pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
-    unanswered_call_watermark_ms: &mut i64,
+    unanswered_call_scan: &mut crate::notification_outbox::UnansweredCallScan,
 ) {
     run_notification_outbox_sweep_inner(
         state,
@@ -4112,7 +4111,7 @@ pub(crate) async fn run_notification_outbox_sweep(
         retention_days,
         prune_batch_size,
         pending_notification_cursor,
-        unanswered_call_watermark_ms,
+        unanswered_call_scan,
         true,
     )
     .await;
@@ -4124,7 +4123,7 @@ async fn run_notification_outbox_sweep_inner(
     retention_days: u32,
     prune_batch_size: usize,
     pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
-    unanswered_call_watermark_ms: &mut i64,
+    unanswered_call_scan: &mut crate::notification_outbox::UnansweredCallScan,
     timed: bool,
 ) {
     async {
@@ -4184,7 +4183,7 @@ async fn run_notification_outbox_sweep_inner(
                 &state.deps.protocol.notification_outbox,
                 state.deps.protocol.mam_storage.as_ref(),
                 state.deps.protocol.notification_settings_projection.as_ref(),
-                unanswered_call_watermark_ms,
+                unanswered_call_scan,
                 chrono::Utc::now(),
                 batch_size,
             )

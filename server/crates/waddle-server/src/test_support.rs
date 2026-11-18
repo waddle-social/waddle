@@ -1141,17 +1141,10 @@ pub async fn sweep_unanswered_calls_for_test(
     outbox: &crate::notification_outbox::NotificationOutboxStore,
     mam: &dyn waddle_xmpp::mam::MamStorage,
     settings: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
-    watermark_ms: &mut i64,
+    scan: &mut crate::notification_outbox::UnansweredCallScan,
     now: chrono::DateTime<chrono::Utc>,
     batch_size: usize,
 ) -> bool {
-    crate::notification_outbox::sweep_unanswered_calls(
-        outbox,
-        mam,
-        settings,
-        watermark_ms,
-        now,
-        batch_size,
-    )
-    .await
+    crate::notification_outbox::sweep_unanswered_calls(outbox, mam, settings, scan, now, batch_size)
+        .await
 }

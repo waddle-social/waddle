@@ -106,8 +106,9 @@ than 55 seconds ago with no missed-call row and no outcome in the callee's own
 archive, and inserts one candidate without ingress lineage. An outcome is any
 archived `proceed`, `accept`, `reject`, `finish` or `retract` for the SID with
 the caller, tie-break included. The deadline is 55 seconds so the caller's own
-45-second retract wins. Each process looks back at most 5 minutes, so calls
-that rang out during a longer outage get no alert.
+45-second retract wins. Every sweep covers the last 5 minutes of invitations,
+including ones written late by recovery; calls that rang out during a longer
+outage get no alert.
 
 Missed calls carry the SID without video and no `<call/>` context, so they use
 ordinary APNs alert nodes and Web Push, never VoIP nodes. APNs uses

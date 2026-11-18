@@ -10,7 +10,16 @@ pub struct DueUnansweredCall {
     pub candidate: NotificationCandidate,
     pub created_at_ms: i64,
     /// The stored ordering key after `created_at_ms`, for the next page.
-    key: (String, String, String),
+    key: DueCallKey,
+}
+
+/// Recipient, conversation and stanza id as stored: one invitation row.
+pub(super) type DueCallKey = (String, String, String);
+
+impl DueUnansweredCall {
+    pub(super) fn key(&self) -> &DueCallKey {
+        &self.key
+    }
 }
 
 const DUE_CALL_COLUMNS: &str = "c.recipient_bare_jid,c.conversation_jid,c.sender_jid,c.thread_id,\

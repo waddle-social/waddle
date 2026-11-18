@@ -77,12 +77,14 @@ eligibility checks the same evidence but counts only callee-authored outcomes,
 so the triggering retract cannot suppress itself. Query errors and incomplete
 200-message pages fail closed and create no alert.
 
-The process-local scan watermark begins five minutes before startup. Pending
-and recently outboxed invitations use the existing partial indices. A successful
-sweep reads every due page in `(created_at_ms, recipient, conversation, stanza
-id)` order, so calls that need no alert cannot hold later ones back whatever
-the batch size, then advances to its due-time bound. An error retains the
-watermark, but never further back than five minutes. For the timer a plain
+Every sweep scans the invitations created in the last five minutes, so one
+whose candidate is written late (deferred insert, recovery) is still found.
+Pending and recently outboxed invitations use the existing partial indices,
+and the sweep reads every due page in `(created_at_ms, recipient, conversation,
+stanza id)` order, so calls that need no alert cannot hold later ones back
+whatever the batch size. Each process remembers the calls it has settled and
+does not read the archive for them again; a call it could not settle is read
+again by the next sweep. For the timer a plain
 caller retract is not an outcome: either the retract path already wrote the
 missed-call row, or it lost the race with the invitation and the timer alerts.
 Timer candidates use the invitation's identity and have no
@@ -110,10 +112,8 @@ an answer or decline crossing the evidence read and insert can still alert.
 A retract planned before the proposal's candidate commits can miss immediate
 eligibility; the unanswered timer then alerts at 55 seconds, because a plain
 caller retract is not an outcome for the timer. The
-ordinary back-to-back same-stream case is covered. The bounded startup window
-covers five minutes of invitations; older invitations are not revisited. An
-invitation candidate committed more than 55 seconds after its receipt time
-(deferred insert or recovery) is behind the watermark and gets no timer alert.
+ordinary back-to-back same-stream case is covered. Invitations older than
+five minutes, for example after a long outage, are not revisited.
 
 Before deployment, separate client changes must add Apple's
 `WADDLE_PUSH_MISSED_CALL` string and conversation tap route, and the web service

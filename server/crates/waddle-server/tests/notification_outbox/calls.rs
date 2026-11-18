@@ -718,7 +718,7 @@ mod unanswered_sweep {
     use crate::support::{settings_projection, store, TestStore};
     use chrono::{DateTime, Utc};
     use minidom::Element;
-    use waddle_server::notification_outbox::NotificationReason;
+    use waddle_server::notification_outbox::{NotificationReason, UnansweredCallScan};
     use waddle_server::notification_settings_projection::{
         ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
         NotificationSettingsSource,
@@ -737,7 +737,7 @@ mod unanswered_sweep {
         store: TestStore,
         mam: InMemoryMamStorage,
         settings: NotificationSettingsProjectionStore,
-        watermark: i64,
+        scan: UnansweredCallScan,
     }
 
     impl Fixture {
@@ -746,7 +746,7 @@ mod unanswered_sweep {
                 store: store().await,
                 mam: InMemoryMamStorage::new(),
                 settings: settings_projection().await,
-                watermark: WATERMARK_MS,
+                scan: UnansweredCallScan::default(),
             }
         }
 
@@ -769,7 +769,7 @@ mod unanswered_sweep {
                 &self.store,
                 &self.mam,
                 &self.settings,
-                &mut self.watermark,
+                &mut self.scan,
                 DateTime::<Utc>::from_timestamp_millis(NOW_MS).expect("clock"),
                 batch,
             )
@@ -841,7 +841,6 @@ mod unanswered_sweep {
         fixture.invitation("future", DUE_MS + 1).await;
         fixture.invitation("at-watermark", WATERMARK_MS).await;
         assert!(fixture.sweep(16).await);
-        assert_eq!(fixture.watermark, DUE_MS);
         assert_eq!(fixture.missed_count().await, 1);
         assert!(fixture.sweep(16).await);
         assert_eq!(fixture.missed_count().await, 1);
@@ -871,7 +870,6 @@ mod unanswered_sweep {
             fixture.outcome(signal, tie_break, callee_authored).await;
             assert!(fixture.sweep(16).await, "{signal}");
             assert_eq!(fixture.missed_count().await, 0, "{signal}");
-            assert_eq!(fixture.watermark, DUE_MS, "{signal}");
         }
     }
 
@@ -895,7 +893,6 @@ mod unanswered_sweep {
         fixture.invitation("zz-earlier", DUE_MS - 2_000).await;
         assert!(fixture.sweep(1).await);
         assert_eq!(fixture.missed_count().await, 2);
-        assert_eq!(fixture.watermark, DUE_MS);
     }
 
     #[tokio::test]
@@ -920,7 +917,6 @@ mod unanswered_sweep {
             .expect("mute");
         assert!(fixture.sweep(16).await);
         assert_eq!(fixture.missed_count().await, 0);
-        assert_eq!(fixture.watermark, DUE_MS);
     }
 
     #[tokio::test]
@@ -930,11 +926,10 @@ mod unanswered_sweep {
         fixture.invitation("second", DUE_MS).await;
         assert!(fixture.sweep(1).await);
         assert_eq!(fixture.missed_count().await, 2);
-        assert_eq!(fixture.watermark, DUE_MS);
     }
 
     #[tokio::test]
-    async fn malformed_archive_evidence_skips_alert_and_preserves_watermark() {
+    async fn malformed_archive_evidence_skips_alert_and_leaves_the_call_unsettled() {
         let mut fixture = Fixture::new().await;
         fixture.invitation("session", DUE_MS).await;
         let call = call_candidate("session", "session", false);
@@ -955,7 +950,7 @@ mod unanswered_sweep {
             .expect("malformed archive row");
         assert!(!fixture.sweep(16).await);
         assert_eq!(fixture.missed_count().await, 0);
-        assert_eq!(fixture.watermark, WATERMARK_MS);
+        assert_eq!(fixture.scan.settled_calls(), 0);
     }
 
     #[tokio::test]
@@ -980,17 +975,53 @@ mod unanswered_sweep {
             .expect("displayed marker row");
         assert!(fixture.sweep(16).await);
         assert_eq!(fixture.missed_count().await, 1);
-        assert_eq!(fixture.watermark, DUE_MS);
     }
 
     #[tokio::test]
-    async fn a_stuck_watermark_is_pulled_forward_to_the_lookback_bound() {
+    async fn an_invitation_older_than_the_lookback_gets_no_alert() {
         let mut fixture = Fixture::new().await;
-        fixture.watermark = WATERMARK_MS - 60_000;
-        // Older than the lookback bound: never alerted.
         fixture.invitation("session", WATERMARK_MS - 1_000).await;
         assert!(fixture.sweep(16).await);
         assert_eq!(fixture.missed_count().await, 0);
-        assert_eq!(fixture.watermark, DUE_MS);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_written_after_an_earlier_sweep_is_still_alerted() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("first", DUE_MS).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 1);
+        // Recovery commits this candidate late, with its original receipt time.
+        fixture.invitation("recovered", DUE_MS - 30_000).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_settled_call_is_not_evaluated_again() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        fixture.outcome("proceed", false, true).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.scan.settled_calls(), 1);
+        // Evidence that would now fail the lookup is never read.
+        let call = call_candidate("session", "session", false);
+        fixture
+            .mam
+            .store_message(
+                call.recipient_bare_jid(),
+                &ArchivedMessage {
+                    timestamp: DateTime::<Utc>::from_timestamp_millis(DUE_MS).expect("clock"),
+                    stanza_xml: Some("invalid archived stanza".into()),
+                    ..ArchivedMessage::for_test(
+                        call.sender_jid().clone(),
+                        call.recipient_bare_jid().clone().into(),
+                    )
+                },
+            )
+            .await
+            .expect("malformed archive row");
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 0);
     }
 }

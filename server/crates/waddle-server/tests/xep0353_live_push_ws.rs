@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
 use minidom::Element;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
-use waddle_server::notification_outbox::NotificationOutboxStore;
+use waddle_server::notification_outbox::{NotificationOutboxStore, UnansweredCallScan};
 use waddle_server::notification_settings_projection::NotificationSettingsProjectionStore;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::ingress::IngressEffectKind;
@@ -105,16 +105,20 @@ impl Fixture {
 
     async fn sweep_unanswered(&self) {
         let created_at_ms = self.call_created_at_ms().await;
-        let mut watermark = created_at_ms - 300_000;
-        self.sweep_unanswered_at(&mut watermark, created_at_ms + 55_000, 128)
-            .await;
-        assert_eq!(
-            watermark, created_at_ms,
-            "completed batch advances to due time"
-        );
+        self.sweep_unanswered_at(
+            &mut UnansweredCallScan::default(),
+            created_at_ms + 55_000,
+            128,
+        )
+        .await;
     }
 
-    async fn sweep_unanswered_at(&self, watermark: &mut i64, now_ms: i64, batch_size: usize) {
+    async fn sweep_unanswered_at(
+        &self,
+        scan: &mut UnansweredCallScan,
+        now_ms: i64,
+        batch_size: usize,
+    ) {
         let now = DateTime::<Utc>::from_timestamp_millis(now_ms).expect("deadline timestamp");
         let database = Database::from_config(
             "unanswered-live-sweep",
@@ -131,7 +135,7 @@ impl Fixture {
         let settings = NotificationSettingsProjectionStore::new(database);
         assert!(
             waddle_server::test_support::sweep_unanswered_calls_for_test(
-                &outbox, &mam, &settings, watermark, now, batch_size,
+                &outbox, &mam, &settings, scan, now, batch_size,
             )
             .await
         );
@@ -1127,20 +1131,18 @@ async fn retract_after_callee_reject_creates_no_missed_call() {
 }
 
 #[tokio::test]
-async fn unanswered_sweep_waits_for_deadline_and_advances_watermark() {
+async fn unanswered_sweep_waits_for_the_deadline() {
     let fixture = Fixture::start().await;
     let (_alice, _bob) = live_invitation(&fixture).await;
     let created = fixture.call_created_at_ms().await;
-    let mut watermark = created - 300_000;
+    let mut scan = UnansweredCallScan::default();
     fixture
-        .sweep_unanswered_at(&mut watermark, created + 54_999, 128)
+        .sweep_unanswered_at(&mut scan, created + 54_999, 128)
         .await;
-    assert_eq!(watermark, created - 1);
     assert!(fixture.missed_calls().await.is_empty());
     fixture
-        .sweep_unanswered_at(&mut watermark, created + 55_000, 128)
+        .sweep_unanswered_at(&mut scan, created + 55_000, 128)
         .await;
-    assert_eq!(watermark, created);
     assert_eq!(fixture.missed_calls().await.len(), 1);
 }
 
@@ -1155,11 +1157,9 @@ async fn one_sweep_pages_through_tied_timestamps_at_batch_size_one() {
         .execute(&fixture.pool)
         .await
         .expect("tie invitation timestamps");
-    let mut watermark = created - 300_000;
     fixture
-        .sweep_unanswered_at(&mut watermark, created + 55_000, 1)
+        .sweep_unanswered_at(&mut UnansweredCallScan::default(), created + 55_000, 1)
         .await;
-    assert_eq!(watermark, created, "a completed sweep advances the bound");
     assert_eq!(
         fixture
             .candidates()

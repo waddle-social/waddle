@@ -1,38 +1,55 @@
 //! Timed missed-call emission backed by the callee's durable MAM evidence.
 
 use chrono::{DateTime, Utc};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 use waddle_xmpp::mam::MamStorage;
 
 use super::{
-    call_outcome_recorded, evaluate_push_gate_at_dispatch, DueUnansweredCall, NoopDndReader,
-    NoopRoomPolicy, NotificationCandidateInsertOutcome, NotificationOutboxStore, OutcomeAuthor,
-    PushEvalCaches, PushEvalDeps, PushEvalStage, T1PushDispatchOutcome,
+    call_outcome_recorded, evaluate_push_gate_at_dispatch, DueCallKey, DueUnansweredCall,
+    NoopDndReader, NoopRoomPolicy, NotificationCandidateInsertOutcome, NotificationOutboxStore,
+    OutcomeAuthor, PushEvalCaches, PushEvalDeps, PushEvalStage, T1PushDispatchOutcome,
     CALL_UNANSWERED_DEADLINE_SECONDS, DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
 };
 use crate::notification_activity::NoopActivityReader;
 use crate::notification_settings_projection::NotificationSettingsProjectionStore;
 
-/// How far back a sweep looks for calls that rang out: after a restart, and
-/// for rows it could not settle.
+/// How far back a sweep looks for calls that rang out. An invitation older
+/// than this, for example one that rang out during a long outage, gets no
+/// alert.
 pub(crate) const UNANSWERED_CALL_LOOKBACK_MS: i64 = 5 * 60 * 1_000;
 
-/// Returns whether the bounded scan and all its evidence/policy/writes succeeded.
-/// A failed row keeps the watermark, up to the lookback bound.
+/// What one process has already decided, so a sweep does not read the archive
+/// again for a call that needed no alert. Every sweep scans the whole
+/// lookback, so an invitation whose candidate is written late (deferred
+/// insert, recovery) is still found.
+#[derive(Debug, Default)]
+pub struct UnansweredCallScan {
+    /// Settled invitations and their `created_at_ms`.
+    settled: HashMap<DueCallKey, i64>,
+}
+
+impl UnansweredCallScan {
+    pub fn settled_calls(&self) -> usize {
+        self.settled.len()
+    }
+}
+
+/// Returns whether the scan and all its evidence, policy and writes succeeded.
+/// A call that could not be settled is read again by the next sweep.
 pub(crate) async fn sweep_unanswered_calls(
     outbox: &NotificationOutboxStore,
     mam: &dyn MamStorage,
     settings: &NotificationSettingsProjectionStore,
-    watermark_ms: &mut i64,
+    scan: &mut UnansweredCallScan,
     now: DateTime<Utc>,
     batch_size: usize,
 ) -> bool {
+    let after_ms = now.timestamp_millis() - UNANSWERED_CALL_LOOKBACK_MS;
     let due_ms = now.timestamp_millis() - CALL_UNANSWERED_DEADLINE_SECONDS * 1_000;
-    // A row that keeps failing must not hold later calls back for longer
-    // than the restart horizon.
-    *watermark_ms = (*watermark_ms).max(now.timestamp_millis() - UNANSWERED_CALL_LOOKBACK_MS);
-    if due_ms <= *watermark_ms || batch_size == 0 {
+    scan.settled
+        .retain(|_, created_at_ms| *created_at_ms > after_ms);
+    if batch_size == 0 {
         return true;
     }
     let mut succeeded = true;
@@ -42,27 +59,32 @@ pub(crate) async fn sweep_unanswered_calls(
         let page = match &previous {
             None => {
                 outbox
-                    .due_unanswered_calls(*watermark_ms, due_ms, batch_size)
+                    .due_unanswered_calls(after_ms, due_ms, batch_size)
                     .await
             }
             Some(previous) => {
                 outbox
-                    .due_unanswered_calls_after(*watermark_ms, previous, due_ms, batch_size)
+                    .due_unanswered_calls_after(after_ms, previous, due_ms, batch_size)
                     .await
             }
         };
         let calls = match page {
             Ok(calls) => calls,
             Err(error) => {
-                warn!(%error, "Unanswered-call scan failed; preserving watermark");
+                warn!(%error, "Unanswered-call scan failed");
                 return false;
             }
         };
         let full_page = calls.len() == batch_size;
         for due in &calls {
+            if scan.settled.contains_key(due.key()) {
+                continue;
+            }
             match alert_if_unanswered(outbox, mam, settings, due, now).await {
-                Ok(true) => inserted += 1,
-                Ok(false) => {}
+                Ok(alerted) => {
+                    inserted += usize::from(alerted);
+                    scan.settled.insert(due.key().clone(), due.created_at_ms);
+                }
                 Err(()) => succeeded = false,
             }
         }
@@ -70,9 +92,6 @@ pub(crate) async fn sweep_unanswered_calls(
         if !full_page {
             break;
         }
-    }
-    if succeeded {
-        *watermark_ms = due_ms;
     }
     debug!(
         inserted,
@@ -82,7 +101,7 @@ pub(crate) async fn sweep_unanswered_calls(
 }
 
 /// Whether an alert was inserted. `Err` means the call could not be settled
-/// and must be scanned again.
+/// and must be read again.
 async fn alert_if_unanswered(
     outbox: &NotificationOutboxStore,
     mam: &dyn MamStorage,
@@ -163,7 +182,7 @@ async fn alert_if_unanswered(
         Ok(NotificationCandidateInsertOutcome::Inserted) => Ok(true),
         Ok(NotificationCandidateInsertOutcome::Duplicate) => Ok(false),
         Err(error) => {
-            warn!(%error, "Unanswered-call insertion failed; preserving watermark");
+            warn!(%error, "Unanswered-call insertion failed");
             Err(())
         }
     }
