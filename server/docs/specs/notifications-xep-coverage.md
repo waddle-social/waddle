@@ -71,9 +71,9 @@ push_publish_jobs  (durable row, Push Service queue; provider
 | Lost live call candidate obligations expire cleanly | Canonical ingress custody and fixed 45-second call expiry; 60-second maintenance grace | `sqlite_expired_live_call_candidate_settles_without_late_push_or_unrecoverable_metric` (`ingress/maintenance_tests.rs`); executor replay and restamp tests in `ingress/execute_notification_tests.rs` and `ingress/restamp/tests.rs` |
 | Recognized bodyless call signals stay deliverable without generic alerts | XEP-0353 top-level `retract`, `proceed`, `reject`, `finish`, `ringing` or legacy `accept` with no top-level JMI `propose`; XEP-0160 pending delivery and MAM retained | `offline_call_signals_preserve_pending_delivery_without_generic_alerts` (`tests/notification_outbox/calls.rs`); predicate unit tests and `tests/xep0353_jingle_message.rs` |
 | Calls honor mute, DND and blocking while passing on-mention | XEP-0492 (`never`, `on-mention`), XEP-0191, Waddle DND | `calls_respect_never_dnd_blocking_and_pass_on_mention` (`tests/notification_outbox/calls.rs`) |
-| Latest call replaces queued call context; DM stays separate | XEP-0353 session identity; XEP-0357 coalescing and fixed receipt-based deadline | `latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_expiry` (`tests/notification_outbox/calls.rs`) |
+| Latest call replaces queued call context; DM stays separate | XEP-0353 session identity and caller full JID from the same invitation; XEP-0357 coalescing and fixed receipt-based deadline | `latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_expiry` (`tests/notification_outbox/calls.rs`) |
 | Zero unread does not suppress an invitation | XEP-0353 call signals have no inbox projection | `unread_zero_does_not_suppress_call_job` (`tests/notification_outbox/publish.rs`); existing DM unread-zero test retains suppression |
-| Offline call reaches PushKit; ordinary DM reaches alert token | XEP-0353 + XEP-0357, canonical offline ingress and APNs routing | `offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_token` (`tests/xep0357_push_service_apns.rs`) |
+| Offline call reaches PushKit with caller full JID; ordinary DM reaches alert token | XEP-0353 + XEP-0357, canonical offline ingress and APNs routing | `offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_token` (`tests/xep0357_push_service_apns.rs`) |
 | Calls wake both local loops without timer waits; a busy loop retains the next wake | XEP-0353 + XEP-0357 durable commit/queue acceptance; process-local scheduling | `committed_call_wakes_both_notification_loops_with_stored_permit`, `committed_dm_does_not_wake_notification_outbox_loop`, `call_wake_during_provider_sweep_is_not_lost`, `call_wake_during_outbox_sweep_is_not_lost` (`tests/xep0357_push_service_apns.rs`), all with one-hour timers |
 | Expiry and class/node mismatches settle custody even after uncertainty | XEP-0357 durable acceptance, authoritative call disposition | `sqlite_call_policies_clear_uncertainty_and_settle_ancestry` / `postgres_call_policies_clear_uncertainty_and_settle_ancestry` (`tests/xep0357_call_dispositions.rs`), including configured topic without a provider |
 | Personal MUC mention (`occupantid` / JID) | XEP-0045 (MUC), XEP-0421 (occupant-id), XEP-0513 (`<mention/>` payload) | `xep0513_groupchat_personal_mentions_match_jid_or_occupant_id_and_respect_noping` (`groupchat_inbox.rs`); `explicit_mentions_route_and_replay_from_mam` (`tests/xep0513_mentions_ws.rs`) |
@@ -135,9 +135,14 @@ Only the node with app ID equal to the configured bundle ID plus `.voip`
 accepts `call`; that node excludes other classes. Calls use APNs push type
 `voip`, priority 10, no collapse ID, and expiration equal to the original
 receipt time in Unix seconds plus 45. The `waddle` routing object contains
-caller bare JID, stanza ID, node and `call` (`sid`, `video`, `expires`), with
-no `aps`, display name or body. Alert payloads retain their existing privacy
-contract.
+caller bare JID in `conversation`, stanza ID, node and `call` (`sid`, `video`,
+`expires`, optional `from`), with no `aps`, display name or body. The context
+`<call from='…'/>` and JSON `call.from` carry the proposing caller's full JID so
+the client can address XEP-0353 `<proceed/>`; they are omitted for bare-JID
+senders. Older queued jobs without `from` remain valid. When present, `from`
+must be a full JID whose bare JID equals `conversation`; malformed metadata fails
+without sending or disabling devices. Alert payloads retain their existing
+privacy contract.
 
 Newly inserted `call` candidates wake the local outbox loop after durable commit.
 Confirmed call-job queue acceptance wakes the local Push Service loop. This

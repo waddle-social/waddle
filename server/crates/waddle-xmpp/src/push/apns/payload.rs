@@ -11,7 +11,7 @@
 //! The payload is built from serde structs and serialized once by
 //! [`ApnsPayload::encode`], which also enforces Apple's 4096-byte limit.
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use serde::{Serialize, Serializer};
 use thiserror::Error;
 use xmpp_parsers::jingle::SessionId;
@@ -161,6 +161,9 @@ pub struct ApnsCall {
     pub sid: SessionId,
     pub video: bool,
     pub expires: u64,
+    /// Proposer resource to address when answering the invitation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<FullJid>,
 }
 
 fn serialize_session_id<S: Serializer>(sid: &SessionId, serializer: S) -> Result<S::Ok, S::Error> {
@@ -265,6 +268,7 @@ mod tests {
             sid: xmpp_parsers::jingle::SessionId("call-1".into()),
             video: false,
             expires: 1_700_000_000,
+            from: None,
         };
         let payload = ApnsVoipPayload::new(ApnsVoipPayloadFields {
             conversation: &conversation,
@@ -277,6 +281,29 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(payload.as_slice()).expect("json"),
             r#"{"waddle":{"v":1,"class":"call","conversation":"alice@example.com","item":"stanza-1","node":"node-1","call":{"sid":"call-1","video":false,"expires":1700000000}}}"#
+        );
+    }
+
+    #[test]
+    fn voip_payload_has_exact_routing_shape_with_caller_resource() {
+        let conversation = "alice@example.com".parse().expect("bare jid");
+        let call = ApnsCall {
+            sid: SessionId("call-1".into()),
+            video: false,
+            expires: 1_700_000_000,
+            from: Some("alice@example.com/phone".parse().expect("full jid")),
+        };
+        let payload = ApnsVoipPayload::new(ApnsVoipPayloadFields {
+            conversation: &conversation,
+            item: "stanza-1",
+            node: "node-1",
+            call: &call,
+        })
+        .encode()
+        .expect("voip payload");
+        assert_eq!(
+            std::str::from_utf8(payload.as_slice()).expect("json"),
+            r#"{"waddle":{"v":1,"class":"call","conversation":"alice@example.com","item":"stanza-1","node":"node-1","call":{"sid":"call-1","video":false,"expires":1700000000,"from":"alice@example.com/phone"}}}"#
         );
     }
 

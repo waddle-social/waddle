@@ -186,9 +186,12 @@ The server also supports PushKit tokens registered as `platform=apns` with
 APNs push type `voip`, priority 10, and that `.voip` topic. Their payload has
 only a `waddle` object (no `aps`): `v`, `class=call`, caller bare JID in
 `conversation`, stanza `item`, `node`, and `call` containing `sid`, `video`,
-and Unix-second `expires` (receipt time plus 45 seconds). It carries no display
-name or body. Ordinary notifications stay on the alert node. Client PushKit
-registration and incoming-call UI are separate follow-up work.
+Unix-second `expires` (receipt time plus 45 seconds), and optional `from`, the
+caller's full JID for addressing XEP-0353 `<proceed/>`. `from` is omitted for
+bare-JID senders and may be absent from older queued jobs; `conversation` stays
+the caller's bare JID. It carries no display name or body. Ordinary notifications
+stay on the alert node. Client PushKit registration and incoming-call UI are
+separate follow-up work.
 
 Call pushes are also emitted when the account has connected or hibernated
 sessions, so a client may receive both the XMPP proposal and its VoIP push.
