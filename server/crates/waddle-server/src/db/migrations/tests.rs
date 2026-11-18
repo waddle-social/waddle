@@ -340,7 +340,7 @@ async fn a_ledger_version_this_binary_does_not_know_is_refused() {
     assert!(matches!(
         error,
         DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version, .. })
-            if version == BASELINE_VERSION + 2
+            if version == BASELINE_VERSION + 3
     ));
 }
 
