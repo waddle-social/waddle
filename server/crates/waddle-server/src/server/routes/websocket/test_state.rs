@@ -257,6 +257,13 @@ where
     // headless recipient pass actually fires for offline-bare
     // JID delivery (#229 PR15) under unit-test fixtures.
     auth_state_inner.xmpp_domain = "example.com".to_string();
+    // Production derives both from `WADDLE_XMPP_DOMAIN`, so the server's
+    // XEP-0115 disco#info queries come from the domain its streams serve. A
+    // reply is routed by its `to` (RFC 6120 §10), and one addressed to any
+    // other domain never reaches the pending query.
+    auth_state_inner.caps_server_domain =
+        crate::server::caps_resolution::ServerDomainJid::parse("example.com")
+            .expect("fixture XMPP domain");
     let auth_state = Arc::new(auth_state_inner);
 
     let mut dispatcher = StanzaDispatcher::new();
