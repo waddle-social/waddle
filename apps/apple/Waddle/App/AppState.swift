@@ -307,7 +307,10 @@ final class AppState {
                     return
                 }
                 // CallKit waits for the stream proposal to fill the slot;
-                // push metadata never establishes protocol state.
+                // push metadata never establishes protocol state. A session
+                // kept through suspension can still say online on a dead
+                // socket, and no scene comes to probe it on a push wake.
+                active.coordinator.resume()
                 return
             }
         }
@@ -382,10 +385,20 @@ final class AppState {
         // still loads providers; recreated windows share that work.
         guard !Self.isHostingTests, !hasBootstrapped, !isBootstrapping else { return }
         isBootstrapping = true
-        defer { isBootstrapping = false; hasBootstrapped = true }
+        defer { isBootstrapping = false }
         DecryptedFileStore.purge()
         await loadProviders()
         _ = await ensureSession()
+        // A keychain that cannot be read yet (locked, or briefly not
+        // available) is neither a session nor a sign-out. Ask again until it
+        // answers; a cancelled wait leaves the next scene to start over.
+        var delay = 1.0
+        while session == nil, phase == .launching, CredentialStore.readSessionID(for: server) == .unavailable {
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            delay = min(delay * 2, 5)
+            _ = await ensureSession()
+        }
+        hasBootstrapped = true
     }
 
     /// Shares restoration between the UI and a push wake, without waiting
