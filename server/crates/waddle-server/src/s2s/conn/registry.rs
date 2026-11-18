@@ -492,17 +492,21 @@ impl Registry {
     }
 
     /// The stream without traffic the longest, if long enough to evict;
-    /// only among streams outside the reserve when `general`.
+    /// only among streams outside the reserve when `general`. A stream
+    /// whose pair keeps another stream goes before the only stream of a
+    /// pair, so a peer holding several streams gives one up before another
+    /// peer loses its pair.
     fn stream_victim(
         &self,
         live: &[(&StreamKey, &Entry)],
         general: bool,
         now: Instant,
     ) -> Vec<StreamKey> {
+        let keys: Vec<&StreamKey> = live.iter().map(|(key, _)| *key).collect();
         live.iter()
             .filter(|(_, entry)| !general || !entry.reserved)
             .filter(|(_, entry)| self.evictable(entry, now))
-            .max_by_key(|(_, entry)| entry.activity.quiet(now))
+            .max_by_key(|(key, entry)| (shares_pair(&keys, key), entry.activity.quiet(now)))
             .map(|(key, _)| (*key).clone())
             .into_iter()
             .collect()
@@ -547,7 +551,9 @@ impl Registry {
     /// full: evict the established stream in that direction that has
     /// carried no traffic the longest, if that has lasted the eviction
     /// time, and return its socket for the new one to take over. The
-    /// evicted connection sends `resource-constraint` and closes.
+    /// evicted connection sends `resource-constraint` and closes. A stream
+    /// whose pair keeps another stream goes before the only stream of a
+    /// pair.
     ///
     /// A stream outside the reserve is evicted first. A reserved peer's
     /// stream is evicted only when no other stream can be and
@@ -563,6 +569,7 @@ impl Registry {
         now: Instant,
     ) -> Option<Arc<SocketCount>> {
         let mut state = self.state();
+        let keys: Vec<&StreamKey> = state.streams.keys().collect();
         let quietest = |reserved: bool| {
             state
                 .streams
@@ -572,7 +579,7 @@ impl Registry {
                         && entry.reserved == reserved
                         && self.evictable(entry, now)
                 })
-                .max_by_key(|(_, entry)| entry.activity.quiet(now))
+                .max_by_key(|(key, entry)| (shares_pair(&keys, key), entry.activity.quiet(now)))
                 .map(|(key, _)| key.clone())
         };
         let victim = quietest(false).or_else(|| {
@@ -795,6 +802,12 @@ fn oldest_backoff(
         .filter(|(_, entry)| entry.retry_at <= now)
         .min_by_key(|(_, entry)| entry.updated)
         .map(|(domain, _)| domain.clone())
+}
+
+/// Whether another of `keys` carries the same directional pair as `key`.
+fn shares_pair(keys: &[&StreamKey], key: &StreamKey) -> bool {
+    keys.iter()
+        .any(|other| other.connection != key.connection && other.same_pair(key))
 }
 
 /// Distinct remote domains among `live` streams; only those outside the

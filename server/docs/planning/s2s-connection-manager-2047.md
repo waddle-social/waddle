@@ -221,7 +221,11 @@ replaced the pair's stream or was refused with `conflict`.
   sink. Each is admitted (D1), verified and registered on its own, and each
   counts against the stream and peer caps and is subject to eviction for
   them like any other stream: its traffic, not the pair's, decides when it
-  is quiet enough to evict.
+  is quiet enough to evict. Among streams quiet enough to evict for the
+  stream cap or for a new socket, one whose pair keeps another stream goes
+  before the only stream of a pair, quietest first within each group, so
+  a peer holding several streams gives one up before another peer loses
+  its pair.
 - **Beyond the per-pair cap.** One stream more takes the place of the
   pair's inbound stream that has carried no traffic the longest, if that
   stream has had none for the eviction idle time; the displaced stream

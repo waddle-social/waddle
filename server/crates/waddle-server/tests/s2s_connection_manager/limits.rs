@@ -745,9 +745,10 @@ impl StanzaSink for CarriedBy {
     }
 }
 
-/// `home-b.test` with `limits` and `sink`, and `nodes` deployments that all
-/// authenticate as `home-a.test` and dial it, as the nodes of a clustered
-/// peer each open their own stream for one directional pair.
+/// `home-b.test` with `limits` and `sink`, admitting `home-a.test` and
+/// `home-c.test`, and `nodes` deployments that all authenticate as
+/// `home-a.test` and dial it, as the nodes of a clustered peer each open
+/// their own stream for one directional pair.
 async fn clustered(
     pki: &Pki,
     limits: Vec<String>,
@@ -756,6 +757,8 @@ async fn clustered(
 ) -> (Vec<Deployment>, Deployment) {
     let (listener_b, address_b) = listener().await;
     let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.allow = vec![HOME_A, HOME_C];
+    spec_b.private = vec![HOME_A, HOME_C];
     spec_b.limits = limits;
     let options = ServiceOptions {
         sink,
@@ -920,6 +923,60 @@ async fn an_inbound_stream_beyond_the_per_pair_cap_takes_a_quiet_ones_place() {
     );
     assert_eq!(nodes[1].handle.streams(), vec![new]);
     assert_eq!(inbound_endings(&metrics, "conflict"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn at_the_stream_cap_a_pairs_extra_stream_is_evicted_before_another_pairs_only_one() {
+    let pki = Pki::new();
+    let sink = Arc::new(CarriedBy::default());
+    let (nodes, b) = clustered(
+        &pki,
+        vec![
+            "max_streams = 3".to_owned(),
+            "eviction_idle_ms = 1".to_owned(),
+        ],
+        3,
+        sink,
+    )
+    .await;
+    // home-c's only stream is the quietest of all.
+    let (listener_c, _) = listener().await;
+    let mut spec_c = Spec::new(HOME_C, HOME_B);
+    spec_c.endpoints = vec![(HOME_B, b.address)];
+    let c = start(&pki, &spec_c, listener_c).await;
+    c.handle
+        .connect(&domain(HOME_C), &domain(HOME_B))
+        .await
+        .expect("home-c's stream");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for node in &nodes[..2] {
+        node.handle
+            .connect(&domain(HOME_A), &domain(HOME_B))
+            .await
+            .expect("a home-a stream within the caps");
+    }
+    holds_streams(&b, 3).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The stream cap is full and every stream is quiet enough to evict:
+    // one of home-a's two streams makes room, not home-c's only one.
+    nodes[2]
+        .handle
+        .connect(&domain(HOME_A), &domain(HOME_B))
+        .await
+        .expect("a third home-a stream");
+    assert!(
+        eventually(WAIT, || {
+            nodes[..2]
+                .iter()
+                .filter(|node| node.handle.streams().is_empty())
+                .count()
+                == 1
+        })
+        .await
+    );
+    holds_streams(&b, 3).await;
+    assert_eq!(remotes(&b), set_of(&[HOME_A, HOME_C]));
+    assert_eq!(c.handle.streams().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
