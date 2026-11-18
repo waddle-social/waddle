@@ -71,6 +71,17 @@ pub async fn presence(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         .await?;
     let local_bare = local.bare();
     let remote_bare = peer_alice(peer);
+    // Each client requests its roster first, as a client does at login:
+    // RFC 6121 section 3.1.6 delivers an approval to the user's interested
+    // resources, those that have requested the roster.
+    for session in [&mut local, &mut remote] {
+        let roster = ask(session, stanza::roster_get(&support::id("roster"))).await?;
+        anyhow::ensure!(
+            is_result(&roster),
+            "roster request refused: {}",
+            describe(&roster)
+        );
+    }
     subscribe(
         &mut local,
         &mut remote,
@@ -104,10 +115,29 @@ pub async fn presence(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     outcome.check("peer sees home-a's presence", seen_by_remote.is_ok(), "");
     outcome.check("home-a sees the peer's presence", seen_by_local.is_ok(), "");
     let roster = ask(&mut local, stanza::roster_get(&support::id("roster"))).await?;
+    let item = roster
+        .get_child("query", ns::ROSTER)
+        .and_then(|query| {
+            query
+                .children()
+                .find(|item| item.attr("jid") == Some(remote_bare.as_str()))
+        })
+        .cloned();
     outcome.check(
-        "home-a roster holds the remote contact",
-        is_result(&roster),
-        describe(&roster),
+        "home-a roster holds the remote contact with a mutual subscription",
+        is_result(&roster)
+            && item
+                .as_ref()
+                .is_some_and(|item| item.attr("subscription") == Some("both")),
+        [
+            describe(&roster),
+            ", subscription ".to_owned(),
+            item.as_ref()
+                .and_then(|item| item.attr("subscription"))
+                .unwrap_or("none")
+                .to_owned(),
+        ]
+        .concat(),
     );
     local.close().await;
     remote.close().await;
