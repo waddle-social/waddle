@@ -189,9 +189,13 @@ self.addEventListener("push", (event) => {
   // XEP-0357 §4 forbids the Push Service from receiving message
   // content, so the envelope never carries title/body. The SW always
   // renders the count-derived default title with an empty body.
-  const title = defaultTitle(unreadCount);
+  const isMissedCall = context.class === MISSED_CALL_CLASS;
+  const title = isMissedCall ? "Missed call" : defaultTitle(unreadCount);
   const body = "";
-  const tag = context.conversation ?? "waddle";
+  // A missed call keeps its own banner beside the conversation's
+  // message banner instead of replacing it.
+  const conversationTag = context.conversation ?? "waddle";
+  const tag = isMissedCall ? `${conversationTag}#missed-call` : conversationTag;
   if (isItemAlreadyShown(itemId)) {
     // Foreground tab already rendered this item — only update the
     // badge / unread broadcast, no duplicate banner.
@@ -297,7 +301,7 @@ function parseV1Envelope(data) {
 /// these strings are pinned to
 /// `NotificationClass::as_db_value` in
 /// `crates/waddle-server/src/notification_outbox.rs`:
-///   * `dm`, `dm_mention`                                    → DM
+///   * `dm`, `dm_mention`, `missed_call`                     → DM
 ///   * `personal_mention`, `channel_mention`,
 ///     `active_channel_mention`, `notify_all`                → MUC
 ///
@@ -307,7 +311,8 @@ function parseV1Envelope(data) {
 /// legally contain underscores per RFC 6122 / PRECIS, so the SW
 /// must NOT treat an underscore in a DM JID's localpart as a
 /// MUC separator.
-const DM_CLASS_VALUES = new Set(["dm", "dm_mention"]);
+const MISSED_CALL_CLASS = "missed_call";
+const DM_CLASS_VALUES = new Set(["dm", "dm_mention", MISSED_CALL_CLASS]);
 const MUC_CLASS_VALUES = new Set([
   "personal_mention",
   "channel_mention",

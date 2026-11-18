@@ -55,17 +55,7 @@ async fn latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_e
         std::slice::from_ref(&target),
     )
     .await;
-    let second = NotificationCandidate::call_with_hints(
-        bare("alice@example.com"),
-        "bob@example.com/laptop".parse().expect("latest sender"),
-        StanzaId::new("second-call", Jid::from(bare("alice@example.com"))),
-        NotificationCall {
-            session_id: SessionId("second-session".into()),
-            video: true,
-        },
-        NotificationMessageHints::none(),
-    )
-    .expect("second call");
+    let second = call_candidate("second-call", "second-session", true);
     store
         .insert_candidate(&second)
         .await
@@ -96,7 +86,6 @@ async fn latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_e
         .expect("call context");
     assert_eq!(context.attr("stanza-id"), Some("second-call"));
     assert_eq!(invitation.attr("sid"), Some("second-session"));
-    assert_eq!(invitation.attr("from"), Some("bob@example.com/laptop"));
     assert_eq!(invitation.attr("video"), Some("true"));
     assert_eq!(invitation.attr("expires"), Some("1700000045"));
 }

@@ -55,13 +55,6 @@ pub(super) fn build_waddle_context(
                     (created_at_ms / 1_000 + super::candidate::CALL_RING_DURATION_SECONDS)
                         .to_string(),
                 )
-                .attr(
-                    minidom::rxml::xml_ncname!("from").to_owned(),
-                    candidate
-                        .sender_jid
-                        .resource()
-                        .map(|_| candidate.sender_jid.to_string()),
-                )
                 .build(),
         );
     }
@@ -175,46 +168,6 @@ pub fn publish_options_form_type_is_xep0060(publish_options: &Element) -> bool {
                 value.is("value", NS_DATA_FORMS) && value.text() == NS_PUBSUB_PUBLISH_OPTIONS
             })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::notification_outbox::{NotificationCall, NotificationMessageHints};
-    use waddle_xmpp_core::xep0359::StanzaId;
-    use xmpp_parsers::jingle::SessionId;
-
-    #[test]
-    fn call_context_includes_full_sender_and_omits_bare_sender() {
-        let recipient: BareJid = "bob@example.com".parse().expect("recipient");
-        let mut candidate = NotificationCandidate::call_with_hints(
-            recipient.clone(),
-            "alice@example.com/phone".parse().expect("full sender"),
-            StanzaId::new("stanza-1", recipient.into()),
-            NotificationCall {
-                session_id: SessionId("call-1".into()),
-                video: false,
-            },
-            NotificationMessageHints::none(),
-        )
-        .expect("call candidate");
-        for (sender, expected) in [
-            ("alice@example.com/phone", Some("alice@example.com/phone")),
-            ("alice@example.com", None),
-        ] {
-            // Exercise the builder's omission rule independently of admission.
-            candidate.sender_jid = sender.parse().expect("sender JID");
-            let context = build_waddle_context(&candidate, 1_700_000_000_123);
-            assert_eq!(context.attr("conversation"), Some("alice@example.com"));
-            let call = context
-                .get_child("call", WADDLE_PUSH_CONTEXT_NS)
-                .expect("call metadata");
-            assert_eq!(call.attr("sid"), Some("call-1"));
-            assert_eq!(call.attr("video"), Some("false"));
-            assert_eq!(call.attr("expires"), Some("1700000045"));
-            assert_eq!(call.attr("from"), expected);
-        }
-    }
 }
 
 #[cfg(test)]

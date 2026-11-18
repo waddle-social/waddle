@@ -21,11 +21,11 @@ public struct PushRoute: Hashable, Sendable {
         self.conversation = ConversationID(jid: jid, kind: kind)
     }
 
-    /// The server's notification classes: DMs, mentions in either, and
-    /// room-wide notices.
+    /// The server's notification classes: DMs and missed calls, mentions
+    /// in either, and room-wide notices.
     private static func kind(ofClass value: String) -> ConversationKind? {
         switch value {
-        case "dm", "dm_mention":
+        case "dm", "dm_mention", "missed_call":
             return .direct
         case "personal_mention", "channel_mention", "active_channel_mention", "notify_all":
             return .room
