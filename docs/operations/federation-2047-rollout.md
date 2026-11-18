@@ -564,6 +564,7 @@ the slice is in brackets.
 | Area | Before | After | Source |
 | --- | --- | --- | --- |
 | Stanza addresses and payload JIDs | Case, width and compatibility forms folded | Refused with `<jid-malformed/>`; a trailing dot is removed and a U-label domain becomes its A-label | [Identity profile rollout](identity-profile-rollout.md#what-changes-for-clients-and-accounts) |
+| Payload `jid` attribute that is not an address at all (XEP-0357 `<enable jid='not a jid'/>`) | Left to the handler: XEP-0357 `<enable/>` answered `bad-request` | `<jid-malformed/>` (type `modify`) before any handler, carrying the stanza's `id` and no address | Identity profile rollout |
 | MUC nicknames | Folded (`ｎｉｃｋ` joined as `nick`) | The stanza is refused; a client must use the nickname exactly | Identity profile rollout |
 | Sign-in | `ALICE` signed in as `alice`; OAUTHBEARER re-slugged | Only the exact canonical name; OpenID Connect accounts with a non-canonical stored name can no longer sign in over XMPP | Identity profile rollout |
 | New account names | Any valid localpart | 1–64 bytes of `a-z`, `0-9`, `.`, `_`, `-`, `+`; OpenID Connect names transliterated | Identity profile rollout |
@@ -576,7 +577,7 @@ the slice is in brackets.
 | IQ to a domain the deployment does not serve | Ping, Carbons, session and discovery refused with `not-allowed`; other namespaces reached local handlers | Every `get`/`set` refused with `remote-server-not-found` (type `cancel`) from the home server, before any handler; before resource binding, `not-authorized`; results and errors to such a domain dropped without an error; XEP-0410 self-ping reads the error as undecided | [`destination.rs`](../../server/crates/waddle-server/src/destination.rs), [remote ping note](../planning/remote-ping-2047.md) |
 | IQ to a numeric IPv4 domain (`2130706433`, `0x7f.1`, `127.1`) | Classified as a remote or unqualified domain | Never routable: `remote-server-not-found`, as for IP literals and single-label names | Identity profile rollout |
 | Message to an unserved domain | Archived, put in the sender's inbox and carbon-copied, then dropped silently | Message error `remote-server-not-found` (type `cancel`) from the addressed JID, without the body; nothing archived | Routing |
-| Presence to an unserved domain | A subscription request answered `unsubscribed`; directed presence dropped | Presence error `remote-server-not-found` | Routing |
+| Presence to an unserved domain | A subscription request answered `unsubscribed`; directed presence, a room join included, dropped | Presence error `remote-server-not-found` from the addressed JID; a join to a domain that only ends like the MUC service's (`room@muc.example.com.evil`) is answered the same way | Routing |
 | IQ to a blocked remote address | `remote-server-not-found` | `not-acceptable` with `<blocked/>` | Routing |
 | Direct-message pin marker for a remote peer | `forbidden` | `remote-server-not-found`; no pin recorded | Routing |
 | Received carbons | Private messages with `muc#user` from a full JID outside the account domain were carbon-copied | Not carbon-copied | Routing |
