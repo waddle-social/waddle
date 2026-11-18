@@ -6,7 +6,8 @@
 //! on every surface: joins, archive reads, room discovery, administration,
 //! owner configuration and destruction, mediated invitations, PubSub on the
 //! scope's Space node, the planner's durable membership and the legacy
-//! permission reads, and the protected effects of `sinks`. Legacy tuples,
+//! permission reads, the room's private event workspace
+//! (`event_workspace`), and the protected effects of `sinks`. Legacy tuples,
 //! durable room affiliations, PubSub affiliations, Space membership and the
 //! room actor's own affiliation list and roles admit nothing there.
 //! Bootstrap and repair writers never lift a ban and never write a
@@ -34,6 +35,8 @@ mod host_grant_support;
 mod ingress_support;
 mod ws_loopback_support;
 
+#[path = "host_grant_fence_cases/event_workspace.rs"]
+mod event_workspace;
 #[path = "host_grant_fence_cases/sinks.rs"]
 mod sinks;
 
