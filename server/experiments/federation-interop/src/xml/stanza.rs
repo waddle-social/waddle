@@ -155,6 +155,22 @@ pub fn muc_role(id: &str, room: &str, nick: &str, role: &str) -> Element {
     )
 }
 
+/// Change the affiliation of `jid` with a room (XEP-0045 sections 9 and
+/// 10).
+pub fn muc_affiliation(id: &str, room: &str, jid: &str, affiliation: &str) -> Element {
+    let item = Element::builder("item", ns::MUC_ADMIN)
+        .attr(xml_ncname!("affiliation").to_owned(), affiliation)
+        .attr(xml_ncname!("jid").to_owned(), jid)
+        .build();
+    set(
+        id,
+        Some(room),
+        Element::builder("query", ns::MUC_ADMIN)
+            .append(item)
+            .build(),
+    )
+}
+
 /// Retract a room message as a moderator (XEP-0425).
 pub fn moderate(id: &str, room: &str, stanza_id: &str) -> Element {
     let moderate = Element::builder("moderate", ns::MODERATION)
@@ -415,6 +431,17 @@ pub fn is_self_presence(element: &Element) -> bool {
             .filter(|child| child.is("x", ns::MUC_USER))
             .flat_map(|x| x.children())
             .any(|child| child.name() == "status" && child.attr("code") == Some("110"))
+}
+
+/// The status codes of a MUC presence (XEP-0045 section 15.6).
+pub fn muc_status_codes(element: &Element) -> Vec<String> {
+    element
+        .children()
+        .filter(|child| child.is("x", ns::MUC_USER))
+        .flat_map(|x| x.children())
+        .filter(|child| child.name() == "status")
+        .filter_map(|status| status.attr("code").map(str::to_owned))
+        .collect()
 }
 
 /// The role in a MUC presence's item.

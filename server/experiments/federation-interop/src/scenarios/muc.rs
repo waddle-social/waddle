@@ -299,13 +299,33 @@ pub async fn two_resources(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
-/// A remote account becomes moderator of a home-a room and demotes a
-/// local occupant. Returns whether the demotion took effect.
+/// What a home-a room's owner gives the remote account before it acts.
+#[derive(Debug, Clone, Copy)]
+enum Standing {
+    /// The moderator role alone (XEP-0045 section 9.6): room moderation,
+    /// with no affiliation.
+    Moderator,
+    /// The admin affiliation (section 10.6), which carries the moderator
+    /// role: a privileged grant (ADR-0020 D8).
+    Admin,
+}
+
+/// A remote account is given `standing` in a home-a room and acts on bob,
+/// a local occupant with no affiliation there. Returns whether the action
+/// took effect.
+///
+/// A moderator without an affiliation may kick bob, since section 8.2
+/// protects only an occupant whose affiliation is higher than the
+/// moderator's, but may not revoke his voice: section 8.4 forbids that for
+/// an affiliation at or above the moderator's, and none is at none. Its
+/// devoice is recorded only as a note, and its kick is the action. An admin
+/// revokes bob's voice.
 async fn remote_moderation(
     h: &Harness,
     peer: Peer,
     outcome: &mut Outcome,
     label: &str,
+    standing: Standing,
 ) -> Result<bool> {
     let room = [
         room_name("moderated").as_str(),
@@ -325,32 +345,66 @@ async fn remote_moderation(
         .login_waddle(Home::A, "bob", &support::id("target"))
         .await?;
     join(&mut target, &room, "bob").await?;
-    let granted = ask(
-        &mut owner,
-        stanza::muc_role(&support::id("grant"), &room, "remote-mod", "moderator"),
-    )
-    .await?;
-    outcome.note([label, ": moderator grant answered ", &describe(&granted)].concat());
-    let action = ask(
+    let remote = ["admin@", Harness::peer_domain(peer)].concat();
+    let (kind, grant) = match standing {
+        Standing::Moderator => (
+            "moderator",
+            stanza::muc_role(&support::id("grant"), &room, "remote-mod", "moderator"),
+        ),
+        Standing::Admin => (
+            "admin",
+            stanza::muc_affiliation(&support::id("grant"), &room, &remote, "admin"),
+        ),
+    };
+    let granted = ask(&mut owner, grant).await?;
+    outcome.note([label, ": ", kind, " grant answered ", &describe(&granted)].concat());
+    let devoice = ask(
         &mut moderator,
-        stanza::muc_role(&support::id("demote"), &room, "bob", "visitor"),
+        stanza::muc_role(&support::id("devoice"), &room, "bob", "visitor"),
     )
     .await?;
-    let demoted = target
-        .wait_for(QUIET, |element| {
-            element.name() == "presence"
-                && element
-                    .attr("from")
-                    .is_some_and(|from| from.ends_with("/bob"))
-                && stanza::muc_role_of(element).as_deref() == Some("visitor")
-        })
-        .await
-        .is_ok();
-    outcome.note([label, ": demotion answered ", &describe(&action)].concat());
+    outcome.note([label, ": devoice answered ", &describe(&devoice)].concat());
+    let (action, took_effect) = match standing {
+        Standing::Admin => {
+            let devoiced = target
+                .wait_for(QUIET, |element| {
+                    element.name() == "presence"
+                        && element
+                            .attr("from")
+                            .is_some_and(|from| from.ends_with("/bob"))
+                        && stanza::muc_role_of(element).as_deref() == Some("visitor")
+                })
+                .await
+                .is_ok();
+            (devoice, devoiced)
+        }
+        Standing::Moderator => {
+            let kick = ask(
+                &mut moderator,
+                stanza::muc_role(&support::id("kick"), &room, "bob", "none"),
+            )
+            .await?;
+            outcome.note([label, ": kick answered ", &describe(&kick)].concat());
+            let kicked = target
+                .wait_for(QUIET, |element| {
+                    element.name() == "presence"
+                        && element.attr("type") == Some("unavailable")
+                        && element
+                            .attr("from")
+                            .is_some_and(|from| from.ends_with("/bob"))
+                        && stanza::muc_status_codes(element)
+                            .iter()
+                            .any(|code| code == "307")
+                })
+                .await
+                .is_ok();
+            (kick, kicked)
+        }
+    };
     owner.close().await;
     moderator.close().await;
     target.close().await;
-    Ok(demoted && is_result(&action))
+    Ok(took_effect && is_result(&action))
 }
 
 pub async fn remote_moderator(h: &mut Harness, peer: Peer) -> Result<Outcome> {
@@ -361,7 +415,8 @@ pub async fn remote_moderator(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         ]
         .concat(),
     );
-    let honored = remote_moderation(h, peer, &mut outcome, "trusted home").await?;
+    let honored =
+        remote_moderation(h, peer, &mut outcome, "trusted home", Standing::Moderator).await?;
     outcome.check("a trusted home's moderator is honored", honored, "");
     Ok(outcome)
 }
@@ -381,7 +436,8 @@ pub async fn untrusted_home(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     }
     h.dirty.insert(Component::Waddle(Home::A));
     h.start_waddle(&profile).await?;
-    let honored = remote_moderation(h, peer, &mut outcome, "untrusted home").await?;
+    let honored =
+        remote_moderation(h, peer, &mut outcome, "untrusted home", Standing::Moderator).await?;
     outcome.check(
         "moderation by a home not on the list is refused",
         !honored,
@@ -392,15 +448,15 @@ pub async fn untrusted_home(h: &mut Harness, peer: Peer) -> Result<Outcome> {
 
 pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
-        "a home-b moderator before and after home-b leaves home-a's trusted-home list",
+        "a home-b room admin before and after home-b leaves home-a's trusted-home list",
     );
-    let honored = remote_moderation(h, peer, &mut outcome, "trusted").await?;
+    let honored = remote_moderation(h, peer, &mut outcome, "trusted", Standing::Admin).await?;
     outcome.check("honored while trusted", honored, "");
     let mut profile = h.profile(Home::A, true);
     profile.trusted_homes.retain(|home| home != HOME_B);
     h.dirty.insert(Component::Waddle(Home::A));
     h.start_waddle(&profile).await?;
-    let after = remote_moderation(h, peer, &mut outcome, "removed").await?;
+    let after = remote_moderation(h, peer, &mut outcome, "removed", Standing::Admin).await?;
     outcome.check("ignored once the home is removed", !after, "");
     Ok(outcome)
 }
@@ -409,7 +465,8 @@ pub async fn privileged_pkix_vs_dialback(h: &mut Harness, _peer: Peer) -> Result
     let mut outcome = Outcome::new(
         "Prosody's admin over pkix (prosody.test) and over dialback (insecure.prosody.test)",
     );
-    let honored = remote_moderation(h, Peer::Prosody, &mut outcome, "pkix").await?;
+    let honored =
+        remote_moderation(h, Peer::Prosody, &mut outcome, "pkix", Standing::Admin).await?;
     outcome.check("honored on pkix", honored, "");
     let before = support::established(h, Home::A, "inbound", "dialback").await;
     let _ = support::ping_from_peer(h, Peer::Prosody, "alice", HOME_A).await;
