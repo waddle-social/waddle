@@ -11,9 +11,11 @@
 //! `muc#roomconfig_pubsub`, which the room description emits
 //! (`muc::roominfo`), and the avatar and banner items of a Space
 //! ([`ITEM_SPACE_AVATAR_METADATA`], [`ITEM_SPACE_BANNER_METADATA`]), whose
-//! XEP-0084 metadata points at image URLs. Waddle publishes neither item,
-//! and neither the server nor its clients fetch the images such items name
-//! on another service (ADR-0020 D4).
+//! XEP-0084 metadata points at image URLs. A Space's owner may publish
+//! either item; [`SpaceImage`] names them and [`space_image_payload`]
+//! decides what such an item may carry. The items are stored and served
+//! as published, and neither the server nor its clients fetch the images
+//! they name (ADR-0020 D4).
 //!
 //! The spaces service lives at `spaces.<domain>` and is advertised in
 //! `disco#items` alongside the existing MUC/upload/pubsub components.
@@ -22,8 +24,10 @@
 //! - `disco#info` on `spaces.<domain>` with `node=<space_id>`: returns space node identity
 //! - `disco#items` on `spaces.<domain>`: returns the canonical space node
 //! - pubsub `<items>` on `spaces.<domain>` for `node=<space_id>`: returns XEP-0402 bookmark items
+//!   and the Space's avatar and banner items
 //! - pubsub `<publish/>` and `<retract/>` on the canonical space node update
-//!   channel bookmark membership.
+//!   channel bookmark membership, or set and remove the Space's avatar and
+//!   banner items.
 //!
 //! XEP-0503 defines no access control, membership or inheritance for a
 //! Space's children: a subscription to a Space node is not a grant in any
@@ -31,8 +35,10 @@
 
 use crate::muc::owner::FIELD_PIN_PERMISSION;
 use minidom::Element;
+use thiserror::Error;
 
 use super::xep0004::{DataForm, Field, FieldType, FormType, ToElement};
+use super::xep0084::NS_AVATAR_METADATA;
 use crate::pubsub::stanzas::PubSubItem;
 use crate::xep::xep0402;
 use crate::{managed_room_jid, ChannelInfo, ChannelType, SpaceDetails, XmppError};
@@ -47,6 +53,257 @@ pub const ITEM_SPACE_AVATAR_METADATA: &str = "urn:xmpp:spaces:avatar:metadata:0"
 /// Item identifier of a Space's banner metadata (XEP-0503 0.3.0, "Spaces
 /// images").
 pub const ITEM_SPACE_BANNER_METADATA: &str = "urn:xmpp:spaces:banner:metadata:0";
+
+/// Most `<info/>` elements a Space image's metadata may hold: the
+/// alternate formats and resolutions of one image (XEP-0084, "Info
+/// Element").
+pub const MAX_SPACE_IMAGE_FORMATS: usize = 8;
+
+/// Longest `url` an `<info/>` element of a Space image may carry, in bytes.
+pub const MAX_SPACE_IMAGE_URL_LEN: usize = 2048;
+
+/// Longest `id` (the image's hash) an `<info/>` element of a Space image
+/// may carry, in bytes.
+pub const MAX_SPACE_IMAGE_ID_LEN: usize = 128;
+
+/// One of the images of a Space (XEP-0503 0.3.0, "Spaces images"), named
+/// by the id of the Space node item that carries its metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceImage {
+    /// The Space's avatar, item [`ITEM_SPACE_AVATAR_METADATA`].
+    Avatar,
+    /// The Space's banner, item [`ITEM_SPACE_BANNER_METADATA`].
+    Banner,
+}
+
+impl SpaceImage {
+    /// The image a Space node item id names, if it names one. Every other
+    /// id of a Space node names a room by its JID (XEP-0402 bookmark).
+    #[must_use]
+    pub fn from_item_id(item_id: &str) -> Option<Self> {
+        match item_id {
+            ITEM_SPACE_AVATAR_METADATA => Some(Self::Avatar),
+            ITEM_SPACE_BANNER_METADATA => Some(Self::Banner),
+            _ => None,
+        }
+    }
+
+    /// The id of the Space node item that carries this image's metadata.
+    #[must_use]
+    pub fn item_id(self) -> &'static str {
+        match self {
+            Self::Avatar => ITEM_SPACE_AVATAR_METADATA,
+            Self::Banner => ITEM_SPACE_BANNER_METADATA,
+        }
+    }
+}
+
+/// Why the item of a Space image is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SpaceImageError {
+    /// The item carries no payload element.
+    #[error("the item carries no payload")]
+    MissingPayload,
+    /// The item carries more than one payload element. A PubSub item holds
+    /// exactly one (XEP-0060 §7.1.3.5), so the several `<metadata/>`
+    /// elements XEP-0503 0.3.0 allows are refused rather than cut to the
+    /// first; one `<metadata/>` lists every format in its `<info/>`
+    /// elements.
+    #[error("the item carries more than one payload element")]
+    SeveralPayloads,
+    /// The payload is not a XEP-0084 `<metadata/>` element.
+    #[error("the payload is not a XEP-0084 metadata element")]
+    NotMetadata,
+    /// The `<metadata/>` element names no image.
+    #[error("the metadata names no image")]
+    NoImage,
+    /// The `<metadata/>` element holds more than
+    /// [`MAX_SPACE_IMAGE_FORMATS`] `<info/>` elements.
+    #[error("the metadata names more formats than are kept")]
+    TooManyFormats,
+    /// The `<metadata/>` element holds a `<pointer/>`, which names a
+    /// third-party service rather than an image.
+    #[error("the metadata holds a pointer")]
+    Pointer,
+    /// The `<metadata/>` element holds an attribute, text or a child that
+    /// XEP-0084 does not define.
+    #[error("the metadata holds content XEP-0084 does not define")]
+    UnexpectedContent,
+    /// An `<info/>` element is malformed in the part named.
+    #[error("an info element is malformed: {0}")]
+    MalformedInfo(SpaceImageInfoPart),
+}
+
+/// The part of a XEP-0084 `<info/>` element that is malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SpaceImageInfoPart {
+    /// The element holds text or a child; it must be empty.
+    #[error("content")]
+    Content,
+    /// The element carries an attribute XEP-0084 does not define.
+    #[error("undefined attribute")]
+    Attribute,
+    /// `bytes` is missing or no unsigned 32-bit integer.
+    #[error("bytes")]
+    Bytes,
+    /// `height` is no unsigned 16-bit integer.
+    #[error("height")]
+    Height,
+    /// `width` is no unsigned 16-bit integer.
+    #[error("width")]
+    Width,
+    /// `id` is missing, empty, beyond [`MAX_SPACE_IMAGE_ID_LEN`] or holds a
+    /// control character.
+    #[error("id")]
+    Id,
+    /// `type` is missing or no `image/` or `video/` content type.
+    #[error("type")]
+    Type,
+    /// `url` is no absolute `http:` or `https:` URL within
+    /// [`MAX_SPACE_IMAGE_URL_LEN`].
+    #[error("url")]
+    Url,
+}
+
+/// The payload of the `<item/>` element `item`, published as one of a
+/// Space's images, when it is what such an item may carry.
+///
+/// The item holds exactly one payload element (XEP-0060 §7.1.3.5), checked
+/// by [`validate_space_image_metadata`]. Nothing the payload names is
+/// fetched or resolved.
+pub fn space_image_payload(item: &Element) -> Result<&Element, SpaceImageError> {
+    let mut payloads = item.children();
+    let payload = payloads.next().ok_or(SpaceImageError::MissingPayload)?;
+    if payloads.next().is_some() {
+        return Err(SpaceImageError::SeveralPayloads);
+    }
+    validate_space_image_metadata(payload)?;
+    Ok(payload)
+}
+
+/// Check that `metadata` is the XEP-0084 `<metadata/>` element of a Space
+/// image (XEP-0503 0.3.0, "Spaces images"):
+///
+/// - a `<metadata xmlns='urn:xmpp:avatar:metadata'/>` element without
+///   attributes or text, holding one to [`MAX_SPACE_IMAGE_FORMATS`]
+///   `<info/>` elements and nothing else. An empty element, which XEP-0084
+///   uses to stop publishing an avatar, names no image; a Space's image is
+///   removed by retracting its item. A `<pointer/>` is refused: its content
+///   belongs to a third-party service and XEP-0503 does not use it.
+/// - each `<info/>` is empty and carries the attributes XEP-0084 defines
+///   and no others: `bytes` (an unsigned 32-bit integer), `id` and `type`
+///   are required; `height` and `width` (unsigned 16-bit integers) and
+///   `url` are optional. `id` is at most [`MAX_SPACE_IMAGE_ID_LEN`] bytes,
+///   `type` an `image/` or `video/` content type, and `url` an absolute
+///   `http:` or `https:` URL of at most [`MAX_SPACE_IMAGE_URL_LEN`] bytes.
+///
+/// XEP-0084 also requires one format to be `image/png` and `id` to be a
+/// SHA-1 hash; XEP-0503's own example holds a JPEG only, under an `id`
+/// that is no hash, so neither is required here.
+pub fn validate_space_image_metadata(metadata: &Element) -> Result<(), SpaceImageError> {
+    if !metadata.is("metadata", NS_AVATAR_METADATA) {
+        return Err(SpaceImageError::NotMetadata);
+    }
+    if !metadata.attrs().is_empty() || !metadata.text().trim().is_empty() {
+        return Err(SpaceImageError::UnexpectedContent);
+    }
+    let mut formats = 0_usize;
+    for child in metadata.children() {
+        if child.is("pointer", NS_AVATAR_METADATA) {
+            return Err(SpaceImageError::Pointer);
+        }
+        if !child.is("info", NS_AVATAR_METADATA) {
+            return Err(SpaceImageError::UnexpectedContent);
+        }
+        formats += 1;
+        if formats > MAX_SPACE_IMAGE_FORMATS {
+            return Err(SpaceImageError::TooManyFormats);
+        }
+        validate_space_image_info(child)?;
+    }
+    if formats == 0 {
+        return Err(SpaceImageError::NoImage);
+    }
+    Ok(())
+}
+
+/// The attributes an `<info/>` element of XEP-0084 defines.
+const INFO_ATTRIBUTES: [&str; 6] = ["bytes", "height", "id", "type", "url", "width"];
+
+fn validate_space_image_info(info: &Element) -> Result<(), SpaceImageError> {
+    let malformed = SpaceImageError::MalformedInfo;
+    if info.children().next().is_some() || !info.text().trim().is_empty() {
+        return Err(malformed(SpaceImageInfoPart::Content));
+    }
+    for ((namespace, name), _) in info.attrs().iter() {
+        let name: &str = name.as_ref();
+        if !namespace.is_none() || !INFO_ATTRIBUTES.contains(&name) {
+            return Err(malformed(SpaceImageInfoPart::Attribute));
+        }
+    }
+    if !info
+        .attr("bytes")
+        .is_some_and(|bytes| bytes.parse::<u32>().is_ok())
+    {
+        return Err(malformed(SpaceImageInfoPart::Bytes));
+    }
+    for (dimension, part) in [
+        ("height", SpaceImageInfoPart::Height),
+        ("width", SpaceImageInfoPart::Width),
+    ] {
+        if info
+            .attr(dimension)
+            .is_some_and(|value| value.parse::<u16>().is_err())
+        {
+            return Err(malformed(part));
+        }
+    }
+    if !info.attr("id").is_some_and(|id| {
+        !id.is_empty() && id.len() <= MAX_SPACE_IMAGE_ID_LEN && !id.chars().any(char::is_control)
+    }) {
+        return Err(malformed(SpaceImageInfoPart::Id));
+    }
+    if !info.attr("type").is_some_and(is_image_content_type) {
+        return Err(malformed(SpaceImageInfoPart::Type));
+    }
+    if info.attr("url").is_some_and(|url| !is_http_url(url)) {
+        return Err(malformed(SpaceImageInfoPart::Url));
+    }
+    Ok(())
+}
+
+/// Whether `content_type` is an `image/` or `video/` content type
+/// (XEP-0084, "Info Element") whose subtype is an RFC 6838 §4.2
+/// `restricted-name`. Parameters are not part of an image's type.
+fn is_image_content_type(content_type: &str) -> bool {
+    let Some((top, subtype)) = content_type.split_once('/') else {
+        return false;
+    };
+    (top.eq_ignore_ascii_case("image") || top.eq_ignore_ascii_case("video"))
+        && is_restricted_name(subtype)
+}
+
+/// RFC 6838 §4.2 `restricted-name`: one to 127 characters, the first
+/// alphanumeric, the rest alphanumeric or one of `!#$&-^_.+`.
+fn is_restricted_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 127
+        && chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && chars.all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '!' | '#' | '$' | '&' | '-' | '^' | '_' | '.' | '+')
+        })
+}
+
+/// Whether `url` is an absolute `http:` or `https:` URL with a host, within
+/// [`MAX_SPACE_IMAGE_URL_LEN`]. It is parsed, never resolved.
+fn is_http_url(url: &str) -> bool {
+    url.len() <= MAX_SPACE_IMAGE_URL_LEN
+        && url::Url::parse(url)
+            .is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https") && parsed.has_host())
+}
 
 /// Waddle's service-discovery form namespace for authenticated server metadata.
 pub const NS_WADDLE_SERVER_INFO: &str = "urn:waddle:server-info:0";
