@@ -270,4 +270,14 @@ struct RoomManagementTests {
         #expect(coordinator.unread.count(for: roomConversation) == 0)
         #expect(coordinator.unread.threadCount(for: thread) == 0)
     }
+
+    @Test func aDeleteTappedWhileOfflineIsNotSentAndLeavesTheRoomUsable() async throws {
+        let (coordinator, port) = online()
+        coordinator.status.connection = .connecting
+        await #expect(throws: PortError.notConnected) { try await coordinator.deleteRoom(room) }
+        #expect(port.roomDestructions.isEmpty)
+        coordinator.status.connection = .online
+        await coordinator.ensureJoined(room)
+        #expect(port.joined == [room])
+    }
 }

@@ -51,7 +51,9 @@ extension SessionCoordinator {
     /// by reading the whole form and writing it back, so two at once would
     /// undo each other.
     private func managing(_ room: BareJID, _ action: (_ generation: Int) async throws -> Void) async throws {
-        guard !isStopped else { throw PortError.notConnected }
+        // Offline, nothing would be sent, and a delete must be able to
+        // tell "never sent" from "sent, no answer".
+        guard !isStopped, status.connection == .online else { throw PortError.notConnected }
         guard roomsBeingManaged.insert(room).inserted else { throw PortError.failed }
         let generation = roomManagementGeneration
         defer {
@@ -75,6 +77,8 @@ extension SessionCoordinator {
                 if generation == roomManagementGeneration { departingRooms.remove(room) }
             }
             await joinTails[room]?.value
+            // A session restarted meanwhile owns the call slot now.
+            guard isCurrent(generation) else { throw PortError.notConnected }
             if calls.groupSlotHolds(room) { await calls.hangUp() }
             // A hang-up from a moment ago may still be waiting to send.
             await calls.settleGroupPresence()
