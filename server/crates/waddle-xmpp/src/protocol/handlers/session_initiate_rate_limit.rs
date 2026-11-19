@@ -11,6 +11,7 @@
 //!   relay attempts before they are rejected.
 //! - TURN credential issuance (`extdisco` requests that actually mint a
 //!   credential-bearing response).
+//! - Client call lifecycle reports, with their own ten-minute window.
 //!
 //! Bucket-style limiter: keep a `VecDeque<Instant>` per bare JID
 //! holding the timestamps of recent events; on each new event, drop
@@ -43,6 +44,9 @@ pub const DEFAULT_MAX_MUJI_ACTIONS: usize = 60;
 /// available during login / reconnect loops.
 pub const DEFAULT_MAX_TURN_CREDENTIALS: usize = 10;
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(30);
+/// Client reports describe whole calls, so use a separate ten-minute budget.
+pub const DEFAULT_MAX_LIFECYCLE_REPORTS: usize = 12;
+pub const DEFAULT_LIFECYCLE_REPORT_WINDOW: Duration = Duration::from_secs(600);
 
 /// Opaque receipt for one successful `check_and_record`. Refunds are
 /// keyed on it so a caller can only ever remove ITS OWN recorded
@@ -130,6 +134,9 @@ impl PerBareJidSlidingWindowRateLimit {
 
 macro_rules! define_rate_limit {
     ($name:ident, $default_max:expr) => {
+        define_rate_limit!($name, $default_max, DEFAULT_WINDOW);
+    };
+    ($name:ident, $default_max:expr, $default_window:expr) => {
         #[derive(Debug)]
         pub struct $name {
             inner: PerBareJidSlidingWindowRateLimit,
@@ -143,7 +150,7 @@ macro_rules! define_rate_limit {
             }
 
             pub fn with_defaults() -> Self {
-                Self::new($default_max, DEFAULT_WINDOW)
+                Self::new($default_max, $default_window)
             }
 
             pub fn check_and_record(
@@ -175,6 +182,11 @@ define_rate_limit!(SessionInitiateRateLimit, DEFAULT_MAX_INITIATES);
 define_rate_limit!(TerminateRateLimit, DEFAULT_MAX_TERMINATES);
 define_rate_limit!(MujiActionRateLimit, DEFAULT_MAX_MUJI_ACTIONS);
 define_rate_limit!(TurnCredentialRateLimit, DEFAULT_MAX_TURN_CREDENTIALS);
+define_rate_limit!(
+    CallLifecycleRateLimit,
+    DEFAULT_MAX_LIFECYCLE_REPORTS,
+    DEFAULT_LIFECYCLE_REPORT_WINDOW
+);
 
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimitExceeded {
@@ -197,6 +209,25 @@ impl std::error::Error for RateLimitExceeded {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_lifecycle_default_budget_uses_its_own_ten_minute_window() {
+        let limiter = CallLifecycleRateLimit::with_defaults();
+        let alice = jid("alice@waddle.test");
+        let bob = jid("bob@waddle.test");
+        let now = Instant::now();
+        for _ in 0..12 {
+            limiter.check_and_record_at(&alice, now).unwrap();
+        }
+        assert!(limiter.check_and_record_at(&alice, now).is_err());
+        assert!(limiter
+            .check_and_record_at(&alice, now + Duration::from_secs(31))
+            .is_err());
+        assert!(limiter.check_and_record_at(&bob, now).is_ok());
+        assert!(limiter
+            .check_and_record_at(&alice, now + Duration::from_secs(601))
+            .is_ok());
+    }
 
     fn jid(s: &str) -> BareJid {
         s.parse().unwrap()

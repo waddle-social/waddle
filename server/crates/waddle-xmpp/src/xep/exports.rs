@@ -467,3 +467,9 @@ pub use super::xep0511::{
 };
 
 // Re-export commonly used items at the xep module level
+
+pub use waddle_xmpp_core::waddle_call_lifecycle::{
+    CallClientPlatform, CallDurationBucket, CallEndReason, CallLifecycleKind,
+    CallLifecycleParseError, CallLifecycleReport, CallReconnectBucket, CallSetupOutcome,
+    NS_WADDLE_CALL_LIFECYCLE,
+};

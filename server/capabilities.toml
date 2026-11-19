@@ -121,7 +121,7 @@ server_maturity = "beta"
 availability = "configured"
 protocols = ["XEP-0166", "XEP-0167", "XEP-0215", "XEP-0272", "XEP-0353"]
 advertised_features = ["urn:xmpp:jingle:1", "urn:xmpp:jingle:apps:rtp:1", "urn:xmpp:jingle:apps:rtp:audio", "urn:xmpp:jingle:apps:rtp:video", "urn:xmpp:jingle-message:0", "urn:xmpp:extdisco:2", "urn:xmpp:jingle:muji:0"]
-custom_namespaces = ["urn:waddle:transports:livekit:0"]
+custom_namespaces = ["urn:waddle:transports:livekit:0", "urn:waddle:call-lifecycle:0"]
 server_evidence = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
 topologies = { local = "beta", federated = "unsupported" }
 [capability.protocol_evidence]

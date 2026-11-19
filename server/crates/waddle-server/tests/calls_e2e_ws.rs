@@ -17,7 +17,9 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
@@ -32,6 +34,10 @@ use waddle_xmpp::ns::JABBER_CLIENT as NS_JABBER_CLIENT;
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
 use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
+use waddle_xmpp::xep::{
+    CallClientPlatform, CallDurationBucket, CallEndReason, CallLifecycleKind, CallLifecycleReport,
+    CallReconnectBucket, CallSetupOutcome, NS_WADDLE_CALL_LIFECYCLE,
+};
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 const NS_SID: &str = "urn:xmpp:sid:0";
@@ -114,6 +120,7 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
         "urn:xmpp:jingle-message:0",
         "urn:xmpp:extdisco:2",
         "urn:waddle:transports:livekit:0",
+        NS_WADDLE_CALL_LIFECYCLE,
         // XEP-0272 (Muji) — MUC group call presence advertisement +
         // Jingle session-initiate join surface to the SFU mixer.
         // Backed by the Muji branch in `JingleHandler`; the legacy
@@ -126,6 +133,56 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
             "disco#info must advertise {ns}; got: {resp}"
         );
     }
+
+    let reply = send_call_lifecycle_report(&mut admin, "call-report-1").await;
+    assert!(matches!(reply, Iq::Result { payload: None, .. }));
+}
+
+fn call_lifecycle_report_iq(id: &str) -> Iq {
+    Iq::Set {
+        from: None,
+        to: Some(DOMAIN.parse().expect("server domain JID")),
+        id: id.to_string(),
+        payload: CallLifecycleReport {
+            kind: CallLifecycleKind::Dm,
+            setup_outcome: CallSetupOutcome::Accepted,
+            end_reason: CallEndReason::Hangup,
+            duration: CallDurationBucket::None,
+            reconnects: CallReconnectBucket::None,
+            platform: CallClientPlatform::Ios,
+        }
+        .build_element(),
+    }
+}
+
+async fn send_call_lifecycle_report(client: &mut WsXmppClient, id: &str) -> Iq {
+    client
+        .send(&element_to_xml(call_lifecycle_report_iq(id).into()))
+        .await
+        .expect("send lifecycle report");
+    let response = client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("lifecycle report reply");
+    Iq::try_from(response.parse::<Element>().expect("reply XML")).expect("reply IQ")
+}
+
+#[tokio::test]
+async fn call_lifecycle_report_requires_a_bound_session() {
+    let (_livekit_admin, server) = start_call_server(&[]).await;
+    let mut admin = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("admin connect");
+    admin
+        .authenticate(DOMAIN, "admin", server.fixed_account_password())
+        .await
+        .expect("admin authentication without binding");
+
+    let reply = send_call_lifecycle_report(&mut admin, "call-report-unbound").await;
+    let Iq::Error { error, .. } = reply else {
+        panic!("expected not-authorized for an unbound session");
+    };
+    assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
 }
 
 #[tokio::test]

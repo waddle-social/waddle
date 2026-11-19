@@ -26,6 +26,7 @@
 
 pub mod archive;
 pub mod blocking_filter;
+pub mod call_lifecycle;
 pub mod canonicalize;
 pub mod carbons;
 pub mod carbons_message;
@@ -63,8 +64,8 @@ pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
 }
 
 /// Register the XMPP-native A/V calling handlers (XEP-0166 Jingle +
-/// XEP-0215 external service discovery) backed by the supplied
-/// LiveKit SFU service. Kept separate from
+/// XEP-0215 external service discovery, plus client lifecycle reports)
+/// backed by the supplied LiveKit SFU service. Kept separate from
 /// [`register_default_handlers`] so non-call deployments and unit
 /// tests don't need to construct a [`waddle_sfu::SfuService`].
 pub fn register_call_handlers(
@@ -86,6 +87,7 @@ pub fn register_call_handlers(
         turn_tls_port,
         turn_udp_port,
     )));
+    dispatcher.register_iq(Arc::new(call_lifecycle::CallLifecycleHandler::new()));
 }
 
 /// Register the full message-pipeline handler chain in the order
