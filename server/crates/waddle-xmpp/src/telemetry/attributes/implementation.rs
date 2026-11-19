@@ -449,7 +449,8 @@ impl MetricAttribute for SmResumeOutcome {
 /// `reason` — why an XEP-0357 push notification was suppressed.
 ///
 /// This is the metric-facing closed set. `waddle-server` converts its
-/// persisted `SuppressedReason` audit value into this enum before emitting,
+/// persisted `SuppressedReason` audit value into this enum before emitting.
+/// Admission gates without a candidate row use metric-only variants directly,
 /// so metric labels never cross the crate boundary as strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushSuppressReason {
@@ -483,11 +484,13 @@ pub enum PushSuppressReason {
     PolicyRetriesExhausted,
     /// The message is an XEP-0444 reaction-only notification.
     Xep0444Reaction,
+    /// Call push admission exceeded the caller/account limit; no audit row exists.
+    WaddleCallRateLimit,
 }
 
 impl PushSuppressReason {
     /// Every allowed value, in stable legacy-renderer order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Xep0357Self,
         Self::Xep0357NoRegistration,
         Self::Xep0357RegistrationDisabled,
@@ -503,10 +506,11 @@ impl PushSuppressReason {
         Self::UnreadZeroAtPublish,
         Self::PolicyRetriesExhausted,
         Self::Xep0444Reaction,
+        Self::WaddleCallRateLimit,
     ];
 
     /// Every allowed label value, in stable legacy-renderer order.
-    pub const VALUES: [&'static str; 15] = [
+    pub const VALUES: [&'static str; 16] = [
         Self::Xep0357Self.as_str(),
         Self::Xep0357NoRegistration.as_str(),
         Self::Xep0357RegistrationDisabled.as_str(),
@@ -522,6 +526,7 @@ impl PushSuppressReason {
         Self::UnreadZeroAtPublish.as_str(),
         Self::PolicyRetriesExhausted.as_str(),
         Self::Xep0444Reaction.as_str(),
+        Self::WaddleCallRateLimit.as_str(),
     ];
 
     /// The byte-stable legacy label value.
@@ -543,6 +548,7 @@ impl PushSuppressReason {
             Self::UnreadZeroAtPublish => "unread_zero_at_publish",
             Self::PolicyRetriesExhausted => "policy_retries_exhausted",
             Self::Xep0444Reaction => "xep0444_reaction",
+            Self::WaddleCallRateLimit => "waddle_call_rate_limit",
         }
     }
 }

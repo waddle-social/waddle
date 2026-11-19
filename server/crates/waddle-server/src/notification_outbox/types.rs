@@ -641,12 +641,11 @@ mod tests {
         ));
     }
 
-    /// Cross-crate lockstep guard (successor of the retired
-    /// `push_suppressed_reasons()` parity check): the persisted
-    /// `SuppressedReason` db values and the sealed
-    /// `PushSuppressReason` metric label values must stay the same
-    /// closed set, so a Loki query on the audit column and a PromQL
-    /// filter on the `reason` label always speak the same vocabulary.
+    // Admission gates without a persisted candidate have metric-only reasons.
+    const METRIC_ONLY_SUPPRESS_REASONS: [waddle_xmpp::telemetry::attributes::PushSuppressReason;
+        1] = [waddle_xmpp::telemetry::attributes::PushSuppressReason::WaddleCallRateLimit];
+
+    /// Persisted audit values match metric labels except explicit metric-only gates.
     #[test]
     fn suppressed_reason_db_values_match_metric_label_values() {
         use waddle_xmpp::telemetry::attributes::{MetricAttribute, PushSuppressReason};
@@ -658,11 +657,12 @@ mod tests {
             .collect();
         let metric_values: Vec<&'static str> = PushSuppressReason::ALL
             .iter()
+            .filter(|reason| !METRIC_ONLY_SUPPRESS_REASONS.contains(reason))
             .map(MetricAttribute::value)
             .collect();
         assert_eq!(
             db_values, metric_values,
-            "audit db values and metric reason labels must stay one closed set",
+            "audit db values must match metric labels except explicit metric-only reasons",
         );
     }
 }

@@ -12,6 +12,7 @@ use crate::notification_outbox::DndState;
 use crate::notification_outbox::NoopDndReader;
 use crate::notification_outbox::NoopRoomPolicy;
 use crate::notification_outbox::NotificationCandidateInsertOutcome;
+use crate::notification_outbox::NotificationClass;
 use crate::notification_outbox::PushEvalCaches;
 use crate::notification_outbox::PushEvalDeps;
 use crate::notification_outbox::PushEvalStage;
@@ -19,6 +20,7 @@ use crate::notification_outbox::RoomPolicyCacheEntry;
 use crate::notification_outbox::T1PushDispatchOutcome;
 use crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS;
 use std::collections::BTreeMap;
+use waddle_xmpp::telemetry::attributes::PushSuppressReason;
 
 pub(super) async fn queue_offline_delivery(
     deps: &Deps<'_>,
@@ -665,6 +667,40 @@ async fn prepare_notification_candidate_for_message(
                  this is structurally impossible — retrying"
             );
             return PreparedOfflineNotification::RetryLater;
+        }
+    }
+    if candidate.class() == NotificationClass::Call {
+        match state
+            .deps
+            .protocol
+            .notification_outbox
+            .call_push_rate_limited(recipient, sender, archive_stanza_id, received_at)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                let reason = PushSuppressReason::WaddleCallRateLimit;
+                info!(
+                    recipient = %candidate.recipient_bare_jid(),
+                    conversation = %candidate.conversation_jid(),
+                    sender = %sender,
+                    notification_class = candidate.class().as_db_value(),
+                    push_stage = "suppressed",
+                    suppression_reason = reason.as_str(),
+                    "call push rate limit suppressed XEP-0357 candidate; no candidate row persisted"
+                );
+                waddle_xmpp::telemetry::reliability::increment_push_suppressed(reason);
+                return PreparedOfflineNotification::Suppressed;
+            }
+            Err(error) => {
+                warn!(
+                    recipient = %recipient,
+                    sender = %sender,
+                    error = ?error,
+                    "call push rate limit lookup failed; deferring candidate"
+                );
+                return PreparedOfflineNotification::RetryLater;
+            }
         }
     }
     PreparedOfflineNotification::Prepared(Box::new(candidate))

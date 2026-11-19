@@ -66,6 +66,17 @@ a recipient `<stanza-id/>` alone does not prove archival. Both paths persist
 the reason `offline_call`; that name does not imply the account has no sessions.
 Blocking, self-notification rejection and the existing T0/T1 push gates apply.
 
+Ringing pushes allow at most 3 `call` notification candidates per caller bare JID
+and recipient account in 60 seconds, and 10 in an hour. This is a soft limit
+across concurrent sessions/replicas. All existing `call` rows count, including
+later-suppressed, outboxed and quarantined rows. This affects push only: invitations
+remain routed, archived, delivered to connected devices and retained for offline
+delivery. A rate-limited invitation has no candidate and yields no missed-call
+alert. A resent invitation (same origin-id) is planned under a
+fresh archive id, so it counts its own first candidate and may be suppressed;
+that first candidate and its push stand. Suppression emits the metric-only `waddle_call_rate_limit` reason; no
+migration, schema change or new stored suppression value is needed.
+
 The live candidate and its ingress receipt commit together with canonical
 ancestry. Replays use the recorded archive stanza id and original receipt time.
 If that effect was lost before execution, maintenance settles its recorded
