@@ -510,7 +510,7 @@ impl PushSuppressReason {
     ];
 
     /// Every allowed label value, in stable legacy-renderer order.
-    pub const VALUES: [&'static str; 16] = [
+    pub const VALUES: [&str; 16] = [
         Self::Xep0357Self.as_str(),
         Self::Xep0357NoRegistration.as_str(),
         Self::Xep0357RegistrationDisabled.as_str(),
