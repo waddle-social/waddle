@@ -137,6 +137,9 @@ Which of these are recorded today:
 | `waddle.auth.failures` | counter | `1` | `stage`, `error_code` | `waddle_auth_failures_total` | Authentication rejections by stage and enumerated error code. |
 | `waddle.auth.success` | counter | `1` | `stage` | `waddle_auth_success_total` | Successful authentication outcomes by stage. |
 | `waddle.call.admin.call_failed` | counter | `1` | `op` | `waddle_call_admin_call_failed_total` | LiveKit admin control-plane calls that failed after final normalization, by operation. |
+| `waddle.call.client.end` | counter | `1` | `platform`, `end_reason` | `waddle_call_client_end_total` | Client-reported call endings, counted only when media connected on the reporting device. |
+| `waddle.call.client.kind` | counter | `1` | `kind`, `setup_outcome` | `waddle_call_client_kind_total` | Every permitted client lifecycle report, by call kind and the setup outcome the client reports. |
+| `waddle.call.client.setup` | counter | `1` | `platform`, `setup_outcome` | `waddle_call_client_setup_total` | Every permitted client lifecycle report, by platform and the setup outcome the client reports. |
 | `waddle.call.control.rate_limited` | counter | `1` | `surface` | `waddle_call_control_rate_limited_total` | Call-control requests rejected by local rate limits. |
 | `waddle.call.reconcile.occupancy_failures` | counter | `1` | — | `waddle_call_reconcile_occupancy_failures_total` | LiveKit room occupancy probes failed during call reconciliation. |
 | `waddle.call.reconcile.pass_duration` | histogram | `s` | — | `waddle_call_reconcile_pass_duration_seconds_bucket / _sum / _count` | Wall-clock duration of one LiveKit call reconciliation pass. |

@@ -1,6 +1,7 @@
 //! Feature advertisements for Waddle services and XMPP discovery responses.
 
 use crate::mam::{FULLTEXT_MAM_NS, WADDLE_MAM_THREAD_NS};
+use crate::waddle_call_lifecycle::NS_WADDLE_CALL_LIFECYCLE;
 
 use super::{DISCO_INFO_NS, NS_CHATSTATES, NS_COMMANDS, NS_MUC_SELF_PING_OPTIMIZATION};
 
@@ -560,6 +561,12 @@ impl Feature {
     #[must_use]
     pub fn waddle_livekit_transport() -> Self {
         Self::new("urn:waddle:transports:livekit:0")
+    }
+
+    /// Custom: closed-set client call lifecycle reports to the own server.
+    #[must_use]
+    pub fn waddle_call_lifecycle() -> Self {
+        Self::new(NS_WADDLE_CALL_LIFECYCLE)
     }
 
     /// XEP-0272: Multiparty Jingle (Muji). MUC group-call presence

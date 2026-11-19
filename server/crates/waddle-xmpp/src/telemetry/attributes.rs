@@ -25,8 +25,38 @@ pub use crate::error::StanzaErrorCondition;
 
 #[cfg(test)]
 mod tests {
-    use super::MetricAttribute;
+    use super::{
+        ClientCallEndReason, ClientCallPlatform, ClientCallSetupOutcome, MessageKind,
+        MetricAttribute,
+    };
     use crate::ingress::{IngressEffectIntent, IngressEffectKind};
+    use waddle_xmpp_core::waddle_call_lifecycle::{
+        CallClientPlatform, CallEndReason, CallLifecycleKind, CallSetupOutcome,
+    };
+
+    #[test]
+    fn client_call_attributes_cover_the_wire_vocabulary() {
+        assert_eq!(
+            CallClientPlatform::ALL.map(ClientCallPlatform::from),
+            ClientCallPlatform::ALL
+        );
+        assert_eq!(
+            CallSetupOutcome::ALL.map(ClientCallSetupOutcome::from),
+            ClientCallSetupOutcome::ALL
+        );
+        assert_eq!(
+            CallEndReason::ALL.map(ClientCallEndReason::from),
+            ClientCallEndReason::ALL
+        );
+        assert_eq!(
+            CallLifecycleKind::ALL.map(MessageKind::from),
+            [MessageKind::Dm, MessageKind::Muc]
+        );
+        assert_eq!(
+            ClientCallEndReason::ALL.map(|reason| reason.value()),
+            ["hangup", "peer_left", "error", "reconnect_exhausted"]
+        );
+    }
 
     #[test]
     fn ingress_effect_kind_labels_match_storage_kind_names() {
@@ -78,6 +108,9 @@ pub use implementation::CallSetupFailureReason;
 pub use implementation::CallSignalEvent;
 pub use implementation::ClaimOp;
 pub use implementation::ClaimResult;
+pub use implementation::ClientCallEndReason;
+pub use implementation::ClientCallPlatform;
+pub use implementation::ClientCallSetupOutcome;
 pub use implementation::FenceResult;
 pub use implementation::HttpRouteTemplate;
 pub use implementation::HttpStatusClass;
