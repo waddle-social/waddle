@@ -64,13 +64,15 @@ public final class DirectoryStore {
 
     public func apply(_ topology: Topology) {
         spaces = topology.spaces
-        let sorted = topology.channels.sorted {
-            ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased())
-        }
+        let sorted = topology.channels.sorted(by: Self.listOrder)
         channels = sorted.filter { !$0.isGroupDM }
         groupDMs = sorted.filter(\.isGroupDM)
         roomJIDs = Set(topology.channels.map(\.roomJID))
         hasLoadedTopology = true
+    }
+
+    private static func listOrder(_ first: Channel, _ second: Channel) -> Bool {
+        (first.position, first.name.lowercased()) < (second.position, second.name.lowercased())
     }
 
     /// Adds or replaces a room, ordered by position then name.
@@ -79,11 +81,11 @@ public final class DirectoryStore {
         if channel.isGroupDM {
             groupDMs.removeAll { $0.roomJID == channel.roomJID }
             groupDMs.append(channel)
-            groupDMs.sort { ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased()) }
+            groupDMs.sort(by: Self.listOrder)
         } else {
             channels.removeAll { $0.roomJID == channel.roomJID }
             channels.append(channel)
-            channels.sort { ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased()) }
+            channels.sort(by: Self.listOrder)
         }
     }
 

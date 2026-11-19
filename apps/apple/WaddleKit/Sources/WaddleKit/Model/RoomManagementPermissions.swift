@@ -1,5 +1,5 @@
 /// Actions offered for a room or group DM, in display order.
-public enum RoomManagementAction: Hashable, Sendable, CaseIterable {
+public enum RoomManagementAction: Hashable, Sendable {
     case editSettings
     case delete
     case renameGroup

@@ -64,4 +64,23 @@ struct RoomManagementCallTests {
         #expect(coordinator.canJoinGroupCall(in: groupRoom) || coordinator.calls.state != .idle)
         coordinator.calls.clear()
     }
+
+    /// A hang-up frees the call at once and sends its leave when the
+    /// presence queue reaches it; a delete must wait for that send.
+    @Test func aHangUpStillWaitingToSendIsFinishedBeforeTheRoomIsDeleted() async throws {
+        let (coordinator, port) = try await inCall(group: false)
+        port.callSends = []
+        port.heldCallVerbs = ["groupPresence"]
+        let hangingUp = Task { await coordinator.calls.hangUp() }
+        await eventually { !port.heldCallSends.isEmpty }
+        let deleting = Task { try await coordinator.deleteRoom(groupRoom) }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(port.roomDestructions.isEmpty)
+        port.heldCallVerbs = []
+        port.releaseCallSends()
+        await hangingUp.value
+        try await deleting.value
+        #expect(port.roomDestructions.map(\.room) == [groupRoom])
+        coordinator.calls.clear()
+    }
 }

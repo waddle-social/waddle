@@ -11,7 +11,7 @@ extension SessionCoordinator {
         guard !patch.isEmpty else { return }
         try await managing(room) { generation in
             try await port.updateRoomSettings(patch, of: room)
-            guard generation == roomManagementGeneration, !isStopped else { return }
+            guard isCurrent(generation) else { return }
             updateChannel(room, name: patch.name, summary: patch.summary)
         }
     }
@@ -22,7 +22,7 @@ extension SessionCoordinator {
     public func deleteRoom(_ room: BareJID) async throws {
         try await giveUp(room) { generation in
             try await port.destroyRoom(room, reason: nil)
-            if generation == roomManagementGeneration, !isStopped { destroyedRooms.insert(room) }
+            if isCurrent(generation) { destroyedRooms.insert(room) }
         }
     }
 
@@ -31,7 +31,7 @@ extension SessionCoordinator {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         try await managing(room) { generation in
             try await port.renameGroupDM(room, name: trimmed.isEmpty ? nil : trimmed)
-            guard generation == roomManagementGeneration, !isStopped else { return }
+            guard isCurrent(generation) else { return }
             updateChannel(room, name: trimmed.isEmpty ? (room.localpart ?? room.description) : trimmed)
         }
     }
@@ -74,14 +74,31 @@ extension SessionCoordinator {
                 if generation == roomManagementGeneration { departingRooms.remove(room) }
             }
             if calls.groupSlotHolds(room) { await calls.hangUp() }
-            guard generation == roomManagementGeneration, !isStopped else { throw PortError.notConnected }
+            // A hang-up from a moment ago may still be waiting to send.
+            await calls.settleGroupPresence()
+            guard isCurrent(generation) else { throw PortError.notConnected }
             try await request(generation)
-            guard generation == roomManagementGeneration, !isStopped else { return }
+            guard isCurrent(generation) else { return }
             directory.remove(room)
             directoryMutations.append(.remove(room))
             onDemandRooms.remove(room)
             presence.markLeft(room)
         }
+    }
+
+    /// False once the session that started an action has stopped.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == roomManagementGeneration && !isStopped
+    }
+
+    /// A room being given up, or deleted this session: never joined.
+    func isFenced(_ room: BareJID) -> Bool {
+        destroyedRooms.contains(room) || departingRooms.contains(room)
+    }
+
+    /// Whether the user is in, or joining, the huddle in `room`.
+    public func isInHuddle(in room: BareJID) -> Bool {
+        calls.groupSlotHolds(room)
     }
 
     /// Records a channel change for topology requests already in flight.
@@ -92,10 +109,7 @@ extension SessionCoordinator {
 
     private func updateChannel(_ room: BareJID, name: String?, summary: String? = nil) {
         guard let channel = directory.channel(for: room) else { return }
-        upsertChannel(Channel(
-            roomJID: room, name: name ?? channel.name, summary: summary ?? channel.summary,
-            kind: channel.kind, position: channel.position, spaceID: channel.spaceID,
-            autojoin: channel.autojoin, isGroupDM: channel.isGroupDM))
+        upsertChannel(channel.with(name: name ?? channel.name, summary: summary ?? channel.summary))
     }
 }
 

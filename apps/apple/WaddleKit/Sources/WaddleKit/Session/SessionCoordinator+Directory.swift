@@ -30,7 +30,7 @@ extension SessionCoordinator {
             .map(\.roomJID)
         var joined: Set<BareJID> = []
         for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
-            guard !destroyedRooms.contains(room), !departingRooms.contains(room), directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
+            guard !isFenced(room), directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
             await port.joinRoom(room, nick: account.nick)
         }
     }
@@ -40,7 +40,7 @@ extension SessionCoordinator {
     /// are otherwise never entered, so opening one would show a room we
     /// cannot send to or receive from (XEP-0045 §7.4).
     func ensureJoined(_ room: BareJID) async {
-        guard !destroyedRooms.contains(room), !departingRooms.contains(room) else { return }
+        guard !isFenced(room) else { return }
         onDemandRooms.insert(room)
         // Offline, the ready pipeline joins it on connect.
         guard status.connection == .online, !presence.joinedRooms.contains(room) else { return }

@@ -135,6 +135,12 @@ extension CallStore {
         return false
     }
 
+    /// Waits for every group presence update already queued, including a
+    /// hang-up's, so none of them is sent after the caller moves on.
+    func settleGroupPresence() async {
+        _ = await groupControl.serializePresence { true }
+    }
+
     func groupSlotHolds(_ room: BareJID) -> Bool {
         switch state {
         case .joiningGroup(let call): call.room == room

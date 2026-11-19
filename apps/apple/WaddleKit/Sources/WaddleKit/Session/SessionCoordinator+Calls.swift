@@ -32,7 +32,7 @@ public extension SessionCoordinator {
     /// slot is free.
     func canJoinGroupCall(in room: BareJID) -> Bool {
         connection == .online && !isStopped && !calls.state.isLive
-            && !destroyedRooms.contains(room) && !departingRooms.contains(room)
+            && !isFenced(room)
             && presence.joinedRooms.contains(room)
     }
 
