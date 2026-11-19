@@ -11,6 +11,7 @@ use url::Url;
 
 mod boundary_convert;
 mod calendar;
+mod call_lifecycle;
 mod calls;
 mod community_admin;
 mod consistent_color;
@@ -36,6 +37,8 @@ mod status_preference;
 mod sticker_verbs;
 mod types;
 
+#[cfg(test)]
+mod call_lifecycle_tests;
 #[cfg(test)]
 mod calls_tests;
 #[cfg(test)]
@@ -71,6 +74,11 @@ mod sticker_verbs_tests;
 
 pub use calendar::{
     WaddleCalendarDate, WaddleEvent, WaddleEventAttendee, WaddleEventParticipation,
+};
+pub use call_lifecycle::{
+    WaddleCallDurationBucket, WaddleCallEndReason, WaddleCallLifecycleKind,
+    WaddleCallLifecycleReport, WaddleCallLifecycleReportOutcome, WaddleCallReconnectBucket,
+    WaddleCallSetupOutcome,
 };
 pub use community_admin::{
     WaddleAdminChannelAffiliationEntry, WaddleAdminChannelListEntry,
