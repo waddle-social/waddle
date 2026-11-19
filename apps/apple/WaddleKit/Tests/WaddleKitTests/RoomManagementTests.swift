@@ -280,4 +280,26 @@ struct RoomManagementTests {
         await coordinator.ensureJoined(room)
         #expect(port.joined == [room])
     }
+
+    @Test func aConnectionLostWhileADeleteWaitsItsTurnSendsNothing() async throws {
+        let (coordinator, port) = online()
+        port.heldDirectoryVerbs = ["joinRoom"]
+        let joining = Task { await coordinator.ensureJoined(room) }
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        let deleting = Task { try await coordinator.deleteRoom(room) }
+        for _ in 0..<50 { await Task.yield() }
+        coordinator.status.connection = .connecting
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        await joining.value
+        await #expect(throws: PortError.notConnected) { try await deleting.value }
+        #expect(port.roomDestructions.isEmpty)
+        coordinator.status.connection = .online
+        coordinator.presence.markLeft(room)
+        port.joined = []
+        await coordinator.ensureJoined(room)
+        #expect(port.joined == [room])
+        await coordinator.calls.leaveGroupPresence(in: room, nick: "alice", identity: nil, epoch: coordinator.calls.generation)
+        #expect(port.callSends == [.groupPresence(room, "alice", .init(state: .left))])
+    }
 }

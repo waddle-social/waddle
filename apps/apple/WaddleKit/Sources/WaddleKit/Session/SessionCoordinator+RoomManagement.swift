@@ -86,6 +86,12 @@ extension SessionCoordinator {
             calls.sealedGroupRooms.insert(room)
             await calls.settleGroupPresence()
             guard isCurrent(generation) else { throw PortError.notConnected }
+            // The connection may have dropped during the waits above. Then
+            // nothing is sent, which is not a delete without an answer.
+            guard status.connection == .online else {
+                calls.sealedGroupRooms.remove(room)
+                throw PortError.notConnected
+            }
             do {
                 try await request()
             } catch {
