@@ -78,6 +78,7 @@ extension SessionCoordinator {
             if calls.groupSlotHolds(room) { await calls.hangUp() }
             // A hang-up from a moment ago may still be waiting to send.
             await calls.settleGroupPresence()
+            guard isCurrent(generation) else { throw PortError.notConnected }
             calls.sealedGroupRooms.insert(room)
             await calls.settleGroupPresence()
             guard isCurrent(generation) else { throw PortError.notConnected }
@@ -87,10 +88,11 @@ extension SessionCoordinator {
                 guard isCurrent(generation) else { throw error }
                 if forGood, (error as? PortError) != .rejected || unconfirmedDeletions.contains(room) {
                     // Timed out or cut off: the room may be gone all the
-                    // same, so it stays fenced until the server says.
+                    // same, and nothing here can tell. A refusal of a
+                    // second try proves nothing either: the server also
+                    // refuses to delete a room that no longer exists.
                     unconfirmedDeletions.insert(room)
                     onDemandRooms.remove(room)
-                    if status.connection == .online { Task { await refreshDirectory() } }
                 } else {
                     calls.sealedGroupRooms.remove(room)
                 }
@@ -116,7 +118,8 @@ extension SessionCoordinator {
         generation == roomManagementGeneration && !isStopped
     }
 
-    /// A room being given up, or deleted this session: never joined.
+    /// A room being given up, deleted this session, or possibly deleted:
+    /// never joined.
     func isFenced(_ room: BareJID) -> Bool {
         destroyedRooms.contains(room) || departingRooms.contains(room) || unconfirmedDeletions.contains(room)
     }
@@ -124,20 +127,6 @@ extension SessionCoordinator {
     /// Whether the user is in, or joining, the huddle in `room`.
     public func isInHuddle(in room: BareJID) -> Bool {
         calls.groupSlotHolds(room)
-    }
-
-    /// Settles deletes that got no clear answer before this topology was
-    /// asked for: a room it still lists exists, any other is gone.
-    func settleUnconfirmedDeletions(_ rooms: Set<BareJID>) {
-        for room in rooms where unconfirmedDeletions.remove(room) != nil {
-            if directory.isRoom(room) {
-                calls.sealedGroupRooms.remove(room)
-            } else {
-                destroyedRooms.insert(room)
-                presence.markLeft(room)
-                unread.clearRoom(room)
-            }
-        }
     }
 
     /// Records a channel change for topology requests already in flight.

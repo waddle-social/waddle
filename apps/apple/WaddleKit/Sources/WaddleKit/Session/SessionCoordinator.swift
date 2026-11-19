@@ -107,8 +107,8 @@ public final class SessionCoordinator {
     @ObservationIgnored var onDemandRooms: Set<BareJID> = []
     /// Destroyed rooms must not be recreated by a later join in this session.
     @ObservationIgnored var destroyedRooms: Set<BareJID> = []
-    /// Rooms whose delete got no clear answer. They stay fenced until a
-    /// topology answer says whether they still exist.
+    /// Rooms whose delete got no clear answer (timed out, cut off). They
+    /// may be gone, so they are not joined again this session.
     @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
     /// Rooms being deleted or left; not joined until the request settles.
     @ObservationIgnored var departingRooms: Set<BareJID> = []

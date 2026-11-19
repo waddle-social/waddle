@@ -6,7 +6,6 @@ extension SessionCoordinator {
     /// discovery keeps the last known directory.
     func refreshDirectory() async {
         let mutationStart = directoryMutations.count
-        let unconfirmed = unconfirmedDeletions
         directoryRefreshesInFlight += 1
         defer {
             directoryRefreshesInFlight -= 1
@@ -24,7 +23,6 @@ extension SessionCoordinator {
                 case .remove(let room): directory.remove(room)
                 }
             }
-            settleUnconfirmedDeletions(unconfirmed)
         }
         for room in destroyedRooms { directory.remove(room) }
         let listed = (directory.channels + directory.groupDMs)
