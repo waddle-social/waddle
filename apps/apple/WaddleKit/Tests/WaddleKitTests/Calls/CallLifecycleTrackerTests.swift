@@ -86,7 +86,9 @@ struct CallLifecycleTrackerTests {
                     let ownHangup = own && (setup == .declined || (connected && setup == .proposed))
                     // A remote timer that ran out on a connected call is the peer leaving.
                     let remoteTimeout = connected && reason == .timeout
-                    #expect(report?.endReason == (ownHangup ? .hangup : remoteTimeout ? .peerLeft : end))
+                    let expectedEnd: CallLifecycleReport.EndReason
+                    if ownHangup { expectedEnd = .hangup } else if remoteTimeout { expectedEnd = .peerLeft } else { expectedEnd = end }
+                    #expect(report?.endReason == expectedEnd)
                     // No reason the other side can send makes this device report a failure or a drop.
                     #expect(report?.setupOutcome != .failed)
                     if connected { #expect(report?.endReason != .error && report?.endReason != .reconnectExhausted) }
@@ -156,7 +158,7 @@ struct CallLifecycleTrackerTests {
                     for _ in 0..<count { tracker.mediaReconnecting(sid: "c1") }
                     if recover { tracker.mediaRecovered(sid: "c1") }
                     let report = tracker.finish(sid: "c1", from: outgoing, to: .idle, cause: .mediaFailure, at: instant)
-                    let bucket: CallLifecycleReport.ReconnectBucket = count == 0 ? .none : count == 1 ? .once : .multiple
+                    let bucket = [CallLifecycleReport.ReconnectBucket.none, .once, .multiple][min(count, 2)]
                     #expect(report?.reconnects == bucket)
                     #expect(report?.endReason == (connected && count > 0 && !recover ? .reconnectExhausted : .error))
                     #expect(report?.setupOutcome == (connected ? .accepted : .failed))

@@ -71,7 +71,7 @@ import Observation
         groupPreparingEchoTimeout: Duration = .seconds(2), groupOtherPreparingTimeout: Duration = .seconds(2),
         groupAcceptTimeout: Duration = .seconds(10),
         now: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now },
-        report: @escaping @MainActor (CallLifecycleReport) -> Void = { _ in },
+        report: @escaping @MainActor (CallLifecycleReport) -> Void = { _ in /* A store nobody reports for, as in most tests. */ },
         newSid: @escaping () -> String = { "c" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased() }
     ) {
         self.groupControl = GroupCallControl(

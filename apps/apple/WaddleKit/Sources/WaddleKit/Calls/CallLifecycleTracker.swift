@@ -50,7 +50,7 @@ public struct CallLifecycleTracker: Sendable {
         return CallLifecycleReport(
             kind: attempt.kind, setupOutcome: attempt.connectedAt == nil ? outcome.0 : .accepted,
             endReason: outcome.1, duration: Self.duration(from: attempt.connectedAt, to: instant),
-            reconnects: attempt.reconnects == 0 ? .none : attempt.reconnects == 1 ? .once : .multiple)
+            reconnects: Self.reconnects(attempt.reconnects))
     }
 
     public mutating func declinedUnseen(sid: String) -> CallLifecycleReport? {
@@ -62,6 +62,14 @@ public struct CallLifecycleTracker: Sendable {
     private mutating func remember(_ sid: String) {
         reported.append(sid)
         if reported.count > 256 { reported.removeFirst() }
+    }
+
+    private static func reconnects(_ count: Int) -> CallLifecycleReport.ReconnectBucket {
+        switch count {
+        case ...0: .none
+        case 1: .once
+        default: .multiple
+        }
     }
 
     private static func duration(from start: ContinuousClock.Instant?, to end: ContinuousClock.Instant) -> CallLifecycleReport.DurationBucket {
