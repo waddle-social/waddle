@@ -5,10 +5,15 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
 use minidom::Element;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+use waddle_server::notification_outbox::{NotificationOutboxStore, UnansweredCallScan};
+use waddle_server::notification_settings_projection::NotificationSettingsProjectionStore;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::ingress::IngressEffectKind;
+use waddle_xmpp::mam::SqlxMamStorage;
 use waddle_xmpp::stream_management::SM_NS;
 use waddle_xmpp::xep::xep0191::NS_BLOCKING;
 use waddle_xmpp::xep::xep0334::{add_hint, remove_hint, Hint};
@@ -42,6 +47,7 @@ struct Fixture {
     server: TestServer,
     pool: sqlx::SqlitePool,
     effects_file: PathBuf,
+    database_url: String,
     _directory: tempfile::TempDir,
 }
 
@@ -82,8 +88,65 @@ impl Fixture {
             server,
             pool,
             effects_file,
+            database_url,
             _directory: directory,
         }
+    }
+
+    async fn call_created_at_ms(&self) -> i64 {
+        sqlx::query_scalar(
+            "SELECT created_at_ms FROM notification_candidates WHERE class = 'call' AND call_sid = ?",
+        )
+        .bind(CALL_ID)
+        .fetch_one(&self.pool)
+        .await
+        .expect("invitation receipt time")
+    }
+
+    async fn sweep_unanswered(&self) {
+        let created_at_ms = self.call_created_at_ms().await;
+        self.sweep_unanswered_at(
+            &mut UnansweredCallScan::default(),
+            created_at_ms + 55_000,
+            128,
+        )
+        .await;
+    }
+
+    async fn sweep_unanswered_at(
+        &self,
+        scan: &mut UnansweredCallScan,
+        now_ms: i64,
+        batch_size: usize,
+    ) {
+        let now = DateTime::<Utc>::from_timestamp_millis(now_ms).expect("deadline timestamp");
+        let database = Database::from_config(
+            "unanswered-live-sweep",
+            &DatabaseConfig::new(DatabaseDriver::Sqlite, &self.database_url),
+        )
+        .await
+        .expect("open live database for timed sweep");
+        let outbox = NotificationOutboxStore::try_new(database.clone())
+            .await
+            .expect("attach existing outbox");
+        let mam = SqlxMamStorage::from_sqlite_pool(self.pool.clone())
+            .await
+            .expect("attach live archive");
+        let settings = NotificationSettingsProjectionStore::new(database);
+        assert!(
+            waddle_server::test_support::sweep_unanswered_calls_for_test(
+                &outbox, &mam, &settings, scan, now, batch_size,
+            )
+            .await
+        );
+    }
+
+    async fn missed_calls(&self) -> Vec<CandidateRow> {
+        self.candidates()
+            .await
+            .into_iter()
+            .filter(|row| row.class == "missed_call" && row.call_sid.as_deref() == Some(CALL_ID))
+            .collect()
     }
 
     async fn connect(&self, account: usize, resource: &str) -> WsXmppClient {
@@ -942,4 +1005,168 @@ async fn caller_blocked_after_proposal_gets_no_missed_call() {
     );
     send(&mut alice, retract("blocked-retract").into()).await;
     fixture.no_missed_call(&mut alice).await;
+}
+
+fn callee_outcome(name: &str, tie_break: bool) -> Message {
+    let mut message = Message::new(Some("alice@localhost".parse::<Jid>().expect("caller")));
+    message.type_ = MessageType::Chat;
+    message.id = Some(Id("callee-outcome".to_owned()));
+    let mut outcome = Element::builder(name, NS_JINGLE_MESSAGE)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), CALL_ID)
+        .build();
+    if tie_break {
+        outcome.append_child(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
+    }
+    message.payloads.push(outcome);
+    add_hint(&mut message, Hint::Store);
+    message
+}
+
+async fn live_invitation(fixture: &Fixture) -> (WsXmppClient, WsXmppClient) {
+    let bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    send(
+        &mut alice,
+        proposal(recipient().into(), CallOffer::audio_only()).into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    fixture.one_call(false).await;
+    (alice, bob)
+}
+
+#[tokio::test]
+async fn unanswered_call_yields_exactly_one_lineage_free_missed_call() {
+    let fixture = Fixture::start().await;
+    let (_alice, _bob) = live_invitation(&fixture).await;
+    fixture.sweep_unanswered().await;
+    fixture.sweep_unanswered().await;
+    let missed = fixture.missed_calls().await;
+    assert_eq!(missed.len(), 1);
+    assert_eq!(missed[0].reason, "call_unanswered");
+    assert_eq!(missed[0].call_video, None);
+    let delivery_id = missed[0]
+        .delivery_id
+        .as_ref()
+        .expect("timer scheduler identity");
+    let descendants: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ?",
+    )
+    .bind(delivery_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("timer ingress ancestry");
+    assert_eq!(descendants, 0, "timer work has no ingress lineage");
+}
+
+async fn callee_outcome_prevents_unanswered(name: &str, tie_break: bool, second_device: bool) {
+    let fixture = Fixture::start().await;
+    let (_alice, mut bob) = live_invitation(&fixture).await;
+    let mut second = if second_device {
+        Some(fixture.available("second-device").await)
+    } else {
+        None
+    };
+    let answerer = second.as_mut().unwrap_or(&mut bob);
+    send(answerer, callee_outcome(name, tie_break).into()).await;
+    barrier(answerer).await;
+    fixture.sweep_unanswered().await;
+    assert!(fixture.missed_calls().await.is_empty());
+}
+
+#[tokio::test]
+async fn callee_proceed_prevents_unanswered_missed_call() {
+    callee_outcome_prevents_unanswered("proceed", false, false).await;
+}
+
+#[tokio::test]
+async fn callee_reject_prevents_unanswered_missed_call() {
+    callee_outcome_prevents_unanswered("reject", false, false).await;
+}
+
+#[tokio::test]
+async fn callee_tie_break_reject_prevents_unanswered_missed_call() {
+    callee_outcome_prevents_unanswered("reject", true, false).await;
+}
+
+#[tokio::test]
+async fn answer_from_second_callee_device_prevents_unanswered_missed_call() {
+    callee_outcome_prevents_unanswered("proceed", false, true).await;
+}
+
+#[tokio::test]
+async fn timer_then_retract_retains_exactly_one_missed_call() {
+    let fixture = Fixture::start().await;
+    let (mut alice, _bob) = live_invitation(&fixture).await;
+    fixture.sweep_unanswered().await;
+    send(&mut alice, retract("after-timer").into()).await;
+    fixture.control_after_retract(&mut alice).await;
+    fixture.notification_effects_settled().await;
+    let missed = fixture.missed_calls().await;
+    assert_eq!(missed.len(), 1);
+    assert_eq!(missed[0].reason, "call_unanswered");
+}
+
+#[tokio::test]
+async fn retract_then_timer_retains_exactly_one_missed_call() {
+    let fixture = Fixture::start().await;
+    let (mut alice, _bob) = live_invitation(&fixture).await;
+    send(&mut alice, retract("before-timer").into()).await;
+    barrier(&mut alice).await;
+    let original = fixture.one_missed_call().await;
+    fixture.sweep_unanswered().await;
+    assert_eq!(fixture.missed_calls().await, vec![original]);
+}
+
+#[tokio::test]
+async fn retract_after_callee_reject_creates_no_missed_call() {
+    let fixture = Fixture::start().await;
+    let (mut alice, mut bob) = live_invitation(&fixture).await;
+    send(&mut bob, callee_outcome("reject", false).into()).await;
+    barrier(&mut bob).await;
+    send(&mut alice, retract("after-reject").into()).await;
+    fixture.no_missed_call(&mut alice).await;
+    fixture.sweep_unanswered().await;
+    assert!(fixture.missed_calls().await.is_empty());
+}
+
+#[tokio::test]
+async fn unanswered_sweep_waits_for_the_deadline() {
+    let fixture = Fixture::start().await;
+    let (_alice, _bob) = live_invitation(&fixture).await;
+    let created = fixture.call_created_at_ms().await;
+    let mut scan = UnansweredCallScan::default();
+    fixture
+        .sweep_unanswered_at(&mut scan, created + 54_999, 128)
+        .await;
+    assert!(fixture.missed_calls().await.is_empty());
+    fixture
+        .sweep_unanswered_at(&mut scan, created + 55_000, 128)
+        .await;
+    assert_eq!(fixture.missed_calls().await.len(), 1);
+}
+
+#[tokio::test]
+async fn one_sweep_pages_through_tied_timestamps_at_batch_size_one() {
+    let fixture = Fixture::start().await;
+    let (mut alice, _bob) = live_invitation(&fixture).await;
+    fixture.control_after_retract(&mut alice).await;
+    let created = fixture.call_created_at_ms().await;
+    sqlx::query("UPDATE notification_candidates SET created_at_ms = ? WHERE class = 'call'")
+        .bind(created)
+        .execute(&fixture.pool)
+        .await
+        .expect("tie invitation timestamps");
+    fixture
+        .sweep_unanswered_at(&mut UnansweredCallScan::default(), created + 55_000, 1)
+        .await;
+    assert_eq!(
+        fixture
+            .candidates()
+            .await
+            .iter()
+            .filter(|row| row.class == "missed_call")
+            .count(),
+        2
+    );
 }

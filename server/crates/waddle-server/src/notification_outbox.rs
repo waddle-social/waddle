@@ -18,6 +18,7 @@ use crate::db::{Database, DatabaseError, IntoParams, Row};
 use crate::notification_activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
+mod call_outcome;
 mod candidate;
 mod candidate_persistence;
 mod direct_envelope;
@@ -47,9 +48,15 @@ pub(crate) const fn outbox_schema_gate() -> (i32, i32) {
 #[cfg(test)]
 mod test_support;
 mod types;
+mod unanswered;
+mod unanswered_sweep;
 
+pub(crate) use call_outcome::{call_outcome_recorded, OutcomeAuthor};
 pub(crate) use candidate::MISSED_CALL_WINDOW_SECONDS;
-pub use candidate::{NotificationCall, NotificationCandidate, NotificationMessageHints};
+pub use candidate::{
+    NotificationCall, NotificationCandidate, NotificationMessageHints,
+    CALL_UNANSWERED_DEADLINE_SECONDS,
+};
 pub use deps::{
     active_mention_ttl_ms_from_env, DndReader, DndState, NoopDndReader, NoopRoomPolicy,
     NotificationDrainDeps, RoomPolicyStore, DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
@@ -74,6 +81,9 @@ pub use types::{
     NotificationOutboxPruneOutcome, NotificationOutboxPublishOutcome, NotificationOutboxStatus,
     NotificationOutboxTarget, NotificationReason, NotificationThreadId, PushServiceNodeName,
 };
+pub use unanswered::DueUnansweredCall;
+pub(crate) use unanswered_sweep::sweep_unanswered_calls;
+pub use unanswered_sweep::UnansweredCallScan;
 
 // Internal wiring: children import shared sibling items through this facade.
 use candidate::{
@@ -86,6 +96,7 @@ use payload::build_waddle_context;
 use publish::policy_retry_delay_ms;
 use publisher_persistence::{lock_outbox_ancestry_tx, settle_outbox_if_unowned_tx};
 use types::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
+use unanswered::DueCallKey;
 
 #[derive(Clone)]
 pub struct NotificationOutboxStore {

@@ -28,8 +28,8 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0353::{
     build_finish, build_proceed, build_propose, build_reject, build_retract, build_ringing,
-    is_bodyless_jmi_signal, jmi_media, jmi_propose, jmi_retract, CallOffer, JingleMI,
-    NS_JINGLE_MESSAGE,
+    is_bodyless_jmi_signal, jmi_call_outcome, jmi_media, jmi_propose, jmi_retract, CallOffer,
+    JingleMI, NS_JINGLE_MESSAGE,
 };
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -214,6 +214,19 @@ fn xep_0353_retract_excludes_glare_tie_breaking() {
             .build(),
     );
     assert!(jmi_retract(&message).is_none());
+    assert_eq!(jmi_call_outcome(&message), Some(SessionId("call-1".into())));
+}
+
+#[test]
+fn xep_0353_tie_break_reject_is_call_outcome_evidence() {
+    let mut message = Message::new_with_type(MessageType::Chat, None);
+    message.payloads.push(
+        Element::builder("reject", NS_JINGLE_MESSAGE)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+            .append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build())
+            .build(),
+    );
+    assert_eq!(jmi_call_outcome(&message), Some(SessionId("call-1".into())));
 }
 
 #[test]

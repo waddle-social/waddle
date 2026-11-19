@@ -9,6 +9,7 @@ use waddle_server::notification_outbox::{
     DndReader, DndState, DrainBatch, DrainScope, NotificationCall, NotificationCandidate,
     NotificationClass, NotificationMessageHints, NotificationOutboxError, WADDLE_PUSH_CONTEXT_NS,
 };
+use waddle_server::notification_outbox::{NotificationCandidateInsertOutcome, NotificationReason};
 use waddle_server::notification_settings_projection::{
     ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
 };
@@ -524,4 +525,503 @@ async fn missed_call_uses_normal_drain_and_never_merges_with_dm_or_invitation() 
     assert!(normal
         .iter()
         .any(|job| job.class() == NotificationClass::MissedCall));
+}
+
+async fn unanswered_scan_bounds_and_insert(store: &crate::support::TestStore) {
+    // Each branch has the same exclusive watermark and inclusive deadline.
+    for (id, created, outboxed, quarantined) in [
+        ("pending-after", 100_001, None, false),
+        ("outboxed-due", 110_000, Some(70_000), false),
+        ("at-watermark", 100_000, None, false),
+        ("after-deadline", 110_001, None, false),
+        ("old-outboxed", 105_000, Some(69_999), false),
+        ("quarantined", 105_001, None, true),
+        ("already-missed", 105_002, None, false),
+    ] {
+        store
+            .insert_candidate(&call_candidate(id, id, false))
+            .await
+            .expect("invitation");
+        store.execute(
+            "UPDATE notification_candidates SET created_at_ms = ?, outboxed_at_ms = ?, quarantined_at_ms = ? WHERE stanza_id = ? AND class = 'call'",
+            waddle_server::db_params![created, outboxed, quarantined.then_some(1_i64), id],
+        ).await.expect("scan fixture");
+    }
+    store
+        .insert_candidate(&missed_call_candidate("prior-retract", "already-missed"))
+        .await
+        .expect("prior missed call");
+    assert_eq!(
+        store
+            .insert_unanswered_call(
+                &call_candidate("already-missed", "already-missed", false),
+                165_000,
+            )
+            .await
+            .expect("timer after retract"),
+        NotificationCandidateInsertOutcome::Duplicate,
+    );
+    let due = store
+        .due_unanswered_calls(100_000, 110_000, 16)
+        .await
+        .expect("due scan");
+    assert_eq!(due.len(), 2);
+    assert_eq!(due[0].created_at_ms, 100_001);
+    assert_eq!(due[1].created_at_ms, 110_000);
+    assert_eq!(due[0].candidate.archive_stanza_id().id, "pending-after");
+    assert_eq!(due[1].candidate.archive_stanza_id().id, "outboxed-due");
+    assert_eq!(
+        store
+            .due_unanswered_calls(100_000, 110_000, 1)
+            .await
+            .expect("bounded scan")
+            .len(),
+        1,
+    );
+    assert!(store
+        .due_unanswered_calls(110_000, 110_000, 16)
+        .await
+        .expect("empty interval")
+        .is_empty());
+    // The page after a row continues in the full ordering key.
+    let next = store
+        .due_unanswered_calls_after(100_000, &due[0], 110_000, 16)
+        .await
+        .expect("next page");
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].candidate.archive_stanza_id().id, "outboxed-due");
+    assert!(store
+        .due_unanswered_calls_after(100_000, &due[1], 110_000, 16)
+        .await
+        .expect("page after the last row")
+        .is_empty());
+    let call = &due[0].candidate;
+    let missed = call.unanswered_call().expect("derived missed call");
+    assert_eq!(missed.reason(), NotificationReason::CallUnanswered);
+    assert_eq!(missed.recipient_bare_jid(), call.recipient_bare_jid());
+    assert_eq!(missed.sender_jid(), call.sender_jid());
+    assert_eq!(missed.archive_stanza_id(), call.archive_stanza_id());
+    assert_eq!(missed.call_session_id(), call.call_session_id());
+    assert_eq!(
+        store
+            .insert_unanswered_call(call, 165_000)
+            .await
+            .expect("timer insert"),
+        NotificationCandidateInsertOutcome::Inserted
+    );
+    assert_eq!(
+        store
+            .insert_unanswered_call(call, 165_001)
+            .await
+            .expect("repeat timer"),
+        NotificationCandidateInsertOutcome::Duplicate
+    );
+    assert_eq!(
+        store
+            .insert_candidate(&missed_call_candidate("late-retract", "pending-after"))
+            .await
+            .expect("later retract"),
+        NotificationCandidateInsertOutcome::Duplicate
+    );
+    let mut rows = store.query("SELECT reason, created_at_ms, (SELECT COUNT(*) FROM notification_outbox_lineage) FROM notification_candidates WHERE class = 'missed_call' AND call_sid = 'pending-after'", ()).await.expect("timer row");
+    let row = rows.next().await.expect("row").expect("missed call");
+    assert_eq!(row.get::<String>(0).expect("reason"), "call_unanswered");
+    assert_eq!(row.get::<i64>(1).expect("created"), 165_000);
+    assert_eq!(row.get::<i64>(2).expect("lineage count"), 0);
+    drop(rows);
+    assert_eq!(
+        store
+            .due_unanswered_calls(100_000, 110_000, 16)
+            .await
+            .expect("after insert")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn unanswered_scan_covers_both_branches_bounds_quarantine_and_duplicates() {
+    unanswered_scan_bounds_and_insert(&store().await).await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn postgres_unanswered_scan_covers_both_branches_bounds_and_duplicates() {
+    use waddle_server::notification_outbox::NotificationOutboxStore;
+
+    let Some(fixture) = crate::ingress_support::IngressFixture::postgres("unanswered_scan").await
+    else {
+        return;
+    };
+    let store = crate::support::TestStore {
+        db: fixture.db.clone(),
+        store: NotificationOutboxStore::try_new(fixture.db.clone())
+            .await
+            .expect("outbox"),
+    };
+    unanswered_scan_bounds_and_insert(&store).await;
+    assert_eq!(fixture.count("ingress_effect_descendants").await, 0);
+    drop(store);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn prune_completed_removes_published_lineage_free_unanswered_call() {
+    let store = store().await;
+    let call = call_candidate("unanswered-prune", "prune-session", false);
+    store
+        .insert_unanswered_call(&call, 1)
+        .await
+        .expect("timer alert");
+    let missed = call.unanswered_call().expect("missed call");
+    enqueue_jobs_for_test(&store, &missed, &[target()]).await;
+    let job = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim")
+        .pop()
+        .expect("job");
+    assert!(store.mark_job_published(&job).await.expect("publish"));
+    let old_ms = waddle_server::time::now_ms() - 9 * 24 * 60 * 60 * 1_000;
+    store
+        .execute(
+            "UPDATE notification_candidates SET outboxed_at_ms = ?",
+            waddle_server::db_params![old_ms],
+        )
+        .await
+        .expect("age candidate");
+    store
+        .execute(
+            "UPDATE notification_outbox SET updated_at_ms = ?",
+            waddle_server::db_params![old_ms],
+        )
+        .await
+        .expect("age job");
+    store
+        .execute(
+            "UPDATE notification_outbox_lineage SET settled_at_ms = ?",
+            waddle_server::db_params![old_ms],
+        )
+        .await
+        .expect("age scheduling link");
+    let pruned = store
+        .prune_completed_before(waddle_server::time::now_ms(), 16)
+        .await
+        .expect("prune");
+    assert_eq!(pruned.candidates_deleted, 1);
+    assert_eq!(pruned.jobs_deleted, 1);
+}
+
+#[cfg(feature = "test-support")]
+mod unanswered_sweep {
+    use super::call_candidate;
+    use crate::support::{settings_projection, store, TestStore};
+    use chrono::{DateTime, Utc};
+    use minidom::Element;
+    use waddle_server::notification_outbox::{NotificationReason, UnansweredCallScan};
+    use waddle_server::notification_settings_projection::{
+        ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
+        NotificationSettingsSource,
+    };
+    use waddle_server::test_support::sweep_unanswered_calls_for_test;
+    use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, MamStorage};
+    use waddle_xmpp::xep::xep0353::NS_JINGLE_MESSAGE;
+    use waddle_xmpp::xep::NotificationLevel;
+    use xmpp_parsers::message::Message;
+
+    const NOW_MS: i64 = 1_000_000;
+    const DUE_MS: i64 = NOW_MS - 55_000;
+    const WATERMARK_MS: i64 = NOW_MS - 300_000;
+
+    struct Fixture {
+        store: TestStore,
+        mam: InMemoryMamStorage,
+        settings: NotificationSettingsProjectionStore,
+        scan: UnansweredCallScan,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            Self {
+                store: store().await,
+                mam: InMemoryMamStorage::new(),
+                settings: settings_projection().await,
+                scan: UnansweredCallScan::default(),
+            }
+        }
+
+        async fn invitation(&self, sid: &str, created_at_ms: i64) {
+            self.store
+                .insert_candidate(&call_candidate(sid, sid, false))
+                .await
+                .expect("invitation");
+            self.store
+                .execute(
+                    "UPDATE notification_candidates SET created_at_ms = ? WHERE stanza_id = ?",
+                    waddle_server::db_params![created_at_ms, sid],
+                )
+                .await
+                .expect("invitation clock");
+        }
+
+        async fn sweep(&mut self, batch: usize) -> bool {
+            sweep_unanswered_calls_for_test(
+                &self.store,
+                &self.mam,
+                &self.settings,
+                &mut self.scan,
+                DateTime::<Utc>::from_timestamp_millis(NOW_MS).expect("clock"),
+                batch,
+            )
+            .await
+        }
+
+        async fn missed_count(&self) -> i64 {
+            let mut rows = self
+                .store
+                .query(
+                    "SELECT COUNT(*) FROM notification_candidates WHERE class = 'missed_call'",
+                    (),
+                )
+                .await
+                .expect("count");
+            rows.next()
+                .await
+                .expect("row")
+                .expect("count")
+                .get(0)
+                .expect("count value")
+        }
+
+        async fn outcome(&self, signal: &str, tie_break: bool, callee_authored: bool) {
+            let call = call_candidate("session", "session", false);
+            let (from, to) = if callee_authored {
+                (
+                    "alice@example.com/second-device".parse().expect("callee"),
+                    call.sender_jid().clone(),
+                )
+            } else {
+                (
+                    call.sender_jid().clone(),
+                    call.recipient_bare_jid().clone().into(),
+                )
+            };
+            let mut message = Message::new(Some(to.clone()));
+            message.type_ = xmpp_parsers::message::MessageType::Chat;
+            message.from = Some(from.clone());
+            let mut payload = Element::builder(signal, NS_JINGLE_MESSAGE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "session");
+            if tie_break {
+                payload = payload.append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
+            }
+            message.payloads.push(payload.build());
+            let mut xml = Vec::new();
+            Element::from(message)
+                .write_to(&mut xml)
+                .expect("serialize");
+            self.mam
+                .store_message(
+                    call.recipient_bare_jid(),
+                    &ArchivedMessage {
+                        timestamp: DateTime::<Utc>::from_timestamp_millis(DUE_MS + 1)
+                            .expect("outcome clock"),
+                        stanza_xml: Some(String::from_utf8(xml).expect("UTF-8")),
+                        ..ArchivedMessage::for_test(from, to)
+                    },
+                )
+                .await
+                .expect("archive outcome");
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_deadline_emits_once_and_preserves_future_calls() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        fixture.invitation("future", DUE_MS + 1).await;
+        fixture.invitation("at-watermark", WATERMARK_MS).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 1);
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 1);
+        let missed = fixture
+            .store
+            .pending_candidates(16)
+            .await
+            .expect("candidates");
+        assert!(missed.iter().any(|candidate| {
+            candidate.reason() == NotificationReason::CallUnanswered
+                && candidate.archive_stanza_id().id == "session"
+        }));
+    }
+
+    #[tokio::test]
+    async fn archived_outcomes_from_callee_devices_and_caller_prevent_timer_alert() {
+        for (signal, tie_break, callee_authored) in [
+            ("proceed", false, true),
+            ("reject", false, true),
+            ("reject", true, true),
+            ("accept", false, true),
+            ("finish", false, true),
+            ("retract", true, false),
+        ] {
+            let mut fixture = Fixture::new().await;
+            fixture.invitation("session", DUE_MS).await;
+            fixture.outcome(signal, tie_break, callee_authored).await;
+            assert!(fixture.sweep(16).await, "{signal}");
+            assert_eq!(fixture.missed_count().await, 0, "{signal}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_caller_retract_without_a_missed_call_row_leaves_the_alert_to_the_timer() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        fixture.outcome("retract", false, false).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_answered_call_does_not_hold_back_later_calls_at_batch_size_one() {
+        let mut fixture = Fixture::new().await;
+        // Answered, so it stays eligible for the scan on every sweep.
+        fixture.invitation("session", DUE_MS).await;
+        fixture.outcome("proceed", false, true).await;
+        // One call tied on the timestamp and one before it.
+        fixture.invitation("tied", DUE_MS).await;
+        fixture.invitation("zz-earlier", DUE_MS - 2_000).await;
+        assert!(fixture.sweep(1).await);
+        assert_eq!(fixture.missed_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn muted_conversation_has_no_timer_candidate() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        let call = call_candidate("session", "session", false);
+        fixture
+            .settings
+            .upsert(&NotificationSettingsProjection {
+                owner_bare_jid: call.recipient_bare_jid().clone(),
+                conversation_jid: call.conversation_jid().clone(),
+                conversation_kind: ConversationKind::Direct,
+                mode: NotificationLevel::Never,
+                source: NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: call.conversation_jid().clone(),
+                updated_at_ms: 1,
+                rich_payload_opt_in: false,
+                source_version: 1,
+            })
+            .await
+            .expect("mute");
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_pages_through_timestamp_ties_with_any_batch_size() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("first", DUE_MS).await;
+        fixture.invitation("second", DUE_MS).await;
+        assert!(fixture.sweep(1).await);
+        assert_eq!(fixture.missed_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_archive_evidence_skips_alert_and_leaves_the_call_unsettled() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        let call = call_candidate("session", "session", false);
+        fixture
+            .mam
+            .store_message(
+                call.recipient_bare_jid(),
+                &ArchivedMessage {
+                    timestamp: DateTime::<Utc>::from_timestamp_millis(DUE_MS).expect("clock"),
+                    stanza_xml: Some("invalid archived stanza".into()),
+                    ..ArchivedMessage::for_test(
+                        call.sender_jid().clone(),
+                        call.recipient_bare_jid().clone().into(),
+                    )
+                },
+            )
+            .await
+            .expect("malformed archive row");
+        assert!(!fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 0);
+        assert_eq!(fixture.scan.settled_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn archive_row_without_stanza_xml_is_not_an_outcome() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        let call = call_candidate("session", "session", false);
+        fixture
+            .mam
+            .store_message(
+                call.recipient_bare_jid(),
+                &ArchivedMessage {
+                    timestamp: DateTime::<Utc>::from_timestamp_millis(DUE_MS).expect("clock"),
+                    stanza_xml: None,
+                    ..ArchivedMessage::for_test(
+                        call.sender_jid().clone(),
+                        call.recipient_bare_jid().clone().into(),
+                    )
+                },
+            )
+            .await
+            .expect("displayed marker row");
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_older_than_the_lookback_gets_no_alert() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", WATERMARK_MS - 1_000).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_written_after_an_earlier_sweep_is_still_alerted() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("first", DUE_MS).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 1);
+        // Recovery commits this candidate late, with its original receipt time.
+        fixture.invitation("recovered", DUE_MS - 30_000).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_settled_call_is_not_evaluated_again() {
+        let mut fixture = Fixture::new().await;
+        fixture.invitation("session", DUE_MS).await;
+        fixture.outcome("proceed", false, true).await;
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.scan.settled_calls(), 1);
+        // Evidence that would now fail the lookup is never read.
+        let call = call_candidate("session", "session", false);
+        fixture
+            .mam
+            .store_message(
+                call.recipient_bare_jid(),
+                &ArchivedMessage {
+                    timestamp: DateTime::<Utc>::from_timestamp_millis(DUE_MS).expect("clock"),
+                    stanza_xml: Some("invalid archived stanza".into()),
+                    ..ArchivedMessage::for_test(
+                        call.sender_jid().clone(),
+                        call.recipient_bare_jid().clone().into(),
+                    )
+                },
+            )
+            .await
+            .expect("malformed archive row");
+        assert!(fixture.sweep(16).await);
+        assert_eq!(fixture.missed_count().await, 0);
+    }
 }
