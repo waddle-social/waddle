@@ -61,6 +61,26 @@ final class RoomManagementModelTests: XCTestCase {
         XCTAssertNil(RoomExitConfirmation(.editSettings, name: "design"))
     }
 
+    func testConfirmationsSayTheHuddleIsLeftToo() {
+        XCTAssertEqual(
+            RoomExitConfirmation(.leaveGroup, name: "Weekend trip", leavesHuddle: true)?.message,
+            "You'll leave the huddle and stop getting its messages. To come back, someone in the group chat needs to add you again."
+        )
+        XCTAssertEqual(
+            RoomExitConfirmation(.delete, name: "design", leavesHuddle: true)?.message,
+            "The room and all its messages are removed for everyone, and you leave the huddle. This can't be undone."
+        )
+    }
+
+    func testOnlyThisRoomsHuddleCounts() {
+        let joining = CallState.joiningGroup(GroupCallAttempt(
+            room: SampleSession.design, sid: "s1", media: CallMedia(audio: true, video: false), nick: "ana"
+        ))
+        XCTAssertTrue(joining.isInHuddle(of: SampleSession.design))
+        XCTAssertFalse(joining.isInHuddle(of: Self.group))
+        XCTAssertFalse(CallState.idle.isInHuddle(of: SampleSession.design))
+    }
+
     func testEditRoomSavesOnlyANamedChange() {
         let editor = RoomSettingsEditor(
             room: SampleSession.design,

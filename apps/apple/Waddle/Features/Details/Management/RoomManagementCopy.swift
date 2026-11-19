@@ -41,20 +41,35 @@ struct RoomExitConfirmation: Equatable {
     let confirmTitle: String
     let failureTitle: String
 
-    init?(_ action: RoomManagementAction, name: String) {
+    /// `leavesHuddle`: we are in the room's huddle, which is left first.
+    init?(_ action: RoomManagementAction, name: String, leavesHuddle: Bool = false) {
         switch action {
         case .delete:
             title = "Delete “\(name)”?"
-            message = "The room and all its messages are removed for everyone. This can't be undone."
+            message = leavesHuddle
+                ? "The room and all its messages are removed for everyone, and you leave the huddle. This can't be undone."
+                : "The room and all its messages are removed for everyone. This can't be undone."
             failureTitle = "Couldn't delete the room"
         case .leaveGroup:
             title = "Leave “\(name)”?"
-            message = "You'll stop getting its messages. To come back, someone in the group chat needs to add you again."
+            message = (leavesHuddle ? "You'll leave the huddle and stop getting its messages." : "You'll stop getting its messages.")
+                + " To come back, someone in the group chat needs to add you again."
             failureTitle = "Couldn't leave the group chat"
         case .editSettings, .renameGroup, .inviteToGroup:
             return nil
         }
         self.action = action
         confirmTitle = action.title
+    }
+}
+
+extension CallState {
+    /// In or joining `room`'s huddle; a delete or leave ends that first.
+    func isInHuddle(of room: BareJID) -> Bool {
+        switch self {
+        case let .joiningGroup(attempt): return attempt.room == room
+        case let .inGroup(call): return call.room == room
+        case .idle, .incoming, .outgoing, .active, .ended: return false
+        }
     }
 }

@@ -72,7 +72,9 @@ private struct RoomManagementDialogs: ViewModifier {
     }
 
     private var confirmation: RoomExitConfirmation? {
-        model.pendingExit.flatMap { RoomExitConfirmation($0, name: name) }
+        model.pendingExit.flatMap {
+            RoomExitConfirmation($0, name: name, leavesHuddle: session.calls.state.isInHuddle(of: model.room))
+        }
     }
 
     private var failureTitle: String {
