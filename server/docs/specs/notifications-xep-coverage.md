@@ -140,6 +140,7 @@ replicas following `docs/runbooks/restricted-runtime-cutover.md`.
 | Offline DM produces a durable XEP-0357 push | XEP-0160 (offline storage), XEP-0313 (MAM), XEP-0359 (stable stanza id), XEP-0357 (`<publish>` payload + `urn:xmpp:push:summary` form + `message-count`) | `xep0357_offline_dm_emits_durable_summary_pubsub_publish_job` (`tests/xep0357_push_service_ws.rs`) — full WS-level pipeline; `xep0357_payload_uses_summary_form_and_waddle_context_only` (`notification_outbox.rs`) — payload shape |
 | Offline call invitation becomes class `call`, reason `offline_call` | XEP-0353 raw top-level `<propose>` with nonempty session id, an audio or video RTP description and no body; XEP-0334 store hint; XEP-0357 routing context | `direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call` (`tests/notification_outbox/calls.rs`); raw-recognizer tests in `crates/waddle-xmpp/tests/xep0353_jingle_message.rs` cover audio and audio+video descriptions |
 | Connected and detached recipients get exactly one call candidate, without pending delivery | Like headless delivery, the live path requires an archived XEP-0353 audio/video proposal (XEP-0334 store hint) in the recipient archive with this stanza id; a recipient archive stamp alone is insufficient; XEP-0198 detached bare/full-JID routing; XEP-0191 blocking; XEP-0492 never; XEP-0359 origin-id replay | `tests/xep0353_live_push_ws.rs` covers connected, detached-only, mixed connected/detached, two connected resources, detached full JID, blocked/self/muted, headless, no-store, no-media/retract and origin-id retry. Negative cases wait for a positive control, and positive cases also count candidate effects before deduplication. Persisted reason remains `offline_call` for every session state. |
+| Ringing pushes are limited per caller bare JID and recipient account | Push-only admission: 3 `call` candidates per 60 seconds and 10 per hour; soft across concurrent sessions/replicas | `tests/xep0353_live_push_ws.rs` covers fourth-invitation delivery, retry identity, retract eligibility, headless pending delivery and caller isolation; `notification_outbox::enqueue::tests` covers window boundaries and counted rows. |
 | Caller cancellation produces exactly one missed-call candidate for connected, detached and headless recipients | XEP-0353 plain retract, XEP-0334 store hint, XEP-0313 recipient archive, XEP-0198 detached routing, XEP-0359 canonical identity | `connected_recipient_gets_one_missed_call_candidate`, `detached_recipient_gets_one_missed_call_candidate`, `headless_recipient_gets_one_missed_call_candidate`, `propose_immediately_followed_by_retract_on_one_stream_gets_missed_call` (`tests/xep0353_live_push_ws.rs`); positives count raw candidate effects before deduplication |
 | Missed-call eligibility rejects forged, old, glare and muted/blocked cancellations | XEP-0353 session and tie-break semantics, receipt-time 60-second window, XEP-0492 mute, XEP-0191 blocking | `retract_without_prior_call_candidate_gets_no_missed_call`, `different_account_cannot_retract_another_call_for_a_missed_call_alert`, `tie_break_retract_gets_no_missed_call`, `retract_more_than_sixty_seconds_after_call_candidate_gets_no_missed_call`, `muted_conversation_gets_no_missed_call_even_with_prior_call_candidate`, `caller_blocked_after_proposal_gets_no_missed_call` (`tests/xep0353_live_push_ws.rs`) |
 | Another caller resource can cancel; a repeated retract retains one alert and settles its receipt | XEP-0353 caller bare-JID identity; canonical ingress ancestry and SID uniqueness | `retract_from_another_caller_resource_gets_one_missed_call`, `second_distinct_retract_is_duplicate_and_its_canonical_receipt_settles` (`tests/xep0353_live_push_ws.rs`) |
@@ -187,7 +188,7 @@ raise the non-terminal backlog alert.
 |---|---|---|
 | `waddle_push_candidate_created_total` | `insert_candidate` → Inserted arm | `prometheus.rs` HELP text |
 | `waddle_push_candidate_coalesced_total` | `insert_candidate` → Duplicate arm (PRIMARY KEY hit) | `prometheus.rs` HELP text |
-| `xmpp.push.suppressed{reason=…}` (OTel; Mimir alias `waddle_push_suppressed_total`) | T0 / T1 typed-evaluator Suppressed arm | `telemetry/attributes.rs::PushSuppressReason`; lockstep with `SuppressedReason::as_db_value` |
+| `xmpp.push.suppressed{reason=…}` (OTel; Mimir alias `waddle_push_suppressed_total`) | T0 / T1 typed-evaluator Suppressed arm | `telemetry/attributes.rs::PushSuppressReason`; persisted labels match `SuppressedReason::as_db_value`, with explicit metric-only admission reasons |
 | `waddle_push_outbox_published_total` | `drain_due_outbox_jobs` → Published outcome | `prometheus.rs` HELP text |
 | `waddle_push_outbox_retry_scheduled_total` | `drain_due_outbox_jobs` → RetryScheduled outcome (transient failure backoff) | `prometheus.rs` HELP text |
 | `waddle_push_outbox_dead_lettered_total` | `drain_due_outbox_jobs` → Failed outcome (permanent failure → terminal `failed` status) | `prometheus.rs` HELP text |
@@ -225,6 +226,17 @@ on the outbox timer. The Push Service loop drains due jobs of all classes on
 both wakes and timer ticks. Stored `Notify` permits retain wakes received during a
 sweep. Wakes are process-local. Another replica may claim the row first, and timers
 provide a fallback for recovery, retries and ambiguous queue acceptance.
+
+Ringing pushes allow at most 3 `call` notification candidates per caller bare JID
+and recipient account in 60 seconds, and 10 in an hour. This is a soft limit
+across concurrent sessions/replicas. All existing `call` rows count, including
+later-suppressed, outboxed and quarantined rows. This affects push only: invitations
+remain routed, archived, delivered to connected devices and retained for offline
+delivery. A rate-limited invitation has no candidate and yields no missed-call
+alert. A resent invitation (same origin-id) is planned under a
+fresh archive id, so it counts its own first candidate and may be suppressed;
+that first candidate and its push stand. Suppression emits the metric-only `waddle_call_rate_limit` reason; no
+migration, schema change or new stored suppression value is needed.
 
 A plain JMI retract with an eligible prior call candidate produces the
 missed-call alert described above. Other bodyless messages with a top-level JMI

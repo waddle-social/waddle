@@ -1,9 +1,13 @@
 //! T0 candidate persistence: idempotent inserts and counts.
 
+use super::candidate::{
+    CALL_PUSH_BURST_LIMIT, CALL_PUSH_BURST_WINDOW_SECONDS, CALL_PUSH_HOURLY_LIMIT,
+    CALL_PUSH_HOURLY_WINDOW_SECONDS,
+};
 use super::{
     decode_candidate, BareJid, DatabaseError, NotificationCandidate,
     NotificationCandidateInsertOutcome, NotificationClass, NotificationOutboxError,
-    NotificationOutboxStore, SuppressedReason, MISSED_CALL_WINDOW_SECONDS,
+    NotificationOutboxStore, StanzaId, SuppressedReason, MISSED_CALL_WINDOW_SECONDS,
 };
 use crate::db::DatabaseDriver;
 use crate::db::Transaction;
@@ -40,6 +44,35 @@ impl NotificationOutboxStore {
             )
             .await?;
         Ok(rows.next().await?.is_some())
+    }
+
+    /// Soft admission limit: concurrent preparations can observe the same history.
+    /// Count all call rows, including later-suppressed or quarantined candidates.
+    pub(crate) async fn call_push_rate_limited(
+        &self,
+        recipient: &BareJid,
+        caller: &BareJid,
+        own: &StanzaId,
+        receipt_at: DateTime<Utc>,
+    ) -> Result<bool, NotificationOutboxError> {
+        let receipt_ms = receipt_at.timestamp_millis();
+        let mut rows = self
+            .query(
+                "SELECT created_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND class = 'call' AND stanza_id <> ? AND created_at_ms >= ? ORDER BY created_at_ms DESC LIMIT ?",
+                crate::db_params![
+                    recipient.to_string(),
+                    caller.to_string(),
+                    own.id.clone(),
+                    receipt_ms.saturating_sub(CALL_PUSH_HOURLY_WINDOW_SECONDS * 1_000),
+                    CALL_PUSH_HOURLY_LIMIT as i64,
+                ],
+            )
+            .await?;
+        let mut timestamps = Vec::with_capacity(CALL_PUSH_HOURLY_LIMIT);
+        while let Some(row) = rows.next().await? {
+            timestamps.push(row.get::<i64>(0)?);
+        }
+        Ok(call_push_history_rate_limited(&timestamps, receipt_ms))
     }
 
     pub async fn insert_candidate(
@@ -458,6 +491,19 @@ impl NotificationOutboxStore {
     }
 }
 
+/// The query supplies at most the hourly limit of rows within its lower bound.
+/// No upper bound: database and receipt clocks can differ.
+fn call_push_history_rate_limited(timestamps: &[i64], receipt_ms: i64) -> bool {
+    timestamps.len() >= CALL_PUSH_HOURLY_LIMIT
+        || timestamps
+            .iter()
+            .filter(|&&created_at| {
+                created_at >= receipt_ms.saturating_sub(CALL_PUSH_BURST_WINDOW_SECONDS * 1_000)
+            })
+            .count()
+            >= CALL_PUSH_BURST_LIMIT
+}
+
 fn pending_descendant_sql(api: Option<&DefinerApiCandidateContext<'_>>) -> String {
     if let Some(api) = api {
         format!(
@@ -474,6 +520,173 @@ mod tests {
     use super::*;
     use crate::notification_outbox::test_support::{bare, store};
     use crate::notification_outbox::{NotificationCall, NotificationMessageHints, StanzaId};
+
+    #[test]
+    fn call_push_history_limits_include_burst_boundary_and_future_rows() {
+        let receipt_ms = 4_000_000;
+        for (age_ms, expected) in [(59_999, true), (60_000, true), (60_001, false), (-1, true)] {
+            assert_eq!(
+                call_push_history_rate_limited(&[receipt_ms - age_ms; 3], receipt_ms),
+                expected,
+                "age {age_ms}",
+            );
+        }
+        assert!(!call_push_history_rate_limited(
+            &[receipt_ms; 2],
+            receipt_ms
+        ));
+        assert!(!call_push_history_rate_limited(
+            &[receipt_ms - 60_001; 9],
+            receipt_ms
+        ));
+        assert!(call_push_history_rate_limited(
+            &[receipt_ms - 3_600_000; 10],
+            receipt_ms
+        ));
+    }
+
+    #[tokio::test]
+    async fn call_push_rate_limit_uses_inclusive_receipt_windows() {
+        let recipient = bare("alice@example.com");
+        let caller = bare("bob@example.com");
+        let own = StanzaId::new("new-call", recipient.clone().into());
+        let receipt_ms = 4_000_000;
+        let receipt = DateTime::from_timestamp_millis(receipt_ms).expect("receipt");
+        for (count, age_ms, expected) in [
+            (2, 0, false),
+            (3, 59_999, true),
+            (3, 60_000, true),
+            (3, 60_001, false),
+            (9, 3_599_999, false),
+            (10, 3_599_999, true),
+            (10, 3_600_000, true),
+            (10, 3_600_001, false),
+            (3, -1, true),
+        ] {
+            let store = store().await;
+            let mut tx = store.db.begin().await.expect("transaction");
+            for index in 0..count {
+                let candidate = NotificationCandidate::call_with_hints(
+                    recipient.clone(),
+                    "bob@example.com/phone".parse().expect("sender"),
+                    StanzaId::new(format!("call-{index}"), recipient.clone().into()),
+                    NotificationCall {
+                        session_id: SessionId(format!("session-{index}")),
+                        video: false,
+                    },
+                    NotificationMessageHints::none(),
+                )
+                .expect("call");
+                NotificationOutboxStore::insert_candidate_in_transaction(
+                    &mut tx,
+                    &candidate,
+                    receipt_ms - age_ms,
+                )
+                .await
+                .expect("insert");
+            }
+            tx.commit().await.expect("commit");
+            assert_eq!(
+                store
+                    .call_push_rate_limited(&recipient, &caller, &own, receipt)
+                    .await
+                    .expect("limit"),
+                expected,
+                "{count} rows aged {age_ms} ms",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn call_push_rate_limit_excludes_own_identity_and_other_scopes_but_counts_all_states() {
+        let store = store().await;
+        let recipient = bare("alice@example.com");
+        let caller = bare("bob@example.com");
+        let receipt_ms = 4_000_000;
+        let receipt = DateTime::from_timestamp_millis(receipt_ms).expect("receipt");
+        for (recipient, sender, stanza, missed) in [
+            (recipient.clone(), "bob@example.com/phone", "own", false),
+            (
+                bare("other@example.com"),
+                "bob@example.com/phone",
+                "other-recipient",
+                false,
+            ),
+            (
+                recipient.clone(),
+                "other@example.com/phone",
+                "other-caller",
+                false,
+            ),
+            (recipient.clone(), "bob@example.com/phone", "missed", true),
+            (
+                recipient.clone(),
+                "bob@example.com/phone",
+                "suppressed",
+                false,
+            ),
+            (
+                recipient.clone(),
+                "bob@example.com/phone",
+                "quarantined",
+                false,
+            ),
+        ] {
+            let session_id = SessionId(stanza.into());
+            let identity = StanzaId::new(stanza, recipient.clone().into());
+            let hints = NotificationMessageHints::none();
+            let candidate = if missed {
+                NotificationCandidate::missed_call_with_hints(
+                    recipient,
+                    sender.parse().expect("sender"),
+                    identity,
+                    session_id,
+                    hints,
+                )
+            } else {
+                NotificationCandidate::call_with_hints(
+                    recipient,
+                    sender.parse().expect("sender"),
+                    identity,
+                    NotificationCall {
+                        session_id,
+                        video: false,
+                    },
+                    hints,
+                )
+            }
+            .expect("candidate");
+            let mut tx = store.db.begin().await.expect("transaction");
+            NotificationOutboxStore::insert_candidate_in_transaction(
+                &mut tx, &candidate, receipt_ms,
+            )
+            .await
+            .expect("insert");
+            tx.execute(
+                "UPDATE notification_candidates SET outboxed_at_ms = ?, suppressed_reason = ?, quarantined_at_ms = ? WHERE stanza_id = ?",
+                crate::db_params![
+                    (stanza == "suppressed").then_some(receipt_ms),
+                    (stanza == "suppressed").then_some("waddle_dnd"),
+                    (stanza == "quarantined").then_some(receipt_ms),
+                    stanza,
+                ],
+            ).await.expect("candidate state");
+            tx.commit().await.expect("commit");
+        }
+        // Only the suppressed and quarantined rows count, even when the retry's
+        // archive authority differs: the query excludes the stanza id alone.
+        let retry = StanzaId::new("own", caller.clone().into());
+        assert!(!store
+            .call_push_rate_limited(&recipient, &caller, &retry, receipt)
+            .await
+            .expect("retry"));
+        // Without that self exclusion, own + suppressed + quarantined reach three.
+        let new = StanzaId::new("new", recipient.clone().into());
+        assert!(store
+            .call_push_rate_limited(&recipient, &caller, &new, receipt)
+            .await
+            .expect("new call"));
+    }
 
     #[tokio::test]
     async fn recent_call_evidence_uses_receipt_window_and_original_scope() {
@@ -592,5 +805,53 @@ mod tests {
             Err(IngressUowError::EffectIntentConflict)
         ));
         tx.commit().await.expect("commit");
+    }
+
+    /// The limit's query is otherwise only exercised on SQLite.
+    #[tokio::test]
+    async fn postgres_call_push_rate_limit_counts_the_pair() {
+        let Some(fixture) =
+            crate::ingress::test_support::IngressFixture::postgres("call_push_rate_limit").await
+        else {
+            return;
+        };
+        let store = NotificationOutboxStore::try_new(fixture.db.clone())
+            .await
+            .expect("outbox");
+        let recipient = bare("alice@example.com");
+        let caller = bare("bob@example.com");
+        for stanza in ["first", "second", "third"] {
+            let candidate = NotificationCandidate::call_with_hints(
+                recipient.clone(),
+                "bob@example.com/phone".parse().expect("sender"),
+                StanzaId::new(stanza, recipient.clone().into()),
+                NotificationCall {
+                    session_id: SessionId(stanza.into()),
+                    video: false,
+                },
+                NotificationMessageHints::none(),
+            )
+            .expect("candidate");
+            store.insert_candidate(&candidate).await.expect("insert");
+        }
+        let now = Utc::now();
+        let limited = |own: &'static str, caller: BareJid| {
+            let store = &store;
+            let recipient = recipient.clone();
+            async move {
+                store
+                    .call_push_rate_limited(
+                        &recipient,
+                        &caller,
+                        &StanzaId::new(own, recipient.clone().into()),
+                        now,
+                    )
+                    .await
+                    .expect("lookup")
+            }
+        };
+        assert!(limited("fourth", caller.clone()).await);
+        assert!(!limited("third", caller).await, "own row is not counted");
+        assert!(!limited("fourth", bare("carol@example.com")).await);
     }
 }

@@ -227,6 +227,35 @@ impl Fixture {
         .expect("call candidates")
     }
 
+    async fn call_with_sid(&self, sid: &str) -> CandidateRow {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = self
+                    .candidates()
+                    .await
+                    .into_iter()
+                    .find(|row| row.class == "call" && row.call_sid.as_deref() == Some(sid))
+                {
+                    return row;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("call candidate committed")
+    }
+
+    fn recipient_candidate_effect_count(&self) -> usize {
+        std::fs::read_to_string(&self.effects_file)
+            .expect("candidate observations")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<(String, String)>(line).expect("candidate observation")
+            })
+            .filter(|(owner, _)| owner == recipient().as_str())
+            .count()
+    }
+
     async fn one_call(&self, video: bool) -> CandidateRow {
         self.one_call_for(&recipient(), CALL_ID, video).await
     }
@@ -445,6 +474,10 @@ async fn barrier(client: &mut WsXmppClient) {
 }
 
 async fn receive_call(client: &mut WsXmppClient) {
+    receive_call_with_sid(client, CALL_ID).await;
+}
+
+async fn receive_call_with_sid(client: &mut WsXmppClient, expected_sid: &str) {
     client
         .recv_matching(|frame| {
             frame
@@ -452,7 +485,7 @@ async fn receive_call(client: &mut WsXmppClient) {
                 .ok()
                 .and_then(|element| Message::try_from(element).ok())
                 .and_then(|message| jmi_propose(&message))
-                .is_some_and(|(sid, _)| sid.0 == CALL_ID)
+                .is_some_and(|(sid, _)| sid.0 == expected_sid)
         })
         .await
         .expect("recipient receives call proposal");
@@ -718,13 +751,127 @@ async fn origin_id_retry_reuses_the_live_call_candidate_archive_identity() {
     assert_eq!(fixture.pending_count().await, 0);
 }
 
+#[tokio::test]
+async fn call_push_burst_limit_preserves_live_delivery_and_other_callers() {
+    let fixture = Fixture::start().await;
+    let mut bob = fixture.available("phone").await;
+    let mut alice = fixture.connect(0, "sender").await;
+    for sid in ["burst-first", "burst-second"] {
+        send(
+            &mut alice,
+            proposal_with_sid(recipient().into(), CallOffer::audio_only(), sid).into(),
+        )
+        .await;
+        barrier(&mut alice).await;
+        receive_call_with_sid(&mut bob, sid).await;
+        fixture.call_with_sid(sid).await;
+    }
+
+    let mut third = proposal_with_sid(recipient().into(), CallOffer::audio_only(), "burst-third");
+    add_origin_id(&mut third, "burst-third-origin");
+    send(&mut alice, third.clone().into()).await;
+    barrier(&mut alice).await;
+    receive_call_with_sid(&mut bob, "burst-third").await;
+    let original_third = fixture.call_with_sid("burst-third").await;
+    assert_eq!(fixture.candidates().await.len(), 3);
+    assert_eq!(fixture.recipient_candidate_effect_count(), 3);
+
+    third.id = Some(Id("burst-third-retry".to_owned()));
+    send(&mut alice, third.into()).await;
+    barrier(&mut alice).await;
+    barrier(&mut bob).await;
+    assert_eq!(fixture.call_with_sid("burst-third").await, original_third);
+    assert_eq!(fixture.candidates().await.len(), 3);
+    // A retry is planned under a fresh archive id, so it counts its own
+    // original row and is suppressed. The original row and push stand.
+    assert_eq!(fixture.recipient_candidate_effect_count(), 3);
+
+    send(
+        &mut alice,
+        proposal_with_sid(recipient().into(), CallOffer::audio_only(), "burst-fourth").into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    receive_call_with_sid(&mut bob, "burst-fourth").await;
+    let rows = fixture.candidates().await;
+    assert_eq!(rows.len(), 3, "the fourth invitation creates no candidate");
+    assert!(rows.iter().all(|row| row.class == "call"));
+    assert_eq!(fixture.recipient_candidate_effect_count(), 3);
+    assert_eq!(fixture.pending_count().await, 0);
+
+    send(
+        &mut alice,
+        retract_with_sid("burst-fourth-retract", "burst-fourth").into(),
+    )
+    .await;
+    fixture.no_missed_call(&mut alice).await;
+    fixture.notification_effects_settled().await;
+
+    let mut charlie = fixture.connect(2, "other-caller").await;
+    send(
+        &mut charlie,
+        proposal_with_sid(recipient().into(), CallOffer::audio_only(), "other-caller").into(),
+    )
+    .await;
+    barrier(&mut charlie).await;
+    receive_call_with_sid(&mut bob, "other-caller").await;
+    fixture.call_with_sid("other-caller").await;
+    let rows = fixture.candidates().await;
+    assert_eq!(
+        rows.len(),
+        5,
+        "three Alice calls, control, and Charlie call"
+    );
+    assert!(rows.iter().all(|row| row.class == "call"));
+}
+
+#[tokio::test]
+async fn headless_fourth_call_keeps_pending_delivery_without_a_candidate() {
+    let fixture = Fixture::start().await;
+    let mut alice = fixture.connect(0, "sender").await;
+    for sid in ["offline-first", "offline-second", "offline-third"] {
+        send(
+            &mut alice,
+            proposal_with_sid(recipient().into(), CallOffer::audio_only(), sid).into(),
+        )
+        .await;
+        barrier(&mut alice).await;
+        fixture.call_with_sid(sid).await;
+    }
+    assert_eq!(fixture.pending_count().await, 3);
+    send(
+        &mut alice,
+        proposal_with_sid(
+            recipient().into(),
+            CallOffer::audio_only(),
+            "offline-fourth",
+        )
+        .into(),
+    )
+    .await;
+    barrier(&mut alice).await;
+    // The committed positive control also proves execution finished for the fourth call.
+    fixture.control_after_retract(&mut alice).await;
+    assert_eq!(fixture.pending_count().await, 4);
+    let rows = fixture.candidates().await;
+    assert_eq!(rows.len(), 4, "three invitations and the positive control");
+    assert!(rows.iter().all(|row| row.class == "call"));
+    assert!(rows
+        .iter()
+        .all(|row| row.call_sid.as_deref() != Some("offline-fourth")));
+}
+
 fn retract(id: &str) -> Message {
+    retract_with_sid(id, CALL_ID)
+}
+
+fn retract_with_sid(id: &str, sid: &str) -> Message {
     let mut message = Message::new(Some(recipient().into()));
     message.type_ = MessageType::Chat;
     message.id = Some(Id(id.to_owned()));
     message
         .payloads
-        .push(build_retract(SessionId(CALL_ID.to_owned())).into());
+        .push(build_retract(SessionId(sid.to_owned())).into());
     add_hint(&mut message, Hint::Store);
     message
 }

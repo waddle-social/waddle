@@ -8,6 +8,10 @@ use super::{
 use xmpp_parsers::jingle::SessionId;
 
 pub const CALL_RING_DURATION_SECONDS: i64 = 45;
+pub(super) const CALL_PUSH_BURST_LIMIT: usize = 3;
+pub(super) const CALL_PUSH_BURST_WINDOW_SECONDS: i64 = 60;
+pub(super) const CALL_PUSH_HOURLY_LIMIT: usize = 10;
+pub(super) const CALL_PUSH_HOURLY_WINDOW_SECONDS: i64 = 3600;
 pub const CALL_UNANSWERED_DEADLINE_SECONDS: i64 = CALL_RING_DURATION_SECONDS + 10;
 /// Retracts remain eligible for a short grace period after ringing expires.
 pub const MISSED_CALL_WINDOW_SECONDS: i64 = CALL_RING_DURATION_SECONDS + 15;
