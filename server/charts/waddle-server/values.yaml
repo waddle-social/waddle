@@ -266,6 +266,11 @@ xmpp:
     keyKey: tls.key
   nativeAuthEnabled: true
   registrationEnabled: false
+  # XEP-0388 SASL2 negotiation on the WebSocket listener (WADDLE_XMPP_SASL2):
+  # `enabled` advertises SASL2 beside SASL1, with XEP-0198 inline resumption
+  # and XEP-0386 Bind 2; `disabled` leaves SASL1 as the only authentication
+  # path. See docs/operations/sasl2.md.
+  sasl2: enabled
 
 extensions:
   enabled: false

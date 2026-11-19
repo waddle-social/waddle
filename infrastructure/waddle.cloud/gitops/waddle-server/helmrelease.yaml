@@ -143,6 +143,9 @@ spec:
     xmpp:
       domain: waddle.social
       publicWebsocketUrl: wss://xmpp.waddle.social/ws
+      # XEP-0388 SASL2 with inline resumption and Bind 2
+      # (docs/operations/sasl2.md). Set to `disabled` to fall back to SASL1.
+      sasl2: enabled
       tls:
         secretName: waddle-xmpp-tls
     persistence:

@@ -535,6 +535,33 @@ pub(super) fn sasl2_inline_requests(
     Sasl2InlineRequests::from_authenticate(request).ok()
 }
 
+/// The SASL2 offer advertised in unauthenticated stream features, or `None`
+/// when SASL2 negotiation is disabled.
+///
+/// The inline offer matches what [`sasl2_inline_requests`] processes:
+/// XEP-0198 resumption and XEP-0386 Bind 2, with stream management enabled
+/// inside the bind, only where the durable session authority is selected,
+/// and no inline features elsewhere.
+pub(super) fn sasl2_advertised_offer(
+    state: &WebSocketState,
+) -> Option<waddle_xmpp_core::xep0388_inline::Sasl2InlineOffer> {
+    use waddle_xmpp_core::disco::Feature;
+    use waddle_xmpp_core::xep0388_inline::{Bind2Feature, Sasl2InlineOffer, NS_SM};
+
+    if !state.sasl2_negotiation_enabled() {
+        return None;
+    }
+    if super::stream_management::selected_store(state).is_none() {
+        return Some(Sasl2InlineOffer::default());
+    }
+    Some(Sasl2InlineOffer {
+        stream_resumption: true,
+        bind2: Some(Bind2Feature {
+            inline_features: vec![Feature(NS_SM.to_owned())],
+        }),
+    })
+}
+
 /// A SASL2 `<success/>` whose inline results are not all known yet.
 ///
 /// Authentication has succeeded. The reply waits for the inline requests:

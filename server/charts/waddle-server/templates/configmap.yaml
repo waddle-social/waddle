@@ -20,6 +20,7 @@ data:
   {{- end }}
   WADDLE_NATIVE_AUTH_ENABLED: {{ .Values.xmpp.nativeAuthEnabled | toString | quote }}
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
+  WADDLE_XMPP_SASL2: {{ .Values.xmpp.sasl2 | quote }}
   WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
   WADDLE_DRAIN_TIMEOUT_SECS: {{ .Values.config.drainTimeoutSeconds | toString | quote }}
   WADDLE_CLUSTERING_ENABLED: {{ .Values.clustering.enabled | toString | quote }}

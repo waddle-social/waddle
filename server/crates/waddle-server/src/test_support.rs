@@ -331,15 +331,29 @@ pub fn receipt_custody_shares_ingress_lane(
     authority.receipt_custody_shares_ingress_lane(database)
 }
 
-/// Build a test-only WebSocket fixture that advertises and dispatches the
-/// dark SASL2 OAuthBearer path. This fixture does not assert TLS termination
-/// or prove that a request arrived without early data.
+/// Build a WebSocket fixture with `WADDLE_XMPP_SASL2=enabled`, the
+/// production default: it advertises and dispatches XEP-0388 SCRAM-SHA-256
+/// and OAUTHBEARER. The loopback fixture does not assert TLS termination.
 #[cfg(feature = "test-support")]
 pub async fn websocket_state_with_sasl2() -> Arc<WebSocketState> {
+    websocket_state_with_sasl2_selection(crate::server::Sasl2Negotiation::Enabled).await
+}
+
+/// Build a WebSocket fixture with `WADDLE_XMPP_SASL2=disabled`: SASL2 is
+/// neither advertised nor accepted and only SASL1 authenticates.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_sasl2_disabled() -> Arc<WebSocketState> {
+    websocket_state_with_sasl2_selection(crate::server::Sasl2Negotiation::Disabled).await
+}
+
+#[cfg(feature = "test-support")]
+async fn websocket_state_with_sasl2_selection(
+    sasl2: crate::server::Sasl2Negotiation,
+) -> Arc<WebSocketState> {
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides {
-            sasl2_test_capability: true,
+            sasl2,
             ..TestStateOverrides::default()
         },
         || std::future::ready(None),
@@ -349,7 +363,7 @@ pub async fn websocket_state_with_sasl2() -> Arc<WebSocketState> {
 
 /// [`websocket_state_with_sasl2`]. Every fixture selects the durable
 /// stream-management authority on its database, as startup does, so the
-/// dark SASL2 handshake processes XEP-0198 inline resume and XEP-0386
+/// SASL2 handshake offers and processes XEP-0198 inline resume and XEP-0386
 /// Bind 2.
 #[cfg(feature = "test-support")]
 pub async fn websocket_state_with_sasl2_and_durable_sm() -> Arc<WebSocketState> {
@@ -363,7 +377,7 @@ pub async fn websocket_state_with_sasl2_without_durable_sm() -> Arc<WebSocketSta
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides {
-            sasl2_test_capability: true,
+            sasl2: crate::server::Sasl2Negotiation::Enabled,
             without_durable_sm: true,
             ..TestStateOverrides::default()
         },

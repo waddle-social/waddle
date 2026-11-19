@@ -784,8 +784,10 @@ async fn handle_xmpp_frame_impl(
             }
             let open_element = websocket_stream_open_element(domain, from.as_ref());
             *stream_open_from = from;
-            let features_element =
-                build_stream_features_for_phase_element(phase, state.sasl2_negotiation_enabled());
+            let features_element = build_stream_features_for_phase_element(
+                phase,
+                super::sasl::sasl2_advertised_offer(state),
+            );
             conn.begin_server_stream_open_response();
             vec![open_element, features_element].into()
         }
@@ -886,10 +888,8 @@ async fn handle_xmpp_frame_impl(
         InboundFrame::Sasl2Authenticate(request) => {
             use waddle_xmpp_core::xep0388::{Sasl2FailureCondition, Sasl2Mechanism, NS_SASL2};
 
-            // SASL2 is dark by default. Only an explicitly opted-in test
-            // fixture can advertise and dispatch this handshake; operator
-            // URL configuration is not evidence of the request's TLS or
-            // early-data state.
+            // An operator-disabled SASL2 (`WADDLE_XMPP_SASL2=disabled`) is
+            // neither advertised nor accepted.
             if !state.sasl2_negotiation_enabled() {
                 return vec![sasl2_failure_element(
                     Sasl2FailureCondition::InvalidMechanism,

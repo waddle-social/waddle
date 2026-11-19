@@ -56,7 +56,10 @@ pub use routes::interpret::effects;
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
 pub mod xmpp_state;
 
-pub use config::{MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};
+pub use config::{
+    InvalidSasl2Negotiation, MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, Sasl2Negotiation,
+    XmppAcmeConfig, XmppConfig,
+};
 pub use routes::webhook_delivery::WebhookDeliveryAttachError;
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
