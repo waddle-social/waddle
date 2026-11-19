@@ -2,6 +2,27 @@ import Foundation
 import WaddleKit
 
 extension FFIOutbound {
+    static func roomSettingsPatch(_ patch: RoomSettingsPatch) -> WaddleRoomConfigPatch {
+        WaddleRoomConfigPatch(
+            membersOnly: nil, publicRoom: nil, persistentRoom: nil,
+            name: patch.name, description: patch.summary, forum: nil,
+            pinPermission: patch.pinPermission.map(pinPermission))
+    }
+
+    static func pinPermission(_ permission: PinPermission) -> WaddlePinPermission {
+        switch permission {
+        case .adminsOnly: return .adminsOnly
+        case .anyone: return .anyone
+        }
+    }
+
+    static func groupDMHistoryAccess(_ history: GroupDMHistoryAccess) -> WaddleGroupDmHistoryAccess {
+        switch history {
+        case .fromJoin: return .fromJoin
+        case .full: return .full
+        }
+    }
+
     /// Exhaustive so a new FFI outcome is a compile error until mapped.
     static func sendOutcome(_ outcome: WaddleSendMessageOutcome) -> SendOutcome {
         switch outcome {

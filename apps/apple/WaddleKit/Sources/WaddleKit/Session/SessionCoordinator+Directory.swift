@@ -5,18 +5,27 @@ extension SessionCoordinator {
     /// DM, and room the user opened or created this session. A failed
     /// discovery keeps the last known directory.
     func refreshDirectory() async {
+        let mutationStart = directoryMutations.count
         let result = await port.discoverTopology()
         // A superseded ready pipeline (the stream dropped and reconnected
         // meanwhile) must not overwrite the directory with its answer.
         guard !Task.isCancelled else { return }
         if case let .success(topology) = result {
             directory.apply(topology)
+            for mutation in directoryMutations.dropFirst(mutationStart) {
+                switch mutation {
+                case .upsert(let channel): directory.upsert(channel)
+                case .remove(let room): directory.remove(room)
+                }
+            }
         }
+        for room in destroyedRooms { directory.remove(room) }
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
             .map(\.roomJID)
         var joined: Set<BareJID> = []
         for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
+            guard !destroyedRooms.contains(room), !departingRooms.contains(room), directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
             await port.joinRoom(room, nick: account.nick)
         }
     }
@@ -26,6 +35,7 @@ extension SessionCoordinator {
     /// are otherwise never entered, so opening one would show a room we
     /// cannot send to or receive from (XEP-0045 §7.4).
     func ensureJoined(_ room: BareJID) async {
+        guard !destroyedRooms.contains(room), !departingRooms.contains(room) else { return }
         onDemandRooms.insert(room)
         // Offline, the ready pipeline joins it on connect.
         guard status.connection == .online, !presence.joinedRooms.contains(room) else { return }
@@ -55,7 +65,7 @@ extension SessionCoordinator {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let localpart = RoomLocalpart.make(from: trimmed) else { throw PortError.invalidRequest }
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
-        directory.upsert(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
+        upsertChannel(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
         // create_room joined, configured and then left the room. Its
         // self-presence may already have marked the room joined while the
         // leave's echo is still in flight, so rejoin unconditionally: the
@@ -68,7 +78,7 @@ extension SessionCoordinator {
     /// Creates a group DM with `members` and returns its conversation.
     public func createGroupDM(name: String, members: [BareJID]) async throws -> ConversationID {
         let room = try await port.createGroupDM(name: name, members: members)
-        directory.upsert(Channel(roomJID: room, name: name, isGroupDM: true))
+        upsertChannel(Channel(roomJID: room, name: name, isGroupDM: true))
         await ensureJoined(room)
         return .room(room)
     }

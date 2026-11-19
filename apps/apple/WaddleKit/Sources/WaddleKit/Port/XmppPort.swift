@@ -98,6 +98,18 @@ public protocol DirectoryPort: AnyObject, Sendable {
     func discoverTopology() async -> Result<Topology, PortError>
     func joinRoom(_ room: BareJID, nick: String) async
     func leaveRoom(_ room: BareJID, nick: String) async
+    /// Fetches the room settings offered by the server.
+    func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings
+    /// Updates only the fields included in the patch.
+    func updateRoomSettings(_ patch: RoomSettingsPatch, of room: BareJID) async throws
+    /// Destroys the room for all occupants.
+    func destroyRoom(_ room: BareJID, reason: String?) async throws
+    /// Renames a group DM; nil clears its name.
+    func renameGroupDM(_ room: BareJID, name: String?) async throws
+    /// Sends an invitation; a later refusal arrives as a message error.
+    func inviteToGroupDM(_ room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess) async throws
+    /// Leaves the group DM and removes our membership.
+    func leaveGroupDM(_ room: BareJID) async throws
     func listMembers(of room: BareJID) async throws -> [RoomMember]
     /// The bots the room declares; the affiliation lists never name them.
     func listRoomBots(in room: BareJID) async throws -> [RoomBot]

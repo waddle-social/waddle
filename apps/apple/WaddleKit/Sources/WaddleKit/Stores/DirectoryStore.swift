@@ -73,17 +73,26 @@ public final class DirectoryStore {
         hasLoadedTopology = true
     }
 
-    /// Adds a room created or joined in this session before the next
-    /// topology refresh lists it.
+    /// Adds or replaces a room, ordered by position then name.
     public func upsert(_ channel: Channel) {
         roomJIDs.insert(channel.roomJID)
         if channel.isGroupDM {
             groupDMs.removeAll { $0.roomJID == channel.roomJID }
             groupDMs.append(channel)
+            groupDMs.sort { ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased()) }
         } else {
             channels.removeAll { $0.roomJID == channel.roomJID }
             channels.append(channel)
+            channels.sort { ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased()) }
         }
+    }
+
+    /// Removes a room and its notification preference.
+    public func remove(_ room: BareJID) {
+        channels.removeAll { $0.roomJID == room }
+        groupDMs.removeAll { $0.roomJID == room }
+        roomJIDs.remove(room)
+        notifyModes.removeValue(forKey: .room(room))
     }
 
     /// Records 1:1 activity, moving the peer to the top of the DM list.
