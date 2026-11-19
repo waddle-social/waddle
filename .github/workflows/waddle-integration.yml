@@ -134,14 +134,6 @@ jobs:
         run: "xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-macOS -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test"
       - name: Build and test iOS app
         run: "device=\"$(python3 apps/apple/scripts/newest-iphone-simulator.py)\"\nxcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination \"platform=iOS Simulator,id=${device}\" CODE_SIGNING_ALLOWED=NO test\n"
-      - name: Keep the snapshots a failed run recorded
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: waddle_apple_pullrequest-apple-recorded-snapshots
-          path: apps/apple/WaddleTests/__Snapshots__
-          if-no-files-found: ignore
-          retention-days: 7
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_apple_pullrequest == 'true' }}"
