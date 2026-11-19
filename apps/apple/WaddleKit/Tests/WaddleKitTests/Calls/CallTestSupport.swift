@@ -18,18 +18,24 @@ let callJoin = CallJoin(
     let ringTimeout: Duration
     let sessionTimeout: Duration
     let unansweredTimeout: Duration
+    let media: RecordingCallMedia?
+    var now = ContinuousClock.now
+    var reports: [CallLifecycleReport] = []
     init(
         sid: @escaping () -> String = { "c1" }, ringTimeout: Duration = .seconds(45), sessionTimeout: Duration = .seconds(45),
-        unansweredTimeout: Duration = .seconds(60)
+        unansweredTimeout: Duration = .seconds(60), media: RecordingCallMedia? = nil
     ) {
         self.sid = sid
         self.ringTimeout = ringTimeout
         self.sessionTimeout = sessionTimeout
         self.unansweredTimeout = unansweredTimeout
+        self.media = media
     }
     lazy var store = CallStore(
-        port: port, ownJID: { [weak self] in self?.own }, ownBareJID: callOwn.bare, ringTimeout: ringTimeout,
-        sessionTimeout: sessionTimeout, unansweredTimeout: unansweredTimeout, newSid: sid)
+        port: port, ownJID: { [weak self] in self?.own }, ownBareJID: callOwn.bare, media: media, ringTimeout: ringTimeout,
+        sessionTimeout: sessionTimeout, unansweredTimeout: unansweredTimeout,
+        now: { [weak self] in self?.now ?? ContinuousClock.now },
+        report: { [weak self] in self?.reports.append($0) }, newSid: sid)
     func event(_ kind: CallEvent.Kind, sid: String = "c1", from: JID = callPeer) -> CallEvent {
         CallEvent(from: from, sid: sid, kind: kind)
     }

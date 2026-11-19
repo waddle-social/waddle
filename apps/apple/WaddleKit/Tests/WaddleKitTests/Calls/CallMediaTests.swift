@@ -338,6 +338,8 @@ import Testing
         case disconnect
     }
     var onFailure: (@MainActor () -> Void)?
+    var onPhaseChange: (@MainActor (CallMediaPhase) -> Void)?
+    var wasEndedByServer = false
     var calls: [Call] = []
     var connectThrows = false
     var holdConnect = false

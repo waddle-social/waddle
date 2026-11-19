@@ -235,6 +235,7 @@ extension CallStore {
         let claimed = state
         let epoch = generation
         cancelGroupWaits(for: claimed)
+        exitCause = .remote(own: false)
         transition(.ended(sid: event.sid, reason: reason))
         if case .inGroup(let call) = claimed {
             forgetOwnGroupEntry(in: call.room, nick: call.nick, identity: ownJID(), epoch: epoch)

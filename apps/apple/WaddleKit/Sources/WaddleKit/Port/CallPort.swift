@@ -1,5 +1,8 @@
 /// XEP-0353 call invitations and the XEP-0166 session verbs. `false` means the stanza was not written.
 public protocol CallPort: AnyObject, Sendable {
+    /// Each outcome is attempted once; delivery never retries a report.
+    func reportCallLifecycle(_ report: CallLifecycleReport) async -> CallLifecycleReportResult
+
     /// XEP-0215 STUN/TURN advertisement; failure returns an empty list so
     /// media keeps the SDK's signaling-provided servers.
     func fetchExternalServices() async -> [ExternalService]

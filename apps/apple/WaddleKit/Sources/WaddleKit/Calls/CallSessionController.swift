@@ -3,7 +3,10 @@
     private enum Failure: Error { case invalidGrant }
     private let media: any CallMediaController
     private let fetchExternalServices: @MainActor () async -> [ExternalService]
-    private let hangUp: @MainActor (String, JingleReason) async -> Void
+    private let mediaConnected: @MainActor (String) -> Void
+    private let phaseChanged: @MainActor (String, CallMediaPhase) -> Void
+    /// The flag is true when the SFU ended the session, which is not a failure.
+    private let hangUp: @MainActor (String, JingleReason, Bool) async -> Void
     private var targetSid: String?
     private var connectedSid: String?
     private var revision = 0
@@ -15,10 +18,14 @@
     init(
         media: any CallMediaController,
         fetchExternalServices: @escaping @MainActor () async -> [ExternalService],
-        hangUp: @escaping @MainActor (String, JingleReason) async -> Void
+        mediaConnected: @escaping @MainActor (String) -> Void,
+        phaseChanged: @escaping @MainActor (String, CallMediaPhase) -> Void,
+        hangUp: @escaping @MainActor (String, JingleReason, Bool) async -> Void
     ) {
         self.media = media
         self.fetchExternalServices = fetchExternalServices
+        self.mediaConnected = mediaConnected
+        self.phaseChanged = phaseChanged
         self.hangUp = hangUp
     }
 
@@ -35,6 +42,7 @@
         if connectedSid != nil {
             connectedSid = nil
             media.onFailure = nil
+            media.onPhaseChange = nil
             let previousDisconnect = disconnectTask
             // Closing the microphone never waits for a suspended connect.
             disconnectTask = Task {
@@ -52,7 +60,15 @@
             guard revision == expectedRevision, !Task.isCancelled else { return }
             connectedSid = call.sid
             media.onFailure = { [weak self] in
-                self?.endCall(call.sid, reason: .connectivityError, revision: expectedRevision)
+                guard let self else { return }
+                self.endCall(call.sid, reason: .connectivityError, revision: expectedRevision, endedByServer: self.media.wasEndedByServer)
+            }
+            media.onPhaseChange = { [weak self] phase in
+                guard let self, self.revision == expectedRevision else { return }
+                switch phase {
+                case .reconnecting, .connected: self.phaseChanged(call.sid, phase)
+                case .idle, .connecting: break
+                }
             }
             do {
                 guard call.join.grantDefect == nil else { throw Failure.invalidGrant }
@@ -62,6 +78,8 @@
                 try await media.connect(join: call.join, media: call.media, iceServers: IceServer.servers(from: services))
                 if revision != expectedRevision || Task.isCancelled {
                     await media.disconnect()
+                } else {
+                    mediaConnected(call.sid)
                 }
             } catch {
                 guard revision == expectedRevision, !Task.isCancelled else {
@@ -70,6 +88,7 @@
                 }
                 connectedSid = nil
                 media.onFailure = nil
+                media.onPhaseChange = nil
                 await media.disconnect()
                 endCall(call.sid, reason: .gone, revision: expectedRevision)
             }
@@ -101,11 +120,11 @@
 
     /// Runs in its own task: the hang-up changes the slot, and must not
     /// cancel its own terminate and finish sends through the media task.
-    private func endCall(_ sid: String, reason: JingleReason, revision expectedRevision: Int) {
+    private func endCall(_ sid: String, reason: JingleReason, revision expectedRevision: Int, endedByServer: Bool = false) {
         guard revision == expectedRevision else { return }
         Task {
             guard revision == expectedRevision else { return }
-            await hangUp(sid, reason)
+            await hangUp(sid, reason, endedByServer)
         }
     }
 }

@@ -3,6 +3,46 @@ import WaddleKit
 /// XEP-0353 invitations use bare or full JIDs according to each verb;
 /// XEP-0166 session verbs preserve both bound resource identities.
 extension FFIXmppPort {
+    func reportCallLifecycle(_ report: CallLifecycleReport) async -> CallLifecycleReportResult {
+        let kind: WaddleCallLifecycleKind = switch report.kind {
+        case .direct: .dm
+        case .group: .muc
+        }
+        let setup: WaddleCallSetupOutcome = switch report.setupOutcome {
+        case .proposed: .proposed
+        case .accepted: .accepted
+        case .declined: .declined
+        case .timeout: .timeout
+        case .failed: .failed
+        }
+        let end: WaddleCallEndReason = switch report.endReason {
+        case .hangup: .hangup
+        case .peerLeft: .peerLeft
+        case .error: .error
+        case .reconnectExhausted: .reconnectExhausted
+        }
+        let duration: WaddleCallDurationBucket = switch report.duration {
+        case .none: .none
+        case .underOneMinute: .underOneMinute
+        case .oneToTenMinutes: .oneToTenMinutes
+        case .tenToSixtyMinutes: .tenToSixtyMinutes
+        case .overSixtyMinutes: .overSixtyMinutes
+        }
+        let reconnects: WaddleCallReconnectBucket = switch report.reconnects {
+        case .none: .none
+        case .once: .once
+        case .multiple: .multiple
+        }
+        let outcome = await client.reportCallLifecycle(report: WaddleCallLifecycleReport(
+            kind: kind, setupOutcome: setup, endReason: end, duration: duration, reconnects: reconnects))
+        switch outcome {
+        case .accepted: return .accepted
+        case .unsupported: return .unsupported
+        case .rateLimited: return .rateLimited
+        case .failed: return .failed
+        }
+    }
+
     func fetchExternalServices() async -> [ExternalService] {
         do {
             return try await client.fetchExternalServices().map(FFIInbound.externalService)
