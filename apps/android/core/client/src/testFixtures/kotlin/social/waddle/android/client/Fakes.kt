@@ -35,6 +35,8 @@ import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleAvatarResult
 import social.waddle.client.ffi.WaddleBookmarkItem
+import social.waddle.client.ffi.WaddleCallLifecycleReport
+import social.waddle.client.ffi.WaddleCallLifecycleReportOutcome
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
@@ -858,6 +860,9 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
  * dispatcher. Cohesive verb families live in sliced-out fakes.
  */
 class FakeWaddleClient : FakeRoomAndAdminClient() {
+    /** Android sends no call lifecycle report; the verb only exists in the shared bindings. */
+    override suspend fun reportCallLifecycle(report: WaddleCallLifecycleReport): WaddleCallLifecycleReportOutcome =
+        WaddleCallLifecycleReportOutcome.UNSUPPORTED
     override suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent> = emptyList()
     override suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent = event
     override suspend fun retractCommunityEvent(communityJid: String, itemId: String) = Unit

@@ -13,7 +13,12 @@ import WaddleKit
 final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored var onFailure: (@MainActor () -> Void)?
 
-    private(set) var phase: CallMediaPhase = .idle
+    @ObservationIgnored var onPhaseChange: (@MainActor (CallMediaPhase) -> Void)?
+    @ObservationIgnored private(set) var wasEndedByServer = false
+
+    private(set) var phase: CallMediaPhase = .idle {
+        didSet { if phase != oldValue { onPhaseChange?(phase) } }
+    }
     private(set) var connectedSince: Date?
     private(set) var mediaUpSince: Date?
     private(set) var isMicrophoneOn = false
@@ -43,6 +48,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
         guard room == nil else { throw CallMediaError.alreadyConnected }
+        wasEndedByServer = false
         let (changes, observer) = RoomObserver.make()
         let room = Room(delegate: observer)
         // One consumer, so the room's reports are handled in the order the
@@ -168,7 +174,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func handle(_ change: RoomChange, in changed: Room) {
         guard changed === room else { return }
         switch change {
-        case .dropped: onFailure?()
+        case .dropped(let endedByServer):
+            wasEndedByServer = endedByServer
+            onFailure?()
         case .reconnecting:
             phase = .reconnecting
             refreshParticipants()
@@ -285,8 +293,10 @@ enum CallMediaError: Error {
 
 /// What the call needs to hear from a room.
 private enum RoomChange {
-    /// The media session died after it was established.
-    case dropped
+    /// The media session died after it was established. True when the
+    /// SFU ended it on purpose: this participant was removed, the room was
+    /// closed, or the same identity joined from elsewhere.
+    case dropped(endedByServer: Bool)
     case reconnecting
     case reconnected
     /// A track was published, subscribed, muted or removed, on either side.
@@ -318,8 +328,13 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
         changes.yield(change)
     }
 
-    func room(_ room: Room, didDisconnectWithError _: LiveKitError?) {
-        forward(.dropped, from: room)
+    func room(_ room: Room, didDisconnectWithError error: LiveKitError?) {
+        let endedByServer: Bool
+        switch error?.type {
+        case .participantRemoved?, .roomDeleted?, .duplicateIdentity?: endedByServer = true
+        default: endedByServer = false
+        }
+        forward(.dropped(endedByServer: endedByServer), from: room)
     }
 
     func room(_ room: Room, didStartReconnectWithMode _: ReconnectMode) {

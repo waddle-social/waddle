@@ -683,6 +683,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rsvp_community_event(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_report_call_lifecycle(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
@@ -947,6 +949,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_commun
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_community_event(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rsvp_community_event(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`uid`: RustBuffer.ByValue,`selfJid`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_report_call_lifecycle(`ptr`: Long,`report`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external_services(`ptr`: Long,
 ): Long
@@ -1319,6 +1323,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rsvp_community_event() != 18201) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_report_call_lifecycle() != 21140) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {
@@ -2271,6 +2278,12 @@ public interface WaddleClientInterface {
     suspend fun `retractCommunityEvent`(`communityJid`: kotlin.String, `itemId`: kotlin.String)
 
     suspend fun `rsvpCommunityEvent`(`communityJid`: kotlin.String, `uid`: kotlin.String, `selfJid`: kotlin.String, `status`: WaddleEventParticipation)
+
+    /**
+     * Submit one report, with a bounded wait and no retry on any outcome.
+     * The caller must invoke this at most once for each report, even after failure.
+     */
+    suspend fun `reportCallLifecycle`(`report`: WaddleCallLifecycleReport): WaddleCallLifecycleReportOutcome
 
     /**
      * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
@@ -3295,6 +3308,30 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
         // Error FFI converter
         WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Submit one report, with a bounded wait and no retry on any outcome.
+     * The caller must invoke this at most once for each report, even after failure.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `reportCallLifecycle`(`report`: WaddleCallLifecycleReport) : WaddleCallLifecycleReportOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_report_call_lifecycle(
+                uniffiHandle,
+                FfiConverterTypeWaddleCallLifecycleReport.lower(`report`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleCallLifecycleReportOutcome.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -8071,6 +8108,59 @@ public object FfiConverterTypeWaddleCallEvent: FfiConverterRustBuffer<WaddleCall
 
 
 
+data class WaddleCallLifecycleReport (
+    var `kind`: WaddleCallLifecycleKind
+    ,
+    var `setupOutcome`: WaddleCallSetupOutcome
+    ,
+    var `endReason`: WaddleCallEndReason
+    ,
+    var `duration`: WaddleCallDurationBucket
+    ,
+    var `reconnects`: WaddleCallReconnectBucket
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallLifecycleReport: FfiConverterRustBuffer<WaddleCallLifecycleReport> {
+    override fun read(buf: ByteBuffer): WaddleCallLifecycleReport {
+        return WaddleCallLifecycleReport(
+            FfiConverterTypeWaddleCallLifecycleKind.read(buf),
+            FfiConverterTypeWaddleCallSetupOutcome.read(buf),
+            FfiConverterTypeWaddleCallEndReason.read(buf),
+            FfiConverterTypeWaddleCallDurationBucket.read(buf),
+            FfiConverterTypeWaddleCallReconnectBucket.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleCallLifecycleReport) = (
+            FfiConverterTypeWaddleCallLifecycleKind.allocationSize(value.`kind`) +
+            FfiConverterTypeWaddleCallSetupOutcome.allocationSize(value.`setupOutcome`) +
+            FfiConverterTypeWaddleCallEndReason.allocationSize(value.`endReason`) +
+            FfiConverterTypeWaddleCallDurationBucket.allocationSize(value.`duration`) +
+            FfiConverterTypeWaddleCallReconnectBucket.allocationSize(value.`reconnects`)
+    )
+
+    override fun write(value: WaddleCallLifecycleReport, buf: ByteBuffer) {
+            FfiConverterTypeWaddleCallLifecycleKind.write(value.`kind`, buf)
+            FfiConverterTypeWaddleCallSetupOutcome.write(value.`setupOutcome`, buf)
+            FfiConverterTypeWaddleCallEndReason.write(value.`endReason`, buf)
+            FfiConverterTypeWaddleCallDurationBucket.write(value.`duration`, buf)
+            FfiConverterTypeWaddleCallReconnectBucket.write(value.`reconnects`, buf)
+    }
+}
+
+
+
 /**
  * Media kinds offered or accepted on a call. Mirrors
  * `waddle_xmpp_client::messaging::CallMedia` 1:1 so the Swift side
@@ -12838,6 +12928,79 @@ public object FfiConverterTypeWaddleCalendarDate : FfiConverterRustBuffer<Waddle
 
 
 
+
+enum class WaddleCallDurationBucket {
+
+    NONE,
+    UNDER_ONE_MINUTE,
+    ONE_TO_TEN_MINUTES,
+    TEN_TO_SIXTY_MINUTES,
+    OVER_SIXTY_MINUTES;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallDurationBucket: FfiConverterRustBuffer<WaddleCallDurationBucket> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallDurationBucket.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallDurationBucket) = 4UL
+
+    override fun write(value: WaddleCallDurationBucket, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallEndReason {
+
+    HANGUP,
+    PEER_LEFT,
+    ERROR,
+    RECONNECT_EXHAUSTED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallEndReason: FfiConverterRustBuffer<WaddleCallEndReason> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallEndReason.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallEndReason) = 4UL
+
+    override fun write(value: WaddleCallEndReason, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * Variants of an inbound A/V call event. Matches the wire shapes
  * `messaging::call::CallEventKind` already parses for the wasm
@@ -13130,6 +13293,111 @@ public object FfiConverterTypeWaddleCallEventKind : FfiConverterRustBuffer<Waddl
 
 
 
+
+enum class WaddleCallLifecycleKind {
+
+    DM,
+    MUC;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallLifecycleKind: FfiConverterRustBuffer<WaddleCallLifecycleKind> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallLifecycleKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallLifecycleKind) = 4UL
+
+    override fun write(value: WaddleCallLifecycleKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallLifecycleReportOutcome {
+
+    ACCEPTED,
+    UNSUPPORTED,
+    RATE_LIMITED,
+    FAILED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallLifecycleReportOutcome: FfiConverterRustBuffer<WaddleCallLifecycleReportOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallLifecycleReportOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallLifecycleReportOutcome) = 4UL
+
+    override fun write(value: WaddleCallLifecycleReportOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallReconnectBucket {
+
+    NONE,
+    ONCE,
+    MULTIPLE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallReconnectBucket: FfiConverterRustBuffer<WaddleCallReconnectBucket> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallReconnectBucket.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallReconnectBucket) = 4UL
+
+    override fun write(value: WaddleCallReconnectBucket, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * Typed outcome of `send_call_session_terminate_with_outcome`.
  * Mirrors the wasm client's three-way classification so the app can
@@ -13176,6 +13444,43 @@ public object FfiConverterTypeWaddleCallSessionTerminateOutcome: FfiConverterRus
     override fun allocationSize(value: WaddleCallSessionTerminateOutcome) = 4UL
 
     override fun write(value: WaddleCallSessionTerminateOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallSetupOutcome {
+
+    PROPOSED,
+    ACCEPTED,
+    DECLINED,
+    TIMEOUT,
+    FAILED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallSetupOutcome: FfiConverterRustBuffer<WaddleCallSetupOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallSetupOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallSetupOutcome) = 4UL
+
+    override fun write(value: WaddleCallSetupOutcome, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

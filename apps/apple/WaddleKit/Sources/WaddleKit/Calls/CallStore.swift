@@ -16,8 +16,21 @@ import Observation
     /// The one call slot; terminal states remain until dismissed or replaced.
     public private(set) var state: CallState = .idle {
         didSet {
+            let cause = exitCause
+            exitCause = nil
             if oldValue.isLive, oldValue.sid != state.sid || !state.isLive, let sid = oldValue.sid {
                 markFinished(sid: sid)
+                if let outcome = lifecycle.finish(sid: sid, from: oldValue, to: state, cause: cause, at: now()) {
+                    report(outcome)
+                }
+            }
+            if state.sid != oldValue.sid {
+                switch state {
+                case .incoming(let call): lifecycle.begin(sid: call.sid, kind: .direct)
+                case .outgoing(let call): lifecycle.begin(sid: call.sid, kind: .direct)
+                case .joiningGroup(let call): lifecycle.begin(sid: call.sid, kind: .group)
+                case .idle, .active, .inGroup, .ended: break
+                }
             }
             if case .ended(let sid, _) = state { markFinished(sid: sid) }
             mediaSession?.update(state)
@@ -25,6 +38,10 @@ import Observation
     }
     /// Last failed wire verb; fresh calls, inbound transitions, dismissal and clear reset it.
     public private(set) var lastError: String?
+    @ObservationIgnored private var lifecycle = CallLifecycleTracker()
+    @ObservationIgnored var exitCause: CallLifecycleTracker.Exit?
+    @ObservationIgnored private let now: @MainActor () -> ContinuousClock.Instant
+    @ObservationIgnored private let report: @MainActor (CallLifecycleReport) -> Void
     @ObservationIgnored private var mediaSession: CallSessionController?
     @ObservationIgnored let port: any CallPort
     @ObservationIgnored let ownJID: @MainActor () -> JID?
@@ -53,6 +70,8 @@ import Observation
         unansweredTimeout: Duration = .seconds(60),
         groupPreparingEchoTimeout: Duration = .seconds(2), groupOtherPreparingTimeout: Duration = .seconds(2),
         groupAcceptTimeout: Duration = .seconds(10),
+        now: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now },
+        report: @escaping @MainActor (CallLifecycleReport) -> Void = { _ in /* A store nobody reports for, as in most tests. */ },
         newSid: @escaping () -> String = { "c" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased() }
     ) {
         self.groupControl = GroupCallControl(
@@ -65,10 +84,25 @@ import Observation
         self.ownJID = ownJID
         self.ownBareJID = ownBareJID
         self.newSid = newSid
+        self.now = now
+        self.report = report
         if let media {
-            self.mediaSession = CallSessionController(media: media, fetchExternalServices: { await port.fetchExternalServices() }) { [weak self] sid, reason in
-                await self?.hangUpActive(ifSid: sid, reason: reason)
-            }
+            self.mediaSession = CallSessionController(
+                media: media, fetchExternalServices: { await port.fetchExternalServices() },
+                mediaConnected: { [weak self] sid in
+                    guard let self else { return }
+                    self.lifecycle.mediaConnected(sid: sid, at: self.now())
+                },
+                phaseChanged: { [weak self] sid, phase in
+                    switch phase {
+                    case .reconnecting: self?.lifecycle.mediaReconnecting(sid: sid)
+                    case .connected: self?.lifecycle.mediaRecovered(sid: sid)
+                    case .idle, .connecting: break
+                    }
+                },
+                hangUp: { [weak self] sid, reason, endedByServer in
+                    await self?.hangUpActive(ifSid: sid, reason: reason, cause: endedByServer ? .endedByServer : .mediaFailure)
+                })
         }
     }
 
@@ -100,7 +134,11 @@ import Observation
         default: break
         }
         let isSelfOriginated = event.from.bare == ownBareJID
-        transition(reduceCallState(before, event, isOwn: isSelfOriginated))
+        let next = reduceCallState(before, event, isOwn: isSelfOriginated)
+        if next != before {
+            exitCause = .remote(own: isSelfOriginated)
+            transition(next)
+        }
         // The ring is answered only when the reducer took this proceed's
         // sender as the responder; an ignored proceed leaves the timeout running.
         if case .outgoing(let was) = before, was.responder == nil, case .outgoing(let now) = state, now.responder != nil {
@@ -141,6 +179,7 @@ import Observation
     public func declinePushedCall(sid: String) -> Bool {
         guard state.sid != sid || !state.isLive else { return false }
         markFinished(sid: sid)
+        if let outcome = lifecycle.declinedUnseen(sid: sid) { report(outcome) }
         if !declinedBeforeProposalSids.contains(sid) {
             declinedBeforeProposalSids.append(sid)
             if declinedBeforeProposalSids.count > 32 { declinedBeforeProposalSids.removeFirst() }
@@ -202,6 +241,7 @@ import Observation
     public func declineIncoming() async -> Bool {
         guard case .incoming(let target) = state else { return false }
         cancelTimers()
+        exitCause = .decline
         state = .idle
         return await answerDeclined(target)
     }
@@ -222,6 +262,7 @@ import Observation
         effectTask?.cancel()
         effectTask = nil
         effects.removeAll()
+        exitCause = .cleared
         state = .idle
         lastError = nil
     }
@@ -238,6 +279,7 @@ import Observation
     func claimHangUp() -> CallState {
         let claimed = state
         cancelTimers()
+        exitCause = .hangUp
         state = .idle
         return claimed
     }

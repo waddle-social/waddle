@@ -643,6 +643,12 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func rsvpCommunityEvent(communityJid: String, uid: String, selfJid: String, status: WaddleEventParticipation) async throws
 
     /**
+     * Submit one report, with a bounded wait and no retry on any outcome.
+     * The caller must invoke this at most once for each report, even after failure.
+     */
+    func reportCallLifecycle(report: WaddleCallLifecycleReport) async  -> WaddleCallLifecycleReportOutcome
+
+    /**
      * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
      * user's own server advertises, as typed entries the app maps to
      * WebRTC ICE servers for LiveKit's RTC configuration at connect
@@ -1597,6 +1603,28 @@ open func rsvpCommunityEvent(communityJid: String, uid: String, selfJid: String,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Submit one report, with a bounded wait and no retry on any outcome.
+     * The caller must invoke this at most once for each report, even after failure.
+     */
+open func reportCallLifecycle(report: WaddleCallLifecycleReport)async  -> WaddleCallLifecycleReportOutcome  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_report_call_lifecycle(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleCallLifecycleReport_lower(report)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleCallLifecycleReportOutcome_lift,
+            errorHandler: nil
+
         )
 }
 
@@ -6526,6 +6554,72 @@ public func FfiConverterTypeWaddleCallEvent_lift(_ buf: RustBuffer) throws -> Wa
 #endif
 public func FfiConverterTypeWaddleCallEvent_lower(_ value: WaddleCallEvent) -> RustBuffer {
     return FfiConverterTypeWaddleCallEvent.lower(value)
+}
+
+
+public struct WaddleCallLifecycleReport: Equatable, Hashable {
+    public var kind: WaddleCallLifecycleKind
+    public var setupOutcome: WaddleCallSetupOutcome
+    public var endReason: WaddleCallEndReason
+    public var duration: WaddleCallDurationBucket
+    public var reconnects: WaddleCallReconnectBucket
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: WaddleCallLifecycleKind, setupOutcome: WaddleCallSetupOutcome, endReason: WaddleCallEndReason, duration: WaddleCallDurationBucket, reconnects: WaddleCallReconnectBucket) {
+        self.kind = kind
+        self.setupOutcome = setupOutcome
+        self.endReason = endReason
+        self.duration = duration
+        self.reconnects = reconnects
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallLifecycleReport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallLifecycleReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallLifecycleReport {
+        return
+            try WaddleCallLifecycleReport(
+                kind: FfiConverterTypeWaddleCallLifecycleKind.read(from: &buf),
+                setupOutcome: FfiConverterTypeWaddleCallSetupOutcome.read(from: &buf),
+                endReason: FfiConverterTypeWaddleCallEndReason.read(from: &buf),
+                duration: FfiConverterTypeWaddleCallDurationBucket.read(from: &buf),
+                reconnects: FfiConverterTypeWaddleCallReconnectBucket.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleCallLifecycleReport, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleCallLifecycleKind.write(value.kind, into: &buf)
+        FfiConverterTypeWaddleCallSetupOutcome.write(value.setupOutcome, into: &buf)
+        FfiConverterTypeWaddleCallEndReason.write(value.endReason, into: &buf)
+        FfiConverterTypeWaddleCallDurationBucket.write(value.duration, into: &buf)
+        FfiConverterTypeWaddleCallReconnectBucket.write(value.reconnects, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallLifecycleReport_lift(_ buf: RustBuffer) throws -> WaddleCallLifecycleReport {
+    return try FfiConverterTypeWaddleCallLifecycleReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallLifecycleReport_lower(_ value: WaddleCallLifecycleReport) -> RustBuffer {
+    return FfiConverterTypeWaddleCallLifecycleReport.lower(value)
 }
 
 
@@ -12792,6 +12886,175 @@ public func FfiConverterTypeWaddleCalendarDate_lower(_ value: WaddleCalendarDate
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCallDurationBucket: Equatable, Hashable {
+
+    case none
+    case underOneMinute
+    case oneToTenMinutes
+    case tenToSixtyMinutes
+    case overSixtyMinutes
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallDurationBucket: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallDurationBucket: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallDurationBucket
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallDurationBucket {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .none
+
+        case 2: return .underOneMinute
+
+        case 3: return .oneToTenMinutes
+
+        case 4: return .tenToSixtyMinutes
+
+        case 5: return .overSixtyMinutes
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallDurationBucket, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .none:
+            writeInt(&buf, Int32(1))
+
+
+        case .underOneMinute:
+            writeInt(&buf, Int32(2))
+
+
+        case .oneToTenMinutes:
+            writeInt(&buf, Int32(3))
+
+
+        case .tenToSixtyMinutes:
+            writeInt(&buf, Int32(4))
+
+
+        case .overSixtyMinutes:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallDurationBucket_lift(_ buf: RustBuffer) throws -> WaddleCallDurationBucket {
+    return try FfiConverterTypeWaddleCallDurationBucket.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallDurationBucket_lower(_ value: WaddleCallDurationBucket) -> RustBuffer {
+    return FfiConverterTypeWaddleCallDurationBucket.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCallEndReason: Equatable, Hashable {
+
+    case hangup
+    case peerLeft
+    case error
+    case reconnectExhausted
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallEndReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallEndReason: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallEndReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallEndReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .hangup
+
+        case 2: return .peerLeft
+
+        case 3: return .error
+
+        case 4: return .reconnectExhausted
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallEndReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .hangup:
+            writeInt(&buf, Int32(1))
+
+
+        case .peerLeft:
+            writeInt(&buf, Int32(2))
+
+
+        case .error:
+            writeInt(&buf, Int32(3))
+
+
+        case .reconnectExhausted:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallEndReason_lift(_ buf: RustBuffer) throws -> WaddleCallEndReason {
+    return try FfiConverterTypeWaddleCallEndReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallEndReason_lower(_ value: WaddleCallEndReason) -> RustBuffer {
+    return FfiConverterTypeWaddleCallEndReason.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * Variants of an inbound A/V call event. Matches the wire shapes
  * `messaging::call::CallEventKind` already parses for the wasm
@@ -12975,6 +13238,228 @@ public func FfiConverterTypeWaddleCallEventKind_lower(_ value: WaddleCallEventKi
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCallLifecycleKind: Equatable, Hashable {
+
+    case dm
+    case muc
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallLifecycleKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallLifecycleKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallLifecycleKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallLifecycleKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .dm
+
+        case 2: return .muc
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallLifecycleKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .dm:
+            writeInt(&buf, Int32(1))
+
+
+        case .muc:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallLifecycleKind_lift(_ buf: RustBuffer) throws -> WaddleCallLifecycleKind {
+    return try FfiConverterTypeWaddleCallLifecycleKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallLifecycleKind_lower(_ value: WaddleCallLifecycleKind) -> RustBuffer {
+    return FfiConverterTypeWaddleCallLifecycleKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCallLifecycleReportOutcome: Equatable, Hashable {
+
+    case accepted
+    case unsupported
+    case rateLimited
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallLifecycleReportOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallLifecycleReportOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallLifecycleReportOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallLifecycleReportOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .accepted
+
+        case 2: return .unsupported
+
+        case 3: return .rateLimited
+
+        case 4: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallLifecycleReportOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .accepted:
+            writeInt(&buf, Int32(1))
+
+
+        case .unsupported:
+            writeInt(&buf, Int32(2))
+
+
+        case .rateLimited:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallLifecycleReportOutcome_lift(_ buf: RustBuffer) throws -> WaddleCallLifecycleReportOutcome {
+    return try FfiConverterTypeWaddleCallLifecycleReportOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallLifecycleReportOutcome_lower(_ value: WaddleCallLifecycleReportOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleCallLifecycleReportOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCallReconnectBucket: Equatable, Hashable {
+
+    case none
+    case once
+    case multiple
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallReconnectBucket: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallReconnectBucket: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallReconnectBucket
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallReconnectBucket {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .none
+
+        case 2: return .once
+
+        case 3: return .multiple
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallReconnectBucket, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .none:
+            writeInt(&buf, Int32(1))
+
+
+        case .once:
+            writeInt(&buf, Int32(2))
+
+
+        case .multiple:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallReconnectBucket_lift(_ buf: RustBuffer) throws -> WaddleCallReconnectBucket {
+    return try FfiConverterTypeWaddleCallReconnectBucket.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallReconnectBucket_lower(_ value: WaddleCallReconnectBucket) -> RustBuffer {
+    return FfiConverterTypeWaddleCallReconnectBucket.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * Typed outcome of `send_call_session_terminate_with_outcome`.
  * Mirrors the wasm client's three-way classification so the app can
@@ -13063,6 +13548,94 @@ public func FfiConverterTypeWaddleCallSessionTerminateOutcome_lift(_ buf: RustBu
 #endif
 public func FfiConverterTypeWaddleCallSessionTerminateOutcome_lower(_ value: WaddleCallSessionTerminateOutcome) -> RustBuffer {
     return FfiConverterTypeWaddleCallSessionTerminateOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleCallSetupOutcome: Equatable, Hashable {
+
+    case proposed
+    case accepted
+    case declined
+    case timeout
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallSetupOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallSetupOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallSetupOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallSetupOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .proposed
+
+        case 2: return .accepted
+
+        case 3: return .declined
+
+        case 4: return .timeout
+
+        case 5: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallSetupOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .proposed:
+            writeInt(&buf, Int32(1))
+
+
+        case .accepted:
+            writeInt(&buf, Int32(2))
+
+
+        case .declined:
+            writeInt(&buf, Int32(3))
+
+
+        case .timeout:
+            writeInt(&buf, Int32(4))
+
+
+        case .failed:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallSetupOutcome_lift(_ buf: RustBuffer) throws -> WaddleCallSetupOutcome {
+    return try FfiConverterTypeWaddleCallSetupOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallSetupOutcome_lower(_ value: WaddleCallSetupOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleCallSetupOutcome.lower(value)
 }
 
 
@@ -19415,6 +19988,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rsvp_community_event() != 18201) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_report_call_lifecycle() != 21140) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {

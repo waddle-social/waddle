@@ -56,6 +56,7 @@ public final class SessionCoordinator {
     @ObservationIgnored let port: any XmppPort
     @ObservationIgnored private let reconnectPolicy: ReconnectPolicy
     @ObservationIgnored private let handlesCalls: Bool
+    @ObservationIgnored private let callLifecycleOutbox: CallLifecycleOutbox?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored var foregroundProbeTask: Task<Void, Never>?
@@ -136,7 +137,11 @@ public final class SessionCoordinator {
         self.account = account
         self.port = port
         self.handlesCalls = handlesCalls
-        self.calls = CallStore(port: port, ownJID: { account.fullJID }, ownBareJID: account.jid, media: callMedia)
+        let callLifecycleOutbox = handlesCalls ? CallLifecycleOutbox(port: port) : nil
+        self.callLifecycleOutbox = callLifecycleOutbox
+        self.calls = CallStore(
+            port: port, ownJID: { account.fullJID }, ownBareJID: account.jid, media: callMedia,
+            report: { [weak callLifecycleOutbox] in callLifecycleOutbox?.submit($0) })
         self.outboxStore = outboxStore
         self.reconnectPolicy = reconnectPolicy
         self.connectBudget = connectBudget
@@ -188,6 +193,7 @@ public final class SessionCoordinator {
     /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
         isStopped = true
+        callLifecycleOutbox?.stop()
         reconnectTask?.cancel()
         reconnectTask = nil
         foregroundProbeTask?.cancel()
@@ -247,6 +253,7 @@ public final class SessionCoordinator {
     func resetStaleConnection() async {
         guard !isStopped, status.connection == .online, !isConnectResetting else { return }
         isConnectResetting = true
+        callLifecycleOutbox?.setOnline(false)
         foregroundProbeTask?.cancel()
         foregroundProbeTask = nil
         isSendReady = false
@@ -395,6 +402,7 @@ public final class SessionCoordinator {
             reconnectTask?.cancel()
             reconnectTask = nil
             status.connection = .online
+            callLifecycleOutbox?.setOnline(true)
             // Avatars may have changed while we were away; rows on screen
             // ask again.
             avatars.markAllStale()
@@ -403,6 +411,7 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = Task { [weak self] in await self?.sessionReady() }
         case .disconnected:
+            callLifecycleOutbox?.setOnline(false)
             // Like Android, the call slot survives stream loss and reconnects;
             // call sends can fail while offline, without new recovery semantics.
             // Every disconnect creates a fresh FFI driver; its old
@@ -459,6 +468,7 @@ public final class SessionCoordinator {
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
+            callLifecycleOutbox?.stop()
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil

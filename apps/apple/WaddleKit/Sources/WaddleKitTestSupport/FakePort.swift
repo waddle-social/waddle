@@ -12,6 +12,11 @@ final class FakePort: XmppPort {
     var holdExternalServicesFetch = false
     var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
 
+    var callLifecycleReports: [CallLifecycleReport] = []
+    var callLifecycleReportResult: CallLifecycleReportResult = .accepted
+    var holdCallLifecycleReports = false
+    var heldCallLifecycleReports: [CheckedContinuation<Void, Never>] = []
+
     var callSends: [CallSend] = []
     var completedCallSends: [CallSend] = []
     var callResults: [String: Bool] = [:]
