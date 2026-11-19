@@ -67,4 +67,48 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.tab, .inbox)
         XCTAssertEqual(navigation.inboxPath, [])
     }
+
+    func testClosingTheSelectedConversationSelectsNothingAndClosesTheInspector() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+        navigation.inspector = .details
+
+        navigation.close(lobby)
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertNil(navigation.inspector)
+    }
+
+    func testClosingAnotherConversationKeepsTheSelection() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+        navigation.inspector = .details
+
+        navigation.close(design)
+
+        XCTAssertEqual(navigation.selection, lobby)
+        XCTAssertEqual(navigation.inspector, .details)
+    }
+
+    func testClosingAConversationPopsEveryPhoneStackBelowIt() {
+        let navigation = NavigationModel()
+        navigation.homePath = [.conversation(design), .conversation(lobby), .details(lobby)]
+        navigation.inboxPath = [.thread(lobby, rootID: "root-1")]
+        navigation.directPath = [.conversation(.direct(BareJID(parsing: "mika@waddle.test")!))]
+
+        navigation.close(lobby)
+
+        XCTAssertEqual(navigation.homePath, [.conversation(design)])
+        XCTAssertEqual(navigation.inboxPath, [])
+        XCTAssertEqual(navigation.directPath.count, 1)
+    }
+
+    func testClosingAConversationDismissesItsSearch() {
+        let navigation = NavigationModel()
+        navigation.sheet = .search(lobby)
+
+        navigation.close(lobby)
+
+        XCTAssertNil(navigation.sheet)
+    }
 }

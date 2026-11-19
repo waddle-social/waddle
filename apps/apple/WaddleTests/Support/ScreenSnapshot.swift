@@ -17,12 +17,16 @@ let screenGoldenOSVersion = 27
 /// Asserts a whole screen against its Night and Daylight goldens.
 ///
 /// Unlike `assertHuddleSnapshot`, the view is hosted in a real window, so
-/// lists, navigation stacks and toolbars draw as they do in the app.
-/// Images are rendered at a fixed 2x, whatever display the test runs on.
+/// lists, forms, text fields, navigation stacks and toolbars draw as they
+/// do in the app. Images are rendered at a fixed 2x, whatever display the
+/// test runs on. With `asSheet`, the view is presented as a sheet over an
+/// empty window, the way a sheet's toolbar and size are decided: on a Mac
+/// only the sheet is captured, on iOS the whole window under it.
 @MainActor
 func assertScreenSnapshot<V: View>(
     of view: V,
     size: CGSize,
+    asSheet: Bool = false,
     file: StaticString = #filePath,
     testName: String = #function,
     line: UInt = #line
@@ -32,7 +36,9 @@ func assertScreenSnapshot<V: View>(
         "Screen goldens are recorded on OS \(screenGoldenOSVersion)"
     )
     for theme in SnapshotTheme.allCases {
-        let image = try await renderScreen(view, theme: theme, size: size)
+        let image = asSheet
+            ? try await renderScreen(SheetPresenter(sheet: view), theme: theme, size: size, capturesSheet: true)
+            : try await renderScreen(view, theme: theme, size: size)
         // A whole screen is mostly ground, so a missing badge is a tiny
         // share of its pixels: demand a near-exact match.
         assertSnapshot(
@@ -55,9 +61,21 @@ private let platformName = "iOS"
 /// Time for `.task` work, list layout and image decoding to settle.
 private let settleTime: Duration = .milliseconds(900)
 
+/// An empty window ground with `sheet` presented over it.
+private struct SheetPresenter<Sheet: View>: View {
+    let sheet: Sheet
+
+    var body: some View {
+        Theme.Colors.bg
+            .sheet(isPresented: .constant(true)) { sheet }
+    }
+}
+
 #if os(macOS)
 @MainActor
-private func renderScreen<V: View>(_ view: V, theme: SnapshotTheme, size: CGSize) async throws -> NSImage {
+private func renderScreen<V: View>(
+    _ view: V, theme: SnapshotTheme, size: CGSize, capturesSheet: Bool = false
+) async throws -> NSImage {
     let window = NSWindow(
         contentRect: CGRect(origin: .zero, size: size),
         styleMask: [.titled, .fullSizeContentView],
@@ -75,7 +93,8 @@ private func renderScreen<V: View>(_ view: V, theme: SnapshotTheme, size: CGSize
     try await Task.sleep(for: settleTime)
 
     // The frame view includes the title bar and toolbar the content draws under.
-    let target = try XCTUnwrap(window.contentView?.superview)
+    let captured = capturesSheet ? try XCTUnwrap(window.attachedSheet, "No sheet was presented") : window
+    let target = try XCTUnwrap(captured.contentView?.superview)
     target.layoutSubtreeIfNeeded()
     let bounds = target.bounds
     let rep = try XCTUnwrap(NSBitmapImageRep(
@@ -98,7 +117,9 @@ private func renderScreen<V: View>(_ view: V, theme: SnapshotTheme, size: CGSize
 }
 #else
 @MainActor
-private func renderScreen<V: View>(_ view: V, theme: SnapshotTheme, size: CGSize) async throws -> UIImage {
+private func renderScreen<V: View>(
+    _ view: V, theme: SnapshotTheme, size: CGSize, capturesSheet: Bool = false
+) async throws -> UIImage {
     let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
     let window = UIWindow(windowScene: scene)
     window.frame = CGRect(origin: .zero, size: size)
