@@ -7629,6 +7629,10 @@ mod coverage_gap_gate_tests;
 mod pinned_hook_tests;
 
 #[cfg(feature = "test-support")]
+#[path = "physical_attestation/transaction_notice.rs"]
+mod transaction_notice_tests;
+
+#[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_entry.rs"]
 mod pinned_entry_tests;
 

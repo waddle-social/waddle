@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{PgConnection, Row};
+use sqlx::{Connection, PgConnection, Row};
 use thiserror::Error;
 
 use super::lineage::LineageError;
@@ -592,6 +592,29 @@ pub async fn attest_connection(
     verify_identity(&snapshot, config)
 }
 
+/// End a transaction a borrower opened with raw `BEGIN` before checkout
+/// observes any identity, without sending `ROLLBACK` to an idle session.
+///
+/// SQLx's transaction depth does not count raw `BEGIN`, and SQLx keeps the
+/// ReadyForQuery transaction status private. `begin_with` is the public
+/// reader of that status: it runs the given statement and succeeds only when
+/// PostgreSQL then reports an open transaction block, otherwise returning
+/// `BeginFailed`. A no-op probe therefore distinguishes an idle session from
+/// an inherited open transaction, which is then rolled back. An unconditional
+/// `ROLLBACK` would instead make PostgreSQL emit the "there is no transaction
+/// in progress" warning on every idle checkout.
+///
+/// An inherited failed transaction rejects the probe, and any other error,
+/// including a failed `ROLLBACK`, makes the hook fail. SQLx then closes the
+/// connection instead of lending it.
+async fn end_inherited_transaction(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    match connection.begin_with("SELECT 1").await {
+        Ok(inherited) => inherited.rollback().await,
+        Err(sqlx::Error::BeginFailed) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 async fn reject_runtime_temp_privilege(
     connection: &mut PgConnection,
 ) -> Result<(), PhysicalAttestationError> {
@@ -725,12 +748,11 @@ pub fn attested_pool(
         .before_acquire(move |connection, _| {
             let config = before_acquire.clone();
             Box::pin(async move {
-                // SQLx tracks ReadyForQuery transaction state internally but
-                // does not expose it to pool hooks. A borrower can issue raw
-                // BEGIN and return a pinned REPEATABLE READ snapshot. End any
-                // such transaction before reading the current lineage. A
-                // failed ROLLBACK hard-closes the connection.
-                sqlx::query("ROLLBACK").execute(&mut *connection).await?;
+                // A borrower can issue raw BEGIN and return a pinned
+                // REPEATABLE READ snapshot. End any such transaction before
+                // reading the current lineage. A failed ROLLBACK hard-closes
+                // the connection.
+                end_inherited_transaction(connection).await?;
                 let timeouts = super::read_only_timeout::bound_postgres_session_waits(connection)
                     .await
                     .map_err(|_| {

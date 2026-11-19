@@ -850,8 +850,9 @@ async fn pinned_hook_never_lends_when_proof_rollback_response_is_lost() {
     fixture.cleanup().await;
 }
 
-// Allow the initial inherited-transaction ROLLBACK through. Discard the
-// CommandComplete for the proof ROLLBACK, which happened after attestation.
+// A fresh session has no inherited transaction, so checkout sends no
+// ROLLBACK before attestation. Discard the CommandComplete for the first
+// ROLLBACK, the proof rollback that ends the attestation transaction.
 async fn lose_proof_rollback(
     listener: tokio::net::TcpListener,
     upstream: sqlx::postgres::PgConnectOptions,
@@ -869,7 +870,6 @@ async fn lose_proof_rollback(
     let forward = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
     });
-    let mut rollbacks = 0;
     loop {
         let tag = server_read.read_u8().await?;
         let length = server_read.read_u32().await?;
@@ -879,13 +879,10 @@ async fn lose_proof_rollback(
         let mut body = vec![0; (length - 4) as usize];
         server_read.read_exact(&mut body).await?;
         if tag == b'C' && body == b"ROLLBACK\0" {
-            rollbacks += 1;
-            if rollbacks == 2 {
-                let _ = lost.send(());
-                forward.abort();
-                let _ = forward.await;
-                return Ok(());
-            }
+            let _ = lost.send(());
+            forward.abort();
+            let _ = forward.await;
+            return Ok(());
         }
         client_write.write_u8(tag).await?;
         client_write.write_u32(length).await?;

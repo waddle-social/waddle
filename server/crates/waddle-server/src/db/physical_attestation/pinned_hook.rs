@@ -8,10 +8,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, Postgres, Row, Transaction, TransactionManager};
 
 use super::{
-    attest_dark_catalog_pinned, discard_temporary_relations, normalize_search_path,
-    quote_identifier, reject_runtime_temp_privilege, AttestationMode, AttestedPgPool,
-    AttestedPostgresWriterCapability, DarkPhysicalAttestationPins, PhysicalAttestationConfig,
-    PhysicalAttestationError,
+    attest_dark_catalog_pinned, discard_temporary_relations, end_inherited_transaction,
+    normalize_search_path, quote_identifier, reject_runtime_temp_privilege, AttestationMode,
+    AttestedPgPool, AttestedPostgresWriterCapability, DarkPhysicalAttestationPins,
+    PhysicalAttestationConfig, PhysicalAttestationError,
 };
 use crate::db::read_only_timeout::{bound_postgres_session_waits, timeout_millis};
 use crate::db::DarkMigrationLedgerPins;
@@ -194,7 +194,9 @@ async fn checkout_inner(
     }
     // Raw BEGIN does not update SQLx's transaction depth. End an inherited
     // transaction before observing any identity; errors discard the session.
-    sqlx::query("ROLLBACK").execute(&mut *connection).await?;
+    // The probe's constant integer resolves no name through the inherited
+    // search path.
+    end_inherited_transaction(connection).await?;
     // An inherited path can put a user-defined type before pg_catalog. Even
     // a role-name cast would then execute a domain CHECK before catalog
     // attestation. Keep built-ins first for every pre-proof statement; the
