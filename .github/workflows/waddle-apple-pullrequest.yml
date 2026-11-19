@@ -54,13 +54,3 @@ jobs:
         run: |
           device="$(python3 apps/apple/scripts/newest-iphone-simulator.py)"
           xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination "platform=iOS Simulator,id=${device}" CODE_SIGNING_ALLOWED=NO test
-      # A golden that is missing is recorded by the failing run. Keeping
-      # it lets a platform with no local simulator get its goldens here.
-      - name: Keep the snapshots a failed run recorded
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: apple-recorded-snapshots
-          path: apps/apple/WaddleTests/__Snapshots__
-          if-no-files-found: ignore
-          retention-days: 7
