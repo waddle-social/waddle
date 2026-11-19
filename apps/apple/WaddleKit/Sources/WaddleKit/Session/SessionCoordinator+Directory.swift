@@ -6,6 +6,11 @@ extension SessionCoordinator {
     /// discovery keeps the last known directory.
     func refreshDirectory() async {
         let mutationStart = directoryMutations.count
+        directoryRefreshesInFlight += 1
+        defer {
+            directoryRefreshesInFlight -= 1
+            if directoryRefreshesInFlight == 0 { directoryMutations.removeAll() }
+        }
         let result = await port.discoverTopology()
         // A superseded ready pipeline (the stream dropped and reconnected
         // meanwhile) must not overwrite the directory with its answer.
@@ -65,6 +70,8 @@ extension SessionCoordinator {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let localpart = RoomLocalpart.make(from: trimmed) else { throw PortError.invalidRequest }
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
+        // A room deleted earlier in the session exists again.
+        destroyedRooms.remove(room)
         upsertChannel(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
         // create_room joined, configured and then left the room. Its
         // self-presence may already have marked the room joined while the

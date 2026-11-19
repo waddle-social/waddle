@@ -24,8 +24,10 @@ struct RoomManagementCallTests {
         return (coordinator, port)
     }
 
+    /// Leaving a huddle announces itself in the room. Sent to a room that
+    /// is already gone, that presence would create the room again.
     @Test(arguments: ["delete", "leave"])
-    func forgettingRoomLeavesItsCallBeforeRemovingDirectoryEntry(action: String) async throws {
+    func theHuddleIsLeftBeforeTheRoomIsGivenUp(action: String) async throws {
         let (coordinator, port) = try await inCall(group: action == "leave")
         port.callSends = []
         port.heldCallVerbs = ["groupPresence"]
@@ -33,34 +35,33 @@ struct RoomManagementCallTests {
             if action == "delete" { try await coordinator.deleteRoom(groupRoom) }
             else { try await coordinator.leaveGroupDM(groupRoom) }
         }
-        await eventually { !port.heldCallSends.isEmpty || coordinator.directory.channel(for: groupRoom) == nil }
-        #expect(coordinator.calls.state == .idle)
-        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
-        #expect(!(await coordinator.joinGroupCall(in: groupRoom, video: false)))
-        #expect(coordinator.directory.channel(for: groupRoom) != nil)
+        await eventually { !port.heldCallSends.isEmpty }
         #expect(port.callSends.first == .groupPresence(groupRoom, "alice", .init(state: .left)))
+        #expect(port.roomDestructions.isEmpty)
+        #expect(port.groupDMLeaves.isEmpty)
+        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
+        #expect(coordinator.directory.channel(for: groupRoom) != nil)
         port.releaseCallSends()
         try await forgetting.value
+        #expect(port.roomDestructions.count + port.groupDMLeaves.count == 1)
+        #expect(coordinator.calls.state == .idle)
         #expect(coordinator.directory.channel(for: groupRoom) == nil)
         #expect(!coordinator.presence.joinedRooms.contains(groupRoom))
         coordinator.calls.clear()
     }
     @Test(arguments: ["delete", "leave"])
-    func failedActionsKeepTheRoomCallActive(action: String) async throws {
+    func aRefusedActionKeepsTheRoomButNotItsHuddle(action: String) async throws {
         let (coordinator, port) = try await inCall(group: action == "leave")
         port.roomDestructionResult = .failure(.rejected)
         port.groupDMLeaveResult = .failure(.rejected)
-        port.callSends = []
         await #expect(throws: PortError.rejected) {
             if action == "delete" { try await coordinator.deleteRoom(groupRoom) }
             else { try await coordinator.leaveGroupDM(groupRoom) }
         }
-        #expect(coordinator.calls.state.isLive)
+        #expect(!coordinator.calls.state.isLive)
         #expect(coordinator.directory.channel(for: groupRoom)?.name == "Call room")
         #expect(coordinator.presence.joinedRooms.contains(groupRoom))
-        #expect(port.callSends.isEmpty)
-        await coordinator.calls.hangUp()
+        #expect(coordinator.canJoinGroupCall(in: groupRoom) || coordinator.calls.state != .idle)
         coordinator.calls.clear()
     }
-
 }

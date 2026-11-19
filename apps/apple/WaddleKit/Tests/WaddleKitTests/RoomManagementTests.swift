@@ -164,4 +164,66 @@ struct RoomManagementTests {
         #expect(listed.map(\.roomJID) == [room, bare("second@muc.waddle.test")])
     }
 
+
+    /// The server tells us we are out of the room before it answers the
+    /// delete, and a join in that gap would create the room again.
+    @Test func aRoomBeingDeletedIsNotJoinedWhileTheRequestIsPending() async throws {
+        let (coordinator, port) = online()
+        port.heldDirectoryVerbs = ["destroyRoom"]
+        let deleting = Task { try await coordinator.deleteRoom(room) }
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        coordinator.presence.markLeft(room)
+        await coordinator.ensureJoined(room)
+        #expect(port.joined.isEmpty)
+        port.releaseDirectoryRequests()
+        try await deleting.value
+        await coordinator.ensureJoined(room)
+        #expect(port.joined.isEmpty)
+    }
+
+    @Test func aRefusedDeleteLetsTheRoomBeJoinedAgain() async throws {
+        let (coordinator, port) = online()
+        port.roomDestructionResult = .failure(.rejected)
+        await #expect(throws: PortError.rejected) { try await coordinator.deleteRoom(room) }
+        await coordinator.ensureJoined(room)
+        #expect(port.joined == [room])
+    }
+
+    /// The shared client saves settings by reading the whole form and
+    /// writing it back, so two saves at once would undo each other.
+    @Test func aSecondActionOnARoomWaitsItsTurnByFailing() async throws {
+        let (coordinator, port) = online()
+        port.heldDirectoryVerbs = ["updateRoomSettings"]
+        let first = Task { try await coordinator.updateRoom(room, with: RoomSettingsPatch(name: "First")) }
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        await #expect(throws: PortError.failed) {
+            try await coordinator.updateRoom(room, with: RoomSettingsPatch(summary: "Second"))
+        }
+        await #expect(throws: PortError.failed) { try await coordinator.deleteRoom(room) }
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        try await first.value
+        #expect(port.roomSettingsUpdates.map(\.patch) == [RoomSettingsPatch(name: "First")])
+        #expect(port.roomDestructions.isEmpty)
+        try await coordinator.updateRoom(room, with: RoomSettingsPatch(summary: "Second"))
+        #expect(coordinator.directory.channel(for: room) == Channel(roomJID: room, name: "First", summary: "Second"))
+    }
+
+    @Test func aDeletedRoomCanBeCreatedAgain() async throws {
+        let (coordinator, port) = online()
+        try await coordinator.deleteRoom(room)
+        let created = try await coordinator.createChannel(name: "General", summary: nil)
+        #expect(created == roomConversation)
+        #expect(coordinator.directory.channel(for: room)?.name == "General")
+        #expect(port.joined == [room])
+    }
+
+    @Test func aStoppedSessionSendsNoInvitation() async throws {
+        let (coordinator, port) = online(Channel(roomJID: room, name: "Group", isGroupDM: true))
+        await coordinator.stop()
+        await #expect(throws: PortError.notConnected) {
+            try await coordinator.inviteToGroupDM(room, invitee: jid("bob@waddle.test").bare, history: .fromJoin)
+        }
+        #expect(port.groupDMInvitations.isEmpty)
+    }
 }

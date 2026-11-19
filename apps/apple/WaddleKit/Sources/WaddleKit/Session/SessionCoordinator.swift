@@ -107,10 +107,14 @@ public final class SessionCoordinator {
     @ObservationIgnored var onDemandRooms: Set<BareJID> = []
     /// Destroyed rooms must not be recreated by a later join in this session.
     @ObservationIgnored var destroyedRooms: Set<BareJID> = []
-    /// Rooms whose successful departure is waiting for call teardown.
+    /// Rooms being deleted or left; not joined until the request settles.
     @ObservationIgnored var departingRooms: Set<BareJID> = []
-    /// Local changes replayed over topology requests that began before them.
+    /// Rooms with a management action in flight; one at a time per room.
+    @ObservationIgnored var roomsBeingManaged: Set<BareJID> = []
+    /// Local changes replayed over topology requests that began before
+    /// them; emptied when no request is in flight.
     @ObservationIgnored var directoryMutations: [DirectoryMutation] = []
+    @ObservationIgnored var directoryRefreshesInFlight = 0
     /// Fences room actions across session teardown, including suspended port calls.
     @ObservationIgnored var roomManagementGeneration = 0
 
@@ -389,6 +393,7 @@ public final class SessionCoordinator {
         onDemandRooms.removeAll()
         destroyedRooms.removeAll()
         departingRooms.removeAll()
+        roomsBeingManaged.removeAll()
         directoryMutations.removeAll()
         extensionCommands.removeAll()
         mentionSearches.clear()

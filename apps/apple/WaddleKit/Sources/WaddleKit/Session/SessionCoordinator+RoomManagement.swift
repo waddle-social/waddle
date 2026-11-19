@@ -9,58 +9,79 @@ extension SessionCoordinator {
     /// Saves room settings; empty patches send nothing. Throws `PortError` on failure.
     public func updateRoom(_ room: BareJID, with patch: RoomSettingsPatch) async throws {
         guard !patch.isEmpty else { return }
-        guard !isStopped else { throw PortError.notConnected }
-        let generation = roomManagementGeneration
-        try await port.updateRoomSettings(patch, of: room)
-        guard generation == roomManagementGeneration, !isStopped else { return }
-        updateChannel(room, name: patch.name, summary: patch.summary)
+        try await managing(room) { generation in
+            try await port.updateRoomSettings(patch, of: room)
+            guard generation == roomManagementGeneration, !isStopped else { return }
+            updateChannel(room, name: patch.name, summary: patch.summary)
+        }
     }
 
-    /// Destroys the room and excludes it for this session. Throws `PortError` on failure.
+    /// Destroys the room and excludes it for this session. A huddle there
+    /// is left first, and stays left if the server refuses. Throws
+    /// `PortError` on failure.
     public func deleteRoom(_ room: BareJID) async throws {
-        guard !isStopped else { throw PortError.notConnected }
-        let generation = roomManagementGeneration
-        try await port.destroyRoom(room, reason: nil)
-        guard generation == roomManagementGeneration, !isStopped else { return }
-        destroyedRooms.insert(room)
-        await forgetRoom(room, generation: generation)
+        try await giveUp(room) { generation in
+            try await port.destroyRoom(room, reason: nil)
+            if generation == roomManagementGeneration, !isStopped { destroyedRooms.insert(room) }
+        }
     }
 
     /// Renames a group DM; whitespace-only names clear it. Throws `PortError` on failure.
     public func renameGroupDM(_ room: BareJID, to name: String) async throws {
-        guard !isStopped else { throw PortError.notConnected }
-        let generation = roomManagementGeneration
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        try await port.renameGroupDM(room, name: trimmed.isEmpty ? nil : trimmed)
-        guard generation == roomManagementGeneration, !isStopped else { return }
-        updateChannel(room, name: trimmed.isEmpty ? (room.localpart ?? room.description) : trimmed)
+        try await managing(room) { generation in
+            try await port.renameGroupDM(room, name: trimmed.isEmpty ? nil : trimmed)
+            guard generation == roomManagementGeneration, !isStopped else { return }
+            updateChannel(room, name: trimmed.isEmpty ? (room.localpart ?? room.description) : trimmed)
+        }
     }
 
     /// Sends a group DM invitation. Throws `PortError` on send failure; refusals arrive later as message errors.
     public func inviteToGroupDM(_ room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess) async throws {
+        guard !isStopped else { throw PortError.notConnected }
         try await port.inviteToGroupDM(room, invitee: invitee, history: history)
     }
 
-    /// Leaves a group DM and forgets it locally. Throws `PortError` on failure.
+    /// Leaves a group DM and forgets it locally. A huddle there is left
+    /// first, and stays left if the server refuses. Throws `PortError` on
+    /// failure.
     public func leaveGroupDM(_ room: BareJID) async throws {
-        guard !isStopped else { throw PortError.notConnected }
-        let generation = roomManagementGeneration
-        try await port.leaveGroupDM(room)
-        guard generation == roomManagementGeneration, !isStopped else { return }
-        await forgetRoom(room, generation: generation)
+        try await giveUp(room) { _ in try await port.leaveGroupDM(room) }
     }
 
-    private func forgetRoom(_ room: BareJID, generation: Int) async {
-        departingRooms.insert(room)
+    /// Runs one management action on `room`. A second action on the same
+    /// room fails instead of overlapping: the shared client saves settings
+    /// by reading the whole form and writing it back, so two at once would
+    /// undo each other.
+    private func managing(_ room: BareJID, _ action: (_ generation: Int) async throws -> Void) async throws {
+        guard !isStopped else { throw PortError.notConnected }
+        guard roomsBeingManaged.insert(room).inserted else { throw PortError.failed }
+        let generation = roomManagementGeneration
         defer {
-            if generation == roomManagementGeneration { departingRooms.remove(room) }
+            if generation == roomManagementGeneration { roomsBeingManaged.remove(room) }
         }
-        if calls.groupSlotHolds(room) { await calls.hangUp() }
-        guard generation == roomManagementGeneration, !isStopped else { return }
-        directory.remove(room)
-        directoryMutations.append(.remove(room))
-        onDemandRooms.remove(room)
-        presence.markLeft(room)
+        try await action(generation)
+    }
+
+    /// Deletes or leaves `room` with `request`, then forgets it. The room
+    /// is fenced from joins for the whole request: the server takes us out
+    /// of a room before it answers, and a join in that gap, or the huddle's
+    /// leave presence sent afterwards, would create a deleted room again.
+    private func giveUp(_ room: BareJID, with request: (_ generation: Int) async throws -> Void) async throws {
+        try await managing(room) { generation in
+            departingRooms.insert(room)
+            defer {
+                if generation == roomManagementGeneration { departingRooms.remove(room) }
+            }
+            if calls.groupSlotHolds(room) { await calls.hangUp() }
+            guard generation == roomManagementGeneration, !isStopped else { throw PortError.notConnected }
+            try await request(generation)
+            guard generation == roomManagementGeneration, !isStopped else { return }
+            directory.remove(room)
+            directoryMutations.append(.remove(room))
+            onDemandRooms.remove(room)
+            presence.markLeft(room)
+        }
     }
 
     /// Records a channel change for topology requests already in flight.
