@@ -107,6 +107,9 @@ public final class SessionCoordinator {
     @ObservationIgnored var onDemandRooms: Set<BareJID> = []
     /// Destroyed rooms must not be recreated by a later join in this session.
     @ObservationIgnored var destroyedRooms: Set<BareJID> = []
+    /// Rooms whose delete got no clear answer. They stay fenced until a
+    /// topology answer says whether they still exist.
+    @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
     /// Rooms being deleted or left; not joined until the request settles.
     @ObservationIgnored var departingRooms: Set<BareJID> = []
     /// Rooms with a management action in flight; one at a time per room.
@@ -115,6 +118,8 @@ public final class SessionCoordinator {
     /// them; emptied when no request is in flight.
     @ObservationIgnored var directoryMutations: [DirectoryMutation] = []
     @ObservationIgnored var directoryRefreshesInFlight = 0
+    /// The last join sent to each room that has one on its way.
+    @ObservationIgnored var joinTails: [BareJID: Task<Void, Never>] = [:]
     /// Fences room actions across session teardown, including suspended port calls.
     @ObservationIgnored var roomManagementGeneration = 0
 
@@ -394,6 +399,8 @@ public final class SessionCoordinator {
         destroyedRooms.removeAll()
         departingRooms.removeAll()
         roomsBeingManaged.removeAll()
+        unconfirmedDeletions.removeAll()
+        joinTails.removeAll()
         directoryMutations.removeAll()
         extensionCommands.removeAll()
         mentionSearches.clear()

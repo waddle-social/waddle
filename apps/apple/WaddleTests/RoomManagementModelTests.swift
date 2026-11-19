@@ -56,7 +56,7 @@ final class RoomManagementModelTests: XCTestCase {
     func testConfirmationsNameTheConversation() {
         let delete = RoomExitConfirmation(.delete, name: "design")
         XCTAssertEqual(delete?.title, "Delete “design”?")
-        XCTAssertEqual(delete?.message, "The room and all its messages are removed for everyone. This can't be undone.")
+        XCTAssertEqual(delete?.message, "The room is removed for everyone. This can't be undone.")
         XCTAssertEqual(RoomExitConfirmation(.leaveGroup, name: "Weekend trip")?.confirmTitle, "Leave group chat")
         XCTAssertNil(RoomExitConfirmation(.editSettings, name: "design"))
     }
@@ -68,7 +68,7 @@ final class RoomManagementModelTests: XCTestCase {
         )
         XCTAssertEqual(
             RoomExitConfirmation(.delete, name: "design", leavesHuddle: true)?.message,
-            "The room and all its messages are removed for everyone, and you leave the huddle. This can't be undone."
+            "The room is removed for everyone, and you leave the huddle. This can't be undone."
         )
     }
 
@@ -152,6 +152,27 @@ final class RoomManagementModelTests: XCTestCase {
         XCTAssertEqual(sample.port.groupDMInvitations.map(\.invitee), [SampleSession.mika, SampleSession.theo])
         XCTAssertEqual(sample.port.groupDMInvitations.map(\.history), [.full, .full])
         XCTAssertEqual(model.tokens, [])
+    }
+
+    /// Theo turns out to be a member while Mika is still being added.
+    func testAMemberListArrivingMidAddStopsThatPersonBeingAdded() async {
+        let sample = SampleSession()
+        sample.port.heldDirectoryVerbs = ["inviteToGroupDM"]
+        let model = GroupAddPeopleModel(
+            room: Self.group,
+            excluded: [],
+            tokens: [RecipientToken(jid: SampleSession.mika, name: nil), RecipientToken(jid: SampleSession.theo, name: nil)]
+        )
+
+        let adding = Task { await model.add(using: sample.coordinator) }
+        while sample.port.heldDirectoryRequests.isEmpty { await Task.yield() }
+        await model.excludeMembers { [RoomMember(jid: SampleSession.theo, nick: "Theo", affiliation: .member)] }
+        sample.port.heldDirectoryVerbs = []
+        sample.port.releaseDirectoryRequests()
+        let added = await adding.value
+
+        XCTAssertTrue(added)
+        XCTAssertEqual(sample.port.groupDMInvitations.map(\.invitee), [SampleSession.mika])
     }
 
     func testAFailedAddKeepsWhoIsLeftToAdd() async {

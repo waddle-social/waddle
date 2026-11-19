@@ -47,8 +47,8 @@ struct RoomExitConfirmation: Equatable {
         case .delete:
             title = "Delete “\(name)”?"
             message = leavesHuddle
-                ? "The room and all its messages are removed for everyone, and you leave the huddle. This can't be undone."
-                : "The room and all its messages are removed for everyone. This can't be undone."
+                ? "The room is removed for everyone, and you leave the huddle. This can't be undone."
+                : "The room is removed for everyone. This can't be undone."
             failureTitle = "Couldn't delete the room"
         case .leaveGroup:
             title = "Leave “\(name)”?"

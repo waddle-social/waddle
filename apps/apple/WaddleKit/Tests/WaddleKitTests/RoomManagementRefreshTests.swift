@@ -105,4 +105,52 @@ struct RoomManagementRefreshTests {
         await coordinator.stop()
     }
 
+    /// A delete that times out may have happened. Joining would create
+    /// the room again, so it waits for the server to say.
+    @Test(arguments: [PortError.timeout, .notConnected, .failed])
+    func aDeleteWithNoClearAnswerIsSettledByTheNextTopology(error: PortError) async throws {
+        let (coordinator, port) = await connected()
+        await coordinator.open(roomConversation)
+        port.joined = []
+        port.roomDestructionResult = .failure(error)
+        // The server did delete the room; only its answer was lost.
+        port.topology = Topology(spaces: [], channels: [])
+        await #expect(throws: error) { try await coordinator.deleteRoom(room) }
+        await coordinator.ensureJoined(room)
+        #expect(port.joined.isEmpty)
+
+        await reconnect(coordinator, port)
+        #expect(!coordinator.directory.isRoom(room))
+        await coordinator.ensureJoined(room)
+        #expect(port.joined.isEmpty)
+        await coordinator.stop()
+    }
+
+    @Test func aDeleteWithNoClearAnswerLeavesARoomTheServerStillLists() async throws {
+        let (coordinator, port) = await connected()
+        port.joined = []
+        port.roomDestructionResult = .failure(.timeout)
+        await #expect(throws: PortError.timeout) { try await coordinator.deleteRoom(room) }
+        await reconnect(coordinator, port)
+        #expect(coordinator.directory.isRoom(room))
+        #expect(port.joined.contains(room))
+        await coordinator.stop()
+    }
+
+    /// A second try that is refused does not prove the room exists: the
+    /// server refuses a delete of a room that is already gone.
+    @Test func aRefusedRetryOfAnUnansweredDeleteKeepsTheRoomFenced() async throws {
+        let (coordinator, port) = await connected()
+        port.joined = []
+        port.holdsTopology = true
+        port.roomDestructionResult = .failure(.timeout)
+        await #expect(throws: PortError.timeout) { try await coordinator.deleteRoom(room) }
+        port.roomDestructionResult = .failure(.rejected)
+        await #expect(throws: PortError.rejected) { try await coordinator.deleteRoom(room) }
+        await coordinator.ensureJoined(room)
+        #expect(port.joined.isEmpty)
+        port.holdsTopology = false
+        port.releaseTopology()
+        await coordinator.stop()
+    }
 }

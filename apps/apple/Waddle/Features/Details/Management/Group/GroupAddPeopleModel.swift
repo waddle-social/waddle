@@ -86,7 +86,9 @@ final class GroupAddPeopleModel {
         isAdding = true
         addError = nil
         defer { isAdding = false }
-        for person in tokens {
+        // The member list can arrive while this runs and unpick people,
+        // so each turn takes whoever is first among those still picked.
+        while let person = tokens.first {
             do {
                 try await session.inviteToGroupDM(room, invitee: person.jid, history: history)
                 tokens.removeAll { $0.jid == person.jid }

@@ -233,6 +233,7 @@ final class FakePort: XmppPort {
 
     func inviteToGroupDM(_ room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess) async throws {
         groupDMInvitations.append((room, invitee, history))
+        await holdDirectoryVerb("inviteToGroupDM")
         try groupDMInvitationResult.get()
     }
 

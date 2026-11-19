@@ -20,10 +20,7 @@ extension SessionCoordinator {
     /// is left first, and stays left if the server refuses. Throws
     /// `PortError` on failure.
     public func deleteRoom(_ room: BareJID) async throws {
-        try await giveUp(room) { generation in
-            try await port.destroyRoom(room, reason: nil)
-            if isCurrent(generation) { destroyedRooms.insert(room) }
-        }
+        try await giveUp(room, forGood: true) { try await port.destroyRoom(room, reason: nil) }
     }
 
     /// Renames a group DM; whitespace-only names clear it. Throws `PortError` on failure.
@@ -46,7 +43,7 @@ extension SessionCoordinator {
     /// first, and stays left if the server refuses. Throws `PortError` on
     /// failure.
     public func leaveGroupDM(_ room: BareJID) async throws {
-        try await giveUp(room) { _ in try await port.leaveGroupDM(room) }
+        try await giveUp(room, forGood: false) { try await port.leaveGroupDM(room) }
     }
 
     /// Runs one management action on `room`. A second action on the same
@@ -63,26 +60,54 @@ extension SessionCoordinator {
         try await action(generation)
     }
 
-    /// Deletes or leaves `room` with `request`, then forgets it. The room
-    /// is fenced from joins for the whole request: the server takes us out
-    /// of a room before it answers, and a join in that gap, or the huddle's
-    /// leave presence sent afterwards, would create a deleted room again.
-    private func giveUp(_ room: BareJID, with request: (_ generation: Int) async throws -> Void) async throws {
+    /// Deletes or leaves `room` with `request`, then forgets it.
+    ///
+    /// The server creates a room when someone joins one that does not
+    /// exist, and it takes us out of a room before it answers. So nothing
+    /// of ours may reach the room once the request is sent: joins already
+    /// on their way and the huddle's leave go first, and the room is fenced
+    /// from joins and sealed from huddle presence until the request
+    /// settles. `forGood` keeps both for the rest of the session.
+    private func giveUp(_ room: BareJID, forGood: Bool, with request: () async throws -> Void) async throws {
         try await managing(room) { generation in
             departingRooms.insert(room)
             defer {
                 if generation == roomManagementGeneration { departingRooms.remove(room) }
             }
+            await joinTails[room]?.value
             if calls.groupSlotHolds(room) { await calls.hangUp() }
             // A hang-up from a moment ago may still be waiting to send.
             await calls.settleGroupPresence()
+            calls.sealedGroupRooms.insert(room)
+            await calls.settleGroupPresence()
             guard isCurrent(generation) else { throw PortError.notConnected }
-            try await request(generation)
+            do {
+                try await request()
+            } catch {
+                guard isCurrent(generation) else { throw error }
+                if forGood, (error as? PortError) != .rejected || unconfirmedDeletions.contains(room) {
+                    // Timed out or cut off: the room may be gone all the
+                    // same, so it stays fenced until the server says.
+                    unconfirmedDeletions.insert(room)
+                    onDemandRooms.remove(room)
+                    if status.connection == .online { Task { await refreshDirectory() } }
+                } else {
+                    calls.sealedGroupRooms.remove(room)
+                }
+                throw error
+            }
             guard isCurrent(generation) else { return }
+            unconfirmedDeletions.remove(room)
+            if forGood {
+                destroyedRooms.insert(room)
+            } else {
+                calls.sealedGroupRooms.remove(room)
+            }
             directory.remove(room)
             directoryMutations.append(.remove(room))
             onDemandRooms.remove(room)
             presence.markLeft(room)
+            unread.clearRoom(room)
         }
     }
 
@@ -93,12 +118,26 @@ extension SessionCoordinator {
 
     /// A room being given up, or deleted this session: never joined.
     func isFenced(_ room: BareJID) -> Bool {
-        destroyedRooms.contains(room) || departingRooms.contains(room)
+        destroyedRooms.contains(room) || departingRooms.contains(room) || unconfirmedDeletions.contains(room)
     }
 
     /// Whether the user is in, or joining, the huddle in `room`.
     public func isInHuddle(in room: BareJID) -> Bool {
         calls.groupSlotHolds(room)
+    }
+
+    /// Settles deletes that got no clear answer before this topology was
+    /// asked for: a room it still lists exists, any other is gone.
+    func settleUnconfirmedDeletions(_ rooms: Set<BareJID>) {
+        for room in rooms where unconfirmedDeletions.remove(room) != nil {
+            if directory.isRoom(room) {
+                calls.sealedGroupRooms.remove(room)
+            } else {
+                destroyedRooms.insert(room)
+                presence.markLeft(room)
+                unread.clearRoom(room)
+            }
+        }
     }
 
     /// Records a channel change for topology requests already in flight.

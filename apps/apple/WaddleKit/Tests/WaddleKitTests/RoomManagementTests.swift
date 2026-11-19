@@ -226,4 +226,48 @@ struct RoomManagementTests {
         }
         #expect(port.groupDMInvitations.isEmpty)
     }
+
+    /// A join already on its way must land before the delete, not after:
+    /// after it, the server would create the room again.
+    @Test func aJoinAlreadyOnItsWayIsFinishedBeforeTheRoomIsDeleted() async throws {
+        let (coordinator, port) = online()
+        port.heldDirectoryVerbs = ["joinRoom"]
+        let joining = Task { await coordinator.ensureJoined(room) }
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        let deleting = Task { try await coordinator.deleteRoom(room) }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(port.roomDestructions.isEmpty)
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        await joining.value
+        try await deleting.value
+        #expect(port.joined == [room])
+        #expect(port.roomDestructions.map(\.room) == [room])
+    }
+
+    @Test func aDeletedRoomGetsNoHuddlePresenceAfterwards() async throws {
+        let (coordinator, port) = online()
+        try await coordinator.deleteRoom(room)
+        await coordinator.calls.leaveGroupPresence(in: room, nick: "alice", identity: nil, epoch: coordinator.calls.generation)
+        #expect(port.callSends.isEmpty)
+    }
+
+    @Test func aRefusedDeleteLeavesHuddlePresenceWorking() async throws {
+        let (coordinator, port) = online()
+        port.roomDestructionResult = .failure(.rejected)
+        await #expect(throws: PortError.rejected) { try await coordinator.deleteRoom(room) }
+        await coordinator.calls.leaveGroupPresence(in: room, nick: "alice", identity: nil, epoch: coordinator.calls.generation)
+        #expect(port.callSends == [.groupPresence(room, "alice", .init(state: .left))])
+    }
+
+    @Test(arguments: ["delete", "leave"])
+    func forgettingARoomClearsItsUnreadCounts(action: String) async throws {
+        let (coordinator, _) = online(Channel(roomJID: room, name: "Room", isGroupDM: action == "leave"))
+        let thread = ThreadKey(room: room, threadID: "t1")
+        coordinator.unread.set(3, for: roomConversation)
+        coordinator.unread.setThread(2, for: thread)
+        if action == "delete" { try await coordinator.deleteRoom(room) } else { try await coordinator.leaveGroupDM(room) }
+        #expect(coordinator.unread.count(for: roomConversation) == 0)
+        #expect(coordinator.unread.threadCount(for: thread) == 0)
+    }
 }

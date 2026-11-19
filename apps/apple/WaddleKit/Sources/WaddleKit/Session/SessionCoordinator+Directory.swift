@@ -6,6 +6,7 @@ extension SessionCoordinator {
     /// discovery keeps the last known directory.
     func refreshDirectory() async {
         let mutationStart = directoryMutations.count
+        let unconfirmed = unconfirmedDeletions
         directoryRefreshesInFlight += 1
         defer {
             directoryRefreshesInFlight -= 1
@@ -23,6 +24,7 @@ extension SessionCoordinator {
                 case .remove(let room): directory.remove(room)
                 }
             }
+            settleUnconfirmedDeletions(unconfirmed)
         }
         for room in destroyedRooms { directory.remove(room) }
         let listed = (directory.channels + directory.groupDMs)
@@ -30,8 +32,8 @@ extension SessionCoordinator {
             .map(\.roomJID)
         var joined: Set<BareJID> = []
         for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
-            guard !isFenced(room), directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
-            await port.joinRoom(room, nick: account.nick)
+            guard directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
+            await join(room)
         }
     }
 
@@ -44,7 +46,22 @@ extension SessionCoordinator {
         onDemandRooms.insert(room)
         // Offline, the ready pipeline joins it on connect.
         guard status.connection == .online, !presence.joinedRooms.contains(room) else { return }
-        await port.joinRoom(room, nick: account.nick)
+        await join(room)
+    }
+
+    /// Sends a join unless the room is fenced when its turn comes. Joins
+    /// to one room run in order, so giving the room up can wait for those
+    /// already on their way.
+    func join(_ room: BareJID) async {
+        let previous = joinTails[room]
+        let task = Task { @MainActor [self] in
+            await previous?.value
+            guard !isFenced(room) else { return }
+            await port.joinRoom(room, nick: account.nick)
+        }
+        joinTails[room] = task
+        await task.value
+        if joinTails[room] == task { joinTails[room] = nil }
     }
 
     func loadNotifyModes() async {
@@ -72,6 +89,8 @@ extension SessionCoordinator {
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
         // A room deleted earlier in the session exists again.
         destroyedRooms.remove(room)
+        unconfirmedDeletions.remove(room)
+        calls.sealedGroupRooms.remove(room)
         upsertChannel(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
         // create_room joined, configured and then left the room. Its
         // self-presence may already have marked the room joined while the
