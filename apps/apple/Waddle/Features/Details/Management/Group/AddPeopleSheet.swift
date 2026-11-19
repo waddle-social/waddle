@@ -1,40 +1,41 @@
 import SwiftUI
 import WaddleKit
 
-/// Invites people to a group chat. An invitation only says it was sent:
-/// whether they join is up to them, so the sheet closes without claiming
-/// they were added.
+/// Adds people found by a name search to a group chat. Only people the
+/// directory finds can be added: the server refuses other addresses
+/// without telling us.
 struct AddPeopleSheet: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
-    @State private var model: GroupInviteModel
+    @State private var model: GroupAddPeopleModel
     @FocusState private var isQueryFocused: Bool
 
-    init(model: GroupInviteModel) {
+    init(model: GroupAddPeopleModel) {
         _model = State(initialValue: model)
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                recipientSection
+                searchSection
                 if !ConversationNameFilter.normalized(model.query).isEmpty {
                     RecipientResultsSection(
-                        typedAddress: model.typedAddress,
-                        search: model.search,
+                        typedAddress: nil,
+                        search: model.visibleSearch,
                         tokens: model.tokens,
+                        emptyMessage: "No one found. People already in this group chat aren't listed.",
                         onToggle: toggle
                     )
                 }
                 historySection
-                if let error = model.sendError {
+                if let error = model.addError {
                     Section {
                         ManagementErrorLabel(message: error)
                     }
                 }
             }
             .formStyle(.grouped)
-            .disabled(model.isSending)
+            .disabled(model.isAdding)
             .navigationTitle("Add people")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -42,29 +43,27 @@ struct AddPeopleSheet: View {
             .toolbar { toolbar }
             .task(id: model.query) { await model.runSearch(for: model.query, using: session) }
         }
-        .interactiveDismissDisabled(model.isSending)
+        .interactiveDismissDisabled(model.isAdding)
         .onAppear { isQueryFocused = true }
+        .task {
+            let session = self.session
+            let room = model.room
+            await model.excludeMembers { try await session.members(of: room) }
+        }
         .managementSheetFrame(minHeight: 460)
     }
 
-    private var recipientSection: some View {
+    private var searchSection: some View {
         Section {
             if !model.tokens.isEmpty {
                 RecipientTokenStrip(tokens: model.tokens, onRemove: toggle)
             }
-            // Verbatim: a localized key turns the address into a link,
-            // which draws the prompt as ordinary text instead of a placeholder.
-            TextField("Add", text: $model.query, prompt: Text(verbatim: "Name or address, like ana@example.com"))
+            TextField("Search people", text: $model.query, prompt: Text("Search people by name"))
                 .labelsHidden()
-                .addressInput()
+                .autocorrectionDisabled()
                 .focused($isQueryFocused)
-                .onSubmit { model.addTypedAddress() }
         } footer: {
-            if let member = model.typedMember {
-                Text("\(member.description) is already in this group chat.")
-            } else {
-                Text("They get an invitation to join this group chat.")
-            }
+            Text("People you pick are added to this group chat.")
         }
     }
 
@@ -78,6 +77,8 @@ struct AddPeopleSheet: View {
             .labelsHidden()
         } header: {
             Text("What they can see")
+        } footer: {
+            Text("Earlier messages are only shared if you can see all of them yourself. If not, they see messages from now on.")
         }
     }
 
@@ -85,16 +86,16 @@ struct AddPeopleSheet: View {
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button("Cancel") { dismiss() }
-                .disabled(model.isSending)
+                .disabled(model.isAdding)
         }
         ToolbarItem(placement: .confirmationAction) {
-            if model.isSending {
+            if model.isAdding {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel(Text("Sending invitations"))
+                    .accessibilityLabel(Text("Adding people"))
             } else {
-                Button("Invite", action: send)
-                    .disabled(!model.canSend)
+                Button("Add", action: add)
+                    .disabled(!model.canAdd)
             }
         }
     }
@@ -104,24 +105,11 @@ struct AddPeopleSheet: View {
         isQueryFocused = true
     }
 
-    private func send() {
+    private func add() {
         Task {
-            if await model.send(using: session) {
+            if await model.add(using: session) {
                 dismiss()
             }
         }
-    }
-}
-
-private extension View {
-    func addressInput() -> some View {
-        #if os(iOS)
-        return self
-            .textInputAutocapitalization(.never)
-            .keyboardType(.emailAddress)
-            .autocorrectionDisabled()
-        #else
-        return self.autocorrectionDisabled()
-        #endif
     }
 }

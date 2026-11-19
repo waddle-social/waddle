@@ -72,15 +72,6 @@ final class RoomManagementModelTests: XCTestCase {
         )
     }
 
-    func testOnlyThisRoomsHuddleCounts() {
-        let joining = CallState.joiningGroup(GroupCallAttempt(
-            room: SampleSession.design, sid: "s1", media: CallMedia(audio: true, video: false), nick: "ana"
-        ))
-        XCTAssertTrue(joining.isInHuddle(of: SampleSession.design))
-        XCTAssertFalse(joining.isInHuddle(of: Self.group))
-        XCTAssertFalse(CallState.idle.isInHuddle(of: SampleSession.design))
-    }
-
     func testEditRoomSavesOnlyANamedChange() {
         let editor = RoomSettingsEditor(
             room: SampleSession.design,
@@ -103,58 +94,77 @@ final class RoomManagementModelTests: XCTestCase {
         XCTAssertFalse(editor.canSave)
     }
 
-    func testAGroupChatNamedAfterItsAddressHasNoNameToEdit() {
-        XCTAssertEqual(GroupRenameEditor.currentName("g-7f3a2c", room: Self.group), "")
-        XCTAssertEqual(GroupRenameEditor.currentName(" Weekend trip ", room: Self.group), "Weekend trip")
-    }
-
-    func testClearingAGroupChatNameCanBeSaved() {
-        let editor = GroupRenameEditor(room: Self.group, channelName: "Weekend trip")
+    func testRenameStartsFromTheNameTheDirectoryShows() {
+        let editor = GroupRenameEditor(room: Self.group, channelName: "g-7f3a2c")
+        XCTAssertEqual(editor.name, "g-7f3a2c")
+        XCTAssertFalse(editor.canSave)
+        editor.name = "  g-7f3a2c "
         XCTAssertFalse(editor.canSave)
         editor.name = ""
         XCTAssertTrue(editor.canSave)
     }
 
-    func testAddPeopleNeverOffersSomeoneAlreadyInTheGroup() {
-        let model = GroupInviteModel(room: Self.group, excluded: [SampleSession.jo])
+    func testAddPeopleNeverOffersSomeoneAlreadyInTheGroup() async {
+        let sample = SampleSession()
+        sample.port.userSearchResults["m"] = [
+            UserSearchResult(jid: SampleSession.jo, displayName: "Jo"),
+            UserSearchResult(jid: SampleSession.mika, displayName: "Mika"),
+        ]
+        let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.jo])
 
-        model.query = "jo@waddle.test"
-        XCTAssertNil(model.typedAddress)
-        XCTAssertEqual(model.typedMember, SampleSession.jo)
-        XCTAssertFalse(model.canSend)
+        await model.runSearch(for: "m", using: sample.coordinator)
 
-        model.query = "mika@waddle.test"
-        XCTAssertEqual(model.invitees.map(\.jid), [SampleSession.mika])
+        XCTAssertEqual(model.visibleSearch.results.map(\.jid), [SampleSession.mika])
     }
 
-    func testAddPeopleInvitesEachPersonWithTheChosenHistory() async {
+    /// Theo is a member but offline, so only the member list knows him.
+    func testAddPeopleLeavesOutOfflineMembersOnceTheListLoads() async {
+        let theo = RecipientToken(jid: SampleSession.theo, name: "Theo")
+        let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.jo], tokens: [theo])
+
+        await model.excludeMembers { [RoomMember(jid: SampleSession.theo, nick: "Theo", affiliation: .member)] }
+
+        XCTAssertTrue(model.excluded.contains(SampleSession.theo))
+        XCTAssertEqual(model.tokens, [])
+        XCTAssertFalse(model.canAdd)
+    }
+
+    func testAddPeopleCarriesOnWhenTheMemberListFails() async {
+        let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.jo])
+
+        await model.excludeMembers { throw PortError.timeout }
+
+        XCTAssertEqual(model.excluded, [SampleSession.jo])
+    }
+
+    func testAddPeopleAddsEachPersonWithTheChosenHistory() async {
         let sample = SampleSession()
-        let model = GroupInviteModel(
+        let model = GroupAddPeopleModel(
             room: Self.group,
             excluded: [],
             tokens: [RecipientToken(jid: SampleSession.mika, name: nil), RecipientToken(jid: SampleSession.theo, name: nil)]
         )
         model.history = .full
 
-        let sent = await model.send(using: sample.coordinator)
+        let added = await model.add(using: sample.coordinator)
 
-        XCTAssertTrue(sent)
+        XCTAssertTrue(added)
         XCTAssertEqual(sample.port.groupDMInvitations.map(\.invitee), [SampleSession.mika, SampleSession.theo])
         XCTAssertEqual(sample.port.groupDMInvitations.map(\.history), [.full, .full])
         XCTAssertEqual(model.tokens, [])
     }
 
-    func testAFailedInvitationKeepsWhoIsLeftToInvite() async {
+    func testAFailedAddKeepsWhoIsLeftToAdd() async {
         let sample = SampleSession()
         sample.port.groupDMInvitationResult = .failure(.failed)
-        let model = GroupInviteModel(
+        let model = GroupAddPeopleModel(
             room: Self.group, excluded: [], tokens: [RecipientToken(jid: SampleSession.mika, name: "Mika")]
         )
 
-        let sent = await model.send(using: sample.coordinator)
+        let added = await model.add(using: sample.coordinator)
 
-        XCTAssertFalse(sent)
+        XCTAssertFalse(added)
         XCTAssertEqual(model.tokens.map(\.jid), [SampleSession.mika])
-        XCTAssertEqual(model.sendError, "Couldn't invite Mika. Try again.")
+        XCTAssertEqual(model.addError, "Couldn't add Mika. Try again.")
     }
 }

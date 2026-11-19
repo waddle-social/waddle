@@ -62,14 +62,3 @@ struct RoomExitConfirmation: Equatable {
         confirmTitle = action.title
     }
 }
-
-extension CallState {
-    /// In or joining `room`'s huddle; a delete or leave ends that first.
-    func isInHuddle(of room: BareJID) -> Bool {
-        switch self {
-        case let .joiningGroup(attempt): return attempt.room == room
-        case let .inGroup(call): return call.room == room
-        case .idle, .incoming, .outgoing, .active, .ended: return false
-        }
-    }
-}

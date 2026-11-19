@@ -21,12 +21,18 @@ let screenGoldenOSVersion = 27
 /// do in the app. Images are rendered at a fixed 2x, whatever display the
 /// test runs on. With `asSheet`, the view is presented as a sheet over an
 /// empty window, the way a sheet's toolbar and size are decided: on a Mac
-/// only the sheet is captured, on iOS the whole window under it.
+/// only the sheet is captured, on iOS the whole window under it. A sheet
+/// is captured without keyboard focus, so no caret blinks and a Mac draws
+/// it as an inactive window whatever else the test run has open.
+///
+/// `precision` is the share of pixels that must match; lower it only for
+/// what moves on its own, such as a spinner.
 @MainActor
 func assertScreenSnapshot<V: View>(
     of view: V,
     size: CGSize,
     asSheet: Bool = false,
+    precision: Float = 0.9995,
     file: StaticString = #filePath,
     testName: String = #function,
     line: UInt = #line
@@ -43,7 +49,7 @@ func assertScreenSnapshot<V: View>(
         // share of its pixels: demand a near-exact match.
         assertSnapshot(
             of: image,
-            as: .image(precision: 0.9995, perceptualPrecision: 0.98),
+            as: .image(precision: precision, perceptualPrecision: 0.98),
             named: "\(theme.rawValue)-\(platformName)",
             file: file,
             testName: testName,
@@ -91,9 +97,29 @@ private func renderScreen<V: View>(
     window.orderFrontRegardless()
     defer { window.close() }
     try await Task.sleep(for: settleTime)
+    if capturesSheet {
+        // Another window takes key, so the sheet's controls, selection and
+        // caret draw the same whether or not the test app is active.
+        let keyHolder = NSWindow(
+            contentRect: CGRect(x: -20_000, y: -20_000, width: 10, height: 10),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        keyHolder.isReleasedWhenClosed = false
+        keyHolder.makeKeyAndOrderFront(nil)
+        defer { keyHolder.close() }
+        try await Task.sleep(for: .milliseconds(200))
+        return try capture(window.attachedSheet)
+    }
+    return try capture(window)
+}
 
+/// The window's frame view at 2x.
+@MainActor
+private func capture(_ captured: NSWindow?) throws -> NSImage {
+    let captured = try XCTUnwrap(captured, "No sheet was presented")
     // The frame view includes the title bar and toolbar the content draws under.
-    let captured = capturesSheet ? try XCTUnwrap(window.attachedSheet, "No sheet was presented") : window
     let target = try XCTUnwrap(captured.contentView?.superview)
     target.layoutSubtreeIfNeeded()
     let bounds = target.bounds
@@ -129,6 +155,11 @@ private func renderScreen<V: View>(
     defer { window.isHidden = true }
     window.layoutIfNeeded()
     try await Task.sleep(for: settleTime)
+    if capturesSheet {
+        // Without focus no caret blinks and no keyboard moves the sheet.
+        window.endEditing(true)
+        try await Task.sleep(for: settleTime)
+    }
 
     let format = UIGraphicsImageRendererFormat()
     format.scale = 2

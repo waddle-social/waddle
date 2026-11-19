@@ -9,8 +9,9 @@ import XCTest
 /// real window, so these are screen snapshots, compared on the OS the
 /// goldens were recorded on (see `assertScreenSnapshot`).
 ///
-/// To re-record after an intended change, delete the affected files under
-/// `__Snapshots__/RoomManagementSnapshotTests` and run the tests twice.
+/// After an intended visual change, delete the affected goldens under
+/// `__Snapshots__/RoomManagementSnapshotTests` and run the tests once to
+/// record new ones (that run fails), then commit them.
 @MainActor
 final class RoomManagementSnapshotTests: XCTestCase {
     private static let group = BareJID(parsing: "g-7f3a2c@groups.waddle.test")!
@@ -58,8 +59,9 @@ final class RoomManagementSnapshotTests: XCTestCase {
         name: "design", summary: "Critique, drafts and the identity work.", pinPermission: .adminsOnly
     )
 
+    /// The spinner turns on its own, so a little of the image may differ.
     func testEditRoomLoading() async throws {
-        try await assertEditRoom(RoomSettingsEditor(room: SampleSession.design))
+        try await assertEditRoom(RoomSettingsEditor(room: SampleSession.design), precision: 0.995)
     }
 
     func testEditRoomFailedToLoad() async throws {
@@ -90,10 +92,13 @@ final class RoomManagementSnapshotTests: XCTestCase {
         try await assertEditRoom(editor)
     }
 
-    private func assertEditRoom(_ editor: RoomSettingsEditor, testName: String = #function) async throws {
+    private func assertEditRoom(
+        _ editor: RoomSettingsEditor, precision: Float = 0.9995, testName: String = #function
+    ) async throws {
         let sample = SampleSession()
         try await assertScreenSnapshot(
-            of: sample.host(EditRoomSheet(editor: editor)), size: Self.sheet, asSheet: true, testName: testName
+            of: sample.host(EditRoomSheet(editor: editor)), size: Self.sheet, asSheet: true,
+            precision: precision, testName: testName
         )
     }
 
@@ -107,7 +112,7 @@ final class RoomManagementSnapshotTests: XCTestCase {
 
     func testAddPeopleWithTwoPicked() async throws {
         let sample = SampleSession()
-        let model = GroupInviteModel(
+        let model = GroupAddPeopleModel(
             room: Self.group,
             excluded: [SampleSession.ana.jid, SampleSession.jo],
             tokens: [
@@ -126,7 +131,7 @@ final class RoomManagementSnapshotTests: XCTestCase {
             UserSearchResult(jid: BareJID(parsing: "jun@waddle.test")!, displayName: "Jun Park"),
             UserSearchResult(jid: BareJID(parsing: "jamie@waddle.test")!, displayName: "Jamie Berg"),
         ]
-        let model = GroupInviteModel(room: Self.group, excluded: [SampleSession.ana.jid, SampleSession.jo])
+        let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.ana.jid, SampleSession.jo])
         model.query = "j"
         try await assertScreenSnapshot(of: sample.host(AddPeopleSheet(model: model)), size: Self.sheet, asSheet: true)
     }

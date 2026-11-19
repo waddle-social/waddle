@@ -46,16 +46,18 @@ final class RoomManagementModel {
     /// Runs a confirmed delete or leave. The room is already gone from the
     /// directory when it succeeds, so navigation moves off it.
     func exit(_ action: RoomManagementAction, using session: SessionCoordinator, navigation: NavigationModel) async {
-        guard action.isDestructive, exiting == nil else { return }
+        guard exiting == nil else { return }
+        let request: () async throws -> Void
+        switch action {
+        case .delete: request = { try await session.deleteRoom(self.room) }
+        case .leaveGroup: request = { try await session.leaveGroupDM(self.room) }
+        case .editSettings, .renameGroup, .inviteToGroup: return
+        }
         pendingExit = nil
         exiting = action
         defer { exiting = nil }
         do {
-            switch action {
-            case .delete: try await session.deleteRoom(room)
-            case .leaveGroup: try await session.leaveGroupDM(room)
-            case .editSettings, .renameGroup, .inviteToGroup: return
-            }
+            try await request()
             navigation.close(.room(room))
         } catch {
             exitFailure = RoomExitFailure(

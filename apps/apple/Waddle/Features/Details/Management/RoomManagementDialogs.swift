@@ -67,13 +67,13 @@ private struct RoomManagementDialogs: ViewModifier {
                 channelName: session.directory.channel(for: model.room)?.name
             ))
         case .addPeople:
-            AddPeopleSheet(model: GroupInviteModel(room: model.room, excluded: groupMembers()))
+            AddPeopleSheet(model: GroupAddPeopleModel(room: model.room, excluded: groupMembers()))
         }
     }
 
     private var confirmation: RoomExitConfirmation? {
         model.pendingExit.flatMap {
-            RoomExitConfirmation($0, name: name, leavesHuddle: session.calls.state.isInHuddle(of: model.room))
+            RoomExitConfirmation($0, name: name, leavesHuddle: session.isInHuddle(in: model.room))
         }
     }
 

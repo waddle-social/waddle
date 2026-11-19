@@ -7,7 +7,7 @@ import WaddleKit
 @Observable
 final class GroupRenameEditor {
     let room: BareJID
-    /// The name the group chat has now; empty when it has none.
+    /// The name the directory shows for the group chat now.
     let currentName: String
     var name: String
     private(set) var isSaving = false
@@ -15,15 +15,8 @@ final class GroupRenameEditor {
 
     init(room: BareJID, channelName: String?) {
         self.room = room
-        currentName = Self.currentName(channelName, room: room)
+        currentName = channelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         name = currentName
-    }
-
-    /// A group chat without a name shows its address's local part, which
-    /// is not a name to edit.
-    static func currentName(_ channelName: String?, room: BareJID) -> String {
-        let trimmed = channelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed == room.localpart ? "" : trimmed
     }
 
     var canSave: Bool {

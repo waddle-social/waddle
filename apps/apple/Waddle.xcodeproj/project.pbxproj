@@ -92,6 +92,7 @@
 		2B9394F19659FF6FC1F28C4D /* SidebarAccountBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ACF126A87B69DBEE632B1E1 /* SidebarAccountBar.swift */; };
 		2C7C2C0365E2BDF13790BD90 /* MessageActionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C3FC76B6AA85AAC8DF37039 /* MessageActionModel.swift */; };
 		2CD83D8B1FDD716A09CA2DB3 /* ProfileMoodRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C38245774FABA6681771A714 /* ProfileMoodRow.swift */; };
+		2D1AE49C2586E8011EEEF699 /* GroupAddPeopleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */; };
 		2D366B2F3F1DBB09FD6F2FA3 /* CallRinger.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6249154B3A2973B96B79CEA /* CallRinger.swift */; };
 		2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3027197695AD04C246A4D2C3 /* AccountSignOutButton.swift */; };
 		2DDA5514F992810F06C5B939 /* FFIEventListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF317440D44D33577F844A73 /* FFIEventListener.swift */; };
@@ -195,6 +196,7 @@
 		5CFF1C9186158342BACB4AEF /* DesignFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB6BECE38DDA80483C9BBADC /* DesignFoundationTests.swift */; };
 		5DDC39257503B655F727DC36 /* ConversationInspectorPlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05CDE3002C84AACE6E61513C /* ConversationInspectorPlacement.swift */; };
 		5E8F6B82D60AA012464E9DA0 /* WaddleCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F3BC43606C47023AC920E8 /* WaddleCommands.swift */; };
+		5FBFF1EDA4006854FB2903A2 /* GroupAddPeopleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */; };
 		5FD4A875132961C78B53440D /* EditRoomSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A413A4085D344F6A2E94270B /* EditRoomSheet.swift */; };
 		5FF74D9CAA9E5256B21392AA /* AnimatedImageDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26A1114C848081879D77F1F /* AnimatedImageDecoder.swift */; };
 		6033E083125F7FCB3A3088DF /* ComposerSlashSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECDFAEB59C784965933AFB95 /* ComposerSlashSuggestions.swift */; };
@@ -226,7 +228,6 @@
 		69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */; };
 		6A268994E1F6D6F07B5B5FCC /* QuickSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E7CEBBBBBA6AAA1203EA414 /* QuickSwitcher.swift */; };
 		6A9AC0512D50E4414D0064AB /* ExtensionCommandStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC04CCBB25DF7EFFCEE73622 /* ExtensionCommandStage.swift */; };
-		6B18B70042B83806658B103F /* GroupInviteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 347E5BB2353A394A0C6E0F00 /* GroupInviteModel.swift */; };
 		6BCEFD523B63E8EE4535F701 /* ComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17423AC98C25904805D06B23 /* ComposerModel.swift */; };
 		6D6B5FAA197C4D4F5721D640 /* FFIXmppPort+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C23BB845ABC3CBB05A9314 /* FFIXmppPort+Push.swift */; };
 		6D7FA77C3C6D0FCD91C0A013 /* FFIInbound+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */; };
@@ -326,7 +327,6 @@
 		977FF2B76F048955C852435F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BC57272670658BD2403BA4E3 /* Localizable.strings */; };
 		97B64D066C7758AB6293B144 /* NavigationSectionHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0DC7EF989C84CD50FE8B750 /* NavigationSectionHeader.swift */; };
 		97BE8A4800D5E7BE0BC89AA2 /* MessageRichBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE2907041A875E132FBDE57 /* MessageRichBody.swift */; };
-		97D166FEE01ECE94A33FC705 /* GroupInviteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 347E5BB2353A394A0C6E0F00 /* GroupInviteModel.swift */; };
 		97EA83659EDC249D123EBA04 /* FFIXmppPort+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */; };
 		983DA929CB7287464454FBF3 /* ConversationInspectorPlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05CDE3002C84AACE6E61513C /* ConversationInspectorPlacement.swift */; };
 		985578F2C1EDA16F80D1107A /* AuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B16D87BBE11A6EE95142654E /* AuthModels.swift */; };
@@ -608,7 +608,6 @@
 		2FB3CC66C2E14BDDAD64BBC5 /* MessageSafetyScoresButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageSafetyScoresButton.swift; sourceTree = "<group>"; };
 		3027197695AD04C246A4D2C3 /* AccountSignOutButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSignOutButton.swift; sourceTree = "<group>"; };
 		319EFC442EA192CBDC1E53C0 /* GifPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifPickerView.swift; sourceTree = "<group>"; };
-		347E5BB2353A394A0C6E0F00 /* GroupInviteModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupInviteModel.swift; sourceTree = "<group>"; };
 		34DADAA8D894F156291483A5 /* TimelineHistoryHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineHistoryHeader.swift; sourceTree = "<group>"; };
 		361CBD76B193AC38008E364F /* SettingsMessageOrderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMessageOrderPicker.swift; sourceTree = "<group>"; };
 		374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectNavigationRow.swift; sourceTree = "<group>"; };
@@ -829,6 +828,7 @@
 		FE0F38B78980F7FA0414198A /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		FE65DBCBF636D9C3AC197602 /* CallToneDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallToneDecodingTests.swift; sourceTree = "<group>"; };
 		FE8ACEF477622BE73C019935 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupAddPeopleModel.swift; sourceTree = "<group>"; };
 		FEB699135F2699F62EE19308 /* QuickSwitcherRanking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSwitcherRanking.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -1242,7 +1242,7 @@
 			isa = PBXGroup;
 			children = (
 				205413AB053B4EB81D79F03C /* AddPeopleSheet.swift */,
-				347E5BB2353A394A0C6E0F00 /* GroupInviteModel.swift */,
+				FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */,
 				0122F8ACD991E51B4298F006 /* GroupRenameEditor.swift */,
 				D02EE5D57B1FEEC55787AAE6 /* RenameGroupSheet.swift */,
 			);
@@ -1949,9 +1949,9 @@
 				F764BAF21FF32BEA75470931 /* GifPickerGrid.swift in Sources */,
 				DB078D9D57598E0A108B674D /* GifPickerView.swift in Sources */,
 				612943B882D8BC86485E27FA /* GifSearchClient.swift in Sources */,
+				5FBFF1EDA4006854FB2903A2 /* GroupAddPeopleModel.swift in Sources */,
 				24530FC828EB809EBE5CE724 /* GroupCallDockView.swift in Sources */,
 				590D6C5A30F8F49BE0909A6D /* GroupCallRosterStrip.swift in Sources */,
-				97D166FEE01ECE94A33FC705 /* GroupInviteModel.swift in Sources */,
 				955DCD98AE01D168BBF79BB5 /* GroupRenameEditor.swift in Sources */,
 				45236C8DF13EAE1862D4A3F2 /* HomeList.swift in Sources */,
 				9E9BBCA72D50BB3C8C973D70 /* HuddleAppearance.swift in Sources */,
@@ -2214,9 +2214,9 @@
 				E39BF0B606B89ACA08E342C1 /* GifPickerGrid.swift in Sources */,
 				D5C5F5438455845AAA44B947 /* GifPickerView.swift in Sources */,
 				4B85E9D528FE9EC737CC180D /* GifSearchClient.swift in Sources */,
+				2D1AE49C2586E8011EEEF699 /* GroupAddPeopleModel.swift in Sources */,
 				8D69014FA3F355C6949FE07A /* GroupCallDockView.swift in Sources */,
 				F4EB7DFF694623E1EB9E357C /* GroupCallRosterStrip.swift in Sources */,
-				6B18B70042B83806658B103F /* GroupInviteModel.swift in Sources */,
 				40E8FEBD750171365C5DE769 /* GroupRenameEditor.swift in Sources */,
 				3D3CC4E01C2B3209E01ABAB7 /* HomeList.swift in Sources */,
 				D14092D809BD9D97C48F43EB /* HuddleAppearance.swift in Sources */,
