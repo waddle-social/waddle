@@ -128,6 +128,11 @@ public final class DirectoryStore {
         notifyModes[conversation] = mode
     }
 
+    /// The mode as the account stores it; `nil` is the kind's default.
+    public func setStoredNotifyMode(_ mode: NotifyMode?, for conversation: ConversationID) {
+        notifyModes[conversation] = mode
+    }
+
     public func setShowsMessagesInPush(_ shows: Bool, for conversation: ConversationID) {
         if shows {
             showingMessagesInPush.insert(conversation)

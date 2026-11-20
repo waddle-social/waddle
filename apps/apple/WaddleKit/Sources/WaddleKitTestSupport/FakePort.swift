@@ -31,6 +31,8 @@ final class FakePort: XmppPort {
     }
     var notifySettingsWrites: [NotifySettingsWrite] = []
     var notifySettingsWriteResult: Result<Void, PortError> = .success(())
+    /// Results for the next writes, in order, before `notifySettingsWriteResult`.
+    var notifySettingsWriteResults: [Result<Void, PortError>] = []
     var notifySettings = NotifySettings()
 
     var sent: [OutboundMessage] = []
@@ -311,7 +313,14 @@ final class FakePort: XmppPort {
 
     func setNotifyMode(_ mode: NotifyMode, showsMessagesInPush: Bool, for conversation: ConversationID) async throws {
         notifySettingsWrites.append(.init(conversation: conversation, mode: mode, showsMessagesInPush: showsMessagesInPush))
-        try notifySettingsWriteResult.get()
+        let result = notifySettingsWriteResults.isEmpty ? notifySettingsWriteResult : notifySettingsWriteResults.removeFirst()
+        try result.get()
+        notifySettings.modes[conversation] = mode
+        if showsMessagesInPush {
+            notifySettings.showingMessagesInPush.insert(conversation)
+        } else {
+            notifySettings.showingMessagesInPush.remove(conversation)
+        }
     }
     func fetchNotifySettings() async throws -> NotifySettings { notifySettings }
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {

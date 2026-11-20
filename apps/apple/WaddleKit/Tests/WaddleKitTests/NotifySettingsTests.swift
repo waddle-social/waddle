@@ -51,6 +51,30 @@ struct NotifySettingsTests {
         #expect(coordinator.directory.showsMessagesInPush(for: roomConversation))
     }
 
+    /// A mode change that overlaps a refused opt-in must not store the
+    /// opt-in the refusal rolled back.
+    @Test func aModeChangeBehindARefusedChangeStoresWhatIsShown() async {
+        let (coordinator, port) = online()
+        port.notifySettingsWriteResults = [.failure(.rejected), .success(())]
+        let first = Task { try? await coordinator.setShowsMessagesInPush(true, for: roomConversation) }
+        let second = Task { try? await coordinator.setNotifyMode(.always, for: roomConversation) }
+        _ = await (first.value, second.value)
+        #expect(port.notifySettingsWrites.last
+            == .init(conversation: roomConversation, mode: .always, showsMessagesInPush: false))
+        #expect(!coordinator.directory.showsMessagesInPush(for: roomConversation))
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
+    }
+
+    /// Another device muted the conversation after this session loaded
+    /// its settings: the opt-in must not write the old mode back.
+    @Test func showingMessagesInPushKeepsAModeSetOnAnotherDevice() async throws {
+        let (coordinator, port) = online()
+        port.notifySettings = NotifySettings(modes: [roomConversation: .never])
+        try await coordinator.setShowsMessagesInPush(true, for: roomConversation)
+        #expect(port.notifySettingsWrites.map(\.mode) == [.never])
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
+    }
+
     @Test func loadingReplacesBothSettings() async {
         let (coordinator, port) = online()
         coordinator.directory.setShowsMessagesInPush(true, for: roomConversation)

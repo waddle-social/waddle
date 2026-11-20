@@ -124,6 +124,8 @@ public final class SessionCoordinator {
     @ObservationIgnored var directoryRefreshesInFlight = 0
     /// The last join sent to each room that has one on its way.
     @ObservationIgnored var joinTails: [BareJID: Task<Void, Never>] = [:]
+    /// The last notification-settings write per conversation, so they run in order.
+    @ObservationIgnored var notifyWriteTails: [ConversationID: Task<Void, Error>] = [:]
     /// Fences room actions across session teardown, including suspended port calls.
     @ObservationIgnored var roomManagementGeneration = 0
 
