@@ -50,7 +50,7 @@ use waddle_server::db::s2s_spaces::{
     SubscriptionRecord, SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
 };
 use waddle_server::permissions::host_grant::{
-    BindSpace, GrantOperationId, ScopeKey, StreamEvidence,
+    BindSpace, FenceAcknowledgement, GrantOperationId, OperatorRevoke, ScopeKey, StreamEvidence,
 };
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::s2s::route::SpacePublication;
@@ -694,6 +694,11 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .stanzas()
         .iter()
         .all(|stanza| stanza.attr("id") != Some("removed-space-event")));
+    let subscription = SubscriptionRequest {
+        evidence: still_subscribed[0].evidence,
+        snapshot: still_subscribed[0].snapshot,
+        ..subscription
+    };
     assert_eq!(
         subscriptions
             .record_protected(&spaces(), node, created_at, subscription, &|_| true, token)
@@ -701,6 +706,82 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             .expect("subscribe again")
             .outcome,
         SubscriptionRecord::Recorded
+    );
+
+    // Hold a queued notification until the room's scope acknowledges a
+    // revoke. The Space subscription itself remains in place.
+    let mut held = fixture.ingress.db.begin().await.expect("hold preference");
+    let mut rows = held
+        .query(
+            "SELECT 1 FROM s2s_space_subscriptions WHERE subscriber_jid = ? FOR UPDATE",
+            waddle_server::db_params![subscriber.as_str()],
+        )
+        .await
+        .expect("lock preference before enqueue");
+    assert!(rows.next().await.expect("held preference").is_some());
+    drop(rows);
+    assert_eq!(
+        notify_space_publication(
+            &managed.hosted.state,
+            &managed.hosted.router,
+            &publication("revoked-room-event"),
+        )
+        .await,
+        1
+    );
+    let revoked = fixture
+        .store
+        .operator_revoke(
+            &OperatorRevoke {
+                operation: GrantOperationId::generate(),
+                lifecycle: command.lifecycle,
+                room: room.clone(),
+                subject: subject(subscriber.as_str()),
+                ban: false,
+            },
+            &served(),
+        )
+        .await
+        .expect("revoke the remote member's room view");
+    let acknowledged = fixture
+        .store
+        .await_revocation_fence(
+            command.lifecycle,
+            revoked.record().generation,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("revocation fence");
+    assert_eq!(
+        acknowledged,
+        FenceAcknowledgement::Acknowledged { replicas: 1 }
+    );
+    assert!(
+        delivery.admit(|_| ()).is_none(),
+        "the retained generation is stale"
+    );
+    held.rollback().await.expect("release the preference lock");
+    let barrier = ask(
+        &managed,
+        items(GUEST_PHONE, "post-revoke-event-barrier", node),
+    )
+    .await;
+    assert_eq!(barrier.attr("type"), Some("result"), "{barrier:?}");
+    assert!(item_ids(&barrier).is_empty());
+    assert!(managed
+        .hosted
+        .captured
+        .stanzas()
+        .iter()
+        .all(|stanza| stanza.attr("id") != Some("revoked-room-event")));
+    assert_eq!(
+        notify_space_publication(
+            &managed.hosted.state,
+            &managed.hosted.router,
+            &publication("post-revoke-room-event"),
+        )
+        .await,
+        0,
     );
 
     for (attempt, expected) in [("first", "result"), ("repeat", "error")] {
