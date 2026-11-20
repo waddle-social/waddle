@@ -16,16 +16,12 @@ use waddle_xmpp_client::pubsub::{
     build_pubsub_items_iq, build_pubsub_publish_iq, parse_pubsub_items_result,
 };
 use waddle_xmpp_core::xep0472::{
-    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
+    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, NS_WADDLE_FEED_SOURCE,
+    PUBSUB_NODE_FEED,
 };
 use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
-
-/// Waddle-namespaced typed child on bridged feed entries (PEP →
-/// feed). Carries `kind="mood"|"activity"|"tune"|"avatar"|"vcard"`
-/// so the chat can render a kind-icon next to bridged posts.
-const NS_FEED_SOURCE: &str = "urn:waddle:feed-source:0";
 
 /// JS-facing snapshot of a XEP-0472 feed entry. Mirrors `FeedEntry`
 /// but with stringly-typed `published` so it serialises cleanly
@@ -66,7 +62,7 @@ impl From<FeedEntry> for JsFeedEntry {
 fn extract_source_kind(entry_el: &Element) -> Option<String> {
     entry_el
         .children()
-        .find(|c| c.name() == "source" && c.ns() == NS_FEED_SOURCE)
+        .find(|c| c.name() == "source" && c.ns() == NS_WADDLE_FEED_SOURCE)
         .and_then(|c| c.attr("kind"))
         .map(str::to_string)
 }

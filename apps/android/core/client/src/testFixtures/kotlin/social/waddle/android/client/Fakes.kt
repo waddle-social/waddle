@@ -50,6 +50,8 @@ import social.waddle.client.ffi.WaddleExtensionCommand
 import social.waddle.client.ffi.WaddleExtensionCommandResult
 import social.waddle.client.ffi.WaddleExtensionFormField
 import social.waddle.client.ffi.WaddleExternalService
+import social.waddle.client.ffi.WaddleFeedEntry
+import social.waddle.client.ffi.WaddleFeedPost
 import social.waddle.client.ffi.WaddleGroupDmHistoryAccess
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleInboxMessageContent
@@ -81,6 +83,10 @@ import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
 import social.waddle.client.ffi.WaddleStatusPreference
 import social.waddle.client.ffi.WaddleStickerPack
+import social.waddle.client.ffi.WaddleStory
+import social.waddle.client.ffi.WaddleStoryPost
+import social.waddle.client.ffi.WaddleStoryReactions
+import social.waddle.client.ffi.WaddleStoryRead
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleUploadSlot
@@ -863,6 +869,25 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     /** Android sends no call lifecycle report; the verb only exists in the shared bindings. */
     override suspend fun reportCallLifecycle(report: WaddleCallLifecycleReport): WaddleCallLifecycleReportOutcome =
         WaddleCallLifecycleReportOutcome.UNSUPPORTED
+
+    /** Android has no feed or stories screen; the verbs only exist in the shared bindings. */
+    override suspend fun fetchFeed(communityJid: String, maxItems: UInt?): List<WaddleFeedEntry> = emptyList()
+    override suspend fun publishFeedPost(communityJid: String, post: WaddleFeedPost): WaddleFeedEntry =
+        WaddleFeedEntry(
+            id = "post-test", title = post.title, body = post.body, author = null,
+            publishedMs = null, link = post.link, source = null,
+        )
+    override suspend fun fetchStories(communityJid: String, maxItems: UInt?): List<WaddleStory> = emptyList()
+    override suspend fun publishStory(communityJid: String, post: WaddleStoryPost): WaddleStory =
+        WaddleStory(
+            id = "story-test", body = post.body, mediaUrl = post.mediaUrl, mediaType = post.mediaType,
+            author = null, postedMs = null, expiresMs = null,
+        )
+    override suspend fun fetchStoryReads(): List<WaddleStoryRead> = emptyList()
+    override suspend fun publishStoryReads(reads: List<WaddleStoryRead>) = Unit
+    override suspend fun fetchStoryReactions(communityJid: String, storyId: String): WaddleStoryReactions =
+        WaddleStoryReactions(reactions = emptyList(), mine = emptyList())
+    override suspend fun setStoryReactions(communityJid: String, storyId: String, emojis: List<String>) = Unit
     override suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent> = emptyList()
     override suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent = event
     override suspend fun retractCommunityEvent(communityJid: String, itemId: String) = Unit

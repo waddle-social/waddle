@@ -1391,6 +1391,21 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) async throws
 
     /**
+     * XEP-0472: fetch the newest entries of the community feed on
+     * `community_jid` (the `community.<domain>` service), newest
+     * first. `max_items: None` leaves the page size to the server.
+     */
+    func fetchFeed(communityJid: String, maxItems: UInt32?) async throws  -> [WaddleFeedEntry]
+
+    /**
+     * XEP-0472: post to the community feed and return the entry as
+     * published, so the caller can show it without fetching again. A
+     * member the server does not let post gets the `forbidden` stanza
+     * error.
+     */
+    func publishFeedPost(communityJid: String, post: WaddleFeedPost) async throws  -> WaddleFeedEntry
+
+    /**
      * The account's stored presence mode from its own
      * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
      * stored. Errors (not connected, timeout, other stanza errors) let
@@ -1435,6 +1450,43 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * carrying the diagnostic).
      */
     func retractStickerPack(packId: String) async  -> Bool
+
+    /**
+     * XEP-0501: fetch the stories on `community_jid` (the
+     * `community.<domain>` service). Expired stories are included.
+     */
+    func fetchStories(communityJid: String, maxItems: UInt32?) async throws  -> [WaddleStory]
+
+    /**
+     * XEP-0470: fetch the reaction counts on one story and which
+     * emoji this account reacted with.
+     */
+    func fetchStoryReactions(communityJid: String, storyId: String) async throws  -> WaddleStoryReactions
+
+    /**
+     * Fetch which stories this account has seen, from its private
+     * read-state item. Empty before the first story was read.
+     */
+    func fetchStoryReads() async throws  -> [WaddleStoryRead]
+
+    /**
+     * XEP-0501: post a story and return it as published, so the
+     * caller can show it without fetching again.
+     */
+    func publishStory(communityJid: String, post: WaddleStoryPost) async throws  -> WaddleStory
+
+    /**
+     * Replace this account's read state with `reads`. The item holds
+     * the whole state, so pass every story still worth remembering.
+     */
+    func publishStoryReads(reads: [WaddleStoryRead]) async throws
+
+    /**
+     * XEP-0470: make `emojis` this account's reactions to one story,
+     * replacing the ones it had; an empty list removes them. At most
+     * 12 reactions, each a single emoji.
+     */
+    func setStoryReactions(communityJid: String, storyId: String, emojis: [String]) async throws
 
 }
 open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
@@ -4021,6 +4073,51 @@ open func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch)async t
 }
 
     /**
+     * XEP-0472: fetch the newest entries of the community feed on
+     * `community_jid` (the `community.<domain>` service), newest
+     * first. `max_items: None` leaves the page size to the server.
+     */
+open func fetchFeed(communityJid: String, maxItems: UInt32?)async throws  -> [WaddleFeedEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_feed(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterOptionUInt32.lower(maxItems)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleFeedEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0472: post to the community feed and return the entry as
+     * published, so the caller can show it without fetching again. A
+     * member the server does not let post gets the `forbidden` stanza
+     * error.
+     */
+open func publishFeedPost(communityJid: String, post: WaddleFeedPost)async throws  -> WaddleFeedEntry  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_feed_post(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterTypeWaddleFeedPost_lower(post)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleFeedEntry_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
      * The account's stored presence mode from its own
      * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
      * stored. Errors (not connected, timeout, other stanza errors) let
@@ -4139,6 +4236,133 @@ open func retractStickerPack(packId: String)async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * XEP-0501: fetch the stories on `community_jid` (the
+     * `community.<domain>` service). Expired stories are included.
+     */
+open func fetchStories(communityJid: String, maxItems: UInt32?)async throws  -> [WaddleStory]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterOptionUInt32.lower(maxItems)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleStory.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0470: fetch the reaction counts on one story and which
+     * emoji this account reacted with.
+     */
+open func fetchStoryReactions(communityJid: String, storyId: String)async throws  -> WaddleStoryReactions  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterString.lower(storyId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleStoryReactions_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Fetch which stories this account has seen, from its private
+     * read-state item. Empty before the first story was read.
+     */
+open func fetchStoryReads()async throws  -> [WaddleStoryRead]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reads(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleStoryRead.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0501: post a story and return it as published, so the
+     * caller can show it without fetching again.
+     */
+open func publishStory(communityJid: String, post: WaddleStoryPost)async throws  -> WaddleStory  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterTypeWaddleStoryPost_lower(post)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleStory_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Replace this account's read state with `reads`. The item holds
+     * the whole state, so pass every story still worth remembering.
+     */
+open func publishStoryReads(reads: [WaddleStoryRead])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story_reads(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceTypeWaddleStoryRead.lower(reads)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0470: make `emojis` this account's reactions to one story,
+     * replacing the ones it had; an empty list removes them. At most
+     * 12 reactions, each a single emoji.
+     */
+open func setStoryReactions(communityJid: String, storyId: String, emojis: [String])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterString.lower(storyId),FfiConverterSequenceString.lower(emojis)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -8064,6 +8288,162 @@ public func FfiConverterTypeWaddleFallbackRange_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddleFallbackRange_lower(_ value: WaddleFallbackRange) -> RustBuffer {
     return FfiConverterTypeWaddleFallbackRange.lower(value)
+}
+
+
+/**
+ * One entry of the community feed.
+ */
+public struct WaddleFeedEntry: Equatable, Hashable {
+    /**
+     * Pubsub item id.
+     */
+    public var id: String
+    public var title: String?
+    public var body: String
+    /**
+     * Bare JID of the author, as stamped by the server.
+     */
+    public var author: String?
+    /**
+     * Publication time, milliseconds since the Unix epoch.
+     */
+    public var publishedMs: Int64?
+    public var link: String?
+    public var source: WaddleFeedSource?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pubsub item id.
+         */id: String, title: String?, body: String,
+        /**
+         * Bare JID of the author, as stamped by the server.
+         */author: String?,
+        /**
+         * Publication time, milliseconds since the Unix epoch.
+         */publishedMs: Int64?, link: String?, source: WaddleFeedSource?) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.author = author
+        self.publishedMs = publishedMs
+        self.link = link
+        self.source = source
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleFeedEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleFeedEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleFeedEntry {
+        return
+            try WaddleFeedEntry(
+                id: FfiConverterString.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                author: FfiConverterOptionString.read(from: &buf),
+                publishedMs: FfiConverterOptionInt64.read(from: &buf),
+                link: FfiConverterOptionString.read(from: &buf),
+                source: FfiConverterOptionTypeWaddleFeedSource.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleFeedEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.author, into: &buf)
+        FfiConverterOptionInt64.write(value.publishedMs, into: &buf)
+        FfiConverterOptionString.write(value.link, into: &buf)
+        FfiConverterOptionTypeWaddleFeedSource.write(value.source, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedEntry_lift(_ buf: RustBuffer) throws -> WaddleFeedEntry {
+    return try FfiConverterTypeWaddleFeedEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedEntry_lower(_ value: WaddleFeedEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleFeedEntry.lower(value)
+}
+
+
+/**
+ * A new feed post. The server stamps the author.
+ */
+public struct WaddleFeedPost: Equatable, Hashable {
+    public var title: String?
+    public var body: String
+    public var link: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String?, body: String, link: String?) {
+        self.title = title
+        self.body = body
+        self.link = link
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleFeedPost: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleFeedPost: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleFeedPost {
+        return
+            try WaddleFeedPost(
+                title: FfiConverterOptionString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                link: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleFeedPost, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.link, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedPost_lift(_ buf: RustBuffer) throws -> WaddleFeedPost {
+    return try FfiConverterTypeWaddleFeedPost.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedPost_lower(_ value: WaddleFeedPost) -> RustBuffer {
+    return FfiConverterTypeWaddleFeedPost.lower(value)
 }
 
 
@@ -12116,6 +12496,357 @@ public func FfiConverterTypeWaddleStickerRef_lower(_ value: WaddleStickerRef) ->
 
 
 /**
+ * One story. The caller decides whether it is still active by
+ * comparing `expires_ms` with the clock.
+ */
+public struct WaddleStory: Equatable, Hashable {
+    /**
+     * Pubsub item id.
+     */
+    public var id: String
+    public var body: String?
+    public var mediaUrl: String
+    public var mediaType: String?
+    /**
+     * Bare JID of the author, as stamped by the server.
+     */
+    public var author: String?
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    public var postedMs: Int64?
+    /**
+     * Milliseconds since the Unix epoch; `None` never expires.
+     */
+    public var expiresMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pubsub item id.
+         */id: String, body: String?, mediaUrl: String, mediaType: String?,
+        /**
+         * Bare JID of the author, as stamped by the server.
+         */author: String?,
+        /**
+         * Milliseconds since the Unix epoch.
+         */postedMs: Int64?,
+        /**
+         * Milliseconds since the Unix epoch; `None` never expires.
+         */expiresMs: Int64?) {
+        self.id = id
+        self.body = body
+        self.mediaUrl = mediaUrl
+        self.mediaType = mediaType
+        self.author = author
+        self.postedMs = postedMs
+        self.expiresMs = expiresMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStory {
+        return
+            try WaddleStory(
+                id: FfiConverterString.read(from: &buf),
+                body: FfiConverterOptionString.read(from: &buf),
+                mediaUrl: FfiConverterString.read(from: &buf),
+                mediaType: FfiConverterOptionString.read(from: &buf),
+                author: FfiConverterOptionString.read(from: &buf),
+                postedMs: FfiConverterOptionInt64.read(from: &buf),
+                expiresMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStory, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionString.write(value.body, into: &buf)
+        FfiConverterString.write(value.mediaUrl, into: &buf)
+        FfiConverterOptionString.write(value.mediaType, into: &buf)
+        FfiConverterOptionString.write(value.author, into: &buf)
+        FfiConverterOptionInt64.write(value.postedMs, into: &buf)
+        FfiConverterOptionInt64.write(value.expiresMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStory_lift(_ buf: RustBuffer) throws -> WaddleStory {
+    return try FfiConverterTypeWaddleStory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStory_lower(_ value: WaddleStory) -> RustBuffer {
+    return FfiConverterTypeWaddleStory.lower(value)
+}
+
+
+/**
+ * A new story. `expiry_hours: None` is a day; less than an hour is an
+ * hour.
+ */
+public struct WaddleStoryPost: Equatable, Hashable {
+    public var body: String?
+    public var mediaUrl: String
+    public var mediaType: String?
+    public var expiryHours: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(body: String?, mediaUrl: String, mediaType: String?, expiryHours: UInt32?) {
+        self.body = body
+        self.mediaUrl = mediaUrl
+        self.mediaType = mediaType
+        self.expiryHours = expiryHours
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStoryPost: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStoryPost: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStoryPost {
+        return
+            try WaddleStoryPost(
+                body: FfiConverterOptionString.read(from: &buf),
+                mediaUrl: FfiConverterString.read(from: &buf),
+                mediaType: FfiConverterOptionString.read(from: &buf),
+                expiryHours: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStoryPost, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.body, into: &buf)
+        FfiConverterString.write(value.mediaUrl, into: &buf)
+        FfiConverterOptionString.write(value.mediaType, into: &buf)
+        FfiConverterOptionUInt32.write(value.expiryHours, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryPost_lift(_ buf: RustBuffer) throws -> WaddleStoryPost {
+    return try FfiConverterTypeWaddleStoryPost.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryPost_lower(_ value: WaddleStoryPost) -> RustBuffer {
+    return FfiConverterTypeWaddleStoryPost.lower(value)
+}
+
+
+/**
+ * How many members reacted to a story with one emoji.
+ */
+public struct WaddleStoryReaction: Equatable, Hashable {
+    public var emoji: String
+    public var count: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(emoji: String, count: UInt32) {
+        self.emoji = emoji
+        self.count = count
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStoryReaction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStoryReaction: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStoryReaction {
+        return
+            try WaddleStoryReaction(
+                emoji: FfiConverterString.read(from: &buf),
+                count: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStoryReaction, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.emoji, into: &buf)
+        FfiConverterUInt32.write(value.count, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryReaction_lift(_ buf: RustBuffer) throws -> WaddleStoryReaction {
+    return try FfiConverterTypeWaddleStoryReaction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryReaction_lower(_ value: WaddleStoryReaction) -> RustBuffer {
+    return FfiConverterTypeWaddleStoryReaction.lower(value)
+}
+
+
+/**
+ * The reactions on one story.
+ */
+public struct WaddleStoryReactions: Equatable, Hashable {
+    public var reactions: [WaddleStoryReaction]
+    /**
+     * The emoji this account reacted with.
+     */
+    public var mine: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reactions: [WaddleStoryReaction],
+        /**
+         * The emoji this account reacted with.
+         */mine: [String]) {
+        self.reactions = reactions
+        self.mine = mine
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStoryReactions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStoryReactions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStoryReactions {
+        return
+            try WaddleStoryReactions(
+                reactions: FfiConverterSequenceTypeWaddleStoryReaction.read(from: &buf),
+                mine: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStoryReactions, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleStoryReaction.write(value.reactions, into: &buf)
+        FfiConverterSequenceString.write(value.mine, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryReactions_lift(_ buf: RustBuffer) throws -> WaddleStoryReactions {
+    return try FfiConverterTypeWaddleStoryReactions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryReactions_lower(_ value: WaddleStoryReactions) -> RustBuffer {
+    return FfiConverterTypeWaddleStoryReactions.lower(value)
+}
+
+
+/**
+ * One story the account has seen.
+ */
+public struct WaddleStoryRead: Equatable, Hashable {
+    public var storyId: String
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    public var readAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(storyId: String,
+        /**
+         * Milliseconds since the Unix epoch.
+         */readAtMs: Int64) {
+        self.storyId = storyId
+        self.readAtMs = readAtMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStoryRead: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStoryRead: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStoryRead {
+        return
+            try WaddleStoryRead(
+                storyId: FfiConverterString.read(from: &buf),
+                readAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStoryRead, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.storyId, into: &buf)
+        FfiConverterInt64.write(value.readAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryRead_lift(_ buf: RustBuffer) throws -> WaddleStoryRead {
+    return try FfiConverterTypeWaddleStoryRead.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStoryRead_lower(_ value: WaddleStoryRead) -> RustBuffer {
+    return FfiConverterTypeWaddleStoryRead.lower(value)
+}
+
+
+/**
  * XEP-0201 thread reference with optional parent for nested threads.
  */
 public struct WaddleThreadTarget: Equatable, Hashable {
@@ -14732,6 +15463,115 @@ public func FfiConverterTypeWaddleExternalServiceType_lift(_ buf: RustBuffer) th
 #endif
 public func FfiConverterTypeWaddleExternalServiceType_lower(_ value: WaddleExternalServiceType) -> RustBuffer {
     return FfiConverterTypeWaddleExternalServiceType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * What a server-written feed entry reports. Entries a member posted
+ * carry no source.
+ */
+
+public enum WaddleFeedSource: Equatable, Hashable {
+
+    case mood
+    case activity
+    case tune
+    case avatar
+    case profile
+    case eventReply
+    /**
+     * A kind this client does not know yet.
+     */
+    case other
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleFeedSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleFeedSource: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleFeedSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleFeedSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .mood
+
+        case 2: return .activity
+
+        case 3: return .tune
+
+        case 4: return .avatar
+
+        case 5: return .profile
+
+        case 6: return .eventReply
+
+        case 7: return .other
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleFeedSource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .mood:
+            writeInt(&buf, Int32(1))
+
+
+        case .activity:
+            writeInt(&buf, Int32(2))
+
+
+        case .tune:
+            writeInt(&buf, Int32(3))
+
+
+        case .avatar:
+            writeInt(&buf, Int32(4))
+
+
+        case .profile:
+            writeInt(&buf, Int32(5))
+
+
+        case .eventReply:
+            writeInt(&buf, Int32(6))
+
+
+        case .other:
+            writeInt(&buf, Int32(7))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedSource_lift(_ buf: RustBuffer) throws -> WaddleFeedSource {
+    return try FfiConverterTypeWaddleFeedSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedSource_lower(_ value: WaddleFeedSource) -> RustBuffer {
+    return FfiConverterTypeWaddleFeedSource.lower(value)
 }
 
 
@@ -18482,6 +19322,30 @@ fileprivate struct FfiConverterOptionTypeWaddleExternalServiceTransport: FfiConv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleFeedSource: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleFeedSource?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleFeedSource.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleFeedSource.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleForumPostKind: FfiConverterRustBuffer {
     typealias SwiftType = WaddleForumPostKind?
 
@@ -19247,6 +20111,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleExternalService: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleFeedEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleFeedEntry]
+
+    public static func write(_ value: [WaddleFeedEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleFeedEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleFeedEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleFeedEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleFeedEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleInboxEntry: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleInboxEntry]
 
@@ -19714,6 +20603,81 @@ fileprivate struct FfiConverterSequenceTypeWaddleStickerPack: FfiConverterRustBu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleStickerPack.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleStory: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleStory]
+
+    public static func write(_ value: [WaddleStory], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleStory.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleStory] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleStory]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleStory.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleStoryReaction: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleStoryReaction]
+
+    public static func write(_ value: [WaddleStoryReaction], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleStoryReaction.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleStoryReaction] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleStoryReaction]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleStoryReaction.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleStoryRead: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleStoryRead]
+
+    public static func write(_ value: [WaddleStoryRead], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleStoryRead.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleStoryRead] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleStoryRead]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleStoryRead.read(from: &buf))
         }
         return seq
     }
@@ -20314,6 +21278,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed() != 30404) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_feed_post() != 24875) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference() != 15536) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20327,6 +21297,24 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack() != 30329) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories() != 30988) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions() != 10812) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reads() != 37503) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story() != 21939) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story_reads() != 61647) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions() != 32798) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {

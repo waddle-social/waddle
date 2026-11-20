@@ -7,7 +7,7 @@ use jid::BareJid;
 use minidom::Element;
 
 use super::{
-    build_pubsub_items_iq, build_pubsub_publish_iq, build_pubsub_retract_iq,
+    build_pubsub_item_iq, build_pubsub_items_iq, build_pubsub_publish_iq, build_pubsub_retract_iq,
     build_pubsub_subscribe_iq, build_pubsub_unsubscribe_iq, community_service_jid,
     parse_pubsub_items_result, parse_pubsub_publish_result_item_id, parse_pubsub_subscribe_result,
     PubsubAccessModel, PubsubPublishOptions, PubsubSendLastPublishedItem, PubsubSubscriptionState,
@@ -427,4 +427,25 @@ fn parse_publish_result_tolerates_bare_success() {
         .parse()
         .expect("valid xml");
     assert_eq!(parse_pubsub_publish_result_item_id(&iq), None);
+}
+
+// ── Single item (§6.5.8) ─────────────────────────────────────────────
+
+#[test]
+fn item_iq_requests_one_item_by_id() {
+    let iq = build_pubsub_item_iq("iq-9", Some(&service()), NODE, "post-1");
+    assert_eq!(iq.attr("type"), Some("get"));
+    assert_eq!(iq.attr("to"), Some(SERVICE));
+    let items = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+        .expect("items element");
+    assert_eq!(items.attr("node"), Some(NODE));
+    assert_eq!(items.attr("max_items"), None);
+    let ids: Vec<_> = items
+        .children()
+        .filter(|child| child.is("item", NS_PUBSUB))
+        .map(|item| item.attr("id"))
+        .collect();
+    assert_eq!(ids, [Some("post-1")]);
 }

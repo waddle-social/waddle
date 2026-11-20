@@ -220,6 +220,27 @@ pub fn build_pubsub_items_iq(
     wrap_pubsub_iq(iq_id, "get", service, pubsub)
 }
 
+/// XEP-0060 §6.5.8 items GET for the single item `item_id` on `node`.
+/// `service` routes as in [`build_pubsub_items_iq`].
+#[must_use]
+pub fn build_pubsub_item_iq(
+    iq_id: &str,
+    service: Option<&BareJid>,
+    node: &str,
+    item_id: &str,
+) -> Element {
+    let items = Element::builder("items", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .append(
+            Element::builder("item", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                .build(),
+        )
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
+    wrap_pubsub_iq(iq_id, "get", service, pubsub)
+}
+
 /// XEP-0060 §7.1 publish SET for one `<item/>` on `node`.
 /// `item_id: None` lets the service generate the ItemID (§7.1.1);
 /// `publish_options` appends a XEP-0223/§7.1.5 precondition form after
