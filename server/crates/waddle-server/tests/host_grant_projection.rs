@@ -1037,6 +1037,7 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         &live,
         &authority,
         first,
+        &mut owner,
         &mut member,
     )
     .await;
