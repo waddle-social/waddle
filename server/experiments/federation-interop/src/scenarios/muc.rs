@@ -518,12 +518,31 @@ pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
             .login_peer(peer, "admin", &support::id("moderator"))
             .await?;
         if trusted {
+            let seated = join(&mut moderator, &room, "remote-mod").await?;
             let (messages, _) = page_archive(&mut moderator, &room).await?;
             outcome.check(
                 format!("{label}: remote admin reads the stored archive"),
                 messages == 1,
                 format!("{messages} messages"),
             );
+            // The receiving home preserves remote archive results only for a
+            // room the client occupies. Leave before probing moderation so
+            // every phase tests the affiliation without an occupant role.
+            let occupant = seated.attr("from").context("self-presence address")?;
+            moderator
+                .send(&stanza::presence(
+                    ns::CLIENT,
+                    Some(occupant),
+                    Some("unavailable"),
+                ))
+                .await?;
+            moderator
+                .wait_for(ANSWER, |element| {
+                    element.attr("from") == Some(occupant)
+                        && element.attr("type") == Some("unavailable")
+                        && stanza::is_self_presence(element)
+                })
+                .await?;
         } else {
             let (messages, _) = page_archive(&mut owner, &room).await?;
             outcome.check(
