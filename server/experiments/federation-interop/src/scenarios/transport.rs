@@ -540,6 +540,11 @@ pub async fn disco_ping(h: &mut Harness, peer: Peer) -> Result<Outcome> {
                 .filter_map(|feature| feature.attr("var").map(str::to_owned))
                 .collect();
             outcome.note(format!("home-a features for remote askers: {features:?}"));
+            outcome.check(
+                "discovery from a remote account omits the federation capability",
+                is_result(&answer) && !advertises_federation(&answer),
+                describe(&answer),
+            );
         }
         outcome.check(
             [name, " ", peer.label(), " -> home-a"].concat(),
