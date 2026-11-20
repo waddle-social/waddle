@@ -722,7 +722,7 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
             .bind_space(&command, &served())
             .await
             .expect("retry"),
-        MutationReceipt::Replayed(record)
+        MutationReceipt::Replayed(record.clone())
     );
     let changed = BindSpace {
         federated: false,
@@ -745,6 +745,28 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
         ("owner".to_owned(), "none".to_owned())
     );
 
+    sqlx::query(
+        "UPDATE host_grant_space_affiliations SET effective_affiliation = 'owner'
+         WHERE lifecycle_id = $1 AND subject_jid = $2",
+    )
+    .bind(&lifecycle)
+    .bind(SENDER)
+    .execute(&pool)
+    .await
+    .expect("simulate a previously effective Space owner");
+    sqlx::query(
+        "INSERT INTO host_grant_space_affiliations VALUES
+         ($1, $2, 'member', 'member', 'unprivileged', $4),
+         ($1, $3, 'outcast', 'outcast', 'local', $4)",
+    )
+    .bind(&lifecycle)
+    .bind(PEER)
+    .bind(CAROL)
+    .bind(record.generation.value())
+    .execute(&pool)
+    .await
+    .expect("simulate restored member and outcast rows");
+
     let binding =
         "SELECT authority_incarnation FROM host_grant_space_bindings WHERE lifecycle_id = $1";
     assert!(sqlx::query_scalar::<_, Option<String>>(binding)
@@ -765,6 +787,59 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
             .expect("node reservation remains after restore"),
         None
     );
+
+    let rebind = BindSpace {
+        operation: GrantOperationId::generate(),
+        owner: subject(OWNER),
+        expected_generation: fixture.state(&fixture.scope).await.generation,
+        ..changed
+    };
+    assert!(matches!(
+        fixture.store.bind_space(&rebind, &served()).await,
+        Err(HostGrantError::SpaceNotBindable)
+    ));
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Reconstructed
+    );
+    assert_eq!(reopen(&fixture, fixture.scope.lifecycle).await.reopened, 1);
+    let rebind = BindSpace {
+        expected_generation: fixture.state(&fixture.scope).await.generation,
+        ..rebind
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .bind_space(&rebind, &served())
+            .await
+            .expect("rebind after reopen"),
+        MutationReceipt::Recorded(_)
+    ));
+    let subjects = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT subject_jid, affiliation, effective_affiliation
+         FROM host_grant_space_affiliations WHERE lifecycle_id = $1",
+    )
+    .bind(&lifecycle)
+    .fetch_all(&pool)
+    .await
+    .expect("read current Space affiliations");
+    assert_eq!(
+        subjects,
+        [(OWNER.to_owned(), "owner".to_owned(), "none".to_owned())]
+    );
+    let revoked = sqlx::query_scalar::<_, String>(
+        "SELECT subject_jid FROM host_grant_space_operation_changes
+         WHERE operation_id = $1 AND affiliation = 'none' ORDER BY subject_jid",
+    )
+    .bind(rebind.operation.to_storage())
+    .fetch_all(&pool)
+    .await
+    .expect("journal records the discarded affiliations");
+    let mut expected = [SENDER, PEER, CAROL];
+    expected.sort_unstable();
+    assert_eq!(revoked, expected);
+    pool.close().await;
+    fixture.close().await;
 }
 
 #[tokio::test]

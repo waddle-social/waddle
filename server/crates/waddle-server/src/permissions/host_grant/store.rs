@@ -847,8 +847,9 @@ impl HostGrantStore {
         own(async move { store.enroll_owned(&command, &bases, mode).await }).await
     }
 
-    /// Owner-phase bootstrap of the exact enrolled Space. The recorded
-    /// owner awaits activation at the operation's shared scope generation.
+    /// Owner-phase bootstrap of the exact enrolled Space. A restore-invalidated
+    /// binding discards its former standing and starts with a single new owner.
+    /// The recorded owner awaits activation at the shared scope generation.
     pub async fn bind_space(
         &self,
         command: &super::BindSpace,
@@ -927,7 +928,9 @@ impl HostGrantStore {
         let inserted = tx.execute(
             "INSERT INTO host_grant_space_bindings \
              (lifecycle_id, service_jid, space_node, access_model, federated, authority_incarnation) \
-             VALUES (?, ?, ?, 'whitelist', ?, ?) ON CONFLICT (lifecycle_id) DO NOTHING",
+             VALUES (?, ?, ?, 'whitelist', ?, ?) ON CONFLICT (lifecycle_id) DO UPDATE SET \
+             federated = EXCLUDED.federated, authority_incarnation = EXCLUDED.authority_incarnation \
+             WHERE host_grant_space_bindings.authority_incarnation IS NULL",
             crate::db_params![lifecycle.as_str(), service, name, command.federated, incarnation],
         ).await.map_err(HostGrantError::from_database)?;
         if inserted != 1 {
@@ -944,17 +947,34 @@ impl HostGrantStore {
             projection_digest: current_digest(&mut tx, &scope).await?,
         };
         insert_operation(&mut tx, &record, &fingerprint, None, now).await?;
+        // A retained binding may hold grants from before the restore.
+        // Journal their removal before replacing them with one pending owner.
+        tx.execute(
+            "INSERT INTO host_grant_space_operation_changes \
+             (operation_id, ordinal, subject_jid, affiliation, previous_affiliation, issuance_basis) \
+             SELECT ?, row_number() OVER (ORDER BY subject_jid)::integer, subject_jid, \
+             'none', affiliation, issuance_basis FROM host_grant_space_affiliations \
+             WHERE lifecycle_id = ? AND subject_jid <> ?",
+            crate::db_params![operation.as_str(), lifecycle.as_str(), command.owner.as_str()],
+        ).await.map_err(HostGrantError::from_database)?;
+        tx.execute(
+            "INSERT INTO host_grant_space_operation_changes \
+             (operation_id, ordinal, subject_jid, affiliation, previous_affiliation, issuance_basis) \
+             VALUES (?, 0, ?, 'owner', COALESCE((SELECT affiliation FROM host_grant_space_affiliations \
+             WHERE lifecycle_id = ? AND subject_jid = ?), 'none'), 'local')",
+            crate::db_params![operation.as_str(), command.owner.as_str(), lifecycle.as_str(), command.owner.as_str()],
+        ).await.map_err(HostGrantError::from_database)?;
+        tx.execute(
+            "DELETE FROM host_grant_space_affiliations WHERE lifecycle_id = ?",
+            crate::db_params![lifecycle.as_str()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
         tx.execute(
             "INSERT INTO host_grant_space_affiliations \
              (lifecycle_id, subject_jid, affiliation, effective_affiliation, issuance_basis, changed_generation) \
              VALUES (?, ?, 'owner', 'none', 'local', ?)",
             crate::db_params![lifecycle.as_str(), command.owner.as_str(), generation.value()],
-        ).await.map_err(HostGrantError::from_database)?;
-        tx.execute(
-            "INSERT INTO host_grant_space_operation_changes \
-             (operation_id, ordinal, subject_jid, affiliation, previous_affiliation, issuance_basis) \
-             VALUES (?, 0, ?, 'owner', 'none', 'local')",
-            crate::db_params![operation.as_str(), command.owner.as_str()],
         ).await.map_err(HostGrantError::from_database)?;
         advance_scope(&mut tx, &scope, generation, &operation, now).await?;
         commit(tx, mode).await?;
