@@ -14,6 +14,9 @@ use crate::scenarios::support::{self, ask, describe, is_result};
 use crate::topology::{self, Home, HOME_A, HOME_B};
 use crate::xml::{ns, stanza};
 
+mod reassignment;
+pub use reassignment::foreign_reassignment;
+
 /// Whether `room` (a bare room JID) is on one of the Waddle deployments'
 /// MUC services.
 pub fn on_waddle(room: &str) -> bool {

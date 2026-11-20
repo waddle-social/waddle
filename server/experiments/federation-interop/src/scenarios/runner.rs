@@ -130,6 +130,7 @@ async fn dispatch(h: &mut Harness, id: &str, peer: Peer) -> Result<Outcome> {
         "neg.authority.own-edit-delete" => muc::own_edit_delete(h, peer).await,
         "neg.authority.private-discovery-and-mam" => muc::private_discovery_and_mam(h, peer).await,
         "neg.identity.same-room-names" => muc::same_room_names(h, peer).await,
+        "neg.identity.foreign-reassignment" => muc::foreign_reassignment(h, peer).await,
         "neg.res.oversized-stanza" => negative_route::oversized(h, peer).await,
         "neg.res.deep-nesting" => negative_route::deep_nesting(h, peer).await,
         "neg.res.preauth-large-element" => negative_route::preauth_large_element(h, peer).await,

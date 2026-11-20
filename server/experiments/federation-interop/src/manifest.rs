@@ -316,9 +316,12 @@ pub const ROWS: &[Row] = &[
     waddle_needs(needs(row("neg.identity.same-room-names", Negative,
         "Identically named rooms on both sides stay distinct", WADDLE), &[Slice::W6a]), &[Slice::W6b]),
     not_driven(needs(row("neg.identity.collisions-and-reassignment", Negative,
-        "Identity collisions, malicious localparts, colliding Unicode IDs and reassigned JIDs", WADDLE),
+        "Identity collisions, malicious localparts, colliding Unicode IDs and Waddle JID retirement", WADDLE),
         &[Slice::W5d, Slice::W6c]),
         "covered by the W5i identity-profile suites and W5d's reuse fence; the harness cannot provision colliding remote accounts on stock servers"),
+    needs(row("neg.identity.foreign-reassignment", Negative,
+        "A recreated JID on an untrusted home retains member access until revoked", PROSODY_ONLY),
+        &[Slice::W5e, Slice::W6a]),
     // Resources.
     g20(row("neg.res.oversized-stanza", Negative, "An oversized stanza is refused", ALL)),
     g20(row("neg.res.deep-nesting", Negative, "A deeply nested stanza is refused", ALL)),

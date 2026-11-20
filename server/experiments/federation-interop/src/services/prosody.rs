@@ -224,15 +224,7 @@ impl Prosody {
         std::fs::write(&self.config, self.render(variant))?;
         for host in [PROSODY, PROSODY_INSECURE] {
             for (account, password) in &self.passwords {
-                let mut register = Command::new(self.bin.join("prosodyctl"));
-                register
-                    .arg("--config")
-                    .arg(&self.config)
-                    .arg("register")
-                    .arg(account)
-                    .arg(host)
-                    .arg(password);
-                process::run("prosodyctl register", register, Duration::from_secs(60)).await?;
+                self.set_account(host, account, Some(password)).await?;
             }
         }
         self.starts += 1;
@@ -247,6 +239,39 @@ impl Prosody {
         )?);
         process::wait_tcp("prosody", self.ports.prosody_c2s(), Duration::from_secs(60)).await?;
         process::wait_tcp("prosody", self.ports.prosody_s2s(), Duration::from_secs(30)).await
+    }
+
+    /// Update the fixture's account store with Prosody stopped.
+    pub async fn set_account(
+        &self,
+        host: &str,
+        account: &str,
+        password: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.process.is_none(),
+            "stop Prosody before changing accounts"
+        );
+        let action = if password.is_some() {
+            "register"
+        } else {
+            "unregister"
+        };
+        let mut command = Command::new(self.bin.join("prosodyctl"));
+        command
+            .arg("--config")
+            .arg(&self.config)
+            .args([action, account, host]);
+        if let Some(password) = password {
+            command.arg(password);
+        }
+        process::run(
+            "prosodyctl account change",
+            command,
+            Duration::from_secs(60),
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn stop(&mut self) -> Result<()> {
