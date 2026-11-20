@@ -43,7 +43,7 @@ extension CallStore {
         }
         let published = await groupControl.serializePresence { [self] in
             guard groupStillPending(attempt, epoch: epoch), !Task.isCancelled else { return nil }
-            return await port.updateGroupCallPresence(
+            return await sendGroupPresence(
                 .init(state: .active(video: attempt.media.video), isMuted: !attempt.media.audio), in: attempt.room, nick: attempt.nick)
         }
         guard generation == epoch else { return false }
@@ -101,7 +101,7 @@ extension CallStore {
         let waiter = groupPresence.registerPreparingEcho(in: attempt.room, nick: attempt.nick, realJID: identity)
         let sent = await groupControl.serializePresence { [self] in
             guard groupStillPending(attempt, epoch: epoch), !Task.isCancelled else { return nil }
-            return await port.updateGroupCallPresence(.init(state: .preparing), in: attempt.room, nick: attempt.nick)
+            return await sendGroupPresence(.init(state: .preparing), in: attempt.room, nick: attempt.nick)
         }
         guard generation == epoch else { return false }
         guard sent == true else { return false }
@@ -135,6 +135,18 @@ extension CallStore {
         return false
     }
 
+    /// The one place group presence leaves from; nothing goes to a sealed room.
+    func sendGroupPresence(_ presence: GroupCallPresenceUpdate, in room: BareJID, nick: String) async -> Bool {
+        guard !sealedGroupRooms.contains(room) else { return false }
+        return await port.updateGroupCallPresence(presence, in: room, nick: nick)
+    }
+
+    /// Waits for every group presence update already queued, including a
+    /// hang-up's, so none of them is sent after the caller moves on.
+    func settleGroupPresence() async {
+        _ = await groupControl.serializePresence { true }
+    }
+
     func groupSlotHolds(_ room: BareJID) -> Bool {
         switch state {
         case .joiningGroup(let call): call.room == room
@@ -154,7 +166,7 @@ extension CallStore {
     /// group phase for the room: a newer attempt owns its advertisement.
     private func leaveGroupPresenceNow(in room: BareJID, nick: String, identity: JID?, epoch: Int) async {
         guard generation == epoch, !groupSlotHolds(room) else { return }
-        let cleared = await port.updateGroupCallPresence(.init(state: .left), in: room, nick: nick)
+        let cleared = await sendGroupPresence(.init(state: .left), in: room, nick: nick)
         guard generation == epoch else { return }
         if !cleared { reportError("muji leave presence failed", epoch: epoch) }
         // A successor may have claimed the room while the leave was in flight.

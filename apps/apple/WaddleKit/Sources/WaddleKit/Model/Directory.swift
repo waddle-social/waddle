@@ -64,6 +64,13 @@ public struct Channel: Hashable, Sendable, Identifiable {
     }
 
     public var conversation: ConversationID { .room(roomJID) }
+
+    /// The same room with a different name and summary.
+    public func with(name: String, summary: String?) -> Channel {
+        Channel(
+            roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM)
+    }
 }
 
 /// The discovered directory of spaces and rooms.

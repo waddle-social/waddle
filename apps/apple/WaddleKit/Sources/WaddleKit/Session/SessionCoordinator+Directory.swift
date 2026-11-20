@@ -5,19 +5,33 @@ extension SessionCoordinator {
     /// DM, and room the user opened or created this session. A failed
     /// discovery keeps the last known directory.
     func refreshDirectory() async {
+        let mutationStart = directoryMutations.count
+        directoryRefreshesInFlight += 1
+        defer {
+            directoryRefreshesInFlight -= 1
+            if directoryRefreshesInFlight == 0 { directoryMutations.removeAll() }
+        }
         let result = await port.discoverTopology()
         // A superseded ready pipeline (the stream dropped and reconnected
         // meanwhile) must not overwrite the directory with its answer.
         guard !Task.isCancelled else { return }
         if case let .success(topology) = result {
             directory.apply(topology)
+            for mutation in directoryMutations.dropFirst(mutationStart) {
+                switch mutation {
+                case .upsert(let channel): directory.upsert(channel)
+                case .remove(let room): directory.remove(room)
+                }
+            }
         }
+        for room in destroyedRooms { directory.remove(room) }
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
             .map(\.roomJID)
         var joined: Set<BareJID> = []
         for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
-            await port.joinRoom(room, nick: account.nick)
+            guard directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
+            await join(room)
         }
     }
 
@@ -26,10 +40,26 @@ extension SessionCoordinator {
     /// are otherwise never entered, so opening one would show a room we
     /// cannot send to or receive from (XEP-0045 §7.4).
     func ensureJoined(_ room: BareJID) async {
+        guard !isFenced(room) else { return }
         onDemandRooms.insert(room)
         // Offline, the ready pipeline joins it on connect.
         guard status.connection == .online, !presence.joinedRooms.contains(room) else { return }
-        await port.joinRoom(room, nick: account.nick)
+        await join(room)
+    }
+
+    /// Sends a join unless the room is fenced when its turn comes. Joins
+    /// to one room run in order, so giving the room up can wait for those
+    /// already on their way.
+    func join(_ room: BareJID) async {
+        let previous = joinTails[room]
+        let task = Task { @MainActor [self] in
+            await previous?.value
+            guard !isFenced(room) else { return }
+            await port.joinRoom(room, nick: account.nick)
+        }
+        joinTails[room] = task
+        await task.value
+        if joinTails[room] == task { joinTails[room] = nil }
     }
 
     func loadNotifyModes() async {
@@ -55,7 +85,11 @@ extension SessionCoordinator {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let localpart = RoomLocalpart.make(from: trimmed) else { throw PortError.invalidRequest }
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
-        directory.upsert(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
+        // A room deleted earlier in the session exists again.
+        destroyedRooms.remove(room)
+        unconfirmedDeletions.remove(room)
+        calls.sealedGroupRooms.remove(room)
+        upsertChannel(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
         // create_room joined, configured and then left the room. Its
         // self-presence may already have marked the room joined while the
         // leave's echo is still in flight, so rejoin unconditionally: the
@@ -68,7 +102,7 @@ extension SessionCoordinator {
     /// Creates a group DM with `members` and returns its conversation.
     public func createGroupDM(name: String, members: [BareJID]) async throws -> ConversationID {
         let room = try await port.createGroupDM(name: name, members: members)
-        directory.upsert(Channel(roomJID: room, name: name, isGroupDM: true))
+        upsertChannel(Channel(roomJID: room, name: name, isGroupDM: true))
         await ensureJoined(room)
         return .room(room)
     }
@@ -138,9 +172,10 @@ extension SessionCoordinator {
         mentionSearches.cached(query, in: room)
     }
 
-    /// Our own occupant in `room`, for permission checks.
+    /// Our own occupant in `room`, for permission checks. The room may have
+    /// given us a nick other than the one we asked for.
     public func selfOccupant(in room: BareJID) -> Occupant? {
-        presence.occupant(named: account.nick, in: room)
+        presence.occupant(named: presence.selfNicks[room] ?? account.nick, in: room)
     }
 }
 

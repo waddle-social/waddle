@@ -31,7 +31,9 @@ public extension SessionCoordinator {
     /// occupant can: the room has let us in, we are online, and the one call
     /// slot is free.
     func canJoinGroupCall(in room: BareJID) -> Bool {
-        connection == .online && !calls.state.isLive && presence.joinedRooms.contains(room)
+        connection == .online && !isStopped && !calls.state.isLive
+            && !isFenced(room)
+            && presence.joinedRooms.contains(room)
     }
 
     /// Starts `room`'s call, or joins the one in progress, under the nick

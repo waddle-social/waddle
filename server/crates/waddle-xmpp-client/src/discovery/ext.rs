@@ -296,6 +296,12 @@ impl DiscoveryExt for ClientHandle {
                 {
                     channel.channel_type = channel_type;
                 }
+                // The space item keeps the name it was published with, so
+                // it goes stale when an owner renames the room. The room's
+                // own answer is current.
+                if let Some(name) = info.room_name() {
+                    channel.name = name.to_string();
+                }
                 channel.description = info
                     .form_value(
                         "http://jabber.org/protocol/muc#roominfo",

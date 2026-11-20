@@ -44,6 +44,23 @@ final class FakePort: XmppPort {
     var inboxReadRequests: [(partner: BareJID, threadID: String?)] = []
     var failingInboxReads = 0
     var failsInboxFetch = false
+    var roomSettingsUpdates: [(room: BareJID, patch: RoomSettingsPatch)] = []
+    var roomSettingsUpdateResult: Result<Void, PortError> = .success(())
+    var roomDestructions: [(room: BareJID, reason: String?)] = []
+    var roomDestructionResult: Result<Void, PortError> = .success(())
+    var groupDMRenames: [(room: BareJID, name: String?)] = []
+    var groupDMRenameResult: Result<Void, PortError> = .success(())
+    var groupDMInvitations: [(room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess)] = []
+    var groupDMInvitationResult: Result<Void, PortError> = .success(())
+    var groupDMLeaves: [BareJID] = []
+    var groupDMLeaveResult: Result<Void, PortError> = .success(())
+    var roomSettingsRequests: [BareJID] = []
+    var roomSettingsResult: Result<RoomSettings, PortError> = .success(RoomSettings(name: nil, summary: nil, pinPermission: nil))
+    var holdsTopology = false
+    private(set) var heldTopology: [CheckedContinuation<Void, Never>] = []
+    var heldDirectoryVerbs: Set<String> = []
+    private(set) var heldDirectoryRequests: [CheckedContinuation<Void, Never>] = []
+    var topologyRequests = 0
     var topology: Topology = .empty
     var inbox: [InboxEntry] = []
     var cursors: [DisplayedCursor] = []
@@ -193,9 +210,68 @@ final class FakePort: XmppPort {
         inboxReads.append(partner)
     }
 
-    func discoverTopology() async -> Result<Topology, PortError> { .success(topology) }
+    func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings {
+        roomSettingsRequests.append(room)
+        return try roomSettingsResult.get()
+    }
+    func updateRoomSettings(_ patch: RoomSettingsPatch, of room: BareJID) async throws {
+        roomSettingsUpdates.append((room, patch))
+        await holdDirectoryVerb("updateRoomSettings")
+        try roomSettingsUpdateResult.get()
+    }
+    func destroyRoom(_ room: BareJID, reason: String?) async throws {
+        roomDestructions.append((room, reason))
+        await holdDirectoryVerb("destroyRoom")
+        try roomDestructionResult.get()
+    }
+
+    func renameGroupDM(_ room: BareJID, name: String?) async throws {
+        groupDMRenames.append((room, name))
+        await holdDirectoryVerb("renameGroupDM")
+        try groupDMRenameResult.get()
+    }
+
+    func inviteToGroupDM(_ room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess) async throws {
+        groupDMInvitations.append((room, invitee, history))
+        await holdDirectoryVerb("inviteToGroupDM")
+        try groupDMInvitationResult.get()
+    }
+
+    func leaveGroupDM(_ room: BareJID) async throws {
+        groupDMLeaves.append(room)
+        await holdDirectoryVerb("leaveGroupDM")
+        try groupDMLeaveResult.get()
+    }
+
+    func holdDirectoryVerb(_ verb: String) async {
+        if heldDirectoryVerbs.contains(verb) {
+            await withCheckedContinuation { heldDirectoryRequests.append($0) }
+        }
+    }
+
+    func releaseDirectoryRequests() {
+        let held = heldDirectoryRequests
+        heldDirectoryRequests = []
+        held.forEach { $0.resume() }
+    }
+
+    func releaseTopology() {
+        let held = heldTopology
+        heldTopology = []
+        held.forEach { $0.resume() }
+    }
+
+    func discoverTopology() async -> Result<Topology, PortError> {
+        topologyRequests += 1
+        let snapshot = topology
+        if holdsTopology {
+            await withCheckedContinuation { heldTopology.append($0) }
+        }
+        return .success(snapshot)
+    }
 
     func joinRoom(_ room: BareJID, nick: String) async {
+        await holdDirectoryVerb("joinRoom")
         joined.append(room)
     }
 

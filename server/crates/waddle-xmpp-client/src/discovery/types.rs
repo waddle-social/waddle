@@ -47,6 +47,16 @@ impl DiscoInfoResult {
         self.features.iter().any(|f| f == feature)
     }
 
+    /// The room's current name, from its `conference` identity (XEP-0045 §6.4).
+    #[must_use]
+    pub fn room_name(&self) -> Option<&str> {
+        self.identities
+            .iter()
+            .filter(|identity| identity.category == "conference")
+            .filter_map(|identity| identity.name.as_deref())
+            .find(|name| !name.trim().is_empty())
+    }
+
     /// Whether the matching discovery form field contains the supplied value.
     #[must_use]
     pub fn has_form_value(&self, form_type: &str, field_var: &str, value: &str) -> bool {

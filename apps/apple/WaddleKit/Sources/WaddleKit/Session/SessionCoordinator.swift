@@ -105,6 +105,23 @@ public final class SessionCoordinator {
     @ObservationIgnored var mdsPublishSupported: Bool?
     /// Rooms opened or created this session; rejoined after reconnects.
     @ObservationIgnored var onDemandRooms: Set<BareJID> = []
+    /// Destroyed rooms must not be recreated by a later join in this session.
+    @ObservationIgnored var destroyedRooms: Set<BareJID> = []
+    /// Rooms whose delete got no clear answer (timed out, cut off). They
+    /// may be gone, so they are not joined again this session.
+    @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
+    /// Rooms being deleted or left; not joined until the request settles.
+    @ObservationIgnored var departingRooms: Set<BareJID> = []
+    /// Rooms with a management action in flight; one at a time per room.
+    @ObservationIgnored var roomsBeingManaged: Set<BareJID> = []
+    /// Local changes replayed over topology requests that began before
+    /// them; emptied when no request is in flight.
+    @ObservationIgnored var directoryMutations: [DirectoryMutation] = []
+    @ObservationIgnored var directoryRefreshesInFlight = 0
+    /// The last join sent to each room that has one on its way.
+    @ObservationIgnored var joinTails: [BareJID: Task<Void, Never>] = [:]
+    /// Fences room actions across session teardown, including suspended port calls.
+    @ObservationIgnored var roomManagementGeneration = 0
 
     @ObservationIgnored private let connectBudget: TimeInterval
     @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
@@ -193,6 +210,7 @@ public final class SessionCoordinator {
     /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
         isStopped = true
+        roomManagementGeneration += 1
         callLifecycleOutbox?.stop()
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -378,6 +396,12 @@ public final class SessionCoordinator {
         threadHistory.clear()
         unreadOverview.reset()
         onDemandRooms.removeAll()
+        destroyedRooms.removeAll()
+        departingRooms.removeAll()
+        roomsBeingManaged.removeAll()
+        unconfirmedDeletions.removeAll()
+        joinTails.removeAll()
+        directoryMutations.removeAll()
         extensionCommands.removeAll()
         mentionSearches.clear()
     }

@@ -64,26 +64,37 @@ public final class DirectoryStore {
 
     public func apply(_ topology: Topology) {
         spaces = topology.spaces
-        let sorted = topology.channels.sorted {
-            ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased())
-        }
+        let sorted = topology.channels.sorted(by: Self.listOrder)
         channels = sorted.filter { !$0.isGroupDM }
         groupDMs = sorted.filter(\.isGroupDM)
         roomJIDs = Set(topology.channels.map(\.roomJID))
         hasLoadedTopology = true
     }
 
-    /// Adds a room created or joined in this session before the next
-    /// topology refresh lists it.
+    private static func listOrder(_ first: Channel, _ second: Channel) -> Bool {
+        (first.position, first.name.lowercased()) < (second.position, second.name.lowercased())
+    }
+
+    /// Adds or replaces a room, ordered by position then name.
     public func upsert(_ channel: Channel) {
         roomJIDs.insert(channel.roomJID)
         if channel.isGroupDM {
             groupDMs.removeAll { $0.roomJID == channel.roomJID }
             groupDMs.append(channel)
+            groupDMs.sort(by: Self.listOrder)
         } else {
             channels.removeAll { $0.roomJID == channel.roomJID }
             channels.append(channel)
+            channels.sort(by: Self.listOrder)
         }
+    }
+
+    /// Removes a room and its notification preference.
+    public func remove(_ room: BareJID) {
+        channels.removeAll { $0.roomJID == room }
+        groupDMs.removeAll { $0.roomJID == room }
+        roomJIDs.remove(room)
+        notifyModes.removeValue(forKey: .room(room))
     }
 
     /// Records 1:1 activity, moving the peer to the top of the DM list.

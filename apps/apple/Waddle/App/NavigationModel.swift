@@ -7,6 +7,13 @@ enum Route: Hashable {
     case conversation(ConversationID)
     case thread(ConversationID, rootID: String)
     case details(ConversationID)
+
+    var conversation: ConversationID {
+        switch self {
+        case let .conversation(conversation), let .thread(conversation, _), let .details(conversation):
+            return conversation
+        }
+    }
 }
 
 /// Sheets presented over the shell.
@@ -119,6 +126,28 @@ final class NavigationModel {
             tab = .inbox
             inboxPath = []
         }
+    }
+
+    /// Moves away from a conversation that no longer exists, after it was
+    /// deleted or left: iPad and Mac select nothing and close the
+    /// inspector; each phone stack returns to the screen it was opened from.
+    func close(_ conversation: ConversationID) {
+        if selection == conversation {
+            selection = nil
+            inspector = nil
+        }
+        if case let .search(searched) = sheet, searched == conversation {
+            sheet = nil
+        }
+        homePath = Self.path(homePath, without: conversation)
+        directPath = Self.path(directPath, without: conversation)
+        inboxPath = Self.path(inboxPath, without: conversation)
+    }
+
+    /// `path` up to the first screen that belongs to `conversation`.
+    private static func path(_ path: [Route], without conversation: ConversationID) -> [Route] {
+        guard let index = path.firstIndex(where: { $0.conversation == conversation }) else { return path }
+        return Array(path[..<index])
     }
 
     /// Scrolls the conversation already on screen to `messageID`. Used from

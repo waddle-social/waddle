@@ -2,6 +2,17 @@ import Foundation
 import WaddleKit
 
 extension FFIInbound {
+    static func roomSettings(_ config: WaddleRoomConfig) -> RoomSettings {
+        RoomSettings(name: config.name, summary: config.description, pinPermission: config.pinPermission.map(pinPermission))
+    }
+
+    static func pinPermission(_ permission: WaddlePinPermission) -> PinPermission {
+        switch permission {
+        case .adminsOnly: return .adminsOnly
+        case .anyone: return .anyone
+        }
+    }
+
     static func topology(_ topology: WaddleTopology) -> Topology {
         Topology(spaces: topology.spaces.map(space), channels: topology.channels.compactMap(channel))
     }

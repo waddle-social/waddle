@@ -56,6 +56,9 @@ import Observation
     @ObservationIgnored private var sessionTimer: Task<Void, Never>?
     /// Abort history is bounded because reductions can outpace the effects queue.
     @ObservationIgnored private(set) var recentlyAbortedSids: [String] = []
+    /// Rooms that must get no more group presence from us: one sent to a
+    /// room that was deleted would create it again.
+    @ObservationIgnored var sealedGroupRooms: Set<BareJID> = []
     @ObservationIgnored private var finishedSids: [String] = []
     @ObservationIgnored private var declinedBeforeProposalSids: [String] = []
     @ObservationIgnored private(set) var generation = 0
@@ -253,6 +256,7 @@ import Observation
         sessionTimer?.cancel()
         sessionTimer = nil
         recentlyAbortedSids.removeAll()
+        sealedGroupRooms.removeAll()
         acceptInFlight?.outcome.cancel()
         acceptInFlight = nil
         generation += 1
