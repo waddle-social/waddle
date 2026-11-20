@@ -30,7 +30,9 @@ WaddleKit/                   UI-free core (Swift package; depends on swift-crypt
 
 - **XMPP-native.** Chat data travels only over XMPP through the Rust core.
   HTTP is used for device-authorization sign-in, for XEP-0363 upload PUTs,
-  and for GETs of XEP-0448 ciphertext from its XEP-0447 source. Call media
+  for GETs of XEP-0448 ciphertext from its XEP-0447 source, and for GETs of
+  a story's picture or video from the http(s) address its author published
+  (a story's file is uploaded as it is, since the whole community reads it). Call media
   goes to the SFU that the Jingle transport names; the call itself is set up
   and ended over XMPP.
 - **Parse once.** `Bridge/` converts UniFFI records into WaddleKit's typed

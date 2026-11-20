@@ -3,8 +3,8 @@ import WaddleKit
 
 /// Community feed and story conversions.
 extension FFIInbound {
-    static func date(milliseconds: Int64?) -> Date? {
-        milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
+    static func date(milliseconds: Int64) -> Date {
+        Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
     }
 
     static func feedPost(_ entry: WaddleFeedEntry) -> FeedPost {
@@ -13,7 +13,7 @@ extension FFIInbound {
             title: entry.title,
             body: entry.body,
             author: bareJID(entry.author),
-            publishedAt: date(milliseconds: entry.publishedMs),
+            publishedAt: entry.publishedMs.map(date(milliseconds:)),
             link: webURL(entry.link),
             source: entry.source.map(feedSource)
         )
@@ -40,8 +40,8 @@ extension FFIInbound {
             media: media,
             mediaType: story.mediaType,
             author: bareJID(story.author),
-            postedAt: date(milliseconds: story.postedMs),
-            expiresAt: date(milliseconds: story.expiresMs)
+            postedAt: story.postedMs.map(date(milliseconds:)),
+            expiresAt: story.expiresMs.map(date(milliseconds:))
         )
     }
 

@@ -18,7 +18,7 @@ struct FeedView: View {
         .navigationTitle("Feed")
         .refreshable { await session.refreshCommunity() }
         .task(id: session.connection == .online) {
-            guard clock == nil, session.connection == .online else { return }
+            guard clock == nil, session.connection == .online, isStale else { return }
             await session.refreshCommunity()
         }
         .toolbar {
@@ -63,6 +63,12 @@ struct FeedView: View {
         }
     }
 
+    /// Coming back to the Feed within a minute shows what is there;
+    /// after that, or after a reconnect that cleared it, it reloads.
+    private var isStale: Bool {
+        session.community.loadedAt.map { Date().timeIntervalSince($0) > 60 } ?? true
+    }
+
     /// Web `sizes.read`: a comfortable line length on a wide window.
     private static var readableWidth: CGFloat { 720 }
 
@@ -81,10 +87,16 @@ struct FeedView: View {
                     message: "Posts from people in your community show up here. Be the first to share something.",
                     symbol: "newspaper"
                 )
-            } else {
+            } else if session.connection == .online {
                 ProgressView()
                     .frame(maxWidth: .infinity)
                     .padding(Theme.Spacing.xl)
+            } else {
+                EmptyStateView(
+                    title: "You're offline",
+                    message: "The Feed loads when you're connected again.",
+                    symbol: "wifi.slash"
+                )
             }
         }
     }

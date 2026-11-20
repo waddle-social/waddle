@@ -11,6 +11,8 @@ public final class CommunityStore {
     public private(set) var isLoading = false
     /// At least one refresh finished since the session started.
     public private(set) var hasLoaded = false
+    /// When the last refresh finished.
+    public private(set) var loadedAt: Date?
     public private(set) var feedFailed = false
     public private(set) var storiesFailed = false
 
@@ -18,9 +20,6 @@ public final class CommunityStore {
     private(set) var reads: [String: Date] = [:]
 
     @ObservationIgnored private var serial = 0
-    /// Whether `reads` includes what the server holds. Until it does,
-    /// publishing would overwrite what another device stored.
-    @ObservationIgnored private(set) var hasLoadedReads = false
     /// Counts this device's reaction changes per story, so a slower
     /// answer does not replace a newer change.
     @ObservationIgnored private var reactionEdits: [String: Int] = [:]
@@ -67,9 +66,10 @@ public final class CommunityStore {
         reactions = reactions.filter { known.contains($0.key) }
     }
 
-    func finish(feedFailed: Bool, storiesFailed: Bool) {
+    func finish(feedFailed: Bool, storiesFailed: Bool, at now: Date = Date()) {
         isLoading = false
         hasLoaded = true
+        loadedAt = now
         self.feedFailed = feedFailed
         self.storiesFailed = storiesFailed
     }
@@ -133,11 +133,6 @@ public final class CommunityStore {
     /// Adds what the server holds to what was seen on this device.
     func mergeReads(_ remote: [String: Date]) {
         reads = StoryReads.merged(reads, with: remote)
-        hasLoadedReads = true
-    }
-
-    func replaceReads(_ reads: [String: Date]) {
-        self.reads = reads
     }
 
     /// Sign-out or a fresh session: drop everything, including answers
@@ -150,7 +145,7 @@ public final class CommunityStore {
         reads = [:]
         reactionEdits = [:]
         unsentReactionEdits = [:]
-        hasLoadedReads = false
+        loadedAt = nil
         isLoading = false
         hasLoaded = false
         feedFailed = false

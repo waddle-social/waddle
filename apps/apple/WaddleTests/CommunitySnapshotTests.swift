@@ -66,7 +66,12 @@ final class CommunitySnapshotTests: XCTestCase {
             now: date(0),
             picture: Self.picture
         )
+        // A sheet on a Mac, the whole screen on iPhone.
+        #if os(macOS)
+        try await assertScreenSnapshot(of: sample.host(viewer.frame(width: 420, height: 720)), size: Self.viewer, asSheet: true)
+        #else
         try await assertScreenSnapshot(of: sample.host(viewer), size: Self.viewer)
+        #endif
     }
 
     // MARK: - Story composer

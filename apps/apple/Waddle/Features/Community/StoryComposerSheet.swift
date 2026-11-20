@@ -9,6 +9,7 @@ struct StoryComposerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var composer: StoryComposer
     @State private var pickedItem: PhotosPickerItem?
+    @State private var posting: Task<Void, Never>?
 
     /// Snapshots hand in a composer already in the state they show.
     init(composer: StoryComposer? = nil) {
@@ -41,7 +42,10 @@ struct StoryComposerSheet: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        posting?.cancel()
+                        dismiss()
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(composer.isPosting ? "Posting…" : "Post", action: post)
@@ -68,8 +72,8 @@ struct StoryComposerSheet: View {
 
     @ViewBuilder
     private var picture: some View {
-        if let picked = composer.picture, let image = Image(storyPicture: picked.data) {
-            image
+        if let preview = composer.preview {
+            preview
                 .resizable()
                 .scaledToFit()
                 .frame(maxWidth: .infinity, maxHeight: 360)
@@ -123,22 +127,10 @@ struct StoryComposerSheet: View {
     }
 
     private func post() {
-        Task {
+        posting = Task {
             if await composer.post(using: session) {
                 dismiss()
             }
         }
-    }
-}
-
-private extension Image {
-    init?(storyPicture data: Data) {
-        #if os(macOS)
-        guard let image = NSImage(data: data) else { return nil }
-        self.init(nsImage: image)
-        #else
-        guard let image = UIImage(data: data) else { return nil }
-        self.init(uiImage: image)
-        #endif
     }
 }

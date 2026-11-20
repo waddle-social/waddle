@@ -45,14 +45,12 @@ public struct FeedPost: Hashable, Sendable, Identifiable {
 /// A feed post being written.
 public struct FeedPostDraft: Hashable, Sendable {
     public let body: String
-    public let link: URL?
 
     /// Trims the text; nil when nothing is left to post.
-    public init?(body: String, link: URL? = nil) {
+    public init?(body: String) {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return nil }
         self.body = body
-        self.link = link
     }
 }
 
@@ -85,8 +83,16 @@ public struct Story: Hashable, Sendable, Identifiable {
         self.expiresAt = expiresAt
     }
 
+    /// By the declared type, or by the file's extension when the author's
+    /// client declared none.
     public var isVideo: Bool {
-        mediaType?.lowercased().hasPrefix("video/") ?? false
+        if let mediaType { return mediaType.lowercased().hasPrefix("video/") }
+        return ["mp4", "m4v", "mov", "webm"].contains(media.pathExtension.lowercased())
+    }
+
+    /// WebM, which browsers record and Apple's players do not decode.
+    public var isWebM: Bool {
+        mediaType?.lowercased() == "video/webm" || media.pathExtension.lowercased() == "webm"
     }
 
     public func isActive(at now: Date) -> Bool {

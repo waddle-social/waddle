@@ -1,5 +1,5 @@
-import Foundation
 import Observation
+import SwiftUI
 import WaddleKit
 
 /// A story being put together: one picture and an optional caption.
@@ -15,13 +15,18 @@ final class StoryComposer {
     /// Stories are smaller than chat attachments, as on web.
     static let maxBytes = 10 * 1024 * 1024
 
-    private(set) var picture: AttachmentPayload?
+    private(set) var picture: AttachmentPayload? {
+        didSet { preview = picture.flatMap { Image(storyPicture: $0.data) } }
+    }
+    /// The picture, decoded once.
+    private(set) var preview: Image?
     var caption = ""
     private(set) var phase: Phase = .editing
     var errorMessage: String?
 
     init(picture: AttachmentPayload? = nil, caption: String = "", phase: Phase = .editing, errorMessage: String? = nil) {
         self.picture = picture
+        preview = picture.flatMap { Image(storyPicture: $0.data) }
         self.caption = caption
         self.phase = phase
         self.errorMessage = errorMessage
@@ -45,11 +50,8 @@ final class StoryComposer {
         }
     }
 
-    func removePicture() {
-        picture = nil
-    }
-
     /// Uploads the picture, then posts the story. True once it is up.
+    /// Cancelling the task stops the upload, and nothing is posted.
     func post(using session: SessionCoordinator) async -> Bool {
         guard let picture, !isPosting else { return false }
         phase = .posting(0)
@@ -62,8 +64,11 @@ final class StoryComposer {
                     self.phase = .posting(fraction)
                 }
             }
+            try Task.checkCancellation()
             try await session.postStory(StoryDraft(body: caption, media: file.url, mediaType: picture.mediaType))
             return true
+        } catch where Task.isCancelled {
+            return false
         } catch let error as AttachmentUploadError {
             errorMessage = error.message
         } catch {
@@ -83,5 +88,17 @@ final class StoryComposer {
             width: picture.width,
             height: picture.height
         )
+    }
+}
+
+private extension Image {
+    init?(storyPicture data: Data) {
+        #if os(macOS)
+        guard let image = NSImage(data: data) else { return nil }
+        self.init(nsImage: image)
+        #else
+        guard let image = UIImage(data: data) else { return nil }
+        self.init(uiImage: image)
+        #endif
     }
 }

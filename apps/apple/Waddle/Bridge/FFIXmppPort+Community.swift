@@ -21,7 +21,7 @@ extension FFIXmppPort {
 
     func publishFeedPost(_ draft: FeedPostDraft) async throws -> FeedPost {
         let service = try communityService()
-        let post = WaddleFeedPost(title: nil, body: draft.body, link: draft.link?.absoluteString)
+        let post = WaddleFeedPost(title: nil, body: draft.body, link: nil)
         return FFIInbound.feedPost(try await mappingPortErrors {
             try await client.publishFeedPost(communityJid: service, post: post)
         })
@@ -53,7 +53,7 @@ extension FFIXmppPort {
     func fetchStoryReads() async throws -> [String: Date] {
         let reads = try await mappingPortErrors { try await client.fetchStoryReads() }
         return Dictionary(
-            reads.map { ($0.storyId, Date(timeIntervalSince1970: TimeInterval($0.readAtMs) / 1000)) },
+            reads.map { ($0.storyId, FFIInbound.date(milliseconds: $0.readAtMs)) },
             uniquingKeysWith: max
         )
     }

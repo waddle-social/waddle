@@ -6,9 +6,9 @@ extension SessionCoordinator {
     /// How many stories have their reactions fetched at once.
     static var storyReactionConcurrency: Int { 4 }
 
-    /// Reloads the community feed, the stories, the reactions of the
-    /// stories still up and, until it has been fetched once, which stories
-    /// this account has seen. A part that fails keeps what was shown.
+    /// Reloads the community feed, the stories, which of them this account
+    /// has seen, and the reactions of the stories still up. A part that
+    /// fails keeps what was shown.
     public func refreshCommunity(at now: Date = Date()) async {
         let refresh = community.begin()
         guard connection == .online else {
@@ -23,11 +23,11 @@ extension SessionCoordinator {
         if let feed { community.publish(posts: feed) }
         if let stories { community.publish(stories: stories) }
 
-        await loadStoryReads()
+        await syncStoryReads(at: now)
         guard community.isCurrent(refresh) else { return }
         await loadStoryReactions(of: community.activeStories(at: now).map(\.id), refresh: refresh)
         guard community.isCurrent(refresh) else { return }
-        community.finish(feedFailed: feed == nil, storiesFailed: stories == nil)
+        community.finish(feedFailed: feed == nil, storiesFailed: stories == nil, at: now)
     }
 
     /// Posts to the feed and shows the post first. Throws `PortError`.
@@ -45,16 +45,12 @@ extension SessionCoordinator {
     }
 
     /// Remembers that the user saw a story, here and on their other
-    /// devices. The whole state is published, so it is not sent before
-    /// the server's copy has been fetched.
+    /// devices. A story seen while that cannot be sent goes out with the
+    /// next one, or the next refresh.
     public func markStoryRead(_ storyID: String, at now: Date = Date()) async {
         guard !community.isRead(storyID) else { return }
         community.markRead(storyID, at: now)
-        let epoch = connectionEpoch
-        guard connection == .online, await loadStoryReads(), epoch == connectionEpoch else { return }
-        let reads = StoryReads.pruned(community.reads, at: now)
-        community.replaceReads(reads)
-        try? await port.publishStoryReads(reads)
+        await syncStoryReads(at: now)
     }
 
     /// Adds the user's reaction to a story, or takes it back. Shown at
@@ -83,20 +79,25 @@ extension SessionCoordinator {
         return value
     }
 
-    /// Whether the server's "seen" state is part of the store's.
-    @discardableResult
-    private func loadStoryReads() async -> Bool {
-        if community.hasLoadedReads { return true }
+    /// Brings this device's "seen" state and the server's together. The
+    /// server holds one item for every device, so its copy is fetched and
+    /// merged each time, and published only when this device adds to it:
+    /// never over a copy that could not be fetched.
+    private func syncStoryReads(at now: Date) async {
+        guard !isStopped, connection == .online else { return }
         let epoch = connectionEpoch
         let port = self.port
         guard let remote = await Self.attempt({ try await port.fetchStoryReads() }),
-              epoch == connectionEpoch else { return false }
+              epoch == connectionEpoch else { return }
         community.mergeReads(remote)
-        return true
+        let merged = StoryReads.pruned(community.reads, at: now)
+        guard merged != StoryReads.pruned(remote, at: now) else { return }
+        try? await port.publishStoryReads(merged)
     }
 
     private func loadStoryReactions(of storyIDs: [String], refresh: Int) async {
         let port = self.port
+        let storyIDs = Array(Set(storyIDs))
         let edits = Dictionary(uniqueKeysWithValues: storyIDs.map { ($0, community.reactionEdit(of: $0)) })
         await withTaskGroup(of: (String, StoryReactions?).self) { group in
             var pending = storyIDs[...]

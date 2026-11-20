@@ -105,6 +105,16 @@ struct CommunityTests {
         #expect(store.activeStories(at: now).map(\.id) == ["new", "forever", "old"])
     }
 
+    @Test func aStoryIsAVideoByItsTypeOrElseItsFileName() {
+        let clip = URL(string: "https://upload.waddle.test/story-1.webm")!
+        #expect(Story(id: "a", media: picture, mediaType: "video/mp4").isVideo)
+        #expect(!Story(id: "b", media: clip, mediaType: "image/jpeg").isVideo)
+        #expect(Story(id: "c", media: clip).isVideo)
+        #expect(Story(id: "c", media: clip).isWebM)
+        #expect(Story(id: "d", media: picture, mediaType: "video/webm").isWebM)
+        #expect(!Story(id: "e", media: picture, mediaType: "image/jpeg").isVideo)
+    }
+
     // MARK: Reactions
 
     @Test func refreshLoadsReactionsOfActiveStoriesOnly() async {
@@ -264,6 +274,49 @@ struct CommunityTests {
         await coordinator.markStoryRead("s2", at: now)
 
         #expect(port.community.publishedReads == [["s1": date(900), "s2": now]])
+    }
+
+    @Test func whatAnotherDeviceSawSinceIsKept() async {
+        let (coordinator, port) = online()
+        port.community.reads = .success(["s1": date(900)])
+        await coordinator.refreshCommunity(at: now)
+
+        port.community.reads = .success(["s1": date(900), "s9": date(950)])
+        await coordinator.markStoryRead("s2", at: now)
+
+        #expect(port.community.publishedReads == [["s1": date(900), "s2": now, "s9": date(950)]])
+        #expect(coordinator.community.isRead("s9"))
+    }
+
+    @Test func aStorySeenOfflineIsPublishedOnTheNextRefresh() async {
+        let (coordinator, port) = online()
+        coordinator.status.connection = .offline(retryAt: nil)
+        await coordinator.markStoryRead("s2", at: now)
+        #expect(port.community.publishedReads.isEmpty)
+
+        coordinator.status.connection = .online
+        await coordinator.refreshCommunity(at: now)
+
+        #expect(port.community.publishedReads == [["s2": now]])
+    }
+
+    @Test func refreshPublishesNothingWhenThisDeviceSawNothingNew() async {
+        let (coordinator, port) = online()
+        let threeDaysAgo = now.addingTimeInterval(-3 * 86400)
+        port.community.reads = .success(["ancient": threeDaysAgo, "s1": date(900)])
+
+        await coordinator.refreshCommunity(at: now)
+
+        #expect(port.community.publishedReads.isEmpty)
+    }
+
+    @Test func storiesListedTwiceAskForReactionsOnce() async {
+        let (coordinator, port) = online()
+        port.community.stories = .success([story("s1"), story("s1")])
+
+        await coordinator.refreshCommunity(at: now)
+
+        #expect(port.community.reactionRequests == ["s1"])
     }
 
     // MARK: Posting

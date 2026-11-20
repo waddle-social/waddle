@@ -7,9 +7,9 @@ extension View {
     /// iPhone and iPad, as a sheet on a Mac.
     func storyViewer(_ story: Binding<Story?>) -> some View {
         #if os(iOS)
-        fullScreenCover(item: story) { StoryViewer(start: $0) }
+        fullScreenCover(item: story) { StoryViewer(start: $0).carryingCallDock() }
         #else
-        sheet(item: story) { StoryViewer(start: $0).frame(width: 420, height: 720) }
+        sheet(item: story) { StoryViewer(start: $0).frame(width: 420, height: 720).carryingCallDock() }
         #endif
     }
 }
@@ -62,6 +62,7 @@ struct StoryViewer: View {
         .environment(\.colorScheme, .dark)
         .environment(\.huddleGround, .black)
         .focusable()
+        .focusEffectDisabled()
         .focused($isFocused)
         .onKeyPress(.leftArrow) { step(-1); return .handled }
         .onKeyPress(.rightArrow) { step(1); return .handled }
@@ -200,6 +201,10 @@ private struct StoryMedia: View {
     var body: some View {
         if let picture {
             picture.resizable().scaledToFit()
+        } else if story.isWebM {
+            Label("This video can't be played here.", systemImage: "film")
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(.white.opacity(0.7))
         } else if story.isVideo {
             VideoPlayer(player: player)
                 .onAppear {
@@ -235,7 +240,7 @@ struct StoryReactionBar: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Theme.Spacing.s) {
+            HStack(spacing: Theme.Spacing.m) {
                 ForEach(reactions.counts, id: \.emoji) { reaction in
                     let isMine = reactions.mine.contains(reaction.emoji)
                     Button { onToggle(reaction.emoji) } label: {
