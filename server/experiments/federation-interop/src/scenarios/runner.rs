@@ -6,12 +6,13 @@ use anyhow::Result;
 
 use crate::evidence::{self, EvidenceLog, Outcome, Record, Section};
 use crate::manifest::{self, Drive, Peer, Row, Slice};
-use crate::scenarios::harness::Harness;
+use crate::scenarios::harness::{Component, Harness};
 use crate::scenarios::negative_cert::Bad;
 use crate::scenarios::{
     muc, negative_addr, negative_admit, negative_cert, negative_dialback, negative_route, observe,
     restart, social, spaces, transport,
 };
+use crate::topology::Home;
 
 /// Which rows a run includes: every row, or those whose id starts with
 /// one of the given prefixes.
@@ -173,8 +174,28 @@ pub async fn run(h: &mut Harness, log: &mut EvidenceLog, filter: &Filter, sectio
         if !sections.contains(&row.section) || !filter.includes(row) {
             continue;
         }
+        // The child-room row checks MUC fallback. Start with fresh streams
+        // so previous flows cannot consume its connection capacity.
+        let fresh_streams = row.id == "flow.child-rooms-by-muc-jid";
+        let setup = if fresh_streams {
+            h.dirty.extend([
+                Component::Waddle(Home::A),
+                Component::Waddle(Home::B),
+                Component::Prosody,
+                Component::Ejabberd,
+            ]);
+            h.restore_standard().await
+        } else {
+            Ok(())
+        };
         for peer in row.peers {
-            let outcome = run_row(h, row, *peer).await;
+            let mut outcome = match &setup {
+                Ok(()) => run_row(h, row, *peer).await,
+                Err(error) => Outcome::not_driven(format!("fresh stream setup failed: {error:#}")),
+            };
+            if fresh_streams && setup.is_ok() {
+                outcome.note("Servers restarted before this flow group to clear earlier streams.");
+            }
             log.record(Record {
                 id: row.id.to_owned(),
                 section: row.section,

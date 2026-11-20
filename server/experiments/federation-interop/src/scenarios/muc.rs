@@ -41,17 +41,26 @@ pub async fn join_with(
     nick: &str,
     fields: &[(&str, &str)],
 ) -> Result<Element> {
-    session
-        .send(&stanza::muc_join(&[room, "/", nick].concat()))
-        .await?;
+    let occupant = [room, "/", nick].concat();
+    session.send(&stanza::muc_join(&occupant)).await?;
     let presence = session
         .wait_for(ANSWER, |element| {
-            let from_room = element
-                .attr("from")
-                .is_some_and(|from| from.split_once('/').map_or(from, |(bare, _)| bare) == room);
-            from_room
-                && (stanza::is_self_presence(element)
-                    || (element.name() == "presence" && element.attr("type") == Some("error")))
+            let Some(from) = element.attr("from") else {
+                return false;
+            };
+            if from.split_once('/').map_or(from, |(bare, _)| bare) != room {
+                return false;
+            }
+            if element.name() == "presence" && element.attr("type") == Some("error") {
+                return true;
+            }
+            element.attr("type").is_none()
+                && stanza::is_self_presence(element)
+                && (from == occupant
+                    || (from.contains('/')
+                        && stanza::muc_status_codes(element)
+                            .iter()
+                            .any(|code| code == "210")))
         })
         .await?;
     anyhow::ensure!(
