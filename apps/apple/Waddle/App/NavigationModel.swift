@@ -43,6 +43,7 @@ enum PhoneTab: Hashable {
     case home
     case directMessages
     case inbox
+    case feed
     case you
 }
 
@@ -52,6 +53,8 @@ enum SplitSection: Hashable {
     case home
     /// The unread overview.
     case inbox
+    /// The community feed and stories.
+    case feed
 }
 
 /// Panels shown beside the conversation on iPad and Mac.
@@ -111,7 +114,7 @@ final class NavigationModel {
         }
     }
 
-    /// Leaves the conversation on iPad and Mac for Home or Inbox.
+    /// Leaves the conversation on iPad and Mac for Home, Inbox or the Feed.
     func show(_ section: SplitSection) {
         selection = nil
         inspector = nil
@@ -125,6 +128,8 @@ final class NavigationModel {
         case .inbox:
             tab = .inbox
             inboxPath = []
+        case .feed:
+            tab = .feed
         }
     }
 
@@ -167,7 +172,7 @@ final class NavigationModel {
         case .home: homePath.append(.thread(conversation, rootID: rootID))
         case .directMessages: directPath.append(.thread(conversation, rootID: rootID))
         case .inbox: inboxPath.append(.thread(conversation, rootID: rootID))
-        case .you: break
+        case .feed, .you: break
         }
     }
 
@@ -184,7 +189,7 @@ final class NavigationModel {
         case .home: homePath.append(.details(conversation))
         case .directMessages: directPath.append(.details(conversation))
         case .inbox: inboxPath.append(.details(conversation))
-        case .you: break
+        case .feed, .you: break
         }
     }
 }

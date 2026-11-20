@@ -10,7 +10,7 @@ Waddle/                      SwiftUI app target
   App/                       AppState (auth → session), navigation, preferences
   Auth/                      device-authorization sign-in, Keychain credential
   Shell/                     iPhone tab shell, iPad/Mac split view, menu commands
-  Features/                  Conversation, Navigation, Details, Account, Calls screens
+  Features/                  Conversation, Navigation, Details, Account, Calls, Community screens
   Design/                    Polar Huddle tokens, theme and shared components
   Resources/                 bundled fonts and their licences
   Platform/                  notifications, APNs registration
@@ -23,14 +23,16 @@ WaddleKit/                   UI-free core (Swift package; depends on swift-crypt
   Files/                     XEP-0448 decryption and XEP-0300 digest checks
   Timeline/                  the conversation reducer
   Calls/                     the 1:1 call slot: XEP-0353 invitations, Jingle sessions
-  Stores/                    presence, unread, inbox, typing, delivery, pins…
+  Stores/                    presence, unread, inbox, typing, delivery, pins, community feed…
   Session/                   SessionCoordinator: event routing and actions
   Compose/                   markdown → XEP-0394, mentions → XEP-0372
 ```
 
 - **XMPP-native.** Chat data travels only over XMPP through the Rust core.
   HTTP is used for device-authorization sign-in, for XEP-0363 upload PUTs,
-  and for GETs of XEP-0448 ciphertext from its XEP-0447 source. Call media
+  for GETs of XEP-0448 ciphertext from its XEP-0447 source, and for GETs of
+  a story's picture or video from the http(s) address its author published
+  (a story's file is uploaded as it is, since the whole community reads it). Call media
   goes to the SFU that the Jingle transport names; the call itself is set up
   and ended over XMPP.
 - **Parse once.** `Bridge/` converts UniFFI records into WaddleKit's typed

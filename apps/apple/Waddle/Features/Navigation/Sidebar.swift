@@ -62,6 +62,13 @@ struct Sidebar: View {
         ) {
             navigation.show(.inbox)
         }
+        SidebarDestinationRow(
+            title: "Feed",
+            symbol: "newspaper",
+            isSelected: isShowing(.feed)
+        ) {
+            navigation.show(.feed)
+        }
     }
 
     private func isShowing(_ section: SplitSection) -> Bool {

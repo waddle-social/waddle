@@ -59,6 +59,7 @@ final class FakePort: XmppPort {
     var holdsTopology = false
     private(set) var heldTopology: [CheckedContinuation<Void, Never>] = []
     var heldDirectoryVerbs: Set<String> = []
+    let community = FakeCommunity()
     private(set) var heldDirectoryRequests: [CheckedContinuation<Void, Never>] = []
     var topologyRequests = 0
     var topology: Topology = .empty
