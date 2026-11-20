@@ -427,6 +427,7 @@ impl Harness {
                 })
                 .collect(),
             tls: prosody::TlsProfile::Default,
+            certificate_less_outbound: None,
         }
     }
 
@@ -439,6 +440,7 @@ impl Harness {
                 })
                 .collect(),
             tls: ejabberd::TlsProfile::Default,
+            certificate_less_node_two: false,
         }
     }
 

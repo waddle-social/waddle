@@ -88,6 +88,9 @@ async fn dispatch(h: &mut Harness, id: &str, peer: Peer) -> Result<Outcome> {
         }
         "neg.dialback.unsolicited" => negative_dialback::unsolicited(h, peer).await,
         "neg.dialback.extra-domains" => negative_dialback::extra_domains(h, peer).await,
+        "neg.dialback.stock-authority-certificate" => {
+            transport::stock_dialback_wrong_authority(h, peer).await
+        }
         "neg.dialback.verify-over-plaintext" => {
             negative_dialback::verify_over_plaintext(h, peer).await
         }
@@ -121,6 +124,7 @@ async fn dispatch(h: &mut Harness, id: &str, peer: Peer) -> Result<Outcome> {
         "neg.authority.privileged-pkix-vs-dialback" => {
             muc::privileged_pkix_vs_dialback(h, peer).await
         }
+        "neg.authority.moderation-dialback-only" => muc::moderation_dialback_only(h, peer).await,
         "neg.authority.untrusted-home" => muc::untrusted_home(h, peer).await,
         "neg.authority.home-removed-from-trusted" => muc::home_removed(h, peer).await,
         "neg.authority.own-edit-delete" => muc::own_edit_delete(h, peer).await,

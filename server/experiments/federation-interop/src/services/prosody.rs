@@ -44,6 +44,13 @@ pub struct Variant {
     /// The certificate each host presents.
     pub leaves: BTreeMap<String, Leaf>,
     pub tls: TlsProfile,
+    pub certificate_less_outbound: Option<CertificateLessOutbound>,
+}
+
+#[derive(Clone)]
+pub struct CertificateLessOutbound {
+    pub host: &'static str,
+    pub target: String,
 }
 
 pub struct Prosody {
@@ -130,7 +137,28 @@ impl Prosody {
         let leaf = |domain: &str| variant.leaves.get(domain);
         let data = self.root.join("data");
         let log = self.logs.join("prosody-debug.log");
+        let fixture_path =
+            variant
+                .certificate_less_outbound
+                .as_ref()
+                .map_or_else(String::new, |_| {
+                    format!(
+                        "plugin_paths = {{ {} }}",
+                        path(&self.root.join("fixture-modules"))
+                    )
+                });
+        let dialback_module = |host| {
+            variant.certificate_less_outbound.as_ref()
+                .filter(|fixture| fixture.host == host)
+                .map_or_else(String::new, |fixture| {
+                    format!(
+                        "  modules_enabled = {{ \"fixture_no_client_certificate\" }}\n  fixture_peer_ca = {}\n  fixture_peer_target = {}",
+                        path(&self.ca), lua(&fixture.target),
+                    )
+                })
+        };
         let lines = vec![
+            fixture_path,
             ["pidfile = ", &path(&self.root.join("prosody.pid"))].concat(),
             ["data_path = ", &path(&data)].concat(),
             ["log = { { levels = { min = \"debug\" }, to = \"file\", filename = ", &path(&log), " }, { levels = { min = \"info\" }, to = \"console\" } }"].concat(),
@@ -162,9 +190,11 @@ impl Prosody {
             ["ssl = ", &self.ssl(leaf(PROSODY), &self.ca, variant.tls)].concat(),
             String::new(),
             ["VirtualHost ", &lua(PROSODY)].concat(),
+            dialback_module(PROSODY),
             ["  ssl = ", &self.ssl(leaf(PROSODY), &self.ca, variant.tls)].concat(),
             String::new(),
             ["VirtualHost ", &lua(PROSODY_INSECURE)].concat(),
+            dialback_module(PROSODY_INSECURE),
             ["  ssl = ", &self.ssl(leaf(PROSODY_INSECURE), &self.other_ca, variant.tls)].concat(),
             String::new(),
             ["Component ", &lua(PROSODY_MUC), " \"muc\""].concat(),
@@ -183,6 +213,14 @@ impl Prosody {
     /// Write the configuration, register the accounts and start.
     pub async fn start(&mut self, variant: &Variant) -> Result<()> {
         std::fs::create_dir_all(self.root.join("data"))?;
+        if variant.certificate_less_outbound.is_some() {
+            let modules = self.root.join("fixture-modules");
+            std::fs::create_dir_all(&modules)?;
+            std::fs::write(
+                modules.join("mod_fixture_no_client_certificate.lua"),
+                include_str!("mod_fixture_no_client_certificate.lua"),
+            )?;
+        }
         std::fs::write(&self.config, self.render(variant))?;
         for host in [PROSODY, PROSODY_INSECURE] {
             for (account, password) in &self.passwords {

@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use minidom::{rxml::xml_ncname, Element};
 
 use crate::evidence::Outcome;
 use crate::manifest::Peer;
@@ -17,7 +18,7 @@ use crate::scenarios::harness::{Component, Harness, ANSWER};
 use crate::scenarios::support::{self, ask, check_tls, describe, established, is_result};
 use crate::services::{ejabberd, prosody};
 use crate::topology::{Home, Server, EJABBERD_INSECURE, HOME_A, PROSODY_INSECURE, RAW_PEER};
-use crate::xml::stanza;
+use crate::xml::{ns, stanza};
 
 /// Ping across in both directions over fresh streams, and check the TLS
 /// version each relay saw and that home-a's log shows pkix streams
@@ -264,60 +265,192 @@ async fn dialback_with_stock(h: &mut Harness, peer: Peer, host: &str) -> Result<
         after_out > before_out,
         format!("outbound dialback streams {before_out} -> {after_out}"),
     );
-    // Inbound from the dialback host: a stock server that presents a
-    // certificate home-a verifies authenticates with SASL EXTERNAL, so
-    // inbound dialback is exercised only if it presents none.
-    let before_in = established(h, Home::A, "inbound", "dialback").await;
-    let before_pkix = established(h, Home::A, "inbound", "pkix").await;
-    let account = crate::client::session::Account {
+    check_stock_inbound_dialback(h, peer, host, true, &mut outcome).await?;
+    Ok(outcome)
+}
+
+pub async fn stock_dialback_wrong_authority(h: &mut Harness, peer: Peer) -> Result<Outcome> {
+    let host = match peer {
+        Peer::Prosody => PROSODY_INSECURE,
+        Peer::Ejabberd => EJABBERD_INSECURE,
+        Peer::Waddle => anyhow::bail!("a stock dialback peer is required"),
+    };
+    let mut outcome = Outcome::new(format!(
+        "{} with a wrong-name authoritative certificate",
+        peer.label()
+    ));
+    let mut control = Outcome::new("the same stock peer with its valid authority certificate");
+    check_stock_inbound_dialback(h, peer, host, true, &mut control).await?;
+    let control = control.finish();
+    if control.status != crate::evidence::Status::Pass {
+        outcome.unverified(
+            "the valid authoritative certificate admitted this same peer",
+            format!("{:?}", control.checks),
+        );
+        return Ok(outcome);
+    }
+    outcome.check(
+        "the valid authoritative certificate admitted this same peer",
+        true,
+        "TLS callback and inbound dialback succeeded, and the client received the ping result",
+    );
+    check_stock_inbound_dialback(h, peer, host, false, &mut outcome).await?;
+    Ok(outcome)
+}
+
+async fn check_stock_inbound_dialback(
+    h: &mut Harness,
+    peer: Peer,
+    host: &str,
+    valid_authority: bool,
+    outcome: &mut Outcome,
+) -> Result<()> {
+    use crate::client::session::{Account, Session};
+    use crate::xml::framer::{Framer, Item};
+
+    let wrong_leaf = if valid_authority {
+        None
+    } else {
+        Some(h.issue(&LeafSpec::new(
+            "wrong-dialback-authority",
+            &["unrelated-name.test"],
+        ))?)
+    };
+    h.dirty.insert(Component::Waddle(Home::A));
+    let mut profile = h.profile(Home::A, true);
+    // Only this peer can establish an inbound stream during the check.
+    profile.allow.retain(|domain| domain == host);
+    profile.dialback.retain(|domain| domain == host);
+    profile.trusted_homes.retain(|domain| domain == host);
+    profile.endpoints.retain(|(domain, _)| domain == host);
+    let (initiating_server, authority, password) = match peer {
+        Peer::Prosody => {
+            h.dirty.insert(Component::Prosody);
+            let mut variant = h.prosody_variant();
+            variant.certificate_less_outbound = Some(prosody::CertificateLessOutbound {
+                host: PROSODY_INSECURE,
+                target: HOME_A.to_owned(),
+            });
+            if let Some(leaf) = wrong_leaf {
+                variant.leaves.insert(host.to_owned(), leaf);
+            }
+            h.prosody.restart(&variant).await?;
+            (
+                Server::Prosody,
+                Server::Prosody,
+                h.prosody.passwords.get("alice"),
+            )
+        }
+        Peer::Ejabberd => {
+            h.dirty.insert(Component::Ejabberd);
+            let mut variant = h.ejabberd_variant();
+            variant.certificate_less_node_two = true;
+            if let Some(leaf) = wrong_leaf {
+                variant.leaves.insert(host.to_owned(), leaf);
+            }
+            h.ejabberd.restart(&variant).await?;
+            let authority = Server::Ejabberd(1);
+            let link = crate::topology::relay_for(Server::Waddle(Home::A), authority)
+                .ok_or_else(|| anyhow::anyhow!("missing ejabberd authoritative relay"))?;
+            let port = h.ports.relay(link);
+            profile
+                .endpoints
+                .retain(|(domain, endpoint)| domain != host || *endpoint == port);
+            (
+                Server::Ejabberd(2),
+                authority,
+                h.ejabberd.passwords.get("alice"),
+            )
+        }
+        Peer::Waddle => anyhow::bail!("a stock dialback peer is required"),
+    };
+    let account = Account {
         domain: host.to_owned(),
         username: "alice".to_owned(),
-        password: match peer {
-            Peer::Prosody => h
-                .prosody
-                .passwords
-                .get("alice")
-                .cloned()
-                .unwrap_or_default(),
-            _ => h
-                .ejabberd
-                .passwords
-                .get("alice")
-                .cloned()
-                .unwrap_or_default(),
-        },
+        password: password
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing stock fixture account"))?,
     };
-    let port = match peer {
-        Peer::Prosody => h.ports.prosody_c2s(),
-        _ => h.ports.ejabberd_c2s(1),
-    };
-    let mut session =
-        crate::client::session::Session::tcp(port, &account, "db", "dialback host").await?;
-    let back = ask(&mut session, stanza::ping(&support::id("db-in"), HOME_A)).await?;
-    session.close().await;
-    let after_in = established(h, Home::A, "inbound", "dialback").await;
-    let after_pkix = established(h, Home::A, "inbound", "pkix").await;
-    outcome.check(
-        ["inbound from ", host].concat(),
-        is_result(&back),
-        describe(&back),
+    h.start_waddle(&profile).await?;
+    let home = Server::Waddle(Home::A);
+    let inbound = h.relay(initiating_server, home)?;
+    let callback = h.relay(home, authority)?;
+    let inbound_start = inbound.connection_count();
+    let callback_start = callback.connection_count();
+    let before = established(h, Home::A, "inbound", "dialback").await;
+    let before_pkix = established(h, Home::A, "inbound", "pkix").await;
+    let refused = support::LogMark::new(
+        h,
+        Home::A,
+        &["s2s peer certificate refused", "identity_mismatch"],
     );
-    if after_in > before_in {
+    let dialback_ended = support::LogMark::new(
+        h,
+        Home::A,
+        &[
+            "s2s connection ended",
+            "\"direction\":\"Inbound\"",
+            "\"outcome\":\"Dialback\"",
+        ],
+    );
+    let mut session = match peer {
+        Peer::Prosody => {
+            Session::tcp(h.ports.prosody_c2s(), &account, "db", "dialback fixture").await?
+        }
+        _ => {
+            Session::tcp_loopback_plain(h.ports.ejabberd_c2s(2), &account, "db", "dialback fixture")
+                .await?
+        }
+    };
+    let answer = ask(&mut session, stanza::ping(&support::id("db-in"), HOME_A)).await;
+    session.close().await;
+
+    let names_pair = |connection: &crate::net::relay::Connection, from: &str, to: &str| {
+        let mut framer = Framer::new();
+        framer.push(connection.initiator_plaintext());
+        matches!(framer.next_item(), Ok(Some(Item::Header(header)))
+            if header.attribute("from").as_deref() == Some(from)
+                && header.attribute("to").as_deref() == Some(to))
+            && connection.server_hello().is_some()
+    };
+    let initiates = inbound
+        .connections()
+        .iter()
+        .skip(inbound_start)
+        .any(|connection| names_pair(connection, host, HOME_A));
+    let called_back = callback
+        .connections()
+        .iter()
+        .skip(callback_start)
+        .any(|connection| names_pair(connection, HOME_A, host));
+    outcome.check(
+        "stock initiator and authoritative callback used TLS for the expected pair",
+        initiates && called_back,
+        format!("initiating stream: {initiates}; callback: {called_back}"),
+    );
+    let got_result = answer.as_ref().is_ok_and(is_result);
+    if valid_authority {
+        let after = established(h, Home::A, "inbound", "dialback").await;
+        let result_from_home = answer
+            .as_ref()
+            .is_ok_and(|iq| is_result(iq) && iq.attr("from") == Some(HOME_A));
         outcome.check(
-            "inbound by dialback for a listed domain",
-            true,
-            "dialback stream established",
+            "stock inbound dialback established and the client received its ping result",
+            result_from_home && after > before,
+            format!("ping result from {HOME_A}: {result_from_home}; inbound dialback streams {before} -> {after}"),
         );
     } else {
-        outcome.unverified(
-            "inbound by dialback for a listed domain",
-            format!(
-                "{} authenticated with SASL EXTERNAL (inbound pkix {before_pkix} -> {after_pkix}); the stock server presents its certificate, so inbound dialback is shown only by the harness peer (Waddle column)",
-                peer.label()
-            ),
+        let refusals = refused.settled(h, 1).await;
+        let rejected_streams = dialback_ended.settled(h, 1).await;
+        let after = established(h, Home::A, "inbound", "dialback").await;
+        let after_pkix = established(h, Home::A, "inbound", "pkix").await;
+        outcome.check(
+            "wrong-name authoritative certificate refused before admission or delivery",
+            !got_result && after == before && after_pkix == before_pkix && refusals > 0 && rejected_streams > 0,
+            format!("ping result: {got_result}; inbound dialback {before} -> {after}; inbound PKIX {before_pkix} -> {after_pkix}; certificate refusals: {refusals}; rejected dialback streams: {rejected_streams}"),
         );
     }
-    Ok(outcome)
+    Ok(())
 }
 
 pub async fn disco_ping(h: &mut Harness, peer: Peer) -> Result<Outcome> {
@@ -330,6 +463,43 @@ pub async fn disco_ping(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut local = h
         .login_waddle(Home::A, "alice", &support::id("disco"))
         .await?;
+    let home_info = ask(
+        &mut local,
+        stanza::disco_info(&support::id("home-info"), HOME_A),
+    )
+    .await?;
+    let advertises_federation = |answer: &Element| {
+        answer
+            .children()
+            .flat_map(|query| query.children())
+            .any(|feature| {
+                feature.name() == "feature" && feature.attr("var") == Some("urn:waddle:s2s:0")
+            })
+    };
+    outcome.check(
+        "enabled home server advertises federation to its client",
+        is_result(&home_info) && advertises_federation(&home_info),
+        describe(&home_info),
+    );
+    let node_info = ask(
+        &mut local,
+        stanza::get(
+            &support::id("node-info"),
+            HOME_A,
+            Element::builder("query", ns::DISCO_INFO)
+                .attr(
+                    xml_ncname!("node").to_owned(),
+                    "urn:waddle:interop:unhandled",
+                )
+                .build(),
+        ),
+    )
+    .await?;
+    outcome.check(
+        "node-specific discovery omits the federation capability",
+        !advertises_federation(&node_info),
+        describe(&node_info),
+    );
     for (name, request) in [
         (
             "disco#info",

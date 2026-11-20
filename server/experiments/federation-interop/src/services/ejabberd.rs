@@ -40,6 +40,7 @@ pub struct Variant {
     /// The certificate files ejabberd loads (`certfiles`).
     pub leaves: BTreeMap<String, Leaf>,
     pub tls: TlsProfile,
+    pub certificate_less_node_two: bool,
 }
 
 pub struct Ejabberd {
@@ -174,6 +175,14 @@ impl Ejabberd {
                 "mod_stream_mgmt": {}
             }
         });
+        if node == 2 && variant.certificate_less_node_two {
+            config["certfiles"] = json!([]);
+            config["acme"] = json!({"auto": false});
+            config["listen"][0]["starttls_required"] = json!(false);
+            config["listen"][0]["starttls"] = json!(false);
+            config["host_config"][EJABBERD_INSECURE]["s2s_cafile"] = json!(self.ca);
+            config["modules"]["mod_s2s_dialback"]["access"] = json!("none");
+        }
         if variant.tls == TlsProfile::Tls12Only {
             if let Some(object) = config.as_object_mut() {
                 object.insert(

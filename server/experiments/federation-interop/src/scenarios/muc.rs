@@ -312,33 +312,13 @@ pub async fn two_resources(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
-/// What a home-a room's owner gives the remote account before it acts.
-#[derive(Debug, Clone, Copy)]
-enum Standing {
-    /// The moderator role alone (XEP-0045 section 9.6): room moderation,
-    /// with no affiliation.
-    Moderator,
-    /// The admin affiliation (section 10.6), which carries the moderator
-    /// role: a privileged grant (ADR-0020 D8).
-    Admin,
-}
-
-/// A remote account is given `standing` in a home-a room and acts on bob,
-/// a local occupant with no affiliation there. Returns whether the action
-/// took effect.
-///
-/// A moderator without an affiliation may kick bob, since section 8.2
-/// protects only an occupant whose affiliation is higher than the
-/// moderator's, but may not revoke his voice: section 8.4 forbids that for
-/// an affiliation at or above the moderator's, and none is at none. Its
-/// devoice is recorded only as a note, and its kick is the action. An admin
-/// revokes bob's voice.
+/// Grant an occupant the moderator role and verify it can kick a local
+/// occupant with the same affiliation, as allowed by XEP-0045 section 8.2.
 async fn remote_moderation(
     h: &Harness,
     peer: Peer,
     outcome: &mut Outcome,
     label: &str,
-    standing: Standing,
 ) -> Result<bool> {
     let room = [
         room_name("moderated").as_str(),
@@ -358,66 +338,44 @@ async fn remote_moderation(
         .login_waddle(Home::A, "bob", &support::id("target"))
         .await?;
     join(&mut target, &room, "bob").await?;
-    let remote = ["admin@", Harness::peer_domain(peer)].concat();
-    let (kind, grant) = match standing {
-        Standing::Moderator => (
-            "moderator",
-            stanza::muc_role(&support::id("grant"), &room, "remote-mod", "moderator"),
-        ),
-        Standing::Admin => (
-            "admin",
-            stanza::muc_affiliation(&support::id("grant"), &room, &remote, "admin"),
-        ),
-    };
-    let granted = ask(&mut owner, grant).await?;
-    outcome.note([label, ": ", kind, " grant answered ", &describe(&granted)].concat());
+    let granted = ask(
+        &mut owner,
+        stanza::muc_role(&support::id("grant"), &room, "remote-mod", "moderator"),
+    )
+    .await?;
+    outcome.note(format!(
+        "{label}: moderator grant answered {}",
+        describe(&granted)
+    ));
     let devoice = ask(
         &mut moderator,
         stanza::muc_role(&support::id("devoice"), &room, "bob", "visitor"),
     )
     .await?;
     outcome.note([label, ": devoice answered ", &describe(&devoice)].concat());
-    let (action, took_effect) = match standing {
-        Standing::Admin => {
-            let devoiced = target
-                .wait_for(QUIET, |element| {
-                    element.name() == "presence"
-                        && element
-                            .attr("from")
-                            .is_some_and(|from| from.ends_with("/bob"))
-                        && stanza::muc_role_of(element).as_deref() == Some("visitor")
-                })
-                .await
-                .is_ok();
-            (devoice, devoiced)
-        }
-        Standing::Moderator => {
-            let kick = ask(
-                &mut moderator,
-                stanza::muc_role(&support::id("kick"), &room, "bob", "none"),
-            )
-            .await?;
-            outcome.note([label, ": kick answered ", &describe(&kick)].concat());
-            let kicked = target
-                .wait_for(QUIET, |element| {
-                    element.name() == "presence"
-                        && element.attr("type") == Some("unavailable")
-                        && element
-                            .attr("from")
-                            .is_some_and(|from| from.ends_with("/bob"))
-                        && stanza::muc_status_codes(element)
-                            .iter()
-                            .any(|code| code == "307")
-                })
-                .await
-                .is_ok();
-            (kick, kicked)
-        }
-    };
+    let kick = ask(
+        &mut moderator,
+        stanza::muc_role(&support::id("kick"), &room, "bob", "none"),
+    )
+    .await?;
+    outcome.note(format!("{label}: kick answered {}", describe(&kick)));
+    let kicked = target
+        .wait_for(QUIET, |element| {
+            element.name() == "presence"
+                && element.attr("type") == Some("unavailable")
+                && element
+                    .attr("from")
+                    .is_some_and(|from| from.ends_with("/bob"))
+                && stanza::muc_status_codes(element)
+                    .iter()
+                    .any(|code| code == "307")
+        })
+        .await
+        .is_ok();
     owner.close().await;
     moderator.close().await;
     target.close().await;
-    Ok(took_effect && is_result(&action))
+    Ok(kicked && is_result(&kick))
 }
 
 pub async fn remote_moderator(h: &mut Harness, peer: Peer) -> Result<Outcome> {
@@ -428,8 +386,7 @@ pub async fn remote_moderator(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         ]
         .concat(),
     );
-    let honored =
-        remote_moderation(h, peer, &mut outcome, "trusted home", Standing::Moderator).await?;
+    let honored = remote_moderation(h, peer, &mut outcome, "trusted home").await?;
     outcome.check("a trusted home's moderator is honored", honored, "");
     Ok(outcome)
 }
@@ -449,8 +406,7 @@ pub async fn untrusted_home(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     }
     h.dirty.insert(Component::Waddle(Home::A));
     h.start_waddle(&profile).await?;
-    let honored =
-        remote_moderation(h, peer, &mut outcome, "untrusted home", Standing::Moderator).await?;
+    let honored = remote_moderation(h, peer, &mut outcome, "untrusted home").await?;
     outcome.check(
         "moderation by a home not on the list is refused",
         !honored,
@@ -624,25 +580,315 @@ fn denied_by_room(answer: &Element, room: &str) -> bool {
 }
 
 pub async fn privileged_pkix_vs_dialback(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
-    let mut outcome = Outcome::new(
-        "Prosody's admin over pkix (prosody.test) and over dialback (insecure.prosody.test)",
-    );
-    let honored =
-        remote_moderation(h, Peer::Prosody, &mut outcome, "pkix", Standing::Admin).await?;
-    outcome.check("honored on pkix", honored, "");
-    let before = support::established(h, Home::A, "inbound", "dialback").await;
-    let _ = support::ping_from_peer(h, Peer::Prosody, "alice", HOME_A).await;
-    let after = support::established(h, Home::A, "inbound", "dialback").await;
-    if after > before {
-        outcome.unverified(
-            "refused on a dialback-only stream",
-            "a dialback stream exists but the harness has no account on its host to drive moderation through it",
+    use crate::topology::PROSODY;
+
+    let mut outcome =
+        Outcome::new("one stored Prosody admin affiliation on PKIX, dialback, and restored PKIX");
+    let muc_domain = topology::muc_domain(HOME_A);
+    let room = format!("{}@{muc_domain}", room_name("stored-strength"));
+    let open = format!("{}@{muc_domain}", room_name("strength-control"));
+    let admin = format!("admin@{PROSODY}");
+    let profile = prosody_authority_profile(h);
+
+    let mut owner = h
+        .login_waddle(Home::A, "admin", &support::id("owner"))
+        .await?;
+    join(&mut owner, &open, "owner").await?;
+    join_with(
+        &mut owner,
+        &room,
+        "owner",
+        &[("muc#roomconfig_membersonly", "1")],
+    )
+    .await?;
+    for (account, affiliation) in [(admin.as_str(), "admin"), ("bob@home-a.test", "member")] {
+        let answer = ask(
+            &mut owner,
+            stanza::muc_affiliation(&support::id("grant"), &room, account, affiliation),
+        )
+        .await?;
+        anyhow::ensure!(
+            is_result(&answer),
+            "fixture affiliation refused: {}",
+            describe(&answer)
         );
+    }
+    send_messages(&mut owner, &room, 1).await?;
+    owner.close().await;
+
+    for (label, pkix) in [("PKIX", true), ("dialback", false), ("restored PKIX", true)] {
+        let phase = start_prosody_authority_phase(h, &profile, &muc_domain, pkix).await?;
+        let mut local = h
+            .login_waddle(Home::A, "bob", &support::id("target"))
+            .await?;
+        let seated = join(&mut local, &room, "bob").await?;
+        outcome.check(
+            format!("{label}: target starts as participant"),
+            stanza::muc_role_of(&seated).as_deref() == Some("participant"),
+            "",
+        );
+        let mut moderator = h
+            .login_peer(Peer::Prosody, "admin", &support::id("moderator"))
+            .await?;
+        let discovery = ask(
+            &mut moderator,
+            stanza::disco_info(&support::id("control"), &open),
+        )
+        .await?;
+        outcome.check(
+            format!("{label}: same service answers open-room discovery"),
+            is_result(&discovery) && discovery.attr("from") == Some(open.as_str()),
+            describe(&discovery),
+        );
+        if pkix {
+            let seated = join(&mut moderator, &room, "remote-mod").await?;
+            let (messages, _) = page_archive(&mut moderator, &room).await?;
+            outcome.check(
+                format!("{label}: the stored affiliation grants archive access"),
+                messages == 1,
+                format!("{messages} messages"),
+            );
+            // The receiving home preserves remote archive results only for a
+            // room the client occupies. Leave before probing moderation so
+            // every phase tests the affiliation without an occupant role.
+            let occupant = seated.attr("from").context("self-presence address")?;
+            moderator
+                .send(&stanza::presence(
+                    ns::CLIENT,
+                    Some(occupant),
+                    Some("unavailable"),
+                ))
+                .await?;
+            moderator
+                .wait_for(ANSWER, |element| {
+                    element.attr("from") == Some(occupant)
+                        && element.attr("type") == Some("unavailable")
+                        && stanza::is_self_presence(element)
+                })
+                .await?;
+            let query = support::id("mam");
+            let mam = ask(
+                &mut moderator,
+                stanza::mam_query(&query, Some(&room), 10, None),
+            )
+            .await?;
+            let count = mam
+                .get_child("fin", ns::MAM)
+                .and_then(|fin| fin.get_child("set", ns::RSM))
+                .and_then(|set| set.get_child("count", ns::RSM))
+                .map(Element::text);
+            outcome.check(
+                format!("{label}: the room authorizes MAM without an occupant role"),
+                is_result(&mam)
+                    && mam.attr("from") == Some(room.as_str())
+                    && count.as_deref() == Some("1"),
+                format!("{}; archive count: {count:?}", describe(&mam)),
+            );
+        } else {
+            let query = support::id("strength-mam");
+            let reply = ask(
+                &mut moderator,
+                stanza::mam_query(&query, Some(&room), 10, None),
+            )
+            .await?;
+            let no_results = moderator
+                .absent(QUIET, |element| {
+                    element
+                        .get_child("result", ns::MAM)
+                        .is_some_and(|result| result.attr("queryid") == Some(query.as_str()))
+                })
+                .await?;
+            outcome.check(
+                "dialback: the same grant cannot read the archive",
+                denied_by_room(&reply, &room) && no_results,
+                describe(&reply),
+            );
+        }
+        let action = ask(
+            &mut moderator,
+            stanza::muc_role(&support::id("devoice"), &room, "bob", "visitor"),
+        )
+        .await?;
+        let observer = format!("{room}/bob");
+        let changed = !local
+            .absent(QUIET, |element| {
+                element.name() == "presence"
+                    && element.attr("from") == Some(observer.as_str())
+                    && stanza::muc_role_of(element).as_deref() == Some("visitor")
+            })
+            .await?;
+        let authorized = if pkix {
+            is_result(&action) && action.attr("from") == Some(room.as_str()) && changed
+        } else {
+            denied_by_room(&action, &room) && !changed
+        };
+        outcome.check(
+            format!("{label}: moderation follows the authenticated stream strength"),
+            authorized,
+            format!("{}; target became visitor: {changed}", describe(&action)),
+        );
+
+        check_prosody_authority_phase(h, &mut outcome, label, &muc_domain, pkix, phase).await?;
+        moderator.close().await;
+        local.close().await;
+    }
+    Ok(outcome)
+}
+
+fn prosody_authority_profile(h: &mut Harness) -> crate::services::waddle_config::Profile {
+    use crate::topology::PROSODY;
+    let mut profile = h.profile(Home::A, true);
+    profile.allow.retain(|domain| domain == PROSODY);
+    profile.dialback = vec![PROSODY.to_owned()];
+    profile.trusted_homes = vec![PROSODY.to_owned()];
+    profile.endpoints.retain(|(domain, _)| domain == PROSODY);
+    h.dirty.insert(Component::Waddle(Home::A));
+    h.dirty.insert(Component::Prosody);
+
+    profile
+}
+
+async fn start_prosody_authority_phase(
+    h: &mut Harness,
+    profile: &crate::services::waddle_config::Profile,
+    muc_domain: &str,
+    pkix: bool,
+) -> Result<(usize, usize, usize)> {
+    use crate::topology::PROSODY;
+    let mut prosody = h.prosody_variant();
+    if !pkix {
+        prosody.certificate_less_outbound =
+            Some(crate::services::prosody::CertificateLessOutbound {
+                host: PROSODY,
+                target: muc_domain.to_owned(),
+            });
+    }
+    h.prosody.stop().await?;
+    h.start_waddle(profile).await?;
+    h.prosody.start(&prosody).await?;
+    let relay = h.relay(topology::Server::Prosody, topology::Server::Waddle(Home::A))?;
+    let baseline = relay.connection_count();
+    let before_pkix = support::established(h, Home::A, "inbound", "pkix").await;
+    let before_dialback = support::established(h, Home::A, "inbound", "dialback").await;
+    Ok((baseline, before_pkix, before_dialback))
+}
+
+async fn check_prosody_authority_phase(
+    h: &Harness,
+    outcome: &mut Outcome,
+    label: &str,
+    muc_domain: &str,
+    pkix: bool,
+    phase: (usize, usize, usize),
+) -> Result<()> {
+    use crate::topology::PROSODY;
+    let relay = h.relay(topology::Server::Prosody, topology::Server::Waddle(Home::A))?;
+    let (_, before_pkix, before_dialback) = phase;
+    let exact_tls_pair = relay.connections().iter().skip(phase.0).any(|connection| {
+        use crate::xml::framer::{Framer, Item};
+        let mut framer = Framer::new();
+        framer.push(connection.initiator_plaintext());
+        matches!(framer.next_item(), Ok(Some(Item::Header(header)))
+                if header.attribute("from").as_deref() == Some(PROSODY)
+                && header.attribute("to").as_deref() == Some(muc_domain))
+            && connection.server_hello().is_some()
+    });
+    let after_pkix = support::established(h, Home::A, "inbound", "pkix").await;
+    let after_dialback = support::established(h, Home::A, "inbound", "dialback").await;
+    let expected_stream = if pkix {
+        after_pkix == before_pkix + 1 && after_dialback == before_dialback
     } else {
-        outcome.unverified(
-            "refused on a dialback-only stream",
-            "the stock server authenticates with SASL EXTERNAL, so no dialback-only stream carries a moderator",
+        after_dialback == before_dialback + 1 && after_pkix == before_pkix
+    };
+    outcome.check(format!("{label}: expected authentication on the Prosody-to-MUC TLS pair"),
+            exact_tls_pair && expected_stream,
+            format!("TLS pair: {exact_tls_pair}; PKIX {before_pkix} -> {after_pkix}; dialback {before_dialback} -> {after_dialback}"));
+    Ok(())
+}
+
+pub async fn moderation_dialback_only(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
+    let mut outcome = Outcome::new("same Prosody occupant requesting a kick on PKIX and dialback");
+    let muc_domain = topology::muc_domain(HOME_A);
+    let room = format!("{}@{muc_domain}", room_name("moderator-strength"));
+    let target_jid = format!("{room}/bob");
+    let profile = prosody_authority_profile(h);
+
+    for (label, pkix) in [("PKIX", true), ("dialback", false)] {
+        let phase = start_prosody_authority_phase(h, &profile, &muc_domain, pkix).await?;
+        let mut owner = h
+            .login_waddle(Home::A, "admin", &support::id("owner"))
+            .await?;
+        join(&mut owner, &room, "owner").await?;
+        let mut target = h
+            .login_waddle(Home::A, "bob", &support::id("target"))
+            .await?;
+        let target_presence = join(&mut target, &room, "bob").await?;
+        let mut moderator = h
+            .login_peer(Peer::Prosody, "admin", &support::id("moderator"))
+            .await?;
+        let moderator_presence = join(&mut moderator, &room, "remote-mod").await?;
+        outcome.check(
+            format!("{label}: both occupants joined as unaffiliated participants"),
+            [&target_presence, &moderator_presence]
+                .iter()
+                .all(|presence| {
+                    stanza::muc_role_of(presence).as_deref() == Some("participant")
+                        && stanza::find(presence, "item", ns::MUC_USER, &|item| {
+                            item.attr("affiliation") == Some("none")
+                        })
+                        .is_some()
+                }),
+            "",
         );
+        let grant = ask(
+            &mut owner,
+            stanza::muc_role(&support::id("role"), &room, "remote-mod", "moderator"),
+        )
+        .await?;
+        let expected = grant.attr("from") == Some(room.as_str())
+            && if pkix {
+                is_result(&grant)
+            } else {
+                grant.attr("type") == Some("error")
+                    && stanza::error_condition(&grant).as_deref() == Some("not-allowed")
+            };
+        outcome.check(
+            format!("{label}: room answers moderator role issuance"),
+            expected,
+            describe(&grant),
+        );
+        let kick = ask(
+            &mut moderator,
+            stanza::muc_role(&support::id("kick"), &room, "bob", "none"),
+        )
+        .await?;
+        let removed = !target
+            .absent(QUIET, |element| {
+                element.name() == "presence"
+                    && element.attr("from") == Some(target_jid.as_str())
+                    && element.attr("type") == Some("unavailable")
+                    && stanza::muc_status_codes(element)
+                        .iter()
+                        .any(|code| code == "307")
+            })
+            .await?;
+        let expected = if pkix {
+            is_result(&kick) && kick.attr("from") == Some(room.as_str()) && removed
+        } else {
+            denied_by_room(&kick, &room) && !removed
+        };
+        outcome.check(
+            format!("{label}: kick follows the moderator role"),
+            expected,
+            format!(
+                "{}; target received kick presence: {removed}",
+                describe(&kick)
+            ),
+        );
+        check_prosody_authority_phase(h, &mut outcome, label, &muc_domain, pkix, phase).await?;
+        moderator.close().await;
+        target.close().await;
+        owner.close().await;
     }
     Ok(outcome)
 }

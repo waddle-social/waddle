@@ -46,9 +46,12 @@ impl Account {
     }
 }
 
+trait TcpIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> TcpIo for T {}
+
 enum Io {
     Tcp {
-        tls: Box<TlsStream<TcpStream>>,
+        tls: Box<dyn TcpIo>,
         framer: Box<Framer>,
     },
     Wss {
@@ -172,23 +175,47 @@ impl Session {
     /// Log in over TCP with STARTTLS and SASL PLAIN, as to Prosody or
     /// ejabberd.
     pub async fn tcp(port: u16, account: &Account, resource: &str, label: &str) -> Result<Self> {
+        Self::tcp_fixture(port, account, resource, label, true).await
+    }
+
+    /// Log in to a disposable test listener without changing its certificate inventory.
+    pub async fn tcp_loopback_plain(
+        port: u16,
+        account: &Account,
+        resource: &str,
+        label: &str,
+    ) -> Result<Self> {
+        Self::tcp_fixture(port, account, resource, label, false).await
+    }
+
+    async fn tcp_fixture(
+        port: u16,
+        account: &Account,
+        resource: &str,
+        label: &str,
+        starttls: bool,
+    ) -> Result<Self> {
         let deadline = Instant::now() + LOGIN_TIMEOUT;
         let mut socket = TcpStream::connect(("127.0.0.1", port))
             .await
             .with_context(|| format!("connect {label}"))?;
         let open = StreamOpen::client(&account.domain).encode()?;
-        socket.write_all(&open).await?;
-        let mut framer = Framer::new();
-        read_until(&mut socket, &mut framer, deadline, |item| {
-            is_element(item, "features")
-        })
-        .await?;
-        write_element(&mut socket, &Element::builder("starttls", ns::TLS).build()).await?;
-        read_until(&mut socket, &mut framer, deadline, |item| {
-            is_element(item, "proceed")
-        })
-        .await?;
-        let mut tls = tls_upgrade_third_party(socket, &account.domain).await?;
+        let mut tls: Box<dyn TcpIo> = if starttls {
+            socket.write_all(&open).await?;
+            let mut framer = Framer::new();
+            read_until(&mut socket, &mut framer, deadline, |item| {
+                is_element(item, "features")
+            })
+            .await?;
+            write_element(&mut socket, &Element::builder("starttls", ns::TLS).build()).await?;
+            read_until(&mut socket, &mut framer, deadline, |item| {
+                is_element(item, "proceed")
+            })
+            .await?;
+            Box::new(tls_upgrade_third_party(socket, &account.domain).await?)
+        } else {
+            Box::new(socket)
+        };
 
         tls.write_all(&open).await?;
         let mut framer = Framer::new();
@@ -234,7 +261,7 @@ impl Session {
             label: label.to_owned(),
             jid,
             io: Io::Tcp {
-                tls: Box::new(tls),
+                tls,
                 framer: Box::new(framer),
             },
             backlog: VecDeque::new(),
@@ -329,7 +356,7 @@ impl Session {
 
     pub async fn send(&mut self, element: &Element) -> Result<()> {
         match &mut self.io {
-            Io::Tcp { tls, .. } => write_element(tls.as_mut(), element).await,
+            Io::Tcp { tls, .. } => write_element(tls, element).await,
             Io::Wss { ws } => {
                 let text = String::from_utf8(header::element_bytes(element))?;
                 ws.send(Message::Text(text.into())).await?;

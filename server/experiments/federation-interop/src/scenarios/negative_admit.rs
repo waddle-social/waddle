@@ -136,6 +136,40 @@ pub async fn removal_and_closed(h: &mut Harness, _peer: Peer) -> Result<Outcome>
     let closed = h.profile(Home::A, true).with_mode(Mode::Closed);
     restart_a(h, &closed).await?;
     no_longer_admitted(h, stream, &mut outcome).await?;
+    let mut no_endpoints = standard.clone();
+    no_endpoints.endpoints.clear();
+    let mut empty_allowlist = standard;
+    empty_allowlist.allow.clear();
+    for (configuration, profile) in [
+        ("closed", None),
+        ("allowlisted without endpoints", Some(no_endpoints)),
+        ("empty allowlist", Some(empty_allowlist)),
+    ] {
+        if let Some(profile) = profile {
+            restart_a(h, &profile).await?;
+        }
+        let mut local = h
+            .login_waddle(Home::A, "alice", &support::id("admission-disco"))
+            .await?;
+        let answer = support::ask(
+            &mut local,
+            stanza::disco_info(&support::id("admission-info"), HOME_A),
+        )
+        .await?;
+        let advertises_federation =
+            answer
+                .children()
+                .flat_map(|query| query.children())
+                .any(|feature| {
+                    feature.name() == "feature" && feature.attr("var") == Some("urn:waddle:s2s:0")
+                });
+        outcome.check(
+            format!("{configuration} home server omits federation from its client discovery"),
+            is_result(&answer) && !advertises_federation,
+            describe(&answer),
+        );
+        local.close().await;
+    }
     Ok(outcome)
 }
 
