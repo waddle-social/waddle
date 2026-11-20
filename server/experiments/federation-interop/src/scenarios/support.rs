@@ -264,7 +264,7 @@ pub async fn follow_up_on_tap(
     h: &Harness,
     peer: Peer,
     relay: &Relay,
-    connections: usize,
+    connection: usize,
     marker: &str,
     occurrences: usize,
     outcome: &mut Outcome,
@@ -273,26 +273,35 @@ pub async fn follow_up_on_tap(
     let ping_id = id("follow");
     let answer = ask(&mut session, stanza::ping(&ping_id, HOME_A)).await;
     session.close().await;
-    let tapped = relay
-        .connections()
-        .last()
-        .map(|connection| String::from_utf8_lossy(&connection.initiator_tls).into_owned())
+    let records = relay.connections();
+    let tapped_record = records.get(connection);
+    let tapped = tapped_record
+        .map(|record| String::from_utf8_lossy(&record.initiator_tls))
         .unwrap_or_default();
     let injected_at = tapped.rfind(marker);
     let injected = tapped.matches(marker).count();
     let ping_at = tapped.find(ping_id.as_str());
-    let same_stream = relay.connection_count() == connections && !newest_closed(relay);
+    let tapped_open = tapped_record.is_some_and(|record| record.closed_after.is_none());
+    let other_ping_records: Vec<_> = records
+        .iter()
+        .enumerate()
+        .filter(|(index, record)| {
+            *index != connection
+                && String::from_utf8_lossy(&record.initiator_tls).contains(ping_id.as_str())
+        })
+        .map(|(index, _)| index)
+        .collect();
     let in_order =
         matches!((injected_at, ping_at), (Some(injected), Some(ping)) if injected < ping);
     let name = "follow-up ping on the same tapped stream is answered after the injected bytes";
     let detail = format!(
-        "answer {}; same connection and open: {same_stream}; injected bytes found {injected} times, last at {injected_at:?}; follow-up ping at {ping_at:?}",
+        "answer {}; tapped connection {connection}, open: {tapped_open}; injected bytes found {injected} times, last at {injected_at:?}; follow-up ping at {ping_at:?}; other connections with the follow-up ping: {other_ping_records:?}",
         answer
             .as_ref()
             .map(describe)
             .unwrap_or_else(|error| error.to_string())
     );
-    if same_stream && in_order && injected >= occurrences {
+    if tapped_open && in_order && injected >= occurrences && other_ping_records.is_empty() {
         outcome.check(name, answer.as_ref().is_ok_and(is_result), detail);
     } else {
         outcome.unverified(

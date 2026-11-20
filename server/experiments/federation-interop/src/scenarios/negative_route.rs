@@ -114,7 +114,6 @@ pub async fn spoofed_from(h: &mut Harness, peer: Peer) -> Result<Outcome> {
 pub async fn forged_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(tap_driven(peer));
     let relay = support::tap_peer_stream(h, peer).await?;
-    let connections = relay.connection_count();
     let mut session = h
         .login_waddle(Home::A, "alice", &support::id("forged"))
         .await?;
@@ -127,7 +126,7 @@ pub async fn forged_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         Some(&session.jid),
         None,
     );
-    relay.inject(header::element_bytes(&forged))?;
+    let connection = relay.inject(header::element_bytes(&forged))?;
     let absent = session
         .absent(QUIET, |element| {
             element.attr("id") == Some(forged_id.as_str())
@@ -139,7 +138,7 @@ pub async fn forged_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         "watched the addressed resource",
     );
     session.close().await;
-    support::follow_up_on_tap(h, peer, relay, connections, &forged_id, 1, &mut outcome).await?;
+    support::follow_up_on_tap(h, peer, relay, connection, &forged_id, 1, &mut outcome).await?;
     Ok(outcome)
 }
 
@@ -190,7 +189,7 @@ pub async fn replayed_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> 
         Some(&session.jid),
         None,
     );
-    relay.inject(header::element_bytes(&replay))?;
+    let connection = relay.inject(header::element_bytes(&replay))?;
     let absent = session
         .absent(QUIET, |element| {
             element.attr("id") == Some(ping_id.as_str())
@@ -203,7 +202,7 @@ pub async fn replayed_iq_result(h: &mut Harness, peer: Peer) -> Result<Outcome> 
     );
     session.close().await;
     // The genuine result and the replay: the id twice in the stream.
-    support::follow_up_on_tap(h, peer, relay, connections, &ping_id, 2, &mut outcome).await?;
+    support::follow_up_on_tap(h, peer, relay, connection, &ping_id, 2, &mut outcome).await?;
     Ok(outcome)
 }
 
@@ -262,7 +261,6 @@ pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         "a message from another account of its server",
     );
     let relay = support::tap_peer_stream(h, peer).await?;
-    let connections = relay.connection_count();
     let message_id = support::id("relay");
     let message = stanza::message(
         ns::SERVER,
@@ -290,8 +288,7 @@ pub async fn relay_unserved(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     if refused {
         outcome.note(["home-a refused the stream: ", &detail].concat());
     } else {
-        support::follow_up_on_tap(h, peer, relay, connections, &message_id, 1, &mut outcome)
-            .await?;
+        support::follow_up_on_tap(h, peer, relay, connection, &message_id, 1, &mut outcome).await?;
     }
     watcher.close().await;
     Ok(outcome)
