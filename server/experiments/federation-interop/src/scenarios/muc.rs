@@ -518,7 +518,6 @@ pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
             .login_peer(peer, "admin", &support::id("moderator"))
             .await?;
         if trusted {
-            join(&mut moderator, &room, "remote-mod").await?;
             let (messages, _) = page_archive(&mut moderator, &room).await?;
             outcome.check(
                 format!("{label}: remote admin reads the stored archive"),
@@ -538,14 +537,16 @@ pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
                 stanza::mam_query(&query, Some(&room), 10, None),
             )
             .await?;
-            let leaked = moderator.drain_backlog().iter().any(|element| {
-                element
-                    .get_child("result", ns::MAM)
-                    .is_some_and(|result| result.attr("queryid") == Some(query.as_str()))
-            });
+            let no_results = moderator
+                .absent(QUIET, |element| {
+                    element
+                        .get_child("result", ns::MAM)
+                        .is_some_and(|result| result.attr("queryid") == Some(query.as_str()))
+                })
+                .await?;
             outcome.check(
                 "removed: the original room denies MAM without sending results",
-                denied_by_room(&mam, &room) && !leaked,
+                denied_by_room(&mam, &room) && no_results,
                 describe(&mam),
             );
         }
@@ -555,14 +556,13 @@ pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         )
         .await?;
         let occupant = [room.as_str(), "/bob"].concat();
-        let devoiced = target
-            .wait_for(QUIET, |element| {
+        let devoiced = !target
+            .absent(QUIET, |element| {
                 element.name() == "presence"
                     && element.attr("from") == Some(occupant.as_str())
                     && stanza::muc_role_of(element).as_deref() == Some("visitor")
             })
-            .await
-            .is_ok();
+            .await?;
         let expected = if trusted {
             is_result(&action) && devoiced
         } else {
