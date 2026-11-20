@@ -81,11 +81,8 @@ pub(super) async fn handle_pubsub_iq(
 
         debug!(?request, "Handling PubSub request via WebSocket");
 
-        // The Space node of an enrolled host-grant scope is not served
-        // through PubSub: its authority is the canonical store, and PubSub
-        // affiliations, subscriptions and items there would be a second,
-        // unfenced grant store. Leaving a subscription is the one operation
-        // kept, since it only reduces what a principal receives.
+        // Enrolled Spaces use the host-grant authority. Do not fall
+        // through to the generic PubSub stores for one of these nodes.
         if target_jid.as_str() == spaces_domain {
             let enrolled = match enrolled_scope_guarded_node(&request) {
                 Ok(Some(node)) => state.deps.app_state.host_grants.space_enrolled(node).await,
@@ -93,6 +90,21 @@ pub(super) async fn handle_pubsub_iq(
                 Err(()) => Ok(true),
             };
             if enrolled != Ok(false) {
+                if let (Ok(true), PubSubRequest::AffiliationsSet { node, changes }) =
+                    (enrolled, request)
+                {
+                    let response = super::pubsub_space_membership::set_space_membership(
+                        iq,
+                        state,
+                        &target_jid,
+                        &user_jid,
+                        authenticated_session,
+                        &node,
+                        changes,
+                    )
+                    .await;
+                    return vec![iq_to_xml(response)];
+                }
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
             }
         }

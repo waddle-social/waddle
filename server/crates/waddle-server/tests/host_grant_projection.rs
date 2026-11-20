@@ -839,6 +839,195 @@ async fn live_spicedb_the_first_projection_requires_a_fresh_namespace() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL and SpiceDB"]
+async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
+    use host_grant_revocation_support::Replica;
+    use s2s_inbound_muc_support::Wiring;
+    use waddle_server::permissions::host_grant::{BindSpace, FenceAcknowledgement, ScopeKey};
+    use waddle_ws_test_support::{
+        iq::round_trip,
+        stanza::{is_error, is_result, set},
+    };
+    use waddle_xmpp::pubsub::{Affiliation, NodeConfig, NS_PUBSUB_OWNER};
+    use xmpp_parsers::minidom::Element;
+
+    let _serial = LIVE_SPICEDB.lock().await;
+    let live = Live::start("hg_space_owner_ws").await;
+    let wiring = Wiring::new(|_| {}).await;
+    let authority = live.replica().await;
+    let lifecycle = live.fixture.scope.lifecycle;
+    assert!(matches!(
+        authority
+            .reconcile(lifecycle)
+            .await
+            .expect("bootstrap projection"),
+        Reconciliation::Activated(_)
+    ));
+    let mut replicas = Vec::new();
+    for _ in 0..2 {
+        let backend = PermissionActor::from_server_config(&live.config)
+            .await
+            .expect("the live permission backend");
+        replicas.push(
+            Replica::start_running_with_backend(
+                live.fixture.ingress.db.database_url(),
+                live.fixture.ingress.deployment_uuid(),
+                &wiring.config,
+                backend,
+            )
+            .await,
+        );
+    }
+    let (first, second) = (&replicas[0], &replicas[1]);
+    first.account("owner").await;
+    first.account("alice").await;
+    let service = bare("spaces.example.com");
+    let node = live.fixture.scope.space_node.as_str();
+    let storage = &first.state.deps.protocol.pubsub_storage;
+    storage
+        .get_or_create_node(&service, node)
+        .await
+        .expect("create node");
+    storage
+        .update_node_config(&service, node, &NodeConfig::spaces_private())
+        .await
+        .expect("configure private Space");
+    live.fixture
+        .store
+        .bind_space(
+            &BindSpace {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: live.fixture.generation().await,
+                owner: subject(OWNER),
+                federated: true,
+            },
+            &served(),
+        )
+        .await
+        .expect("bind Space authority");
+    assert!(matches!(
+        authority
+            .reconcile(lifecycle)
+            .await
+            .expect("owner projection"),
+        Reconciliation::Activated(_)
+    ));
+
+    let affiliations = |entries: &[(&str, &str)]| {
+        let mut items = Element::builder("affiliations", NS_PUBSUB_OWNER)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+        for &(jid, affiliation) in entries {
+            items = items.append(
+                Element::builder("affiliation", NS_PUBSUB_OWNER)
+                    .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid)
+                    .attr(
+                        minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                        affiliation,
+                    )
+                    .build(),
+            );
+        }
+        Element::builder("pubsub", NS_PUBSUB_OWNER)
+            .append(items.build())
+            .build()
+    };
+    let change = |affiliation: &str| affiliations(&[(PEER, affiliation)]);
+    let key = ScopeKey::new(service.clone(), node).expect("Space key");
+    let second_gate = &second.state.deps.app_state.host_grants;
+    assert!(second_gate
+        .space_read_local(&key, &subject(OWNER))
+        .await
+        .is_some());
+    let mut owner = first.client("owner", "desk").await;
+    let mut member = second.client("alice", "phone").await;
+    let original = live.fixture.generation().await;
+    let denied = round_trip(
+        &mut member,
+        set("space-denied", service.as_str(), change("member")),
+    )
+    .await;
+    assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
+    assert_eq!(live.fixture.generation().await, original);
+
+    let unsupported = round_trip(
+        &mut owner,
+        set(
+            "space-reject-mixed",
+            service.as_str(),
+            affiliations(&[(PEER, "member"), (CAROL, "publisher")]),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&unsupported, DefinedCondition::FeatureNotImplemented),
+        "{unsupported:?}"
+    );
+    assert_eq!(live.fixture.generation().await, original);
+    assert!(second_gate
+        .space_read_local(&key, &subject(PEER))
+        .await
+        .is_none());
+
+    let granted = round_trip(
+        &mut owner,
+        set("space-granted", service.as_str(), change("member")),
+    )
+    .await;
+    assert!(is_result(&granted), "{granted:?}");
+    let scope = live.fixture.state(&live.fixture.scope).await;
+    assert_eq!(scope.projected_generation, Some(scope.generation));
+    let before = second_gate
+        .space_read_local(&key, &subject(PEER))
+        .await
+        .expect("member is effective on the other replica");
+    assert_eq!(
+        before.admit(|affiliation| affiliation),
+        Some(Affiliation::Member)
+    );
+
+    let member_denied = round_trip(
+        &mut member,
+        set(
+            "space-member-cannot-revoke",
+            service.as_str(),
+            change("none"),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&member_denied, DefinedCondition::Forbidden),
+        "{member_denied:?}"
+    );
+    assert_eq!(live.fixture.generation().await, scope.generation);
+    let revoked = round_trip(
+        &mut owner,
+        set("space-revoked", service.as_str(), change("none")),
+    )
+    .await;
+    assert!(is_result(&revoked), "{revoked:?}");
+    let generation = live.fixture.generation().await;
+    assert_eq!(
+        live.fixture
+            .store
+            .revocation_fence(lifecycle, generation)
+            .await
+            .expect("fence status"),
+        FenceAcknowledgement::Acknowledged { replicas: 2 }
+    );
+    assert!(
+        before.admit(|_| ()).is_none(),
+        "a stale member decision was admitted"
+    );
+    assert!(second_gate
+        .space_read_local(&key, &subject(PEER))
+        .await
+        .is_none());
+    drop((owner, member, replicas));
+    live.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL and SpiceDB"]
 async fn live_spicedb_graph_only_admin_cannot_moderate_a_managed_room_over_s2s() {
     use host_grant_revocation_support::{role_item, Replica};
     use s2s_inbound_muc_support::{

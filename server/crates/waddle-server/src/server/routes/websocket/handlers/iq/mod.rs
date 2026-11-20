@@ -125,6 +125,7 @@ mod permissions;
 mod pin_query;
 mod pubsub_admin;
 mod pubsub_dispatch;
+mod pubsub_space_membership;
 mod push;
 pub(crate) mod roster;
 mod sans_io;
