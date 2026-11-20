@@ -101,7 +101,9 @@ public final class EventsStore {
     func save(_ event: CommunityEvent) {
         let shown = unsentReplies[event.id].map { event.replying($0.reply, by: account) } ?? event
         replace(event.id, with: shown, in: &events)
-        changedHere.append((event.id, shown, serial))
+        // As the server stored it: a reply still being sent may be refused,
+        // and a refresh must not bring it back.
+        changedHere.append((event.id, event, serial))
     }
 
     func remove(_ eventID: String) {

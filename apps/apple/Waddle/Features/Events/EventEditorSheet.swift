@@ -9,7 +9,6 @@ struct EventEditorSheet: View {
     @State private var form: EventForm
     @State private var isSaving = false
     @State private var errorMessage: String?
-    @State private var saving: Task<Void, Never>?
     private let onSaved: (() -> Void)?
 
     /// Snapshots hand in an error to show.
@@ -51,10 +50,10 @@ struct EventEditorSheet: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        saving?.cancel()
-                        dismiss()
-                    }
+                    // A save that was sent cannot be taken back, so there
+                    // is nothing to cancel until the server answers.
+                    Button("Cancel") { dismiss() }
+                        .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isSaving ? "Saving…" : "Save", action: save)
@@ -97,13 +96,11 @@ struct EventEditorSheet: View {
         guard let draft = form.draft(), !isSaving else { return }
         isSaving = true
         errorMessage = nil
-        saving = Task {
+        Task {
             do {
                 try await session.saveEvent(draft)
                 onSaved?()
                 dismiss()
-            } catch where Task.isCancelled {
-                // The sheet was closed while saving; nobody is left to tell.
             } catch {
                 errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't save the event. Try again.")
             }

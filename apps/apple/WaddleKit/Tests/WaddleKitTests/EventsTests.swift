@@ -384,6 +384,27 @@ struct EventsTests {
         #expect(coordinator.events.myReply(to: "a") == .maybe)
     }
 
+    @Test func aRefusedReplyStaysUndoneWhenTheEventWasSavedMeanwhile() async throws {
+        let (coordinator, port) = online()
+        port.calendar.list = .success([event("a")])
+        await coordinator.refreshEvents(at: now)
+        port.calendar.held = ["fetchEvents", "reply"]
+        let refresh = Task { await coordinator.refreshEvents(at: now) }
+        while port.calendar.fetchRequests == 1 { await Task.yield() }
+        let reply = Task { try await coordinator.reply(.going, to: "a") }
+        while port.calendar.replies.isEmpty { await Task.yield() }
+
+        try await coordinator.saveEvent(draft("Game night", id: "a"))
+        #expect(coordinator.events.myReply(to: "a") == .going)
+        port.calendar.replyResult = .failure(.rejected)
+        port.calendar.release()
+        await #expect(throws: PortError.rejected) { try await reply.value }
+        await refresh.value
+
+        #expect(coordinator.events.myReply(to: "a") == nil)
+        #expect(coordinator.events.event("a")?.title == "Game night")
+    }
+
     @Test func quickRepliesAreSentInOrderAndEndAsTheLastOne() async throws {
         let (coordinator, port) = online()
         port.calendar.list = .success([event("a")])
