@@ -1871,6 +1871,10 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
         .map(|subscription| subscription.subscriber.to_bare())
         .collect();
     for subscription in subscriptions {
+        if subscription.grant.is_some() {
+            // Grant-backed preferences require canonical authorization at delivery.
+            continue;
+        }
         let account = &subscription.account;
         let subscriber = Jid::from(account.clone());
         let evidence = PrincipalEvidence::Stream(subscription.evidence);

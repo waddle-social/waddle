@@ -47,7 +47,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::{Database, DatabaseDriver, Row, Transaction};
-use crate::permissions::host_grant::StreamEvidence;
+use crate::permissions::host_grant::{
+    AuthorityIncarnation, GrantGeneration, ScopeLifecycleId, StreamEvidence,
+};
 use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::verify::TrustProfileKind;
 
@@ -283,6 +285,16 @@ pub struct SpaceSubscription {
     pub evidence: StreamEvidence,
     /// The S2S snapshot that stream was admitted under.
     pub snapshot: Uuid,
+    /// The canonical affiliation under which this protected preference was created.
+    pub grant: Option<SpaceSubscriptionGrant>,
+}
+
+/// The scope and effective affiliation generation behind a protected preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceSubscriptionGrant {
+    pub lifecycle: ScopeLifecycleId,
+    pub incarnation: AuthorityIncarnation,
+    pub generation: GrantGeneration,
 }
 
 /// A subscription request as the store records it.
@@ -664,10 +676,27 @@ fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
         Some("private_ca") => Some(TrustProfileKind::PrivateCa),
         Some(_) => return Err(storage("an unknown trust profile")),
     };
+    let grant = match (
+        row.get::<Option<String>>(4).map_err(storage)?,
+        row.get::<Option<String>>(5).map_err(storage)?,
+        row.get::<Option<i64>>(6).map_err(storage)?,
+    ) {
+        (None, None, None) => None,
+        (Some(lifecycle), Some(incarnation), Some(generation)) => Some(SpaceSubscriptionGrant {
+            lifecycle: ScopeLifecycleId::from_storage(&lifecycle)
+                .ok_or_else(|| storage("invalid subscription scope"))?,
+            incarnation: AuthorityIncarnation::from_storage(&incarnation)
+                .ok_or_else(|| storage("invalid subscription authority incarnation"))?,
+            generation: GrantGeneration::new(generation)
+                .ok_or_else(|| storage("invalid subscription affiliation generation"))?,
+        }),
+        _ => return Err(storage("incomplete subscription grant identity")),
+    };
     Ok(SpaceSubscription {
         account: account.parse().map_err(storage)?,
         evidence: StreamEvidence::recorded(strength, trust_profile),
         snapshot: snapshot.parse().map_err(storage)?,
+        grant,
     })
 }
 
@@ -788,30 +817,36 @@ impl SpaceSubscriptions {
             tx.rollback().await.map_err(storage)?;
             return Ok(Recording::only(SubscriptionRecord::Bounds));
         }
-        tx.execute(
-            "INSERT INTO s2s_space_subscriptions \
+        let recorded = tx
+            .execute(
+                "INSERT INTO s2s_space_subscriptions \
              (service_jid, node_name, subscriber_jid, account_jid, subscriber_domain, \
               node_created_at_ms, strength, trust_profile, snapshot_generation, subscribed_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (service_jid, node_name, subscriber_jid) DO UPDATE SET \
              strength = excluded.strength, trust_profile = excluded.trust_profile, \
              snapshot_generation = excluded.snapshot_generation, \
-             subscribed_at_ms = excluded.subscribed_at_ms",
-            crate::db_params![
-                service.as_str(),
-                node,
-                account.as_str(),
-                account.as_str(),
-                domain,
-                node_created_at_ms,
-                strength_code(evidence.strength()),
-                evidence.trust_profile().map(trust_profile_code),
-                snapshot.to_string(),
-                now_ms
-            ],
-        )
-        .await
-        .map_err(storage)?;
+             subscribed_at_ms = excluded.subscribed_at_ms \
+             WHERE s2s_space_subscriptions.grant_lifecycle_id IS NULL",
+                crate::db_params![
+                    service.as_str(),
+                    node,
+                    account.as_str(),
+                    account.as_str(),
+                    domain,
+                    node_created_at_ms,
+                    strength_code(evidence.strength()),
+                    evidence.trust_profile().map(trust_profile_code),
+                    snapshot.to_string(),
+                    now_ms
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        if recorded != 1 {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(Recording::only(SubscriptionRecord::NotFederated));
+        }
         tx.commit().await.map_err(storage)?;
         // The account's own lapsed row was renewed, not removed.
         removed.retain(|gone| {
@@ -956,7 +991,8 @@ impl SpaceSubscriptions {
         let guard = self.db.guard().await.map_err(storage)?;
         let mut rows = guard
             .query(
-                "SELECT subscriber_jid, strength, trust_profile, snapshot_generation \
+                "SELECT subscriber_jid, strength, trust_profile, snapshot_generation, \
+                 grant_lifecycle_id, grant_authority_incarnation, grant_generation \
                  FROM s2s_space_subscriptions \
                  WHERE service_jid = ? AND node_name = ? AND node_created_at_ms = ? \
                  AND subscribed_at_ms >= ? \
