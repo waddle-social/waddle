@@ -2,6 +2,7 @@
 
 use crate::identity::CanonicalBareJid;
 use crate::protocol::frame::MAX_FRAME_SIZE;
+use crate::pubsub::SubId;
 use jid::{BareJid, FullJid};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -10,6 +11,7 @@ const HEADER: &[u8; 4] = b"SPR\x01";
 const TYPED_HEADER: &[u8; 4] = b"SPR\x02";
 const MAX_JID_BYTES: usize = 3071;
 const UUID_BYTES: usize = 16;
+const MAX_SUBSCRIPTION_ID_BYTES: usize = 256;
 const FIXED_BYTES: usize = HEADER.len() + 4 * size_of::<u32>() + 2 * UUID_BYTES + size_of::<i64>();
 
 /// Maximum protected room rows in one content result.
@@ -24,12 +26,14 @@ pub const MAX_PROTECTED_SPACE_REPLY_BYTES: usize = FIXED_BYTES
     + MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES
         * (size_of::<u32>() + MAX_JID_BYTES + 2 * UUID_BYTES + size_of::<i64>());
 
-/// Exact XMPP result payload admitted by the stored Space decision.
+/// Exact XMPP stanza payload admitted by the stored Space decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtectedSpaceReplyKind {
     DiscoInfo,
     DiscoItems,
     PubSubItems,
+    Subscribe,
+    BookmarkEvent,
 }
 
 /// Identity of the original access decision, without a replica lease.
@@ -40,6 +44,8 @@ pub enum ProtectedSpaceReplyKind {
 pub struct ProtectedSpaceReplyDescriptor {
     kind: ProtectedSpaceReplyKind,
     room_dependencies: Option<Vec<ProtectedSpaceRoomDependency>>,
+    subscription_id: Option<SubId>,
+    bookmark_event: Option<ProtectedSpaceBookmarkEvent>,
     service: BareJid,
     node: String,
     recipient: FullJid,
@@ -53,6 +59,23 @@ pub struct ProtectedSpaceReplyDescriptor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("invalid protected Space reply descriptor")]
 pub struct ProtectedSpaceReplyCodecError;
+
+/// The committed bookmark mutation an event represents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedSpaceBookmarkEvent {
+    operation: Uuid,
+    present: bool,
+}
+
+impl ProtectedSpaceBookmarkEvent {
+    pub fn operation(&self) -> Uuid {
+        self.operation
+    }
+
+    pub fn present(&self) -> bool {
+        self.present
+    }
+}
 
 /// One managed room named by an exact protected Space content reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +150,8 @@ impl ProtectedSpaceReplyDescriptor {
         Ok(Self {
             kind: ProtectedSpaceReplyKind::DiscoInfo,
             room_dependencies: None,
+            subscription_id: None,
+            bookmark_event: None,
             service,
             node,
             recipient,
@@ -142,6 +167,8 @@ impl ProtectedSpaceReplyDescriptor {
         if self.kind != kind {
             self.kind = kind;
             self.room_dependencies = None;
+            self.subscription_id = None;
+            self.bookmark_event = None;
         }
         self
     }
@@ -156,8 +183,10 @@ impl ProtectedSpaceReplyDescriptor {
         mut self,
         dependencies: Vec<ProtectedSpaceRoomDependency>,
     ) -> Result<Self, ProtectedSpaceReplyCodecError> {
-        if self.kind == ProtectedSpaceReplyKind::DiscoInfo
-            || dependencies.len() > MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES
+        if !matches!(
+            self.kind,
+            ProtectedSpaceReplyKind::DiscoItems | ProtectedSpaceReplyKind::PubSubItems
+        ) || dependencies.len() > MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES
         {
             return Err(ProtectedSpaceReplyCodecError);
         }
@@ -178,6 +207,47 @@ impl ProtectedSpaceReplyDescriptor {
 
     pub(super) fn content_dependencies(&self) -> Option<&[ProtectedSpaceRoomDependency]> {
         self.room_dependencies.as_deref()
+    }
+
+    /// Bind a subscribe reply to the ID of its exact stored preference.
+    pub fn with_subscription(
+        mut self,
+        subid: SubId,
+    ) -> Result<Self, ProtectedSpaceReplyCodecError> {
+        let id = subid.as_str();
+        if id.is_empty() || id.len() > MAX_SUBSCRIPTION_ID_BYTES || id.chars().any(char::is_control)
+        {
+            return Err(ProtectedSpaceReplyCodecError);
+        }
+        self.kind = ProtectedSpaceReplyKind::Subscribe;
+        self.room_dependencies = None;
+        self.subscription_id = Some(subid);
+        self.bookmark_event = None;
+        Ok(self)
+    }
+
+    pub fn subscription_id(&self) -> Option<&SubId> {
+        self.subscription_id.as_ref()
+    }
+
+    /// Bind an event to its exact subscription, mutation, and room decision.
+    /// An empty base ID represents a headline that has no stanza ID.
+    pub fn with_bookmark_event(
+        self,
+        subid: SubId,
+        operation: Uuid,
+        room: ProtectedSpaceRoomDependency,
+        present: bool,
+    ) -> Result<Self, ProtectedSpaceReplyCodecError> {
+        let mut event = self.with_subscription(subid)?;
+        event.kind = ProtectedSpaceReplyKind::BookmarkEvent;
+        event.room_dependencies = Some(vec![room]);
+        event.bookmark_event = Some(ProtectedSpaceBookmarkEvent { operation, present });
+        Ok(event)
+    }
+
+    pub fn bookmark_event(&self) -> Option<&ProtectedSpaceBookmarkEvent> {
+        self.bookmark_event.as_ref()
     }
 
     pub fn service(&self) -> &BareJid {
@@ -228,6 +298,14 @@ impl ProtectedSpaceReplyDescriptor {
                 bytes.extend_from_slice(TYPED_HEADER);
                 bytes.push(2);
             }
+            ProtectedSpaceReplyKind::Subscribe => {
+                bytes.extend_from_slice(TYPED_HEADER);
+                bytes.push(3);
+            }
+            ProtectedSpaceReplyKind::BookmarkEvent => {
+                bytes.extend_from_slice(TYPED_HEADER);
+                bytes.push(4);
+            }
         }
         for field in fields {
             // The constructor limits every field below u32::MAX.
@@ -248,6 +326,15 @@ impl ProtectedSpaceReplyDescriptor {
                 bytes.extend_from_slice(&dependency.generation.to_be_bytes());
             }
         }
+        if let Some(subid) = &self.subscription_id {
+            let id = subid.as_str().as_bytes();
+            bytes.extend_from_slice(&(id.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(id);
+        }
+        if let Some(event) = &self.bookmark_event {
+            bytes.extend_from_slice(event.operation.as_bytes());
+            bytes.push(u8::from(event.present));
+        }
         bytes
     }
 
@@ -265,6 +352,8 @@ impl ProtectedSpaceReplyDescriptor {
             match input.split_first() {
                 Some((1, rest)) => (rest, ProtectedSpaceReplyKind::DiscoItems),
                 Some((2, rest)) => (rest, ProtectedSpaceReplyKind::PubSubItems),
+                Some((3, rest)) => (rest, ProtectedSpaceReplyKind::Subscribe),
+                Some((4, rest)) => (rest, ProtectedSpaceReplyKind::BookmarkEvent),
                 _ => return Err(ProtectedSpaceReplyCodecError),
             }
         };
@@ -294,34 +383,60 @@ impl ProtectedSpaceReplyDescriptor {
             generation,
         )?
         .with_kind(kind);
-        if kind != ProtectedSpaceReplyKind::DiscoInfo {
+        if matches!(
+            kind,
+            ProtectedSpaceReplyKind::DiscoItems | ProtectedSpaceReplyKind::PubSubItems
+        ) {
             let count = usize::from(u16::from_be_bytes(read_array(&mut input)?));
             if count > MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES {
                 return Err(ProtectedSpaceReplyCodecError);
             }
             let mut dependencies = Vec::with_capacity(count);
             for _ in 0..count {
-                let room_text = read_string(&mut input, MAX_JID_BYTES)?;
-                let room: BareJid = room_text
-                    .parse()
-                    .map_err(|_| ProtectedSpaceReplyCodecError)?;
-                if room.as_str() != room_text {
-                    return Err(ProtectedSpaceReplyCodecError);
-                }
-                dependencies.push(ProtectedSpaceRoomDependency::new(
-                    room,
-                    Uuid::from_bytes(read_array(&mut input)?),
-                    Uuid::from_bytes(read_array(&mut input)?),
-                    i64::from_be_bytes(read_array(&mut input)?),
-                )?);
+                dependencies.push(read_room_dependency(&mut input)?);
             }
             descriptor = descriptor.with_room_dependencies(dependencies)?;
+        } else if kind == ProtectedSpaceReplyKind::Subscribe {
+            let subid = read_string(&mut input, MAX_SUBSCRIPTION_ID_BYTES)?;
+            descriptor = descriptor.with_subscription(SubId::from_raw(subid))?;
+        } else if kind == ProtectedSpaceReplyKind::BookmarkEvent {
+            if u16::from_be_bytes(read_array(&mut input)?) != 1 {
+                return Err(ProtectedSpaceReplyCodecError);
+            }
+            let room = read_room_dependency(&mut input)?;
+            let subid = read_string(&mut input, MAX_SUBSCRIPTION_ID_BYTES)?;
+            let operation = Uuid::from_bytes(read_array(&mut input)?);
+            let present = match read_array(&mut input)? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(ProtectedSpaceReplyCodecError),
+            };
+            descriptor =
+                descriptor.with_bookmark_event(SubId::from_raw(subid), operation, room, present)?;
         }
         if !input.is_empty() {
             return Err(ProtectedSpaceReplyCodecError);
         }
         Ok(descriptor)
     }
+}
+
+fn read_room_dependency(
+    input: &mut &[u8],
+) -> Result<ProtectedSpaceRoomDependency, ProtectedSpaceReplyCodecError> {
+    let room_text = read_string(input, MAX_JID_BYTES)?;
+    let room: BareJid = room_text
+        .parse()
+        .map_err(|_| ProtectedSpaceReplyCodecError)?;
+    if room.as_str() != room_text {
+        return Err(ProtectedSpaceReplyCodecError);
+    }
+    ProtectedSpaceRoomDependency::new(
+        room,
+        Uuid::from_bytes(read_array(input)?),
+        Uuid::from_bytes(read_array(input)?),
+        i64::from_be_bytes(read_array(input)?),
+    )
 }
 
 fn read_array<const N: usize>(input: &mut &[u8]) -> Result<[u8; N], ProtectedSpaceReplyCodecError> {

@@ -405,10 +405,16 @@ fn matches_protected_space_reply(
     element: &minidom::Element,
     descriptor: &ProtectedSpaceReplyDescriptor,
 ) -> bool {
+    if element.attr("from") != Some(descriptor.service().as_str())
+        || element.attr("to") != Some(descriptor.recipient().as_str())
+    {
+        return false;
+    }
+    if descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent {
+        return matches_protected_bookmark_event(element, descriptor);
+    }
     element.is("iq", "jabber:client")
         && element.attr("type") == Some("result")
-        && element.attr("from") == Some(descriptor.service().as_str())
-        && element.attr("to") == Some(descriptor.recipient().as_str())
         && element.attr("id") == Some(descriptor.id())
         && element.children().count() == 1
         && match descriptor.kind() {
@@ -425,7 +431,94 @@ fn matches_protected_space_reply(
                 .and_then(|pubsub| pubsub.get_child("items", crate::pubsub::NS_PUBSUB))
                 .filter(|items| items.attr("node") == Some(descriptor.node()))
                 .is_some_and(|items| matches_protected_rooms(items, descriptor)),
+            ProtectedSpaceReplyKind::Subscribe => {
+                matches_protected_subscription(element, descriptor)
+            }
+            ProtectedSpaceReplyKind::BookmarkEvent => false,
         }
+}
+
+/// A protected headline names one versioned bookmark mutation and no other data.
+fn matches_protected_bookmark_event(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    use crate::pubsub::NS_PUBSUB_EVENT;
+    use crate::xep::xep0402::NS_BOOKMARKS2;
+
+    let (Some(proof), [room]) = (descriptor.bookmark_event(), descriptor.room_dependencies())
+    else {
+        return false;
+    };
+    let id = (!descriptor.id().is_empty()).then_some(descriptor.id());
+    if descriptor.subscription_id().is_none()
+        || !element.is("message", "jabber:client")
+        || element.attr("type") != Some("headline")
+        || element.attr("id") != id
+        || element.attrs().len() != 3 + usize::from(id.is_some())
+        || element.children().count() != 1
+        || !element.text().trim().is_empty()
+    {
+        return false;
+    }
+    let Some(items) = element
+        .get_child("event", NS_PUBSUB_EVENT)
+        .filter(|event| {
+            event.attrs().is_empty()
+                && event.children().count() == 1
+                && event.text().trim().is_empty()
+        })
+        .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
+        .filter(|items| {
+            items.attrs().len() == 1
+                && items.attr("node") == Some(descriptor.node())
+                && items.children().count() == 1
+                && items.text().trim().is_empty()
+        })
+    else {
+        return false;
+    };
+    let name = if proof.present() { "item" } else { "retract" };
+    let Some(entry) = items.get_child(name, NS_PUBSUB_EVENT) else {
+        return false;
+    };
+    if entry.attrs().len() != 1
+        || entry.attr("id") != Some(room.room().as_str())
+        || !entry.text().trim().is_empty()
+    {
+        return false;
+    }
+    let mut payloads = entry.children();
+    match payloads.next() {
+        None => true,
+        Some(payload) => {
+            proof.present() && payload.is("conference", NS_BOOKMARKS2) && payloads.next().is_none()
+        }
+    }
+}
+
+/// A local subscribe result confirms exactly one bare-JID subscription.
+fn matches_protected_subscription(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    let Some(subid) = descriptor.subscription_id() else {
+        return false;
+    };
+    let bare_recipient = descriptor.recipient().to_bare();
+    element
+        .get_child("pubsub", crate::pubsub::NS_PUBSUB)
+        .filter(|pubsub| pubsub.children().count() == 1 && pubsub.attrs().is_empty())
+        .and_then(|pubsub| pubsub.get_child("subscription", crate::pubsub::NS_PUBSUB))
+        .is_some_and(|subscription| {
+            subscription.children().next().is_none()
+                && subscription.text().trim().is_empty()
+                && subscription.attrs().len() == 4
+                && subscription.attr("node") == Some(descriptor.node())
+                && subscription.attr("jid") == Some(bare_recipient.as_str())
+                && subscription.attr("subid") == Some(subid.as_str())
+                && subscription.attr("subscription") == Some("subscribed")
+        })
 }
 
 /// Content replies cover exactly the listed managed rooms. Known image
@@ -2126,6 +2219,156 @@ mod protected_space_reply_storage_tests {
                 )
                 .is_err());
             }
+        }
+    }
+
+    #[test]
+    fn subscribe_result_binds_the_full_resource_bare_account_and_chosen_subid() {
+        use crate::pubsub::SubId;
+
+        let subid = SubId::generate();
+        let wire = REPLY.replace(
+            "<query xmlns='http://jabber.org/protocol/disco#info' node='docs'/>",
+            &format!(
+                "<pubsub xmlns='http://jabber.org/protocol/pubsub'><subscription node='docs' jid='alice@example.test' subscription='subscribed' subid='{subid}'/></pubsub>"
+            ),
+        );
+        let missing = descriptor().with_kind(ProtectedSpaceReplyKind::Subscribe);
+        assert!(ProtectedSpaceReplyDescriptor::decode(&missing.encode()).is_err());
+        assert!(
+            SmReplayPayload::from_protected_space_reply(wire.clone(), missing.clone()).is_err()
+        );
+        assert!(missing
+            .clone()
+            .with_subscription(SubId::from_raw(""))
+            .is_err());
+        assert!(missing
+            .clone()
+            .with_subscription(SubId::from_raw("a".repeat(257)))
+            .is_err());
+
+        let descriptor = missing
+            .with_subscription(subid.clone())
+            .expect("exact subscription");
+        let payload = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("matching subscribe result");
+        let storage = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(storage.clone()).is_err());
+        let restored = SmReplayPayload::from_storage(storage).expect("subscribe envelope");
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        assert_eq!(restored.wire(), wire);
+        for (old, replacement) in [
+            ("alice@example.test/dev", "alice@example.test/other"),
+            ("jid='alice@example.test'", "jid='alice@example.test/dev'"),
+            ("jid='alice@example.test'", "jid='bob@example.test'"),
+            ("subscription='subscribed'", "subscription='pending'"),
+            ("node='docs'", "node='other'"),
+            ("id='disco-1'", "id='disco-2'"),
+            ("spaces.example.test", "other.example.test"),
+            (subid.as_str(), "another-subscription"),
+        ] {
+            assert!(SmReplayPayload::from_protected_space_reply(
+                wire.replace(old, replacement),
+                descriptor.clone()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn bookmark_event_round_trips_and_binds_each_wire_identity() {
+        use crate::pubsub::SubId;
+        use crate::stream_management::ProtectedSpaceRoomDependency;
+
+        let room = "room@muc.example.test";
+        let dependency = ProtectedSpaceRoomDependency::new(
+            room.parse().expect("room"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            9,
+        )
+        .expect("room dependency");
+        let operation = uuid::Uuid::new_v4();
+        let subid = SubId::generate();
+        for (present, stanza_id, id_attribute, name, payload) in [
+            (
+                true,
+                "event-1",
+                " id='event-1'",
+                "item",
+                "<conference xmlns='urn:xmpp:bookmarks:1'/>",
+            ),
+            (false, "", "", "retract", ""),
+        ] {
+            let wire = format!(
+                "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test/dev'{id_attribute}><event xmlns='http://jabber.org/protocol/pubsub#event'><items node='docs'><{name} id='{room}'>{payload}</{name}></items></event></message>"
+            );
+            let base = descriptor();
+            let descriptor = ProtectedSpaceReplyDescriptor::new(
+                base.service().clone(),
+                base.node().to_owned(),
+                base.recipient().clone(),
+                stanza_id.to_owned(),
+                base.lifecycle(),
+                base.incarnation(),
+                base.generation(),
+            )
+            .expect("event base")
+            .with_bookmark_event(subid.clone(), operation, dependency.clone(), present)
+            .expect("bookmark event proof");
+            let parsed =
+                SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+                    .expect("exact bookmark event");
+            let stored = parsed.to_storage().into_owned();
+            assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+            let restored = SmReplayPayload::from_storage(stored).expect("stored event");
+            assert_eq!(restored.wire(), wire);
+            assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+            assert_eq!(descriptor.subscription_id(), Some(&subid));
+            assert_eq!(
+                descriptor
+                    .bookmark_event()
+                    .expect("mutation identity")
+                    .operation(),
+                operation
+            );
+            assert_eq!(
+                descriptor
+                    .bookmark_event()
+                    .expect("mutation identity")
+                    .present(),
+                present
+            );
+            assert_eq!(
+                descriptor.room_dependencies(),
+                std::slice::from_ref(&dependency)
+            );
+
+            let mut bad_action = descriptor.encode();
+            *bad_action.last_mut().expect("action byte") = 2;
+            assert!(ProtectedSpaceReplyDescriptor::decode(&bad_action).is_err());
+            let wrong_action = if present { "retract" } else { "item" };
+            for changed in [
+                wire.replace("headline", "chat"),
+                wire.replace("node='docs'", "node='other'"),
+                wire.replace("spaces.example.test", "other.example.test"),
+                wire.replace("alice@example.test/dev", "alice@example.test/other"),
+                wire.replace(room, "other@muc.example.test"),
+                wire.replace(&format!("<{name} "), &format!("<{wrong_action} "))
+                    .replace(&format!("</{name}>"), &format!("</{wrong_action}>")),
+                wire.replace("</message>", "<body>extra data</body></message>"),
+            ] {
+                assert!(
+                    SmReplayPayload::from_protected_space_reply(changed, descriptor.clone())
+                        .is_err()
+                );
+            }
+            let wrong_id = if present {
+                wire.replace(" id='event-1'", "")
+            } else {
+                wire.replace(" type='headline'", " type='headline' id='unexpected'")
+            };
+            assert!(SmReplayPayload::from_protected_space_reply(wrong_id, descriptor).is_err());
         }
     }
 
