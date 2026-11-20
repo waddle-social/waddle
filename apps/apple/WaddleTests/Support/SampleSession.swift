@@ -109,6 +109,60 @@ final class SampleSession {
         store.finish(refresh: refresh, keeping: sections, didFail: false)
     }
 
+    static let rink = Story(
+        id: "story-rink",
+        body: "First ice of the season at the rink.",
+        media: URL(string: "https://upload.waddle.test/story-rink.jpg")!,
+        mediaType: "image/jpeg",
+        author: priya,
+        postedAt: date(-1200),
+        expiresAt: date(80_000)
+    )
+
+    /// Fills the Feed as a refresh would: three posts, three stories (one
+    /// seen), and reactions on the first story.
+    func seedCommunity() {
+        let store = coordinator.community
+        _ = store.begin()
+        store.publish(posts: [
+            FeedPost(
+                id: "post-3",
+                body: "Release candidate is tagged. Thanks to everyone who tested room history on Android this week.",
+                author: Self.mika,
+                publishedAt: date(-420),
+                link: URL(string: "https://waddle.social/releases")
+            ),
+            FeedPost(id: "post-2", body: "Jo is feeling happy", author: Self.jo, publishedAt: date(-3600), source: .mood),
+            FeedPost(
+                id: "post-1",
+                body: "New identity drafts are up in design-critique. The waddling typing dots are my favourite part.",
+                author: Self.theo,
+                publishedAt: date(-90_000)
+            ),
+        ])
+        store.publish(stories: [
+            Self.rink,
+            Story(
+                id: "story-desk", media: URL(string: "https://upload.waddle.test/story-desk.jpg")!,
+                mediaType: "image/jpeg", author: Self.jo, postedAt: date(-5400), expiresAt: date(70_000)
+            ),
+            Story(
+                id: "story-huddle", media: URL(string: "https://upload.waddle.test/story-huddle.jpg")!,
+                mediaType: "image/jpeg", author: Self.theo, postedAt: date(-9000), expiresAt: date(60_000)
+            ),
+        ])
+        store.mergeReads(["story-huddle": date(-600)])
+        store.set(
+            StoryReactions(
+                counts: [StoryReactions.Count(emoji: "❤️", count: 3), StoryReactions.Count(emoji: "🎉", count: 1)],
+                mine: ["❤️"]
+            ),
+            of: Self.rink.id,
+            askedAt: 0
+        )
+        store.finish(feedFailed: false, storiesFailed: false)
+    }
+
     /// `view` with everything a signed-in screen reads from the environment.
     func host<V: View>(_ view: V) -> some View {
         view

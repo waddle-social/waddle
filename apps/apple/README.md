@@ -10,7 +10,7 @@ Waddle/                      SwiftUI app target
   App/                       AppState (auth → session), navigation, preferences
   Auth/                      device-authorization sign-in, Keychain credential
   Shell/                     iPhone tab shell, iPad/Mac split view, menu commands
-  Features/                  Conversation, Navigation, Details, Account, Calls screens
+  Features/                  Conversation, Navigation, Details, Account, Calls, Community screens
   Design/                    Polar Huddle tokens, theme and shared components
   Resources/                 bundled fonts and their licences
   Platform/                  notifications, APNs registration
@@ -23,7 +23,7 @@ WaddleKit/                   UI-free core (Swift package; depends on swift-crypt
   Files/                     XEP-0448 decryption and XEP-0300 digest checks
   Timeline/                  the conversation reducer
   Calls/                     the 1:1 call slot: XEP-0353 invitations, Jingle sessions
-  Stores/                    presence, unread, inbox, typing, delivery, pins…
+  Stores/                    presence, unread, inbox, typing, delivery, pins, community feed…
   Session/                   SessionCoordinator: event routing and actions
   Compose/                   markdown → XEP-0394, mentions → XEP-0372
 ```
