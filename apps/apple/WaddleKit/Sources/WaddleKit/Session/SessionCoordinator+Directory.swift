@@ -172,9 +172,10 @@ extension SessionCoordinator {
         mentionSearches.cached(query, in: room)
     }
 
-    /// Our own occupant in `room`, for permission checks.
+    /// Our own occupant in `room`, for permission checks. The room may have
+    /// given us a nick other than the one we asked for.
     public func selfOccupant(in room: BareJID) -> Occupant? {
-        presence.occupant(named: account.nick, in: room)
+        presence.occupant(named: presence.selfNicks[room] ?? account.nick, in: room)
     }
 }
 
