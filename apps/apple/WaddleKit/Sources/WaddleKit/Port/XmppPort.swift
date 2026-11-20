@@ -119,8 +119,9 @@ public protocol DirectoryPort: AnyObject, Sendable {
     /// Creates a channel room and returns its JID.
     func createRoom(localpart: String, name: String, summary: String?, nick: String) async throws -> BareJID
     func createGroupDM(name: String, members: [BareJID]) async throws -> BareJID
-    func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws
-    func fetchNotifyModes() async throws -> [ConversationID: NotifyMode]
+    /// Stores both settings of a conversation; they travel together.
+    func setNotifyMode(_ mode: NotifyMode, showsMessagesInPush: Bool, for conversation: ConversationID) async throws
+    func fetchNotifySettings() async throws -> NotifySettings
 }
 
 /// The signed-in user's published profile and other users' avatars.

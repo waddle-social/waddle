@@ -7,6 +7,18 @@ enum PushTokenKind: CaseIterable, Sendable {
     case voip
 }
 
+/// Where a registrar finds the signed-in session to register with.
+@MainActor
+protocol PushSessionHost: AnyObject {
+    var server: URL { get }
+    /// The live session's coordinator, if someone is signed in.
+    var pushCoordinator: SessionCoordinator? { get }
+}
+
+extension AppState: PushSessionHost {
+    var pushCoordinator: SessionCoordinator? { session?.coordinator }
+}
+
 /// Registers one token topic, fencing superseded attempts before retirement.
 @MainActor
 final class PushTokenRegistrar {
@@ -18,7 +30,7 @@ final class PushTokenRegistrar {
 
     private let kind: PushTokenKind
     private let status: @MainActor (AppState.PushRegistrationStatus) -> Void
-    weak var appState: AppState?
+    private weak var host: (any PushSessionHost)?
 
     init(kind: PushTokenKind, status: @escaping @MainActor (AppState.PushRegistrationStatus) -> Void = { _ in }) {
         self.kind = kind
@@ -32,9 +44,10 @@ final class PushTokenRegistrar {
     private var isFinishingRegistration = false
     private var registrationRetryRequested = false
     private weak var registrationFencedCoordinator: SessionCoordinator?
+    private var retirementTask: Task<Void, Never>?
 
-    func attach(_ appState: AppState) {
-        self.appState = appState
+    func attach(_ host: any PushSessionHost) {
+        self.host = host
         startPendingRegistrationIfPossible()
     }
 
@@ -47,6 +60,14 @@ final class PushTokenRegistrar {
         }
     }
 
+    /// Turns push off for this install: every account's registration of
+    /// this topic is retired, and none is made until push is enabled
+    /// again. A retirement the server could not confirm stays queued.
+    func turnOff() {
+        setEnabled(false)
+        invalidate()
+    }
+
     func didRegister(deviceToken: Data) {
         guard isEnabled else { return }
         if registrationTask != nil { registrationRetryRequested = true }
@@ -55,11 +76,15 @@ final class PushTokenRegistrar {
     }
 
     func startPendingRegistrationIfPossible() {
-        guard isEnabled, registrationTask == nil,
+        guard isEnabled else {
+            retirePendingRegistrationsIfPossible()
+            return
+        }
+        guard registrationTask == nil, retirementTask == nil,
               !isFinishingRegistration,
               let deviceToken = pendingDeviceToken,
-              let appState,
-              let coordinator = appState.session?.coordinator,
+              let host,
+              let coordinator = host.pushCoordinator,
               coordinator.connection == .online
         else { return }
         guard registrationFencedCoordinator !== coordinator else { return }
@@ -70,9 +95,9 @@ final class PushTokenRegistrar {
         let generation = registrationGeneration
         let environment = Self.apnsEnvironment
         registrationCoordinator = coordinator
-        registrationTask = Task { [weak self, weak appState] in
+        registrationTask = Task { [weak self, weak host] in
             guard let self else { return }
-            guard let appState else {
+            guard let host else {
                 if self.registrationGeneration == generation {
                     self.registrationTask = nil
                     self.registrationCoordinator = nil
@@ -83,7 +108,7 @@ final class PushTokenRegistrar {
                 deviceToken: deviceToken,
                 environment: environment,
                 appID: appID,
-                appState: appState,
+                host: host,
                 coordinator: coordinator,
                 generation: generation
             )
@@ -98,18 +123,43 @@ final class PushTokenRegistrar {
         }
     }
 
+    /// While push is off no registration runs, so retirements left over
+    /// from an offline moment are sent here once the account is online.
+    private func retirePendingRegistrationsIfPossible() {
+        guard retirementTask == nil, registrationTask == nil, !isFinishingRegistration,
+              let host,
+              let coordinator = host.pushCoordinator,
+              coordinator.connection == .online
+        else { return }
+        let owner = PushRegistrationStore.Owner(server: host.server, account: coordinator.account.jid)
+        let kind = self.kind
+        let pending = PushRegistrationStore.pendingRetirements(for: owner, kind: kind)
+        guard !pending.isEmpty else { return }
+        retirementTask = Task { [weak self] in
+            for registration in pending {
+                if await coordinator.disablePush(registration) {
+                    PushRegistrationStore.removePendingRetirement(registration, for: owner, kind: kind)
+                }
+            }
+            guard let self else { return }
+            self.retirementTask = nil
+            // Push may have been turned on again meanwhile.
+            if self.isEnabled { self.startPendingRegistrationIfPossible() }
+        }
+    }
+
     private func register(
         deviceToken: Data,
         environment: PushEnvironment,
         appID: String,
-        appState: AppState,
+        host: any PushSessionHost,
         coordinator: SessionCoordinator,
         generation: Int
     ) async -> RegistrationAttempt {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        let owner = PushRegistrationStore.Owner(server: appState.server, account: coordinator.account.jid)
+        let owner = PushRegistrationStore.Owner(server: host.server, account: coordinator.account.jid)
 
-        guard isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) else { return .superseded }
+        guard isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) else { return .superseded }
         var couldNotRetirePreviousRegistration = false
         for retirement in PushRegistrationStore.pendingRetirements(for: owner, kind: kind) {
             if await coordinator.disablePush(retirement) {
@@ -122,12 +172,12 @@ final class PushTokenRegistrar {
         if let registration = PushRegistrationStore.registration(for: owner, kind: kind),
            PushRegistrationStore.contextMatches(token: token, environment: environment, appID: appID, for: owner, kind: kind) {
             guard await coordinator.enablePush(registration) else {
-                if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
+                if isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) {
                     status(.failed("Push re-registration with the XMPP server failed. It will retry after reconnecting."))
                 }
-                return isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) ? .failed : .superseded
+                return isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) ? .failed : .superseded
             }
-            if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
+            if isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) {
                 pendingDeviceToken = nil
                 if couldNotRetirePreviousRegistration {
                     status(.failed("A previous push registration could not be retired. It will retry after reconnecting."))
@@ -150,29 +200,29 @@ final class PushTokenRegistrar {
         if let registration = PushRegistrationStore.registration(for: owner, kind: kind) {
             PushRegistrationStore.enqueueRetirement(registration, for: owner, kind: kind)
             guard await coordinator.disablePush(registration) else {
-                if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
+                if isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) {
                     status(.failed("The previous push registration could not be retired. It will retry after reconnecting."))
                 }
-                return isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) ? .failed : .superseded
+                return isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) ? .failed : .superseded
             }
             PushRegistrationStore.removePendingRetirement(registration, for: owner, kind: kind)
             PushRegistrationStore.forget(owner, kind: kind)
         }
 
-        guard isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) else { return .superseded }
+        guard isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) else { return .superseded }
         guard let registration = await coordinator.registerPush(deviceToken: token, environment: environment, appID: appID) else {
-            if isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) {
+            if isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) {
                 status(.failed("Push registration with the XMPP server failed. It will retry after reconnecting."))
             }
-            return isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) ? .failed : .superseded
+            return isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) ? .failed : .superseded
         }
-        guard isCurrent(generation, deviceToken: deviceToken, appState: appState, coordinator: coordinator) else {
+        guard isCurrent(generation, deviceToken: deviceToken, host: host, coordinator: coordinator) else {
             PushRegistrationStore.enqueueRetirement(registration, for: owner, kind: kind)
             if await coordinator.disablePush(registration) {
                 PushRegistrationStore.removePendingRetirement(registration, for: owner, kind: kind)
                 return .superseded
             }
-            if self.appState === appState {
+            if self.host === host {
                 status(.failed("A new push registration needs cleanup. It will retry after reconnecting."))
             }
             return .failed
@@ -186,13 +236,13 @@ final class PushTokenRegistrar {
     private func isCurrent(
         _ generation: Int,
         deviceToken: Data,
-        appState: AppState,
+        host: any PushSessionHost,
         coordinator: SessionCoordinator
     ) -> Bool {
         isEnabled && registrationGeneration == generation
             && pendingDeviceToken == deviceToken
-            && self.appState === appState
-            && appState.session?.coordinator === coordinator
+            && self.host === host
+            && host.pushCoordinator === coordinator
             && coordinator.connection == .online
     }
 
@@ -220,8 +270,8 @@ final class PushTokenRegistrar {
     /// Stops using an invalidated token before a later callback can replace it.
     func invalidate() {
         pendingDeviceToken = nil
-        let coordinator = appState?.session?.coordinator
-        let owner = appState.flatMap { state in
+        let coordinator = host?.pushCoordinator
+        let owner = host.flatMap { state in
             coordinator.map { PushRegistrationStore.Owner(server: state.server, account: $0.account.jid) }
         }
         PushRegistrationStore.retireAll(kind: kind)

@@ -63,8 +63,8 @@ extension SessionCoordinator {
     }
 
     func loadNotifyModes() async {
-        guard let modes = try? await port.fetchNotifyModes() else { return }
-        directory.replaceNotifyModes(modes)
+        guard let settings = try? await port.fetchNotifySettings() else { return }
+        directory.replaceNotifySettings(settings)
     }
 
     /// XEP-0492 notification mode for a conversation. Optimistic, rolled
@@ -72,12 +72,67 @@ extension SessionCoordinator {
     public func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {
         let previous = directory.notifyMode(for: conversation)
         directory.setNotifyMode(mode, for: conversation)
-        do {
-            try await port.setNotifyMode(mode, for: conversation)
-        } catch {
-            directory.setNotifyMode(previous, for: conversation)
-            throw error
+        try await storeNotifySettings(for: conversation, changing: .mode(mode)) {
+            self.directory.setNotifyMode(previous, for: conversation)
         }
+    }
+
+    /// Whether push notifications for a conversation show who wrote and
+    /// what, on every device of the account. Optimistic, rolled back if
+    /// the server rejects it.
+    public func setShowsMessagesInPush(_ shows: Bool, for conversation: ConversationID) async throws {
+        let previous = directory.showsMessagesInPush(for: conversation)
+        directory.setShowsMessagesInPush(shows, for: conversation)
+        try await storeNotifySettings(for: conversation, changing: .showsMessagesInPush(shows)) {
+            self.directory.setShowsMessagesInPush(previous, for: conversation)
+        }
+    }
+
+    private enum NotifySetting {
+        case mode(NotifyMode)
+        case showsMessagesInPush(Bool)
+    }
+
+    /// Sends both settings of a conversation, which the account stores
+    /// together. Writes to one conversation run one at a time, so a later
+    /// one never repeats a value an earlier one is about to roll back.
+    /// The setting that is not changing is read from the server first: it
+    /// may have changed on another device since this session loaded it.
+    /// If that read fails nothing is written, since a stale value could
+    /// undo the other device's change.
+    private func storeNotifySettings(
+        for conversation: ConversationID,
+        changing changed: NotifySetting,
+        rollback: @escaping @MainActor () -> Void
+    ) async throws {
+        let earlier = notifyWriteTails[conversation]
+        let write = Task { @MainActor [self] in
+            _ = await earlier?.result
+            do {
+                let stored = try await port.fetchNotifySettings()
+                // The new value is applied again: a write that ran in
+                // between may have refreshed it away.
+                switch changed {
+                case let .mode(mode):
+                    directory.setShowsMessagesInPush(
+                        stored.showingMessagesInPush.contains(conversation), for: conversation)
+                    directory.setNotifyMode(mode, for: conversation)
+                case let .showsMessagesInPush(shows):
+                    directory.setStoredNotifyMode(stored.modes[conversation], for: conversation)
+                    directory.setShowsMessagesInPush(shows, for: conversation)
+                }
+                try await port.setNotifyMode(
+                    directory.notifyMode(for: conversation),
+                    showsMessagesInPush: directory.showsMessagesInPush(for: conversation),
+                    for: conversation)
+            } catch {
+                rollback()
+                throw error
+            }
+        }
+        notifyWriteTails[conversation] = write
+        defer { if notifyWriteTails[conversation] == write { notifyWriteTails[conversation] = nil } }
+        try await write.value
     }
 
     /// Creates a channel room, joins it, and returns its conversation.

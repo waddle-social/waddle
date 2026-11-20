@@ -68,11 +68,14 @@ struct SettingsNotificationsSection: View {
     var body: some View {
         Section {
             Toggle("Show message previews", isOn: $preferences.showsNotificationPreviews)
-            LabeledContent("Push registration", value: pushRegistrationStatus.title)
-            if case let .failed(message) = pushRegistrationStatus {
-                Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+            Toggle("Push notifications", isOn: $preferences.receivesPush)
+            if preferences.receivesPush {
+                LabeledContent("Push registration", value: pushRegistrationStatus.title)
+                if case let .failed(message) = pushRegistrationStatus {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.Colors.dangerText)
+                }
             }
             if notificationPermissionGranted == false {
                 Label("Notifications are turned off in system settings.", systemImage: "bell.slash")
@@ -89,8 +92,15 @@ struct SettingsNotificationsSection: View {
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Choose how each conversation notifies you from its details. Push delivery also depends on APNs being configured for this app by the server.")
+            Text(Self.footer(receivesPush: preferences.receivesPush))
         }
+    }
+
+    static func footer(receivesPush: Bool) -> String {
+        let conversations = "Choose how each conversation notifies you, and whether its notifications show messages, from its details."
+        return receivesPush
+            ? "\(conversations) Push notifications reach this device while Waddle is closed, if the server has them set up."
+            : "\(conversations) With push notifications off, this device is notified only while Waddle is open, and calls ring only while it is open. Your other devices are not affected."
     }
 
     private static var systemSettingsURL: URL? {

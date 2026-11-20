@@ -20,10 +20,17 @@ final class AppDelegate: NSObject {
 
     func attach(_ appState: AppState) {
         self.appState = appState
+        if !appState.preferences.receivesPush {
+            alertRegistrar.setEnabled(false)
+            #if os(iOS)
+            voipRegistrar.setEnabled(false)
+            #endif
+        }
         alertRegistrar.attach(appState)
         #if os(iOS)
         voipRegistrar.attach(appState)
         #endif
+        appState.preferences.onReceivesPushChanged = { [weak self] in self?.applyPushPreference() }
         appState.finishPendingPushRegistration = { [weak self] coordinator in
             guard let self else { return }
             await self.alertRegistrar.finishPendingRegistration(for: coordinator)
@@ -31,24 +38,50 @@ final class AppDelegate: NSObject {
             await self.voipRegistrar.finishPendingRegistration(for: coordinator)
             #endif
         }
-        appState.restartPushRegistration = { [weak self] in
-            guard let self else { return }
-            Self.registerForRemoteNotifications()
+        // With push off the registrars only retire what is still queued.
+        appState.restartPushRegistration = { [weak self, weak appState] in
+            guard let self, let appState else { return }
+            if appState.preferences.receivesPush {
+                Self.registerForRemoteNotifications()
+            }
             self.alertRegistrar.startPendingRegistrationIfPossible()
             #if os(iOS)
-            if let token = self.voipRegistry?.token {
+            if appState.preferences.receivesPush, let token = self.voipRegistry?.token {
                 self.voipRegistrar.didRegister(deviceToken: token)
             }
             self.voipRegistrar.startPendingRegistrationIfPossible()
             #endif
         }
         #if os(iOS)
-        appState.setVoIPPushEnabled = { [weak self] enabled in
-            guard let self else { return }
+        appState.setVoIPPushEnabled = { [weak self, weak appState] enabled in
+            guard let self, let appState else { return }
+            let enabled = enabled && appState.preferences.receivesPush
             self.voipRegistrar.setEnabled(enabled)
             self.voipRegistry?.setEnabled(enabled)
         }
         #endif
+    }
+
+    /// Follows the "Push notifications" setting. Off retires this
+    /// install's registrations and stops asking Apple for tokens; on
+    /// registers again.
+    private func applyPushPreference() {
+        guard let appState else { return }
+        if appState.preferences.receivesPush {
+            alertRegistrar.setEnabled(true)
+            #if os(iOS)
+            appState.setVoIPPushEnabled?(appState.phase != .signedOut)
+            #endif
+            appState.restartPushRegistration?()
+        } else {
+            alertRegistrar.turnOff()
+            Self.unregisterForRemoteNotifications()
+            #if os(iOS)
+            voipRegistrar.turnOff()
+            voipRegistry?.setEnabled(false)
+            #endif
+            appState.pushRegistrationStatus = .waiting
+        }
     }
 
     private func launched() {
@@ -57,6 +90,7 @@ final class AppDelegate: NSObject {
         #if os(iOS)
         if voipRegistry == nil {
             voipRegistry = VoIPPushRegistry(
+                isEnabled: AppState.shared.preferences.receivesPush,
                 onToken: { [weak self] token in self?.voipRegistrar.didRegister(deviceToken: token) },
                 onInvalidated: { [weak self] in self?.voipRegistrar.invalidate() }
             )
@@ -70,6 +104,15 @@ final class AppDelegate: NSObject {
         UIApplication.shared.registerForRemoteNotifications()
         #elseif os(macOS)
         NSApplication.shared.registerForRemoteNotifications()
+        #endif
+    }
+
+    /// Stops delivery to this install even if a retirement is still queued.
+    private static func unregisterForRemoteNotifications() {
+        #if os(iOS)
+        UIApplication.shared.unregisterForRemoteNotifications()
+        #elseif os(macOS)
+        NSApplication.shared.unregisterForRemoteNotifications()
         #endif
     }
 }

@@ -14,12 +14,12 @@ final class VoIPPushRegistry: NSObject {
 
     var token: Data? { registry.pushToken(for: .voIP) }
 
-    init(onToken: @escaping @MainActor (Data) -> Void, onInvalidated: @escaping @MainActor () -> Void) {
+    init(isEnabled: Bool, onToken: @escaping @MainActor (Data) -> Void, onInvalidated: @escaping @MainActor () -> Void) {
         self.onToken = onToken
         self.onInvalidated = onInvalidated
         super.init()
         registry.delegate = self
-        registry.desiredPushTypes = [.voIP]
+        setEnabled(isEnabled)
     }
 
     func setEnabled(_ enabled: Bool) {

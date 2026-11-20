@@ -24,6 +24,26 @@ final class FakePort: XmppPort {
     var heldCallVerbs: Set<String> = []
     var heldCallSends: [CheckedContinuation<Void, Never>] = []
 
+    /// Device tokens offered for registration, in order.
+    var pushRegistrationRequests: [String] = []
+    var pushRegistrationResult: PushRegistration?
+    var enabledPush: [PushRegistration] = []
+    /// Every retirement asked for, confirmed or not.
+    var disabledPush: [PushRegistration] = []
+    var disablesPush = true
+
+    struct NotifySettingsWrite: Equatable {
+        let conversation: ConversationID
+        let mode: NotifyMode
+        let showsMessagesInPush: Bool
+    }
+    var notifySettingsWrites: [NotifySettingsWrite] = []
+    var notifySettingsWriteResult: Result<Void, PortError> = .success(())
+    /// Results for the next writes, in order, before `notifySettingsWriteResult`.
+    var notifySettingsWriteResults: [Result<Void, PortError>] = []
+    var notifySettings = NotifySettings()
+    var failsNotifySettingsFetch = false
+
     var sent: [OutboundMessage] = []
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
     var reactions: [(target: String, emojis: [String])] = []
@@ -300,8 +320,21 @@ final class FakePort: XmppPort {
         BareJID(localpart: "group", domain: "muc.waddle.test")!
     }
 
-    func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {}
-    func fetchNotifyModes() async throws -> [ConversationID: NotifyMode] { [:] }
+    func setNotifyMode(_ mode: NotifyMode, showsMessagesInPush: Bool, for conversation: ConversationID) async throws {
+        notifySettingsWrites.append(.init(conversation: conversation, mode: mode, showsMessagesInPush: showsMessagesInPush))
+        let result = notifySettingsWriteResults.isEmpty ? notifySettingsWriteResult : notifySettingsWriteResults.removeFirst()
+        try result.get()
+        notifySettings.modes[conversation] = mode
+        if showsMessagesInPush {
+            notifySettings.showingMessagesInPush.insert(conversation)
+        } else {
+            notifySettings.showingMessagesInPush.remove(conversation)
+        }
+    }
+    func fetchNotifySettings() async throws -> NotifySettings {
+        if failsNotifySettingsFetch { throw PortError.timeout }
+        return notifySettings
+    }
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
         avatarLookups.append(jid)
         return avatarLookup(jid, knownID)
@@ -314,8 +347,18 @@ final class FakePort: XmppPort {
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
     func requestUploadSlot(filename: String, size: Int, mediaType: String) async -> UploadSlot? { nil }
-    func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? { nil }
-    func disablePush(_ registration: PushRegistration) async -> Bool { true }
+    func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? {
+        pushRegistrationRequests.append(deviceToken)
+        return pushRegistrationResult
+    }
+    func enablePush(_ registration: PushRegistration) async -> Bool {
+        enabledPush.append(registration)
+        return true
+    }
+    func disablePush(_ registration: PushRegistration) async -> Bool {
+        disabledPush.append(registration)
+        return disablesPush
+    }
 
     var extensionCommandDiscovery: Result<[ExtensionCommand], PortError> = .success([])
     var extensionDiscoveryCount = 0

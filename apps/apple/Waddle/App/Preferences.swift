@@ -71,6 +71,18 @@ final class Preferences {
         didSet { defaults.set(showsNotificationPreviews, forKey: Keys.previews) }
     }
 
+    /// Whether this install registers with Apple's push service. Off
+    /// means it is only notified while Waddle is running.
+    var receivesPush: Bool {
+        didSet {
+            defaults.set(receivesPush, forKey: Keys.push)
+            if receivesPush != oldValue { onReceivesPushChanged?() }
+        }
+    }
+
+    /// Set by the owner of the push registrations.
+    @ObservationIgnored var onReceivesPushChanged: (() -> Void)?
+
     /// Denser rows: smaller avatars and tighter spacing.
     var compactMessages: Bool {
         didSet { defaults.set(compactMessages, forKey: Keys.compact) }
@@ -87,6 +99,7 @@ final class Preferences {
         appearance = defaults.string(forKey: Keys.appearance).flatMap(Appearance.init(rawValue:)) ?? .system
         sendsReadReceipts = defaults.object(forKey: Keys.readReceipts) as? Bool ?? true
         showsNotificationPreviews = defaults.object(forKey: Keys.previews) as? Bool ?? true
+        receivesPush = defaults.object(forKey: Keys.push) as? Bool ?? true
         compactMessages = defaults.object(forKey: Keys.compact) as? Bool ?? false
         messageOrder = defaults.string(forKey: Keys.messageOrder).flatMap(MessageOrder.init(rawValue:)) ?? .chat
     }
@@ -95,6 +108,7 @@ final class Preferences {
         static let appearance = "waddle.apple.appearance"
         static let readReceipts = "waddle.apple.read-receipts"
         static let previews = "waddle.apple.notification-previews"
+        static let push = "waddle.apple.receives-push"
         static let compact = "waddle.apple.compact-messages"
         static let messageOrder = "waddle.apple.message-order"
     }

@@ -220,6 +220,19 @@ public enum NotifyMode: Hashable, Sendable, CaseIterable {
     case never
 }
 
+/// The notification settings the account stores per conversation.
+public struct NotifySettings: Hashable, Sendable {
+    /// Only conversations with an explicit mode.
+    public var modes: [ConversationID: NotifyMode]
+    /// Conversations whose push notifications show who wrote and what.
+    public var showingMessagesInPush: Set<ConversationID>
+
+    public init(modes: [ConversationID: NotifyMode] = [:], showingMessagesInPush: Set<ConversationID> = []) {
+        self.modes = modes
+        self.showingMessagesInPush = showingMessagesInPush
+    }
+}
+
 /// A XEP-0313 page.
 public struct ArchivePage: Hashable, Sendable {
     public let messages: [WireMessage]
