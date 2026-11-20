@@ -1912,11 +1912,11 @@ pub(crate) async fn notify_remote_subscribers(
     state: &WebSocketState,
     route: &dyn crate::destination::RemoteRoute,
     publication: &SpacePublication,
-) {
+) -> usize {
     // Without an S2S snapshot nothing leaves for another server, and
     // nothing is read to find that out.
     if state.deps.app_state.s2s_federation.is_none() {
-        return;
+        return 0;
     }
     let SpacePublication {
         service,
@@ -1928,7 +1928,7 @@ pub(crate) async fn notify_remote_subscribers(
     let db = database(state).clone();
     let grants = &state.deps.app_state.host_grants;
     let Ok(enrolled) = grants.space_enrolled(node_name).await else {
-        return;
+        return 0;
     };
     if !enrolled
         && !matches!(
@@ -1938,7 +1938,7 @@ pub(crate) async fn notify_remote_subscribers(
             Ok(true)
         )
     {
-        return;
+        return 0;
     }
     // The node as it is now: the publication is decided after its
     // publisher was answered, and a Space deleted since tells nothing.
@@ -1950,10 +1950,10 @@ pub(crate) async fn notify_remote_subscribers(
         .await
     {
         Ok(Some(node)) if node.created_at.timestamp_millis() == created_at_ms => node,
-        Ok(_) => return,
+        Ok(_) => return 0,
         Err(_) => {
             tracing::warn!("event notifications withheld: the Space could not be read");
-            return;
+            return 0;
         }
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1962,31 +1962,32 @@ pub(crate) async fn notify_remote_subscribers(
         .await
     else {
         tracing::warn!("event notifications withheld: the remote subscriptions could not be read");
-        return;
+        return 0;
     };
     if subscriptions.is_empty() {
-        return;
+        return 0;
     }
     let Some((item_id, item_payload)) = event_item(event) else {
-        return;
+        return 0;
     };
     // The room the event names; an image of the Space names none.
     let room = if space_image(&item_id, item_payload.as_ref()) {
         None
     } else {
         let Some(room) = bookmarked_room(state, &item_id, item_payload.as_ref()) else {
-            return;
+            return 0;
         };
         // Whether the room is open to other servers is the same for every
         // subscriber: a room that is not is told to none of them.
         if room_open(state, &room).await != Some(true) {
-            return;
+            return 0;
         }
         Some(room)
     };
+    let mut queued = 0;
     if enrolled {
         let Ok(key) = ScopeKey::new(service.clone(), node_name.as_str()) else {
-            return;
+            return 0;
         };
         for subscription in subscriptions {
             let Some(mut grant) = grants.space_subscription_event(&key, &subscription).await else {
@@ -2013,16 +2014,18 @@ pub(crate) async fn notify_remote_subscribers(
                 }
             }
             let subscriber = Jid::from(subscription.account);
-            if !route.protected_space_event(
+            if route.protected_space_event(
                 service,
                 &subscriber,
                 Stanza::Message(for_remote_subscriber(event, &subscriber)),
                 grant,
             ) {
+                queued += 1;
+            } else {
                 telemetry::event_withheld();
             }
         }
-        return;
+        return queued;
     }
     // The service's own record, read for this publication just before the
     // first hand-over: a subscription removed, or an account banned, since
@@ -2035,7 +2038,7 @@ pub(crate) async fn notify_remote_subscribers(
         .await
     else {
         tracing::warn!("event notifications withheld: the subscriptions could not be read");
-        return;
+        return 0;
     };
     let deliverable: Vec<BareJid> = deliverable
         .into_iter()
@@ -2061,10 +2064,13 @@ pub(crate) async fn notify_remote_subscribers(
                 &subscriber,
                 Stanza::Message(for_remote_subscriber(event, &subscriber)),
             );
-        if !sent {
+        if sent {
+            queued += 1;
+        } else {
             telemetry::event_withheld();
         }
     }
+    queued
 }
 
 /// Whether the remote `account` may read the Space `node` now, on the

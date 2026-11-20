@@ -393,13 +393,13 @@ pub async fn notify_space_publication(
     state: &WebSocketState,
     router: &crate::s2s::route::S2sRouter,
     publication: &crate::s2s::route::SpacePublication,
-) {
+) -> usize {
     crate::server::routes::websocket::s2s_spaces::notify_remote_subscribers(
         state,
         router,
         publication,
     )
-    .await;
+    .await
 }
 
 /// Have admin commands run against the application state of `state`

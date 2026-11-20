@@ -630,7 +630,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             &jid(GUEST_PHONE),
             &PubSubEvent::new(node, vec![bookmark.clone()]),
         );
-        event.id = Some(id.to_owned());
+        event.id = Some(xmpp_parsers::message::Id(id.to_owned()));
         SpacePublication {
             service: spaces(),
             node: node.to_owned(),
@@ -638,12 +638,15 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             event,
         }
     };
-    notify_space_publication(
-        &managed.hosted.state,
-        &managed.hosted.router,
-        &publication("protected-space-event"),
-    )
-    .await;
+    assert_eq!(
+        notify_space_publication(
+            &managed.hosted.state,
+            &managed.hosted.router,
+            &publication("protected-space-event"),
+        )
+        .await,
+        1
+    );
     let event = managed.hosted.answered("protected-space-event").await;
     assert_eq!(event.name(), "message");
     assert_eq!(event.attr("to"), Some(subscriber.as_str()));
@@ -666,12 +669,15 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .expect("lock preference");
     assert!(rows.next().await.expect("subscription row").is_some());
     drop(rows);
-    notify_space_publication(
-        &managed.hosted.state,
-        &managed.hosted.router,
-        &publication("removed-space-event"),
-    )
-    .await;
+    assert_eq!(
+        notify_space_publication(
+            &managed.hosted.state,
+            &managed.hosted.router,
+            &publication("removed-space-event"),
+        )
+        .await,
+        1
+    );
     removal
         .execute(
             "DELETE FROM s2s_space_subscriptions WHERE subscriber_jid = ?",
