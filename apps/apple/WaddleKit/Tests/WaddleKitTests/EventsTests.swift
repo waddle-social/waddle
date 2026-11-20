@@ -357,6 +357,33 @@ struct EventsTests {
         #expect(coordinator.events.myReply(to: "a") == .going)
     }
 
+    @Test func aReplySentDuringARefreshSurvivesItsOlderAnswer() async throws {
+        let (coordinator, port) = online()
+        port.calendar.list = .success([event("a")])
+        await coordinator.refreshEvents(at: now)
+        port.calendar.held = ["fetchEvents"]
+        let refresh = Task { await coordinator.refreshEvents(at: now) }
+        while port.calendar.fetchRequests == 1 { await Task.yield() }
+
+        try await coordinator.reply(.going, to: "a")
+        port.calendar.release()
+        await refresh.value
+
+        #expect(coordinator.events.myReply(to: "a") == .going)
+    }
+
+    @Test func aLaterRefreshShowsTheRepliesTheServerHolds() async throws {
+        let (coordinator, port) = online()
+        port.calendar.list = .success([event("a")])
+        await coordinator.refreshEvents(at: now)
+        try await coordinator.reply(.going, to: "a")
+
+        port.calendar.list = .success([event("a", replies: [EventAttendee(jid: me.jid, reply: .maybe)])])
+        await coordinator.refreshEvents(at: now)
+
+        #expect(coordinator.events.myReply(to: "a") == .maybe)
+    }
+
     @Test func quickRepliesAreSentInOrderAndEndAsTheLastOne() async throws {
         let (coordinator, port) = online()
         port.calendar.list = .success([event("a")])

@@ -207,6 +207,47 @@ struct EventsTimeTests {
         #expect(picks.end == at("2027-02-06T12:30:00+01:00"))
     }
 
+    @Test func movingAWeeklySeriesMovesItsWeekday() throws {
+        var picks = form(start: "2027-02-08T19:00:00+01:00", end: "2027-02-08T21:00:00+01:00", repeats: .weekly)
+        picks.weekdays = [.monday, .friday]
+
+        picks.moveStart(to: at("2027-02-09T19:00:00+01:00"))
+
+        #expect(picks.shownWeekdays() == [.tuesday, .friday])
+        #expect(try #require(picks.draft()?.recurrence).weekdays == [.tuesday, .friday])
+    }
+
+    @Test func aSeriesCanAlwaysEndOnADateOnceItsStartMoves() throws {
+        var picks = form(start: "2027-02-05T19:00:00+01:00", end: "2027-02-05T21:00:00+01:00", repeats: .weekly)
+
+        picks.moveStart(to: at("2027-06-04T19:00:00+02:00"))
+        picks.ending = .on
+
+        #expect(picks.until == at("2027-07-04T19:00:00+02:00"))
+        #expect(picks.draft() != nil)
+    }
+
+    @Test func editingAnEventFarAheadOffersAnEndDateAfterItsStart() throws {
+        let event = fetched(nil, start: .instant(at("2027-09-03T17:00:00Z")), end: .instant(at("2027-09-03T19:00:00Z")))
+        var picks = EventForm(editing: event, now: at("2027-02-01T09:00:00Z"), timeZone: oslo)
+        picks.repeats = .weekly
+        picks.ending = .on
+
+        #expect(picks.until == at("2027-10-03T17:00:00Z"))
+        #expect(picks.draft() != nil)
+    }
+
+    @Test func anAllDayEventGivenATimeRunsAnHour() throws {
+        let event = fetched(nil, start: .day(day(2027, 2, 5)), end: .day(day(2027, 2, 6)))
+        var picks = EventForm(editing: event, now: at("2027-02-01T09:00:00Z"), timeZone: oslo)
+
+        picks.isAllDay = false
+
+        let draft = try #require(picks.draft())
+        #expect(draft.start == .instant(at("2027-02-05T00:00:00+01:00")))
+        #expect(draft.end == .instant(at("2027-02-05T01:00:00+01:00")))
+    }
+
     @Test func aNewEventStartsAtTheNextFullHourTodayAndRunsAnHour() {
         let picks = EventForm(on: day(2027, 2, 5), now: at("2027-02-05T14:20:00+01:00"), timeZone: oslo)
 

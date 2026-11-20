@@ -52,7 +52,7 @@ struct EventDetailSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.l) {
                 EventFacts(event: event, occurrence: opened.occurrence)
-                if let details = event.details {
+                if let details = opened.occurrence?.details ?? event.details {
                     Text(details)
                         .huddleText(Theme.Typography.message)
                         .foregroundStyle(Theme.Colors.fg)

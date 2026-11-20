@@ -110,7 +110,7 @@ struct EventsMonthCard: View {
         Group {
             if count > 3 {
                 Text("\(count)")
-                    .font(HuddleFonts.swiftUIFont(.body, size: 9, weight: 700))
+                    .huddleText(Theme.Typography.badge)
                     .monospacedDigit()
                     .foregroundStyle(color)
             } else {
@@ -121,7 +121,7 @@ struct EventsMonthCard: View {
                 }
             }
         }
-        .frame(height: 7)
+        .frame(height: 12)
         .accessibilityHidden(true)
     }
 

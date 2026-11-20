@@ -29,6 +29,9 @@ public final class EventsStore {
     @ObservationIgnored private var unsentReplies: [String: (reply: EventReply, writes: Int)] = [:]
     /// What the server last agreed to, for events with a reply being sent.
     @ObservationIgnored private var confirmedReplies: [String: EventReply?] = [:]
+    /// Replies the server took, with the refresh number at the time: a
+    /// refresh that began earlier was answered without them.
+    @ObservationIgnored private var repliesSentHere: [(id: String, reply: EventReply, during: Int)] = []
     /// The newest reply write of each event; the next one waits for it.
     @ObservationIgnored private var replyWrites: [String: Task<Void, any Error>] = [:]
 
@@ -71,8 +74,10 @@ public final class EventsStore {
         for change in changedHere {
             replace(change.id, with: change.event, in: &list)
         }
+        repliesSentHere.removeAll { $0.during < refresh }
         events = list.map { event in
-            unsentReplies[event.id].map { event.replying($0.reply, by: account) } ?? event
+            let sent = repliesSentHere.last { $0.id == event.id }?.reply
+            return (unsentReplies[event.id]?.reply ?? sent).map { event.replying($0, by: account) } ?? event
         }
     }
 
@@ -128,6 +133,7 @@ public final class EventsStore {
     /// The server took `reply`.
     func sent(_ reply: EventReply, of eventID: String) {
         confirmedReplies[eventID] = .some(reply)
+        repliesSentHere.append((eventID, reply, serial))
         settle(eventID)
     }
 
@@ -179,6 +185,7 @@ public final class EventsStore {
         changedHere = []
         replyEdits = [:]
         unsentReplies = [:]
+        repliesSentHere = []
         confirmedReplies = [:]
         replyWrites = [:]
         loadedAt = nil

@@ -21,7 +21,11 @@ public struct EventForm: Equatable, Sendable {
     public var hasDate = true
     public var isAllDay = false {
         didSet {
-            guard isAllDay else { return }
+            guard isAllDay else {
+                // A last day is not an end time: give the event an hour.
+                if oldValue, end <= start { end = start.addingTimeInterval(3600) }
+                return
+            }
             // An all-day series cannot end on a date, and an all-day event
             // always has a last day.
             if ending == .on { ending = .never }
@@ -81,7 +85,7 @@ public struct EventForm: Equatable, Sendable {
             : calendar.date(bySettingHour: 10, minute: 0, second: 0, of: day.start(in: timeZone))!
         self.start = start
         end = start.addingTimeInterval(3600)
-        until = calendar.date(byAdding: .month, value: 1, to: start)!
+        until = Self.aMonthAfter(start, in: timeZone)
         eventID = nil
         self.timeZone = timeZone
         workspaceRoom = nil
@@ -114,6 +118,7 @@ public struct EventForm: Equatable, Sendable {
                 hasEnd = false
             }
         }
+        until = Self.aMonthAfter(start, in: timeZone)
         if let rule = event.recurrence, let first = event.start {
             repeats = Repeat(rule.frequency)
             interval = rule.interval
@@ -143,9 +148,18 @@ public struct EventForm: Equatable, Sendable {
     /// An all-day series can only end never or after some times.
     public var offersEndDate: Bool { !isAllDay }
 
+    /// Where "ends on a date" begins: never before the start.
+    private static func aMonthAfter(_ start: Date, in timeZone: TimeZone) -> Date {
+        CalendarDay.gregorian(timeZone).date(byAdding: .month, value: 1, to: start)!
+    }
+
     /// Moves the start and keeps the length: the same time, or for an
-    /// all-day event the same number of days.
+    /// all-day event the same number of days. A weekly series moves to the
+    /// new weekday, and a last date left behind moves past the start.
     public mutating func moveStart(to date: Date) {
+        let weekday = CalendarDay(start, in: timeZone).weekday
+        if CalendarDay(date, in: timeZone).weekday != weekday { weekdays.remove(weekday) }
+        if until < date { until = Self.aMonthAfter(date, in: timeZone) }
         if isAllDay {
             let days = CalendarDay(start, in: timeZone).distance(to: CalendarDay(end, in: timeZone))
             end = CalendarDay(date, in: timeZone).advanced(by: max(days, 0)).start(in: timeZone)
