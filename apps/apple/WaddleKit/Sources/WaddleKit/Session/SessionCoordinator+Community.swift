@@ -77,7 +77,7 @@ extension SessionCoordinator {
 
     /// Runs a write that needs the session, and drops its answer if the
     /// session ended meanwhile.
-    private func whileOnline<Value: Sendable>(_ write: () async throws -> Value) async throws -> Value {
+    func whileOnline<Value: Sendable>(_ write: () async throws -> Value) async throws -> Value {
         guard !isStopped, connection == .online else { throw PortError.notConnected }
         let epoch = connectionEpoch
         let value = try await write()
@@ -121,7 +121,7 @@ extension SessionCoordinator {
         }
     }
 
-    private nonisolated static func attempt<Value: Sendable>(_ request: @Sendable () async throws -> Value) async -> Value? {
+    nonisolated static func attempt<Value: Sendable>(_ request: @Sendable () async throws -> Value) async -> Value? {
         try? await request()
     }
 }

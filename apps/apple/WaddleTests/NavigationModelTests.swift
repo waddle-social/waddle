@@ -71,6 +71,31 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.tab, .feed)
     }
 
+    func testShowingEventsLeavesTheConversationAndOpensThemFromThePhonesFeed() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+        navigation.inspector = .details
+
+        navigation.show(.events)
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertNil(navigation.inspector)
+        XCTAssertEqual(navigation.splitSection, .events)
+        XCTAssertEqual(navigation.tab, .feed)
+        XCTAssertEqual(navigation.feedPath, [.events])
+    }
+
+    func testShowingTheFeedReturnsThePhonesFeedToItsRoot() {
+        let navigation = NavigationModel()
+        navigation.show(.events)
+
+        navigation.show(.feed)
+
+        XCTAssertEqual(navigation.splitSection, .feed)
+        XCTAssertEqual(navigation.tab, .feed)
+        XCTAssertEqual(navigation.feedPath, [])
+    }
+
     func testShowingInboxReturnsThePhoneStackToItsRoot() {
         let navigation = NavigationModel()
         navigation.inboxPath = [.conversation(lobby)]

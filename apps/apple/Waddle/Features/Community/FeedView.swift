@@ -5,10 +5,13 @@ import WaddleKit
 /// people shared, newest first.
 struct FeedView: View {
     @Environment(SessionCoordinator.self) private var session
+    @Environment(NavigationModel.self) private var navigation
     @State private var openStory: Story?
     @State private var isAddingStory = false
     /// A fixed clock, for snapshots; the app follows the real one.
     var clock: Date?
+    /// On the phone, where Events has no tab of its own, the toolbar opens it.
+    var opensEvents = false
 
     var body: some View {
         TimelineView(.everyMinute) { timeline in
@@ -22,6 +25,16 @@ struct FeedView: View {
             await session.refreshCommunity()
         }
         .toolbar {
+            if opensEvents {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        navigation.feedPath = [.events]
+                    } label: {
+                        Label("Events", systemImage: "calendar")
+                    }
+                    .help("Events")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task { await session.refreshCommunity() }
