@@ -65,6 +65,7 @@ pub struct Attachment {
 
 impl Attachment {
     /// Create an attachment with a reaction set.
+    #[must_use]
     pub fn reactions(reactions: ReactionSet) -> Self {
         Self {
             payloads: vec![AttachmentPayload::Reactions(reactions)],
@@ -73,6 +74,7 @@ impl Attachment {
     }
 
     /// Create an empty attachment container.
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             payloads: Vec::new(),
@@ -81,18 +83,21 @@ impl Attachment {
     }
 
     /// Preserve an unknown attachment child.
+    #[must_use]
     pub fn with_unknown_child(mut self, child: Element) -> Self {
         self.unknown_children.push(child);
         self
     }
 
     /// Add a known payload.
+    #[must_use]
     pub fn with_payload(mut self, payload: AttachmentPayload) -> Self {
         self.payloads.push(payload);
         self
     }
 
     /// Return the reaction set if present.
+    #[must_use]
     pub fn reactions_set(&self) -> Option<&ReactionSet> {
         self.payloads.iter().find_map(|payload| match payload {
             AttachmentPayload::Reactions(reactions) => Some(reactions),
@@ -104,11 +109,14 @@ impl Attachment {
 /// XEP-0470 reaction set attached by one publisher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionSet {
+    /// Reaction emoji, trimmed and deduplicated in first-seen order.
     pub emojis: Vec<String>,
+    /// Optional `timestamp` attribute of the `<reactions/>` element.
     pub timestamp: Option<String>,
 }
 
 impl ReactionSet {
+    /// Build a reaction set, trimming and deduplicating `emojis`.
     pub fn new<I, S>(emojis: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -120,15 +128,25 @@ impl ReactionSet {
         }
     }
 
+    /// Set the `timestamp` attribute.
+    #[must_use]
     pub fn with_timestamp(mut self, timestamp: impl Into<String>) -> Self {
         self.timestamp = Some(timestamp.into());
         self
     }
 
+    /// Whether the set holds no reaction.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.emojis.is_empty()
     }
 
+    /// Check the set against the per-publisher limits.
+    ///
+    /// # Errors
+    /// Returns an error when the set holds more than
+    /// [`MAX_REACTIONS_PER_ATTACHMENT`] reactions or a reaction that is
+    /// not a single extended grapheme cluster.
     pub fn validate(&self) -> Result<(), AttachmentValidationError> {
         if self.emojis.len() > MAX_REACTIONS_PER_ATTACHMENT {
             return Err(AttachmentValidationError::TooManyReactions {
@@ -154,26 +172,39 @@ impl ReactionSet {
 /// Summary reaction count for a single emoji.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionSummary {
+    /// Emoji text carried by the reaction.
     pub emoji: String,
+    /// Number of publishers who attached this emoji.
     pub count: u32,
 }
 
 /// XEP-0470 summary payload. Later slices can populate this from the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentSummary {
+    /// Per-emoji reaction counts.
     pub reactions: Vec<ReactionSummary>,
+    /// Number of publishers who attached `<noticed/>`, when any did.
     pub noticed_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a reaction set was refused.
 pub enum AttachmentValidationError {
-    TooManyReactions { actual: usize, max: usize },
+    /// The set holds more reactions than one publisher may attach.
+    TooManyReactions {
+        /// Number of reactions in the set.
+        actual: usize,
+        /// Largest accepted number of reactions.
+        max: usize,
+    },
+    /// A reaction is not a single extended grapheme cluster.
     ReactionNotSingleGrapheme(String),
 }
 
 // ── Detection ────────────────────────────────────────────────────────
 
 /// Check if an element is an `<attachments/>` element.
+#[must_use]
 pub fn is_attachments_element(elem: &Element) -> bool {
     elem.ns() == NS_PUBSUB_ATTACHMENTS && elem.name() == "attachments"
 }
@@ -181,6 +212,7 @@ pub fn is_attachments_element(elem: &Element) -> bool {
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Parse an `<attachments/>` element.
+#[must_use]
 pub fn parse_attachments_element(elem: &Element) -> Option<Attachment> {
     if !is_attachments_element(elem) {
         return None;
@@ -247,6 +279,7 @@ fn parse_summary_element(elem: &Element) -> AttachmentSummary {
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build an `<attachments/>` element.
+#[must_use]
 pub fn build_attachments_element(attachment: &Attachment) -> Element {
     let mut elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS).build();
 
@@ -274,6 +307,8 @@ pub fn build_attachments_element(attachment: &Attachment) -> Element {
     elem
 }
 
+/// Build a `<reactions/>` element.
+#[must_use]
 pub fn build_reactions_element(reactions: &ReactionSet) -> Element {
     let mut elem = Element::builder("reactions", NS_PUBSUB_ATTACHMENTS).build();
     if let Some(timestamp) = &reactions.timestamp {
@@ -293,6 +328,8 @@ pub fn build_reactions_element(reactions: &ReactionSet) -> Element {
     elem
 }
 
+/// Build a `<summary/>` element.
+#[must_use]
 pub fn build_summary_element(summary: &AttachmentSummary) -> Element {
     let mut root = Element::builder("summary", NS_PUBSUB_ATTACHMENTS_SUMMARY).build();
     let mut reactions = Element::builder("reactions", NS_PUBSUB_ATTACHMENTS_SUMMARY).build();
@@ -321,6 +358,7 @@ pub fn build_summary_element(summary: &AttachmentSummary) -> Element {
     root
 }
 
+/// Count reactions and notices across every publisher's attachment.
 pub fn summarize_attachments<I>(attachments: I) -> AttachmentSummary
 where
     I: IntoIterator<Item = (BareJid, Attachment)>,

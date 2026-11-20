@@ -29,6 +29,7 @@ pub mod xep0388;
 pub mod xep0388_inline;
 pub mod xep0388_server;
 pub mod xep0392;
+pub mod xep0470;
 pub mod xep0472;
 pub mod xep0501;
 
