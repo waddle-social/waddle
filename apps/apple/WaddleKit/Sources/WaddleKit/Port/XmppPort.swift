@@ -169,5 +169,25 @@ public protocol CommandPort: AnyObject, Sendable {
     ) async throws -> ExtensionCommandResult
 }
 
+/// The community feed (XEP-0472) and stories (XEP-0501) of the account's
+/// own server.
+public protocol CommunityPort: AnyObject, Sendable {
+    /// Newest first.
+    func fetchFeed(max: Int?) async throws -> [FeedPost]
+    /// Returns the post as published.
+    func publishFeedPost(_ draft: FeedPostDraft) async throws -> FeedPost
+    /// Expired stories included.
+    func fetchStories(max: Int?) async throws -> [Story]
+    /// Returns the story as published.
+    func publishStory(_ draft: StoryDraft) async throws -> Story
+    /// The account's private "seen" state: story id to when it was seen.
+    func fetchStoryReads() async throws -> [String: Date]
+    /// Replaces the whole "seen" state.
+    func publishStoryReads(_ reads: [String: Date]) async throws
+    func fetchStoryReactions(of storyID: String) async throws -> StoryReactions
+    /// Makes `emojis` the account's reactions to the story; empty removes them.
+    func setStoryReactions(_ emojis: [String], on storyID: String) async throws
+}
+
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort
+public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort

@@ -42,6 +42,8 @@ public final class SessionCoordinator {
     /// The Activity overview: unread rooms with their unread messages and
     /// threads.
     public let unreadOverview: UnreadOverviewStore
+    /// The community feed and stories.
+    public let community: CommunityStore
     /// XEP-0050 extension commands, discovered once the session is ready.
     public internal(set) var extensionCommands: [ExtensionCommand] = []
 
@@ -177,6 +179,7 @@ public final class SessionCoordinator {
         self.readCursors = ReadCursorStore()
         self.threadHistory = ThreadHistoryStore()
         self.unreadOverview = UnreadOverviewStore()
+        self.community = CommunityStore()
         avatars.fetch = { [port] jid, knownID in
             await port.fetchAvatar(of: jid, knownID: knownID)
         }
@@ -395,6 +398,7 @@ public final class SessionCoordinator {
         cancelInboxHydrate()
         threadHistory.clear()
         unreadOverview.reset()
+        community.reset()
         onDemandRooms.removeAll()
         destroyedRooms.removeAll()
         departingRooms.removeAll()
