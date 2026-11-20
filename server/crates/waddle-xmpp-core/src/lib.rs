@@ -23,6 +23,7 @@ pub mod waddle_call_lifecycle;
 pub mod waddle_status_preference;
 pub mod waddle_story_reads;
 pub mod xcal;
+pub mod xcal_expansion;
 pub mod xep0201;
 pub mod xep0359;
 pub mod xep0388;

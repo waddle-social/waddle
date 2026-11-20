@@ -667,13 +667,17 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events(
 ): Int
@@ -958,6 +962,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(`ptr`:
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(`ptr`: Long,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_cancel_community_event_occurrence(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,`occurrence`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_community_events(`ptr`: Long,`communityJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_community_event(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`event`: RustBuffer.ByValue,
@@ -1210,6 +1216,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reac
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
 ): Unit
+external fun uniffi_waddle_xmpp_client_ffi_fn_func_expand_community_event(`event`: RustBuffer.ByValue,`fromMs`: Long,`toMs`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Double
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_parse_jid(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1333,6 +1341,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event() != 53397) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1345,10 +1356,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 62037) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence() != 61272) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 23102) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 57706) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 60125) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_community_event() != 52707) {
@@ -2324,10 +2338,22 @@ public interface WaddleClientInterface {
 
     suspend fun `disconnect`()
 
+    /**
+     * Cancels the one occurrence of a repeating event that starts at
+     * `occurrence` (its `recurrence_id`), keeping the rest of the series.
+     */
+    suspend fun `cancelCommunityEventOccurrence`(`communityJid`: kotlin.String, `itemId`: kotlin.String, `occurrence`: WaddleCalendarDate): WaddleEvent
+
+    /**
+     * Every event of the community, each with the RSVPs it has received.
+     */
     suspend fun `fetchCommunityEvents`(`communityJid`: kotlin.String): List<WaddleEvent>
 
     /**
-     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     * Empty id creates. An update replaces the recurrence with the one given
+     * and keeps the RSVPs. Cancelled and changed occurrences are kept too,
+     * unless the start moves or the event stops repeating: they are named
+     * by the start they had.
      */
     suspend fun `publishCommunityEvent`(`communityJid`: kotlin.String, `event`: WaddleEvent): WaddleEvent
 
@@ -3331,6 +3357,34 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     }
 
 
+    /**
+     * Cancels the one occurrence of a repeating event that starts at
+     * `occurrence` (its `recurrence_id`), keeping the rest of the series.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `cancelCommunityEventOccurrence`(`communityJid`: kotlin.String, `itemId`: kotlin.String, `occurrence`: WaddleCalendarDate) : WaddleEvent {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_cancel_community_event_occurrence(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterString.lower(`itemId`),FfiConverterTypeWaddleCalendarDate.lower(`occurrence`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleEvent.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Every event of the community, each with the RSVPs it has received.
+     */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `fetchCommunityEvents`(`communityJid`: kotlin.String) : List<WaddleEvent> {
@@ -3353,7 +3407,10 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     * Empty id creates. An update replaces the recurrence with the one given
+     * and keeps the RSVPs. Cancelled and changed occurrences are kept too,
+     * unless the start moves or the event stops repeating: they are named
+     * by the start they had.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -8969,7 +9026,23 @@ data class WaddleEvent (
     ,
     var `end`: WaddleCalendarDate?
     ,
+    /**
+     * Each account's latest RSVP. Publishing does not change them.
+     */
     var `attendees`: List<WaddleEventAttendee>
+    ,
+    var `recurrence`: WaddleRecurrence?
+    ,
+    /**
+     * Starts of the cancelled occurrences. Publishing does not change them;
+     * `cancel_community_event_occurrence` adds one.
+     */
+    var `excluded`: List<WaddleCalendarDate>
+    ,
+    /**
+     * Occurrences changed on their own. Publishing does not change them.
+     */
+    var `overrides`: List<WaddleEventOverride>
 
 ){
 
@@ -8996,6 +9069,9 @@ public object FfiConverterTypeWaddleEvent: FfiConverterRustBuffer<WaddleEvent> {
             FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
             FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
             FfiConverterSequenceTypeWaddleEventAttendee.read(buf),
+            FfiConverterOptionalTypeWaddleRecurrence.read(buf),
+            FfiConverterSequenceTypeWaddleCalendarDate.read(buf),
+            FfiConverterSequenceTypeWaddleEventOverride.read(buf),
         )
     }
 
@@ -9009,7 +9085,10 @@ public object FfiConverterTypeWaddleEvent: FfiConverterRustBuffer<WaddleEvent> {
             FfiConverterOptionalString.allocationSize(value.`workspaceRoom`) +
             FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`start`) +
             FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`end`) +
-            FfiConverterSequenceTypeWaddleEventAttendee.allocationSize(value.`attendees`)
+            FfiConverterSequenceTypeWaddleEventAttendee.allocationSize(value.`attendees`) +
+            FfiConverterOptionalTypeWaddleRecurrence.allocationSize(value.`recurrence`) +
+            FfiConverterSequenceTypeWaddleCalendarDate.allocationSize(value.`excluded`) +
+            FfiConverterSequenceTypeWaddleEventOverride.allocationSize(value.`overrides`)
     )
 
     override fun write(value: WaddleEvent, buf: ByteBuffer) {
@@ -9023,6 +9102,9 @@ public object FfiConverterTypeWaddleEvent: FfiConverterRustBuffer<WaddleEvent> {
             FfiConverterOptionalTypeWaddleCalendarDate.write(value.`start`, buf)
             FfiConverterOptionalTypeWaddleCalendarDate.write(value.`end`, buf)
             FfiConverterSequenceTypeWaddleEventAttendee.write(value.`attendees`, buf)
+            FfiConverterOptionalTypeWaddleRecurrence.write(value.`recurrence`, buf)
+            FfiConverterSequenceTypeWaddleCalendarDate.write(value.`excluded`, buf)
+            FfiConverterSequenceTypeWaddleEventOverride.write(value.`overrides`, buf)
     }
 }
 
@@ -9061,6 +9143,136 @@ public object FfiConverterTypeWaddleEventAttendee: FfiConverterRustBuffer<Waddle
     override fun write(value: WaddleEventAttendee, buf: ByteBuffer) {
             FfiConverterString.write(value.`uri`, buf)
             FfiConverterTypeWaddleEventParticipation.write(value.`status`, buf)
+    }
+}
+
+
+
+/**
+ * One occurrence of an event, as `expand_community_event` works it out.
+ */
+data class WaddleEventOccurrence (
+    /**
+     * The start the recurrence gives the occurrence: the value to cancel it
+     * by. `None` when the event does not repeat.
+     */
+    var `recurrenceId`: WaddleCalendarDate?
+    ,
+    var `start`: WaddleCalendarDate
+    ,
+    var `end`: WaddleCalendarDate?
+    ,
+    var `summary`: kotlin.String
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `location`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleEventOccurrence: FfiConverterRustBuffer<WaddleEventOccurrence> {
+    override fun read(buf: ByteBuffer): WaddleEventOccurrence {
+        return WaddleEventOccurrence(
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+            FfiConverterTypeWaddleCalendarDate.read(buf),
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleEventOccurrence) = (
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`recurrenceId`) +
+            FfiConverterTypeWaddleCalendarDate.allocationSize(value.`start`) +
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`end`) +
+            FfiConverterString.allocationSize(value.`summary`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`location`)
+    )
+
+    override fun write(value: WaddleEventOccurrence, buf: ByteBuffer) {
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`recurrenceId`, buf)
+            FfiConverterTypeWaddleCalendarDate.write(value.`start`, buf)
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`end`, buf)
+            FfiConverterString.write(value.`summary`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`location`, buf)
+    }
+}
+
+
+
+/**
+ * One occurrence of a repeating event that was changed on its own.
+ * A missing field means the occurrence keeps the event's value.
+ */
+data class WaddleEventOverride (
+    /**
+     * The start the occurrence would have had.
+     */
+    var `recurrenceId`: WaddleCalendarDate
+    ,
+    var `summary`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `location`: kotlin.String?
+    ,
+    var `start`: WaddleCalendarDate?
+    ,
+    var `end`: WaddleCalendarDate?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleEventOverride: FfiConverterRustBuffer<WaddleEventOverride> {
+    override fun read(buf: ByteBuffer): WaddleEventOverride {
+        return WaddleEventOverride(
+            FfiConverterTypeWaddleCalendarDate.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleEventOverride) = (
+            FfiConverterTypeWaddleCalendarDate.allocationSize(value.`recurrenceId`) +
+            FfiConverterOptionalString.allocationSize(value.`summary`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`location`) +
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`start`) +
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`end`)
+    )
+
+    override fun write(value: WaddleEventOverride, buf: ByteBuffer) {
+            FfiConverterTypeWaddleCalendarDate.write(value.`recurrenceId`, buf)
+            FfiConverterOptionalString.write(value.`summary`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`location`, buf)
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`start`, buf)
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`end`, buf)
     }
 }
 
@@ -11786,6 +11998,71 @@ public object FfiConverterTypeWaddlePresenceHat: FfiConverterRustBuffer<WaddlePr
     override fun write(value: WaddlePresenceHat, buf: ByteBuffer) {
             FfiConverterString.write(value.`uri`, buf)
             FfiConverterString.write(value.`title`, buf)
+    }
+}
+
+
+
+/**
+ * How an event repeats. Occurrences are worked out by the caller, in UTC.
+ */
+data class WaddleRecurrence (
+    var `frequency`: WaddleRecurrenceFrequency
+    ,
+    /**
+     * Every `interval` days, weeks, months or years; at least 1.
+     */
+    var `interval`: kotlin.UInt
+    ,
+    /**
+     * Empty means the weekday of the event's start.
+     */
+    var `weekdays`: List<WaddleWeekday>
+    ,
+    /**
+     * 1 to 31, or -1 to -31 counted from the end of the month.
+     */
+    var `monthDays`: List<kotlin.Int>
+    ,
+    var `end`: WaddleRecurrenceEnd
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRecurrence: FfiConverterRustBuffer<WaddleRecurrence> {
+    override fun read(buf: ByteBuffer): WaddleRecurrence {
+        return WaddleRecurrence(
+            FfiConverterTypeWaddleRecurrenceFrequency.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeWaddleWeekday.read(buf),
+            FfiConverterSequenceInt.read(buf),
+            FfiConverterTypeWaddleRecurrenceEnd.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRecurrence) = (
+            FfiConverterTypeWaddleRecurrenceFrequency.allocationSize(value.`frequency`) +
+            FfiConverterUInt.allocationSize(value.`interval`) +
+            FfiConverterSequenceTypeWaddleWeekday.allocationSize(value.`weekdays`) +
+            FfiConverterSequenceInt.allocationSize(value.`monthDays`) +
+            FfiConverterTypeWaddleRecurrenceEnd.allocationSize(value.`end`)
+    )
+
+    override fun write(value: WaddleRecurrence, buf: ByteBuffer) {
+            FfiConverterTypeWaddleRecurrenceFrequency.write(value.`frequency`, buf)
+            FfiConverterUInt.write(value.`interval`, buf)
+            FfiConverterSequenceTypeWaddleWeekday.write(value.`weekdays`, buf)
+            FfiConverterSequenceInt.write(value.`monthDays`, buf)
+            FfiConverterTypeWaddleRecurrenceEnd.write(value.`end`, buf)
     }
 }
 
@@ -16178,6 +16455,145 @@ public object FfiConverterTypeWaddlePushVapidLookup : FfiConverterRustBuffer<Wad
 
 
 
+sealed class WaddleRecurrenceEnd {
+
+    object Never : WaddleRecurrenceEnd()
+
+
+    /**
+     * The series has this many occurrences, cancelled ones included.
+     */
+    data class Count(
+        val `count`: kotlin.UInt) : WaddleRecurrenceEnd()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * The last occurrence starts at or before this instant.
+     */
+    data class Until(
+        val `timestampMs`: kotlin.Long) : WaddleRecurrenceEnd()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRecurrenceEnd : FfiConverterRustBuffer<WaddleRecurrenceEnd>{
+    override fun read(buf: ByteBuffer): WaddleRecurrenceEnd {
+        return when(buf.getInt()) {
+            1 -> WaddleRecurrenceEnd.Never
+            2 -> WaddleRecurrenceEnd.Count(
+                FfiConverterUInt.read(buf),
+                )
+            3 -> WaddleRecurrenceEnd.Until(
+                FfiConverterLong.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleRecurrenceEnd) = when(value) {
+        is WaddleRecurrenceEnd.Never -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleRecurrenceEnd.Count -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterUInt.allocationSize(value.`count`)
+            )
+        }
+        is WaddleRecurrenceEnd.Until -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterLong.allocationSize(value.`timestampMs`)
+            )
+        }
+    }
+
+    override fun write(value: WaddleRecurrenceEnd, buf: ByteBuffer) {
+        when(value) {
+            is WaddleRecurrenceEnd.Never -> {
+                buf.putInt(1)
+                Unit
+            }
+            is WaddleRecurrenceEnd.Count -> {
+                buf.putInt(2)
+                FfiConverterUInt.write(value.`count`, buf)
+                Unit
+            }
+            is WaddleRecurrenceEnd.Until -> {
+                buf.putInt(3)
+                FfiConverterLong.write(value.`timestampMs`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class WaddleRecurrenceFrequency {
+
+    DAILY,
+    WEEKLY,
+    MONTHLY,
+    YEARLY;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRecurrenceFrequency: FfiConverterRustBuffer<WaddleRecurrenceFrequency> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleRecurrenceFrequency.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleRecurrenceFrequency) = 4UL
+
+    override fun write(value: WaddleRecurrenceFrequency, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
  * values explicitly so extension references survive the boundary
@@ -16901,6 +17317,45 @@ public object FfiConverterTypeWaddleStatusPreference : FfiConverterRustBuffer<Wa
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class WaddleWeekday {
+
+    SUNDAY,
+    MONDAY,
+    TUESDAY,
+    WEDNESDAY,
+    THURSDAY,
+    FRIDAY,
+    SATURDAY;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleWeekday: FfiConverterRustBuffer<WaddleWeekday> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleWeekday.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleWeekday) = 4UL
+
+    override fun write(value: WaddleWeekday, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -17804,6 +18259,38 @@ public object FfiConverterOptionalTypeWaddlePinPreview: FfiConverterRustBuffer<W
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleRecurrence: FfiConverterRustBuffer<WaddleRecurrence?> {
+    override fun read(buf: ByteBuffer): WaddleRecurrence? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleRecurrence.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleRecurrence?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleRecurrence.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleRecurrence?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleRecurrence.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleRegisterDeviceResult: FfiConverterRustBuffer<WaddleRegisterDeviceResult?> {
     override fun read(buf: ByteBuffer): WaddleRegisterDeviceResult? {
         if (buf.get().toInt() == 0) {
@@ -18664,6 +19151,34 @@ public object FfiConverterSequenceUShort: FfiConverterRustBuffer<List<kotlin.USh
 /**
  * @suppress
  */
+public object FfiConverterSequenceInt: FfiConverterRustBuffer<List<kotlin.Int>> {
+    override fun read(buf: ByteBuffer): List<kotlin.Int> {
+        val len = buf.getInt()
+        return List<kotlin.Int>(len) {
+            FfiConverterInt.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.Int>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterInt.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.Int>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterInt.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -19046,6 +19561,62 @@ public object FfiConverterSequenceTypeWaddleEventAttendee: FfiConverterRustBuffe
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleEventAttendee.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleEventOccurrence: FfiConverterRustBuffer<List<WaddleEventOccurrence>> {
+    override fun read(buf: ByteBuffer): List<WaddleEventOccurrence> {
+        val len = buf.getInt()
+        return List<WaddleEventOccurrence>(len) {
+            FfiConverterTypeWaddleEventOccurrence.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleEventOccurrence>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleEventOccurrence.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleEventOccurrence>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleEventOccurrence.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleEventOverride: FfiConverterRustBuffer<List<WaddleEventOverride>> {
+    override fun read(buf: ByteBuffer): List<WaddleEventOverride> {
+        val len = buf.getInt()
+        return List<WaddleEventOverride>(len) {
+            FfiConverterTypeWaddleEventOverride.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleEventOverride>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleEventOverride.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleEventOverride>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleEventOverride.write(it, buf)
         }
     }
 }
@@ -19948,6 +20519,62 @@ public object FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer<
 
 
 
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleCalendarDate: FfiConverterRustBuffer<List<WaddleCalendarDate>> {
+    override fun read(buf: ByteBuffer): List<WaddleCalendarDate> {
+        val len = buf.getInt()
+        return List<WaddleCalendarDate>(len) {
+            FfiConverterTypeWaddleCalendarDate.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleCalendarDate>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleCalendarDate.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleCalendarDate>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleCalendarDate.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer<List<WaddleWeekday>> {
+    override fun read(buf: ByteBuffer): List<WaddleWeekday> {
+        val len = buf.getInt()
+        return List<WaddleWeekday>(len) {
+            FfiConverterTypeWaddleWeekday.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleWeekday>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleWeekday.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleWeekday>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleWeekday.write(it, buf)
+        }
+    }
+}
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -19971,6 +20598,23 @@ public typealias FfiConverterTypeStanzaId = FfiConverterString
 
 
 
+
+
+        /**
+         * The occurrences of `event` that overlap `from_ms..to_ms`, earliest first.
+         * Recurrences are walked in UTC, the same on every client. An all-day
+         * occurrence sits at midnight UTC of its date, so a caller showing another
+         * time zone should ask for a day more on each side.
+         */
+    @Throws(WaddleException::class) fun `expandCommunityEvent`(`event`: WaddleEvent, `fromMs`: kotlin.Long, `toMs`: kotlin.Long): List<WaddleEventOccurrence> {
+            return FfiConverterSequenceTypeWaddleEventOccurrence.lift(
+    uniffiRustCallWithError(WaddleException) { _status ->
+    UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_func_expand_community_event(
+
+        FfiConverterTypeWaddleEvent.lower(`event`),FfiConverterLong.lower(`fromMs`),FfiConverterLong.lower(`toMs`),_status)
+}
+    )
+    }
 
 
         /**

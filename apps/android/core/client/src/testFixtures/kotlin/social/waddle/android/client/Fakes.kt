@@ -35,6 +35,7 @@ import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleAvatarResult
 import social.waddle.client.ffi.WaddleBookmarkItem
+import social.waddle.client.ffi.WaddleCalendarDate
 import social.waddle.client.ffi.WaddleCallLifecycleReport
 import social.waddle.client.ffi.WaddleCallLifecycleReportOutcome
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
@@ -894,6 +895,9 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     override suspend fun rsvpCommunityEvent(
         communityJid: String, uid: String, selfJid: String, status: WaddleEventParticipation,
     ) = Unit
+    override suspend fun cancelCommunityEventOccurrence(
+        communityJid: String, itemId: String, occurrence: WaddleCalendarDate,
+    ): WaddleEvent = throw UnsupportedOperationException("no event is stored in the fake")
     override suspend fun createEventRoom(name: String, privateRoom: Boolean): String =
         "event-test@conference.example.com"
     override suspend fun eventPlanningItems(roomJid: String): List<WaddlePlanningItem> = emptyList()
