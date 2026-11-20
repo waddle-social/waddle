@@ -857,7 +857,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         &managed,
         request(
             GUEST_PHONE,
-            "protected-disco-revoked",
+            "protected-disco-revoked".to_owned(),
             false,
             naming("query", NS_DISCO_INFO, node).build(),
         ),
@@ -878,7 +878,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         &managed,
         request(
             GUEST_PHONE,
-            "protected-disco-regranted",
+            "protected-disco-regranted".to_owned(),
             false,
             naming("query", NS_DISCO_INFO, node).build(),
         ),
