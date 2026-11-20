@@ -63,7 +63,7 @@ use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
-use crate::db::s2s_spaces::SpaceSubscriptionGrant;
+use crate::db::s2s_spaces::{SpaceSubscription, SpaceSubscriptionGrant};
 use crate::db::Database;
 use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::route::RemotePrincipal;
@@ -116,34 +116,66 @@ pub struct HostGrantUnavailable;
 pub struct ManagedSpaceGrant {
     affiliation: Affiliation,
     fence: FenceTicket,
-    remote_reply: Option<RemoteSpaceReply>,
+    remote_effect: Option<RemoteSpaceEffect>,
     room_dependencies: Vec<FenceTicket>,
     subscription_grant: SpaceSubscriptionGrant,
 }
 
 #[derive(Debug)]
-struct RemoteSpaceReply {
-    service: BareJid,
-    recipient: Jid,
-    id: String,
+enum RemoteSpaceEffect {
+    Reply {
+        service: BareJid,
+        recipient: Jid,
+        id: String,
+    },
+    Event {
+        key: ScopeKey,
+        recipient: BareJid,
+        subscribed_with: AuthenticationStrength,
+    },
 }
 
 impl ManagedSpaceGrant {
-    /// Check that this effect is the IQ result for the authenticated request
-    /// and that the outbound pair meets the grant's stream assurance.
-    pub(crate) fn permits_remote_reply(
+    /// Check the authorized addresses, stanza shape, and stream assurance.
+    pub(crate) fn permits_remote_effect(
         &self,
         stanza: &minidom::Element,
         strength: AuthenticationStrength,
     ) -> bool {
-        self.remote_reply.as_ref().is_some_and(|reply| {
-            (self.affiliation == Affiliation::Member || strength == AuthenticationStrength::Pkix)
-                && stanza.name() == "iq"
-                && stanza.attr("type") == Some("result")
-                && stanza.attr("from") == Some(reply.service.as_str())
-                && stanza.attr("to") == Some(reply.recipient.as_str())
-                && stanza.attr("id") == Some(reply.id.as_str())
-        })
+        if self.affiliation != Affiliation::Member && strength != AuthenticationStrength::Pkix {
+            return false;
+        }
+        match self.remote_effect.as_ref() {
+            Some(RemoteSpaceEffect::Reply {
+                service,
+                recipient,
+                id,
+            }) => {
+                stanza.name() == "iq"
+                    && stanza.attr("type") == Some("result")
+                    && stanza.attr("from") == Some(service.as_str())
+                    && stanza.attr("to") == Some(recipient.as_str())
+                    && stanza.attr("id") == Some(id.as_str())
+            }
+            Some(RemoteSpaceEffect::Event {
+                key,
+                recipient,
+                subscribed_with,
+            }) => {
+                (*subscribed_with != AuthenticationStrength::Pkix
+                    || strength == AuthenticationStrength::Pkix)
+                    && stanza.name() == "message"
+                    && stanza.attr("from") == Some(key.service().as_str())
+                    && stanza.attr("to") == Some(recipient.as_str())
+                    && stanza
+                        .get_child("event", waddle_xmpp::pubsub::NS_PUBSUB_EVENT)
+                        .and_then(|event| {
+                            event.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB_EVENT)
+                        })
+                        .is_some_and(|items| items.attr("node") == Some(key.node()))
+            }
+            None => false,
+        }
     }
 
     pub(crate) fn subscription_grant(&self) -> SpaceSubscriptionGrant {
@@ -724,10 +756,37 @@ impl HostGrantGate {
         let mut grant = self
             .space_read(key, &subject, &PrincipalEvidence::of(principal))
             .await?;
-        grant.remote_reply = Some(RemoteSpaceReply {
+        grant.remote_effect = Some(RemoteSpaceEffect::Reply {
             service: key.service().clone(),
             recipient: principal.address().clone(),
             id: request.id().to_owned(),
+        });
+        Some(grant)
+    }
+
+    /// Authorize an event only for a preference still backed by the same
+    /// effective affiliation. Regranting access requires resubscription.
+    pub async fn space_subscription_event(
+        &self,
+        key: &ScopeKey,
+        subscription: &SpaceSubscription,
+    ) -> Option<ManagedSpaceGrant> {
+        let expected = subscription.grant?;
+        let subject = GrantSubject::new(subscription.account.clone()).ok()?;
+        let mut grant = self
+            .space_read(
+                key,
+                &subject,
+                &PrincipalEvidence::Stream(subscription.evidence),
+            )
+            .await?;
+        if grant.subscription_grant != expected {
+            return None;
+        }
+        grant.remote_effect = Some(RemoteSpaceEffect::Event {
+            key: key.clone(),
+            recipient: subscription.account.clone(),
+            subscribed_with: subscription.evidence.strength(),
         });
         Some(grant)
     }
@@ -779,7 +838,7 @@ impl HostGrantGate {
         ticket.is_current().then_some(ManagedSpaceGrant {
             affiliation,
             fence: ticket,
-            remote_reply: None,
+            remote_effect: None,
             room_dependencies: Vec::new(),
             subscription_grant: SpaceSubscriptionGrant {
                 lifecycle: standing.lifecycle,

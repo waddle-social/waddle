@@ -49,7 +49,9 @@ use waddle_server::db::s2s_spaces::{
     lock_space_deletion, FederatedSpaces, SpaceSubscriptionGrant, SpaceSubscriptions,
     SubscriptionRecord, SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
 };
-use waddle_server::permissions::host_grant::{BindSpace, GrantOperationId, StreamEvidence};
+use waddle_server::permissions::host_grant::{
+    BindSpace, GrantOperationId, ScopeKey, StreamEvidence,
+};
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::test_support::host_spaces_for_remote_principals;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem};
@@ -601,6 +603,25 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .expect("read current preference");
     assert_eq!(still_subscribed.len(), 1);
     assert_eq!(still_subscribed[0].grant, Some(token));
+
+    let key = ScopeKey::new(spaces(), node).expect("qualified Space");
+    let gates = &managed.hosted.state.deps.app_state.host_grants;
+    let delivery = gates
+        .space_subscription_event(&key, &still_subscribed[0])
+        .await
+        .expect("the subscription's current affiliation can authorize delivery");
+    assert_eq!(
+        delivery.admit(|affiliation| affiliation),
+        Some(waddle_xmpp::pubsub::Affiliation::Member)
+    );
+    let old_subscription = waddle_server::db::s2s_spaces::SpaceSubscription {
+        grant: Some(stale),
+        ..still_subscribed[0].clone()
+    };
+    assert!(gates
+        .space_subscription_event(&key, &old_subscription)
+        .await
+        .is_none());
 
     for (attempt, expected) in [("first", "result"), ("repeat", "error")] {
         let unsubscribe = naming("unsubscribe", NS_PUBSUB, node)
