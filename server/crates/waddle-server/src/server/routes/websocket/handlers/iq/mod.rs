@@ -73,6 +73,8 @@ use xmpp_parsers::minidom::Element;
 use crate::server::routes::websocket::frame::ResponseBatch;
 use crate::telemetry::mark_span_error;
 
+const HOME_FEDERATION_FEATURE: &str = "urn:waddle:s2s:0";
+
 mod archive_inbox_upload;
 pub(crate) mod blocking;
 mod caps_result;

@@ -255,6 +255,11 @@ impl S2sConfig {
         self.endpoints.get(domain).map_or(&[], Vec::as_slice)
     }
 
+    /// Remote domains for which this process has an explicit endpoint.
+    pub(crate) fn endpoint_domains(&self) -> impl Iterator<Item = &CanonicalDomain> {
+        self.endpoints.keys()
+    }
+
     /// The caps and rates.
     pub fn limits(&self) -> &ResourceLimits {
         &self.limits

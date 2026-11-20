@@ -1,3 +1,4 @@
+use super::super::extension_forms::extension_namespace_feature;
 use super::{
     build_disco_info_response, build_disco_info_response_with_extensions, command_name_by_boundary,
     extension_command_metadata_form, extension_features_for_disco, extension_route_disco_node,
@@ -90,13 +91,15 @@ pub(super) async fn handle_extensions_disco_info<'a>(
             "extension-route",
             Some(route.label.as_str()),
         )];
-        let features = vec![
+        let mut features = vec![
             Feature::disco_info(),
             Feature::new(DATA_FORMS_NS),
             Feature::new("urn:waddle:extension:1"),
             Feature::new(EXTENSION_ROUTE_FORM_TYPE),
-            Feature::new(route.payload_namespace.as_str()),
         ];
+        features.extend(extension_namespace_feature(
+            route.payload_namespace.as_str(),
+        ));
         let manifest = state
             .deps
             .protocol

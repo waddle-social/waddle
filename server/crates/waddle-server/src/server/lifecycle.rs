@@ -571,29 +571,6 @@ pub async fn start_with_config_and_owner_outbox(
         )?),
         None => None,
     };
-    let http_s2s_router = s2s_router.clone();
-    let http_handle = tokio::spawn(async move {
-        start_http_server(HttpServerDeps {
-            state: http_state,
-            server_config: http_server_config,
-            xmpp_config: http_xmpp_config,
-            mam_storage: http_mam_storage,
-            pubsub_database_storage: http_pubsub_database_storage,
-            owner_outbox,
-            acme_http01_challenge_service,
-            listener: http_listener,
-            shutdown_handle: http_shutdown_handle,
-            drain_complete: http_drain_complete,
-            sm_drain_complete,
-            shutdown_deadline: http_shutdown_deadline,
-            connections_drained,
-            s2s_router: http_s2s_router,
-        })
-        .await
-    });
-
-    info!("TCP XMPP listener disabled; serving WebSocket C2S only");
-
     // The S2S service starts draining when the process stop token fires,
     // after the router's shutdown notices where a router runs, and is
     // joined below. It shares no lock, permit or task with HTTP.
@@ -628,6 +605,30 @@ pub async fn start_with_config_and_owner_outbox(
         }
         service
     });
+
+    // Discovery queries must see the attached S2S transport on their first request.
+    let http_s2s_router = s2s_router.clone();
+    let http_handle = tokio::spawn(async move {
+        start_http_server(HttpServerDeps {
+            state: http_state,
+            server_config: http_server_config,
+            xmpp_config: http_xmpp_config,
+            mam_storage: http_mam_storage,
+            pubsub_database_storage: http_pubsub_database_storage,
+            owner_outbox,
+            acme_http01_challenge_service,
+            listener: http_listener,
+            shutdown_handle: http_shutdown_handle,
+            drain_complete: http_drain_complete,
+            sm_drain_complete,
+            shutdown_deadline: http_shutdown_deadline,
+            connections_drained,
+            s2s_router: http_s2s_router,
+        })
+        .await
+    });
+
+    info!("TCP XMPP listener disabled; serving WebSocket C2S only");
 
     // Run the Ecdysis shutdown lifecycle
     let shutdown_handle = tokio::spawn(async move {

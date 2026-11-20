@@ -609,6 +609,12 @@ pub enum SeatAdoption {
 ///   refuse or strip any it finds.
 #[async_trait]
 pub trait RemoteRoute: Send + Sync {
+    /// Whether local accounts have a configured route to at least one
+    /// admissible remote domain. Individual peers may be unavailable.
+    fn supports_client_federation(&self) -> bool {
+        false
+    }
+
     /// Offer one stanza for remote delivery.
     async fn route(&self, outbound: RemoteOutbound) -> RemoteRouteOutcome;
 

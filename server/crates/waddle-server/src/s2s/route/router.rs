@@ -47,7 +47,7 @@ use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
     RemoteRouteOutcome, SeatAdoption, ServedDomains, ServedService, UnroutableReason,
 };
-use crate::s2s::config::S2sConfig;
+use crate::s2s::config::{AdmissionMode, S2sConfig};
 use crate::s2s::conn::{
     ConnectError, S2sHandle, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd,
     TransmitError, VerifiedPeerStream, Waited,
@@ -1084,6 +1084,31 @@ impl S2sRouter {
 
 #[async_trait]
 impl RemoteRoute for S2sRouter {
+    fn supports_client_federation(&self) -> bool {
+        let inner = &self.inner;
+        if inner.transport.get().is_none()
+            || inner.shutdown.is_cancelled()
+            || !CanonicalDomain::from_domain(inner.served.local())
+                .is_ok_and(|home| inner.config.is_local(&home))
+        {
+            return false;
+        }
+
+        let admission = inner.config.admission();
+        let is_remote = |domain: &CanonicalDomain| !inner.served.serves(domain.as_domain_ref());
+        if inner.config.discovery_enabled() {
+            return match admission.mode() {
+                AdmissionMode::Closed => false,
+                AdmissionMode::Allowlist => admission.allowlist().iter().any(is_remote),
+                AdmissionMode::Open => true,
+            };
+        }
+        inner
+            .config
+            .endpoint_domains()
+            .any(|domain| is_remote(domain) && admission.decide(domain).is_ok())
+    }
+
     async fn route(&self, outbound: RemoteOutbound) -> RemoteRouteOutcome {
         self.inner.route(outbound).await
     }
