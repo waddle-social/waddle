@@ -24,11 +24,15 @@
 // The shared fixtures serve several host-grant suites; this binary uses a
 // subset of each.
 #[allow(dead_code)]
+mod host_grant_revocation_support;
+#[allow(dead_code)]
 mod host_grant_support;
 #[allow(dead_code)]
 mod ingress_support;
 #[path = "host_grant_support/live_spicedb.rs"]
 mod live_spicedb;
+#[allow(dead_code, unused_imports)]
+mod s2s_inbound_muc_support;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -834,6 +838,174 @@ async fn live_spicedb_the_first_projection_requires_a_fresh_namespace() {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL and SpiceDB"]
+async fn live_spicedb_graph_only_admin_cannot_moderate_a_managed_room_over_s2s() {
+    use host_grant_revocation_support::{role_item, Replica};
+    use s2s_inbound_muc_support::{
+        error_condition, item, local_join, local_receives, local_set, presence_between,
+        remote_join, remote_set, statuses, Hosted, Wiring, ARRIVES, HOME_B, QUIET,
+    };
+    use waddle_server::s2s::route::RouterLimits;
+    use waddle_xmpp::{muc::room_actor::GetSnapshot, muc::room_registry_actor::GetRoom, Role};
+
+    const GUEST: &str = "guest@home-b.test";
+    const GUEST_PHONE: &str = "guest@home-b.test/phone";
+    let _serial = LIVE_SPICEDB.lock().await;
+    for (label, trusted) in [("hg_graph_untrusted", false), ("hg_graph_trusted", true)] {
+        let live = Live::start(label).await;
+        let wiring = Wiring::new(|spec| {
+            if trusted {
+                spec.trusted_homes = vec![HOME_B];
+            }
+        })
+        .await;
+        let authority = live.replica().await;
+        let lifecycle = live.fixture.scope.lifecycle;
+        assert!(matches!(
+            authority
+                .reconcile(lifecycle)
+                .await
+                .expect("bootstrap projection"),
+            Reconciliation::Activated(_)
+        ));
+        for account in [GUEST, "alice@example.com"] {
+            live.fixture
+                .set(OWNER, account, RoomAffiliation::Member)
+                .await
+                .expect("canonical membership");
+            assert!(matches!(
+                authority
+                    .reconcile(lifecycle)
+                    .await
+                    .expect("membership projection"),
+                Reconciliation::Activated(_)
+            ));
+        }
+        let backend = PermissionActor::from_server_config(&live.config)
+            .await
+            .expect("the live permission backend");
+        assert_eq!(backend.backend_name(), "spicedb");
+        let replica = Replica::start_running_with_backend(
+            live.fixture.ingress.db.database_url(),
+            live.fixture.ingress.deployment_uuid(),
+            &wiring.config,
+            backend,
+        )
+        .await;
+        replica.account("owner").await;
+        replica.account("alice").await;
+        replica.channel(&live.fixture.scope.channel_id).await;
+        replica.federate(&live.fixture.scope.channel_id, true).await;
+        let hosted =
+            Hosted::serve(wiring, Arc::clone(&replica.state), RouterLimits::default()).await;
+        let room = live.fixture.scope.room.as_str();
+        let guest_occupant = format!("{room}/guest");
+        let target_occupant = format!("{room}/alice");
+        let member = Some(("participant".to_owned(), "member".to_owned()));
+        let mut owner = replica.client("owner", "desk").await;
+        let mut target = replica.client("alice", "desk").await;
+        assert_eq!(
+            error_condition(&local_join(&mut owner, room, "owner").await),
+            None
+        );
+        assert_eq!(item(&local_join(&mut target, room, "alice").await), member);
+        hosted
+            .peer_sends(remote_join(GUEST_PHONE, room, "guest", "guest-join"))
+            .await;
+        let admitted = hosted
+            .at_peer(|stanza| {
+                presence_between(stanza, &guest_occupant, GUEST_PHONE)
+                    && statuses(stanza).iter().any(|code| code == "110")
+            })
+            .await
+            .expect("the guest joins on its canonical membership");
+        assert_eq!(item(&admitted), member);
+        assert!(hosted.seat(room, GUEST_PHONE).is_some());
+        let room_actor = replica
+            .state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: live.fixture.scope.room.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .expect("room actor");
+
+        let channel = live.channel();
+        let graph_only_admin = Tuple::new(
+            channel.clone(),
+            Relation::new("admin"),
+            Subject::user(GUEST),
+        );
+        let raw = live.unguarded_actor().await;
+        assert!(!spicedb_allows(&live, GUEST, Permission::Moderate, &channel).await);
+        raw.ask(WriteTuple {
+            tuple: graph_only_admin.clone(),
+        })
+        .await
+        .expect("graph-only relationship");
+        assert!(spicedb_allows(&live, GUEST, Permission::Moderate, &channel).await);
+        assert_eq!(
+            live.fixture.affiliations(GUEST).await,
+            Some((RoomAffiliation::Member, RoomAffiliation::Member))
+        );
+
+        hosted
+            .peer_sends(remote_set(
+                GUEST_PHONE,
+                room,
+                "graph-only-devoice",
+                role_item("visitor", "alice"),
+            ))
+            .await;
+        let refused = hosted.answered("graph-only-devoice").await;
+        assert_eq!(refused.attr("from"), Some(room), "{refused:?}");
+        assert_eq!(refused.attr("to"), Some(GUEST_PHONE), "{refused:?}");
+        assert_eq!(
+            error_condition(&refused).as_deref(),
+            Some("forbidden"),
+            "{refused:?}"
+        );
+        let target_devoiced = |presence: &minidom::Element| {
+            presence.name() == "presence"
+                && presence.attr("from") == Some(target_occupant.as_str())
+                && item(presence).is_some_and(|(role, _)| role == "visitor")
+        };
+        assert!(local_receives(&mut target, QUIET, target_devoiced)
+            .await
+            .is_none());
+        let snapshot = room_actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert_eq!(snapshot.room.occupants["alice"].role, Role::Participant);
+        assert!(spicedb_allows(&live, GUEST, Permission::Moderate, &channel).await);
+
+        let authorized = local_set(
+            &mut owner,
+            room,
+            "owner-devoice",
+            role_item("visitor", "alice"),
+        )
+        .await;
+        assert_eq!(authorized.attr("type"), Some("result"), "{authorized:?}");
+        assert!(local_receives(&mut target, ARRIVES, target_devoiced)
+            .await
+            .is_some());
+        let snapshot = room_actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert_eq!(snapshot.room.occupants["alice"].role, Role::Visitor);
+        raw.ask(DeleteTuple {
+            tuple: graph_only_admin,
+        })
+        .await
+        .expect("remove graph-only relationship");
+        assert!(!spicedb_allows(&live, GUEST, Permission::Moderate, &channel).await);
+        drop(hosted);
+        drop(replica);
+        live.close().await;
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires a disposable SpiceDB: WADDLE_TEST_SPICEDB_ENDPOINT, WADDLE_TEST_SPICEDB_PRESHARED_KEY and WADDLE_TEST_SPICEDB_DISPOSABLE=1"]
 async fn live_spicedb_contradicting_projection_state_is_never_written_over() {
     let _serial = LIVE_SPICEDB.lock().await;
@@ -930,10 +1102,11 @@ async fn live_spicedb_contradicting_projection_state_is_never_written_over() {
             .expect("write"),
         ProjectionWrite::Applied
     );
+    let graph_only_owner = "mallory@example.com";
     let stray = Tuple::new(
         live.channel(),
         Relation::new("owner"),
-        Subject::user("mallory@example.com"),
+        Subject::user(graph_only_owner),
     );
     let legacy = live.unguarded_actor().await;
     legacy
@@ -942,20 +1115,25 @@ async fn live_spicedb_contradicting_projection_state_is_never_written_over() {
         })
         .await
         .expect("stray relationship");
+    assert!(
+        spicedb_allows(
+            &live,
+            graph_only_owner,
+            Permission::Moderate,
+            &live.channel()
+        )
+        .await
+    );
+    assert_eq!(live.fixture.affiliations(graph_only_owner).await, None);
+    assert!(sql_admits(&live.fixture, OWNER, HostGrantAction::Moderate).await);
+    assert!(!sql_admits(&live.fixture, graph_only_owner, HostGrantAction::Moderate).await);
     assert_eq!(
         authority.reconcile(lifecycle).await.expect("pass"),
         expect(ProjectionContradiction::ContentMismatch)
     );
     assert!(!sql_admits(&live.fixture, "dave@example.com", HostGrantAction::Read).await);
     // The stray owner is nobody to the canonical policy.
-    assert!(
-        !sql_admits(
-            &live.fixture,
-            "mallory@example.com",
-            HostGrantAction::Manage
-        )
-        .await
-    );
+    assert!(!sql_admits(&live.fixture, graph_only_owner, HostGrantAction::Manage).await);
     legacy
         .ask(DeleteTuple { tuple: stray })
         .await

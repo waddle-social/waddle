@@ -29,9 +29,11 @@ use waddle_server::ingress::IngressAuthority;
 use waddle_server::permissions::host_grant::{
     FederationSnapshot, HostGrantAttachment, HostGrantStore, PrincipalPolicy, ReplicaFence,
 };
+use waddle_server::permissions::PermissionActor;
 use waddle_server::s2s::config::S2sConfig;
 use waddle_server::test_support::{
     router, seed_local_account, websocket_state_with_host_grant_fence,
+    websocket_state_with_host_grant_fence_and_backend,
     websocket_state_with_host_grant_fence_running_s2s, WebSocketState,
 };
 use waddle_ws_test_support::WsXmppClient;
@@ -79,17 +81,31 @@ impl Replica {
     /// lineage is `deployment`'s. Room-manifest acceptance and every other
     /// surface decide with one attachment, as on a server.
     pub async fn start(database_url: &str, deployment: Uuid) -> Self {
-        Self::build(database_url, deployment, None).await
+        Self::build(database_url, deployment, None, None).await
     }
 
     /// [`Self::start`] for a replica that runs the S2S snapshot `s2s`: its
     /// attachment and its state decide remote principals under that
     /// snapshot, as startup arranges when S2S is enabled.
     pub async fn start_running(database_url: &str, deployment: Uuid, s2s: &S2sConfig) -> Self {
-        Self::build(database_url, deployment, Some(s2s)).await
+        Self::build(database_url, deployment, Some(s2s), None).await
     }
 
-    async fn build(database_url: &str, deployment: Uuid, s2s: Option<&S2sConfig>) -> Self {
+    pub async fn start_running_with_backend(
+        database_url: &str,
+        deployment: Uuid,
+        s2s: &S2sConfig,
+        backend: PermissionActor,
+    ) -> Self {
+        Self::build(database_url, deployment, Some(s2s), Some(backend)).await
+    }
+
+    async fn build(
+        database_url: &str,
+        deployment: Uuid,
+        s2s: Option<&S2sConfig>,
+        backend: Option<PermissionActor>,
+    ) -> Self {
         let principals = principals(s2s);
         let config = DatabaseConfig::new(DatabaseDriver::Postgres, database_url);
         let database = Database::from_config("revocation-replica", &config)
@@ -123,12 +139,21 @@ impl Replica {
         // The fenced state binds its host-grant gate to the authority's
         // attachment gate: offering that gate again binds nothing, and the
         // surfaces decide with the attachment acceptance holds.
-        let state = match s2s {
-            Some(s2s) => {
+        let state = match (s2s, backend) {
+            (Some(s2s), Some(backend)) => {
+                websocket_state_with_host_grant_fence_and_backend(
+                    pool,
+                    Arc::clone(&authority),
+                    s2s,
+                    backend,
+                )
+                .await
+            }
+            (Some(s2s), None) => {
                 websocket_state_with_host_grant_fence_running_s2s(pool, Arc::clone(&authority), s2s)
                     .await
             }
-            None => websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await,
+            (None, _) => websocket_state_with_host_grant_fence(pool, Arc::clone(&authority)).await,
         };
         let host_grants = &state.deps.app_state.host_grants;
         assert!(!host_grants.bind_attachment(authority.host_grant_gate()));
@@ -260,6 +285,7 @@ impl Deployment {
                 grants.ingress.db.database_url(),
                 grants.ingress.deployment_uuid(),
                 s2s,
+                None,
             )
             .await;
             if index == 0 {

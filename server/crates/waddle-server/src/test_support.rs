@@ -1446,7 +1446,7 @@ pub async fn websocket_state_with_host_grant_fence(
     db_pool: Arc<DatabasePool>,
     ingress: Arc<IngressAuthority>,
 ) -> Arc<WebSocketState> {
-    host_grant_fence_state(db_pool, ingress, None).await
+    host_grant_fence_state(db_pool, ingress, None, None).await
 }
 
 /// [`websocket_state_with_host_grant_fence`] for a replica that runs the
@@ -1466,6 +1466,27 @@ pub async fn websocket_state_with_host_grant_fence_running_s2s(
         Some(crate::permissions::host_grant::FederationSnapshot::of(
             config,
         )),
+        None,
+    )
+    .await
+}
+
+/// A federating test replica using the supplied permission backend under
+/// the same canonical scope guard as its ingress and room registry.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_host_grant_fence_and_backend(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+    config: &crate::s2s::config::S2sConfig,
+    backend: crate::permissions::PermissionActor,
+) -> Arc<WebSocketState> {
+    host_grant_fence_state(
+        db_pool,
+        ingress,
+        Some(crate::permissions::host_grant::FederationSnapshot::of(
+            config,
+        )),
+        Some(backend),
     )
     .await
 }
@@ -1475,6 +1496,7 @@ async fn host_grant_fence_state(
     db_pool: Arc<DatabasePool>,
     ingress: Arc<IngressAuthority>,
     s2s_federation: Option<crate::permissions::host_grant::FederationSnapshot>,
+    permission_backend: Option<crate::permissions::PermissionActor>,
 ) -> Arc<WebSocketState> {
     use crate::permissions::host_grant::{EnrolledScopes, HostGrantGate, HostGrantStore};
     use kameo::actor::Spawn;
@@ -1483,7 +1505,10 @@ async fn host_grant_fence_state(
         HostGrantStore::open(database.clone()).expect("the host-grant fence needs PostgreSQL");
     let enrolled = EnrolledScopes::watch(store.clone());
     let permission_actor = crate::permissions::PermissionActor::spawn(
-        crate::permissions::PermissionActor::new_for_tests(Arc::new(database.clone()))
+        permission_backend
+            .unwrap_or_else(|| {
+                crate::permissions::PermissionActor::new_for_tests(Arc::new(database.clone()))
+            })
             .with_host_grant_authority(store.clone(), enrolled.clone()),
     );
     let host_grants = HostGrantGate::with_enrolled_scopes(store, enrolled);
