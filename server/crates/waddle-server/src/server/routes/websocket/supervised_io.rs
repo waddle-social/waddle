@@ -616,8 +616,16 @@ struct WriteRequest<T> {
 /// may invoke `attempt` only while their authority holds.
 /// The generic supervised-I/O test harness does not install this fence; the
 /// WebSocket adapter supplies one for every submitted frame.
+pub(crate) type WritePreparation<'a> =
+    futures::future::BoxFuture<'a, Result<Box<dyn Send + 'a>, ()>>;
+
 pub(crate) trait WriteAuthority: Send + Sync {
     fn revoked(&self) -> futures::future::BoxFuture<'_, ()>;
+    /// Acquire any storage guard after readiness and release it immediately
+    /// after the synchronous sink attempt. Ordinary frames need no guard.
+    fn prepare(&self) -> Option<WritePreparation<'_>> {
+        None
+    }
     fn attempt(
         &self,
         connection_ref: &ConnectionRef,
@@ -3828,6 +3836,21 @@ where
     }
 
     let authority = request.authority.clone();
+    let prepared = match authority.as_deref().and_then(WriteAuthority::prepare) {
+        Some(prepare) => tokio::select! {
+            biased;
+            _ = force_stop.cancelled() => return SendOutcome::Stopped,
+            _ = peer_close.cancelled() => return SendOutcome::PeerClosed,
+            _ = stop.cancelled() => return SendOutcome::Stopped,
+            _ = shutdown.cancelled() => return SendOutcome::Shutdown,
+            _ = authority_revoked(authority.as_deref()) => return SendOutcome::AuthorityRevoked,
+            prepared = prepare => match prepared {
+                Ok(guard) => Some(guard),
+                Err(()) => return SendOutcome::AuthorityRevoked,
+            },
+        },
+        None => None,
+    };
     let mut start_result = None;
     let mut attempt = || {
         let value = request
@@ -3844,6 +3867,7 @@ where
             true
         }
     };
+    drop(prepared);
     if !admitted {
         return SendOutcome::AuthorityRevoked;
     }

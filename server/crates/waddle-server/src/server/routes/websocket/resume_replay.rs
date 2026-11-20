@@ -99,6 +99,14 @@ async fn authorize_protected(
     grants: &HostGrantGate,
 ) -> Option<ResponseFrame> {
     let payload = SmReplayPayload::from_storage(stored).ok()?;
+    authorize_protected_payload(payload, recipient, grants).await
+}
+
+pub(super) async fn authorize_protected_payload(
+    payload: SmReplayPayload,
+    recipient: &jid::FullJid,
+    grants: &HostGrantGate,
+) -> Option<ResponseFrame> {
     let identity = payload.protected_space_reply()?;
     let grant = grants
         .refresh_local_space_reply(identity, recipient)

@@ -1886,6 +1886,9 @@ pub(crate) fn queue_space_notification(
     event: &Message,
     bookmark_version: Option<crate::permissions::host_grant::SpaceBookmarkVersion>,
 ) {
+    if let Some(version) = &bookmark_version {
+        super::local_space_events::queue(state, service, &node.node_name, event, version);
+    }
     if state.deps.app_state.s2s_federation.is_none() {
         return;
     }

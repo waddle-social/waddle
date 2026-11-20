@@ -371,6 +371,7 @@ where
             #[cfg(feature = "test-support")]
             sasl2_test_capability,
             room_listings: Default::default(),
+        local_space_publications: Arc::new(tokio::sync::Semaphore::new(8)),
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,

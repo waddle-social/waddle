@@ -94,6 +94,7 @@ pub(crate) use s2s_room_relay::{
     REMOTE_ROOM_REQUEST_REPLY_TIMEOUT,
 };
 pub(crate) mod s2s_rooms;
+mod local_space_events;
 pub(crate) mod s2s_spaces;
 mod sasl;
 mod send;

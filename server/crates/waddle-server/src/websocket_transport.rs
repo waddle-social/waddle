@@ -1311,6 +1311,19 @@ struct FrameAuthority {
 }
 
 impl WriteAuthority for FrameAuthority {
+    fn prepare(
+        &self,
+    ) -> Option<crate::server::routes::websocket::supervised_io::WritePreparation<'_>> {
+        let Some(SpaceReplyAuthority::Managed(grant)) = self.space_reply.as_ref() else {
+            return None;
+        };
+        grant.replay_identity().subscription_id()?;
+        Some(Box::pin(async move {
+            let guard = grant.hold_subscription().await.ok_or(())?;
+            Ok(Box::new(guard) as Box<dyn Send + '_>)
+        }))
+    }
+
     fn revoked(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             match self.mode {

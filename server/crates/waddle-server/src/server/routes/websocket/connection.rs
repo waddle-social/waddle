@@ -46,7 +46,9 @@ use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::protocol::TimerId;
-use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint, SocketOutboundReceiver};
+use waddle_xmpp::registry::{
+    LocalSocketIo, SocketOutboundEndpoint, SocketOutboundFrame, SocketOutboundReceiver,
+};
 use waddle_xmpp::stream_management::SmRequest;
 
 mod binding;
@@ -558,7 +560,7 @@ enum LoopEvent {
     DeferredInbound,
     Inbound(Option<Result<Message, InputError<axum::Error>>>),
     // Boxed so the largest payload does not set the size of every event.
-    Outbound(Option<Box<OutboundStanza>>),
+    Outbound(Option<Box<SocketOutboundFrame>>),
     OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
     TimerExpired(TimerId),
     SendWindowPauseDeadline,
@@ -1166,7 +1168,7 @@ impl LiveSocketState {
             // rather than overflowing the SM unacked queue. The inbound
             // source above stays active, so client acks keep arriving and
             // releasing the pause.
-            outbound = self.outbound_rx.recv(), if !send_window_paused => {
+            outbound = self.outbound_rx.recv_next(), if !send_window_paused => {
                 LoopEvent::Outbound(outbound.map(Box::new))
             }
 
@@ -1465,15 +1467,15 @@ impl LiveSocketState {
 
             // Handle outbound messages routed from other connections.
             LoopEvent::Outbound(outbound) => {
-                match outbound {
-                    Some(outbound_stanza) => {
+                match outbound.map(|event| *event) {
+                    Some(SocketOutboundFrame::Ordinary(outbound_stanza)) => {
                         if !handle_outbound_stanza(
                             &mut ws_sender,
                             &mut ws_receiver,
                             state,
                             &mut *conn,
                             &mut *timers,
-                            *outbound_stanza,
+                            outbound_stanza,
                             OutboundAuthority {
                                 permit: admission_permit,
                                 shutdown: shutdown_token,
@@ -1481,6 +1483,44 @@ impl LiveSocketState {
                         )
                         .await
                         {
+                            return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
+                        }
+                    }
+                    Some(SocketOutboundFrame::ProtectedSpace(payload)) => {
+                        let Some(recipient) = conn.phase.bound_jid() else {
+                            return ControlFlow::Continue(());
+                        };
+                        if !payload.protected_space_reply().is_some_and(|descriptor| {
+                            descriptor.bookmark_event().is_some()
+                                && descriptor.service().as_str()
+                                    == state.deps.service_domains.spaces.as_str()
+                        }) {
+                            return ControlFlow::Continue(());
+                        }
+                        let Some(frame) = super::resume_replay::authorize_protected_payload(
+                            payload,
+                            recipient,
+                            &state.deps.app_state.host_grants,
+                        )
+                        .await
+                        else {
+                            return ControlFlow::Continue(());
+                        };
+                        let report = write_ingress_response_batch_with_protected_sink(
+                            &mut *ws_sender,
+                            &mut ws_receiver,
+                            state,
+                            conn,
+                            &mut ResponseBatch::from_frames([frame]),
+                            BatchSmPolicy::Record,
+                            BatchAuthority {
+                                permit: admission_permit,
+                                shutdown: shutdown_token,
+                            },
+                            Some(InterruptibleSink::start_protected_space_reply),
+                        )
+                        .await;
+                        if !matches!(report.outcome, BatchWriteOutcome::Continue) {
                             return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                         }
                     }

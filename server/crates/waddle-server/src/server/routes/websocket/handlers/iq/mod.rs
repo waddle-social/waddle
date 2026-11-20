@@ -125,6 +125,7 @@ mod permissions;
 mod pin_query;
 mod protected_space_bookmarks;
 mod protected_space_contents;
+mod protected_space_subscriptions;
 mod pubsub_admin;
 mod pubsub_dispatch;
 mod pubsub_space_membership;

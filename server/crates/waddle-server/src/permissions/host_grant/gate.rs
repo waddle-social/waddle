@@ -56,7 +56,7 @@ use xmpp_parsers::iq::Iq;
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
 use super::issuance::IssuanceBasis;
-use super::model::{GrantSubject, ScopeKey};
+use super::model::{GrantOperationId, GrantSubject, ScopeKey, SpaceBookmarkVersion};
 use super::policy::HostGrantAction;
 use super::principal::{
     named_evidence, NoSeats, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, SeatEvidence,
@@ -66,6 +66,7 @@ use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
+use crate::db::local_space_subscriptions::{LocalSpaceSubscription, LocalSpaceSubscriptions};
 use crate::db::s2s_spaces::{SpaceSubscription, SpaceSubscriptionGrant, SpaceSubscriptions};
 use crate::db::Database;
 use crate::s2s::conn::AuthenticationStrength;
@@ -129,6 +130,21 @@ pub struct ManagedSpaceGrant {
 pub(crate) struct LocalSpaceReplyGrant {
     grant: ManagedSpaceGrant,
     replay: ProtectedSpaceReplyDescriptor,
+    preference: Option<LocalReplyPreference>,
+}
+
+struct LocalReplyPreference {
+    store: LocalSpaceSubscriptions,
+    key: ScopeKey,
+    subscription: LocalSpaceSubscription,
+}
+
+impl std::fmt::Debug for LocalReplyPreference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalReplyPreference")
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalSpaceReplyGrant {
@@ -138,6 +154,35 @@ impl LocalSpaceReplyGrant {
 
     pub(crate) fn replay_identity(&self) -> &ProtectedSpaceReplyDescriptor {
         &self.replay
+    }
+
+    pub(crate) async fn hold_subscription(&self) -> Option<crate::db::Transaction<'_>> {
+        let preference = self.preference.as_ref()?;
+        tokio::time::timeout(ROOM_READ_DEADLINE, async {
+            if let Some(event) = self.replay.bookmark_event() {
+                let room = self.replay.room_dependencies().first()?.room().clone();
+                let version = SpaceBookmarkVersion {
+                    lifecycle: preference.subscription.grant.lifecycle,
+                    incarnation: preference.subscription.grant.incarnation,
+                    room,
+                    operation: GrantOperationId::from_uuid(event.operation()),
+                    present: event.present(),
+                };
+                preference
+                    .store
+                    .hold_delivery(&preference.key, &preference.subscription, &version)
+                    .await
+                    .ok()?
+            } else {
+                preference
+                    .store
+                    .hold_preference(&preference.key, &preference.subscription)
+                    .await
+                    .ok()?
+            }
+        })
+        .await
+        .ok()?
     }
 
     pub(crate) fn with_room_dependencies(
@@ -912,7 +957,98 @@ impl HostGrantGate {
         )
         .ok()?
         .with_kind(kind);
-        Some(LocalSpaceReplyGrant { grant, replay })
+        Some(LocalSpaceReplyGrant {
+            grant,
+            replay,
+            preference: None,
+        })
+    }
+
+    pub(crate) async fn local_space_subscribe_reply(
+        &self,
+        key: &ScopeKey,
+        requester: &FullJid,
+        request: &Iq,
+        subscription: LocalSpaceSubscription,
+    ) -> Option<LocalSpaceReplyGrant> {
+        if !matches!(request, Iq::Set { .. })
+            || request.to().map(Jid::as_str) != Some(key.service().as_str())
+            || subscription.account.jid() != &requester.to_bare()
+            || !matches!(
+                waddle_xmpp::pubsub::parse_pubsub_iq(request),
+                Ok(waddle_xmpp::pubsub::PubSubRequest::Subscribe { node, jid })
+                    if node == key.node() && jid.as_str() == subscription.account.as_str()
+            )
+        {
+            return None;
+        }
+        let grant = self.space_read_local(key, &subscription.account).await?;
+        if grant.subscription_grant() != subscription.grant {
+            return None;
+        }
+        let replay = ProtectedSpaceReplyDescriptor::new(
+            key.service().clone(),
+            key.node().to_owned(),
+            requester.clone(),
+            request.id().to_owned(),
+            grant.fence.lifecycle().as_uuid(),
+            grant.subscription_grant.incarnation.as_uuid(),
+            grant.fence.generation().value(),
+        )
+        .ok()?
+        .with_subscription(subscription.subid.clone())
+        .ok()?;
+        let preference = LocalReplyPreference {
+            store: LocalSpaceSubscriptions::new(self.store.as_ref()?.database().clone()),
+            key: key.clone(),
+            subscription,
+        };
+        Some(LocalSpaceReplyGrant {
+            grant,
+            replay,
+            preference: Some(preference),
+        })
+    }
+
+    pub(crate) async fn local_space_bookmark_event(
+        &self,
+        key: &ScopeKey,
+        requester: &FullJid,
+        message_id: Option<&str>,
+        subscription: &LocalSpaceSubscription,
+        version: &SpaceBookmarkVersion,
+    ) -> Option<ProtectedSpaceReplyDescriptor> {
+        if subscription.account.jid() != &requester.to_bare()
+            || subscription.grant.lifecycle != version.lifecycle
+            || subscription.grant.incarnation != version.incarnation
+        {
+            return None;
+        }
+        let grant = self.space_read_local(key, &subscription.account).await?;
+        if grant.subscription_grant() != subscription.grant {
+            return None;
+        }
+        let incarnation = version.incarnation.as_uuid();
+        let (room, _) = self
+            .local_space_room_dependency(&version.room, subscription.account.jid(), incarnation)
+            .await?;
+        ProtectedSpaceReplyDescriptor::new(
+            key.service().clone(),
+            key.node().to_owned(),
+            requester.clone(),
+            message_id.unwrap_or_default().to_owned(),
+            version.lifecycle.as_uuid(),
+            incarnation,
+            grant.fence.generation().value(),
+        )
+        .ok()?
+        .with_bookmark_event(
+            subscription.subid.clone(),
+            version.operation.as_uuid(),
+            room,
+            version.present,
+        )
+        .ok()
     }
 
     /// Bind an already-authorized legacy reply to the exact local request.
@@ -992,10 +1128,29 @@ impl HostGrantGate {
             }
             grant.require_room(room);
         }
-        Some(LocalSpaceReplyGrant {
+        let preference = if let Some(subid) = replay.subscription_id() {
+            Some(LocalReplyPreference {
+                store: LocalSpaceSubscriptions::new(self.store.as_ref()?.database().clone()),
+                key,
+                subscription: LocalSpaceSubscription {
+                    account: subject,
+                    grant: grant.subscription_grant(),
+                    subid: subid.clone(),
+                },
+            })
+        } else {
+            None
+        };
+        let result = LocalSpaceReplyGrant {
             grant,
             replay: replay.clone(),
-        })
+            preference,
+        };
+        if replay.subscription_id().is_some() {
+            let hold = result.hold_subscription().await?;
+            let _ = hold.rollback().await;
+        }
+        Some(result)
     }
 
     pub(crate) async fn local_space_room_dependency(

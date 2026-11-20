@@ -1496,6 +1496,7 @@ fn canonical_domain_part(domain: &str) -> Option<DomainPart> {
 /// WebSocket route dependencies kept narrower than the full server graph.
 pub struct WebSocketState {
     pub deps: WebSocketDeps,
+    pub(crate) local_space_publications: Arc<tokio::sync::Semaphore>,
     /// The rooms this replica's MUC service may list, read at most once at
     /// a time for each audience of its `disco#items`.
     pub(crate) room_listings: super::handlers::iq::RoomListings,

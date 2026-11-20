@@ -267,6 +267,10 @@ pub enum PubSubError {
     PreconditionNotMet,
     /// The requester has no matching subscription to remove.
     NotSubscribed,
+    /// The subscription identifier is stale or does not match the subscriber.
+    InvalidSubscriptionId,
+    /// This subscription requires the identifier returned at subscribe time.
+    SubscriptionIdRequired,
     /// An unexpected backend/storage failure unrelated to the requested resource.
     /// Maps to XEP-0060 §8.1.3 `<internal-server-error/>` (error type: wait).
     InternalServerError,
