@@ -20,7 +20,7 @@ Waddle/                      SwiftUI app target
 WaddleTests/                 design-system tests and snapshot goldens
 WaddleKit/                   UI-free core (Swift package; depends on swift-crypto)
   Identity/ Model/           typed JIDs and parsed stanzas
-  Files/                     XEP-0448 decryption and XEP-0300 digest checks
+  Files/                     XEP-0448 encryption and decryption, XEP-0300 digest checks
   Timeline/                  the conversation reducer
   Calls/                     the 1:1 call slot: XEP-0353 invitations, Jingle sessions
   Stores/                    presence, unread, inbox, typing, delivery, pins, community feed, events…
@@ -29,7 +29,8 @@ WaddleKit/                   UI-free core (Swift package; depends on swift-crypt
 ```
 
 - **XMPP-native.** Chat data travels only over XMPP through the Rust core.
-  HTTP is used for device-authorization sign-in, for XEP-0363 upload PUTs,
+  HTTP is used for device-authorization sign-in, for XEP-0363 upload PUTs
+  (a chat attachment is uploaded as XEP-0448 ciphertext),
   for GETs of XEP-0448 ciphertext from its XEP-0447 source, and for GETs of
   a story's picture or video from the http(s) address its author published
   (a story's file is uploaded as it is, since the whole community reads it). Call media

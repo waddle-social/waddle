@@ -145,7 +145,7 @@ struct ConversationComposer: View {
     }
 
     private var uploader: AttachmentUploader {
-        AttachmentUploader(session: session)
+        AttachmentUploader(session: session, protection: .encrypted)
     }
 
     private var intake: ComposerAttachmentIntake {

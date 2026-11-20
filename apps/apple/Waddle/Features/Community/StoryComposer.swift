@@ -92,7 +92,7 @@ final class StoryComposer {
         errorMessage = nil
         defer { phase = .editing }
         do {
-            let file = try await AttachmentUploader(session: session).upload(Self.named(picture)) { [weak self] fraction in
+            let file = try await AttachmentUploader(session: session, protection: .plain).upload(Self.named(picture)) { [weak self] fraction in
                 Task { @MainActor in
                     guard let self, self.isPosting else { return }
                     self.phase = .posting(fraction)
