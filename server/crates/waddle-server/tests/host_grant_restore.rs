@@ -81,10 +81,10 @@ use waddle_server::permissions::host_grant::{
     HostGrantAttachment, HostGrantAuthority, HostGrantCommitFault, HostGrantError, HostGrantGate,
     HostGrantStore, LatchKind, MutationReceipt, OperationKind, OperationOutcome, OperatorRevoke,
     PositionAcknowledgement, PositionLatch, PositionStanding, PositionWitness, PositionWriter,
-    PostgresPosition, PrincipalEvidence, ProjectedGrant, ProjectedRelationship,
-    ProjectionContradiction, ProjectionIntent, ProjectionMarker, ProjectionWrite, Reconciliation,
-    ReconstructionTarget, ReopenReport, ReopenSelection, ReplicaFailure, RestoreDeclaration,
-    RestoreEpoch, RestoreFenceRefusal, RestoreFenceReport, RetireScope, RoomAffiliation, ScopeKey,
+    PostgresPosition, ProjectedGrant, ProjectedRelationship, ProjectionContradiction,
+    ProjectionIntent, ProjectionMarker, ProjectionWrite, Reconciliation, ReconstructionTarget,
+    ReopenReport, ReopenSelection, ReplicaFailure, RestoreDeclaration, RestoreEpoch,
+    RestoreFenceRefusal, RestoreFenceReport, RetireScope, RoomAffiliation, ScopeKey,
     ScopeLifecycleId, WitnessChange, WitnessSync, HOST_GRANT_PROJECTION_DEFINITION,
     HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
@@ -760,7 +760,7 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     );
 
     assert!(gate
-        .space_grant(&key, &subject(SENDER), &PrincipalEvidence::NoStream)
+        .space_read_local(&key, &subject(SENDER))
         .await
         .is_none());
     assert_eq!(
@@ -780,28 +780,21 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
         "owner"
     );
     let granted = gate
-        .space_grant(&key, &subject(SENDER), &PrincipalEvidence::NoStream)
+        .space_read_local(&key, &subject(SENDER))
         .await
         .expect("the owner has an activated decision");
     assert_eq!(
         granted.admit(|standing| standing),
         Some(waddle_xmpp::pubsub::Affiliation::Owner)
     );
-    assert!(gate
-        .space_grant(&key, &subject(CAROL), &PrincipalEvidence::NoStream)
-        .await
-        .is_none());
+    assert!(gate.space_read_local(&key, &subject(CAROL)).await.is_none());
     let wrong_service = ScopeKey::new(
         "spaces.other.test".parse().expect("service JID"),
         key.node(),
     )
     .expect("different service");
     assert!(gate
-        .space_grant(
-            &wrong_service,
-            &subject(SENDER),
-            &PrincipalEvidence::NoStream
-        )
+        .space_read_local(&wrong_service, &subject(SENDER))
         .await
         .is_none());
     sqlx::query(
@@ -816,6 +809,22 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     .execute(&pool)
     .await
     .expect("simulate restored member and outcast rows");
+
+    let remote = "alice@foreign.test";
+    sqlx::query(
+        "INSERT INTO host_grant_space_affiliations VALUES
+         ($1, $2, 'member', 'member', 'unprivileged', $3)",
+    )
+    .bind(&lifecycle)
+    .bind(remote)
+    .bind(record.generation.value())
+    .execute(&pool)
+    .await
+    .expect("record a foreign member");
+    assert!(gate
+        .space_read_local(&key, &subject(remote))
+        .await
+        .is_none());
 
     let binding =
         "SELECT authority_incarnation FROM host_grant_space_bindings WHERE lifecycle_id = $1";
@@ -839,7 +848,7 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     );
 
     assert!(gate
-        .space_grant(&key, &subject(SENDER), &PrincipalEvidence::NoStream)
+        .space_read_local(&key, &subject(SENDER))
         .await
         .is_none());
     let rebind = BindSpace {
@@ -889,7 +898,7 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     .fetch_all(&pool)
     .await
     .expect("journal records the discarded affiliations");
-    let mut expected = [SENDER, PEER, CAROL];
+    let mut expected = [SENDER, PEER, CAROL, remote];
     expected.sort_unstable();
     assert_eq!(revoked, expected);
     pool.close().await;

@@ -63,6 +63,7 @@ use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
 use crate::db::Database;
+use crate::s2s::route::RemotePrincipal;
 
 /// At most one warning a minute that a managed room was refused on a replica
 /// without an attachment; only the kind of the refusal is logged.
@@ -632,9 +633,28 @@ impl HostGrantGate {
             .collect())
     }
 
-    /// Resolve an enrolled Space subject against canonical standing. Missing
-    /// or unusable standing denies the protected effect.
-    pub async fn space_grant(
+    /// Authorize a read for an authenticated local account.
+    pub async fn space_read_local(
+        &self,
+        key: &ScopeKey,
+        subject: &GrantSubject,
+    ) -> Option<ManagedSpaceGrant> {
+        self.space_read(key, subject, &PrincipalEvidence::NoStream)
+            .await
+    }
+
+    /// Authorize a read for the account carried by the authenticated S2S stream.
+    pub async fn space_read_remote(
+        &self,
+        key: &ScopeKey,
+        principal: &RemotePrincipal,
+    ) -> Option<ManagedSpaceGrant> {
+        let subject = GrantSubject::new(principal.account().as_bare_jid().clone()).ok()?;
+        self.space_read(key, &subject, &PrincipalEvidence::of(principal))
+            .await
+    }
+
+    async fn space_read(
         &self,
         key: &ScopeKey,
         subject: &GrantSubject,
@@ -652,16 +672,20 @@ impl HostGrantGate {
         .ok()?
         .ok()??;
         let witness = attachment.principals().witness(subject.jid(), evidence);
-        if standing.recorded == Affiliation::Outcast
+        let valid_origin = matches!(
+            (&witness, evidence),
+            (PrincipalWitness::Served, PrincipalEvidence::NoStream)
+                | (PrincipalWitness::Remote(_), PrincipalEvidence::Stream(_))
+        );
+        if !valid_origin
+            || standing.recorded == Affiliation::Outcast
             || (matches!(&witness, PrincipalWitness::Remote(_)) && !standing.federated)
         {
             return None;
         }
         let affiliation = match standing.effective {
             Affiliation::Member if witness.grants_honoured() => Affiliation::Member,
-            affiliation @ (Affiliation::Owner
-            | Affiliation::Publisher
-            | Affiliation::PublishOnly)
+            affiliation @ (Affiliation::Owner | Affiliation::Publisher)
                 if witness.privilege_honoured()
                     && matches!(
                         (&witness, standing.issuance_basis),
