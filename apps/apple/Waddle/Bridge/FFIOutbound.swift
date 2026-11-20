@@ -81,10 +81,19 @@ enum FFIOutbound {
             width: file.width.flatMap { UInt32(exactly: $0) },
             height: file.height.flatMap { UInt32(exactly: $0) },
             desc: file.description,
-            hashes: [],
+            hashes: fileHashes(file.digests),
             disposition: disposition(forMediaType: file.mediaType),
             encrypted: file.encrypted.map(encryptedFile)
         )
+    }
+
+    /// XEP-0300 digests of the file itself. XEP-0448 requires one for an
+    /// encrypted file. The core sends SHA-256 only and refuses a message
+    /// that names another algorithm, so others are left out.
+    static func fileHashes(_ digests: FileDigests) -> [WaddleStickerHash] {
+        digests.xep0300
+            .filter { $0.algorithm == HashAlgorithm.sha256.rawValue }
+            .map { WaddleStickerHash(algo: $0.algorithm, valueB64: $0.base64) }
     }
 
     /// XEP-0446 disposition inferred from the media type: media a client

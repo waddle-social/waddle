@@ -89,8 +89,8 @@ name the issue that tracks them.
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
-| File upload + attachments | 0363, 0447 | ✅ | ✅ | Photos re-encoded as JPEG without location data |
-| Encrypted attachments | 0448 | ❌ | 🟡 | Received files are downloaded, verified (XEP-0300 sha-256/sha-512, GCM tag) and decrypted in memory (AES-128/256-GCM with or without tag, AES-256-CBC), then shown like plain attachments. Sending encrypted files is not implemented |
+| File upload + attachments | 0363, 0447 | ✅ | ✅ | Photos re-encoded as JPEG without location data. Uploads are encrypted (see Encrypted attachments) |
+| Encrypted attachments | 0448 | ❌ | ✅ | Every chat attachment is sealed before upload (AES-256-GCM, a fresh key and IV per file, tag appended), so the upload service stores ciphertext under `<name>.enc`; the message carries the key, the file's sha-256 and the ciphertext's sha-256. Received files are downloaded, verified (XEP-0300 sha-256/sha-512, GCM tag) and decrypted in memory (AES-128/256-GCM with or without tag, AES-256-CBC), then shown like plain attachments. Your own sent picture is downloaded and decrypted again to show it. A story's picture is uploaded as it is, since the whole community reads it |
 | Link previews | urn:waddle:link-preview:0 | ❌ | ✅ | Renders server-attached cards |
 | Stickers | 0449 | 🟡 | 🟡 | Render only; GIF stickers play |
 | Animated GIFs | 0447, 0448 | ❌ | ✅ | Shared GIFs (plain and decrypted XEP-0448) and bodies that are a single `https` image or Giphy URL render inline like web, GIFs playing; first frame only with Reduce Motion. Baseline: first frame only; image URL bodies showed as text |
