@@ -25,7 +25,8 @@ use waddle_xmpp_client::ClientError;
 use crate::convert::sticker_pack_from_ffi;
 use crate::sticker_verbs::{
     map_fetch_pack_reply, map_fetch_packs_reply, map_retract_reply, sticker_pack_fetch_stanza,
-    sticker_pack_publish_stanza, sticker_pack_retract_stanza, sticker_packs_fetch_stanza,
+    sticker_pack_import_stanza, sticker_pack_publish_stanza, sticker_pack_retract_stanza,
+    sticker_packs_fetch_stanza,
 };
 use crate::{
     WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError, WaddleEventListener,
@@ -388,7 +389,96 @@ fn retract_item_not_found_is_idempotent_success() {
     .is_err());
 }
 
+// ── Import (XEP-0449 §import) ────────────────────────────────────────
+
+#[test]
+fn import_publishes_the_fetched_pack_under_its_own_id() {
+    let id = PackId::try_new(XEP_EXAMPLE_ID).expect("id");
+    let fetched = items_result_with_pack("their/node", XEP_EXAMPLE_ID);
+    let original = fetched
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+        .and_then(|items| items.get_child("item", NS_PUBSUB))
+        .and_then(|item| item.get_child("pack", NS_STICKERS))
+        .cloned()
+        .expect("fixture pack");
+
+    let iq = sticker_pack_import_stanza(Ok(fetched), "their/node", &id).expect("imports");
+
+    let publish = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .expect("publish");
+    assert_eq!(publish.attr("node"), Some(STICKERS_NODE));
+    let item = publish.get_child("item", NS_PUBSUB).expect("item");
+    assert_eq!(item.attr("id"), Some(XEP_EXAMPLE_ID));
+    assert_eq!(item.get_child("pack", NS_STICKERS), Some(&original));
+    assert_ne!(iq.attr("id"), Some("fetch-1"), "a fresh IQ id");
+}
+
+#[test]
+fn import_reports_a_pack_that_is_gone_as_item_not_found() {
+    let id = PackId::try_new(XEP_EXAMPLE_ID).expect("id");
+    let gone = WaddleError::Stanza {
+        condition: "item-not-found".to_string(),
+        text: None,
+    };
+
+    // The owner's server says so, or answers without the pack.
+    assert_eq!(
+        sticker_pack_import_stanza(Err(item_not_found()), STICKERS_NODE, &id).err(),
+        Some(gone.clone())
+    );
+    let other = items_result_with_pack(STICKERS_NODE, "another-pack");
+    assert_eq!(
+        sticker_pack_import_stanza(Ok(other), STICKERS_NODE, &id).err(),
+        Some(gone)
+    );
+}
+
+#[test]
+fn import_refuses_a_restricted_pack() {
+    let id = PackId::try_new(XEP_EXAMPLE_ID).expect("id");
+    let mut fetched = items_result_with_pack(STICKERS_NODE, XEP_EXAMPLE_ID);
+    fetched
+        .get_child_mut("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child_mut("items", NS_PUBSUB))
+        .and_then(|items| items.get_child_mut("item", NS_PUBSUB))
+        .and_then(|item| item.get_child_mut("pack", NS_STICKERS))
+        .expect("fixture pack")
+        .append_child(Element::builder("restricted", NS_STICKERS).build());
+
+    assert_eq!(
+        sticker_pack_import_stanza(Ok(fetched), STICKERS_NODE, &id).err(),
+        Some(WaddleError::InvalidArgument)
+    );
+}
+
 // ── Typed failures through the exported methods ──────────────────────
+
+#[tokio::test]
+async fn import_sticker_pack_reports_not_connected_and_invalid_input() {
+    let listener = RecordingListener::default();
+    let client = test_client(listener.clone());
+    let result = client
+        .import_sticker_pack(
+            "romeo@montague.lit".to_string(),
+            None,
+            XEP_EXAMPLE_ID.to_string(),
+        )
+        .await;
+    assert_eq!(result, Err(WaddleError::NotConnected));
+
+    let invalid_jid = client
+        .import_sticker_pack("not a jid".to_string(), None, XEP_EXAMPLE_ID.to_string())
+        .await;
+    assert_eq!(invalid_jid, Err(WaddleError::InvalidJid));
+
+    let empty_id = client
+        .import_sticker_pack("romeo@montague.lit".to_string(), None, "  ".to_string())
+        .await;
+    assert_eq!(empty_id, Err(WaddleError::InvalidArgument));
+}
 
 #[tokio::test]
 async fn fetch_sticker_packs_reports_not_connected() {

@@ -1445,6 +1445,16 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func fetchStickerPacks(ownerJid: String?) async throws  -> [WaddleStickerPack]
 
     /**
+     * XEP-0449 §import: copy another user's pack to the account's own
+     * PEP node. The pack is fetched from `owner_jid` (`node: None` is
+     * their PEP `urn:xmpp:stickers:0` node) and published again as it
+     * is, under the same id, which is returned. A pack that is gone
+     * fails with `item-not-found`; one its author marked
+     * `<restricted/>` with `InvalidArgument`.
+     */
+    func importStickerPack(ownerJid: String, node: String?, packId: String) async throws  -> String
+
+    /**
      * XEP-0449: publish (create or update/import) a sticker pack on
      * the account's own PEP node. The pubsub item id is recomputed
      * from the pack content per §"Sticker pack hash calculation" —
@@ -4224,6 +4234,31 @@ open func fetchStickerPacks(ownerJid: String?)async throws  -> [WaddleStickerPac
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeWaddleStickerPack.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0449 §import: copy another user's pack to the account's own
+     * PEP node. The pack is fetched from `owner_jid` (`node: None` is
+     * their PEP `urn:xmpp:stickers:0` node) and published again as it
+     * is, under the same id, which is returned. A pack that is gone
+     * fails with `item-not-found`; one its author marked
+     * `<restricted/>` with `InvalidArgument`.
+     */
+open func importStickerPack(ownerJid: String, node: String?, packId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_import_sticker_pack(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(ownerJid),FfiConverterOptionString.lower(node),FfiConverterString.lower(packId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -22073,6 +22108,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs() != 18633) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_import_sticker_pack() != 51887) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack() != 16031) {

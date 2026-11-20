@@ -1,10 +1,10 @@
 use super::{
-    build_pack_element, build_pack_publish_iq, build_pack_retract_iq, build_sticker_marker_element,
-    build_sticker_pack_items_iq, build_sticker_packs_items_iq, compute_pack_hash, compute_pack_id,
-    parse_pack_element, parse_sticker_marker_pack, parse_sticker_packs_result, BareJid, Element,
-    HashAlgo, PackId, PackRef, PackSticker, StickerDimensions, StickerHash, StickerMarker,
-    StickerPackDoc, StickerText, NS_FILE_METADATA, NS_HASHES, NS_PUBSUB, NS_SFS, NS_STICKERS,
-    NS_URL_DATA, STICKERS_NODE,
+    build_pack_element, build_pack_import_iq, build_pack_publish_iq, build_pack_retract_iq,
+    build_sticker_marker_element, build_sticker_pack_items_iq, build_sticker_packs_items_iq,
+    compute_pack_hash, compute_pack_id, parse_pack_element, parse_sticker_marker_pack,
+    parse_sticker_packs_result, BareJid, Element, HashAlgo, PackId, PackImport, PackRef,
+    PackSticker, StickerDimensions, StickerHash, StickerMarker, StickerPackDoc, StickerText,
+    NS_FILE_METADATA, NS_HASHES, NS_PUBSUB, NS_SFS, NS_STICKERS, NS_URL_DATA, STICKERS_NODE,
 };
 
 // ── Fixtures ─────────────────────────────────────────────────────────
@@ -623,6 +623,129 @@ fn a_built_pack_marker_reads_back_as_the_same_reference() {
 fn a_bare_sticker_marker_names_no_pack() {
     let marker = build_sticker_marker_element(&StickerMarker { pack: None });
     assert_eq!(parse_sticker_marker_pack(&marker), None);
+}
+
+// ── Import ───────────────────────────────────────────────────────────
+
+/// A pack as another client may publish it: names in two languages, a
+/// summary with a language tag, and an id that is not derived from the
+/// content. None of that survives a rebuild from the typed document.
+fn foreign_pack_item(restricted: bool) -> Element {
+    let mut pack: Element = "<pack xmlns='urn:xmpp:stickers:0'>\
+            <name>Marsey</name>\
+            <name xml:lang='de'>Marsey die Katze</name>\
+            <summary xml:lang='en'>Be cute or be cynical. CC-BY-SA.</summary>\
+            <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>EpRv28DHHzFrE4zd+xaNpVb4jbu4s74XtioExNjQzZ0=</hash>\
+            <item>\
+                <file xmlns='urn:xmpp:file:metadata:0'>\
+                    <media-type>image/png</media-type>\
+                    <desc>😘</desc>\
+                    <size>67016</size>\
+                    <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=</hash>\
+                </file>\
+                <sources xmlns='urn:xmpp:sfs:0'>\
+                    <url-data xmlns='http://jabber.org/protocol/url-data' target='https://download.montague.lit/sticker_marsey_kiss.png'/>\
+                </sources>\
+                <suggest>:kiss:</suggest>\
+            </item>\
+        </pack>"
+        .parse()
+        .expect("valid pack xml");
+    if restricted {
+        pack.append_child(Element::builder("restricted", NS_STICKERS).build());
+    }
+    Element::builder("item", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "their-own-id")
+        .append(pack)
+        .build()
+}
+
+#[test]
+fn importing_a_pack_publishes_the_same_item_under_the_same_id() {
+    // xep-0449.xml §import: "duplicate the pubsub item from its original
+    // source to the users personal eventing node ... preserving the id".
+    let id = PackId::try_new("their-own-id").expect("id");
+    let fetched = items_result("their/node", vec![foreign_pack_item(false)]);
+
+    let PackImport::Publish(iq) = build_pack_import_iq("import-1", &fetched, "their/node", &id)
+    else {
+        panic!("expected a publish");
+    };
+
+    assert_eq!(iq.attr("type"), Some("set"));
+    assert_eq!(iq.attr("to"), None, "published to the own PEP service");
+    let publish = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .expect("publish");
+    assert_eq!(publish.attr("node"), Some(STICKERS_NODE));
+    let item = publish.get_child("item", NS_PUBSUB).expect("item");
+    assert_eq!(item.attr("id"), Some("their-own-id"));
+    // The payload is the fetched one, untouched: both names with their
+    // languages, the tagged summary and the suggestion are all there.
+    let original = foreign_pack_item(false);
+    assert_eq!(
+        item.get_child("pack", NS_STICKERS),
+        original.get_child("pack", NS_STICKERS)
+    );
+}
+
+#[test]
+fn a_restricted_pack_is_not_imported() {
+    // §import: "SHOULD NOT offer to import a sticker pack that has a
+    // <restricted/> element".
+    let id = PackId::try_new("their-own-id").expect("id");
+    let fetched = items_result(STICKERS_NODE, vec![foreign_pack_item(true)]);
+
+    assert!(matches!(
+        build_pack_import_iq("import-1", &fetched, STICKERS_NODE, &id),
+        PackImport::Restricted
+    ));
+}
+
+#[test]
+fn a_pack_that_is_not_there_or_is_not_a_pack_is_not_imported() {
+    let id = PackId::try_new("their-own-id").expect("id");
+
+    // Another item, an empty result, and a reply for another node.
+    let other = items_result(STICKERS_NODE, vec![foreign_pack_item(false)]);
+    assert!(matches!(
+        build_pack_import_iq(
+            "i",
+            &other,
+            STICKERS_NODE,
+            &PackId::try_new("gone").expect("id")
+        ),
+        PackImport::Missing
+    ));
+    assert!(matches!(
+        build_pack_import_iq(
+            "i",
+            &items_result(STICKERS_NODE, vec![]),
+            STICKERS_NODE,
+            &id
+        ),
+        PackImport::Missing
+    ));
+    assert!(matches!(
+        build_pack_import_iq("i", &other, "another/node", &id),
+        PackImport::Missing
+    ));
+
+    // An item under that id whose payload is not a sticker pack.
+    let not_a_pack = Element::builder("item", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "their-own-id")
+        .append(Element::builder("pack", "urn:example:other").build())
+        .build();
+    assert!(matches!(
+        build_pack_import_iq(
+            "i",
+            &items_result(STICKERS_NODE, vec![not_a_pack]),
+            STICKERS_NODE,
+            &id
+        ),
+        PackImport::Missing
+    ));
 }
 
 // ── PackId invariants ────────────────────────────────────────────────
