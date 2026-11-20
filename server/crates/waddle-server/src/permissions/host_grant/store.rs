@@ -63,6 +63,9 @@ use crate::ingress_substrate::{
 use crate::permissions::{Object, ObjectType};
 
 /// Longest a store transaction waits for a row lock.
+// PostgreSQL advisory namespace for Space content writes and authority restore.
+const SPACE_BOOKMARK_RESTORE_LOCK: i64 = 0x5741_4444_4c45_5342;
+
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest any one statement of a store transaction runs.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -981,6 +984,146 @@ impl HostGrantStore {
         advance_scope(&mut tx, &scope, generation, &operation, now).await?;
         commit(tx, mode).await?;
         Ok(MutationReceipt::Recorded(record))
+    }
+
+    /// Publish or retract a same-scope room bookmark while holding its authority guard.
+    pub async fn write_space_bookmark(
+        &self,
+        change: &super::SpaceBookmarkChange,
+        policy: &IssuancePolicy,
+    ) -> Result<super::SpaceBookmarkOutcome, HostGrantError> {
+        if policy.check(&change.initiator, RoomAffiliation::Member)? != IssuanceBasis::Local {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        ManagedRoom::new(change.room.clone())?;
+        let payload_xml = match &change.action {
+            super::SpaceBookmarkAction::Publish { payload } => {
+                waddle_xmpp::xep::xep0402::parse_bookmark(change.room.as_str(), payload)
+                    .map_err(|_| HostGrantError::InvalidSpaceBookmark)?;
+                let wire = String::from(payload);
+                if wire.len() > crate::ingress_uow::ROOM_REQUEST_STANZA_MAX_BYTES {
+                    return Err(HostGrantError::InvalidSpaceBookmark);
+                }
+                Some(wire)
+            }
+            super::SpaceBookmarkAction::Retract => None,
+        };
+        let store = self.clone();
+        let change = change.clone();
+        let mode = commit_mode();
+        own(async move {
+            store
+                .write_space_bookmark_owned(&change, payload_xml, mode)
+                .await
+        })
+        .await
+    }
+
+    async fn write_space_bookmark_owned(
+        &self,
+        change: &super::SpaceBookmarkChange,
+        payload_xml: Option<String>,
+        mode: CommitMode,
+    ) -> Result<super::SpaceBookmarkOutcome, HostGrantError> {
+        use super::SpaceBookmarkOutcome;
+        use crate::pubsub::DatabasePubSubStorage;
+
+        let mut tx = self.begin_write().await?;
+        // The declaration of a new authority incarnation takes the
+        // exclusive side before changing any binding or authority row.
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+        let scope = load_scope(&mut tx, change.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+            .ok_or(HostGrantError::UnknownScope)?;
+        let incarnation = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        if incarnation != change.expected_incarnation {
+            return Err(HostGrantError::IncarnationChanged);
+        }
+        refuse_unusable_scope(&scope, incarnation)?;
+        if !scope_admits(&scope, incarnation) {
+            return Err(HostGrantError::SpaceNotBindable);
+        }
+        if scope.generation != change.expected_generation {
+            return Err(HostGrantError::StaleGeneration {
+                current: scope.generation,
+            });
+        }
+        let lifecycle = change.lifecycle.to_storage();
+        let service = change.key.service();
+        let node = change.key.node();
+        let mut rows = tx
+            .query(
+                "SELECT p.max_items, p.persist_items
+             FROM host_grant_space_bindings b
+             JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id
+             JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
+             JOIN host_grant_space_affiliations s ON s.lifecycle_id = b.lifecycle_id
+             JOIN host_grant_rooms r ON r.lifecycle_id = b.lifecycle_id AND r.room_jid = ?
+             JOIN host_grants g ON g.lifecycle_id = b.lifecycle_id AND g.room_jid = r.room_jid
+             WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
+             AND b.service_jid = ? AND b.space_node = ? AND l.retired_at_ms IS NULL
+             AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)
+             AND s.subject_jid = ? AND s.affiliation = 'owner'
+             AND s.effective_affiliation = 'owner' AND s.issuance_basis = 'local'
+             AND g.subject_jid = s.subject_jid AND g.affiliation <> 'outcast'
+             AND g.effective_affiliation IN ('admin', 'owner') FOR SHARE OF p",
+                crate::db_params![
+                    change.room.as_str(),
+                    lifecycle.as_str(),
+                    incarnation.to_storage(),
+                    service.as_str(),
+                    node,
+                    waddle_xmpp::xep::xep0503::NS_SPACES,
+                    change.initiator.as_str(),
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)
+            .map_err(statement_failure)?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(HostGrantError::InitiatorNotAuthorized)?;
+        let max_items = u32::try_from(row.get::<i64>(0)?).map_err(|_| corrupt("Space item cap"))?;
+        let persist_items: i32 = row.get(1)?;
+        drop(rows);
+        if persist_items != 1 {
+            return Err(HostGrantError::SpaceNotBindable);
+        }
+
+        let item_id = change.room.as_str();
+        let result = if let Some(payload_xml) = payload_xml {
+            DatabasePubSubStorage::put_item_tx(
+                &mut tx,
+                service,
+                node,
+                item_id,
+                Some(payload_xml),
+                Some(change.initiator.as_str().to_owned()),
+                crate::time::now_ms(),
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+            let evicted_item_ids =
+                DatabasePubSubStorage::enforce_max_items_tx(&mut tx, service, node, max_items)
+                    .await
+                    .map_err(HostGrantError::from_database)?;
+            SpaceBookmarkOutcome::Published { evicted_item_ids }
+        } else {
+            let removed = DatabasePubSubStorage::delete_item_tx(&mut tx, service, node, item_id)
+                .await
+                .map_err(HostGrantError::from_database)?;
+            SpaceBookmarkOutcome::Retracted { removed }
+        };
+        commit(tx, mode).await?;
+        Ok(result)
     }
 
     /// Record an atomic membership change from an authenticated served owner.
@@ -2282,6 +2425,13 @@ impl HostGrantStore {
         mode: CommitMode,
     ) -> Result<RestoreDeclaration, HostGrantError> {
         let mut tx = self.begin_write().await?;
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+            crate::db_params![SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
         // Locking the authority row needs UPDATE on it, which the runtime
         // role does not hold: on a runtime handle PostgreSQL refuses this
         // first statement and nothing changes.

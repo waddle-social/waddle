@@ -333,26 +333,14 @@ impl DatabasePubSubStorage {
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?
         } else {
-            tx.execute(
-                r#"
-                INSERT INTO pubsub_items (
-                    owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
-                    seq = excluded.seq,
-                    payload_xml = excluded.payload_xml,
-                    publisher_jid = excluded.publisher_jid,
-                    published_at_ms = excluded.published_at_ms
-                "#,
-                crate::db_params![
-                    owner.to_string(),
-                    node_name,
-                    item_id.clone(),
-                    payload_xml,
-                    publisher_jid,
-                    published_at_ms,
-                ],
+            Self::put_item_tx(
+                &mut tx,
+                owner,
+                node_name,
+                &item_id,
+                payload_xml,
+                publisher_jid,
+                published_at_ms,
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?
@@ -362,9 +350,10 @@ impl DatabasePubSubStorage {
                 "PubSub item belongs to a different publisher".to_string(),
             )));
         }
-        let evicted_item_ids = self
-            .enforce_max_items_tx(&mut tx, owner, node_name, node.config.max_items)
-            .await?;
+        let evicted_item_ids =
+            Self::enforce_max_items_tx(&mut tx, owner, node_name, node.config.max_items)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
         if let Some(bookmark) = validated_bookmark.as_ref() {
             let source_version = next_notification_settings_source_version_tx(&mut tx).await?;
             let payload = item.payload.as_ref().ok_or_else(|| {
@@ -541,14 +530,10 @@ impl DatabasePubSubStorage {
                 .begin()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            let affected = tx
-                .execute(
-                    "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
-                    crate::db_params![owner.to_string(), node_name, item_id],
-                )
+            let affected = Self::delete_item_tx(&mut tx, owner, node_name, item_id)
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            if affected > 0 {
+            if affected {
                 reconcile_bookmark_projection_after_removal_tx(
                     &mut tx, owner, node_name, item_id, source,
                 )
@@ -557,7 +542,7 @@ impl DatabasePubSubStorage {
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            return Ok(affected > 0);
+            return Ok(affected);
         }
         if is_dnd_node(node_name) {
             // Retracting an `urn:waddle:dnd:0` item MUST clear the
@@ -569,14 +554,10 @@ impl DatabasePubSubStorage {
                 .begin()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            let affected = tx
-                .execute(
-                    "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
-                    crate::db_params![owner.to_string(), node_name, item_id],
-                )
+            let affected = Self::delete_item_tx(&mut tx, owner, node_name, item_id)
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            if affected > 0 {
+            if affected {
                 delete_dnd_projection_tx(&mut tx, owner)
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -584,7 +565,7 @@ impl DatabasePubSubStorage {
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            return Ok(affected > 0);
+            return Ok(affected);
         }
 
         let affected = self
@@ -662,13 +643,60 @@ impl DatabasePubSubStorage {
         Ok(affected)
     }
 
-    pub(super) async fn enforce_max_items_tx(
-        &self,
+    pub(crate) async fn put_item_tx(
+        tx: &mut Transaction<'_>,
+        owner: &BareJid,
+        node_name: &str,
+        item_id: &str,
+        payload_xml: Option<String>,
+        publisher_jid: Option<String>,
+        published_at_ms: i64,
+    ) -> Result<u64, crate::db::DatabaseError> {
+        tx.execute(
+            r#"
+            INSERT INTO pubsub_items (
+                owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
+                seq = excluded.seq,
+                payload_xml = excluded.payload_xml,
+                publisher_jid = excluded.publisher_jid,
+                published_at_ms = excluded.published_at_ms
+            "#,
+            crate::db_params![
+                owner.as_str(),
+                node_name,
+                item_id,
+                payload_xml,
+                publisher_jid,
+                published_at_ms,
+            ],
+        )
+        .await
+    }
+
+    pub(crate) async fn delete_item_tx(
+        tx: &mut Transaction<'_>,
+        owner: &BareJid,
+        node_name: &str,
+        item_id: &str,
+    ) -> Result<bool, crate::db::DatabaseError> {
+        Ok(tx
+            .execute(
+                "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
+                crate::db_params![owner.as_str(), node_name, item_id],
+            )
+            .await?
+            > 0)
+    }
+
+    pub(crate) async fn enforce_max_items_tx(
         tx: &mut Transaction<'_>,
         owner: &BareJid,
         node_name: &str,
         max_items: u32,
-    ) -> Result<Vec<String>, XmppError> {
+    ) -> Result<Vec<String>, crate::db::DatabaseError> {
         if max_items == 0 || max_items == u32::MAX {
             return Ok(Vec::new());
         }
@@ -693,18 +721,10 @@ impl DatabasePubSubStorage {
                     max_items,
                 ],
             )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+            .await?;
         let mut evicted_item_ids = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?
-        {
-            evicted_item_ids.push(
-                row.get(0)
-                    .map_err(|error| XmppError::internal(error.to_string()))?,
-            );
+        while let Some(row) = rows.next().await? {
+            evicted_item_ids.push(row.get(0)?);
         }
         Ok(evicted_item_ids)
     }

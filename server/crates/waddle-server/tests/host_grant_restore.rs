@@ -996,6 +996,166 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
 }
 
 #[tokio::test]
+async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_atomically() {
+    use waddle_server::permissions::host_grant::{
+        SpaceBookmarkAction, SpaceBookmarkChange, SpaceBookmarkOutcome,
+    };
+    use xmpp_parsers::minidom::Element;
+
+    let Some(fixture) = GrantFixture::active("hg_space_bookmark_writer").await else {
+        return;
+    };
+    let pool = owner_pool(&fixture).await;
+    let lifecycle = fixture.scope.lifecycle;
+    let service = "spaces.example.com";
+    let node = &fixture.scope.space_node;
+    sqlx::query(
+        "INSERT INTO pubsub_nodes (owner_jid, node_name, access_model, publish_model,
+         node_type, max_items, persist_items, deliver_payloads, notify_retract, notify_delete,
+         send_last_published_item, created_at_ms)
+         VALUES ($1, $2, 'whitelist', 'publishers', 'urn:xmpp:spaces:0',
+         1, 1, 1, 1, 1, 'never', 42)",
+    )
+    .bind(service)
+    .bind(node)
+    .execute(&pool)
+    .await
+    .expect("seed the enrolled node");
+    fixture
+        .store
+        .bind_space(
+            &BindSpace {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: fixture.generation().await,
+                owner: subject(SENDER),
+                federated: true,
+            },
+            &served(),
+        )
+        .await
+        .expect("bind Space");
+    fixture.activate_current(&fixture.scope).await;
+    let mut change = SpaceBookmarkChange {
+        key: ScopeKey::new(service.parse().expect("service JID"), node.clone()).expect("Space key"),
+        lifecycle,
+        expected_incarnation: fixture
+            .store
+            .authority_incarnation()
+            .await
+            .expect("incarnation"),
+        expected_generation: fixture.generation().await,
+        initiator: subject(SENDER),
+        room: fixture.scope.room.clone(),
+        action: SpaceBookmarkAction::Publish {
+            payload: Element::builder("conference", "urn:xmpp:bookmarks:1").build(),
+        },
+    };
+    let policy = &fixture.policy;
+    assert!(matches!(
+        fixture.store.write_space_bookmark(&change, policy).await,
+        Err(HostGrantError::InitiatorNotAuthorized)
+    ));
+
+    fixture
+        .set(OWNER, SENDER, RoomAffiliation::Admin)
+        .await
+        .expect("grant the Space owner room management");
+    fixture.activate_current(&fixture.scope).await;
+    assert!(matches!(
+        fixture.store.write_space_bookmark(&change, policy).await,
+        Err(HostGrantError::StaleGeneration { .. })
+    ));
+    change.expected_generation = fixture.generation().await;
+    let room_owner_only = SpaceBookmarkChange {
+        initiator: subject(OWNER),
+        ..change.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .write_space_bookmark(&room_owner_only, policy)
+            .await,
+        Err(HostGrantError::InitiatorNotAuthorized)
+    ));
+    let unrelated = fixture.enroll_another().await;
+    let different_room = SpaceBookmarkChange {
+        room: unrelated.room,
+        ..change.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .write_space_bookmark(&different_room, policy)
+            .await,
+        Err(HostGrantError::InitiatorNotAuthorized)
+    ));
+
+    sqlx::query(
+        "INSERT INTO pubsub_items (owner_jid, node_name, item_id, published_at_ms)
+         VALUES ($1, $2, 'old-item', 1)",
+    )
+    .bind(service)
+    .bind(node)
+    .execute(&pool)
+    .await
+    .expect("seed a previous item");
+    let items = || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT item_id FROM pubsub_items WHERE owner_jid = $1 AND node_name = $2 ORDER BY item_id",
+        )
+        .bind(service)
+        .bind(node)
+        .fetch_all(&pool)
+    };
+    assert!(matches!(
+        with_host_grant_commit_fault(
+            HostGrantCommitFault::LostBeforeCommit,
+            fixture.store.write_space_bookmark(&change, policy),
+        )
+        .await,
+        Err(HostGrantError::CommitOutcomeUnknown)
+    ));
+    assert_eq!(items().await.expect("items after rollback"), ["old-item"]);
+
+    assert_eq!(
+        fixture
+            .store
+            .write_space_bookmark(&change, policy)
+            .await
+            .expect("publish bookmark"),
+        SpaceBookmarkOutcome::Published {
+            evicted_item_ids: vec!["old-item".to_owned()]
+        },
+    );
+    assert_eq!(
+        items().await.expect("only exact room item"),
+        [change.room.as_str()]
+    );
+    change.action = SpaceBookmarkAction::Retract;
+    assert_eq!(
+        fixture
+            .store
+            .write_space_bookmark(&change, policy)
+            .await
+            .expect("retract bookmark"),
+        SpaceBookmarkOutcome::Retracted { removed: true },
+    );
+    assert!(items().await.expect("empty node").is_empty());
+
+    assert!(matches!(
+        declare(&fixture, 1).await,
+        RestoreDeclaration::Transitioned { .. }
+    ));
+    assert!(matches!(
+        fixture.store.write_space_bookmark(&change, policy).await,
+        Err(HostGrantError::IncarnationChanged)
+    ));
+    pool.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_declared_restore_closes_every_scope_under_a_new_incarnation() {
     let Some(fixture) = GrantFixture::active("hg_restore_transition").await else {
         return;

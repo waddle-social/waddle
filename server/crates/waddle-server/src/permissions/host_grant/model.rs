@@ -350,6 +350,32 @@ impl BindSpace {
     }
 }
 
+/// A content change on the immutable whitelist Space binding.
+#[derive(Clone, Debug)]
+pub enum SpaceBookmarkAction {
+    Publish { payload: minidom::Element },
+    Retract,
+}
+
+/// A local owner changes the bookmark of a room already enrolled under the Space.
+#[derive(Clone, Debug)]
+pub struct SpaceBookmarkChange {
+    pub key: ScopeKey,
+    pub lifecycle: ScopeLifecycleId,
+    pub expected_incarnation: AuthorityIncarnation,
+    pub expected_generation: GrantGeneration,
+    pub initiator: GrantSubject,
+    pub room: BareJid,
+    pub action: SpaceBookmarkAction,
+}
+
+/// The item-store effects committed by the canonical transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpaceBookmarkOutcome {
+    Published { evicted_item_ids: Vec<String> },
+    Retracted { removed: bool },
+}
+
 /// Space affiliations writable by a served owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpaceMembership {
