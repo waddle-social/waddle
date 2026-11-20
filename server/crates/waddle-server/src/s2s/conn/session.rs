@@ -410,7 +410,11 @@ impl Session {
     /// failed write ends the connection, and its sender learns only that
     /// the outcome is unknown.
     async fn transmit(&mut self, transmission: Transmission) -> Result<(), S2sOutcome> {
-        let Transmission { stanza, written } = transmission;
+        let Transmission {
+            stanza,
+            space_grant,
+            written,
+        } = transmission;
         let outputs = match self.stream.send_stanza(stanza) {
             Ok(outputs) => outputs,
             Err(error) => {
@@ -418,6 +422,32 @@ impl Session {
                 return Ok(());
             }
         };
+        if let Some(grant) = space_grant {
+            let [Output::Transmit(bytes)] = outputs.as_slice() else {
+                return Err(S2sOutcome::Protocol);
+            };
+            match grant.admit(|_| self.transport.stage_tls(bytes)) {
+                None => {
+                    let _ = written.send(Err(Untransmitted::AuthorizationExpired));
+                    return Ok(());
+                }
+                Some(Ok(())) => {}
+                Some(Err(_)) => return Err(S2sOutcome::Io),
+            }
+            // TLS owns these bytes now. The fence is released before waiting
+            // on the peer, and already admitted bytes may finish flushing.
+            let write = self.shared.config.deadlines().write;
+            match tokio::time::timeout(write, self.transport.flush_tls()).await {
+                Ok(Ok(())) => self.activity.traffic(),
+                Ok(Err(_)) => return Err(S2sOutcome::Io),
+                Err(_) => {
+                    self.lost = true;
+                    return Err(S2sOutcome::Timeout);
+                }
+            }
+            let _ = written.send(Ok(()));
+            return Ok(());
+        }
         for output in outputs {
             // Dropping `written` on failure tells the sender the outcome is
             // unknown.

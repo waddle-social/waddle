@@ -195,7 +195,17 @@ impl Transport {
         }
     }
 
-    async fn flush_tls(&mut self) -> Result<(), TransportError> {
+    /// Hand protected bytes to the established TLS session synchronously.
+    /// The caller holds the authorization fence only for this transfer.
+    pub(super) fn stage_tls(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        let tls = self.tls.as_mut().ok_or_else(|| {
+            std::io::Error::new(ErrorKind::NotConnected, "protected stanza requires TLS")
+        })?;
+        tls.writer().write_all(bytes)?;
+        Ok(())
+    }
+
+    pub(super) async fn flush_tls(&mut self) -> Result<(), TransportError> {
         if let Some(tls) = self.tls.as_mut() {
             flush(tls, &mut self.socket).await?;
         }

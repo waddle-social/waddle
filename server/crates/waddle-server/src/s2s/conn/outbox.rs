@@ -8,6 +8,8 @@
 //! is not a delivered one: the peer may still drop it, and nothing on the
 //! stream acknowledges it.
 
+use std::sync::Arc;
+
 use minidom::Element;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -15,6 +17,7 @@ use waddle_xmpp::s2s::SendError;
 
 use super::peer_stream::VerifiedPeerStream;
 use super::registry::Registry;
+use crate::permissions::host_grant::ManagedSpaceGrant;
 
 /// How many stanzas an outbound stream holds before its sender waits: the
 /// one being written.
@@ -24,6 +27,7 @@ pub(super) const OUTBOX_CAPACITY: usize = 1;
 #[derive(Debug)]
 pub(super) struct Transmission {
     pub(super) stanza: Element,
+    pub(super) space_grant: Option<Arc<ManagedSpaceGrant>>,
     pub(super) written: oneshot::Sender<Result<(), Untransmitted>>,
 }
 
@@ -32,6 +36,7 @@ pub(super) struct Transmission {
 pub(super) enum Untransmitted {
     /// The codec refused the stanza before producing a byte.
     Refused(SendError),
+    AuthorizationExpired,
     /// The stream began to close before it wrote the stanza.
     Closing(Element),
 }
@@ -60,6 +65,9 @@ pub enum TransmitError {
     /// identity profile.
     #[error("the stream refused the stanza: {0}")]
     Refused(SendError),
+    /// The protected stanza lost its grant before entering TLS.
+    #[error("space authorization expired before transmission")]
+    AuthorizationExpired,
     /// The stream took the stanza and ended before its write completed or
     /// within it: the stanza may or may not have reached the peer.
     #[error("the stream ended while writing the stanza")]
@@ -72,17 +80,26 @@ pub(super) async fn transmit(
     registry: &Registry,
     stream: &VerifiedPeerStream,
     stanza: Element,
+    space_grant: Option<Arc<ManagedSpaceGrant>>,
 ) -> Result<(), TransmitError> {
     let Some(outbox) = registry.outbox(stream) else {
         return Err(TransmitError::NotTaken(stanza));
     };
     let (written, result) = oneshot::channel();
-    if let Err(refused) = outbox.send(Transmission { stanza, written }).await {
+    if let Err(refused) = outbox
+        .send(Transmission {
+            stanza,
+            space_grant,
+            written,
+        })
+        .await
+    {
         return Err(TransmitError::NotTaken(refused.0.stanza));
     }
     match result.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(Untransmitted::Refused(error))) => Err(TransmitError::Refused(error)),
+        Ok(Err(Untransmitted::AuthorizationExpired)) => Err(TransmitError::AuthorizationExpired),
         Ok(Err(Untransmitted::Closing(stanza))) => Err(TransmitError::NotTaken(stanza)),
         Err(_) => Err(TransmitError::Unknown),
     }

@@ -3614,6 +3614,7 @@ impl PairWorker {
                         .answer(queued, Failure::Timeout, registered)
                         .await;
                 }
+                Ok(Err(TransmitError::AuthorizationExpired)) => return,
                 Ok(Err(TransmitError::Refused(_))) => {
                     return self
                         .router

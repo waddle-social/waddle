@@ -35,6 +35,7 @@ use super::session::{is_peer_failure, EstablishedSender, Role, Session, SessionS
 use super::sink::{RefuseAllStanzas, StanzaSink};
 use super::telemetry;
 use super::transport::Transport;
+use crate::permissions::host_grant::ManagedSpaceGrant;
 use crate::s2s::config::{AdmissionRefusal, S2sConfig, STREAM_CODEC_LIMITS};
 use crate::s2s::verify::{OutboundTransport, VerifierWorkers};
 
@@ -411,7 +412,18 @@ impl S2sHandle {
         stream: &VerifiedPeerStream,
         stanza: minidom::Element,
     ) -> Result<(), TransmitError> {
-        outbox::transmit(&self.shared.registry, stream, stanza).await
+        outbox::transmit(&self.shared.registry, stream, stanza, None).await
+    }
+
+    /// Offer a protected Space response. The connection checks the grant at
+    /// the TLS write boundary, after taking the response from its outbox.
+    pub async fn transmit_space_reply(
+        &self,
+        stream: &VerifiedPeerStream,
+        stanza: minidom::Element,
+        grant: Arc<ManagedSpaceGrant>,
+    ) -> Result<(), TransmitError> {
+        outbox::transmit(&self.shared.registry, stream, stanza, Some(grant)).await
     }
 
     /// Every established stream.
