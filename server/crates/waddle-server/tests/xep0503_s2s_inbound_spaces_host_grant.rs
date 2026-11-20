@@ -474,6 +474,26 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             );
         }
     }
+    let room = managed.room();
+    let bookmark = PubSubItem::new(
+        Some(room.to_string()),
+        Some(build_bookmark_element(
+            &Bookmark::new(room.clone()).with_name("managed"),
+        )),
+    );
+    storage
+        .publish_item(&spaces(), node, &bookmark, None, false)
+        .await
+        .expect("store the room bookmark");
+    let visible = ask(&managed, items(GUEST_PHONE, "protected-items-member", node)).await;
+    assert_eq!(visible.attr("type"), Some("result"), "{visible:?}");
+    assert_eq!(item_ids(&visible), [room.to_string()]);
+    let hidden = ask(
+        &managed,
+        items(STRANGER_PHONE, "protected-items-stranger", node),
+    )
+    .await;
+    assert_eq!(error_condition(&hidden).as_deref(), Some("item-not-found"));
     managed.deployment.close().await;
 }
 

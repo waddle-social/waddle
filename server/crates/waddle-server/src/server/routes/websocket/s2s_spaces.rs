@@ -87,7 +87,8 @@ use crate::db::s2s_spaces::{
 };
 use crate::db::Database;
 use crate::permissions::host_grant::{
-    HostGrantAction, PrincipalEvidence, PrincipalWitness, RoomBinding, RoomGate, ScopeKey,
+    HostGrantAction, ManagedSpaceGrant, PrincipalEvidence, PrincipalWitness, RoomBinding, RoomGate,
+    ScopeKey,
 };
 use crate::s2s::route::SpacePublication;
 use crate::s2s::route::{LocalSpaces, RemotePrincipal, SpaceOperation, SpaceReply, SpaceRequest};
@@ -826,9 +827,8 @@ impl Asked<'_> {
         node: &str,
         enabled_for: i64,
     ) -> Result<Option<OpenSpace>, Undecided> {
-        // The Space of an enrolled host-grant scope is served to nobody:
-        // no grant of the scope is a Space's, so nobody's standing in it
-        // can be decided.
+        // Enrolled Spaces use canonical decisions. Legacy PubSub
+        // affiliations cannot authorize an operation on them.
         match self
             .state
             .deps
@@ -906,6 +906,37 @@ impl Asked<'_> {
         }
     }
 
+    async fn protected_child_visible(
+        &self,
+        id: &str,
+        payload: Option<&Element>,
+        grant: &mut ManagedSpaceGrant,
+    ) -> bool {
+        let Some(room) = bookmarked_room(self.state, id, payload) else {
+            return false;
+        };
+        if room_open(self.state, &room).await != Some(true) {
+            return false;
+        }
+        match self
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(&room))
+            .await
+        {
+            RoomGate::Unmanaged => true,
+            RoomGate::Managed(decision)
+                if decision.allows_as(&self.account, &self.evidence, HostGrantAction::View) =>
+            {
+                grant.require_room(decision);
+                true
+            }
+            RoomGate::Managed(_) | RoomGate::Unavailable => false,
+        }
+    }
+
     // --- service discovery and ping ------------------------------------------
 
     /// XEP-0030 §3: the service's identity and what it is, or a Space
@@ -955,16 +986,47 @@ impl Asked<'_> {
             return None;
         };
         let node = DiscoInfoQuery::try_from(payload.clone()).ok()?.node?;
-        let key = ScopeKey::new(self.service.clone(), node.as_str()).ok()?;
-        let grant = self
-            .state
+        let grant = self.protected_read(&node, principal).await?;
+        let stanza = result(self.iq, Some(self.node_info(node).await)).pop()?;
+        Some(SpaceReply::Protected { stanza, grant })
+    }
+
+    async fn protected_read(
+        &self,
+        node: &str,
+        principal: &RemotePrincipal,
+    ) -> Option<ManagedSpaceGrant> {
+        let key = ScopeKey::new(self.service.clone(), node).ok()?;
+        self.state
             .deps
             .app_state
             .host_grants
             .space_read_remote(&key, principal, self.iq)
-            .await?;
-        let stanza = result(self.iq, Some(self.node_info(node).await)).pop()?;
-        Some(SpaceReply::Protected { stanza, grant })
+            .await
+    }
+
+    async fn protected_items(&self, principal: &RemotePrincipal) -> Option<SpaceReply> {
+        if self.iq_payload_ns() != Some(NS_PUBSUB) {
+            return None;
+        }
+        let PubSubRequest::Items {
+            node,
+            max_items,
+            item_ids,
+        } = parse_pubsub_iq(self.iq).ok()?
+        else {
+            return None;
+        };
+        let mut grant = self.protected_read(&node, principal).await?;
+        let mut replies = self
+            .item_response(&node, max_items, &item_ids, Some(&mut grant))
+            .await;
+        match replies.pop()? {
+            stanza if matches!(&stanza, Stanza::Iq(iq) if matches!(iq.as_ref(), Iq::Result { .. })) => {
+                Some(SpaceReply::Protected { stanza, grant })
+            }
+            error => Some(SpaceReply::Ordinary(vec![error])),
+        }
     }
 
     async fn node_info(&self, node: String) -> Element {
@@ -1206,6 +1268,16 @@ impl Asked<'_> {
         if !reads(space.node.config.access_model, space.affiliation) {
             return self.refuse(forbidden("You may not read this Space."));
         }
+        self.item_response(node, max_items, item_ids, None).await
+    }
+
+    async fn item_response(
+        &self,
+        node: &str,
+        max_items: Option<u32>,
+        item_ids: &[String],
+        mut grant: Option<&mut ManagedSpaceGrant>,
+    ) -> Vec<Stanza> {
         let most = max_items.map_or(MAX_RETURNED_ITEMS, |asked| asked.min(MAX_RETURNED_ITEMS));
         let Ok(stored) = self
             .storage()
@@ -1221,7 +1293,13 @@ impl Asked<'_> {
                 Some(id) if SpaceImage::from_item_id(id).is_some() => {
                     item.payload.is_some() && space_image(id, item.payload.as_ref())
                 }
-                Some(id) => self.child_visible(id, item.payload.as_ref()).await == Some(true),
+                Some(id) => match grant.as_deref_mut() {
+                    Some(grant) => {
+                        self.protected_child_visible(id, item.payload.as_ref(), grant)
+                            .await
+                    }
+                    None => self.child_visible(id, item.payload.as_ref()).await == Some(true),
+                },
                 None => false,
             };
             if told {
@@ -1530,9 +1608,13 @@ impl LocalSpaces for WebSocketLocalSpaces {
                 Iq::Get { .. } => result(iq, None),
                 _ => refuse(iq, bad_request()),
             },
-            operation @ (SpaceOperation::PubSub | SpaceOperation::Owner) => {
-                asked.pubsub(operation).await
+            SpaceOperation::PubSub => {
+                if let Some(reply) = asked.protected_items(&request.principal).await {
+                    return reply;
+                }
+                asked.pubsub(SpaceOperation::PubSub).await
             }
+            SpaceOperation::Owner => asked.pubsub(SpaceOperation::Owner).await,
         };
         SpaceReply::Ordinary(answers)
     }

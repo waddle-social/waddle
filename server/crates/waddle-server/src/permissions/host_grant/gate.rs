@@ -116,6 +116,7 @@ pub struct ManagedSpaceGrant {
     affiliation: Affiliation,
     fence: FenceTicket,
     remote_reply: Option<RemoteSpaceReply>,
+    room_dependencies: Vec<FenceTicket>,
 }
 
 #[derive(Debug)]
@@ -145,7 +146,13 @@ impl ManagedSpaceGrant {
 
     /// Transfer a protected effect synchronously while the decision is current.
     pub fn admit<R>(&self, effect: impl FnOnce(Affiliation) -> R) -> Option<R> {
-        self.fence.admit(|| effect(self.affiliation))
+        self.fence
+            .admit_with(&self.room_dependencies, || effect(self.affiliation))
+    }
+
+    /// The reply includes data from a managed room as well as the Space.
+    pub(crate) fn require_room(&mut self, room: ManagedRoomGrants) {
+        self.room_dependencies.push(room.fence);
     }
 }
 
@@ -743,6 +750,7 @@ impl HostGrantGate {
             affiliation,
             fence: ticket,
             remote_reply: None,
+            room_dependencies: Vec::new(),
         })
     }
 

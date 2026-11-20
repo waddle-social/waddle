@@ -1026,6 +1026,20 @@ impl FenceTicket {
         self.current_in(&state).then(effect)
     }
 
+    /// Admit one effect that depends on several scope decisions from this replica.
+    pub(super) fn admit_with<R>(
+        &self,
+        dependencies: &[Self],
+        effect: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let state = self.fence.read();
+        (self.current_in(&state)
+            && dependencies
+                .iter()
+                .all(|ticket| Arc::ptr_eq(&self.fence, &ticket.fence) && ticket.current_in(&state)))
+        .then(effect)
+    }
+
     /// Ask the replica's server to sweep the decision's scope: an effect
     /// that began under this ticket finished after the ticket stopped being
     /// current.
