@@ -7811,6 +7811,7 @@ dependencies = [
  "waddle-ws-test-support",
  "waddle-xmpp",
  "waddle-xmpp-client",
+ "waddle-xmpp-client-ffi",
  "waddle-xmpp-core",
  "wiremock",
  "xmpp-parsers",

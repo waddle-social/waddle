@@ -140,6 +140,8 @@ class XmppSessionManager(
 
     private val activeSession = ActiveSession()
 
+    private val eventPlanning = EventPlanningRequests(activeSession)
+
     private val readState: ReadStateCoordinator =
         ReadStateCoordinator(activeSession, stores, userPrefs) { event ->
             router.emit(event)
@@ -280,6 +282,24 @@ class XmppSessionManager(
             it.rsvpCommunityEvent(communityJid, uid, selfJid, status)
             true
         } ?: false
+
+    fun captureEventPlanningOwner(expectedSelf: String): EventPlanningOwner? = eventPlanning.ownerFor(expectedSelf)
+
+    suspend fun applyPlanningIfCurrent(owner: EventPlanningOwner?, action: () -> Unit): Boolean =
+        eventPlanning.applyIfCurrent(owner, action)
+
+    suspend fun createPlanningEvent(
+        owner: EventPlanningOwner?,
+        metadata: social.waddle.client.ffi.WaddlePlanningItem,
+        retry: EventPlanningRetry? = null,
+        onRoomCreated: (EventPlanningRetry) -> Unit = {},
+    ): EventPlanningResult = eventPlanning.create(owner, metadata, retry, onRoomCreated)
+
+    suspend fun savePlanningItem(
+        owner: EventPlanningOwner?,
+        roomJid: String,
+        item: social.waddle.client.ffi.WaddlePlanningItem,
+    ): EventPlanningResult = eventPlanning.save(owner, roomJid, item)
 
     suspend fun eventPlanningItems(roomJid: String): List<social.waddle.client.ffi.WaddlePlanningItem>? =
         activeSession.fetch { it.eventPlanningItems(roomJid) }

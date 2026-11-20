@@ -9,6 +9,13 @@ use url::Url;
 /// Room-scoped XEP-0060 node and Waddle payload namespace.
 pub const NODE_EVENT_PLANNING: &str = "urn:waddle:event-planning:0";
 
+/// Reserved room addresses used for private event planning workspaces.
+#[must_use]
+pub fn is_event_room(room: &BareJid) -> bool {
+    room.node()
+        .is_some_and(|node| node.as_str().starts_with("event-"))
+}
+
 /// Independently addressable planning object type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanningKind {

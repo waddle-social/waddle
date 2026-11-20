@@ -1144,7 +1144,11 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     && !server_permission_allowed(
                         state,
                         authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
-                        Permission::CreateMuc,
+                        if waddle_xmpp_core::event_planning::is_event_room(room_jid) {
+                            Permission::CreateEventRoom
+                        } else {
+                            Permission::CreateMuc
+                        },
                     )
                     .await
                     .unwrap_or(false)
@@ -1174,7 +1178,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                             .node()
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string()),
-                        members_only: false,
+                        members_only: waddle_xmpp_core::event_planning::is_event_room(room_jid),
+                        public_room: !waddle_xmpp_core::event_planning::is_event_room(room_jid),
                         ..Default::default()
                     });
 

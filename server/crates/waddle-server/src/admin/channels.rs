@@ -1984,6 +1984,14 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     config.max_occupants = 0;
     config.enable_logging = true;
 
+    if waddle_xmpp_core::event_planning::is_event_room(&channel_jid)
+        && (!config.members_only || config.public_room || !config.persistent)
+    {
+        return Err(Box::new(CommandResult::Error(XmppError::forbidden(Some(
+            "Event workspaces must remain private, members-only and persistent.".into(),
+        )))));
+    }
+
     state
         .room_registry
         .ask(CreateRoom {
@@ -4149,6 +4157,14 @@ async fn run_update(
         ..existing.clone()
     };
     apply_channel_type(&mut updated, new_channel_type);
+    if waddle_xmpp_core::event_planning::is_event_room(&args.channel_jid)
+        && (!updated.members_only || updated.public_room || !updated.persistent)
+    {
+        return Err(Box::new(CommandResult::Error(XmppError::forbidden(Some(
+            "Event workspaces must remain private, members-only and persistent.".into(),
+        )))));
+    }
+
     let linked_bookmark = if let Some(link) = state
         .channel_space_link_store
         .get(&args.channel_jid)

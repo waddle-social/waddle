@@ -8,6 +8,14 @@ mentions and per-room notification controls.
 
 ## Transport and access
 
+The `event-` room-name prefix is reserved for private event workspaces.
+Authenticated server members, administrators and owners have the distinct
+`create_event_room` permission; the owner-only `create_muc` permission for
+ordinary rooms is unchanged. Newly created event rooms are persistent,
+members-only and hidden before admission. Room-owner configuration and channel
+administration reject attempts to make them public, open or transient. Joining
+an existing event room never grants creator ownership.
+
 Use XEP-0060 IQs addressed to the event room's **bare JID**, with node
 `urn:waddle:event-planning:0`. Only item retrieval, publication and retraction are
 supported. Subscription, configuration and node-administration requests are denied;
@@ -55,8 +63,9 @@ Repeated `participant` children contain bare JIDs. Polls contain at least two
 `<selection>stable-id</selection>` children. Scalar fields cannot repeat.
 
 An unscheduled event omits its timestamps. If an end is supplied, a start is
-required and the end must be later. Timezone changes alter presentation, not the
-stored instant. Links accept HTTP(S) URLs without embedded credentials. Expense
+required and the end must be later. Timestamps are stored as UTC instants;
+the timezone identifies their local display and calendar zone. Links accept
+HTTP(S) URLs without embedded credentials. Expense
 amounts use minor units to avoid floating-point rounding and stay within the
 JavaScript safe-integer range so native-created expenses remain readable on web.
 

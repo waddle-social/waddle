@@ -298,7 +298,7 @@ impl WaddleClient {
         name: String,
         private_room: bool,
     ) -> Result<String, WaddleError> {
-        if name.trim().is_empty() {
+        if name.trim().is_empty() || !private_room {
             return Err(WaddleError::InvalidArgument);
         }
         let account = self
@@ -334,23 +334,27 @@ impl WaddleClient {
             form.bool_value(FIELD_MEMBERS_ONLY) == Some(private_room)
                 && form.bool_value(FIELD_PUBLIC_ROOM) == Some(!private_room)
         });
-        let persistent = self
+        let persistence = self
             .clone_handle()
             .await
             .ok_or(WaddleError::NotConnected)?
             .discover_info(room_jid.as_str(), None)
             .await
-            .is_ok_and(|info| {
+            .map(|info| {
                 info.has_feature(waddle_xmpp_client::xep::xep0045_owner::FEATURE_MUC_PERSISTENT)
-            });
-        if !valid || !persistent {
+            })
+            .map_err(|error| client_error_to_waddle(&error));
+        if !valid || !matches!(persistence, Ok(true)) {
             let _ = self
                 .destroy_room(
                     room,
                     Some("Event room configuration was not applied".into()),
                 )
                 .await;
-            return Err(verified.err().unwrap_or(WaddleError::MalformedResponse));
+            return Err(verified
+                .err()
+                .or_else(|| persistence.err())
+                .unwrap_or(WaddleError::MalformedResponse));
         }
         let bookmark = self
             .set_room_notification_mode(
@@ -360,15 +364,22 @@ impl WaddleClient {
                 false,
             )
             .await;
-        match bookmark {
-            Ok(crate::WaddleSetRoomNotificationModeOutcome::Ok { .. }) => Ok(room),
-            outcome => {
-                let _ = self
-                    .destroy_room(room, Some("Event setup did not complete".into()))
-                    .await;
-                Err(outcome.err().unwrap_or(WaddleError::MalformedResponse))
+        let error = match bookmark {
+            Ok(crate::WaddleSetRoomNotificationModeOutcome::Ok { .. }) => return Ok(room),
+            Ok(crate::WaddleSetRoomNotificationModeOutcome::NodeConfigMismatch) => {
+                self.emit_error("Event workspace bookmark could not be saved because the bookmarks node configuration did not match.".into());
+                WaddleError::MalformedResponse
             }
-        }
+            Ok(crate::WaddleSetRoomNotificationModeOutcome::Error) => {
+                self.emit_error("Saving the event workspace bookmark failed.".into());
+                WaddleError::MalformedResponse
+            }
+            Err(error) => error,
+        };
+        let _ = self
+            .destroy_room(room, Some("Event setup did not complete".into()))
+            .await;
+        Err(error)
     }
 }
 #[cfg(test)]

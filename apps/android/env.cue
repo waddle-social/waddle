@@ -42,7 +42,7 @@ let _NamespaceAndroidCache = schema.#Contributor & {
 }
 
 // Preserve the actual render and JUnit failure when a CI screenshot check
-// differs. The pipeline still fails; reviewers can inspect the evidence.
+// differs. Also publish successful event-picker captures for UI review.
 let _AndroidTestReports = schema.#Contributor & {
 	id: "androidTestReports"
 	tasks: [{
@@ -60,6 +60,20 @@ let _AndroidTestReports = schema.#Contributor & {
 					apps/android/app/build/test-results/
 					apps/android/app/build/reports/tests/
 					"""
+				"if-no-files-found": "ignore"
+				"retention-days":    3
+			}
+		}
+	}, {
+		id:        "android.eventPickerPreviews"
+		label:     "Upload Android event picker previews"
+		priority:  100
+		condition: "on_success"
+		provider: github: {
+			uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+			with: {
+				name:                "android-event-picker-previews"
+				path:                "apps/android/app/build/outputs/roborazzi/event-picker-previews/*.png"
 				"if-no-files-found": "ignore"
 				"retention-days":    3
 			}

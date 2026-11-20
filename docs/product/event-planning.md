@@ -5,6 +5,16 @@ start with a title while dates, accommodation and venues are still undecided.
 For example, create “Waddle maintainers — London, February 2027”, choose
 `Europe/London` as its time zone, then add dates when everyone has agreed.
 
+On Android, use **Choose date** and the time picker for the start and end. Search
+for a city such as London in the time-zone selector. Dates can be left unset or
+cleared; an end time must follow the start. For public calendar entries, enable
+**All day** to select calendar dates without times; the displayed end date is
+the last day included in the event.
+
+Server members can create private event planning spaces. This does not grant
+permission to create ordinary community channels. Event spaces remain private
+when their settings are edited.
+
 ## Invite the group
 
 Event planning spaces are private rooms. Invite members and appoint

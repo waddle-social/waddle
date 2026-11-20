@@ -6,8 +6,8 @@
     <string name="events_name">Event name</string>
     <string name="events_description">Description</string>
     <string name="events_location">Location</string>
-    <string name="events_start">Start (YYYY-MM-DD or ISO time with offset, optional)</string>
-    <string name="events_end">End (exclusive date or ISO time with offset, optional)</string>
+    <string name="events_start">Start</string>
+    <string name="events_end">End</string>
     <string name="events_save">Save</string>
     <string name="events_cancel">Cancel</string>
     <string name="events_delete">Delete event</string>
@@ -38,9 +38,9 @@
     <string name="events_reopen">Reopen</string>
     <string name="events_url">Link URL (https://…)</string>
     <string name="events_category">Category</string>
-    <string name="events_timezone">Time zone (e.g. Europe/London)</string>
-    <string name="events_local_start">Start (YYYY-MM-DDTHH:MM, optional)</string>
-    <string name="events_local_end">End (YYYY-MM-DDTHH:MM, optional)</string>
+    <string name="events_timezone">Time zone</string>
+    <string name="events_local_start">Start</string>
+    <string name="events_local_end">End</string>
     <string name="events_assignee">Owner (bare JID)</string>
     <string name="events_amount">Amount</string>
     <string name="events_currency">Currency (e.g. GBP)</string>
@@ -63,4 +63,22 @@
     <string name="events_invitee">Invitee (bare JID)</string>
     <string name="events_coorganiser">Co-organiser</string>
     <string name="events_invite">Invite</string>
+    <string name="events_choose_date">Choose date</string>
+    <string name="events_choose_time">Choose time</string>
+    <string name="events_picker_done">Done</string>
+    <string name="events_date_control">%1$s date</string>
+    <string name="events_time_control">%1$s time</string>
+    <string name="events_clear_date">Clear %1$s</string>
+    <string name="events_all_day">All day</string>
+    <string name="events_last_day">Last day</string>
+    <string name="events_dates_optional">Dates can be decided later.</string>
+    <string name="events_invalid_zone">Choose a valid time zone.</string>
+    <string name="events_invalid_date">Choose a valid date and time.</string>
+    <string name="events_skipped_time">This time does not exist because the clocks change. Choose another time.</string>
+    <string name="events_ambiguous_time">This time occurs twice because the clocks change. Choose another time.</string>
+    <string name="events_start_required">Choose a start before setting an end.</string>
+    <string name="events_end_after_start">End must be after start.</string>
+    <string name="events_last_day_after_start">Last day cannot be before start.</string>
+    <string name="events_zone_search">Search cities or time zones</string>
+    <string name="events_no_zones">No matching time zones.</string>
 </resources>
