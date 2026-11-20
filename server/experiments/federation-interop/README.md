@@ -40,6 +40,21 @@ override is used). It needs the same host as the other native experiments
 The evidence is written as `federation-interop-<unix time>-<commit>.json`
 and `.md`. Generated logs are run output, not source.
 
+### Independent Spaces client
+
+Build [chord-cli at `df604efb0779e3ee8abc189d2c8f6169290dac15`](https://github.com/abbyfluoroethane/chord/tree/df604efb0779e3ee8abc189d2c8f6169290dac15)
+using `cargo build --locked -p chord-cli`. Supply the absolute binary path
+to run the independent-client row:
+
+```sh
+INTEROP_CHORD_BIN=/path/to/chord-cli \
+  bash server/experiments/federation-interop/run-native.sh \
+  --only flow.chord-reads-waddle-space
+```
+
+The row verifies discovery, subscription, and the qualified room listing
+through chord's ejabberd account. It is unverified when the binary is absent.
+
 ## Environment
 
 | Piece | What the harness starts |

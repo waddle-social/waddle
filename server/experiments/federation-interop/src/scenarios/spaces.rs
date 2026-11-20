@@ -133,6 +133,58 @@ pub async fn peer_reads_waddle_space(h: &mut Harness, peer: Peer) -> Result<Outc
     Ok(outcome)
 }
 
+/// Read and subscribe to a hosted Space through a separate client on ejabberd.
+pub async fn chord_reads_waddle_space(h: &mut Harness) -> Result<Outcome> {
+    let binary = std::env::var_os("INTEROP_CHORD_BIN")
+        .ok_or_else(|| crate::evidence::Unverifiable("INTEROP_CHORD_BIN is unset".to_owned()))?;
+    let password = h.ejabberd.passwords.get("alice").ok_or_else(|| {
+        crate::evidence::Unverifiable("ejabberd test account is unavailable".to_owned())
+    })?;
+    let account = format!("alice@{}", topology::EJABBERD);
+    let address = format!("starttls://127.0.0.1:{}", h.ports.ejabberd_c2s(1));
+    let database = h.root.join("chord-spaces.sqlite3");
+    let service = topology::spaces_domain(HOME_A);
+    let node = support::id("chord-space");
+    let room = format!("{}@{}", support::id("child"), topology::muc_domain(HOME_A));
+    let mut owner = h
+        .login_waddle(Home::A, "admin", &support::id("owner"))
+        .await?;
+    muc::join(&mut owner, &room, "owner").await?;
+    waddle_space(&mut owner, &node, std::slice::from_ref(&room)).await?;
+
+    let mut outcome = Outcome::new("chord-cli authenticating to ejabberd with verified STARTTLS");
+    for action in ["space-info", "space-join", "channels"] {
+        let mut command = tokio::process::Command::new(&binary);
+        command
+            .env("CHORD_JID", &account)
+            .env("CHORD_PASSWORD", password)
+            .env("CHORD_SERVER", &address)
+            .env("CHORD_DB", &database)
+            .env("SSL_CERT_FILE", &h.pki.ca_path)
+            .args(["--json", action, &service, &node])
+            .kill_on_drop(true);
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await??;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let matched = match action {
+            "space-info" => {
+                let info: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_default();
+                info["service"] == service && info["node"] == node
+            }
+            "space-join" => stdout.trim() == format!("joined space {service} {node}"),
+            "channels" => stdout.contains(&room),
+            _ => unreachable!(),
+        };
+        outcome.check(
+            action,
+            output.status.success() && matched,
+            format!("{stdout}{}", String::from_utf8_lossy(&output.stderr)),
+        );
+    }
+    owner.close().await;
+    Ok(outcome)
+}
+
 pub async fn child_rooms(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
         [

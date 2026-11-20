@@ -25,7 +25,7 @@ if [[ "${1:-}" != "--inside-native-shell" ]]; then
   # The --run script is expanded by the shell inside nix-shell, not here.
   # shellcheck disable=SC2016
   exec nix-shell --pure "$INTEROP_EXPERIMENT_ROOT/native.nix" \
-    --keep INTEROP_EXPERIMENT_ROOT --keep INTEROP_ARGS --keep INTEROP_LANDED \
+    --keep INTEROP_EXPERIMENT_ROOT --keep INTEROP_ARGS --keep INTEROP_LANDED --keep INTEROP_CHORD_BIN \
     --keep CARGO_TARGET_DIR --keep CARGO_BUILD_JOBS --keep HOME \
     --run 'eval "set -- $INTEROP_ARGS"; exec bash "$INTEROP_EXPERIMENT_ROOT/run-native.sh" --inside-native-shell "$@"'
 fi

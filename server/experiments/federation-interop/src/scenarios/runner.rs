@@ -59,6 +59,7 @@ async fn dispatch(h: &mut Harness, id: &str, peer: Peer) -> Result<Outcome> {
         "flow.community-admin-trusted-home" => spaces::community_admin(h, peer).await,
         "flow.disco-ping" => transport::disco_ping(h, peer).await,
         "flow.space-on-peer-pubsub" => spaces::space_on_peer_pubsub(h, peer).await,
+        "flow.chord-reads-waddle-space" => spaces::chord_reads_waddle_space(h).await,
         "flow.peer-reads-waddle-space" => spaces::peer_reads_waddle_space(h, peer).await,
         "flow.child-rooms-by-muc-jid" => spaces::child_rooms(h, peer).await,
         "flow.no-avatar-banner-fetch" => spaces::no_avatar_fetch(h, peer).await,
