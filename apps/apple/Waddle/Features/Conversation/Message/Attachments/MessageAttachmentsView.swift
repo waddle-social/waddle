@@ -139,13 +139,14 @@ struct MessageImageAttachment: View {
     }
 }
 
-/// A sticker: the image alone, without chrome. GIF stickers play.
+/// A sticker: the image alone, without chrome. GIF stickers play. The
+/// row hides a sticker's text, so a picture that cannot be fetched is
+/// replaced by that text.
 struct MessageStickerView: View {
     let file: SharedFile
 
     var body: some View {
         sticker
-            .frame(width: 120, height: 120)
             .accessibilityLabel(Text(file.description ?? "Sticker"))
             .accessibilityAddTraits(.isImage)
     }
@@ -156,18 +157,34 @@ struct MessageStickerView: View {
             RemoteImageDataView(url: file.url) { phase in
                 switch phase {
                 case let .success(data):
-                    AnimatedImageView(data: data, maxPixelSize: 360)
-                case .empty, .failure:
-                    Color.clear
+                    AnimatedImageView(data: data, maxPixelSize: 360).frame(width: 120, height: 120)
+                case .empty:
+                    Color.clear.frame(width: 120, height: 120)
+                case .failure:
+                    unavailable
                 }
             }
         } else {
-            AsyncImage(url: file.url) { image in
-                image.resizable().scaledToFit()
-            } placeholder: {
-                Color.clear
+            AsyncImage(url: file.url) { phase in
+                switch phase {
+                case let .success(image):
+                    image.resizable().scaledToFit().frame(width: 120, height: 120)
+                case .empty:
+                    Color.clear.frame(width: 120, height: 120)
+                case .failure:
+                    unavailable
+                @unknown default:
+                    unavailable
+                }
             }
         }
+    }
+
+    /// What the sticker shows, in words, where its picture would be.
+    private var unavailable: some View {
+        Label(file.description ?? "Sticker", systemImage: "face.smiling")
+            .huddleText(Theme.Typography.body)
+            .foregroundStyle(Theme.Colors.fgMuted)
     }
 }
 

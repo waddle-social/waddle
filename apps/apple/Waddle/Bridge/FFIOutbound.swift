@@ -20,7 +20,7 @@ enum FFIOutbound {
             linkPreviewToken: nil,
             requestDisplayedMarker: options.requestDisplayedMarker,
             mucPm: false,
-            sticker: nil,
+            sticker: options.sticker.map { WaddleStickerRef(packId: $0.packID, packJid: nil, packNode: nil) },
             mentionDirectory: options.mentionDirectory.map(mentionDirectory)
         )
     }
@@ -82,7 +82,7 @@ enum FFIOutbound {
             height: file.height.flatMap { UInt32(exactly: $0) },
             desc: file.description,
             hashes: fileHashes(file.digests),
-            disposition: disposition(forMediaType: file.mediaType),
+            disposition: file.disposition == .inline ? "inline" : disposition(forMediaType: file.mediaType),
             encrypted: file.encrypted.map(encryptedFile)
         )
     }

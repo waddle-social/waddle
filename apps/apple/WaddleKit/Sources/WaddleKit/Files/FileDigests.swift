@@ -37,5 +37,10 @@ public struct FileDigests: Hashable, Sendable, Codable {
             .sorted { $0.algorithm < $1.algorithm }
     }
 
+    /// The SHA-256 of `data`, the digest Waddle sends.
+    public static func sha256(of data: Data) -> FileDigests {
+        FileDigests([.sha256: DigestCheck.digest(of: data, using: .sha256)])
+    }
+
     public var isEmpty: Bool { values.isEmpty }
 }

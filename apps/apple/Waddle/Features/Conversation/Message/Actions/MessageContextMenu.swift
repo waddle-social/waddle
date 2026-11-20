@@ -86,7 +86,7 @@ struct MessageContextMenu: View {
             } label: {
                 Label("Edit", systemImage: "pencil")
             }
-            .disabled(item.correctionTargetID == nil || item.isLocalEcho)
+            .disabled(item.correctionTargetID == nil || item.isLocalEcho || item.message.isSticker)
             Button(role: .destructive) {
                 actions.requestDeletion(of: item)
             } label: {
@@ -164,7 +164,7 @@ struct MessageAccessibilityActions: ViewModifier {
                 Button("Open link") { openURL(preview.url) }
             }
             if item.isMine, item.tombstone == nil {
-                if item.correctionTargetID != nil, !item.isLocalEcho {
+                if item.correctionTargetID != nil, !item.isLocalEcho, !item.message.isSticker {
                     Button("Edit") { actions.edit(item) }
                 }
                 if item.retractionTargetID != nil {

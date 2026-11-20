@@ -10,6 +10,9 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
     public var requestDisplayedMarker: Bool
     /// Room sends: resolve typed `@nick` tokens to mention references.
     public var mentionDirectory: MentionDirectory?
+    /// XEP-0449: the message is a sticker, whose picture is the one file
+    /// in `sharedFiles`.
+    public var sticker: StickerReference?
 
     /// XEP-0461 reply with its XEP-0428 fallback range.
     public struct Reply: Hashable, Sendable, Codable {
@@ -31,7 +34,8 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         references: [Reference] = [],
         sharedFiles: [SharedFile] = [],
         requestDisplayedMarker: Bool = false,
-        mentionDirectory: MentionDirectory? = nil
+        mentionDirectory: MentionDirectory? = nil,
+        sticker: StickerReference? = nil
     ) {
         self.reply = reply
         self.thread = thread
@@ -40,6 +44,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         self.sharedFiles = sharedFiles
         self.requestDisplayedMarker = requestDisplayedMarker
         self.mentionDirectory = mentionDirectory
+        self.sticker = sticker
     }
 }
 

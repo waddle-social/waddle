@@ -17,5 +17,6 @@ struct ComposerActions {
     let pickPhoto: () -> Void
     let pickFile: () -> Void
     let pickGIF: () -> Void
+    let pickSticker: () -> Void
     let paste: () -> Void
 }
