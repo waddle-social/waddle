@@ -215,4 +215,16 @@ public protocol EventsPort: AnyObject, Sendable {
 }
 
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort
+/// The account's own XEP-0449 sticker packs.
+public protocol StickerPort: AnyObject, Sendable {
+    /// Every pack the account has published; none is an empty list.
+    func fetchStickerPacks() async throws -> [StickerPack]
+    /// One of the account's packs, or nil when it is not there.
+    func fetchStickerPack(id: String) async throws -> StickerPack?
+    /// Publishes a pack and answers with the id its content gives it.
+    func publishStickerPack(_ draft: StickerPackDraft) async throws -> String
+    /// Removing a pack that is already gone succeeds.
+    func retractStickerPack(_ packID: String) async throws
+}
+
+public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort & StickerPort

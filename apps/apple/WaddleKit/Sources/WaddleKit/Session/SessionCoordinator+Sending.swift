@@ -9,6 +9,29 @@ extension SessionCoordinator {
     @discardableResult
     public func send(_ draft: Draft, in conversation: ConversationID) async -> String? {
         guard let composed = MessageComposer.compose(draft) else { return nil }
+        return await send(composed, preview: draft.text, in: conversation)
+    }
+
+    /// Sends a sticker of one of the account's packs, through the same
+    /// queue as any message.
+    @discardableResult
+    public func send(
+        _ sticker: Sticker,
+        from pack: StickerPack,
+        in conversation: ConversationID,
+        reply: ReplyContext? = nil,
+        thread: String? = nil
+    ) async -> String? {
+        guard let composed = MessageComposer.compose(sticker, from: pack, reply: reply, thread: thread) else { return nil }
+        return await send(composed, preview: sticker.description, in: conversation)
+    }
+
+    /// `preview` is what the conversation list shows for a 1:1 send.
+    private func send(
+        _ composed: (body: String, options: OutboundOptions),
+        preview: String,
+        in conversation: ConversationID
+    ) async -> String? {
         var options = composed.options
         options.mentionDirectory = mentionDirectory(for: conversation)
         let message = OutboundMessage(
@@ -19,8 +42,8 @@ extension SessionCoordinator {
         )
         timelines.insertLocalEcho(localEcho(of: message), in: conversation)
         if conversation.kind == .direct {
-            let preview = MeAction.presentation(ofBody: draft.text, actor: account.jid.localpart ?? account.jid.domain)
-            directory.touchDirect(conversation.jid, at: Date(), preview: preview ?? draft.text)
+            let action = MeAction.presentation(ofBody: preview, actor: account.jid.localpart ?? account.jid.domain)
+            directory.touchDirect(conversation.jid, at: Date(), preview: action ?? preview)
         }
         stopTyping(in: conversation)
         enqueue(message)
@@ -267,6 +290,7 @@ extension SessionCoordinator {
             },
             markupSpans: message.options.markupSpans,
             references: message.options.references,
+            isSticker: message.options.sticker != nil,
             sharedFiles: message.options.sharedFiles,
             authorRealJID: conversation.isRoom ? account.jid : nil
         )

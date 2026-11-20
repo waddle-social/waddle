@@ -44,6 +44,8 @@ public final class SessionCoordinator {
     public let unreadOverview: UnreadOverviewStore
     /// The community feed and stories.
     public let community: CommunityStore
+    /// The account's sticker packs.
+    public let stickers: StickerStore
     /// The community calendar.
     public let events: EventsStore
     /// XEP-0050 extension commands, discovered once the session is ready.
@@ -184,6 +186,7 @@ public final class SessionCoordinator {
         self.threadHistory = ThreadHistoryStore()
         self.unreadOverview = UnreadOverviewStore()
         self.community = CommunityStore()
+        self.stickers = StickerStore()
         self.events = EventsStore(account: account.jid)
         avatars.fetch = { [port] jid, knownID in
             await port.fetchAvatar(of: jid, knownID: knownID)
@@ -404,6 +407,7 @@ public final class SessionCoordinator {
         threadHistory.clear()
         unreadOverview.reset()
         community.reset()
+        stickers.reset()
         events.reset()
         onDemandRooms.removeAll()
         destroyedRooms.removeAll()
