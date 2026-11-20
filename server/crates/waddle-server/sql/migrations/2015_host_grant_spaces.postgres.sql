@@ -1,3 +1,10 @@
+-- The PostgreSQL baseline already creates the version 8 PubSub relations.
+-- Record that version for a baseline database whose PubSub owner phase has
+-- not run yet. That initializer must preserve the node relation now that
+-- canonical Space bindings can refer to it.
+INSERT INTO pubsub_schema_version (version)
+SELECT 8 WHERE NOT EXISTS (SELECT 1 FROM pubsub_schema_version);
+
 -- A private PubSub node bound to the Space key in the scope lifecycle ledger.
 -- Retain the exact bound node: PostgreSQL refuses deletion while a binding
 -- exists. Existing room affiliations imply no standing in the Space.
