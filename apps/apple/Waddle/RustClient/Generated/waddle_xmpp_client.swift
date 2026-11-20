@@ -631,10 +631,22 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func disconnect() async
 
+    /**
+     * Cancels the one occurrence of a repeating event that starts at
+     * `occurrence` (its `recurrence_id`), keeping the rest of the series.
+     */
+    func cancelCommunityEventOccurrence(communityJid: String, itemId: String, occurrence: WaddleCalendarDate) async throws  -> WaddleEvent
+
+    /**
+     * Every event of the community, each with the RSVPs it has received.
+     */
     func fetchCommunityEvents(communityJid: String) async throws  -> [WaddleEvent]
 
     /**
-     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     * Empty id creates. An update replaces the recurrence with the one given
+     * and keeps the RSVPs. Cancelled and changed occurrences are kept too,
+     * unless the start moves or the event stops repeating: they are named
+     * by the start they had.
      */
     func publishCommunityEvent(communityJid: String, event: WaddleEvent) async throws  -> WaddleEvent
 
@@ -1587,6 +1599,30 @@ open func disconnect()async   {
         )
 }
 
+    /**
+     * Cancels the one occurrence of a repeating event that starts at
+     * `occurrence` (its `recurrence_id`), keeping the rest of the series.
+     */
+open func cancelCommunityEventOccurrence(communityJid: String, itemId: String, occurrence: WaddleCalendarDate)async throws  -> WaddleEvent  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_cancel_community_event_occurrence(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(communityJid),FfiConverterString.lower(itemId),FfiConverterTypeWaddleCalendarDate_lower(occurrence)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleEvent_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Every event of the community, each with the RSVPs it has received.
+     */
 open func fetchCommunityEvents(communityJid: String)async throws  -> [WaddleEvent]  {
     return
         try  await uniffiRustCallAsync(
@@ -1605,7 +1641,10 @@ open func fetchCommunityEvents(communityJid: String)async throws  -> [WaddleEven
 }
 
     /**
-     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     * Empty id creates. An update replaces the recurrence with the one given
+     * and keeps the RSVPs. Cancelled and changed occurrences are kept too,
+     * unless the start moves or the event stops repeating: they are named
+     * by the start they had.
      */
 open func publishCommunityEvent(communityJid: String, event: WaddleEvent)async throws  -> WaddleEvent  {
     return
@@ -7492,11 +7531,34 @@ public struct WaddleEvent: Equatable, Hashable {
     public var workspaceRoom: String?
     public var start: WaddleCalendarDate?
     public var end: WaddleCalendarDate?
+    /**
+     * Each account's latest RSVP. Publishing does not change them.
+     */
     public var attendees: [WaddleEventAttendee]
+    public var recurrence: WaddleRecurrence?
+    /**
+     * Starts of the cancelled occurrences. Publishing does not change them;
+     * `cancel_community_event_occurrence` adds one.
+     */
+    public var excluded: [WaddleCalendarDate]
+    /**
+     * Occurrences changed on their own. Publishing does not change them.
+     */
+    public var overrides: [WaddleEventOverride]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, uid: String, summary: String, description: String?, location: String?, organizer: String?, workspaceRoom: String?, start: WaddleCalendarDate?, end: WaddleCalendarDate?, attendees: [WaddleEventAttendee]) {
+    public init(id: String, uid: String, summary: String, description: String?, location: String?, organizer: String?, workspaceRoom: String?, start: WaddleCalendarDate?, end: WaddleCalendarDate?,
+        /**
+         * Each account's latest RSVP. Publishing does not change them.
+         */attendees: [WaddleEventAttendee], recurrence: WaddleRecurrence?,
+        /**
+         * Starts of the cancelled occurrences. Publishing does not change them;
+         * `cancel_community_event_occurrence` adds one.
+         */excluded: [WaddleCalendarDate],
+        /**
+         * Occurrences changed on their own. Publishing does not change them.
+         */overrides: [WaddleEventOverride]) {
         self.id = id
         self.uid = uid
         self.summary = summary
@@ -7507,6 +7569,9 @@ public struct WaddleEvent: Equatable, Hashable {
         self.start = start
         self.end = end
         self.attendees = attendees
+        self.recurrence = recurrence
+        self.excluded = excluded
+        self.overrides = overrides
     }
 
 
@@ -7534,7 +7599,10 @@ public struct FfiConverterTypeWaddleEvent: FfiConverterRustBuffer {
                 workspaceRoom: FfiConverterOptionString.read(from: &buf),
                 start: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
                 end: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
-                attendees: FfiConverterSequenceTypeWaddleEventAttendee.read(from: &buf)
+                attendees: FfiConverterSequenceTypeWaddleEventAttendee.read(from: &buf),
+                recurrence: FfiConverterOptionTypeWaddleRecurrence.read(from: &buf),
+                excluded: FfiConverterSequenceTypeWaddleCalendarDate.read(from: &buf),
+                overrides: FfiConverterSequenceTypeWaddleEventOverride.read(from: &buf)
         )
     }
 
@@ -7549,6 +7617,9 @@ public struct FfiConverterTypeWaddleEvent: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleCalendarDate.write(value.start, into: &buf)
         FfiConverterOptionTypeWaddleCalendarDate.write(value.end, into: &buf)
         FfiConverterSequenceTypeWaddleEventAttendee.write(value.attendees, into: &buf)
+        FfiConverterOptionTypeWaddleRecurrence.write(value.recurrence, into: &buf)
+        FfiConverterSequenceTypeWaddleCalendarDate.write(value.excluded, into: &buf)
+        FfiConverterSequenceTypeWaddleEventOverride.write(value.overrides, into: &buf)
     }
 }
 
@@ -7619,6 +7690,167 @@ public func FfiConverterTypeWaddleEventAttendee_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddleEventAttendee_lower(_ value: WaddleEventAttendee) -> RustBuffer {
     return FfiConverterTypeWaddleEventAttendee.lower(value)
+}
+
+
+/**
+ * One occurrence of an event, as `expand_community_event` works it out.
+ */
+public struct WaddleEventOccurrence: Equatable, Hashable {
+    /**
+     * The start the recurrence gives the occurrence: the value to cancel it
+     * by. `None` when the event does not repeat.
+     */
+    public var recurrenceId: WaddleCalendarDate?
+    public var start: WaddleCalendarDate
+    public var end: WaddleCalendarDate?
+    public var summary: String
+    public var description: String?
+    public var location: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The start the recurrence gives the occurrence: the value to cancel it
+         * by. `None` when the event does not repeat.
+         */recurrenceId: WaddleCalendarDate?, start: WaddleCalendarDate, end: WaddleCalendarDate?, summary: String, description: String?, location: String?) {
+        self.recurrenceId = recurrenceId
+        self.start = start
+        self.end = end
+        self.summary = summary
+        self.description = description
+        self.location = location
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleEventOccurrence: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEventOccurrence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEventOccurrence {
+        return
+            try WaddleEventOccurrence(
+                recurrenceId: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
+                start: FfiConverterTypeWaddleCalendarDate.read(from: &buf),
+                end: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
+                summary: FfiConverterString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                location: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleEventOccurrence, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeWaddleCalendarDate.write(value.recurrenceId, into: &buf)
+        FfiConverterTypeWaddleCalendarDate.write(value.start, into: &buf)
+        FfiConverterOptionTypeWaddleCalendarDate.write(value.end, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.location, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventOccurrence_lift(_ buf: RustBuffer) throws -> WaddleEventOccurrence {
+    return try FfiConverterTypeWaddleEventOccurrence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventOccurrence_lower(_ value: WaddleEventOccurrence) -> RustBuffer {
+    return FfiConverterTypeWaddleEventOccurrence.lower(value)
+}
+
+
+/**
+ * One occurrence of a repeating event that was changed on its own.
+ * A missing field means the occurrence keeps the event's value.
+ */
+public struct WaddleEventOverride: Equatable, Hashable {
+    /**
+     * The start the occurrence would have had.
+     */
+    public var recurrenceId: WaddleCalendarDate
+    public var summary: String?
+    public var description: String?
+    public var location: String?
+    public var start: WaddleCalendarDate?
+    public var end: WaddleCalendarDate?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The start the occurrence would have had.
+         */recurrenceId: WaddleCalendarDate, summary: String?, description: String?, location: String?, start: WaddleCalendarDate?, end: WaddleCalendarDate?) {
+        self.recurrenceId = recurrenceId
+        self.summary = summary
+        self.description = description
+        self.location = location
+        self.start = start
+        self.end = end
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleEventOverride: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEventOverride: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEventOverride {
+        return
+            try WaddleEventOverride(
+                recurrenceId: FfiConverterTypeWaddleCalendarDate.read(from: &buf),
+                summary: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                location: FfiConverterOptionString.read(from: &buf),
+                start: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf),
+                end: FfiConverterOptionTypeWaddleCalendarDate.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleEventOverride, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleCalendarDate.write(value.recurrenceId, into: &buf)
+        FfiConverterOptionString.write(value.summary, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.location, into: &buf)
+        FfiConverterOptionTypeWaddleCalendarDate.write(value.start, into: &buf)
+        FfiConverterOptionTypeWaddleCalendarDate.write(value.end, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventOverride_lift(_ buf: RustBuffer) throws -> WaddleEventOverride {
+    return try FfiConverterTypeWaddleEventOverride.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEventOverride_lower(_ value: WaddleEventOverride) -> RustBuffer {
+    return FfiConverterTypeWaddleEventOverride.lower(value)
 }
 
 
@@ -11139,6 +11371,93 @@ public func FfiConverterTypeWaddlePresenceHat_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeWaddlePresenceHat_lower(_ value: WaddlePresenceHat) -> RustBuffer {
     return FfiConverterTypeWaddlePresenceHat.lower(value)
+}
+
+
+/**
+ * How an event repeats. Occurrences are worked out by the caller, in UTC.
+ */
+public struct WaddleRecurrence: Equatable, Hashable {
+    public var frequency: WaddleRecurrenceFrequency
+    /**
+     * Every `interval` days, weeks, months or years; at least 1.
+     */
+    public var interval: UInt32
+    /**
+     * Empty means the weekday of the event's start.
+     */
+    public var weekdays: [WaddleWeekday]
+    /**
+     * 1 to 31, or -1 to -31 counted from the end of the month.
+     */
+    public var monthDays: [Int32]
+    public var end: WaddleRecurrenceEnd
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(frequency: WaddleRecurrenceFrequency,
+        /**
+         * Every `interval` days, weeks, months or years; at least 1.
+         */interval: UInt32,
+        /**
+         * Empty means the weekday of the event's start.
+         */weekdays: [WaddleWeekday],
+        /**
+         * 1 to 31, or -1 to -31 counted from the end of the month.
+         */monthDays: [Int32], end: WaddleRecurrenceEnd) {
+        self.frequency = frequency
+        self.interval = interval
+        self.weekdays = weekdays
+        self.monthDays = monthDays
+        self.end = end
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRecurrence: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRecurrence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRecurrence {
+        return
+            try WaddleRecurrence(
+                frequency: FfiConverterTypeWaddleRecurrenceFrequency.read(from: &buf),
+                interval: FfiConverterUInt32.read(from: &buf),
+                weekdays: FfiConverterSequenceTypeWaddleWeekday.read(from: &buf),
+                monthDays: FfiConverterSequenceInt32.read(from: &buf),
+                end: FfiConverterTypeWaddleRecurrenceEnd.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRecurrence, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleRecurrenceFrequency.write(value.frequency, into: &buf)
+        FfiConverterUInt32.write(value.interval, into: &buf)
+        FfiConverterSequenceTypeWaddleWeekday.write(value.weekdays, into: &buf)
+        FfiConverterSequenceInt32.write(value.monthDays, into: &buf)
+        FfiConverterTypeWaddleRecurrenceEnd.write(value.end, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRecurrence_lift(_ buf: RustBuffer) throws -> WaddleRecurrence {
+    return try FfiConverterTypeWaddleRecurrence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRecurrence_lower(_ value: WaddleRecurrence) -> RustBuffer {
+    return FfiConverterTypeWaddleRecurrence.lower(value)
 }
 
 
@@ -17293,6 +17612,173 @@ public func FfiConverterTypeWaddlePushVapidLookup_lower(_ value: WaddlePushVapid
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleRecurrenceEnd: Equatable, Hashable {
+
+    case never
+    /**
+     * The series has this many occurrences, cancelled ones included.
+     */
+    case count(count: UInt32
+    )
+    /**
+     * The last occurrence starts at or before this instant.
+     */
+    case until(timestampMs: Int64
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRecurrenceEnd: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRecurrenceEnd: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleRecurrenceEnd
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRecurrenceEnd {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .never
+
+        case 2: return .count(count: try FfiConverterUInt32.read(from: &buf)
+        )
+
+        case 3: return .until(timestampMs: try FfiConverterInt64.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleRecurrenceEnd, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .never:
+            writeInt(&buf, Int32(1))
+
+
+        case let .count(count):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt32.write(count, into: &buf)
+
+
+        case let .until(timestampMs):
+            writeInt(&buf, Int32(3))
+            FfiConverterInt64.write(timestampMs, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRecurrenceEnd_lift(_ buf: RustBuffer) throws -> WaddleRecurrenceEnd {
+    return try FfiConverterTypeWaddleRecurrenceEnd.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRecurrenceEnd_lower(_ value: WaddleRecurrenceEnd) -> RustBuffer {
+    return FfiConverterTypeWaddleRecurrenceEnd.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleRecurrenceFrequency: Equatable, Hashable {
+
+    case daily
+    case weekly
+    case monthly
+    case yearly
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRecurrenceFrequency: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRecurrenceFrequency: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleRecurrenceFrequency
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRecurrenceFrequency {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .daily
+
+        case 2: return .weekly
+
+        case 3: return .monthly
+
+        case 4: return .yearly
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleRecurrenceFrequency, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .daily:
+            writeInt(&buf, Int32(1))
+
+
+        case .weekly:
+            writeInt(&buf, Int32(2))
+
+
+        case .monthly:
+            writeInt(&buf, Int32(3))
+
+
+        case .yearly:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRecurrenceFrequency_lift(_ buf: RustBuffer) throws -> WaddleRecurrenceFrequency {
+    return try FfiConverterTypeWaddleRecurrenceFrequency.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRecurrenceFrequency_lower(_ value: WaddleRecurrenceFrequency) -> RustBuffer {
+    return FfiConverterTypeWaddleRecurrenceFrequency.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
  * values explicitly so extension references survive the boundary
@@ -18200,6 +18686,108 @@ public func FfiConverterTypeWaddleStatusPreference_lower(_ value: WaddleStatusPr
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleWeekday: Equatable, Hashable {
+
+    case sunday
+    case monday
+    case tuesday
+    case wednesday
+    case thursday
+    case friday
+    case saturday
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleWeekday: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleWeekday: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleWeekday
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleWeekday {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .sunday
+
+        case 2: return .monday
+
+        case 3: return .tuesday
+
+        case 4: return .wednesday
+
+        case 5: return .thursday
+
+        case 6: return .friday
+
+        case 7: return .saturday
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleWeekday, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .sunday:
+            writeInt(&buf, Int32(1))
+
+
+        case .monday:
+            writeInt(&buf, Int32(2))
+
+
+        case .tuesday:
+            writeInt(&buf, Int32(3))
+
+
+        case .wednesday:
+            writeInt(&buf, Int32(4))
+
+
+        case .thursday:
+            writeInt(&buf, Int32(5))
+
+
+        case .friday:
+            writeInt(&buf, Int32(6))
+
+
+        case .saturday:
+            writeInt(&buf, Int32(7))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleWeekday_lift(_ buf: RustBuffer) throws -> WaddleWeekday {
+    return try FfiConverterTypeWaddleWeekday.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleWeekday_lower(_ value: WaddleWeekday) -> RustBuffer {
+    return FfiConverterTypeWaddleWeekday.lower(value)
+}
+
+
 
 
 
@@ -18962,6 +19550,30 @@ fileprivate struct FfiConverterOptionTypeWaddlePinPreview: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleRecurrence: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleRecurrence?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleRecurrence.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleRecurrence.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleRegisterDeviceResult: FfiConverterRustBuffer {
     typealias SwiftType = WaddleRegisterDeviceResult?
 
@@ -19611,6 +20223,31 @@ fileprivate struct FfiConverterSequenceUInt16: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [Int32]
+
+    public static func write(_ value: [Int32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Int32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Int32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -19953,6 +20590,56 @@ fileprivate struct FfiConverterSequenceTypeWaddleEventAttendee: FfiConverterRust
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleEventAttendee.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleEventOccurrence: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleEventOccurrence]
+
+    public static func write(_ value: [WaddleEventOccurrence], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleEventOccurrence.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleEventOccurrence] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleEventOccurrence]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleEventOccurrence.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleEventOverride: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleEventOverride]
+
+    public static func write(_ value: [WaddleEventOverride], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleEventOverride.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleEventOverride] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleEventOverride]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleEventOverride.read(from: &buf))
         }
         return seq
     }
@@ -20758,6 +21445,56 @@ fileprivate struct FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBu
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleCalendarDate: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleCalendarDate]
+
+    public static func write(_ value: [WaddleCalendarDate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleCalendarDate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleCalendarDate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleCalendarDate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleCalendarDate.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleWeekday]
+
+    public static func write(_ value: [WaddleWeekday], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleWeekday.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleWeekday] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleWeekday]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleWeekday.read(from: &buf))
+        }
+        return seq
+    }
+}
+
 
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
@@ -20894,6 +21631,21 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * The occurrences of `event` that overlap `from_ms..to_ms`, earliest first.
+ * Recurrences are walked in UTC, the same on every client. An all-day
+ * occurrence sits at midnight UTC of its date, so a caller showing another
+ * time zone should ask for a day more on each side.
+ */
+public func expandCommunityEvent(event: WaddleEvent, fromMs: Int64, toMs: Int64)throws  -> [WaddleEventOccurrence]  {
+    return try  FfiConverterSequenceTypeWaddleEventOccurrence.lift(try rustCallWithError(FfiConverterTypeWaddleError_lift) {
+    uniffi_waddle_xmpp_client_ffi_fn_func_expand_community_event(
+        FfiConverterTypeWaddleEvent_lower(event),
+        FfiConverterInt64.lower(fromMs),
+        FfiConverterInt64.lower(toMs),$0
+    )
+})
+}
+/**
  * XEP-0392 §"Angle generation": hue in degrees (`0.0..360.0`) for
  * `input` (nickname or bare JID, used verbatim — no normalization).
  */
@@ -20930,6 +21682,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event() != 53397) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20942,10 +21697,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 62037) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence() != 61272) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 23102) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 57706) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 60125) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_community_event() != 52707) {

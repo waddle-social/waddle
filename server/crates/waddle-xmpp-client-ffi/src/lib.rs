@@ -81,7 +81,9 @@ mod stories_tests;
 mod test_support;
 
 pub use calendar::{
-    WaddleCalendarDate, WaddleEvent, WaddleEventAttendee, WaddleEventParticipation,
+    expand_community_event, WaddleCalendarDate, WaddleEvent, WaddleEventAttendee,
+    WaddleEventOccurrence, WaddleEventOverride, WaddleEventParticipation, WaddleRecurrence,
+    WaddleRecurrenceEnd, WaddleRecurrenceFrequency, WaddleWeekday,
 };
 pub use call_lifecycle::{
     WaddleCallDurationBucket, WaddleCallEndReason, WaddleCallLifecycleKind,
