@@ -543,6 +543,24 @@ pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
                         && stanza::is_self_presence(element)
                 })
                 .await?;
+            let query = support::id("mam");
+            let mam = ask(
+                &mut moderator,
+                stanza::mam_query(&query, Some(&room), 10, None),
+            )
+            .await?;
+            let count = mam
+                .get_child("fin", ns::MAM)
+                .and_then(|fin| fin.get_child("set", ns::RSM))
+                .and_then(|set| set.get_child("count", ns::RSM))
+                .map(Element::text);
+            outcome.check(
+                format!("{label}: the room authorizes MAM without an occupant role"),
+                is_result(&mam)
+                    && mam.attr("from") == Some(room.as_str())
+                    && count.as_deref() == Some("1"),
+                format!("{}; archive count: {count:?}", describe(&mam)),
+            );
         } else {
             let (messages, _) = page_archive(&mut owner, &room).await?;
             outcome.check(
@@ -564,7 +582,7 @@ pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
                 })
                 .await?;
             outcome.check(
-                "removed: the original room denies MAM without sending results",
+                "removed: the original room denies MAM and the client receives no results",
                 denied_by_room(&mam, &room) && no_results,
                 describe(&mam),
             );
