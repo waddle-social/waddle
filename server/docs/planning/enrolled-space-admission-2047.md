@@ -76,8 +76,11 @@ store or replica lease cannot establish standing.
 
 ## Constraints from the architecture review
 
-The first enrolled profile is immutable whitelist. Bind the node creation
-identity, access model and federation exposure to the canonical lifecycle.
+The first enrolled profile is immutable whitelist. Bind the exact service and node, access model, and federation exposure to
+the canonical lifecycle. PostgreSQL retains the referenced node while the
+binding exists. Retiring a scope then requires a canonical transition
+before node removal, with the existing lifecycle ledger holding the
+tombstone. A creation timestamp confers no identity.
 Fail closed on disagreement with legacy configuration. Before enrollment,
 exclude legacy schema writers and binaries and include the new state in
 restore verification. Open enrolled nodes require a separate canonical
@@ -104,3 +107,28 @@ A read and notification slice establishes only those behaviors. Full service
 claims require the applicable XEP-0503 service operations, including node
 creation, deletion and configuration, item retraction, and subscription
 management. The canonical grant path applies to each privileged operation.
+
+
+## Writer and journal
+
+Start with an audited operator bind of an existing whitelisted node and one
+effective served owner. Record it as a distinct operation in the scope
+journal. Affiliation updates use a separate typed change list attached to
+that same journal. The fingerprint includes an operation tag, the exact
+scope binding, expected generation, initiator and normalized batch. A
+duplicate operation ID returns the original result only for the same
+fingerprint. Record one journal entry per shared generation under the
+existing scope write lock.
+
+Keep the projection digest defined over the room mirror. The projection
+marker must advance to the new operation and generation even when that
+digest is identical. Effective affiliations can decrease at commit.
+Increases require verified activation for the matching generation and
+retain their issuance basis. At least one effective served owner must
+remain after a normal affiliation update.
+
+A room projection cannot attest Space affiliations after restore. A
+restore-incarnation transition closes Space admission. Reopening rooms
+leaves Spaces closed until an audited operator rebootstrap verifies the
+node binding and replaces restored grants in the canonical ledger. Verify
+that restoring a snapshot from before a revoke cannot regrant access.
