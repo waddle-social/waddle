@@ -291,6 +291,7 @@ cancellation; no unbounded spawned-task or logging queue is allowed.
 | XML top-level stanza | 64 KiB raw UTF-8, bounded incrementally before DOM construction. |
 | XML shape | Depth 32 below stream root; 32 attributes per element; 1,024 elements per stanza; 8 KiB total attribute bytes per stanza. |
 | XML buffering | 128 KiB maximum per connection; reject DTDs/external entities and unsupported encodings; bounded whitespace counts toward rate/deadline. |
+| XML decoded tree | 128 KiB of retained strings per top-level stanza, charging each element's and attribute's namespace name per copy; declared namespace names at most 1 KiB; one name or attribute value at most 8 KiB (the parser's per-connection scratch buffer). Node structure is bounded by the element count, about 1.25 MiB at 1,024 elements, so resident decoder state is about 1.7 MiB per connection in the worst case. |
 | TLS handshake buffering | 128 KiB per connection, chain at most 8 certificates and 64 KiB encoded; demonstrate library enforcement under B2. |
 | Output buffer | 16 control frames and 64 KiB per connection; first exhausted bound closes. No application queue. |
 | TCP connect / initial header / TLS / each expected stream restart | 5 seconds each; 20 seconds total through authenticated post-SASL header. Timers do not reset on partial bytes. |

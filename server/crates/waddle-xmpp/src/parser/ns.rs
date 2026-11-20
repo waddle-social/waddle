@@ -2,6 +2,8 @@
 pub const JABBER_CLIENT: &str = "jabber:client";
 /// XMPP server namespace
 pub const JABBER_SERVER: &str = "jabber:server";
+/// Server Dialback namespace (XEP-0220)
+pub const JABBER_SERVER_DIALBACK: &str = "jabber:server:dialback";
 /// XMPP streams namespace
 pub const STREAM: &str = "http://etherx.jabber.org/streams";
 /// STARTTLS namespace
