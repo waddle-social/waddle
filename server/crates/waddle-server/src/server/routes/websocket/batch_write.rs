@@ -14,11 +14,13 @@
 
 use super::frame::ResponseFrame;
 use super::send::{
-    send_ws_message_with_authority, send_ws_message_with_binding, AuthoritySendOutcome,
+    send_ws_message_with_authority, send_ws_message_with_binding, send_ws_protected_space_reply,
+    AuthoritySendOutcome, ProtectedSpaceSocketReply, StartProtectedSpaceReply,
 };
 use super::state::WsConnState;
 use super::stream_management::{
-    apply_sm_ack_with_fence, is_countable_stanza, CustodyFrame, CustodyRefusal, LiveCustody,
+    apply_sm_ack_with_fence, is_countable_stanza, CustodyFrame, CustodyPayload, CustodyRefusal,
+    LiveCustody,
 };
 use super::{
     debug, error, info, warn, Message, Sink, SmStanza, StreamExt, WebSocketState, MAX_FRAME_SIZE,
@@ -205,6 +207,7 @@ where
 }
 
 /// Settle each receipt carrier as soon as its ordered response prefix reaches the wire.
+#[cfg(test)]
 pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
     sender: &mut S,
     reader: &mut R,
@@ -220,14 +223,37 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
-    let report = write_response_batch_report_with_admission(
+    write_ingress_response_batch_with_protected_sink(
+        sender, reader, state, conn, responses, policy, authority, None,
+    )
+    .await
+}
+
+pub(super) async fn write_ingress_response_batch_with_protected_sink<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    responses: &mut super::frame::ResponseBatch,
+    policy: BatchSmPolicy,
+    authority: BatchAuthority<'_>,
+    protected_start: Option<StartProtectedSpaceReply<S, SE>>,
+) -> BatchWriteReport
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: super::send::WebSocketWriteError,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
+    RE: std::fmt::Display,
+{
+    let report = write_response_batch_impl(
         sender,
         reader,
         state,
         conn,
         responses.frames.clone(),
         policy,
-        authority,
+        Some((authority.permit, authority.shutdown)),
+        protected_start,
     )
     .await;
     if matches!(report.outcome, BatchWriteOutcome::Continue) {
@@ -285,6 +311,7 @@ where
         frames.into_iter().map(Into::into).collect(),
         policy,
         Some((authority.permit, authority.shutdown)),
+        None,
     )
     .await
 }
@@ -297,6 +324,7 @@ async fn write_response_batch_impl<S, SE, R, RE>(
     frames: Vec<ResponseFrame>,
     policy: BatchSmPolicy,
     authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
+    protected_start: Option<StartProtectedSpaceReply<S, SE>>,
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -371,7 +399,11 @@ where
         } else {
             None
         };
-        let frame_xml = frame.clone().into_serialized_xml();
+        let protected = frame.protected_space_reply();
+        let frame_xml = protected.map_or_else(
+            || frame.clone().into_serialized_xml(),
+            |reply| reply.payload.wire().to_owned(),
+        );
         let current_should_record = should_record(conn, &frame_xml, policy);
         if current_should_record && conn.sm_state.needs_send_pause() {
             match await_send_window_recovery(sender, reader, state, conn, authority).await {
@@ -440,7 +472,9 @@ where
                 .take_live_custody(
                     &conn.sm_state,
                     CustodyFrame {
-                        xml: &frame_xml,
+                        payload: protected.map_or(CustodyPayload::Wire(&frame_xml), |reply| {
+                            CustodyPayload::Protected(&reply.payload)
+                        }),
                         original_receipt_at: policy.receipt_at(),
                         provenance: &provenance,
                         ingress_receipts: frame.ingress_receipts(),
@@ -481,7 +515,10 @@ where
             };
             let (request_ack, accepted) = record_live_sm_frame(
                 conn,
-                frame_xml.clone(),
+                protected.map_or_else(
+                    || frame_xml.clone(),
+                    |reply| reply.payload.to_storage().into_owned(),
+                ),
                 SmEvictionPath::Batch,
                 policy,
                 provenance,
@@ -537,7 +574,34 @@ where
                 };
             }
         }
-        let send_outcome = if let Some(binding) = binding_permit.as_ref() {
+        let send_outcome = if let Some(reply) = protected {
+            match (protected_start, conn.phase.bound_jid()) {
+                (Some(start), Some(requester)) => {
+                    match send_ws_protected_space_reply(
+                        sender,
+                        ProtectedSpaceSocketReply {
+                            connection: conn.connection_ref.clone(),
+                            requester: requester.clone(),
+                            payload: reply.payload.clone(),
+                            grant: reply.grant.clone(),
+                        },
+                        start,
+                        authority,
+                    )
+                    .await
+                    {
+                        AuthoritySendOutcome::Sent => Ok(()),
+                        AuthoritySendOutcome::TransportClosed => {
+                            Err(SendWindowOutcome::TransportClosed)
+                        }
+                        AuthoritySendOutcome::AuthorityRevoked => {
+                            Err(SendWindowOutcome::AuthorityRevoked)
+                        }
+                    }
+                }
+                _ => Err(SendWindowOutcome::TransportClosed),
+            }
+        } else if let Some(binding) = binding_permit.as_ref() {
             match send_ws_message_with_binding(
                 sender,
                 Message::Text(frame_xml.into()),
@@ -1041,8 +1105,14 @@ where
         let frame: ResponseFrame = frame.into();
         let ingress_receipts = frame.ingress_receipts().to_vec();
         let provenance = frame.provenance();
-        let frame_xml = frame.into_serialized_xml();
+        let protected = frame.protected_space_reply();
+        let frame_xml = protected.map_or_else(
+            || frame.clone().into_serialized_xml(),
+            |reply| reply.payload.wire().to_owned(),
+        );
         if should_record(conn, &frame_xml, policy) {
+            let retained =
+                protected.map_or(frame_xml, |reply| reply.payload.to_storage().into_owned());
             let accepted = if conn.sm_recovery_required {
                 let before = conn.terminal_sm_recovery.queue_len();
                 let received_at = match policy {
@@ -1050,7 +1120,7 @@ where
                     BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => chrono::Utc::now(),
                 };
                 conn.record_terminal_recovery_outbound_with_provenance(
-                    frame_xml,
+                    retained,
                     received_at,
                     provenance,
                 );
@@ -1063,7 +1133,7 @@ where
             } else {
                 let (_, accepted) = record_live_sm_frame(
                     conn,
-                    frame_xml,
+                    retained,
                     SmEvictionPath::ReplayTail,
                     policy,
                     provenance,

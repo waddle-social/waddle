@@ -763,7 +763,7 @@ const REMOTE_LISTING_FETCH_BOUND: usize = 4_096;
 /// the session's grants decided. When a room is not decided by then the
 /// session is answered with `internal-server-error` (type `wait`) rather
 /// than with the rest.
-const LISTING_LIMIT: Duration = Duration::from_millis(2_500);
+pub(super) const LISTING_LIMIT: Duration = Duration::from_millis(2_500);
 
 /// Longest an account at another server waits for the rooms its listing
 /// may name, before its grants: the channel catalog, the live rooms and
@@ -791,7 +791,7 @@ const SESSION_DECISIONS_LIMIT: Duration = Duration::from_millis(1_000);
 const REMOTE_CANDIDATES_TTL: Duration = Duration::from_secs(2);
 
 /// Managed rooms whose grants one listing reads at once.
-const GRANT_READS_AT_ONCE: usize = 4;
+pub(super) const GRANT_READS_AT_ONCE: usize = 4;
 
 /// Instant rooms whose actors one listing asks at once.
 const SNAPSHOT_ASKS_AT_ONCE: usize = 16;

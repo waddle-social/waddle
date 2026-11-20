@@ -383,7 +383,7 @@ pub(super) async fn settle_terminal_session(
                 provenance: retained.frame.provenance,
                 ingress_receipts: retained.frame.ingress_receipts,
                 sequence: retained.frame.sequence,
-                stanza_xml: retained.frame.stanza.wire().to_owned(),
+                stanza_xml: retained.frame.stanza.to_storage().into_owned(),
                 original_receipt_at: retained.frame.original_receipt_at,
             })
             .collect(),

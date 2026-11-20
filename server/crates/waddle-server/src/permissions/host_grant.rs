@@ -102,6 +102,23 @@ pub use fence::{
     FENCE_ACKNOWLEDGEMENT_DEADLINE, FENCE_CLOCK_SKEW_WARNING, FENCE_EXPIRY_GRACE,
     FENCE_LEASE_MARGIN, FENCE_LEASE_TTL, FENCE_TICK,
 };
+pub(crate) use gate::{LocalSpaceReplyGrant, UnmanagedSpaceReplyGuard};
+
+/// Authorization checked when a Space reply reaches the socket.
+#[derive(Clone, Debug)]
+pub(crate) enum SpaceReplyAuthority {
+    Managed(std::sync::Arc<LocalSpaceReplyGrant>),
+    Unmanaged(UnmanagedSpaceReplyGuard),
+}
+
+impl SpaceReplyAuthority {
+    pub(crate) fn admit<R>(&self, send: impl FnOnce() -> R) -> Option<R> {
+        match self {
+            Self::Managed(grant) => grant.admit(send),
+            Self::Unmanaged(guard) => guard.admit(send),
+        }
+    }
+}
 pub use gate::{
     HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, ManagedSpaceGrant, RoomGate,
     StoredRoomGrants,

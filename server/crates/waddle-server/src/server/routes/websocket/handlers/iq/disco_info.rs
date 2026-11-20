@@ -24,6 +24,7 @@ mod muc;
 mod server_info;
 mod services;
 mod spaces;
+pub(super) use spaces::{guard_unmanaged_space_info, local_protected_space_info};
 
 #[derive(Clone, Copy)]
 struct DiscoInfoRequest<'a> {

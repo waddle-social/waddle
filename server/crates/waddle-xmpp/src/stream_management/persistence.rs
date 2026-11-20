@@ -238,6 +238,11 @@ pub struct SmReplayPayload {
 }
 
 impl SmReplayPayload {
+    /// Whether a retained value needs protected replay handling.
+    pub fn is_protected_storage(value: &str) -> bool {
+        value.starts_with("sm-protected-space:")
+    }
+
     /// Parse one wire stanza. Protected storage envelopes are not wire XML.
     pub fn from_wire(wire: String) -> Result<Self, SmPersistenceError> {
         Self::parse_wire(wire, None, None)

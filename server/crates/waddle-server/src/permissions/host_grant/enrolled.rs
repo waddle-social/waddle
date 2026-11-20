@@ -331,6 +331,26 @@ impl EnrolledScopes {
         self.answer(|set| set.space_node(node).is_some())
     }
 
+    /// Run a legacy Space effect while its node is known unmanaged. The
+    /// snapshot read remains held through the synchronous effect, so a load
+    /// cannot install the enrollment and report freshness past that effect.
+    pub(super) fn admit_unmanaged_spaces<'a, R>(
+        &self,
+        nodes: impl IntoIterator<Item = &'a str>,
+        effect: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let state = self.state.borrow();
+        match &*state {
+            EnrolledState::RelationsAbsent => Some(effect()),
+            EnrolledState::Loaded(set)
+                if nodes.into_iter().all(|node| set.space_node(node).is_none()) =>
+            {
+                Some(effect())
+            }
+            EnrolledState::Pending | EnrolledState::Loaded(_) => None,
+        }
+    }
+
     /// The enrollment of the room at `room`, without waiting.
     ///
     /// Room bindings are keyed by the canonical address. An address that is
@@ -557,5 +577,69 @@ async fn refresh_until_dropped(
             FIRST_LOAD_RETRY_INTERVAL
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn unmanaged_space_effects_refuse_unknown_and_enrolled_nodes() {
+        let scopes = EnrolledScopes::default();
+        assert_eq!(scopes.admit_unmanaged_spaces(["docs"], || 1), Some(1));
+        scopes.state.send_replace(EnrolledState::Pending);
+        assert_eq!(scopes.admit_unmanaged_spaces(["docs"], || 1), None);
+
+        let mut set = EnrolledSet::default();
+        set.insert_scope(ScopeLifecycleId::generate(), "docs".to_owned());
+        scopes
+            .state
+            .send_replace(EnrolledState::Loaded(Arc::new(set)));
+        assert_eq!(scopes.admit_unmanaged_spaces(["docs"], || 1), None);
+        assert_eq!(scopes.admit_unmanaged_spaces(["unrelated"], || 1), Some(1));
+        assert_eq!(
+            scopes.admit_unmanaged_spaces(["unrelated", "docs"], || 1),
+            None
+        );
+    }
+
+    #[test]
+    fn enrollment_does_not_install_during_an_unmanaged_space_handoff() {
+        let scopes = EnrolledScopes::default();
+        let (install, begin) = mpsc::channel();
+        let (starting, started) = mpsc::channel();
+        let (complete, completed) = mpsc::channel();
+        std::thread::scope(|threads| {
+            let installer = scopes.clone();
+            threads.spawn(move || {
+                begin
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("handoff reached the effect");
+                let mut set = EnrolledSet::default();
+                set.insert_scope(ScopeLifecycleId::generate(), "docs".to_owned());
+                starting.send(()).expect("installation can start");
+                installer
+                    .state
+                    .send_replace(EnrolledState::Loaded(Arc::new(set)));
+                complete.send(()).expect("installation completed");
+            });
+            assert_eq!(
+                scopes.admit_unmanaged_spaces(["docs"], || {
+                    install.send(()).expect("start enrollment");
+                    started.recv().expect("installation is starting");
+                    assert_eq!(
+                        completed.recv_timeout(Duration::from_millis(50)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    );
+                }),
+                Some(())
+            );
+            completed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("installation completes after handoff");
+            assert_eq!(scopes.admit_unmanaged_spaces(["docs"], || 1), None);
+        });
     }
 }

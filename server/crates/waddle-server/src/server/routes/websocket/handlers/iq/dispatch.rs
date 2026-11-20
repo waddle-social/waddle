@@ -320,15 +320,52 @@ pub async fn handle_iq_with_conn_state(
         return misc_response.into();
     }
 
+    if payload_ns == "http://jabber.org/protocol/disco#info" {
+        if let Some(reply) = super::disco_info::local_protected_space_info(
+            &iq,
+            state,
+            phase.bound_jid(),
+            authenticated_session,
+        )
+        .await
+        {
+            return ResponseBatch::from_frames(vec![reply]);
+        }
+    }
     let disco_info_response =
         handle_disco_info_iq(handler_ctx, state, phase, authenticated_session).await;
     if !disco_info_response.is_empty() {
-        return disco_info_response.into();
+        return super::disco_info::guard_unmanaged_space_info(
+            &iq,
+            state,
+            phase.bound_jid(),
+            disco_info_response,
+        );
     }
 
+    if matches!(
+        payload_ns.as_str(),
+        "http://jabber.org/protocol/disco#items" | waddle_xmpp::pubsub::NS_PUBSUB
+    ) {
+        if let Some(reply) = super::protected_space_contents::reply(
+            &iq,
+            state,
+            phase.bound_jid(),
+            authenticated_session,
+        )
+        .await
+        {
+            return ResponseBatch::from_frames(vec![reply]);
+        }
+    }
     let disco_items_response = handle_disco_items_iq(handler_ctx, state, phase).await;
     if !disco_items_response.is_empty() {
-        return disco_items_response.into();
+        return super::protected_space_contents::guard_legacy_replies(
+            &iq,
+            state,
+            phase.bound_jid(),
+            disco_items_response,
+        );
     }
 
     if payload_ns == "http://jabber.org/protocol/commands" {
@@ -402,7 +439,12 @@ pub async fn handle_iq_with_conn_state(
 
     let pubsub_response = handle_pubsub_iq(handler_ctx, state, phase, authenticated_session).await;
     if !pubsub_response.is_empty() {
-        return pubsub_response.into();
+        return super::protected_space_contents::guard_legacy_replies(
+            &iq,
+            state,
+            phase.bound_jid(),
+            pubsub_response,
+        );
     }
 
     // Unknown IQ - log a compact summary and return an error.

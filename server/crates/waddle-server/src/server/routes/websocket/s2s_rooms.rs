@@ -463,7 +463,9 @@ fn stanza_of(frame: ResponseFrame) -> Option<Stanza> {
                 .map(|iq| Stanza::Iq(Box::new(iq))),
             _ => None,
         },
-        ResponseFrame::SmEnabled(_) | ResponseFrame::StreamError(_) => None,
+        ResponseFrame::SmEnabled(_)
+        | ResponseFrame::StreamError(_)
+        | ResponseFrame::ProtectedSpace(_) => None,
     }
 }
 

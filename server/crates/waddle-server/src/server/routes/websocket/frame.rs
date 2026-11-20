@@ -27,6 +27,9 @@ use crate::ingress::ExecutionReport;
 use crate::ingress::ImmediateSink;
 use crate::ingress::IngressDecisionClass;
 use crate::ingress::IngressPrincipal;
+use crate::permissions::host_grant::{
+    LocalSpaceReplyGrant, SpaceReplyAuthority, UnmanagedSpaceReplyGuard,
+};
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
 use crate::server::routes::interpret::effects::{ClientRoomOrigin, IngressPlan};
@@ -38,6 +41,8 @@ use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;
+use std::sync::Arc;
+use waddle_xmpp::stream_management::persistence::{SmPersistenceError, SmReplayPayload};
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stream_error::{DefinedCondition, StreamError};
 
@@ -73,6 +78,8 @@ pub(crate) enum ResponseFrame {
     SmEnabled(Element),
     /// Typed transport-only stream error emitted by the websocket adapter.
     StreamError(StreamErrorFrame),
+    /// An IQ result that needs the Space fence at the physical socket.
+    ProtectedSpace(ProtectedSpaceFrame),
     /// Origin of this exact retained frame, independent of completion receipts.
     Provenanced {
         frame: Box<ResponseFrame>,
@@ -85,12 +92,53 @@ pub(crate) enum ResponseFrame {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProtectedSpaceFrame {
+    pub(super) payload: SmReplayPayload,
+    pub(super) grant: SpaceReplyAuthority,
+}
+
 impl ResponseFrame {
+    pub(super) fn protected_space_frame(
+        xml: String,
+        grant: LocalSpaceReplyGrant,
+    ) -> Result<Self, SmPersistenceError> {
+        let payload =
+            SmReplayPayload::from_protected_space_reply(xml, grant.replay_identity().clone())?;
+        Ok(Self::ProtectedSpace(ProtectedSpaceFrame {
+            payload,
+            grant: SpaceReplyAuthority::Managed(Arc::new(grant)),
+        }))
+    }
+
+    pub(super) fn unmanaged_space_frame(
+        xml: String,
+        guard: UnmanagedSpaceReplyGuard,
+    ) -> Result<Self, SmPersistenceError> {
+        Ok(Self::ProtectedSpace(ProtectedSpaceFrame {
+            payload: SmReplayPayload::from_wire(xml)?,
+            grant: SpaceReplyAuthority::Unmanaged(guard),
+        }))
+    }
+
+    pub(super) fn protected_space_reply(&self) -> Option<&ProtectedSpaceFrame> {
+        match self {
+            Self::ProtectedSpace(reply) => Some(reply),
+            Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
+                frame.protected_space_reply()
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn into_serialized_xml(self) -> String {
         match self {
             Self::Stanza(stanza) => stanza_to_xml(&stanza),
             Self::Element(element) | Self::SmEnabled(element) => element_to_xml(element),
             Self::StreamError(error) => error.into_serialized_xml(),
+            Self::ProtectedSpace(_) => {
+                unreachable!("protected Space replies use the fenced batch writer")
+            }
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
                 frame.into_serialized_xml()
             }
@@ -113,7 +161,7 @@ impl ResponseFrame {
             Self::Element(element) => {
                 element.name() == "close" && element.ns() == "urn:ietf:params:xml:ns:xmpp-framing"
             }
-            Self::SmEnabled(_) | Self::StreamError(_) => false,
+            Self::SmEnabled(_) | Self::StreamError(_) | Self::ProtectedSpace(_) => false,
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
                 frame.is_websocket_stream_close()
             }
@@ -140,7 +188,10 @@ impl ResponseFrame {
         match self {
             Self::Stanza(stanza) => Some(stanza),
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => frame.stanza(),
-            Self::Element(_) | Self::SmEnabled(_) | Self::StreamError(_) => None,
+            Self::Element(_)
+            | Self::SmEnabled(_)
+            | Self::StreamError(_)
+            | Self::ProtectedSpace(_) => None,
         }
     }
 

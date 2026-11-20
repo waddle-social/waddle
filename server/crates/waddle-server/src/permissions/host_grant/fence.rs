@@ -1001,6 +1001,10 @@ impl FenceTicket {
         self.lifecycle
     }
 
+    pub(super) fn generation(&self) -> GrantGeneration {
+        self.generation
+    }
+
     fn current_in(&self, state: &FenceState) -> bool {
         state.lease_valid()
             && state.registration == self.registration

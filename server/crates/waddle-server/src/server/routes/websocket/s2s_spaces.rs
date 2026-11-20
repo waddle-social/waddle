@@ -103,7 +103,7 @@ pub const FIELD_SPACE_FEDERATED: &str = "urn:waddle:spaces:federated";
 const MAX_LISTED_SPACES: usize = 256;
 
 /// The most items one answer returns to a remote asker.
-const MAX_RETURNED_ITEMS: u32 = 256;
+pub(super) const MAX_RETURNED_ITEMS: u32 = 256;
 
 /// Publications of one Space, on average each second, queued to be decided
 /// for subscribers at other servers.
@@ -724,7 +724,11 @@ pub(crate) fn submitted_federated(iq: &Iq) -> Result<Option<bool>, ()> {
 
 /// The room a Space item names, when it is a XEP-0402 bookmark of a room
 /// of this deployment's MUC service; `None` for any other item.
-fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) -> Option<BareJid> {
+pub(super) fn bookmarked_room(
+    state: &WebSocketState,
+    id: &str,
+    payload: Option<&Element>,
+) -> Option<BareJid> {
     if payload.is_some_and(|payload| !payload.is("conference", NS_BOOKMARKS2)) {
         return None;
     }
@@ -737,7 +741,7 @@ fn bookmarked_room(state: &WebSocketState, id: &str, payload: Option<&Element>) 
 /// "Spaces images") that a remote principal who may read the Space is told
 /// of: its id names an image, and its payload, where it carries one, is
 /// that image's metadata. A retraction carries none.
-fn space_image(id: &str, payload: Option<&Element>) -> bool {
+pub(super) fn space_image(id: &str, payload: Option<&Element>) -> bool {
     SpaceImage::from_item_id(id).is_some()
         && payload.is_none_or(|payload| validate_space_image_metadata(payload).is_ok())
 }

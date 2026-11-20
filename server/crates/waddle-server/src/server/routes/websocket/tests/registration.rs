@@ -235,6 +235,7 @@ async fn busy_registration_sends_resource_constraint_and_rolls_back() {
         ConnectionIo {
             sender: &mut socket,
             receiver: &mut reader,
+            protected_reply_start: None,
         },
         FrameAuthority {
             permit: &permit,
@@ -1161,6 +1162,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             ConnectionIo {
                 sender: &mut socket,
                 receiver: &mut reader,
+                protected_reply_start: None,
             },
             FrameAuthority {
                 permit: &permit,

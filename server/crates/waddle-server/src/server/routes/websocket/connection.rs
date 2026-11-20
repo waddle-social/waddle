@@ -1,5 +1,5 @@
 use super::batch_write::{
-    write_ingress_response_batch_with_admission, write_response_batch_with_admission,
+    write_ingress_response_batch_with_protected_sink, write_response_batch_with_admission,
     BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
 };
 use super::cleanup::cleanup_connection_shutdown;
@@ -329,9 +329,10 @@ impl<E: Send> SettleInbound for WebSocketInput<E> {
     }
 }
 
-pub(super) struct ConnectionIo<'a, S, R> {
+pub(super) struct ConnectionIo<'a, S: Sink<Message>, R> {
     pub(super) sender: &'a mut S,
     pub(super) receiver: &'a mut R,
+    pub(super) protected_reply_start: Option<super::send::StartProtectedSpaceReply<S, S::Error>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1368,8 +1369,11 @@ impl LiveSocketState {
                             force_detach_rx: &mut *force_detach_rx,
                         },
                         ConnectionIo {
-                            sender: &mut ws_sender,
+                            sender: &mut *ws_sender,
                             receiver: &mut ws_receiver,
+                            protected_reply_start: Some(
+                                InterruptibleSink::start_protected_space_reply,
+                            ),
                         },
                         FrameAuthority {
                             permit: admission_permit,
@@ -1402,8 +1406,11 @@ impl LiveSocketState {
                                 force_detach_rx: &mut *force_detach_rx,
                             },
                             ConnectionIo {
-                                sender: &mut ws_sender,
+                                sender: &mut *ws_sender,
                                 receiver: &mut ws_receiver,
+                                protected_reply_start: Some(
+                                    InterruptibleSink::start_protected_space_reply,
+                                ),
                             },
                             FrameAuthority {
                                 permit: admission_permit,
@@ -1649,8 +1656,11 @@ impl LiveSocketState {
                             force_detach_rx: &mut *force_detach_rx,
                         },
                         ConnectionIo {
-                            sender: &mut ws_sender,
+                            sender: &mut *ws_sender,
                             receiver: &mut ws_receiver,
+                            protected_reply_start: Some(
+                                InterruptibleSink::start_protected_space_reply,
+                            ),
                         },
                         FrameAuthority {
                             permit: admission_permit,
@@ -1700,8 +1710,11 @@ impl LiveSocketState {
                             force_detach_rx: &mut *force_detach_rx,
                         },
                         ConnectionIo {
-                            sender: &mut ws_sender,
+                            sender: &mut *ws_sender,
                             receiver: &mut ws_receiver,
+                            protected_reply_start: Some(
+                                InterruptibleSink::start_protected_space_reply,
+                            ),
                         },
                         FrameAuthority {
                             permit: admission_permit,
@@ -2765,6 +2778,7 @@ where
     let ConnectionIo {
         sender: ws_sender,
         receiver: ws_receiver,
+        protected_reply_start,
     } = io;
     let FrameAuthority {
         permit: admission_permit,
@@ -2816,6 +2830,7 @@ where
         ConnectionIo {
             sender: ws_sender,
             receiver: ws_receiver,
+            protected_reply_start,
         },
         FrameAuthority {
             permit: admission_permit,
@@ -2851,6 +2866,7 @@ where
     let ConnectionIo {
         sender: ws_sender,
         receiver: ws_receiver,
+        protected_reply_start,
     } = io;
     let FrameAuthority {
         permit: admission_permit,
@@ -2859,6 +2875,34 @@ where
     // A SASL2 exchange that authenticated with inline requests runs its
     // resume, or binds its resource, before registration looks at the phase.
     super::sasl::advance_sasl2_inline(state.as_ref(), conn).await;
+
+    // Refuse a protected replay before publishing the resumed resource.
+    // The outgoing batch obtains fresh tickets again for the physical sink.
+    let replay_deadline =
+        tokio::time::Instant::now() + super::registration::BIND_RETIREMENT_TIMEOUT;
+    if conn.durable_sm.is_hydrating() {
+        if let (Some(h), Some(jid)) = (conn.pending_resume_h, conn.phase.bound_jid().cloned()) {
+            let authorized = tokio::time::timeout_at(
+                replay_deadline,
+                super::resume_replay::protected_replay_is_authorized(
+                    &conn.sm_state,
+                    h,
+                    &jid,
+                    state.deps.service_domains.spaces.as_str(),
+                    &state.deps.app_state.host_grants,
+                ),
+            )
+            .await;
+            if !matches!(authorized, Ok(true)) {
+                if let SmRegistrationFinalization::ReplaceWithFailed(failed) =
+                    super::stream_management::reject_unregistered_resume(state.as_ref(), conn, &jid)
+                        .await
+                {
+                    responses = ResponseBatch::from_frames(vec![failed.to_element()]);
+                }
+            }
+        }
+    }
 
     // Mirror any phase transition `handle_xmpp_frame` performed (most
     // importantly Ready → Closing on SASL failure / stream error)
@@ -2994,12 +3038,30 @@ where
                     resumed,
                     replay_after_h,
                 } => {
+                    let Ok(Some(replay)) = tokio::time::timeout_at(
+                        replay_deadline,
+                        super::resume_replay::authorized_replay_frames(
+                            &conn.sm_state,
+                            replay_after_h,
+                            state.deps.auth_state.xmpp_domain.as_str(),
+                            conn.phase.bound_jid(),
+                            state.deps.service_domains.spaces.as_str(),
+                            &state.deps.app_state.host_grants,
+                        ),
+                    )
+                    .await
+                    else {
+                        // A stale protected ordinal cannot be dropped from the
+                        // replay sequence. Keep the batch in durable custody.
+                        let _ = close_ws_connection(
+                            ws_sender,
+                            "Failed to close WebSocket after protected replay refusal",
+                        )
+                        .await;
+                        return false;
+                    };
                     responses = ResponseBatch::from_frames(vec![resumed.to_element()]);
-                    responses.frames.extend(super::resume_replay::replay_frames(
-                        &conn.sm_state,
-                        replay_after_h,
-                        state.deps.auth_state.xmpp_domain.as_str(),
-                    ));
+                    responses.frames.extend(replay);
                     // W1.6c seam: queue a live stanza behind the unwritten replay.
                     #[cfg(feature = "test-support")]
                     super::characterization_seams::hold_until_live_stanza_queued(
@@ -3065,7 +3127,7 @@ where
     } else {
         BatchSmPolicy::Record
     };
-    let write_report = write_ingress_response_batch_with_admission(
+    let write_report = write_ingress_response_batch_with_protected_sink(
         ws_sender,
         ws_receiver,
         state.as_ref(),
@@ -3076,6 +3138,7 @@ where
             permit: admission_permit,
             shutdown: shutdown_token,
         },
+        protected_reply_start,
     )
     .await;
     // The terminal resume frame is always frame 0 of its batch, and the

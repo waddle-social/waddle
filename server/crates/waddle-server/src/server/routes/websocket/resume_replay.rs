@@ -8,9 +8,135 @@
 //! obligation settled nothing and left its canonical row non-terminal. One
 //! builder removes the class of defect rather than the instance.
 
-use waddle_xmpp::stream_management::{stamp_replay_delay, StreamManagementState};
+use waddle_xmpp::stream_management::{
+    persistence::SmReplayPayload, stamp_replay_delay, ReplayStanza, StreamManagementState,
+};
 
 use super::frame::ResponseFrame;
+use crate::permissions::host_grant::HostGrantGate;
+
+pub(super) async fn protected_replay_is_authorized(
+    sm_state: &StreamManagementState,
+    client_h: u32,
+    recipient: &jid::FullJid,
+    spaces_service: &str,
+    grants: &HostGrantGate,
+) -> bool {
+    for entry in sm_state.stanzas_to_resend(client_h) {
+        let admitted = if SmReplayPayload::is_protected_storage(&entry.stanza_xml) {
+            authorize_protected(entry.stanza_xml, recipient, grants)
+                .await
+                .is_some()
+        } else {
+            authorize_legacy_reply(entry.stanza_xml, Some(recipient), spaces_service, grants)
+                .is_some()
+        };
+        if !admitted {
+            return false;
+        }
+    }
+    true
+}
+
+pub(super) enum LegacyReplay {
+    Ordinary(String),
+    Fenced(ResponseFrame),
+}
+
+/// A reply retained before enrollment cannot carry canonical authority.
+pub(super) fn authorize_legacy_reply(
+    wire: String,
+    recipient: Option<&jid::FullJid>,
+    spaces_service: &str,
+    grants: &HostGrantGate,
+) -> Option<LegacyReplay> {
+    let iq = wire.parse::<minidom::Element>().ok()?;
+    if !iq.is("iq", "jabber:client")
+        || iq.attr("type") != Some("result")
+        || iq.attr("from") != Some(spaces_service)
+    {
+        return Some(LegacyReplay::Ordinary(wire));
+    }
+    let nodes = legacy_reply_nodes(&iq);
+    if nodes.is_empty() {
+        return Some(LegacyReplay::Ordinary(wire));
+    }
+    let guard = grants.unmanaged_space_result_guard(
+        spaces_service.parse().ok()?,
+        recipient?,
+        &iq,
+        nodes,
+    )?;
+    ResponseFrame::unmanaged_space_frame(wire, guard)
+        .ok()
+        .map(LegacyReplay::Fenced)
+}
+
+fn legacy_reply_nodes(iq: &minidom::Element) -> Vec<String> {
+    iq.children()
+        .filter(|payload| {
+            matches!(
+                payload.ns().as_str(),
+                "http://jabber.org/protocol/disco#info"
+                    | "http://jabber.org/protocol/disco#items"
+                    | waddle_xmpp::pubsub::NS_PUBSUB
+                    | waddle_xmpp::pubsub::NS_PUBSUB_OWNER
+            )
+        })
+        .flat_map(|payload| {
+            payload
+                .attr("node")
+                .into_iter()
+                .chain(payload.children().filter_map(|child| child.attr("node")))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+async fn authorize_protected(
+    stored: String,
+    recipient: &jid::FullJid,
+    grants: &HostGrantGate,
+) -> Option<ResponseFrame> {
+    let payload = SmReplayPayload::from_storage(stored).ok()?;
+    let identity = payload.protected_space_reply()?;
+    let grant = grants
+        .refresh_local_space_reply(identity, recipient)
+        .await?;
+    ResponseFrame::protected_space_frame(payload.wire().to_owned(), grant).ok()
+}
+
+pub(super) async fn authorized_replay_frames(
+    sm_state: &StreamManagementState,
+    client_h: u32,
+    server_domain: &str,
+    recipient: Option<&jid::FullJid>,
+    spaces_service: &str,
+    grants: &HostGrantGate,
+) -> Option<Vec<ResponseFrame>> {
+    let mut frames = Vec::new();
+    for mut entry in sm_state.stanzas_to_resend(client_h) {
+        let wire = std::mem::take(&mut entry.stanza_xml);
+        let frame = if SmReplayPayload::is_protected_storage(&wire) {
+            authorize_protected(wire, recipient?, grants).await?
+        } else {
+            match authorize_legacy_reply(wire, recipient, spaces_service, grants)? {
+                LegacyReplay::Ordinary(wire) => {
+                    entry.stanza_xml = wire;
+                    frames.push(ordinary_replay_frame(entry, server_domain));
+                    continue;
+                }
+                LegacyReplay::Fenced(frame) => frame,
+            }
+        };
+        frames.push(
+            frame
+                .with_ingress_receipts(entry.ingress_receipts)
+                .with_provenance(entry.provenance),
+        );
+    }
+    Some(frames)
+}
 
 /// Build the replay frames a resumed stream owes its client, in queue order.
 ///
@@ -18,6 +144,7 @@ use super::frame::ResponseFrame;
 /// original receipt time (#1178) so the client sorts it at its true timeline
 /// position rather than at drain time, and carries forward the ingress receipt
 /// obligations the entry was holding, so reaching the wire settles them.
+#[cfg(test)]
 pub(super) fn replay_frames(
     sm_state: &StreamManagementState,
     client_h: u32,
@@ -26,16 +153,18 @@ pub(super) fn replay_frames(
     sm_state
         .stanzas_to_resend(client_h)
         .into_iter()
-        .map(|entry| {
-            ResponseFrame::from_serialized_xml(stamp_replay_delay(
-                &entry.stanza_xml,
-                server_domain,
-                entry.original_receipt_at,
-            ))
-            .with_ingress_receipts(entry.ingress_receipts)
-            .with_provenance(entry.provenance)
-        })
+        .map(|entry| ordinary_replay_frame(entry, server_domain))
         .collect()
+}
+
+fn ordinary_replay_frame(entry: ReplayStanza, server_domain: &str) -> ResponseFrame {
+    ResponseFrame::from_serialized_xml(stamp_replay_delay(
+        &entry.stanza_xml,
+        server_domain,
+        entry.original_receipt_at,
+    ))
+    .with_ingress_receipts(entry.ingress_receipts)
+    .with_provenance(entry.provenance)
 }
 
 #[cfg(test)]
@@ -58,12 +187,83 @@ mod tests {
         Stanza::Message(message)
     }
 
+    #[tokio::test]
+    async fn legacy_space_replay_binds_to_the_resumed_resource() {
+        let db = crate::db::Database::in_memory("legacy-space-resume")
+            .await
+            .unwrap();
+        let gate = HostGrantGate::new(db);
+        let recipient: jid::FullJid = "a@example.com/x".parse().unwrap();
+        let wire = |to| {
+            format!(
+                "<iq xmlns='jabber:client' type='result' id='info' from='spaces.example.com'{to}>\
+             <query xmlns='http://jabber.org/protocol/disco#info' node='legacy'/></iq>"
+            )
+        };
+        for to in ["", " to='a@example.com/x'"] {
+            let xml = wire(to);
+            let Some(LegacyReplay::Fenced(frame)) =
+                authorize_legacy_reply(xml.clone(), Some(&recipient), "spaces.example.com", &gate)
+            else {
+                panic!("expected a fenced legacy result");
+            };
+            assert_eq!(frame.protected_space_reply().unwrap().payload.wire(), xml);
+        }
+        assert!(authorize_legacy_reply(
+            wire(" to='a@example.com/other'"),
+            Some(&recipient),
+            "spaces.example.com",
+            &gate,
+        )
+        .is_none());
+    }
+
     fn receipt() -> SmIngressFrameReceipt {
         SmIngressFrameReceipt {
             message_key: MessageKey::new(),
             kind: SmIngressReceiptKind::from_storage(7),
             semantic_identity_hash: [3u8; 32],
         }
+    }
+
+    #[tokio::test]
+    async fn protected_reply_refusal_preserves_the_replay_prefix() {
+        let db = crate::db::Database::in_memory("protected-space-resume")
+            .await
+            .unwrap();
+        let gate = HostGrantGate::new(db);
+        let recipient: jid::FullJid = "a@example.com/x".parse().unwrap();
+        let mut sm = StreamManagementState::new();
+        // An invalid retained protected record must never be interpreted
+        // as ordinary XML or skipped to send the following ordinal.
+        let _ = sm.record_outbound("sm-protected-space:1:invalid".into(), SmEvictionPath::Batch);
+        let _ = sm.record_outbound(
+            stanza_to_xml(&message(Id("ordinary".to_owned()))),
+            SmEvictionPath::Batch,
+        );
+        let replay = |h| {
+            authorized_replay_frames(
+                &sm,
+                h,
+                "example.com",
+                Some(&recipient),
+                "spaces.example.com",
+                &gate,
+            )
+        };
+        assert!(
+            !protected_replay_is_authorized(&sm, 0, &recipient, "spaces.example.com", &gate).await
+        );
+        assert!(replay(0).await.is_none());
+        assert!(
+            protected_replay_is_authorized(&sm, 1, &recipient, "spaces.example.com", &gate).await
+        );
+        let after_ack = replay(1).await.expect("only the ordinary frame remains");
+        assert_eq!(after_ack.len(), 1);
+        assert!(after_ack[0]
+            .clone()
+            .into_serialized_xml()
+            .contains("ordinary"));
     }
 
     /// Regression: the post-registration resume path rebuilt these frames with

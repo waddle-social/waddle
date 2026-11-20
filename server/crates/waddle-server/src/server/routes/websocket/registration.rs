@@ -33,7 +33,7 @@ use waddle_xmpp::registry::{
 /// The same budget covers local registration after a foreign claim disappears.
 const RESUME_REGISTRATION_BUSY_ATTEMPTS: usize = 3;
 
-const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 tokio::task_local! {

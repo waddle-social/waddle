@@ -46,8 +46,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use jid::{BareJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::pubsub::Affiliation;
+use waddle_xmpp::stream_management::{
+    ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency,
+};
 use xmpp_parsers::iq::Iq;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
@@ -119,6 +122,89 @@ pub struct ManagedSpaceGrant {
     remote_effect: Option<RemoteSpaceEffect>,
     room_dependencies: Vec<FenceTicket>,
     subscription_grant: SpaceSubscriptionGrant,
+}
+
+/// An exact local disco response and its current Space read authority.
+#[derive(Debug)]
+pub(crate) struct LocalSpaceReplyGrant {
+    grant: ManagedSpaceGrant,
+    replay: ProtectedSpaceReplyDescriptor,
+}
+
+impl LocalSpaceReplyGrant {
+    pub(crate) fn admit<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
+        self.grant.admit(|_| effect())
+    }
+
+    pub(crate) fn replay_identity(&self) -> &ProtectedSpaceReplyDescriptor {
+        &self.replay
+    }
+
+    pub(crate) fn with_room_dependencies(
+        mut self,
+        rooms: Vec<(ProtectedSpaceRoomDependency, ManagedRoomGrants)>,
+    ) -> Option<Self> {
+        let (dependencies, decisions): (Vec<_>, Vec<_>) = rooms.into_iter().unzip();
+        self.replay = self.replay.with_room_dependencies(dependencies).ok()?;
+        for decision in decisions {
+            self.grant.require_room(decision);
+        }
+        Some(self)
+    }
+}
+
+/// An exact legacy Space disco reply whose handoff still depends on the
+/// replica classifying the node as unmanaged.
+#[derive(Clone, Debug)]
+pub(crate) struct UnmanagedSpaceReplyGuard {
+    enrolled: EnrolledScopes,
+    service: BareJid,
+    nodes: Vec<String>,
+    recipient: FullJid,
+    id: String,
+    exact_payload: Option<minidom::Element>,
+}
+
+impl UnmanagedSpaceReplyGuard {
+    pub(crate) fn permits_reply(&self, stanza: &minidom::Element, recipient: &FullJid) -> bool {
+        recipient == &self.recipient
+            && stanza.is("iq", "jabber:client")
+            && stanza.attr("type") == Some("result")
+            && stanza.attr("from") == Some(self.service.as_str())
+            // Older replies addressed only the authenticated socket when a
+            // client omitted `from`. Explicit addressing must match it.
+            && stanza.attr("to").is_none_or(|to| to == recipient.as_str())
+            && stanza.attr("id") == Some(self.id.as_str())
+            && stanza.children().count() == 1
+            && match &self.exact_payload {
+                Some(payload) => stanza.children().next() == Some(payload),
+                None => stanza
+                    .get_child("query", "http://jabber.org/protocol/disco#info")
+                    .is_some_and(|query| query.attr("node") == self.nodes.first().map(String::as_str)),
+            }
+    }
+
+    pub(crate) fn admit<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
+        self.enrolled
+            .admit_unmanaged_spaces(self.nodes.iter().map(String::as_str), effect)
+    }
+}
+
+fn is_local_space_disco_request(
+    service: &BareJid,
+    node: &str,
+    requester: &FullJid,
+    request: &Iq,
+) -> bool {
+    let Iq::Get { payload, .. } = request else {
+        return false;
+    };
+    let query = xmpp_parsers::disco::DiscoInfoQuery::try_from(payload.clone());
+    query.is_ok_and(|query| query.node.as_deref() == Some(node))
+        && request.to().map(Jid::as_str) == Some(service.as_str())
+        && request
+            .from()
+            .is_none_or(|from| from.as_str() == requester.as_str())
 }
 
 #[derive(Debug)]
@@ -747,6 +833,172 @@ impl HostGrantGate {
             .await
     }
 
+    /// Authorize the exact read reply for a bound local session.
+    pub(crate) async fn space_reply_local(
+        &self,
+        key: &ScopeKey,
+        requester: &FullJid,
+        request: &Iq,
+    ) -> Option<LocalSpaceReplyGrant> {
+        let Iq::Get { payload, .. } = request else {
+            return None;
+        };
+        if request.to().map(Jid::as_str) != Some(key.service().as_str())
+            || request
+                .from()
+                .is_some_and(|from| from.as_str() != requester.as_str())
+        {
+            return None;
+        }
+        let kind = if xmpp_parsers::disco::DiscoInfoQuery::try_from(payload.clone())
+            .is_ok_and(|query| query.node.as_deref() == Some(key.node()))
+        {
+            ProtectedSpaceReplyKind::DiscoInfo
+        } else if xmpp_parsers::disco::DiscoItemsQuery::try_from(payload.clone())
+            .is_ok_and(|query| query.node.as_deref() == Some(key.node()))
+        {
+            ProtectedSpaceReplyKind::DiscoItems
+        } else if payload.is("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+            && matches!(
+                waddle_xmpp::pubsub::parse_pubsub_iq(request),
+                Ok(waddle_xmpp::pubsub::PubSubRequest::Items { node, .. }) if node == key.node()
+            )
+        {
+            ProtectedSpaceReplyKind::PubSubItems
+        } else {
+            return None;
+        };
+        let subject = GrantSubject::new(requester.to_bare()).ok()?;
+        let grant = self.space_read_local(key, &subject).await?;
+        let replay = ProtectedSpaceReplyDescriptor::new(
+            key.service().clone(),
+            key.node().to_owned(),
+            requester.clone(),
+            request.id().to_owned(),
+            grant.fence.lifecycle().as_uuid(),
+            grant.subscription_grant.incarnation.as_uuid(),
+            grant.fence.generation().value(),
+        )
+        .ok()?
+        .with_kind(kind);
+        Some(LocalSpaceReplyGrant { grant, replay })
+    }
+
+    /// Bind an already-authorized legacy reply to the exact local request.
+    /// Legacy access decisions remain the handler's responsibility.
+    pub(crate) fn unmanaged_space_disco_reply_local(
+        &self,
+        service: &BareJid,
+        node: &str,
+        requester: &FullJid,
+        request: &Iq,
+    ) -> Option<UnmanagedSpaceReplyGuard> {
+        if !is_local_space_disco_request(service, node, requester, request)
+            || self.enrolled.space_node(node) != Enrollment::Unmanaged
+        {
+            return None;
+        }
+        Some(UnmanagedSpaceReplyGuard {
+            enrolled: self.enrolled.clone(),
+            service: service.clone(),
+            nodes: vec![node.to_owned()],
+            recipient: requester.clone(),
+            id: request.id().to_owned(),
+            exact_payload: None,
+        })
+    }
+
+    pub(crate) fn unmanaged_space_result_guard(
+        &self,
+        service: BareJid,
+        requester: &FullJid,
+        reply: &minidom::Element,
+        nodes: Vec<String>,
+    ) -> Option<UnmanagedSpaceReplyGuard> {
+        if nodes.is_empty()
+            || !self
+                .enrolled
+                .admit_unmanaged_spaces(nodes.iter().map(String::as_str), || ())
+                .is_some()
+        {
+            return None;
+        }
+        let guard = UnmanagedSpaceReplyGuard {
+            enrolled: self.enrolled.clone(),
+            service,
+            nodes,
+            recipient: requester.clone(),
+            id: reply.attr("id")?.to_owned(),
+            exact_payload: Some(reply.children().next()?.clone()),
+        };
+        guard.permits_reply(reply, requester).then_some(guard)
+    }
+
+    /// Refresh a retained reply's lease only for its original scope decision.
+    pub(crate) async fn refresh_local_space_reply(
+        &self,
+        replay: &ProtectedSpaceReplyDescriptor,
+        requester: &FullJid,
+    ) -> Option<LocalSpaceReplyGrant> {
+        if requester != replay.recipient() {
+            return None;
+        }
+        let subject = GrantSubject::new(requester.to_bare()).ok()?;
+        let key = ScopeKey::new(replay.service().clone(), replay.node()).ok()?;
+        let mut grant = self.space_read_local(&key, &subject).await?;
+        if grant.fence.lifecycle().as_uuid() != replay.lifecycle()
+            || grant.subscription_grant.incarnation.as_uuid() != replay.incarnation()
+            || grant.fence.generation().value() != replay.generation()
+        {
+            return None;
+        }
+        for expected in replay.room_dependencies() {
+            let (current, room) = self
+                .local_space_room_dependency(expected.room(), subject.jid(), replay.incarnation())
+                .await?;
+            if &current != expected {
+                return None;
+            }
+            grant.require_room(room);
+        }
+        Some(LocalSpaceReplyGrant {
+            grant,
+            replay: replay.clone(),
+        })
+    }
+
+    pub(crate) async fn local_space_room_dependency(
+        &self,
+        room: &BareJid,
+        requester: &BareJid,
+        incarnation: uuid::Uuid,
+    ) -> Option<(ProtectedSpaceRoomDependency, ManagedRoomGrants)> {
+        if self.attachment()?.binding().incarnation.as_uuid() != incarnation {
+            return None;
+        }
+        let RoomGate::Managed(decision) = self.room(RoomBinding::Room(room)).await else {
+            return None;
+        };
+        if self.attachment()?.binding().incarnation.as_uuid() != incarnation
+            || decision.grants.room != *room
+            || !decision.allows_as(
+                requester,
+                &PrincipalEvidence::NoStream,
+                HostGrantAction::View,
+            )
+        {
+            return None;
+        }
+        let dependency = ProtectedSpaceRoomDependency::new(
+            room.clone(),
+            decision.fence.lifecycle().as_uuid(),
+            incarnation,
+            decision.fence.generation().value(),
+        )
+        .ok()?;
+        Some((dependency, decision))
+    }
+
     /// Authorize a read for the account carried by the authenticated S2S stream.
     pub async fn space_read_remote(
         &self,
@@ -896,5 +1148,47 @@ fn enrolled(enrollment: Enrollment) -> Result<bool, HostGrantUnavailable> {
         Enrollment::Unmanaged => Ok(false),
         Enrollment::Enrolled => Ok(true),
         Enrollment::Undecided => Err(HostGrantUnavailable),
+    }
+}
+
+#[cfg(test)]
+mod unmanaged_space_reply_tests {
+    use super::*;
+
+    #[test]
+    fn unmanaged_reply_guard_is_bound_to_its_request_and_recipient() {
+        let gate = HostGrantGate::default();
+        let service: BareJid = "spaces.example.test".parse().expect("service JID");
+        let requester: FullJid = "alice@example.test/phone".parse().expect("client JID");
+        let other: FullJid = "alice@example.test/desktop".parse().expect("other client");
+        let query = || {
+            minidom::Element::from(xmpp_parsers::disco::DiscoInfoQuery {
+                node: Some("docs".to_owned()),
+            })
+        };
+        let request = Iq::Get {
+            from: None,
+            to: Some(service.clone().into()),
+            id: "space-1".to_owned(),
+            payload: query(),
+        };
+        assert!(gate
+            .unmanaged_space_disco_reply_local(&service, "other", &requester, &request)
+            .is_none());
+        let guard = gate
+            .unmanaged_space_disco_reply_local(&service, "docs", &requester, &request)
+            .expect("matching legacy decision");
+        let reply = |to| {
+            minidom::Element::from(Iq::Result {
+                from: Some(service.clone().into()),
+                to,
+                id: "space-1".to_owned(),
+                payload: Some(query()),
+            })
+        };
+        assert!(guard.permits_reply(&reply(Some(requester.clone().into())), &requester));
+        assert!(guard.permits_reply(&reply(None), &requester));
+        assert!(!guard.permits_reply(&reply(None), &other));
+        assert!(!guard.permits_reply(&reply(Some(other.into())), &requester));
     }
 }

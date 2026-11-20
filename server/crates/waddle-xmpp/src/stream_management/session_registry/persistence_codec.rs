@@ -58,7 +58,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
     ingress_receipts: Vec<super::super::SmIngressFrameReceipt>,
     provenance: super::super::SmFrameProvenance,
 ) -> Result<super::super::persistence::PersistedUnackedStanza, SmRegistryError> {
-    let stanza = super::super::persistence::SmReplayPayload::from_wire(stanza_xml.to_owned())
+    let stanza = super::super::persistence::SmReplayPayload::from_storage(stanza_xml.to_owned())
         .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
     Ok(super::super::persistence::PersistedUnackedStanza {
         provenance,
@@ -114,7 +114,7 @@ pub(super) fn persisted_to_detached(
                 provenance: row.provenance.clone(),
                 ingress_receipts: row.ingress_receipts.clone(),
                 sequence: row.sequence,
-                stanza_xml: row.stanza.wire().to_owned(),
+                stanza_xml: row.stanza.to_storage().into_owned(),
                 original_receipt_at: row.original_receipt_at,
             })
         })
