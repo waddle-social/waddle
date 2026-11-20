@@ -54,18 +54,20 @@ struct AttachmentUploader {
         guard !payload.data.isEmpty else { throw AttachmentUploadError.empty }
         guard payload.data.count <= AttachmentPolicy.maxBytes else { throw AttachmentUploadError.tooLarge }
         let sealed = try await seal(payload.data)
-        // Ciphertext is stored without the file's name or type showing.
-        let body = sealed?.ciphertext ?? payload.data
-        let mediaType = sealed == nil ? payload.mediaType : "application/octet-stream"
+        // What the upload service stores: the file, or ciphertext that
+        // does not show its type.
+        let stored = sealed.map {
+            (data: $0.ciphertext, filename: "\(payload.filename).enc", mediaType: "application/octet-stream")
+        } ?? (data: payload.data, filename: payload.filename, mediaType: payload.mediaType)
         guard let slot = await session.uploadSlot(
-            filename: sealed == nil ? payload.filename : "\(payload.filename).enc",
-            size: body.count,
-            mediaType: mediaType
+            filename: stored.filename,
+            size: stored.data.count,
+            mediaType: stored.mediaType
         ) else { throw AttachmentUploadError.slotUnavailable }
         try Task.checkCancellation()
-        let request = Self.putRequest(for: slot, mediaType: mediaType, byteCount: body.count)
+        let request = Self.putRequest(for: slot, mediaType: stored.mediaType, byteCount: stored.data.count)
         let delegate = UploadProgressDelegate(onProgress: progress)
-        let (_, response) = try await URLSession.shared.upload(for: request, from: body, delegate: delegate)
+        let (_, response) = try await URLSession.shared.upload(for: request, from: stored.data, delegate: delegate)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw AttachmentUploadError.rejected(status: status) }
         progress(1)

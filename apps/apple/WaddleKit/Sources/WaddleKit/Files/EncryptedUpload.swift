@@ -10,6 +10,7 @@ public struct EncryptedUpload: Sendable {
     /// SHA-256 of the file itself, for its XEP-0446 metadata (§2.1 requires
     /// a digest of the plaintext).
     public let plaintextDigests: FileDigests
+    private let ciphertextDigests: FileDigests
     private let key: EncryptedFileKey
 
     public init(sealing plaintext: Data) throws {
@@ -17,7 +18,8 @@ public struct EncryptedUpload: Sendable {
         let nonce = AES.GCM.Nonce()
         let box = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce)
         ciphertext = box.ciphertext + box.tag
-        plaintextDigests = FileDigests([.sha256: DigestCheck.digest(of: plaintext, using: .sha256)])
+        plaintextDigests = Self.sha256(of: plaintext)
+        ciphertextDigests = Self.sha256(of: ciphertext)
         key = try EncryptedFileKey(
             cipher: .aes256GCM,
             key: symmetricKey.withUnsafeBytes { Data($0) },
@@ -31,8 +33,12 @@ public struct EncryptedUpload: Sendable {
             cipher: key.cipher,
             keyBase64: key.key.base64EncodedString(),
             ivBase64: key.iv.base64EncodedString(),
-            digests: FileDigests([.sha256: DigestCheck.digest(of: ciphertext, using: .sha256)]),
+            digests: ciphertextDigests,
             sources: [url]
         )
+    }
+
+    private static func sha256(of data: Data) -> FileDigests {
+        FileDigests([.sha256: DigestCheck.digest(of: data, using: .sha256)])
     }
 }

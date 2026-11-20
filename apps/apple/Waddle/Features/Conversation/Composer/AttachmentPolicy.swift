@@ -26,7 +26,7 @@ enum AttachmentPolicy {
     /// The metadata always describes the file itself (name, type, size);
     /// a sealed upload adds the file's digest and the XEP-0448 envelope
     /// for the ciphertext stored at `url`.
-    static func sharedFile(at url: URL, for payload: AttachmentPayload, sealed: EncryptedUpload? = nil) -> SharedFile {
+    static func sharedFile(at url: URL, for payload: AttachmentPayload, sealed: EncryptedUpload?) -> SharedFile {
         SharedFile(
             url: url,
             name: payload.filename,
