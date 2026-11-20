@@ -49,11 +49,14 @@ to run the independent-client row:
 ```sh
 INTEROP_CHORD_BIN=/path/to/chord-cli \
   bash server/experiments/federation-interop/run-native.sh \
-  --only flow.chord-reads-waddle-space
+  --only flow.chord-reads-waddle-space,flow.waddle-reads-chord-space
 ```
 
-The row verifies discovery, subscription, and the qualified room listing
-through chord's ejabberd account. It is unverified when the binary is absent.
+The first row verifies discovery, subscription, and the qualified room listing
+through chord's ejabberd account. The reverse row uses chord to create a
+Space and publish a room on ejabberd, then uses Waddle's WebSocket endpoint
+to subscribe, read the bookmark and join the room. Both rows are unverified
+when the binary is absent.
 
 ## Environment
 

@@ -133,16 +133,30 @@ pub async fn peer_reads_waddle_space(h: &mut Harness, peer: Peer) -> Result<Outc
     Ok(outcome)
 }
 
-/// Read and subscribe to a hosted Space through a separate client on ejabberd.
-pub async fn chord_reads_waddle_space(h: &mut Harness) -> Result<Outcome> {
+async fn run_chord(h: &Harness, account: &str, args: &[&str]) -> Result<std::process::Output> {
     let binary = std::env::var_os("INTEROP_CHORD_BIN")
         .ok_or_else(|| crate::evidence::Unverifiable("INTEROP_CHORD_BIN is unset".to_owned()))?;
-    let password = h.ejabberd.passwords.get("alice").ok_or_else(|| {
+    let password = h.ejabberd.passwords.get(account).ok_or_else(|| {
         crate::evidence::Unverifiable("ejabberd test account is unavailable".to_owned())
     })?;
-    let account = format!("alice@{}", topology::EJABBERD);
-    let address = format!("starttls://127.0.0.1:{}", h.ports.ejabberd_c2s(1));
-    let database = h.root.join("chord-spaces.sqlite3");
+    let mut command = tokio::process::Command::new(binary);
+    command
+        .env("CHORD_JID", format!("{account}@{}", topology::EJABBERD))
+        .env("CHORD_PASSWORD", password)
+        .env(
+            "CHORD_SERVER",
+            format!("starttls://127.0.0.1:{}", h.ports.ejabberd_c2s(1)),
+        )
+        .env("CHORD_DB", h.root.join(format!("chord-{account}.sqlite3")))
+        .env("SSL_CERT_FILE", &h.pki.ca_path)
+        .arg("--json")
+        .args(args)
+        .kill_on_drop(true);
+    Ok(tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await??)
+}
+
+/// Read and subscribe to a hosted Space through a separate client on ejabberd.
+pub async fn chord_reads_waddle_space(h: &mut Harness) -> Result<Outcome> {
     let service = topology::spaces_domain(HOME_A);
     let node = support::id("chord-space");
     let room = format!("{}@{}", support::id("child"), topology::muc_domain(HOME_A));
@@ -154,17 +168,7 @@ pub async fn chord_reads_waddle_space(h: &mut Harness) -> Result<Outcome> {
 
     let mut outcome = Outcome::new("chord-cli authenticating to ejabberd with verified STARTTLS");
     for action in ["space-info", "space-join", "channels"] {
-        let mut command = tokio::process::Command::new(&binary);
-        command
-            .env("CHORD_JID", &account)
-            .env("CHORD_PASSWORD", password)
-            .env("CHORD_SERVER", &address)
-            .env("CHORD_DB", &database)
-            .env("SSL_CERT_FILE", &h.pki.ca_path)
-            .args(["--json", action, &service, &node])
-            .kill_on_drop(true);
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await??;
+        let output = run_chord(h, "alice", &[action, &service, &node]).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let matched = match action {
             "space-info" => {
@@ -181,6 +185,79 @@ pub async fn chord_reads_waddle_space(h: &mut Harness) -> Result<Outcome> {
             format!("{stdout}{}", String::from_utf8_lossy(&output.stderr)),
         );
     }
+    owner.close().await;
+    Ok(outcome)
+}
+
+/// Use Waddle's WSS endpoint to follow a Space created by chord on ejabberd.
+pub async fn waddle_reads_chord_space(h: &mut Harness) -> Result<Outcome> {
+    let created = run_chord(h, "admin", &["space-create", &support::id("stock-space")]).await?;
+    anyhow::ensure!(
+        created.status.success(),
+        "chord Space creation: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: serde_json::Value = serde_json::from_slice(&created.stdout)?;
+    let service = Harness::peer_pubsub(Peer::Ejabberd);
+    anyhow::ensure!(
+        created["service"] == service,
+        "unexpected Space service: {created}"
+    );
+    let node = created["node"]
+        .as_str()
+        .filter(|node| !node.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("chord did not report the created Space node"))?;
+    let room = format!(
+        "{}@{}",
+        support::id("stock-child"),
+        Harness::peer_muc(Peer::Ejabberd)
+    );
+    let mut owner = h
+        .login_peer(Peer::Ejabberd, "admin", &support::id("room-owner"))
+        .await?;
+    muc::join(&mut owner, &room, "owner").await?;
+    let added = run_chord(h, "admin", &["space-add-room", &service, node, &room]).await?;
+    anyhow::ensure!(
+        added.status.success(),
+        "chord room publication: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let mut outcome = Outcome::new("Waddle WSS session following a chord-created ejabberd Space");
+    check_stock_space_config(&mut owner, &service, node, &mut outcome).await?;
+    let mut reader = h
+        .login_waddle(Home::A, "alice", &support::id("reader"))
+        .await?;
+    let bare = reader.bare();
+    let subscribed = ask(
+        &mut reader,
+        stanza::pubsub_subscribe(&support::id("sub"), &service, node, &bare),
+    )
+    .await?;
+    outcome.check(
+        "Waddle subscribes",
+        is_result(&subscribed),
+        describe(&subscribed),
+    );
+    let items = ask(
+        &mut reader,
+        stanza::pubsub_items(&support::id("items"), Some(&service), node),
+    )
+    .await?;
+    let found = is_result(&items) && item_ids(&items).contains(&room);
+    outcome.check("Waddle reads the published room", found, describe(&items));
+    if found {
+        let joined = muc::join(&mut reader, &room, "reader").await;
+        outcome.check(
+            "Waddle joins the published room",
+            joined.is_ok(),
+            joined
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+        );
+    }
+    reader.close().await;
     owner.close().await;
     Ok(outcome)
 }
@@ -249,16 +326,14 @@ async fn configure_stock_space(
     node: &str,
     outcome: &mut Outcome,
 ) -> Result<()> {
-    let fields = [
-        ("pubsub#type", ns::SPACES),
-        ("pubsub#access_model", "open"),
-        ("pubsub#notify_retract", "true"),
-        ("pubsub#persist_items", "true"),
-        ("pubsub#purge_offline", "false"),
-    ];
     let configured = ask(
         owner,
-        stanza::pubsub_configure(&support::id("configure"), service, node, &fields),
+        stanza::pubsub_configure(
+            &support::id("configure"),
+            service,
+            node,
+            &PUBLIC_SPACE_FIELDS,
+        ),
     )
     .await?;
     anyhow::ensure!(
@@ -266,6 +341,23 @@ async fn configure_stock_space(
         "stock Space configuration refused: {}",
         describe(&configured)
     );
+    check_stock_space_config(owner, service, node, outcome).await
+}
+
+const PUBLIC_SPACE_FIELDS: [(&str, &str); 5] = [
+    ("pubsub#type", ns::SPACES),
+    ("pubsub#access_model", "open"),
+    ("pubsub#notify_retract", "true"),
+    ("pubsub#persist_items", "true"),
+    ("pubsub#purge_offline", "false"),
+];
+
+async fn check_stock_space_config(
+    owner: &mut Session,
+    service: &str,
+    node: &str,
+    outcome: &mut Outcome,
+) -> Result<()> {
     let stored = ask(
         owner,
         stanza::pubsub_owner_get(&support::id("config-read"), service, "configure", node),
@@ -278,7 +370,7 @@ async fn configure_stock_space(
         .ok_or_else(|| {
             anyhow::anyhow!("stock Space configuration missing: {}", describe(&stored))
         })?;
-    for (name, expected) in fields {
+    for (name, expected) in PUBLIC_SPACE_FIELDS {
         let actual = form
             .children()
             .find(|field| field.is("field", ns::DATA_FORMS) && field.attr("var") == Some(name))
