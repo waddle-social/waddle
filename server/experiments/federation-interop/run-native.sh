@@ -26,6 +26,7 @@ if [[ "${1:-}" != "--inside-native-shell" ]]; then
   # shellcheck disable=SC2016
   exec nix-shell --pure "$INTEROP_EXPERIMENT_ROOT/native.nix" \
     --keep INTEROP_EXPERIMENT_ROOT --keep INTEROP_ARGS --keep INTEROP_LANDED --keep INTEROP_CHORD_BIN \
+    --keep INTEROP_CHORD_BROWSER_BIN --keep INTEROP_CHORD_BROWSER_CONFIG \
     --keep CARGO_TARGET_DIR --keep CARGO_BUILD_JOBS --keep HOME \
     --run 'eval "set -- $INTEROP_ARGS"; exec bash "$INTEROP_EXPERIMENT_ROOT/run-native.sh" --inside-native-shell "$@"'
 fi

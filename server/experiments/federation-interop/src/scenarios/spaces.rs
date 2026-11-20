@@ -257,6 +257,23 @@ pub async fn waddle_reads_chord_space(h: &mut Harness) -> Result<Outcome> {
                 .unwrap_or_default(),
         );
     }
+    if let Some(browser) = std::env::var_os("INTEROP_CHORD_BROWSER_BIN") {
+        let mut command = tokio::process::Command::new(browser);
+        command.args([&service, node, &room]);
+        let result = crate::process::run(
+            "Firefox Spaces acceptance",
+            command,
+            std::time::Duration::from_secs(180),
+        )
+        .await;
+        let passed = result.is_ok();
+        outcome.check(
+            "Firefox follows and joins the Space and restores both from a fresh profile",
+            passed,
+            result.unwrap_or_else(|error| error.to_string()),
+        );
+    }
+
     reader.close().await;
     owner.close().await;
     Ok(outcome)

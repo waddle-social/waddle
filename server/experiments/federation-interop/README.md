@@ -58,6 +58,18 @@ Space and publish a room on ejabberd, then uses Waddle's WebSocket endpoint
 to subscribe, read the bookmark and join the room. Both rows are unverified
 when the binary is absent.
 
+To extend the outbound chord row through the built chat UI, set
+`INTEROP_CHORD_BROWSER_BIN` to the absolute path to
+`firefox-chord-space.py` or a launcher for it. The native fixture supplies
+the Space service, node and child room as three arguments and stays alive
+while the probe runs. The probe reads `INTEROP_CHORD_BROWSER_CONFIG`, a
+private JSON fixture containing the built chat directory (`chat`), local
+Worker origin (`chat_origin`), Waddle HTTPS endpoint (`home`), disposable
+Colony origin and test session cookie (`issuer`, `issuer_cookie`), the
+matrix's `pki/test-ca.pem` (`ca`), and paths to `certutil` and `firefox`.
+Configure the fixture home with that issuer and chat origin. Two temporary
+Firefox profiles authenticate through Waddle's OIDC flow.
+
 ## Environment
 
 | Piece | What the harness starts |
