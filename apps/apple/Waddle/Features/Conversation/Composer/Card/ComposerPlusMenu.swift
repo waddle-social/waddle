@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The filled `+` menu: attach a photo, file or GIF, paste (Mac), or
+/// The filled `+` menu: attach a photo, file, GIF or sticker, paste (Mac), or
 /// browse slash commands.
 struct ComposerPlusMenu: View {
     let isEditing: Bool
@@ -16,6 +16,9 @@ struct ComposerPlusMenu: View {
             }
             Button(action: actions.pickGIF) {
                 Label("GIF", systemImage: "play.rectangle.on.rectangle")
+            }
+            Button(action: actions.pickSticker) {
+                Label("Sticker", systemImage: "face.smiling")
             }
             #if os(macOS)
             // iOS pastes pictures and files straight into the field, from

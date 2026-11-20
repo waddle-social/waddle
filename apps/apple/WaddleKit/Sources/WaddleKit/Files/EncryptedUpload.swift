@@ -18,8 +18,8 @@ public struct EncryptedUpload: Sendable {
         let nonce = AES.GCM.Nonce()
         let box = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce)
         ciphertext = box.ciphertext + box.tag
-        plaintextDigests = Self.sha256(of: plaintext)
-        ciphertextDigests = Self.sha256(of: ciphertext)
+        plaintextDigests = .sha256(of: plaintext)
+        ciphertextDigests = .sha256(of: ciphertext)
         key = try EncryptedFileKey(
             cipher: .aes256GCM,
             key: symmetricKey.withUnsafeBytes { Data($0) },
@@ -36,9 +36,5 @@ public struct EncryptedUpload: Sendable {
             digests: ciphertextDigests,
             sources: [url]
         )
-    }
-
-    private static func sha256(of data: Data) -> FileDigests {
-        FileDigests([.sha256: DigestCheck.digest(of: data, using: .sha256)])
     }
 }

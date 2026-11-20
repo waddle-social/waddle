@@ -88,6 +88,19 @@ struct StickerTests {
         #expect(composed.options.thread == "t1")
     }
 
+    /// A correction re-sends the message as text, which would turn the
+    /// sticker into its description.
+    @Test func aSentStickerCannotBeEdited() async throws {
+        let (coordinator, port) = online()
+        await coordinator.send(wave, from: pack("pack-1"), in: bobConversation)
+        let row = try #require(coordinator.timelines.timeline(for: bobConversation).items.last)
+
+        let edited = await coordinator.edit(row, draft: Draft(text: "hello"))
+
+        #expect(!edited)
+        #expect(port.corrections.isEmpty)
+    }
+
     // MARK: Packs
 
     @Test func loadingShowsThePacksOfTheAccount() async {

@@ -2,13 +2,16 @@ import SwiftUI
 import WaddleKit
 
 /// What slash commands and the formatting bar present over the composer:
-/// the GIF picker, an extension command's form, and the link prompt.
+/// the GIF picker, the sticker picker, an extension command's form, and
+/// the link prompt.
 struct ComposerCommandPresentations: ViewModifier {
     @Environment(SessionCoordinator.self) private var session
     @Binding var gifSearch: ComposerGifSearch?
+    @Binding var showsStickers: Bool
     @Binding var linkPrompt: ComposerLinkPrompt
     let commands: ComposerCommandCenter
     let onPickGIF: (GifSearchItem) -> Void
+    let onPickSticker: (Sticker, StickerPack) -> Void
     /// The typed link, validated by the composer.
     let onAddLink: (String) -> Void
 
@@ -22,6 +25,11 @@ struct ComposerCommandPresentations: ViewModifier {
                 )
                 .carryingCallDock()
                 .environment(session)
+            }
+            .sheet(isPresented: $showsStickers) {
+                StickerPickerSheet(onPick: onPickSticker, onCancel: { showsStickers = false })
+                    .carryingCallDock()
+                    .environment(session)
             }
             .sheet(item: formStage) { _ in
                 ExtensionCommandFormSheet(center: commands)

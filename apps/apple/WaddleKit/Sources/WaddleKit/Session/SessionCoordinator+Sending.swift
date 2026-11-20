@@ -333,10 +333,12 @@ extension SessionCoordinator {
     /// re-sends the whole message, as the XEP requires: the draft's text
     /// and mentions (markup and references are recomputed against the new
     /// body) with the original's reply, thread and attachments. The draft's
-    /// own reply, thread and attachments are ignored.
+    /// own reply, thread and attachments are ignored. A sticker is not
+    /// text and cannot be corrected.
     public func edit(_ item: TimelineItem, draft: Draft) async -> Bool {
         guard item.isMine,
               item.tombstone == nil,
+              !item.message.isSticker,
               let target = item.correctionTargetID,
               let from = ownJID(in: item.conversation),
               let composed = MessageComposer.compose(correctionDraft(of: item, draft: draft))
