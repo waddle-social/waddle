@@ -10,6 +10,10 @@ CREATE TABLE host_grant_space_bindings (
     space_node TEXT NOT NULL,
     access_model TEXT NOT NULL,
     federated BOOLEAN NOT NULL,
+    authority_incarnation TEXT,
+    CONSTRAINT host_grant_space_bindings_incarnation CHECK (
+        authority_incarnation IS NULL OR authority_incarnation ~ '^[0-9a-f]{32}$'
+    ),
     CONSTRAINT host_grant_space_bindings_scope
         FOREIGN KEY (lifecycle_id, service_jid, space_node)
         REFERENCES host_grant_scope_lifecycles (lifecycle_id, service_jid, space_node),

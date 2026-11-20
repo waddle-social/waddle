@@ -2017,6 +2017,15 @@ impl HostGrantStore {
         )
         .await
         .map_err(HostGrantError::from_database)?;
+        // The room projection cannot attest restored Space affiliations.
+        // Keep node reservations but require a new operator bind before use.
+        tx.execute(
+            "UPDATE host_grant_space_bindings SET authority_incarnation = NULL \
+             WHERE authority_incarnation IS NOT NULL",
+            (),
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
         // From this commit no scope bound to the earlier incarnation admits,
         // mutates or activates; the batches below close each one.
         commit(tx, mode).await?;

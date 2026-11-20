@@ -107,7 +107,7 @@ const SERVICE_UNAVAILABLE: (ErrorType, DefinedCondition) =
 
 /// Every relation of the canonical host-grant store: what a restore of the
 /// database brings back.
-const AUTHORITY_RELATIONS: [&str; 7] = [
+const AUTHORITY_RELATIONS: [&str; 9] = [
     "host_grant_authority",
     "host_grant_scope_lifecycles",
     "host_grant_scopes",
@@ -115,6 +115,8 @@ const AUTHORITY_RELATIONS: [&str; 7] = [
     "host_grants",
     "host_grant_operations",
     "host_grant_operation_changes",
+    "host_grant_space_bindings",
+    "host_grant_space_affiliations",
 ];
 
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which
@@ -160,11 +162,13 @@ impl AuthorityBackup {
     async fn restore(&self, fixture: &GrantFixture) {
         let pool = owner_pool(fixture).await;
         let mut tx = pool.begin().await.expect("restore transaction");
-        for relation in AUTHORITY_RELATIONS {
+        for relation in AUTHORITY_RELATIONS.into_iter().rev() {
             sqlx::query(&format!("DELETE FROM public.{relation}"))
                 .execute(&mut *tx)
                 .await
                 .unwrap_or_else(|error| panic!("clear {relation}: {error}"));
+        }
+        for relation in AUTHORITY_RELATIONS {
             sqlx::query(&format!(
                 "INSERT INTO public.{relation} SELECT * FROM {}.{relation}",
                 self.schema
@@ -673,6 +677,57 @@ fn reconstruction_lowers_only_and_records_subjects_only_the_projection_held() {
         vec![target(OWNER, RoomAffiliation::Outcast)]
     );
     assert!(reconstruction_targets(&intent, &doubled, false).is_empty());
+}
+
+#[tokio::test]
+async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_node() {
+    let Some(fixture) = GrantFixture::active("hg_restore_space_binding").await else {
+        return;
+    };
+    let pool = owner_pool(&fixture).await;
+    let lifecycle = fixture.scope.lifecycle.to_storage();
+    sqlx::query(
+        "INSERT INTO pubsub_nodes (owner_jid, node_name, access_model, publish_model, \
+         node_type, max_items, persist_items, deliver_payloads, notify_retract, notify_delete, \
+         send_last_published_item, created_at_ms) \
+         SELECT service_jid, space_node, 'whitelist', 'publishers', 'urn:xmpp:spaces:0', \
+         100, 1, 1, 1, 1, 'never', 42 FROM host_grant_scope_lifecycles WHERE lifecycle_id = $1",
+    )
+    .bind(&lifecycle)
+    .execute(&pool)
+    .await
+    .expect("seed the exact enrolled PubSub node");
+    sqlx::query(
+        "INSERT INTO host_grant_space_bindings
+         (lifecycle_id, service_jid, space_node, access_model, federated, authority_incarnation)
+         SELECT lifecycle_id, service_jid, space_node, 'whitelist', true, incarnation
+         FROM host_grant_scope_lifecycles CROSS JOIN host_grant_authority WHERE lifecycle_id = $1",
+    )
+    .bind(&lifecycle)
+    .execute(&pool)
+    .await
+    .expect("seed a Space binding under the live incarnation");
+
+    let binding =
+        "SELECT authority_incarnation FROM host_grant_space_bindings WHERE lifecycle_id = $1";
+    assert!(sqlx::query_scalar::<_, Option<String>>(binding)
+        .bind(&lifecycle)
+        .fetch_one(&pool)
+        .await
+        .expect("bound node before restore")
+        .is_some());
+    assert!(matches!(
+        declare(&fixture, 1).await,
+        RestoreDeclaration::Transitioned { .. }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(binding)
+            .bind(&lifecycle)
+            .fetch_one(&pool)
+            .await
+            .expect("node reservation remains after restore"),
+        None
+    );
 }
 
 #[tokio::test]
