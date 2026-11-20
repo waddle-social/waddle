@@ -302,13 +302,11 @@ pub struct Material {
     pub dialback_secret: PathBuf,
 }
 
-/// Every peer of the harness reaches a deployment from 127.0.0.1 through
-/// its relay, so the limits Waddle keeps per source address would act as
-/// one cap shared by every peer at once, and a clustered ejabberd opens up
-/// to four streams for one pair. The unauthenticated sockets per address
-/// and the negotiating streams per peer are therefore at their ceilings
-/// (4 each); the per-address accept rate is already at its ceiling, and
-/// the harness's own raw connections keep to it.
+/// Each relayed server has its own loopback source address. A clustered
+/// ejabberd can still open up to four streams for one directional pair, so
+/// the unauthenticated sockets per address and the negotiating streams per
+/// peer have ceilings of four. Raw connections use the default loopback
+/// address and are paced to stay within its accept rate.
 ///
 /// The harness also opens more directional domain pairs than the 24
 /// established streams a deployment keeps: three local domains against

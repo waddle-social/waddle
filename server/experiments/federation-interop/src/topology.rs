@@ -7,7 +7,7 @@
 //! cases; each relay serves one directed source-to-destination pair, so
 //! cutting one pair leaves the others alone.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 
 /// The account domains of the two Waddle deployments.
 pub const HOME_A: &str = "home-a.test";
@@ -107,6 +107,17 @@ pub enum Server {
 }
 
 impl Server {
+    /// All domains served by a test node share its source address.
+    pub fn relay_source(self) -> Ipv4Addr {
+        let host = match self {
+            Self::Waddle(Home::A) => 2,
+            Self::Waddle(Home::B) => 3,
+            Self::Prosody => 4,
+            Self::Ejabberd(node) => node + 4,
+        };
+        Ipv4Addr::new(127, 0, 0, host)
+    }
+
     pub fn label(self) -> String {
         match self {
             Self::Waddle(home) => home.label().to_owned(),

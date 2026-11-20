@@ -173,6 +173,7 @@ impl Harness {
                 link.label(),
                 ports.relay(link),
                 topology::s2s_port(ports, link.to),
+                link.from.relay_source(),
             )
             .await?;
             relays.insert(link, relay);
@@ -256,6 +257,7 @@ impl Harness {
             "redirect-target".to_owned(),
             ports.redirect_target(),
             ports.raw_receiver(),
+            std::net::Ipv4Addr::LOCALHOST,
         )
         .await?;
         let fetches = FetchRecorder::start(ports.fetch_recorder()).await?;

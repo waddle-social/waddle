@@ -11,6 +11,7 @@
 //! observation rows, never for the flows.
 
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -118,7 +119,7 @@ pub struct Relay {
 }
 
 impl Relay {
-    pub async fn start(label: String, port: u16, upstream: u16) -> Result<Self> {
+    pub async fn start(label: String, port: u16, upstream: u16, source: Ipv4Addr) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .await
             .with_context(|| format!("bind relay {label} on {port}"))?;
@@ -145,7 +146,7 @@ impl Relay {
                 }
                 let shared = Arc::clone(&accept_shared);
                 tokio::spawn(async move {
-                    relay_one(shared, socket, upstream, mode).await;
+                    relay_one(shared, socket, upstream, source, mode).await;
                 });
             }
         });
@@ -257,7 +258,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-async fn relay_one(shared: Arc<Shared>, client: TcpStream, upstream: u16, mode: Mode) {
+async fn relay_one(
+    shared: Arc<Shared>,
+    client: TcpStream,
+    upstream: u16,
+    source: Ipv4Addr,
+    mode: Mode,
+) {
     let index = {
         let mut connections = lock(&shared.connections);
         connections.push(Connection {
@@ -271,7 +278,7 @@ async fn relay_one(shared: Arc<Shared>, client: TcpStream, upstream: u16, mode: 
     shared.max_active.fetch_max(now_active, Ordering::SeqCst);
     let mut cut = shared.cut.subscribe();
     let result = tokio::select! {
-        result = carry(&shared, index, client, upstream, mode) => result,
+        result = carry(&shared, index, client, upstream, source, mode) => result,
         _ = cut.changed() => Err(anyhow::anyhow!("relay cut")),
     };
     shared.active.fetch_sub(1, Ordering::SeqCst);
@@ -289,9 +296,15 @@ async fn carry(
     index: usize,
     client: TcpStream,
     upstream: u16,
+    source: Ipv4Addr,
     mode: Mode,
 ) -> Result<()> {
-    let server = TcpStream::connect(("127.0.0.1", upstream))
+    let socket = TcpSocket::new_v4().context("create upstream socket")?;
+    socket
+        .bind(SocketAddrV4::new(source, 0).into())
+        .context("bind upstream source")?;
+    let server = socket
+        .connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, upstream).into())
         .await
         .context("connect upstream")?;
     match mode {
