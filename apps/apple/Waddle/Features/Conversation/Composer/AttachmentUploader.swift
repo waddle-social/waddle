@@ -53,7 +53,11 @@ struct AttachmentUploader {
     ) async throws -> SharedFile {
         guard !payload.data.isEmpty else { throw AttachmentUploadError.empty }
         guard payload.data.count <= AttachmentPolicy.maxBytes else { throw AttachmentUploadError.tooLarge }
+        // An attachment removed while it waited or was being sealed asks
+        // the server for nothing.
+        try Task.checkCancellation()
         let sealed = try await seal(payload.data)
+        try Task.checkCancellation()
         // What the upload service stores: the file, or ciphertext that
         // does not show its type.
         let stored = sealed.map {
