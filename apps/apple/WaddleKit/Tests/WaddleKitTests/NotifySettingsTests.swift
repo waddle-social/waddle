@@ -23,6 +23,16 @@ struct NotifySettingsTests {
         ])
     }
 
+    /// The opt-in is stored with a mode, so it must not turn a group
+    /// chat's default (every message) into the room default (mentions).
+    @Test func showingMessagesInPushKeepsAGroupChatNotifyingAboutEveryMessage() async throws {
+        let (coordinator, port) = online()
+        let group = bare("g-1@groups.waddle.test")
+        coordinator.directory.upsert(Channel(roomJID: group, name: "Trip", position: 0, isGroupDM: true))
+        try await coordinator.setShowsMessagesInPush(true, for: .room(group))
+        #expect(port.notifySettingsWrites.map(\.mode) == [.always])
+    }
+
     @Test func aRefusedChangeIsRolledBack() async {
         let (coordinator, port) = online()
         port.notifySettingsWriteResult = .failure(.rejected)

@@ -31,7 +31,7 @@ struct NotificationModeSection: View {
                 Text(Self.showsMessagesFooter)
                 if let errorMessage {
                     Text(errorMessage)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Theme.Colors.dangerText)
                 }
             }
         }

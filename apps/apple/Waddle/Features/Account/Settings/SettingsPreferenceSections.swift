@@ -74,7 +74,7 @@ struct SettingsNotificationsSection: View {
                 if case let .failed(message) = pushRegistrationStatus {
                     Text(message)
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Theme.Colors.dangerText)
                 }
             }
             if notificationPermissionGranted == false {
