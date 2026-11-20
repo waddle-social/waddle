@@ -243,7 +243,12 @@ pub async fn child_rooms(h: &mut Harness, peer: Peer) -> Result<Outcome> {
 }
 
 /// Configure and read back the required XEP-0503 v0.3.0 public node fields.
-async fn configure_stock_space(owner: &mut Session, service: &str, node: &str) -> Result<()> {
+async fn configure_stock_space(
+    owner: &mut Session,
+    service: &str,
+    node: &str,
+    outcome: &mut Outcome,
+) -> Result<()> {
     let fields = [
         ("pubsub#type", ns::SPACES),
         ("pubsub#access_model", "open"),
@@ -279,13 +284,14 @@ async fn configure_stock_space(owner: &mut Session, service: &str, node: &str) -
             .find(|field| field.is("field", ns::DATA_FORMS) && field.attr("var") == Some(name))
             .and_then(|field| field.get_child("value", ns::DATA_FORMS))
             .map(Element::text);
-        anyhow::ensure!(
+        outcome.check(
+            format!("stock Space field {name}"),
             actual.as_deref() == Some(expected)
                 || matches!(
                     (expected, actual.as_deref()),
                     ("true", Some("1")) | ("false", Some("0"))
                 ),
-            "stock Space field {name}: expected {expected}, got {actual:?}"
+            format!("expected {expected}, got {actual:?}"),
         );
     }
     Ok(())
@@ -320,7 +326,7 @@ pub async fn space_on_peer_pubsub(h: &mut Harness, peer: Peer) -> Result<Outcome
         federate_space(&mut owner, &service, &node).await?;
         muc::join(&mut owner, &room, "owner").await?;
     } else {
-        configure_stock_space(&mut owner, &service, &node).await?;
+        configure_stock_space(&mut owner, &service, &node, &mut outcome).await?;
     }
     let mut local = h
         .login_waddle(Home::A, "alice", &support::id("local"))
