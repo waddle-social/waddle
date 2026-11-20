@@ -19,7 +19,6 @@ pub struct Postgres {
     password: String,
     bin: PathBuf,
     data: PathBuf,
-    socket: PathBuf,
     logs: PathBuf,
     process: Option<Supervised>,
 }
@@ -33,11 +32,11 @@ impl Postgres {
         label: &str,
         port: u16,
     ) -> Result<Self> {
-        let data = root.join(label).join("data");
-        let socket = root.join(label).join("socket");
-        std::fs::create_dir_all(&socket)?;
+        let cluster = root.join(label);
+        std::fs::create_dir_all(&cluster)?;
+        let data = cluster.join("data");
         let password = uuid::Uuid::new_v4().simple().to_string();
-        let password_file = root.join(label).join("initdb-password");
+        let password_file = cluster.join("initdb-password");
         crate::process::write_private(&password_file, password.as_bytes())?;
         let mut initdb = Command::new(bin.join("initdb"));
         initdb
@@ -61,7 +60,6 @@ impl Postgres {
             password,
             bin: bin.to_owned(),
             data,
-            socket,
             logs: logs.to_owned(),
             process: None,
         };
@@ -79,13 +77,7 @@ impl Postgres {
             .arg("-c")
             .arg("listen_addresses=127.0.0.1")
             .arg("-c")
-            .arg(
-                [
-                    "unix_socket_directories=",
-                    &self.socket.display().to_string(),
-                ]
-                .concat(),
-            )
+            .arg("unix_socket_directories=")
             .arg("-c")
             .arg("max_connections=200")
             .arg("-c")
