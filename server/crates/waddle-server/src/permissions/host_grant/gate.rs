@@ -46,8 +46,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use waddle_xmpp::pubsub::Affiliation;
+use xmpp_parsers::iq::Iq;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
@@ -63,6 +64,7 @@ use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
 use crate::db::Database;
+use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::route::RemotePrincipal;
 
 /// At most one warning a minute that a managed room was refused on a replica
@@ -113,9 +115,34 @@ pub struct HostGrantUnavailable;
 pub struct ManagedSpaceGrant {
     affiliation: Affiliation,
     fence: FenceTicket,
+    remote_reply: Option<RemoteSpaceReply>,
+}
+
+#[derive(Debug)]
+struct RemoteSpaceReply {
+    service: BareJid,
+    recipient: Jid,
+    id: String,
 }
 
 impl ManagedSpaceGrant {
+    /// Check that this effect is the IQ result for the authenticated request
+    /// and that the outbound pair meets the grant's stream assurance.
+    pub(crate) fn permits_remote_reply(
+        &self,
+        stanza: &minidom::Element,
+        strength: AuthenticationStrength,
+    ) -> bool {
+        self.remote_reply.as_ref().is_some_and(|reply| {
+            (self.affiliation == Affiliation::Member || strength == AuthenticationStrength::Pkix)
+                && stanza.name() == "iq"
+                && stanza.attr("type") == Some("result")
+                && stanza.attr("from") == Some(reply.service.as_str())
+                && stanza.attr("to") == Some(reply.recipient.as_str())
+                && stanza.attr("id") == Some(reply.id.as_str())
+        })
+    }
+
     /// Transfer a protected effect synchronously while the decision is current.
     pub fn admit<R>(&self, effect: impl FnOnce(Affiliation) -> R) -> Option<R> {
         self.fence.admit(|| effect(self.affiliation))
@@ -648,10 +675,24 @@ impl HostGrantGate {
         &self,
         key: &ScopeKey,
         principal: &RemotePrincipal,
+        request: &Iq,
     ) -> Option<ManagedSpaceGrant> {
+        if !matches!(request, Iq::Get { .. })
+            || request.from() != Some(principal.address())
+            || request.to().map(Jid::as_str) != Some(key.service().as_str())
+        {
+            return None;
+        }
         let subject = GrantSubject::new(principal.account().as_bare_jid().clone()).ok()?;
-        self.space_read(key, &subject, &PrincipalEvidence::of(principal))
-            .await
+        let mut grant = self
+            .space_read(key, &subject, &PrincipalEvidence::of(principal))
+            .await?;
+        grant.remote_reply = Some(RemoteSpaceReply {
+            service: key.service().clone(),
+            recipient: principal.address().clone(),
+            id: request.id().to_owned(),
+        });
+        Some(grant)
     }
 
     async fn space_read(
@@ -701,6 +742,7 @@ impl HostGrantGate {
         ticket.is_current().then_some(ManagedSpaceGrant {
             affiliation,
             fence: ticket,
+            remote_reply: None,
         })
     }
 

@@ -438,7 +438,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .expect("bind Space");
     fixture.activate_current(&fixture.scope).await;
 
-    let mut conn = fixture.ingress.db.guard().await.expect("database");
+    let conn = fixture.ingress.db.guard().await.expect("database");
     conn.execute(
         "INSERT INTO host_grant_space_affiliations
          (lifecycle_id, subject_jid, affiliation, effective_affiliation, issuance_basis, changed_generation)

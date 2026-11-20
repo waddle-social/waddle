@@ -911,12 +911,14 @@ impl HostGrantStore {
         };
         let lifecycle = command.lifecycle.to_storage();
         let incarnation = current.to_storage();
+        // The lifecycle identifies the Space at this service. Older Space
+        // nodes store no PubSub type; an explicit different type is refused.
         let mut node = tx
             .query(
                 "SELECT l.service_jid, l.space_node FROM host_grant_scope_lifecycles l \
              JOIN pubsub_nodes p ON p.owner_jid = l.service_jid AND p.node_name = l.space_node \
              WHERE l.lifecycle_id = ? AND l.retired_at_ms IS NULL \
-             AND p.access_model = 'whitelist' AND p.node_type = ? FOR SHARE OF p",
+             AND p.access_model = 'whitelist' AND (p.node_type IS NULL OR p.node_type = ?) FOR SHARE OF p",
                 crate::db_params![lifecycle.as_str(), waddle_xmpp::xep::xep0503::NS_SPACES],
             )
             .await

@@ -961,7 +961,7 @@ impl Asked<'_> {
             .deps
             .app_state
             .host_grants
-            .space_read_remote(&key, principal)
+            .space_read_remote(&key, principal, self.iq)
             .await?;
         let stanza = result(self.iq, Some(self.node_info(node).await)).pop()?;
         Some(SpaceReply::Protected { stanza, grant })

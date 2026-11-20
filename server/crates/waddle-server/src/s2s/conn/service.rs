@@ -423,6 +423,9 @@ impl S2sHandle {
         stanza: minidom::Element,
         grant: Arc<ManagedSpaceGrant>,
     ) -> Result<(), TransmitError> {
+        if !grant.permits_remote_reply(&stanza, stream.strength()) {
+            return Err(TransmitError::AuthorizationExpired);
+        }
         outbox::transmit(&self.shared.registry, stream, stanza, Some(grant)).await
     }
 
