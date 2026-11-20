@@ -433,6 +433,44 @@ async fn round_trip_unacked_preserves_typed_stanza() {
     assert_eq!(body, Some("m1".to_string()));
 }
 
+#[tokio::test]
+async fn protected_space_reply_keeps_its_authority_in_both_storage_readers() {
+    use waddle_xmpp::stream_management::{
+        persistence::SmReplayPayload, ProtectedSpaceReplyDescriptor,
+    };
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let session = fixture_session("protected-space");
+    storage.upsert_session(session.clone()).await.unwrap();
+    let descriptor = ProtectedSpaceReplyDescriptor::new(
+        "spaces.example.com".parse().unwrap(),
+        "private".to_owned(),
+        session.jid.clone(),
+        "space-info".to_owned(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        3,
+    )
+    .unwrap();
+    let xml = "<iq xmlns='jabber:client' type='result' id='space-info' \
+               from='spaces.example.com' to='alice@example.com/web'>\
+               <query xmlns='http://jabber.org/protocol/disco#info' node='private'/></iq>";
+    let mut frame = fixture_unacked("protected-space", 11);
+    frame.stanza = SmReplayPayload::from_protected_space_reply(xml.to_owned(), descriptor.clone())
+        .expect("protected Space reply");
+    storage.append_unacked(frame).await.unwrap();
+
+    let direct = storage.list_unacked(&session.stream_id).await.unwrap();
+    let joined = storage.list_all_sessions_with_unacked().await.unwrap();
+    assert_eq!(direct.len(), 1);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(joined[0].1.len(), 1);
+    for frame in [&direct[0], &joined[0].1[0]] {
+        assert_eq!(frame.stanza.protected_space_reply(), Some(&descriptor));
+        assert_eq!(frame.stanza.wire(), xml);
+    }
+}
+
 /// Issue #209 PR #405: the libSQL backend overrides
 /// `list_all_sessions_with_unacked` with a single LEFT JOIN
 /// query (vs the trait default's N+1). Verify the SQL grouping

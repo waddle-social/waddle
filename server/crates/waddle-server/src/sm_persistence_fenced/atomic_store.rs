@@ -128,7 +128,7 @@ impl PostgresFencedSmPersistence {
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
         for stanza in &unacked {
-            let xml = stanza.stanza.wire();
+            let xml = stanza.stanza.to_storage().into_owned();
             let receipt_ms = stanza.original_receipt_at.timestamp_millis();
             tx.execute(
                 "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \
