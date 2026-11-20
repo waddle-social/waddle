@@ -190,6 +190,55 @@ pub async fn child_rooms(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     Ok(outcome)
 }
 
+/// Configure and read back the required XEP-0503 v0.3.0 public node fields.
+async fn configure_stock_space(owner: &mut Session, service: &str, node: &str) -> Result<()> {
+    let fields = [
+        ("pubsub#type", ns::SPACES),
+        ("pubsub#access_model", "open"),
+        ("pubsub#notify_retract", "true"),
+        ("pubsub#persist_items", "true"),
+        ("pubsub#purge_offline", "false"),
+    ];
+    let configured = ask(
+        owner,
+        stanza::pubsub_configure(&support::id("configure"), service, node, &fields),
+    )
+    .await?;
+    anyhow::ensure!(
+        is_result(&configured),
+        "stock Space configuration refused: {}",
+        describe(&configured)
+    );
+    let stored = ask(
+        owner,
+        stanza::pubsub_owner_get(&support::id("config-read"), service, "configure", node),
+    )
+    .await?;
+    let form = stored
+        .get_child("pubsub", ns::PUBSUB_OWNER)
+        .and_then(|pubsub| pubsub.get_child("configure", ns::PUBSUB_OWNER))
+        .and_then(|configure| configure.get_child("x", ns::DATA_FORMS))
+        .ok_or_else(|| {
+            anyhow::anyhow!("stock Space configuration missing: {}", describe(&stored))
+        })?;
+    for (name, expected) in fields {
+        let actual = form
+            .children()
+            .find(|field| field.is("field", ns::DATA_FORMS) && field.attr("var") == Some(name))
+            .and_then(|field| field.get_child("value", ns::DATA_FORMS))
+            .map(Element::text);
+        anyhow::ensure!(
+            actual.as_deref() == Some(expected)
+                || matches!(
+                    (expected, actual.as_deref()),
+                    ("true", Some("1")) | ("false", Some("0"))
+                ),
+            "stock Space field {name}: expected {expected}, got {actual:?}"
+        );
+    }
+    Ok(())
+}
+
 pub async fn space_on_peer_pubsub(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
         [
@@ -218,6 +267,8 @@ pub async fn space_on_peer_pubsub(h: &mut Harness, peer: Peer) -> Result<Outcome
         // other servers reach both only once their owner opens them.
         federate_space(&mut owner, &service, &node).await?;
         muc::join(&mut owner, &room, "owner").await?;
+    } else {
+        configure_stock_space(&mut owner, &service, &node).await?;
     }
     let mut local = h
         .login_waddle(Home::A, "alice", &support::id("local"))
