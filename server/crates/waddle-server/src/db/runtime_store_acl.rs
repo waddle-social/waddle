@@ -105,9 +105,9 @@ const ACCOUNT_BINDING_RELATIONS: &[Relation] = &[
 /// The host-grant store reads the authority incarnation, the lifecycle
 /// ledger and the room bindings, which the owner phase alone writes. It
 /// row-locks and updates scope state, inserts and updates grant rows, and
-/// appends to the operation journal: an outcome is written once, and no
-/// host-grant row is ever deleted. A replica inserts and renews its
-/// revocation-fence lease and inserts and advances its acknowledgements.
+/// appends to the operation journal. The runtime can remove a local
+/// subscription preference while durable grant rows are retained. A replica
+/// renews its revocation-fence lease and advances its acknowledgements.
 const HOST_GRANT_RELATIONS: &[Relation] = &[
     Relation {
         name: "host_grant_authority",
@@ -168,6 +168,12 @@ const HOST_GRANT_RELATIONS: &[Relation] = &[
         insert: true,
         update: true,
         delete: false,
+    },
+    Relation {
+        name: "local_space_subscriptions",
+        insert: true,
+        update: true,
+        delete: true,
     },
     Relation {
         name: "host_grant_space_operation_changes",

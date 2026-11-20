@@ -460,6 +460,35 @@ async fn begin_for_subscription<'a>(
     Ok(Some(tx))
 }
 
+/// Hold the exact publication version while the caller stages a delivery.
+pub(super) async fn hold_bookmark_delivery_version(
+    tx: &mut Transaction<'_>,
+    service: &BareJid,
+    node: &str,
+    version: &crate::permissions::host_grant::SpaceBookmarkVersion,
+) -> Result<bool, super::DatabaseError> {
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM host_grant_space_bookmark_versions v
+             JOIN host_grant_space_bindings b ON b.lifecycle_id = v.lifecycle_id
+             WHERE b.service_jid = ? AND b.space_node = ?
+             AND b.authority_incarnation = v.authority_incarnation
+             AND v.lifecycle_id = ? AND v.room_jid = ? AND v.authority_incarnation = ?
+             AND v.operation_token = ? AND v.present = (?::bigint <> 0) FOR SHARE OF v",
+            crate::db_params![
+                service.as_str(),
+                node,
+                version.lifecycle.to_storage(),
+                version.room.as_str(),
+                version.incarnation.to_storage(),
+                version.operation.to_storage(),
+                version.present,
+            ],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
 async fn protected_subscription_still_allowed(
     tx: &mut Transaction<'_>,
     service: &BareJid,
@@ -1165,28 +1194,9 @@ impl SpaceSubscriptions {
         )
         .await
         .map_err(storage)?;
-        let mut versions = tx
-            .query(
-                "SELECT 1 FROM host_grant_space_bookmark_versions v
-             JOIN host_grant_space_bindings b ON b.lifecycle_id = v.lifecycle_id
-             WHERE b.service_jid = ? AND b.space_node = ?
-             AND b.authority_incarnation = v.authority_incarnation
-             AND v.lifecycle_id = ? AND v.room_jid = ? AND v.authority_incarnation = ?
-             AND v.operation_token = ? AND v.present = (?::bigint <> 0) FOR SHARE OF v",
-                crate::db_params![
-                    service.as_str(),
-                    node,
-                    version.lifecycle.to_storage(),
-                    version.room.as_str(),
-                    version.incarnation.to_storage(),
-                    version.operation.to_storage(),
-                    version.present,
-                ],
-            )
+        let current = hold_bookmark_delivery_version(&mut tx, service, node, version)
             .await
             .map_err(storage)?;
-        let current = versions.next().await.map_err(storage)?.is_some();
-        drop(versions);
         if !current {
             tx.rollback().await.map_err(storage)?;
             return Ok(None);

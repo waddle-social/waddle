@@ -1306,6 +1306,238 @@ async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_ato
 }
 
 #[tokio::test]
+async fn local_space_preferences_track_only_the_current_local_grant_era() {
+    use waddle_server::db::local_space_subscriptions::{
+        LocalSpaceSubscriptions, LocalSpaceUnsubscribe,
+    };
+    use waddle_server::db::s2s_spaces::SpaceSubscriptionGrant;
+    use waddle_server::permissions::host_grant::{SpaceBookmarkAction, SpaceBookmarkChange};
+
+    let Some(fixture) = GrantFixture::active("hg_local_space_preferences").await else {
+        return;
+    };
+    let pool = owner_pool(&fixture).await;
+    let lifecycle = fixture.scope.lifecycle;
+    let service = "spaces.example.com";
+    let node = &fixture.scope.space_node;
+    sqlx::query(
+        "INSERT INTO pubsub_nodes (owner_jid, node_name, access_model, publish_model,
+         node_type, max_items, persist_items, deliver_payloads, notify_retract, notify_delete,
+         send_last_published_item, created_at_ms)
+         VALUES ($1, $2, 'whitelist', 'publishers', 'urn:xmpp:spaces:0',
+         100, 1, 1, 1, 1, 'never', 42)",
+    )
+    .bind(service)
+    .bind(node)
+    .execute(&pool)
+    .await
+    .expect("seed an enrolled node");
+    let key =
+        ScopeKey::new(service.parse().expect("service JID"), node.clone()).expect("Space key");
+    fixture
+        .store
+        .bind_space(
+            &BindSpace {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: fixture.generation().await,
+                owner: subject(OWNER),
+                federated: false,
+            },
+            &served(),
+        )
+        .await
+        .expect("bind a local-only Space");
+    fixture.activate_current(&fixture.scope).await;
+    let set = |generation, affiliation| SetSpaceAffiliations {
+        operation: GrantOperationId::generate(),
+        lifecycle,
+        expected_generation: generation,
+        initiator: subject(OWNER),
+        changes: [PEER, "alice@peer.test"]
+            .into_iter()
+            .map(|account| SpaceAffiliationChange {
+                subject: subject(account),
+                affiliation,
+            })
+            .collect(),
+    };
+    let changed = fixture
+        .store
+        .set_space_affiliations(
+            &set(fixture.generation().await, SpaceMembership::Member),
+            &fixture.policy,
+        )
+        .await
+        .expect("record explicit local and remote members");
+    let incarnation = changed.record().authority_incarnation;
+    let era = SpaceSubscriptionGrant {
+        lifecycle,
+        incarnation,
+        generation: changed.record().generation,
+    };
+
+    let subscriptions = LocalSpaceSubscriptions::new(fixture.ingress.db.clone());
+    assert!(subscriptions
+        .record(&key, &subject(PEER), &served(), era)
+        .await
+        .expect("read pending member")
+        .is_none());
+    fixture.activate_current(&fixture.scope).await;
+    assert!(subscriptions
+        .record(&key, &subject("alice@peer.test"), &served(), era)
+        .await
+        .expect("reject a foreign grant without fabricating peer evidence")
+        .is_none());
+    let local = subscriptions
+        .record(&key, &subject(PEER), &served(), era)
+        .await
+        .expect("record local membership preference")
+        .expect("eligible member");
+    assert_eq!(
+        subscriptions
+            .record(&key, &subject(PEER), &served(), era)
+            .await
+            .expect("same era"),
+        Some(local.clone()),
+    );
+    assert_eq!(
+        subscriptions
+            .of_scope(&key, lifecycle)
+            .await
+            .expect("live preferences"),
+        [local.clone()]
+    );
+
+    let publish = SpaceBookmarkChange {
+        key: key.clone(),
+        lifecycle,
+        expected_incarnation: incarnation,
+        expected_generation: fixture.generation().await,
+        initiator: subject(OWNER),
+        room: fixture.scope.room.clone(),
+        action: SpaceBookmarkAction::Publish {
+            payload: minidom::Element::builder("conference", "urn:xmpp:bookmarks:1").build(),
+        },
+    };
+    let original = fixture
+        .store
+        .write_space_bookmark(&publish, &fixture.policy)
+        .await
+        .expect("publish");
+    let current = subscriptions
+        .hold_delivery(&key, &local, &original.versions[0])
+        .await
+        .expect("verify delivery")
+        .expect("exact preference and bookmark");
+    current.rollback().await.expect("release delivery");
+    let replacement = fixture
+        .store
+        .write_space_bookmark(&publish, &fixture.policy)
+        .await
+        .expect("republish");
+    assert!(subscriptions
+        .hold_delivery(&key, &local, &original.versions[0])
+        .await
+        .expect("reject superseded bookmark")
+        .is_none());
+
+    let revoked = fixture
+        .store
+        .set_space_affiliations(
+            &set(fixture.generation().await, SpaceMembership::None),
+            &fixture.policy,
+        )
+        .await
+        .expect("revoke membership");
+    assert!(subscriptions
+        .hold_delivery(&key, &local, &replacement.versions[0])
+        .await
+        .expect("reject superseded affiliation")
+        .is_none());
+    assert!(subscriptions
+        .of_scope(&key, lifecycle)
+        .await
+        .expect("no live preferences")
+        .is_empty());
+
+    let granted = fixture
+        .store
+        .set_space_affiliations(
+            &set(revoked.record().generation, SpaceMembership::Member),
+            &fixture.policy,
+        )
+        .await
+        .expect("grant membership again");
+    fixture.activate_current(&fixture.scope).await;
+    assert!(subscriptions
+        .record(&key, &subject(PEER), &served(), era)
+        .await
+        .expect("reject old era")
+        .is_none());
+    let renewed = subscriptions
+        .record(
+            &key,
+            &subject(PEER),
+            &served(),
+            SpaceSubscriptionGrant {
+                generation: granted.record().generation,
+                ..era
+            },
+        )
+        .await
+        .expect("fresh preference")
+        .expect("regranted member");
+    assert_ne!(renewed.subid, local.subid);
+    assert_eq!(
+        subscriptions
+            .remove_own(&key, &subject(PEER), &served(), Some(&local.subid))
+            .await
+            .expect("stale unsubscribe cannot delete renewal"),
+        LocalSpaceUnsubscribe::Invalid,
+    );
+    assert_eq!(
+        subscriptions
+            .remove_own(&key, &subject(PEER), &served(), None)
+            .await
+            .expect("existing preference requires its subid"),
+        LocalSpaceUnsubscribe::Required,
+    );
+    assert!(subscriptions
+        .hold_preference(&key, &renewed)
+        .await
+        .expect("renewal survives")
+        .is_some());
+    assert_eq!(
+        subscriptions
+            .remove_own(&key, &subject(PEER), &served(), Some(&renewed.subid))
+            .await
+            .expect("own unsubscribe"),
+        LocalSpaceUnsubscribe::Removed,
+    );
+    assert_eq!(
+        subscriptions
+            .remove_own(&key, &subject(PEER), &served(), None)
+            .await
+            .expect("missing subscription"),
+        LocalSpaceUnsubscribe::Absent,
+    );
+    assert!(subscriptions
+        .hold_preference(&key, &renewed)
+        .await
+        .expect("not subscribed")
+        .is_none());
+    let remote_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM s2s_space_subscriptions")
+        .fetch_one(&pool)
+        .await
+        .expect("remote preference count");
+    assert_eq!(remote_count, 0);
+
+    pool.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_declared_restore_closes_every_scope_under_a_new_incarnation() {
     let Some(fixture) = GrantFixture::active("hg_restore_transition").await else {
         return;
@@ -2349,6 +2581,7 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
         format!("GRANT SELECT ON host_grant_space_bindings TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_bookmark_versions TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
@@ -2623,6 +2856,7 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT SELECT ON host_grant_space_bindings TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_bookmark_versions TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
