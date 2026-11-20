@@ -461,17 +461,129 @@ pub async fn untrusted_home(h: &mut Harness, peer: Peer) -> Result<Outcome> {
 
 pub async fn home_removed(h: &mut Harness, peer: Peer) -> Result<Outcome> {
     let mut outcome = Outcome::new(
-        "a home-b room admin before and after home-b leaves home-a's trusted-home list",
+        "one persisted home-b admin affiliation before, during and after removal from home-a's trusted-home list",
     );
-    let honored = remote_moderation(h, peer, &mut outcome, "trusted", Standing::Admin).await?;
-    outcome.check("honored while trusted", honored, "");
-    let mut profile = h.profile(Home::A, true);
-    profile.trusted_homes.retain(|home| home != HOME_B);
-    h.dirty.insert(Component::Waddle(Home::A));
-    h.start_waddle(&profile).await?;
-    let after = remote_moderation(h, peer, &mut outcome, "removed", Standing::Admin).await?;
-    outcome.check("ignored once the home is removed", !after, "");
+    let room = [
+        room_name("stored-admin").as_str(),
+        "@",
+        &topology::muc_domain(HOME_A),
+    ]
+    .concat();
+    let mut owner = h
+        .login_waddle(Home::A, "admin", &support::id("owner"))
+        .await?;
+    join_with(
+        &mut owner,
+        &room,
+        "owner",
+        &[("muc#roomconfig_membersonly", "1")],
+    )
+    .await?;
+    for (account, affiliation) in [
+        ("admin@home-b.test", "admin"),
+        ("bob@home-a.test", "member"),
+    ] {
+        let grant = ask(
+            &mut owner,
+            stanza::muc_affiliation(&support::id("grant"), &room, account, affiliation),
+        )
+        .await?;
+        anyhow::ensure!(
+            is_result(&grant),
+            "fixture grant refused: {}",
+            describe(&grant)
+        );
+    }
+    send_messages(&mut owner, &room, 1).await?;
+    owner.close().await;
+
+    for (label, trusted) in [("trusted", true), ("removed", false), ("restored", true)] {
+        if label != "trusted" {
+            let mut profile = h.profile(Home::A, true);
+            if !trusted {
+                profile.trusted_homes.retain(|home| home != HOME_B);
+            }
+            h.dirty.insert(Component::Waddle(Home::A));
+            h.start_waddle(&profile).await?;
+        }
+        let mut owner = h
+            .login_waddle(Home::A, "admin", &support::id("owner"))
+            .await?;
+        join(&mut owner, &room, "owner").await?;
+        let mut target = h
+            .login_waddle(Home::A, "bob", &support::id("target"))
+            .await?;
+        join(&mut target, &room, "bob").await?;
+        let mut moderator = h
+            .login_peer(peer, "admin", &support::id("moderator"))
+            .await?;
+        if trusted {
+            join(&mut moderator, &room, "remote-mod").await?;
+            let (messages, _) = page_archive(&mut moderator, &room).await?;
+            outcome.check(
+                format!("{label}: remote admin reads the stored archive"),
+                messages == 1,
+                format!("{messages} messages"),
+            );
+        } else {
+            let (messages, _) = page_archive(&mut owner, &room).await?;
+            outcome.check(
+                "removed: local owner still reads the stored archive",
+                messages == 1,
+                format!("{messages} messages"),
+            );
+            let query = support::id("mam");
+            let mam = ask(
+                &mut moderator,
+                stanza::mam_query(&query, Some(&room), 10, None),
+            )
+            .await?;
+            let leaked = moderator.drain_backlog().iter().any(|element| {
+                element
+                    .get_child("result", ns::MAM)
+                    .is_some_and(|result| result.attr("queryid") == Some(query.as_str()))
+            });
+            outcome.check(
+                "removed: the original room denies MAM without sending results",
+                denied_by_room(&mam, &room) && !leaked,
+                describe(&mam),
+            );
+        }
+        let action = ask(
+            &mut moderator,
+            stanza::muc_role(&support::id("devoice"), &room, "bob", "visitor"),
+        )
+        .await?;
+        let occupant = [room.as_str(), "/bob"].concat();
+        let devoiced = target
+            .wait_for(QUIET, |element| {
+                element.name() == "presence"
+                    && element.attr("from") == Some(occupant.as_str())
+                    && stanza::muc_role_of(element).as_deref() == Some("visitor")
+            })
+            .await
+            .is_ok();
+        let expected = if trusted {
+            is_result(&action) && devoiced
+        } else {
+            denied_by_room(&action, &room) && !devoiced
+        };
+        outcome.check(
+            format!("{label}: moderation follows current trust"),
+            expected,
+            format!("{}; visitor presence: {devoiced}", describe(&action)),
+        );
+        moderator.close().await;
+        target.close().await;
+        owner.close().await;
+    }
     Ok(outcome)
+}
+
+fn denied_by_room(answer: &Element, room: &str) -> bool {
+    answer.attr("from") == Some(room)
+        && answer.attr("type") == Some("error")
+        && stanza::error_condition(answer).as_deref() == Some("forbidden")
 }
 
 pub async fn privileged_pkix_vs_dialback(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
