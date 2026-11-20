@@ -411,6 +411,7 @@ what a later rolling update has to respect.
 | Destination routing | A replica of the previous release answers IQs to other domains per namespace (`not-allowed` for ping, Carbons, session and discovery; other namespaces reach local handlers), archives a message to another domain and drops it silently. The decision is taken by the replica that holds the client's connection and leaves no stored state, so a client on another replica sees the other behaviour | No migration is needed; the behaviour converges when the last old replica is gone |
 | Relay between replicas | The ordered relay's envelope and its id `waddle.clustering.relay.deliver_ordered.v16` are unchanged. One message id is new, `waddle.clustering.relay.remote_room_request.v1`, sent only for stanzas from S2S streams: nothing sends it with S2S off, and a replica that predates it answers `UnknownMessage`, which the sender turns into a retryable error | A rolling update is safe for the relay in either order |
 | Host-grant writer and revocation fences | A binary from before the fences decides managed rooms from the legacy stores, holds no fence lease, and so is neither waited for by a revoke nor bound by it | No scope is enrolled until every serving replica runs this release, and no older replica joins while a scope is enrolled (G11, G24) |
+| Bound Space bookmark writes | Migration 2017 rejects legacy item writes to a bound node. The canonical writer commits each change with its notification version | Retire pre-2017 serving binaries and owner tools in the `Recreate` window before applying the migration |
 | Session endings of a retired account | A replica without migration 2014's lease is not seen by `waddle-server account retire`, ends nothing, and keeps the account's streams open | Every serving replica runs this release before an account is retired ([account retirement, step 3](account-retirement.md#procedure)) |
 | `[host_policy]` in the S2S snapshot | A binary that predates the table refuses a snapshot that holds it, `federate_new_rooms` included; the snapshot is not read while S2S is off | Before a snapshot uses the table, every replica runs this release; a rollback to an older binary removes the table first |
 | Web and native clients | A client older than the server sees the new refusals (see [What users see](#what-users-see-with-s2s-off)); a web client newer than the server, between the `chat` deployment and step 9, behaves as with S2S off | No client-side migration is needed; see [Clients](#clients) |
@@ -755,10 +756,14 @@ and the [verification checklist](../evidence/2047/unrun-tests.md#items-recorded-
   `HostGrantAttachmentGate::refuses_unmanaged` before serving a room no
   enrolled scope manages. In this release only room-manifest acceptance
   (`ingress/commit_room.rs`) asks it.
-- **Open at this release:** a PubSub admission identity for an enrolled
-  scope's Space (until then that Space is served to nobody over S2S), and a
-  tool that seeds a replacement SpiceDB with the authority's witnesses (until
-  then a permanently lost SpiceDB leaves projected scopes closed).
+- Bind the exact private PubSub node to its enrolled Space. Binding waits
+  for item writes that already hold the node lock. Later writes to the
+  bound node use the canonical transaction. Publish, retract, and same-scope
+  room eviction notifications carry the committed item version through TLS
+  staging.
+- **Open at this release:** a tool that seeds a replacement SpiceDB with
+  the authority's witnesses. A permanently lost SpiceDB leaves projected
+  scopes closed.
 
 ## Gaps to settle before the window
 

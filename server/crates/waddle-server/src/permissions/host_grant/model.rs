@@ -376,6 +376,23 @@ pub enum SpaceBookmarkOutcome {
     Retracted { removed: bool },
 }
 
+/// The exact committed version of a managed room's bookmark in its enrolled Space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceBookmarkVersion {
+    pub lifecycle: ScopeLifecycleId,
+    pub incarnation: AuthorityIncarnation,
+    pub room: BareJid,
+    pub operation: GrantOperationId,
+    pub present: bool,
+}
+
+/// Item-store results and the authoritative versions they changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceBookmarkWrite {
+    pub outcome: SpaceBookmarkOutcome,
+    pub versions: Vec<SpaceBookmarkVersion>,
+}
+
 /// Space affiliations writable by a served owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpaceMembership {

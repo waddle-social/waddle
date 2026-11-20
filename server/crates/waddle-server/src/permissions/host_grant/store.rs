@@ -64,7 +64,7 @@ use crate::permissions::{Object, ObjectType};
 
 /// Longest a store transaction waits for a row lock.
 // PostgreSQL advisory namespace for Space content writes and authority restore.
-const SPACE_BOOKMARK_RESTORE_LOCK: i64 = 0x5741_4444_4c45_5342;
+pub(crate) const SPACE_BOOKMARK_RESTORE_LOCK: i64 = 0x5741_4444_4c45_5342;
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest any one statement of a store transaction runs.
@@ -921,7 +921,7 @@ impl HostGrantStore {
                 "SELECT l.service_jid, l.space_node FROM host_grant_scope_lifecycles l \
              JOIN pubsub_nodes p ON p.owner_jid = l.service_jid AND p.node_name = l.space_node \
              WHERE l.lifecycle_id = ? AND l.retired_at_ms IS NULL \
-             AND p.access_model = 'whitelist' AND (p.node_type IS NULL OR p.node_type = ?) FOR SHARE OF p",
+             AND p.access_model = 'whitelist' AND (p.node_type IS NULL OR p.node_type = ?) FOR UPDATE OF p",
                 crate::db_params![lifecycle.as_str(), waddle_xmpp::xep::xep0503::NS_SPACES],
             )
             .await
@@ -991,7 +991,7 @@ impl HostGrantStore {
         &self,
         change: &super::SpaceBookmarkChange,
         policy: &IssuancePolicy,
-    ) -> Result<super::SpaceBookmarkOutcome, HostGrantError> {
+    ) -> Result<super::SpaceBookmarkWrite, HostGrantError> {
         if policy.check(&change.initiator, RoomAffiliation::Member)? != IssuanceBasis::Local {
             return Err(HostGrantError::InitiatorNotAuthorized);
         }
@@ -1024,8 +1024,8 @@ impl HostGrantStore {
         change: &super::SpaceBookmarkChange,
         payload_xml: Option<String>,
         mode: CommitMode,
-    ) -> Result<super::SpaceBookmarkOutcome, HostGrantError> {
-        use super::SpaceBookmarkOutcome;
+    ) -> Result<super::SpaceBookmarkWrite, HostGrantError> {
+        use super::{SpaceBookmarkOutcome, SpaceBookmarkVersion, SpaceBookmarkWrite};
         use crate::pubsub::DatabasePubSubStorage;
 
         let mut tx = self.begin_write().await?;
@@ -1098,8 +1098,14 @@ impl HostGrantStore {
             return Err(HostGrantError::SpaceNotBindable);
         }
 
+        tx.execute(
+            "SELECT pg_catalog.set_config('waddle.space_bookmark_lifecycle', ?, true)",
+            crate::db_params![lifecycle.as_str()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
         let item_id = change.room.as_str();
-        let result = if let Some(payload_xml) = payload_xml {
+        let outcome = if let Some(payload_xml) = payload_xml {
             DatabasePubSubStorage::put_item_tx(
                 &mut tx,
                 service,
@@ -1122,8 +1128,56 @@ impl HostGrantStore {
                 .map_err(HostGrantError::from_database)?;
             SpaceBookmarkOutcome::Retracted { removed }
         };
+        let operation = GrantOperationId::generate();
+        let version = |room: BareJid, present| SpaceBookmarkVersion {
+            lifecycle: change.lifecycle,
+            incarnation,
+            room,
+            operation,
+            present,
+        };
+        let versions = match &outcome {
+            SpaceBookmarkOutcome::Published { evicted_item_ids } => {
+                let mut versions = vec![version(change.room.clone(), true)];
+                if !evicted_item_ids.is_empty() {
+                    // The legacy item table can contain arbitrary IDs. Only an
+                    // exact enrolled room in this scope owns a version row.
+                    let evicted: BTreeSet<_> =
+                        evicted_item_ids.iter().map(String::as_str).collect();
+                    let rooms = load_rooms(&mut tx, change.lifecycle).await?;
+                    versions.extend(rooms.into_iter().filter_map(|room| {
+                        (room.room() != &change.room && evicted.contains(room.room().as_str()))
+                            .then(|| version(room.room().clone(), false))
+                    }));
+                }
+                versions
+            }
+            SpaceBookmarkOutcome::Retracted { removed: true } => {
+                vec![version(change.room.clone(), false)]
+            }
+            SpaceBookmarkOutcome::Retracted { removed: false } => Vec::new(),
+        };
+        for version in &versions {
+            tx.execute(
+                "INSERT INTO host_grant_space_bookmark_versions
+                 (lifecycle_id, room_jid, authority_incarnation, operation_token, present)
+                 VALUES (?, ?, ?, ?, (?::bigint <> 0))
+                 ON CONFLICT (lifecycle_id, room_jid) DO UPDATE SET
+                 authority_incarnation = EXCLUDED.authority_incarnation,
+                 operation_token = EXCLUDED.operation_token, present = EXCLUDED.present",
+                crate::db_params![
+                    lifecycle.as_str(),
+                    version.room.as_str(),
+                    incarnation.to_storage(),
+                    operation.to_storage(),
+                    version.present,
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+        }
         commit(tx, mode).await?;
-        Ok(result)
+        Ok(SpaceBookmarkWrite { outcome, versions })
     }
 
     /// Record an atomic membership change from an authenticated served owner.

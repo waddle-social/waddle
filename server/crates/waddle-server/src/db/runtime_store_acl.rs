@@ -164,6 +164,12 @@ const HOST_GRANT_RELATIONS: &[Relation] = &[
         delete: false,
     },
     Relation {
+        name: "host_grant_space_bookmark_versions",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
         name: "host_grant_space_operation_changes",
         insert: true,
         update: false,

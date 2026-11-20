@@ -219,6 +219,7 @@ enum RemoteSpaceEffect {
         recipient: BareJid,
         subscribed_with: AuthenticationStrength,
         subscriptions: SpaceSubscriptions,
+        bookmark_version: Option<super::SpaceBookmarkVersion>,
     },
 }
 
@@ -248,6 +249,7 @@ impl ManagedSpaceGrant {
                 key,
                 recipient,
                 subscribed_with,
+                bookmark_version,
                 ..
             }) => {
                 (*subscribed_with != AuthenticationStrength::Pkix
@@ -260,7 +262,18 @@ impl ManagedSpaceGrant {
                         .and_then(|event| {
                             event.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB_EVENT)
                         })
-                        .is_some_and(|items| items.attr("node") == Some(key.node()))
+                        .is_some_and(|items| {
+                            items.attr("node") == Some(key.node())
+                                && bookmark_version.as_ref().is_some_and(|version| {
+                                    items.children().count() == 1
+                                        && items.children().next().is_some_and(|entry| {
+                                            entry.is(
+                                                if version.present { "item" } else { "retract" },
+                                                waddle_xmpp::pubsub::NS_PUBSUB_EVENT,
+                                            ) && entry.attr("id") == Some(version.room.as_str())
+                                        })
+                                })
+                        })
             }
             None => false,
         }
@@ -268,6 +281,22 @@ impl ManagedSpaceGrant {
 
     pub(crate) fn subscription_grant(&self) -> SpaceSubscriptionGrant {
         self.subscription_grant
+    }
+
+    pub(crate) fn bind_bookmark_version(&mut self, version: &super::SpaceBookmarkVersion) -> bool {
+        let Some(RemoteSpaceEffect::Event {
+            bookmark_version, ..
+        }) = &mut self.remote_effect
+        else {
+            return false;
+        };
+        if version.lifecycle != self.subscription_grant.lifecycle
+            || version.incarnation != self.subscription_grant.incarnation
+        {
+            return false;
+        }
+        *bookmark_version = Some(version.clone());
+        true
     }
 
     /// Transfer a protected effect synchronously while the decision is current.
@@ -283,6 +312,7 @@ impl ManagedSpaceGrant {
             key,
             recipient,
             subscriptions,
+            bookmark_version,
             ..
         }) = &self.remote_effect
         else {
@@ -295,6 +325,7 @@ impl ManagedSpaceGrant {
                 key.node(),
                 recipient,
                 self.subscription_grant,
+                bookmark_version.as_ref()?,
                 chrono::Utc::now().timestamp_millis(),
             ),
         )
@@ -1072,6 +1103,7 @@ impl HostGrantGate {
             recipient: subscription.account.clone(),
             subscribed_with: subscription.evidence.strength(),
             subscriptions: SpaceSubscriptions::new(self.store.as_ref()?.database().clone()),
+            bookmark_version: None,
         });
         Some(grant)
     }

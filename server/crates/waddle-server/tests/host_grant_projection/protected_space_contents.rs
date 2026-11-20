@@ -17,6 +17,7 @@ use waddle_xmpp::pubsub::{PubSubItem, NS_PUBSUB};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
 use xmpp_parsers::{iq::Iq, stanza_error::DefinedCondition};
 
+use super::host_grant_support::EnrolledScope;
 use super::{bare, host_grant_revocation_support::Replica, subject, Live, OWNER, PEER};
 
 const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
@@ -83,18 +84,44 @@ async fn assert_visible_children(
     }
 }
 
+pub(super) async fn seed_legacy_child(live: &Live, replica: &Replica) -> EnrolledScope {
+    let hidden_scope = live.fixture.enroll_another().await;
+    let room = &hidden_scope.room;
+    let service = bare("spaces.example.com");
+    replica
+        .state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(
+            &service,
+            &live.fixture.scope.space_node,
+            &PubSubItem::new(
+                Some(room.to_string()),
+                Some(build_bookmark_element(
+                    &Bookmark::new(room.clone()).with_name("Existing bookmark"),
+                )),
+            ),
+            None,
+            false,
+        )
+        .await
+        .expect("seed the legacy bookmark before binding");
+    hidden_scope
+}
+
 pub(super) async fn assert_canonical_space_children(
     live: &Live,
     authority: &HostGrantAuthority,
     replica: &Replica,
     owner: &mut WsXmppClient,
     member: &mut WsXmppClient,
+    hidden_scope: &EnrolledScope,
 ) {
     let fixture = &live.fixture;
     let service = bare("spaces.example.com");
     let node = fixture.scope.space_node.as_str();
     let allowed_room = &fixture.scope.room;
-    let hidden_scope = fixture.enroll_another().await;
     let hidden_room = &hidden_scope.room;
     assert!(matches!(
         authority
@@ -106,7 +133,7 @@ pub(super) async fn assert_canonical_space_children(
     let hide = SetAffiliation {
         operation: GrantOperationId::generate(),
         lifecycle: hidden_scope.lifecycle,
-        expected_generation: fixture.state(&hidden_scope).await.generation,
+        expected_generation: fixture.state(hidden_scope).await.generation,
         initiator: subject(OWNER),
         room: hidden_room.clone(),
         subject: subject(PEER),
@@ -211,13 +238,15 @@ async fn assert_protected_bookmark_writes(
         is_error(&foreign, DefinedCondition::Forbidden),
         "{foreign:?}"
     );
-    assert!(
-        storage
-            .get_items(service, node, None, &[])
-            .await
-            .expect("read stored items")
-            .is_empty(),
-        "denied publications must leave the node empty"
+    let stored = storage
+        .get_items(service, node, None, &[])
+        .await
+        .expect("read published items");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].id,
+        other.as_str(),
+        "denied publishes must leave the legacy bookmark alone"
     );
 
     let published = round_trip(owner, publish("space-publish-owner", allowed, name)).await;
@@ -247,19 +276,10 @@ async fn assert_protected_bookmark_writes(
     assert_eq!(item.attr("id"), Some(allowed.as_str()));
     assert_eq!(item.children().next(), Some(&bookmark(allowed, name)));
 
-    storage
-        .publish_item(
-            service,
-            node,
-            &PubSubItem::new(
-                Some(other.to_string()),
-                Some(bookmark(other, "Existing bookmark")),
-            ),
-            None,
-            false,
-        )
+    assert!(storage
+        .retract_item(service, node, other.as_str())
         .await
-        .expect("retain a distinct pre-existing bookmark");
+        .is_err());
     let denied = round_trip(member, retract("space-retract-member", allowed)).await;
     assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
     let foreign = round_trip(owner, retract("space-retract-other-scope", other)).await;

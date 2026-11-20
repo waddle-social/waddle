@@ -136,8 +136,9 @@ pub use model::{
     GrantSubjectError, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome,
     OperationRecord, ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId,
     ScopeState, SetAffiliation, SetSpaceAffiliations, SpaceAffiliationChange, SpaceBookmarkAction,
-    SpaceBookmarkChange, SpaceBookmarkOutcome, SpaceMembership, HOST_GRANT_POLICY_VERSION,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
+    SpaceBookmarkChange, SpaceBookmarkOutcome, SpaceBookmarkVersion, SpaceBookmarkWrite,
+    SpaceMembership, HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use principal::{
@@ -162,6 +163,7 @@ pub use runtime_attach::{
     ReplicaFailure, INCOMPLETE_READINESS_GRACE, MAX_INCOMPLETE_PASSES, REVERIFY_INTERVAL,
 };
 pub use standing::{RoomBinding, RoomGrants, RoomLookup};
+pub(crate) use store::SPACE_BOOKMARK_RESTORE_LOCK;
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
 pub use store::{Activation, HostGrantStore, RESTORE_TRANSITION_BATCH};

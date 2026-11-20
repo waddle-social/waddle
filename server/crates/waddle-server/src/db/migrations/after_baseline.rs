@@ -70,6 +70,7 @@ pub const S2S_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2013;
 pub const ACCOUNT_SESSION_ENDINGS_VERSION: i64 = 2014;
 pub const HOST_GRANT_SPACES_VERSION: i64 = 2015;
 pub const S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION: i64 = 2016;
+pub const HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION: i64 = 2017;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -220,6 +221,16 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2016_s2s_space_subscription_grants.postgres.sql"
             ),
         },
+        Migration {
+            version: HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION,
+            description: "host grant space bookmark versions".to_string(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2017_host_grant_space_bookmark_versions.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2017_host_grant_space_bookmark_versions.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -338,11 +349,11 @@ mod tests {
         all, ACCOUNT_SESSION_ENDINGS_VERSION, CHANNEL_FEDERATED_VERSION,
         HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
         HOST_GRANT_REVOCATION_FENCE_VERSION, HOST_GRANT_SPACES_VERSION,
-        OFFLINE_CALL_NOTIFICATIONS_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
-        S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION, S2S_IQ_CORRELATIONS_VERSION,
-        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
-        S2S_REMOTE_ROOMS_VERSION, S2S_SPACE_SUBSCRIPTIONS_VERSION,
-        S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
+        HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION, OFFLINE_CALL_NOTIFICATIONS_VERSION,
+        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION,
+        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+        S2S_SPACE_SUBSCRIPTIONS_VERSION, S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
     };
 
     #[test]
@@ -374,7 +385,8 @@ mod tests {
                 S2S_SPACE_SUBSCRIPTIONS_VERSION,
                 ACCOUNT_SESSION_ENDINGS_VERSION,
                 HOST_GRANT_SPACES_VERSION,
-                S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION
+                S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
+                HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION,
             ]
         );
     }

@@ -21,6 +21,10 @@ pub(super) async fn cleanup_stale_space_bookmarks(
     let mut retracted_from = Vec::new();
     let mut removed_stale: Vec<RemovedStaleSpaceBookmark> = Vec::new();
     for stale in stale_nodes.iter().filter(|name| name.as_str() != keep_node) {
+        if state.deps.app_state.host_grants.space_enrolled(stale).await != Ok(false) {
+            restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+            return Err("could not authorize cleanup of a prior Space bookmark".to_owned());
+        }
         let item_filter = [item_id.to_string()];
         let previous_item = match state
             .deps
@@ -103,6 +107,17 @@ pub(super) async fn cleanup_stale_space_bookmarks(
         }
     };
     for parent in parents.iter().filter(|parent| parent.as_str() != keep_node) {
+        if state
+            .deps
+            .app_state
+            .host_grants
+            .space_enrolled(parent)
+            .await
+            != Ok(false)
+        {
+            restore_stale_space_bookmarks(state, spaces_jid, channel_id, &removed_stale).await;
+            return Err("could not authorize cleanup of a prior Space placement".to_owned());
+        }
         match delete_channel_parent_tuple(state, channel_id, parent).await {
             Ok(true) => removed_stale.push(RemovedStaleSpaceBookmark {
                 node: parent.clone(),
@@ -132,6 +147,17 @@ async fn restore_stale_space_bookmarks(
     removed_stale: &[RemovedStaleSpaceBookmark],
 ) {
     for removed in removed_stale.iter().rev() {
+        if state
+            .deps
+            .app_state
+            .host_grants
+            .space_enrolled(&removed.node)
+            .await
+            != Ok(false)
+        {
+            warn!(channel_id, node = %removed.node, "Stale Space bookmark rollback no longer authorized");
+            continue;
+        }
         let Some(item) = removed.item.as_ref() else {
             if removed.parent_tuple_deleted {
                 let _ = write_channel_parent_tuple(state, channel_id, &removed.node).await;

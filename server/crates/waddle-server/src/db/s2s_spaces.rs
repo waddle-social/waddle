@@ -1149,12 +1149,48 @@ impl SpaceSubscriptions {
         node: &str,
         account: &BareJid,
         grant: SpaceSubscriptionGrant,
+        version: &crate::permissions::host_grant::SpaceBookmarkVersion,
         now_ms: i64,
     ) -> Result<Option<Transaction<'_>>, SpaceStoreError> {
-        if self.db.driver() != DatabaseDriver::Postgres {
+        if self.db.driver() != DatabaseDriver::Postgres
+            || version.lifecycle != grant.lifecycle
+            || version.incarnation != grant.incarnation
+        {
             return Ok(None);
         }
         let mut tx = self.db.begin().await.map_err(storage)?;
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![crate::permissions::host_grant::SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await
+        .map_err(storage)?;
+        let mut versions = tx
+            .query(
+                "SELECT 1 FROM host_grant_space_bookmark_versions v
+             JOIN host_grant_space_bindings b ON b.lifecycle_id = v.lifecycle_id
+             WHERE b.service_jid = ? AND b.space_node = ?
+             AND b.authority_incarnation = v.authority_incarnation
+             AND v.lifecycle_id = ? AND v.room_jid = ? AND v.authority_incarnation = ?
+             AND v.operation_token = ? AND v.present = (?::bigint <> 0) FOR SHARE OF v",
+                crate::db_params![
+                    service.as_str(),
+                    node,
+                    version.lifecycle.to_storage(),
+                    version.room.as_str(),
+                    version.incarnation.to_storage(),
+                    version.operation.to_storage(),
+                    version.present,
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        let current = versions.next().await.map_err(storage)?.is_some();
+        drop(versions);
+        if !current {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(None);
+        }
         let mut rows = tx.query(
             "SELECT 1 FROM s2s_space_subscriptions \
              WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ? \

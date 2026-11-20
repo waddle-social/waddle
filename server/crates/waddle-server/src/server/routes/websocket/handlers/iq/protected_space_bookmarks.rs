@@ -1,7 +1,7 @@
 use jid::{BareJid, Jid};
 use waddle_xmpp::pubsub::{
-    build_pubsub_error, build_pubsub_event, build_pubsub_publish_result,
-    build_pubsub_success, Affiliation, PubSubError, PubSubEvent, PubSubItem, PubSubRequest, NS_PUBSUB,
+    build_pubsub_error, build_pubsub_event, build_pubsub_publish_result, build_pubsub_success,
+    Affiliation, PubSubError, PubSubEvent, PubSubRequest, NS_PUBSUB,
 };
 use waddle_xmpp_core::pubsub::stanzas::{build_pubsub_retract_event, PubSubUnsupportedFeature};
 use xmpp_parsers::iq::Iq;
@@ -11,7 +11,7 @@ use crate::permissions::host_grant::{
     GrantSubject, HostGrantError, ScopeKey, SpaceBookmarkAction, SpaceBookmarkChange,
     SpaceBookmarkOutcome,
 };
-use crate::server::routes::websocket::s2s_spaces::queue_remote_notification;
+use crate::server::routes::websocket::s2s_spaces::queue_space_notification;
 
 pub(super) async fn write(
     iq: &Iq,
@@ -123,8 +123,8 @@ pub(super) async fn write(
             &policy,
         )
         .await;
-    let outcome = match result {
-        Ok(outcome) => outcome,
+    let written = match result {
+        Ok(written) => written,
         Err(HostGrantError::InitiatorNotAuthorized | HostGrantError::Issuance(_)) => {
             return build_pubsub_error(iq, PubSubError::Forbidden)
         }
@@ -154,42 +154,29 @@ pub(super) async fn write(
         .await
     {
         let sender = Jid::from(service.clone());
-        match &outcome {
-            SpaceBookmarkOutcome::Published { evicted_item_ids } => {
-                if let Some(item) = published {
-                    let item = PubSubItem {
-                        publisher: None,
-                        payload: record
-                            .config
-                            .deliver_payloads
-                            .then_some(item.payload)
-                            .flatten(),
-                        ..item
-                    };
-                    let event = build_pubsub_event(
-                        &sender,
-                        &sender,
-                        &PubSubEvent::new(node.clone(), vec![item]),
-                    );
-                    queue_remote_notification(state, service, &record, &event);
+        for version in written.versions {
+            let event = if version.present {
+                let Some(mut item) = published.clone() else {
+                    continue;
+                };
+                item.publisher = None;
+                if !record.config.deliver_payloads {
+                    item.payload = None;
                 }
-                if record.config.notify_retract {
-                    for evicted in evicted_item_ids {
-                        let event = build_pubsub_retract_event(&sender, &sender, &node, evicted);
-                        queue_remote_notification(state, service, &record, &event);
-                    }
-                }
-            }
-            SpaceBookmarkOutcome::Retracted { removed: true }
-                if notify || record.config.notify_retract =>
-            {
-                let event = build_pubsub_retract_event(&sender, &sender, &node, &id);
-                queue_remote_notification(state, service, &record, &event);
-            }
-            SpaceBookmarkOutcome::Retracted { .. } => {}
+                build_pubsub_event(
+                    &sender,
+                    &sender,
+                    &PubSubEvent::new(node.clone(), vec![item]),
+                )
+            } else if notify || record.config.notify_retract {
+                build_pubsub_retract_event(&sender, &sender, &node, version.room.as_str())
+            } else {
+                continue;
+            };
+            queue_space_notification(state, service, &record, &event, Some(version));
         }
     }
-    match outcome {
+    match written.outcome {
         SpaceBookmarkOutcome::Published { .. } => build_pubsub_publish_result(iq, &node, &id),
         SpaceBookmarkOutcome::Retracted { removed: true } => build_pubsub_success(iq),
         SpaceBookmarkOutcome::Retracted { removed: false } => {

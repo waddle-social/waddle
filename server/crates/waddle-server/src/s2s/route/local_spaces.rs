@@ -21,7 +21,7 @@ use xmpp_parsers::message::Message;
 
 use super::principal::RemotePrincipal;
 use super::reach::SpaceOperation;
-use crate::permissions::host_grant::ManagedSpaceGrant;
+use crate::permissions::host_grant::{ManagedSpaceGrant, SpaceBookmarkVersion};
 
 /// One IQ request a remote principal addressed to the Spaces PubSub
 /// service.
@@ -53,6 +53,8 @@ pub struct SpacePublication {
     /// The event notification as the service built it for its own
     /// subscribers (XEP-0060 §7.1).
     pub event: Message,
+    /// Exact committed bookmark change for an enrolled Space.
+    pub bookmark_version: Option<SpaceBookmarkVersion>,
 }
 
 /// A Spaces response and, for protected data, the grant for its write.

@@ -51,7 +51,8 @@ use waddle_server::db::s2s_spaces::{
 };
 use waddle_server::permissions::host_grant::{
     BindSpace, FenceAcknowledgement, GrantOperationId, OperatorRevoke, ScopeKey,
-    SetSpaceAffiliations, SpaceAffiliationChange, SpaceMembership, StreamEvidence,
+    SetSpaceAffiliations, SpaceAffiliationChange, SpaceBookmarkAction, SpaceBookmarkChange,
+    SpaceBookmarkVersion, SpaceMembership, StreamEvidence,
 };
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::s2s::route::SpacePublication;
@@ -539,10 +540,28 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             &Bookmark::new(room.clone()).with_name("managed"),
         )),
     );
-    storage
-        .publish_item(&spaces(), node, &bookmark, None, false)
+    let scope = fixture.state(&fixture.scope).await;
+    let change = SpaceBookmarkChange {
+        key: ScopeKey::new(spaces(), node).expect("Space key"),
+        lifecycle: command.lifecycle,
+        expected_incarnation: scope.authority_incarnation,
+        expected_generation: scope.generation,
+        initiator: subject(OWNER),
+        room: room.clone(),
+        action: SpaceBookmarkAction::Publish {
+            payload: bookmark.payload.clone().expect("bookmark payload"),
+        },
+    };
+    let written = fixture
+        .store
+        .write_space_bookmark(&change, &fixture.policy)
         .await
-        .expect("store the room bookmark");
+        .expect("store the canonical bookmark");
+    let version = written
+        .versions
+        .into_iter()
+        .next()
+        .expect("publication version");
     let visible = ask(&managed, items(GUEST_PHONE, "protected-items-member", node)).await;
     assert_eq!(visible.attr("type"), Some("result"), "{visible:?}");
     assert_eq!(item_ids(&visible), [room.to_string()]);
@@ -631,7 +650,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .await
         .is_none());
 
-    let publication = |id: &str| {
+    let publication = |id: &str, version: &SpaceBookmarkVersion| {
         let mut event = build_pubsub_event(
             &jid(SPACES),
             &jid(GUEST_PHONE),
@@ -643,13 +662,14 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             node: node.to_owned(),
             node_created_at_ms: created_at,
             event,
+            bookmark_version: Some(version.clone()),
         }
     };
     assert_eq!(
         notify_space_publication(
             &managed.hosted.state,
             &managed.hosted.router,
-            &publication("protected-space-event"),
+            &publication("protected-space-event", &version),
         )
         .await,
         1
@@ -657,6 +677,85 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
     let event = managed.hosted.answered("protected-space-event").await;
     assert_eq!(event.name(), "message");
     assert_eq!(event.attr("to"), Some(subscriber.as_str()));
+
+    let latest = fixture
+        .store
+        .write_space_bookmark(&change, &fixture.policy)
+        .await
+        .expect("republish the same bookmark")
+        .versions
+        .into_iter()
+        .next()
+        .expect("replacement version");
+    assert_ne!(latest.operation, version.operation);
+    for offered in [
+        publication("superseded-space-event", &version),
+        publication("latest-space-event", &latest),
+    ] {
+        assert_eq!(
+            notify_space_publication(&managed.hosted.state, &managed.hosted.router, &offered).await,
+            1,
+            "the transport must decide the queued version",
+        );
+    }
+    let current = managed.hosted.answered("latest-space-event").await;
+    assert_eq!(current.attr("to"), Some(subscriber.as_str()));
+    assert!(managed
+        .hosted
+        .captured
+        .stanzas()
+        .iter()
+        .all(|stanza| stanza.attr("id") != Some("superseded-space-event")));
+
+    let mut retract = change.clone();
+    retract.action = SpaceBookmarkAction::Retract;
+    let retracted = fixture
+        .store
+        .write_space_bookmark(&retract, &fixture.policy)
+        .await
+        .expect("retract bookmark")
+        .versions
+        .remove(0);
+    assert!(!retracted.present);
+    let mut retraction = publication("current-space-retraction", &retracted);
+    retraction.event = waddle_xmpp_core::build_pubsub_retract_event(
+        &jid(SPACES),
+        &jid(GUEST_PHONE),
+        node,
+        room.as_str(),
+    );
+    retraction.event.id = Some(xmpp_parsers::message::Id(
+        "current-space-retraction".to_owned(),
+    ));
+    assert_eq!(
+        notify_space_publication(&managed.hosted.state, &managed.hosted.router, &retraction).await,
+        1
+    );
+    managed.hosted.answered("current-space-retraction").await;
+
+    let latest = fixture
+        .store
+        .write_space_bookmark(&change, &fixture.policy)
+        .await
+        .expect("restore bookmark")
+        .versions
+        .remove(0);
+    retraction.event.id = Some(xmpp_parsers::message::Id(
+        "superseded-space-retraction".to_owned(),
+    ));
+    for offered in [retraction, publication("restored-space-event", &latest)] {
+        assert_eq!(
+            notify_space_publication(&managed.hosted.state, &managed.hosted.router, &offered).await,
+            1
+        );
+    }
+    managed.hosted.answered("restored-space-event").await;
+    assert!(managed
+        .hosted
+        .captured
+        .stanzas()
+        .iter()
+        .all(|stanza| stanza.attr("id") != Some("superseded-space-retraction")));
 
     // A concurrent removal holds the row before the event is queued. The
     // connection's locked recheck must see the deletion, even though the
@@ -680,7 +779,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         notify_space_publication(
             &managed.hosted.state,
             &managed.hosted.router,
-            &publication("removed-space-event"),
+            &publication("removed-space-event", &latest),
         )
         .await,
         1
@@ -731,7 +830,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         notify_space_publication(
             &managed.hosted.state,
             &managed.hosted.router,
-            &publication("revoked-room-event"),
+            &publication("revoked-room-event", &latest),
         )
         .await,
         1
@@ -785,7 +884,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         notify_space_publication(
             &managed.hosted.state,
             &managed.hosted.router,
-            &publication("post-revoke-room-event"),
+            &publication("post-revoke-room-event", &latest),
         )
         .await,
         0,

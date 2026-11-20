@@ -1876,6 +1876,16 @@ pub(crate) fn queue_remote_notification(
     node: &PubSubNode,
     event: &Message,
 ) {
+    queue_space_notification(state, service, node, event, None);
+}
+
+pub(crate) fn queue_space_notification(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &PubSubNode,
+    event: &Message,
+    bookmark_version: Option<crate::permissions::host_grant::SpaceBookmarkVersion>,
+) {
     if state.deps.app_state.s2s_federation.is_none() {
         return;
     }
@@ -1886,6 +1896,7 @@ pub(crate) fn queue_remote_notification(
         node: node.node_name.clone(),
         node_created_at_ms: node.created_at.timestamp_millis(),
         event: event.clone(),
+        bookmark_version,
     });
 }
 
@@ -1927,6 +1938,7 @@ pub(crate) async fn notify_remote_subscribers(
         node: node_name,
         node_created_at_ms: created_at_ms,
         event,
+        bookmark_version,
     } = publication;
     let created_at_ms = *created_at_ms;
     let db = database(state).clone();
@@ -1934,6 +1946,9 @@ pub(crate) async fn notify_remote_subscribers(
     let Ok(enrolled) = grants.space_enrolled(node_name).await else {
         return 0;
     };
+    if enrolled != bookmark_version.is_some() {
+        return 0;
+    }
     if !enrolled
         && !matches!(
             FederatedSpaces::new(db.clone())
@@ -1990,6 +2005,12 @@ pub(crate) async fn notify_remote_subscribers(
     };
     let mut queued = 0;
     if enrolled {
+        let Some(version) = bookmark_version.as_ref() else {
+            return 0;
+        };
+        if version.room.as_str() != item_id {
+            return 0;
+        }
         let Ok(key) = ScopeKey::new(service.clone(), node_name.as_str()) else {
             return 0;
         };
@@ -1998,6 +2019,10 @@ pub(crate) async fn notify_remote_subscribers(
                 telemetry::event_withheld();
                 continue;
             };
+            if !grant.bind_bookmark_version(version) {
+                telemetry::event_withheld();
+                continue;
+            }
             if let Some(room) = &room {
                 let evidence = PrincipalEvidence::Stream(subscription.evidence);
                 match grants.room(RoomBinding::Room(room)).await {

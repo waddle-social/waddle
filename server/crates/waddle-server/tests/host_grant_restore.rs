@@ -1021,21 +1021,81 @@ async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_ato
     .execute(&pool)
     .await
     .expect("seed the enrolled node");
-    fixture
-        .store
-        .bind_space(
-            &BindSpace {
-                operation: GrantOperationId::generate(),
-                lifecycle,
-                expected_generation: fixture.generation().await,
-                owner: subject(SENDER),
-                federated: true,
-            },
-            &served(),
-        )
+    let unrelated = fixture.enroll_another().await;
+    let sibling_room = waddle_server::permissions::host_grant::ManagedRoom::new(
+        format!("room-{}@muc.example.com", Uuid::new_v4().simple())
+            .parse()
+            .expect("sibling room JID"),
+    )
+    .expect("managed sibling room");
+    sqlx::query(
+        "INSERT INTO host_grant_rooms (room_jid, channel_id, lifecycle_id, access_model, bound_at_ms)
+         VALUES ($1, $2, $3, 'members_only', 42)",
+    )
+    .bind(sibling_room.room().as_str())
+    .bind(sibling_room.channel_id())
+    .bind(lifecycle.to_storage())
+    .execute(&pool)
+    .await
+    .expect("seed a sibling room binding in the fixture's scope");
+    let mut legacy = pool.begin().await.expect("legacy write transaction");
+    let legacy_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *legacy)
         .await
-        .expect("bind Space");
+        .expect("legacy writer PID");
+    sqlx::query(
+        "INSERT INTO pubsub_items (owner_jid, node_name, item_id, published_at_ms)
+         VALUES ($1, $2, 'old-item', 1), ($1, $2, $3, 1), ($1, $2, $4, 1)",
+    )
+    .bind(service)
+    .bind(node)
+    .bind(sibling_room.room().as_str())
+    .bind(unrelated.room.as_str())
+    .execute(&mut *legacy)
+    .await
+    .expect("seed a managed bookmark, a foreign-scope bookmark, and a legacy item");
+    let bind = BindSpace {
+        operation: GrantOperationId::generate(),
+        lifecycle,
+        expected_generation: fixture.generation().await,
+        owner: subject(SENDER),
+        federated: true,
+    };
+    let store = fixture.store.clone();
+    let binding = tokio::spawn(async move { store.bind_space(&bind, &served()).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
+                )",
+            )
+            .bind(legacy_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("detect binding wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("binding must wait for the in-flight legacy write");
+    legacy.commit().await.expect("finish the pre-binding write");
+    binding.await.expect("join binding").expect("bind Space");
     fixture.activate_current(&fixture.scope).await;
+    assert!(
+        sqlx::query("DELETE FROM pubsub_items WHERE owner_jid = $1 AND node_name = $2")
+            .bind(service)
+            .bind(node)
+            .execute(&pool)
+            .await
+            .is_err(),
+        "a legacy write must fail after binding"
+    );
+
     let mut change = SpaceBookmarkChange {
         key: ScopeKey::new(service.parse().expect("service JID"), node.clone()).expect("Space key"),
         lifecycle,
@@ -1078,7 +1138,6 @@ async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_ato
             .await,
         Err(HostGrantError::InitiatorNotAuthorized)
     ));
-    let unrelated = fixture.enroll_another().await;
     let different_room = SpaceBookmarkChange {
         room: unrelated.room,
         ..change.clone()
@@ -1091,21 +1150,33 @@ async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_ato
         Err(HostGrantError::InitiatorNotAuthorized)
     ));
 
+    let earlier_publication = GrantOperationId::generate().to_storage();
     sqlx::query(
-        "INSERT INTO pubsub_items (owner_jid, node_name, item_id, published_at_ms)
-         VALUES ($1, $2, 'old-item', 1)",
+        "INSERT INTO host_grant_space_bookmark_versions
+         (lifecycle_id, room_jid, authority_incarnation, operation_token, present)
+         VALUES ($1, $2, $3, $4, true)",
     )
-    .bind(service)
-    .bind(node)
+    .bind(lifecycle.to_storage())
+    .bind(sibling_room.room().as_str())
+    .bind(change.expected_incarnation.to_storage())
+    .bind(&earlier_publication)
     .execute(&pool)
     .await
-    .expect("seed a previous item");
+    .expect("seed the sibling's earlier publication marker");
     let items = || {
         sqlx::query_scalar::<_, String>(
             "SELECT item_id FROM pubsub_items WHERE owner_jid = $1 AND node_name = $2 ORDER BY item_id",
         )
         .bind(service)
         .bind(node)
+        .fetch_all(&pool)
+    };
+    let versions = || {
+        sqlx::query_as::<_, (String, String, String, bool)>(
+            "SELECT room_jid, authority_incarnation, operation_token, present
+             FROM host_grant_space_bookmark_versions WHERE lifecycle_id = $1 ORDER BY room_jid",
+        )
+        .bind(lifecycle.to_storage())
         .fetch_all(&pool)
     };
     assert!(matches!(
@@ -1116,32 +1187,111 @@ async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_ato
         .await,
         Err(HostGrantError::CommitOutcomeUnknown)
     ));
-    assert_eq!(items().await.expect("items after rollback"), ["old-item"]);
-
+    assert_eq!(items().await.expect("items after rollback").len(), 3);
     assert_eq!(
-        fixture
-            .store
-            .write_space_bookmark(&change, policy)
-            .await
-            .expect("publish bookmark"),
-        SpaceBookmarkOutcome::Published {
-            evicted_item_ids: vec!["old-item".to_owned()]
-        },
+        versions().await.expect("versions rolled back"),
+        [(
+            sibling_room.room().to_string(),
+            change.expected_incarnation.to_storage(),
+            earlier_publication.clone(),
+            true,
+        )]
     );
+
+    let published = fixture
+        .store
+        .write_space_bookmark(&change, policy)
+        .await
+        .expect("publish bookmark");
+    let SpaceBookmarkOutcome::Published {
+        mut evicted_item_ids,
+    } = published.outcome
+    else {
+        panic!("publication did not return its evictions");
+    };
+    evicted_item_ids.sort();
+    let mut expected_evictions = [
+        "old-item",
+        sibling_room.room().as_str(),
+        different_room.room.as_str(),
+    ];
+    expected_evictions.sort();
+    assert_eq!(evicted_item_ids, expected_evictions);
     assert_eq!(
         items().await.expect("only exact room item"),
         [change.room.as_str()]
     );
-    change.action = SpaceBookmarkAction::Retract;
+    assert_eq!(published.versions.len(), 2);
+    let new = &published.versions[0];
+    let eviction = &published.versions[1];
+    assert_eq!((&new.room, new.present), (&change.room, true));
     assert_eq!(
-        fixture
-            .store
-            .write_space_bookmark(&change, policy)
-            .await
-            .expect("retract bookmark"),
-        SpaceBookmarkOutcome::Retracted { removed: true },
+        (&eviction.room, eviction.present),
+        (sibling_room.room(), false)
     );
+    assert_ne!(eviction.operation.to_storage(), earlier_publication);
+    assert_eq!(new.operation, eviction.operation);
+    let persisted = versions().await.expect("version rows");
+    for version in &published.versions {
+        assert_eq!(version.lifecycle, lifecycle);
+        assert_eq!(version.incarnation, change.expected_incarnation);
+        assert!(persisted.contains(&(
+            version.room.to_string(),
+            version.incarnation.to_storage(),
+            version.operation.to_storage(),
+            version.present,
+        )));
+    }
+
+    let republished = fixture
+        .store
+        .write_space_bookmark(&change, policy)
+        .await
+        .expect("republish exact bookmark");
+    let [latest] = republished.versions.as_slice() else {
+        panic!("expected one replacement publication marker");
+    };
+    assert!(latest.present);
+    assert_ne!(latest.operation, new.operation);
+    assert_eq!(latest.room, new.room);
+
+    change.action = SpaceBookmarkAction::Retract;
+    let retracted = fixture
+        .store
+        .write_space_bookmark(&change, policy)
+        .await
+        .expect("retract bookmark");
+    assert_eq!(
+        retracted.outcome,
+        SpaceBookmarkOutcome::Retracted { removed: true }
+    );
+    let [retraction] = retracted.versions.as_slice() else {
+        panic!("expected an exact retraction marker");
+    };
+    assert_eq!(
+        (&retraction.room, retraction.present),
+        (&change.room, false)
+    );
+    assert_ne!(retraction.operation, latest.operation);
     assert!(items().await.expect("empty node").is_empty());
+    let after_retract = versions().await.expect("persisted tombstone");
+    assert!(after_retract.contains(&(
+        change.room.to_string(),
+        retraction.incarnation.to_storage(),
+        retraction.operation.to_storage(),
+        false,
+    )));
+    let repeated = fixture
+        .store
+        .write_space_bookmark(&change, policy)
+        .await
+        .expect("repeat retract");
+    assert_eq!(
+        repeated.outcome,
+        SpaceBookmarkOutcome::Retracted { removed: false }
+    );
+    assert!(repeated.versions.is_empty());
+    assert_eq!(versions().await.expect("unchanged markers"), after_retract);
 
     assert!(matches!(
         declare(&fixture, 1).await,

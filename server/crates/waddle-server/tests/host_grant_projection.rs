@@ -936,6 +936,7 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         .update_node_config(&service, node, &NodeConfig::spaces_private())
         .await
         .expect("configure private Space");
+    let hidden_scope = protected_space_contents::seed_legacy_child(&live, first).await;
     live.fixture
         .store
         .bind_space(
@@ -1039,6 +1040,7 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         first,
         &mut owner,
         &mut member,
+        &hidden_scope,
     )
     .await;
     let scope = live.fixture.state(&live.fixture.scope).await;
