@@ -1078,6 +1078,32 @@ mod bookmark_merge {
     }
 
     #[test]
+    fn room_name_comes_from_the_conference_identity() {
+        let identity = |category: &str, name: Option<&str>| DiscoIdentity {
+            category: category.to_string(),
+            identity_type: "text".to_string(),
+            name: name.map(str::to_string),
+        };
+        let named = DiscoInfoResult {
+            identities: vec![
+                identity("automation", Some("Commands")),
+                identity("conference", Some("Renamed")),
+            ],
+            ..muc_info()
+        };
+        assert_eq!(named.room_name(), Some("Renamed"));
+
+        let blank = DiscoInfoResult {
+            identities: vec![
+                identity("conference", Some("  ")),
+                identity("conference", None),
+            ],
+            ..muc_info()
+        };
+        assert_eq!(blank.room_name(), None);
+    }
+
+    #[test]
     fn failed_bookmarks_fetch_degrades_to_empty_list() {
         // Web parity: the whole pubsub fetch sits in a bare
         // `try/catch` — any failure means "no bookmarks", never a
