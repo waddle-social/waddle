@@ -290,13 +290,7 @@ pub struct SpaceSubscription {
     pub grant: Option<SpaceSubscriptionGrant>,
 }
 
-/// The scope and effective affiliation generation behind a protected preference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpaceSubscriptionGrant {
-    pub lifecycle: ScopeLifecycleId,
-    pub incarnation: AuthorityIncarnation,
-    pub generation: GrantGeneration,
-}
+pub use crate::permissions::host_grant::SpaceSubscriptionGrant;
 
 /// A subscription request as the store records it.
 #[derive(Debug, Clone, Copy)]

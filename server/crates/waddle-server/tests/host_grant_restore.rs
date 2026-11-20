@@ -1334,7 +1334,7 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
     .expect("seed an enrolled node");
     let key =
         ScopeKey::new(service.parse().expect("service JID"), node.clone()).expect("Space key");
-    fixture
+    let bound = fixture
         .store
         .bind_space(
             &BindSpace {
@@ -1425,6 +1425,24 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .write_space_bookmark(&publish, &fixture.policy)
         .await
         .expect("publish");
+    assert_eq!(original.local_audience, [local.clone()]);
+    let late = subscriptions
+        .record(
+            &key,
+            &subject(OWNER),
+            &served(),
+            SpaceSubscriptionGrant {
+                generation: bound.record().generation,
+                ..era
+            },
+        )
+        .await
+        .expect("record the owner preference after the publication")
+        .expect("owner may subscribe");
+    assert!(
+        !original.local_audience.contains(&late),
+        "a subscriber cannot join an already committed publication's audience"
+    );
     let current = subscriptions
         .hold_delivery(&key, &local, &original.versions[0])
         .await
@@ -1436,6 +1454,14 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .write_space_bookmark(&publish, &fixture.policy)
         .await
         .expect("republish");
+    assert_eq!(replacement.local_audience, [local.clone(), late.clone()]);
+    assert_eq!(
+        subscriptions
+            .remove_own(&key, &subject(OWNER), &served(), Some(&late.subid))
+            .await
+            .expect("remove the owner's late preference"),
+        LocalSpaceUnsubscribe::Removed,
+    );
     assert!(subscriptions
         .hold_delivery(&key, &local, &original.versions[0])
         .await

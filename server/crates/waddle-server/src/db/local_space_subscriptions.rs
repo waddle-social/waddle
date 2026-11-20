@@ -27,12 +27,7 @@ pub enum LocalSpaceSubscriptionError {
     InvalidRow,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalSpaceSubscription {
-    pub account: GrantSubject,
-    pub grant: SpaceSubscriptionGrant,
-    pub subid: SubId,
-}
+pub use crate::permissions::host_grant::LocalSpaceSubscription;
 
 /// The authenticated account's unsubscribe outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,40 +219,7 @@ impl LocalSpaceSubscriptions {
         let Some(mut tx) = self.begin().await? else {
             return Ok(Vec::new());
         };
-        let mut rows = tx
-            .query(
-                &format!(
-                    "SELECT g.subject_jid, b.authority_incarnation, g.changed_generation, sub.subid
-                       {CURRENT_GRANT} {LIVE_PREFERENCE} WHERE {ACTIVE_SPACE}
-                     ORDER BY g.subject_jid LIMIT ?"
-                ),
-                crate::db_params![
-                    lifecycle.to_storage(),
-                    key.service().as_str(),
-                    key.node(),
-                    HOST_GRANT_POLICY_VERSION,
-                    waddle_xmpp::xep::xep0503::NS_SPACES,
-                    i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS)
-                        .expect("bounded local preferences"),
-                ],
-            )
-            .await?;
-        let mut subscriptions = Vec::new();
-        while let Some(row) = rows.next().await? {
-            subscriptions.push(LocalSpaceSubscription {
-                account: GrantSubject::from_storage(&row.get::<String>(0)?)
-                    .ok_or(LocalSpaceSubscriptionError::InvalidRow)?,
-                grant: SpaceSubscriptionGrant {
-                    lifecycle,
-                    incarnation: AuthorityIncarnation::from_storage(&row.get::<String>(1)?)
-                        .ok_or(LocalSpaceSubscriptionError::InvalidRow)?,
-                    generation: GrantGeneration::new(row.get::<i64>(2)?)
-                        .ok_or(LocalSpaceSubscriptionError::InvalidRow)?,
-                },
-                subid: SubId::from_raw(row.get::<String>(3)?),
-            });
-        }
-        drop(rows);
+        let subscriptions = read_local_space_audience(&mut tx, key, lifecycle).await?;
         tx.rollback().await?;
         Ok(subscriptions)
     }
@@ -355,6 +317,50 @@ impl LocalSpaceSubscriptions {
         .await?;
         Ok(Some(tx))
     }
+}
+
+/// Read the scope's live preferences from the caller's snapshot.
+/// A publication caller already holds this scope exclusively, so a new
+/// subscription cannot enter the captured audience after that publication.
+pub(crate) async fn read_local_space_audience(
+    tx: &mut Transaction<'_>,
+    key: &ScopeKey,
+    lifecycle: ScopeLifecycleId,
+) -> Result<Vec<LocalSpaceSubscription>, LocalSpaceSubscriptionError> {
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT g.subject_jid, b.authority_incarnation, g.changed_generation, sub.subid
+                   {CURRENT_GRANT} {LIVE_PREFERENCE} WHERE {ACTIVE_SPACE}
+                 ORDER BY g.subject_jid LIMIT ?"
+            ),
+            crate::db_params![
+                lifecycle.to_storage(),
+                key.service().as_str(),
+                key.node(),
+                HOST_GRANT_POLICY_VERSION,
+                waddle_xmpp::xep::xep0503::NS_SPACES,
+                i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS).expect("bounded local preferences"),
+            ],
+        )
+        .await?;
+    let mut subscriptions = Vec::new();
+    while let Some(row) = rows.next().await? {
+        subscriptions.push(LocalSpaceSubscription {
+            account: GrantSubject::from_storage(&row.get::<String>(0)?)
+                .ok_or(LocalSpaceSubscriptionError::InvalidRow)?,
+            grant: SpaceSubscriptionGrant {
+                lifecycle,
+                incarnation: AuthorityIncarnation::from_storage(&row.get::<String>(1)?)
+                    .ok_or(LocalSpaceSubscriptionError::InvalidRow)?,
+                generation: GrantGeneration::new(row.get::<i64>(2)?)
+                    .ok_or(LocalSpaceSubscriptionError::InvalidRow)?,
+            },
+            subid: SubId::from_raw(row.get::<String>(3)?),
+        });
+    }
+    drop(rows);
+    Ok(subscriptions)
 }
 
 async fn hold_scope(

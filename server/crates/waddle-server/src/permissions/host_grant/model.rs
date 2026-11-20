@@ -386,11 +386,29 @@ pub struct SpaceBookmarkVersion {
     pub present: bool,
 }
 
+/// The scope and effective affiliation era behind a protected preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceSubscriptionGrant {
+    pub lifecycle: ScopeLifecycleId,
+    pub incarnation: AuthorityIncarnation,
+    pub generation: GrantGeneration,
+}
+
+/// An explicit preference set by a locally authenticated account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalSpaceSubscription {
+    pub account: GrantSubject,
+    pub grant: SpaceSubscriptionGrant,
+    pub subid: waddle_xmpp::pubsub::SubId,
+}
+
 /// Item-store results and the authoritative versions they changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpaceBookmarkWrite {
     pub outcome: SpaceBookmarkOutcome,
     pub versions: Vec<SpaceBookmarkVersion>,
+    /// Exact live local preferences at the publication transaction's lock.
+    pub local_audience: Vec<LocalSpaceSubscription>,
 }
 
 /// Space affiliations writable by a served owner.

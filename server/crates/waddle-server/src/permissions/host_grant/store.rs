@@ -1176,8 +1176,28 @@ impl HostGrantStore {
             .await
             .map_err(HostGrantError::from_database)?;
         }
+        let local_audience = if versions.is_empty() {
+            Vec::new()
+        } else {
+            use crate::db::local_space_subscriptions::{
+                read_local_space_audience, LocalSpaceSubscriptionError,
+            };
+            read_local_space_audience(&mut tx, &change.key, change.lifecycle)
+                .await
+                .map_err(|error| match error {
+                    LocalSpaceSubscriptionError::Database(error) => {
+                        HostGrantError::from_database(error)
+                    }
+                    LocalSpaceSubscriptionError::BoundsUnproven => HostGrantError::BoundsUnproven,
+                    LocalSpaceSubscriptionError::InvalidRow => corrupt("local Space preference"),
+                })?
+        };
         commit(tx, mode).await?;
-        Ok(SpaceBookmarkWrite { outcome, versions })
+        Ok(SpaceBookmarkWrite {
+            outcome,
+            versions,
+            local_audience,
+        })
     }
 
     /// Record an atomic membership change from an authenticated served owner.
