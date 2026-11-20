@@ -1,9 +1,10 @@
 use super::{
     build_pack_element, build_pack_publish_iq, build_pack_retract_iq, build_sticker_marker_element,
     build_sticker_pack_items_iq, build_sticker_packs_items_iq, compute_pack_hash, compute_pack_id,
-    parse_pack_element, parse_sticker_packs_result, BareJid, Element, HashAlgo, PackId, PackRef,
-    PackSticker, StickerDimensions, StickerHash, StickerMarker, StickerPackDoc, StickerText,
-    NS_FILE_METADATA, NS_HASHES, NS_PUBSUB, NS_SFS, NS_STICKERS, NS_URL_DATA, STICKERS_NODE,
+    parse_pack_element, parse_sticker_marker_pack, parse_sticker_packs_result, BareJid, Element,
+    HashAlgo, PackId, PackRef, PackSticker, StickerDimensions, StickerHash, StickerMarker,
+    StickerPackDoc, StickerText, NS_FILE_METADATA, NS_HASHES, NS_PUBSUB, NS_SFS, NS_STICKERS,
+    NS_URL_DATA, STICKERS_NODE,
 };
 
 // ── Fixtures ─────────────────────────────────────────────────────────
@@ -593,6 +594,35 @@ fn pack_marker_carries_pack_and_optional_location() {
     assert_eq!(foreign.attr("pack"), Some(XEP_EXAMPLE_ID));
     assert_eq!(foreign.attr("jid"), Some("romeo@montague.lit"));
     assert_eq!(foreign.attr("node"), Some("generic/sticker/node"));
+}
+
+#[test]
+fn a_built_pack_marker_reads_back_as_the_same_reference() {
+    // §send-from-pack, both directions: what one client builds another
+    // reads, with and without the `jid` / `node` location.
+    for pack in [
+        PackRef {
+            id: PackId::try_new(XEP_EXAMPLE_ID).expect("id"),
+            jid: None,
+            node: None,
+        },
+        PackRef {
+            id: PackId::try_new(XEP_EXAMPLE_ID).expect("id"),
+            jid: Some(bare("romeo@montague.lit")),
+            node: Some("generic/sticker/node".to_string()),
+        },
+    ] {
+        let marker = build_sticker_marker_element(&StickerMarker {
+            pack: Some(pack.clone()),
+        });
+        assert_eq!(parse_sticker_marker_pack(&marker), Some(pack));
+    }
+}
+
+#[test]
+fn a_bare_sticker_marker_names_no_pack() {
+    let marker = build_sticker_marker_element(&StickerMarker { pack: None });
+    assert_eq!(parse_sticker_marker_pack(&marker), None);
 }
 
 // ── PackId invariants ────────────────────────────────────────────────
