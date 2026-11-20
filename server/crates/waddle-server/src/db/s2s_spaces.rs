@@ -361,6 +361,12 @@ pub struct SpaceSubscriptions {
     db: Database,
 }
 
+impl std::fmt::Debug for SpaceSubscriptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpaceSubscriptions").finish_non_exhaustive()
+    }
+}
+
 /// One subscription being counted against the bounds: of `account` to the
 /// Space `node` of `service`, made at `now_ms`.
 #[derive(Clone, Copy)]
@@ -1134,6 +1140,39 @@ impl SpaceSubscriptions {
         ).await.map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         Ok(removed == 1)
+    }
+
+    /// Retain the exact live preference through the synchronous TLS transfer.
+    pub(crate) async fn hold_protected_delivery(
+        &self,
+        service: &BareJid,
+        node: &str,
+        account: &BareJid,
+        grant: SpaceSubscriptionGrant,
+        now_ms: i64,
+    ) -> Result<Option<Transaction<'_>>, SpaceStoreError> {
+        if self.db.driver() != DatabaseDriver::Postgres {
+            return Ok(None);
+        }
+        let mut tx = self.db.begin().await.map_err(storage)?;
+        let mut rows = tx.query(
+            "SELECT 1 FROM s2s_space_subscriptions \
+             WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ? \
+             AND grant_lifecycle_id = ? AND grant_authority_incarnation = ? AND grant_generation = ? \
+             AND subscribed_at_ms >= ? FOR SHARE",
+            crate::db_params![
+                service.as_str(), node, account.as_str(), grant.lifecycle.to_storage(),
+                grant.incarnation.to_storage(), grant.generation.value(),
+                now_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS)
+            ],
+        ).await.map_err(storage)?;
+        let present = rows.next().await.map_err(storage)?.is_some();
+        drop(rows);
+        if !present {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(None);
+        }
+        Ok(Some(tx))
     }
 
     /// The subscriptions remote accounts made to the node `node` of

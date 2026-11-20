@@ -63,7 +63,7 @@ use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
-use crate::db::s2s_spaces::{SpaceSubscription, SpaceSubscriptionGrant};
+use crate::db::s2s_spaces::{SpaceSubscription, SpaceSubscriptionGrant, SpaceSubscriptions};
 use crate::db::Database;
 use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::route::RemotePrincipal;
@@ -132,6 +132,7 @@ enum RemoteSpaceEffect {
         key: ScopeKey,
         recipient: BareJid,
         subscribed_with: AuthenticationStrength,
+        subscriptions: SpaceSubscriptions,
     },
 }
 
@@ -161,6 +162,7 @@ impl ManagedSpaceGrant {
                 key,
                 recipient,
                 subscribed_with,
+                ..
             }) => {
                 (*subscribed_with != AuthenticationStrength::Pkix
                     || strength == AuthenticationStrength::Pkix)
@@ -186,6 +188,36 @@ impl ManagedSpaceGrant {
     pub fn admit<R>(&self, effect: impl FnOnce(Affiliation) -> R) -> Option<R> {
         self.fence
             .admit_with(&self.room_dependencies, || effect(self.affiliation))
+    }
+
+    /// Stage a remote effect. For an event, a self-unsubscribe must wait
+    /// until the TLS session owns the bytes or staging has been refused.
+    pub(crate) async fn admit_remote<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
+        let Some(RemoteSpaceEffect::Event {
+            key,
+            recipient,
+            subscriptions,
+            ..
+        }) = &self.remote_effect
+        else {
+            return self.admit(|_| effect());
+        };
+        let hold = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            subscriptions.hold_protected_delivery(
+                key.service(),
+                key.node(),
+                recipient,
+                self.subscription_grant,
+                chrono::Utc::now().timestamp_millis(),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        let staged = self.admit(|_| effect());
+        let _ = hold.rollback().await;
+        staged
     }
 
     /// The reply includes data from a managed room as well as the Space.
@@ -787,6 +819,7 @@ impl HostGrantGate {
             key: key.clone(),
             recipient: subscription.account.clone(),
             subscribed_with: subscription.evidence.strength(),
+            subscriptions: SpaceSubscriptions::new(self.store.as_ref()?.database().clone()),
         });
         Some(grant)
     }

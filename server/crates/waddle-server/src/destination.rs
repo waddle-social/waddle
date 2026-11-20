@@ -680,6 +680,17 @@ pub trait RemoteRoute: Send + Sync {
         false
     }
 
+    /// Offer a Space notification that needs canonical authorization at the write.
+    fn protected_space_event(
+        &self,
+        _service: &jid::BareJid,
+        _subscriber: &jid::Jid,
+        _stanza: waddle_xmpp::Stanza,
+        _grant: crate::permissions::host_grant::ManagedSpaceGrant,
+    ) -> bool {
+        false
+    }
+
     /// Take `publication`, stored in a local Space, for the Space's
     /// subscribers at other servers. It only queues, so the publisher's
     /// request never waits for what is decided about them; `false` when it

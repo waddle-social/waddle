@@ -1921,10 +1921,18 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
     } = publication;
     let created_at_ms = *created_at_ms;
     let db = database(state).clone();
-    let federated = FederatedSpaces::new(db.clone())
-        .is_federated(service, node_name, created_at_ms)
-        .await;
-    if !matches!(federated, Ok(true)) {
+    let grants = &state.deps.app_state.host_grants;
+    let Ok(enrolled) = grants.space_enrolled(node_name).await else {
+        return;
+    };
+    if !enrolled
+        && !matches!(
+            FederatedSpaces::new(db.clone())
+                .is_federated(service, node_name, created_at_ms)
+                .await,
+            Ok(true)
+        )
+    {
         return;
     }
     // The node as it is now: the publication is decided after its
@@ -1971,6 +1979,46 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
         }
         Some(room)
     };
+    if enrolled {
+        let Ok(key) = ScopeKey::new(service.clone(), node_name.as_str()) else {
+            return;
+        };
+        for subscription in subscriptions {
+            let Some(mut grant) = grants.space_subscription_event(&key, &subscription).await else {
+                telemetry::event_withheld();
+                continue;
+            };
+            if let Some(room) = &room {
+                let evidence = PrincipalEvidence::Stream(subscription.evidence);
+                match grants.room(RoomBinding::Room(room)).await {
+                    RoomGate::Unmanaged => {}
+                    RoomGate::Managed(decision)
+                        if decision.allows_as(
+                            &subscription.account,
+                            &evidence,
+                            HostGrantAction::View,
+                        ) =>
+                    {
+                        grant.require_room(decision)
+                    }
+                    RoomGate::Managed(_) | RoomGate::Unavailable => {
+                        telemetry::event_withheld();
+                        continue;
+                    }
+                }
+            }
+            let subscriber = Jid::from(subscription.account);
+            if !state.deps.remote_route.protected_space_event(
+                service,
+                &subscriber,
+                Stanza::Message(for_remote_subscriber(event, &subscriber)),
+                grant,
+            ) {
+                telemetry::event_withheld();
+            }
+        }
+        return;
+    }
     // The service's own record, read for this publication just before the
     // first hand-over: a subscription removed, or an account banned, since
     // the remote subscription was recorded receives nothing.

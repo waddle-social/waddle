@@ -415,9 +415,9 @@ impl S2sHandle {
         outbox::transmit(&self.shared.registry, stream, stanza, None).await
     }
 
-    /// Offer a protected Space response. The connection checks the grant at
+    /// Offer a protected Space reply or event. The connection checks the grant at
     /// the TLS write boundary, after taking the response from its outbox.
-    pub async fn transmit_space_reply(
+    pub async fn transmit_space_effect(
         &self,
         stream: &VerifiedPeerStream,
         stanza: minidom::Element,

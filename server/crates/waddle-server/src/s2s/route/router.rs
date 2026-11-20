@@ -497,6 +497,7 @@ enum Purpose {
     /// the subscriber's domain, and nothing answers it if it cannot be
     /// sent: it is a headline, never sent again.
     SpaceEvent {
+        grant: Option<Arc<crate::permissions::host_grant::ManagedSpaceGrant>>,
         /// The place of the pair's share of event notifications it holds
         /// until it is sent or dropped.
         _share: spaces::EventShare,
@@ -963,7 +964,8 @@ impl S2sRouter {
     /// pair's share of event notifications is full. Nothing is kept for a
     /// notification that was not taken.
     pub fn offer_space_event(&self, service: &BareJid, subscriber: &Jid, stanza: Stanza) -> bool {
-        self.inner.offer_space_event(service, subscriber, stanza)
+        self.inner
+            .offer_space_event(service, subscriber, stanza, None)
     }
 
     /// The seats of the remote occupants this replica seats, with the
@@ -1154,7 +1156,22 @@ impl RemoteRoute for S2sRouter {
         // Only a replica that serves its Spaces to remote principals sends
         // their notifications to remote subscribers.
         self.inner.spaces.get().is_some()
-            && self.inner.offer_space_event(service, subscriber, stanza)
+            && self
+                .inner
+                .offer_space_event(service, subscriber, stanza, None)
+    }
+
+    fn protected_space_event(
+        &self,
+        service: &BareJid,
+        subscriber: &Jid,
+        stanza: Stanza,
+        grant: crate::permissions::host_grant::ManagedSpaceGrant,
+    ) -> bool {
+        self.inner.spaces.get().is_some()
+            && self
+                .inner
+                .offer_space_event(service, subscriber, stanza, Some(Arc::new(grant)))
     }
 
     fn space_published(&self, publication: super::local_spaces::SpacePublication) -> bool {
@@ -3606,13 +3623,16 @@ impl PairWorker {
             let transmit = async {
                 if let Purpose::Reply {
                     space_grant: Some(grant),
+                }
+                | Purpose::SpaceEvent {
+                    grant: Some(grant), ..
                 } = &queued.purpose
                 {
                     if !self.router.admits(&self.pair.remote) {
                         return Err(TransmitError::AuthorizationExpired);
                     }
                     transport
-                        .transmit_space_reply(&stream, element, Arc::clone(grant))
+                        .transmit_space_effect(&stream, element, Arc::clone(grant))
                         .await
                 } else {
                     transport.transmit(&stream, element).await

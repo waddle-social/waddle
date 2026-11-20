@@ -426,7 +426,7 @@ impl Session {
             let [Output::Transmit(bytes)] = outputs.as_slice() else {
                 return Err(S2sOutcome::Protocol);
             };
-            match grant.admit(|_| self.transport.stage_tls(bytes)) {
+            match grant.admit_remote(|| self.transport.stage_tls(bytes)).await {
                 None => {
                     let _ = written.send(Err(Untransmitted::AuthorizationExpired));
                     return Ok(());

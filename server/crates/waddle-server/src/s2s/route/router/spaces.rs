@@ -203,6 +203,7 @@ impl Inner {
         service: &BareJid,
         subscriber: &Jid,
         stanza: Stanza,
+        grant: Option<Arc<crate::permissions::host_grant::ManagedSpaceGrant>>,
     ) -> bool {
         let pair = match (
             CanonicalDomain::parse_canonical(service.domain().as_str()),
@@ -240,7 +241,10 @@ impl Inner {
         };
         permit.send(Queued {
             stanza,
-            purpose: Purpose::SpaceEvent { _share: share },
+            purpose: Purpose::SpaceEvent {
+                grant,
+                _share: share,
+            },
         });
         telemetry::space_event_queued();
         true
