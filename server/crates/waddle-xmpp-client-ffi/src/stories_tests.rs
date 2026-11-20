@@ -13,7 +13,8 @@ use waddle_xmpp_core::xep0470::{Attachment, AttachmentPayload, ReactionSet};
 
 use crate::stories::{
     map_stories_reply, map_story_reactions_replies, map_story_reads_reply, next_story_attachment,
-    stories_fetch_stanza, story_from_post, story_publish_stanza, story_reads_from_ffi,
+    reaction_set, stories_fetch_stanza, story_from_post, story_publish_stanza,
+    story_reads_from_ffi,
 };
 use crate::test_support::offline_client;
 use crate::{
@@ -69,6 +70,10 @@ fn photo_post() -> WaddleStoryPost {
         media_type: Some("image/jpeg".to_string()),
         expiry_hours: None,
     }
+}
+
+fn reactions(values: &[&str]) -> ReactionSet {
+    reaction_set(strings(values)).expect("valid reactions")
 }
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -143,6 +148,18 @@ fn a_story_lives_as_long_as_asked_but_at_least_an_hour() {
     };
     assert_eq!(lifetime_hours(Some(6)), 6);
     assert_eq!(lifetime_hours(Some(0)), 1);
+}
+
+#[test]
+fn a_story_that_would_outlive_the_calendar_is_refused() {
+    let forever = WaddleStoryPost {
+        expiry_hours: Some(u32::MAX),
+        ..photo_post()
+    };
+    assert_eq!(
+        story_from_post(forever, &alice()),
+        Err(WaddleError::InvalidArgument)
+    );
 }
 
 #[test]
@@ -395,7 +412,7 @@ fn a_failed_reactions_fetch_is_an_error() {
 
 #[test]
 fn first_reactions_become_a_new_attachment() {
-    let next = next_story_attachment(None, strings(&["👍", " ❤️ ", "👍"])).expect("valid");
+    let next = next_story_attachment(None, reactions(&["👍", " ❤️ ", "👍"]));
     assert_eq!(
         next,
         Some(Attachment::reactions(ReactionSet::new(["👍", "❤️"])))
@@ -408,9 +425,7 @@ fn new_reactions_replace_the_old_and_keep_everything_else() {
     let current = Attachment::reactions(ReactionSet::new(["👍"]))
         .with_payload(AttachmentPayload::Noticed)
         .with_unknown_child(vote.clone());
-    let next = next_story_attachment(Some(current), strings(&["🎉"]))
-        .expect("valid")
-        .expect("attachment");
+    let next = next_story_attachment(Some(current), reactions(&["🎉"])).expect("attachment");
     assert_eq!(
         next.reactions_set().map(|set| set.emojis.clone()),
         Some(strings(&["🎉"]))
@@ -428,17 +443,15 @@ fn new_reactions_replace_the_old_and_keep_everything_else() {
 #[test]
 fn clearing_reactions_leaves_nothing_when_nothing_else_was_attached() {
     let current = Attachment::reactions(ReactionSet::new(["👍"]));
-    assert_eq!(next_story_attachment(Some(current), Vec::new()), Ok(None));
-    assert_eq!(next_story_attachment(None, strings(&[" "])), Ok(None));
+    assert_eq!(next_story_attachment(Some(current), reactions(&[])), None);
+    assert_eq!(next_story_attachment(None, reactions(&[" "])), None);
 }
 
 #[test]
 fn clearing_reactions_keeps_what_else_was_attached() {
     let current =
         Attachment::reactions(ReactionSet::new(["👍"])).with_payload(AttachmentPayload::Noticed);
-    let next = next_story_attachment(Some(current), Vec::new())
-        .expect("valid")
-        .expect("attachment");
+    let next = next_story_attachment(Some(current), reactions(&[])).expect("attachment");
     assert_eq!(next.payloads, vec![AttachmentPayload::Noticed]);
 }
 
@@ -449,12 +462,9 @@ fn too_many_reactions_or_more_than_one_emoji_each_are_refused() {
         .map(String::from)
         .collect();
     assert_eq!(thirteen.len(), 13);
+    assert_eq!(reaction_set(thirteen), Err(WaddleError::InvalidArgument));
     assert_eq!(
-        next_story_attachment(None, thirteen),
-        Err(WaddleError::InvalidArgument)
-    );
-    assert_eq!(
-        next_story_attachment(None, strings(&["👍👍"])),
+        reaction_set(strings(&["👍👍"])),
         Err(WaddleError::InvalidArgument)
     );
 }

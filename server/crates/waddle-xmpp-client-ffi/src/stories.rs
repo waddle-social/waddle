@@ -141,7 +141,8 @@ pub(crate) fn stories_fetch_stanza(community: &BareJid, max_items: Option<u32>) 
 
 /// Turn a post into the story to publish: a fresh item id, `author` as
 /// the author, posted now. XEP-0501 requires the media, so a post
-/// without it is refused, as is a malformed media type.
+/// without it is refused, as is a malformed media type or a lifetime
+/// past the end of the calendar.
 pub(crate) fn story_from_post(
     post: WaddleStoryPost,
     author: &BareJid,
@@ -157,9 +158,11 @@ pub(crate) fn story_from_post(
     let mut story = Story::new(format!("story-{}", Uuid::new_v4()))
         .with_media(media_url)
         .with_author(author.as_str());
-    if let Some(posted) = story.posted {
-        story = story.with_expires_at(posted + Duration::hours(hours));
-    }
+    let expires = story
+        .posted
+        .and_then(|posted| posted.checked_add_signed(Duration::hours(hours)))
+        .ok_or(WaddleError::InvalidArgument)?;
+    story = story.with_expires_at(expires);
     if let Some(body) = post.body.filter(|body| !body.trim().is_empty()) {
         story = story.with_body(body);
     }
@@ -273,21 +276,21 @@ pub(crate) fn map_story_reactions_replies(
     Ok(WaddleStoryReactions { reactions, mine })
 }
 
-fn reaction_set(emojis: Vec<String>) -> Result<ReactionSet, WaddleError> {
+/// Parse FFI emoji into a reaction set within the per-member limits.
+pub(crate) fn reaction_set(emojis: Vec<String>) -> Result<ReactionSet, WaddleError> {
     let set = ReactionSet::new(emojis);
     set.validate().map_err(|_| WaddleError::InvalidArgument)?;
     Ok(set)
 }
 
 /// The attachment that should replace `current` once the account's
-/// reactions are `emojis`: the reactions are swapped, everything else
+/// reactions are `reactions`: the reactions are swapped, everything else
 /// the account attached (including children this client does not
 /// understand) is kept. `None` means nothing is left to publish.
 pub(crate) fn next_story_attachment(
     current: Option<Attachment>,
-    emojis: Vec<String>,
-) -> Result<Option<Attachment>, WaddleError> {
-    let reactions = reaction_set(emojis)?;
+    reactions: ReactionSet,
+) -> Option<Attachment> {
     let mut next = current.unwrap_or_else(Attachment::empty);
     next.payloads
         .retain(|payload| !matches!(payload, AttachmentPayload::Reactions(_)));
@@ -295,7 +298,7 @@ pub(crate) fn next_story_attachment(
         next.payloads
             .insert(0, AttachmentPayload::Reactions(reactions));
     }
-    Ok((!next.payloads.is_empty() || !next.unknown_children.is_empty()).then_some(next))
+    (!next.payloads.is_empty() || !next.unknown_children.is_empty()).then_some(next)
 }
 
 // ── Exported verbs ───────────────────────────────────────────────────────────
@@ -397,7 +400,7 @@ impl WaddleClient {
     ) -> Result<(), WaddleError> {
         let community = parse_community(&community_jid)?;
         require_story_id(&story_id)?;
-        reaction_set(emojis.clone())?;
+        let reactions = reaction_set(emojis)?;
         let own = self.account_bare_jid()?;
         let Some(handle) = self.clone_handle().await else {
             return Err(WaddleError::NotConnected);
@@ -405,7 +408,7 @@ impl WaddleClient {
         let fetch = build_own_story_attachment_iq(&fresh_iq_id(), &community, &story_id, &own);
         let current = own_attachment(send_iq_with_timeout(&handle, fetch).await, &own)?;
         let had_attachment = current.is_some();
-        let Some(next) = next_story_attachment(current, emojis)? else {
+        let Some(next) = next_story_attachment(current, reactions) else {
             if !had_attachment {
                 return Ok(());
             }

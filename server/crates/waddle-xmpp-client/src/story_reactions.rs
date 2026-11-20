@@ -11,7 +11,7 @@ use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp_core::xep0470::{
     build_attachments_element, parse_attachments_element, Attachment, NS_PUBSUB_ATTACHMENTS,
-    PUBSUB_ATTACHMENTS_NODE_PREFIX,
+    NS_PUBSUB_ATTACHMENTS_SUMMARY, PUBSUB_ATTACHMENTS_NODE_PREFIX,
 };
 use waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES;
 
@@ -26,10 +26,10 @@ mod tests;
 
 /// Summary node holding the reaction counts of every story: the
 /// XEP-0470 summary namespace over the stories node.
-pub const STORY_REACTIONS_SUMMARY_NODE: &str =
-    "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0";
-
-const NS_PUBSUB_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
+#[must_use]
+pub fn story_reactions_summary_node() -> String {
+    format!("{NS_PUBSUB_ATTACHMENTS_SUMMARY}/{PUBSUB_NODE_STORIES}")
+}
 
 /// Attachment node of one story on `community`. The service accepts
 /// only this exact spelling, so the node and item id are
@@ -53,7 +53,7 @@ pub fn build_story_reaction_summary_iq(
     build_pubsub_item_iq(
         iq_id,
         Some(community),
-        STORY_REACTIONS_SUMMARY_NODE,
+        &story_reactions_summary_node(),
         story_id,
     )
 }

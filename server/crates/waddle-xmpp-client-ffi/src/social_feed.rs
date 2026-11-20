@@ -15,16 +15,13 @@ use waddle_xmpp_client::pubsub::{
 };
 use waddle_xmpp_client::ClientError;
 use waddle_xmpp_core::xep0472::{
-    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
+    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, NS_WADDLE_FEED_SOURCE,
+    PUBSUB_NODE_FEED,
 };
 
 use crate::error::client_error_to_waddle;
 use crate::messaging_verbs::send_iq_with_timeout;
 use crate::{WaddleClient, WaddleError};
-
-/// Namespace of the `<source kind='…'/>` child the server adds to
-/// entries it writes on a member's behalf.
-const NS_FEED_SOURCE: &str = "urn:waddle:feed-source:0";
 
 /// What a server-written feed entry reports. Entries a member posted
 /// carry no source.
@@ -91,7 +88,7 @@ fn feed_entry_to_ffi(entry: FeedEntry, source: Option<WaddleFeedSource>) -> Wadd
 
 fn feed_source(entry: &Element) -> Option<WaddleFeedSource> {
     entry
-        .get_child("source", NS_FEED_SOURCE)
+        .get_child("source", NS_WADDLE_FEED_SOURCE)
         .and_then(|source| source.attr("kind"))
         .map(WaddleFeedSource::from_kind)
 }

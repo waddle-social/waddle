@@ -105,7 +105,7 @@ name the issue that tracks them.
 | Affiliations / roles | 0045 | ❌ | ✅ | XEP-0045 member lists, affiliation changes, kick, ban. Baseline: called `/v1/space/members`, which the server does not serve |
 | Hats | 0317 | 🟡 | ✅ | Shown as author and member badges. Extension bots wear the server-assigned bot hat only while posting, so they are not listed as people. A room's bots are what its `urn:waddle:room:bots:0` disco#items node declares: shown under "Bots" by name (no presence, no actions), and their messages carry a Bot badge. Loaded on opening the room; refetched when a bot-hatted presence names an unlisted JID |
 | Admin console | 0050 | — | ❌ | For community owners: users, spaces and rooms. None of the `admin_*` verbs or `is_community_owner` are called (#2460) |
-| Feed | 0472 | — | ❌ | Read and post. No screen yet; the core verbs exist (`fetch_feed`, `publish_feed_post`). Server maturity is experimental (#2464) |
+| Feed | 0472 | — | ❌ | Read and post; the server takes reactions on stories only, not on feed posts. No screen yet; the core verbs exist (`fetch_feed`, `publish_feed_post`). Server maturity is experimental (#2464) |
 | Stories | 0501, 0470 | — | ❌ | Compose, view, react, read state. No screen yet; the core verbs exist (`fetch_stories`, `publish_story`, `fetch_story_reads`, `publish_story_reads`, `fetch_story_reactions`, `set_story_reactions`). Server maturity is experimental (#2464) |
 | Events | xCal | — | ❌ | Calendar, create and edit, recurrence, RSVP. The core has no FFI verb yet; draft PR #2450 adds them without recurrence authoring (#2465) |
 

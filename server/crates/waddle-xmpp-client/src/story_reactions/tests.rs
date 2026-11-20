@@ -10,11 +10,13 @@ use waddle_xmpp_core::xep0470::{Attachment, AttachmentPayload, ReactionSet};
 use super::{
     build_own_story_attachment_iq, build_story_attachment_publish_iq,
     build_story_attachment_retract_iq, build_story_reaction_summary_iq, parse_own_story_attachment,
-    parse_story_reaction_summary, story_attachment_node, STORY_REACTIONS_SUMMARY_NODE,
+    parse_story_reaction_summary, story_attachment_node, story_reactions_summary_node,
 };
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
+const SUMMARY_NODE: &str =
+    "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0";
 const STORY_NODE: &str = "urn:xmpp:pubsub-attachments:1/xmpp:community.waddle.test?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=story-1";
 
 fn community() -> BareJid {
@@ -37,10 +39,7 @@ fn parse(xml: &str) -> Element {
 
 #[test]
 fn summary_node_is_the_summary_namespace_over_the_stories_node() {
-    assert_eq!(
-        STORY_REACTIONS_SUMMARY_NODE,
-        "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0"
-    );
+    assert_eq!(story_reactions_summary_node(), SUMMARY_NODE);
 }
 
 #[test]
@@ -62,7 +61,7 @@ fn summary_iq_asks_the_summary_node_for_the_story_item() {
     assert_eq!(iq.attr("type"), Some("get"));
     assert_eq!(iq.attr("to"), Some("community.waddle.test"));
     let items = pubsub_child(&iq, "items");
-    assert_eq!(items.attr("node"), Some(STORY_REACTIONS_SUMMARY_NODE));
+    assert_eq!(items.attr("node"), Some(SUMMARY_NODE));
     let item = items.get_child("item", NS_PUBSUB).expect("item");
     assert_eq!(item.attr("id"), Some("story-1"));
 }
