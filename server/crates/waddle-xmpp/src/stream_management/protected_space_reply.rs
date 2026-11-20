@@ -1,0 +1,270 @@
+//! Authorization context of a retained C2S Space discovery reply.
+
+use crate::protocol::frame::MAX_FRAME_SIZE;
+use jid::{BareJid, FullJid};
+use uuid::Uuid;
+
+const HEADER: &[u8; 4] = b"SPR\x01";
+const MAX_JID_BYTES: usize = 3071;
+const UUID_BYTES: usize = 16;
+const FIXED_BYTES: usize = HEADER.len() + 4 * size_of::<u32>() + 2 * UUID_BYTES + size_of::<i64>();
+
+/// Maximum storage size, including the node and ID drawn from one input frame.
+pub const MAX_PROTECTED_SPACE_REPLY_BYTES: usize = FIXED_BYTES + 2 * MAX_JID_BYTES + MAX_FRAME_SIZE;
+
+/// Identity of the original access decision, without a replica lease.
+///
+/// Decoding establishes structural validity. The resource host must recheck the
+/// original decision against current authority before disclosing the reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedSpaceReplyDescriptor {
+    service: BareJid,
+    node: String,
+    recipient: FullJid,
+    id: String,
+    lifecycle: Uuid,
+    incarnation: Uuid,
+    generation: i64,
+}
+
+/// A missing, malformed, or unsupported protected reply descriptor is unusable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid protected Space reply descriptor")]
+pub struct ProtectedSpaceReplyCodecError;
+
+impl ProtectedSpaceReplyDescriptor {
+    pub fn new(
+        service: BareJid,
+        node: String,
+        recipient: FullJid,
+        id: String,
+        lifecycle: Uuid,
+        incarnation: Uuid,
+        generation: i64,
+    ) -> Result<Self, ProtectedSpaceReplyCodecError> {
+        let valid_length = node
+            .len()
+            .checked_add(id.len())
+            .is_some_and(|total| total <= MAX_FRAME_SIZE);
+        if service.as_str().len() > MAX_JID_BYTES
+            || recipient.as_str().len() > MAX_JID_BYTES
+            || recipient.node().is_none()
+            || node.is_empty()
+            || !valid_length
+            || generation <= 0
+        {
+            return Err(ProtectedSpaceReplyCodecError);
+        }
+        Ok(Self {
+            service,
+            node,
+            recipient,
+            id,
+            lifecycle,
+            incarnation,
+            generation,
+        })
+    }
+
+    pub fn service(&self) -> &BareJid {
+        &self.service
+    }
+
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    pub fn recipient(&self) -> &FullJid {
+        &self.recipient
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn lifecycle(&self) -> Uuid {
+        self.lifecycle
+    }
+
+    pub fn incarnation(&self) -> Uuid {
+        self.incarnation
+    }
+
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    /// Encode the versioned, length-prefixed storage representation.
+    pub fn encode(&self) -> Vec<u8> {
+        let fields = [
+            self.service.as_str(),
+            self.node(),
+            self.recipient.as_str(),
+            self.id(),
+        ];
+        let length = FIXED_BYTES + fields.iter().map(|field| field.len()).sum::<usize>();
+        let mut bytes = Vec::with_capacity(length);
+        bytes.extend_from_slice(HEADER);
+        for field in fields {
+            // The constructor limits every field below u32::MAX.
+            bytes.extend_from_slice(&(field.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(field.as_bytes());
+        }
+        bytes.extend_from_slice(self.lifecycle.as_bytes());
+        bytes.extend_from_slice(self.incarnation.as_bytes());
+        bytes.extend_from_slice(&self.generation.to_be_bytes());
+        bytes
+    }
+
+    /// Reject unknown versions, noncanonical JID spellings, and trailing data.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtectedSpaceReplyCodecError> {
+        if bytes.len() > MAX_PROTECTED_SPACE_REPLY_BYTES {
+            return Err(ProtectedSpaceReplyCodecError);
+        }
+        let mut input = bytes
+            .strip_prefix(HEADER)
+            .ok_or(ProtectedSpaceReplyCodecError)?;
+        let service_text = read_string(&mut input, MAX_JID_BYTES)?;
+        let node = read_string(&mut input, MAX_FRAME_SIZE)?;
+        let recipient_text = read_string(&mut input, MAX_JID_BYTES)?;
+        let id = read_string(&mut input, MAX_FRAME_SIZE - node.len())?;
+        let service: BareJid = service_text
+            .parse()
+            .map_err(|_| ProtectedSpaceReplyCodecError)?;
+        let recipient: FullJid = recipient_text
+            .parse()
+            .map_err(|_| ProtectedSpaceReplyCodecError)?;
+        if service.as_str() != service_text || recipient.as_str() != recipient_text {
+            return Err(ProtectedSpaceReplyCodecError);
+        }
+        let lifecycle = Uuid::from_bytes(read_array(&mut input)?);
+        let incarnation = Uuid::from_bytes(read_array(&mut input)?);
+        let generation = i64::from_be_bytes(read_array(&mut input)?);
+        if !input.is_empty() {
+            return Err(ProtectedSpaceReplyCodecError);
+        }
+        Self::new(
+            service,
+            node.into(),
+            recipient,
+            id.into(),
+            lifecycle,
+            incarnation,
+            generation,
+        )
+    }
+}
+
+fn read_array<const N: usize>(input: &mut &[u8]) -> Result<[u8; N], ProtectedSpaceReplyCodecError> {
+    let (head, tail) = input
+        .split_first_chunk()
+        .ok_or(ProtectedSpaceReplyCodecError)?;
+    *input = tail;
+    Ok(*head)
+}
+
+fn read_string<'a>(
+    input: &mut &'a [u8],
+    limit: usize,
+) -> Result<&'a str, ProtectedSpaceReplyCodecError> {
+    let len = u32::from_be_bytes(read_array(input)?) as usize;
+    if len > limit {
+        return Err(ProtectedSpaceReplyCodecError);
+    }
+    let (bytes, tail) = input
+        .split_at_checked(len)
+        .ok_or(ProtectedSpaceReplyCodecError)?;
+    *input = tail;
+    std::str::from_utf8(bytes).map_err(|_| ProtectedSpaceReplyCodecError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> ProtectedSpaceReplyDescriptor {
+        ProtectedSpaceReplyDescriptor::new(
+            "spaces.example.test".parse().expect("bare service JID"),
+            "docs/仕様".into(),
+            "alice@example.test/Firefox"
+                .parse()
+                .expect("full client JID"),
+            "disco:invoice & preview".into(),
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            42,
+        )
+        .expect("descriptor")
+    }
+
+    #[test]
+    fn descriptor_preserves_exact_reply_identity() {
+        let descriptor = descriptor();
+        let encoded = descriptor.encode();
+        assert_eq!(
+            ProtectedSpaceReplyDescriptor::decode(&encoded),
+            Ok(descriptor)
+        );
+    }
+
+    #[test]
+    fn descriptor_bounds_node_and_id_before_encoding() {
+        let original = descriptor();
+        let make = |id| {
+            ProtectedSpaceReplyDescriptor::new(
+                original.service.clone(),
+                original.node.clone(),
+                original.recipient.clone(),
+                id,
+                original.lifecycle,
+                original.incarnation,
+                original.generation,
+            )
+        };
+        let id_bytes = MAX_FRAME_SIZE - original.node.len();
+        let max = make("x".repeat(id_bytes)).expect("maximum input frame");
+        assert_eq!(
+            ProtectedSpaceReplyDescriptor::decode(&max.encode()),
+            Ok(max)
+        );
+        assert!(make("x".repeat(id_bytes + 1)).is_err());
+    }
+
+    #[test]
+    fn malformed_descriptors_do_not_decode_as_ordinary_replay() {
+        let encoded = descriptor().encode();
+        for end in 0..encoded.len() {
+            assert!(ProtectedSpaceReplyDescriptor::decode(&encoded[..end]).is_err());
+        }
+
+        let mut bad = encoded.clone();
+        bad[HEADER.len() - 1] += 1;
+        assert!(ProtectedSpaceReplyDescriptor::decode(&bad).is_err());
+
+        let mut bad = encoded.clone();
+        bad[HEADER.len()..HEADER.len() + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(ProtectedSpaceReplyDescriptor::decode(&bad).is_err());
+
+        let mut bad = encoded.clone();
+        bad[HEADER.len() + 4] = 0xff;
+        assert!(ProtectedSpaceReplyDescriptor::decode(&bad).is_err());
+
+        let mut bad = encoded.clone();
+        bad[HEADER.len() + 4] = b'S';
+        assert!(ProtectedSpaceReplyDescriptor::decode(&bad).is_err());
+
+        let mut bad = encoded.clone();
+        let generation_offset = bad.len() - size_of::<i64>();
+        bad[generation_offset..].copy_from_slice(&0_i64.to_be_bytes());
+        assert!(ProtectedSpaceReplyDescriptor::decode(&bad).is_err());
+
+        let mut bad = encoded;
+        bad.push(0);
+        assert!(ProtectedSpaceReplyDescriptor::decode(&bad).is_err());
+        assert!(ProtectedSpaceReplyDescriptor::decode(&vec![
+            0;
+            MAX_PROTECTED_SPACE_REPLY_BYTES + 1
+        ])
+        .is_err());
+    }
+}

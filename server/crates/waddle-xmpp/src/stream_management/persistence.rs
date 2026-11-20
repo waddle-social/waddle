@@ -27,14 +27,19 @@
 //!    session, runs each unacked stanza through `classify_dm_intake`
 //!    and `pending_delivery` insertion (Q6 promotion).
 
-use crate::stream_management::SmIngressAppendKey;
-use crate::stream_management::SmIngressFrameReceipt;
+use crate::protocol::frame::MAX_FRAME_SIZE;
+use crate::stream_management::{
+    ProtectedSpaceReplyDescriptor, SmIngressAppendKey, SmIngressFrameReceipt,
+    MAX_PROTECTED_SPACE_REPLY_BYTES,
+};
 use crate::tombstone::TombstoneTarget;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
@@ -215,6 +220,10 @@ pub struct PersistedSession {
     pub presence_payloads: Vec<minidom::Element>,
 }
 
+const PROTECTED_SPACE_STORAGE_PREFIX: &str = "sm-protected-space:1:";
+const MAX_ENCODED_SPACE_DESCRIPTOR: usize = (MAX_PROTECTED_SPACE_REPLY_BYTES * 4).div_ceil(3);
+const MAX_ENCODED_SPACE_REPLY: usize = (MAX_FRAME_SIZE * 4).div_ceil(3);
+
 /// A typed stanza and the immutable wire representation of this replay entry.
 ///
 /// SM persistence is part of the retransmission log: reserializing the typed
@@ -225,12 +234,69 @@ pub struct PersistedSession {
 pub struct SmReplayPayload {
     stanza: Box<Stanza>,
     wire: String,
+    protected_space_reply: Option<ProtectedSpaceReplyDescriptor>,
 }
 
 impl SmReplayPayload {
-    /// Parse at the replay/storage boundary while preserving the original frame.
+    /// Parse one wire stanza. Protected storage envelopes are not wire XML.
     pub fn from_wire(wire: String) -> Result<Self, SmPersistenceError> {
-        Self::parse_wire(wire, None)
+        Self::parse_wire(wire, None, None)
+    }
+
+    /// Pair the response bytes with their original Space decision. Validate the
+    /// exact result identity before typed stanza parsing can normalize it.
+    pub fn from_protected_space_reply(
+        wire: String,
+        descriptor: ProtectedSpaceReplyDescriptor,
+    ) -> Result<Self, SmPersistenceError> {
+        if wire.len() > MAX_FRAME_SIZE {
+            return Err(invalid_protected_space_reply());
+        }
+        Self::parse_wire(wire, None, Some(descriptor))
+    }
+
+    /// Decode the text stored in the replay row. Older rows retain their XML
+    /// representation. The protected envelope is never usable as wire XML.
+    pub fn from_storage(value: String) -> Result<Self, SmPersistenceError> {
+        let Some(envelope) = value.strip_prefix(PROTECTED_SPACE_STORAGE_PREFIX) else {
+            return Self::from_wire(value);
+        };
+        if envelope.len() > MAX_ENCODED_SPACE_DESCRIPTOR + 1 + MAX_ENCODED_SPACE_REPLY {
+            return Err(invalid_protected_space_reply());
+        }
+        let (descriptor, wire) = envelope
+            .split_once('.')
+            .ok_or_else(invalid_protected_space_reply)?;
+        if descriptor.len() > MAX_ENCODED_SPACE_DESCRIPTOR || wire.len() > MAX_ENCODED_SPACE_REPLY {
+            return Err(invalid_protected_space_reply());
+        }
+        let descriptor_bytes = STANDARD_NO_PAD
+            .decode(descriptor)
+            .map_err(|_| invalid_protected_space_reply())?;
+        let descriptor = ProtectedSpaceReplyDescriptor::decode(&descriptor_bytes)
+            .map_err(|_| invalid_protected_space_reply())?;
+        let wire = STANDARD_NO_PAD
+            .decode(wire)
+            .map_err(|_| invalid_protected_space_reply())?;
+        let wire = String::from_utf8(wire).map_err(|_| invalid_protected_space_reply())?;
+        Self::from_protected_space_reply(wire, descriptor)
+    }
+
+    /// Encode the full row value. Legacy XML decoders reject the entire
+    /// protected envelope, which contains no raw reply XML.
+    pub fn to_storage(&self) -> Cow<'_, str> {
+        match &self.protected_space_reply {
+            Some(descriptor) => Cow::Owned(format!(
+                "{PROTECTED_SPACE_STORAGE_PREFIX}{}.{}",
+                STANDARD_NO_PAD.encode(descriptor.encode()),
+                STANDARD_NO_PAD.encode(self.wire.as_bytes()),
+            )),
+            None => Cow::Borrowed(self.wire()),
+        }
+    }
+
+    pub fn protected_space_reply(&self) -> Option<&ProtectedSpaceReplyDescriptor> {
+        self.protected_space_reply.as_ref()
     }
 
     /// Serialize a typed stanza that no transport has written yet. The bytes
@@ -249,10 +315,14 @@ impl SmReplayPayload {
     /// Also require the captured XML to describe the supplied producer stanza.
     /// This is a structural comparison before typed parsing can discard fields.
     pub fn from_wire_matching(wire: String, expected: &Stanza) -> Result<Self, SmPersistenceError> {
-        Self::parse_wire(wire, Some(expected))
+        Self::parse_wire(wire, Some(expected), None)
     }
 
-    fn parse_wire(wire: String, expected: Option<&Stanza>) -> Result<Self, SmPersistenceError> {
+    fn parse_wire(
+        wire: String,
+        expected: Option<&Stanza>,
+        protected_space_reply: Option<ProtectedSpaceReplyDescriptor>,
+    ) -> Result<Self, SmPersistenceError> {
         let mut reader = std::io::Cursor::new(wire.as_bytes());
         let element = minidom::Element::from_reader(&mut reader)
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
@@ -265,6 +335,12 @@ impl SmReplayPayload {
             return Err(SmPersistenceError::Other(
                 "replay frame differs from its producer stanza".to_owned(),
             ));
+        }
+        if protected_space_reply
+            .as_ref()
+            .is_some_and(|descriptor| !matches_protected_space_reply(&element, descriptor))
+        {
+            return Err(invalid_protected_space_reply());
         }
         let stanza = match element.name() {
             "message" => xmpp_parsers::message::Message::try_from(element)
@@ -285,10 +361,12 @@ impl SmReplayPayload {
         Ok(Self {
             stanza: Box::new(stanza),
             wire,
+            protected_space_reply,
         })
     }
 
-    /// Captured frame bytes, for retransmission or a storage I/O boundary.
+    /// Captured frame bytes for retransmission. A protected reply requires
+    /// fresh admission before transfer. Storage writers use [Self::to_storage].
     pub fn wire(&self) -> &str {
         &self.wire
     }
@@ -306,8 +384,31 @@ impl From<Box<Stanza>> for SmReplayPayload {
             .write_to(&mut bytes)
             .expect("serializing a stanza to a byte buffer cannot fail");
         let wire = String::from_utf8(bytes).expect("serialized stanza is UTF-8");
-        Self { stanza, wire }
+        Self {
+            stanza,
+            wire,
+            protected_space_reply: None,
+        }
     }
+}
+
+fn invalid_protected_space_reply() -> SmPersistenceError {
+    SmPersistenceError::Other("invalid protected Space replay payload".to_owned())
+}
+
+fn matches_protected_space_reply(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    element.is("iq", "jabber:client")
+        && element.attr("type") == Some("result")
+        && element.attr("from") == Some(descriptor.service().as_str())
+        && element.attr("to") == Some(descriptor.recipient().as_str())
+        && element.attr("id") == Some(descriptor.id())
+        && element.children().count() == 1
+        && element
+            .get_child("query", "http://jabber.org/protocol/disco#info")
+            .is_some_and(|query| query.attr("node") == Some(descriptor.node()))
 }
 
 impl AsRef<Stanza> for SmReplayPayload {
@@ -1719,3 +1820,91 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod protected_space_reply_storage_tests {
+    use super::*;
+
+    const REPLY: &str = "<iq xmlns='jabber:client' type='result' from='spaces.example.test' to='alice@example.test/dev' id='disco-1'><query xmlns='http://jabber.org/protocol/disco#info' node='docs'/></iq>";
+
+    fn descriptor() -> ProtectedSpaceReplyDescriptor {
+        ProtectedSpaceReplyDescriptor::new(
+            "spaces.example.test".parse().expect("bare service JID"),
+            "docs".to_owned(),
+            "alice@example.test/dev".parse().expect("full client JID"),
+            "disco-1".to_owned(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            1,
+        )
+        .expect("reply descriptor")
+    }
+
+    #[test]
+    fn protected_reply_round_trips_with_no_legacy_wire_xml() {
+        let descriptor = descriptor();
+        let payload =
+            SmReplayPayload::from_protected_space_reply(REPLY.to_owned(), descriptor.clone())
+                .expect("protected payload");
+        let stored = payload.to_storage().into_owned();
+        assert!(stored.starts_with(PROTECTED_SPACE_STORAGE_PREFIX));
+        assert!(!stored.contains('<'));
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+
+        let restored = SmReplayPayload::from_storage(stored.clone()).expect("protected envelope");
+        assert_eq!(restored.wire(), REPLY);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        assert_eq!(restored.to_storage(), stored);
+
+        let ordinary = SmReplayPayload::from_storage(REPLY.to_owned()).expect("legacy XML");
+        assert_eq!(ordinary.wire(), REPLY);
+        assert_eq!(ordinary.protected_space_reply(), None);
+        assert_eq!(ordinary.to_storage(), REPLY);
+    }
+
+    #[test]
+    fn unknown_and_malformed_protected_storage_is_rejected() {
+        let descriptor = descriptor();
+        let encoded = STANDARD_NO_PAD.encode(descriptor.encode());
+        let payload = SmReplayPayload::from_protected_space_reply(REPLY.to_owned(), descriptor)
+            .expect("protected reply");
+        let stored = payload.to_storage();
+        for invalid in [
+            stored.replacen("space:1:", "space:2:", 1),
+            format!("{stored}.extra"),
+            format!("{stored}="),
+            format!("{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}"),
+            format!("{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}.!"),
+            format!(
+                "{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}.{}",
+                "A".repeat(MAX_ENCODED_SPACE_REPLY + 1)
+            ),
+            format!(
+                "{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}.{}",
+                STANDARD_NO_PAD.encode(REPLY.replace("node='docs'", "node='other'"))
+            ),
+        ] {
+            assert!(SmReplayPayload::from_storage(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn protected_reply_identity_validates_stanza_shape_and_addresses() {
+        let descriptor = descriptor();
+        for (expected, wrong) in [
+            ("jabber:client", "jabber:server"),
+            ("type='result'", "type='get'"),
+            ("disco-1", "disco-2"),
+            ("spaces.example.test", "other.example.test"),
+            ("alice@example.test/dev", "alice@example.test/other"),
+            ("node='docs'", "node='other'"),
+            ("disco#info", "disco#items"),
+        ] {
+            let wrong_reply = REPLY.replace(expected, wrong);
+            assert!(
+                SmReplayPayload::from_protected_space_reply(wrong_reply, descriptor.clone())
+                    .is_err()
+            );
+        }
+    }
+}
