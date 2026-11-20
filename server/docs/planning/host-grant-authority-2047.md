@@ -2,12 +2,17 @@
 
 ## Status and decision requested
 
-**Proposed design for review; implementation and activation are blocked.** This
-document recommends PostgreSQL as the single canonical host-grant authority and
-SpiceDB as its reconstructible policy projection. It does not approve that
-selection, satisfy F0/F3, authorize implementation, or change runtime behavior.
-[ADR-0020](../adrs/0020-independent-community-federation.md) remains Proposed.
-The [federation plan](../../../docs/planning/federation-2047.md) and distributed
+**Selected with conditions by ADR-0020 decision D5 (accepted 2026-11-13);
+implementation and activation remain blocked.** This document recommends
+PostgreSQL as the single canonical host-grant authority and SpiceDB as its
+reconstructible policy projection.
+[ADR-0020](../adrs/0020-independent-community-federation.md) accepts that
+selection on conditions B1, B4, B6 and B7 of the
+[blocking ledger](#blocking-review-ledger), and its first slice evaluates
+admission in SQL inside the acceptance transaction. The selection does not
+discharge any ledger entry, authorize implementation of a surface whose
+entries remain open, or change runtime behavior. The
+[federation plan](../../../docs/planning/federation-2047.md) and distributed
 actor roadmap retain their ordering and activation gates.
 
 Review whether this candidate has an implementable safety boundary and
@@ -78,6 +83,9 @@ Every action needs explicit policy. The production
 subtract `channel#outcast` from `read`, while
 [MUC admission](../../crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs)
 gives outcast precedence and separately handles members-only/deployment rules.
+The schema's `send_message` and `view` permissions likewise omit `outcast`, so
+a room outcast who can view the parent Space appears to keep access; ADR-0020
+D5 requires fixing all three.
 Witnesses bind negative overrides, configuration, lifecycle and action as well
 as positive grants. Community ownership does not imply deployment authority;
 Space subscription does not grant child membership. Complete policy is B2.
@@ -248,6 +256,9 @@ overwrites Outcast; [MUC admin](../../crates/waddle-server/src/server/routes/web
 persists graph state before actor application and conditional rollback;
 [member hydration](../../crates/waddle-server/src/server/durable_membership.rs)
 uses separate graph reads and retains existing mirror behavior on failure.
+ADR-0020 D5 requires the grant-authority work to retire the owner reseeding
+that overwrites Outcast, the latent legacy `set_room_affiliation` path and the
+graph-first MUC admin write, not only to reject them for enrolled scopes.
 
 A Rust facade is insufficient. Enrollment requires retiring old binaries and
 credentials, preventing direct writes to the new namespace, and testing scope
@@ -354,6 +365,13 @@ alternate grants and unsupported sinks in enrolled scopes reject access.
 Release configuration stays off; native fixtures exercise the path without
 exposing a partially authorized community.
 
+Under ADR-0020 D5, this slice evaluates admission in SQL inside the
+fresh-manifest acceptance transaction. Its witness is the PostgreSQL state
+locked in that transaction; the SpiceDB projection is not consulted for its
+admission decision, so B3 does not gate this slice. B3 still gates any later
+admission that reads the projection, which D5 defers until inheritance needs
+it.
+
 Clustered manifest activation remains dark until its roadmap dependencies
 permit it. Single-node manifest evidence does not prove clustered delivery.
 Independent authority contenders can prove database serialization without
@@ -392,17 +410,18 @@ actor-restoration and remote-custody gaps individually.
 
 ## Blocking review ledger
 
-| ID | Unresolved decision/evidence | Work blocked |
-| --- | --- | --- |
-| B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. |
-| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. |
-| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. |
-| B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. |
-| B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. |
-| B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. |
-| B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. |
+| ID | Unresolved decision/evidence | Work blocked | After ADR-0020 D5 |
+| --- | --- | --- | --- |
+| B1 | Exhaustive scope writer/reader exclusion, old writer retirement and concrete store capabilities | Enrollment and production authority integration. | Condition of the D5 selection; open. |
+| B2 | Complete action/negative/admin/global dependency policy, actor projection, XMPP request/result identity | Affected protected operations and handlers. | Open. D5 adds the channel schema outcast fix and the writer retirements above as required work. |
+| B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. | Open. Off the first slice's safety path, which admits in SQL; gates any admission that reads the projection. |
+| B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. | Condition of the D5 selection; open. |
+| B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. | Open. |
+| B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. | Condition of the D5 selection; open. The production authorization ID codec covers only its codec part. |
+| B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. | Condition of the D5 selection; open. |
 
 The coarse fence's availability cost is a non-blocking tradeoff once bounded
 resources and independent progress are proved. Fine-grained fences can follow
 only after complete policy/mutation dependencies are demonstrated. Merging this
-document or passing an inventory scan discharges none of these blockers.
+document, accepting D5 or passing an inventory scan discharges none of these
+blockers.

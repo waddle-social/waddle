@@ -12,6 +12,30 @@ remain required. The identity, grant/effect-fence and separate production
 activation gates in [ADR-0020](../adrs/0020-independent-community-federation.md)
 are unchanged.
 
+**Amended by [ADR-0020](../adrs/0020-independent-community-federation.md)
+decision D2 (accepted 2026-11-13).** Where this document conflicts with D2,
+D2 controls:
+
+- A leaf whose extended key usage is serverAuth only is accepted in both TLS
+  roles. This supersedes the explicit role EKU that pipeline step 3 requires
+  of the initiating peer's certificate; the stock client verifier's rejection
+  of such a leaf in the probe table is library behavior, not policy. Public
+  CAs such as Let's Encrypt no longer issue clientAuth certificates.
+- `open` mode adds a public-WebPKI trust profile beside the per-peer
+  private-CA profile described here. The complete-CRL and fail-closed
+  freshness rules below remain the profile for configured private CAs; they
+  are not applied as hard checks to public chains, whose revocation handling
+  is selected and reviewed with the implementation. A profile is selected by
+  configuration, never as a fallback after another profile rejects a chain.
+- In `open` mode the inbound reference domain is the stream source admitted
+  under D1, not a configured pair. On inbound direct TLS (XEP-0368) that
+  domain arrives in the stream header after the handshake, so the identity
+  match on that path completes before SASL EXTERNAL success rather than inside
+  the TLS verifier callback.
+
+The remaining construction, limits and evidence requirements are unchanged,
+and B2 remains open.
+
 Scope remains two native Waddle processes, loopback endpoints and `.test`
 domains. Application dispatch, grants, delivery custody, DNS discovery, public
 CA issuance and production network exposure remain outside this slice. The
@@ -74,6 +98,8 @@ HTTP metadata or post-verification identity substitution is allowed.
    cRLSign usages for issuers. The fixture issues dual-role leaf certificates;
    this is a restricted issuance policy, not a claim that XMPP universally
    requires both EKUs. Every candidate path must satisfy the same policy.
+   Under ADR-0020 D2, a serverAuth-only leaf satisfies the role check in both
+   roles.
 4. Match the authenticated leaf's XMPP reference identity as specified below.
    Produce the certificate-verification assertion only after chain, revocation,
    profile and identity checks all pass. A match in a failed chain must never
@@ -280,6 +306,11 @@ run two servers, measure resource limits or complete B2.
 | Dual EKU through client verifier | Accepted |
 | ServerAuth-only EKU through client verifier | Rejected |
 
+The last row records stock library behavior. ADR-0020 D2 supersedes it as
+policy: the candidate accepts a serverAuth-only leaf in both roles, so the
+inbound path cannot apply the clientAuth usage that the stock client verifier
+enforces.
+
 The SRV probe also parsed the expected OtherName OID and wrapped IA5String; that
 was an observation, not another assertion or a verified SRV matcher. Runtime was
 Rust **1.98.0**, not repository toolchain **1.98.1**. The probe pinned rustls
@@ -310,7 +341,7 @@ No skipped dependency counts as a pass.
 | Boundary | Required cases and assertion |
 | --- | --- |
 | Signed path and TLS ownership | Correct mTLS both directions; wrong CA, missing certificate, invalid certificate signature and forged CertificateVerify must fail. A valid name with invalid chain/signature must never authenticate EXTERNAL. |
-| Roles/profile | Missing/wrong EKU, missing digitalSignature, CA-as-leaf, invalid issuer usages, unknown critical extensions, trailing DER and excessive certificate count/bytes fail at the defined stage. |
+| Roles/profile | Missing/wrong EKU, missing digitalSignature, CA-as-leaf, invalid issuer usages, unknown critical extensions, trailing DER and excessive certificate count/bytes fail at the defined stage. A serverAuth-only leaf authenticates in both roles. |
 | DNS/service identity | Wrong account/component domain, SAN alias outside the pair, CN-only leaf, SRV-only valid identity, wrong `_xmpp-server` service, inserted `_tcp`, malformed OtherName DER/IA5String and duplicate applicable entries. Record positive exact-name matches and negative pair authorization separately. |
 | Constraints | Enforced DNS constraints and explicitly rejected SRVName/OtherName-constrained CA/path; no retry that drops constraints or promotes an intermediate to a root. |
 | Root/inventory | Expired/not-yet-valid/non-CA/bad-self-signature anchor, duplicate subject/different key, unknown intermediate, cycle, unsupported algorithm and invalid inventory path fail startup; root metadata deadline closes live streams. |
