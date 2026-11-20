@@ -3371,6 +3371,8 @@ impl RecordedOperation {
             OperationKind::Exhaust => Err(HostGrantError::ScopeExhausted),
             OperationKind::Enroll
             | OperationKind::SetAffiliation
+            | OperationKind::BindSpace
+            | OperationKind::SetSpaceAffiliations
             | OperationKind::Retire
             | OperationKind::Restore
             | OperationKind::Reconstruct

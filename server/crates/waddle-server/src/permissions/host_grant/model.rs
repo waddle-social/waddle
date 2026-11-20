@@ -359,6 +359,8 @@ pub struct RetireScope {
 pub enum OperationKind {
     Enroll,
     SetAffiliation,
+    BindSpace,
+    SetSpaceAffiliations,
     Retire,
     /// The scope had no working generation left for the command and was
     /// closed instead.
@@ -382,6 +384,8 @@ impl OperationKind {
         match self {
             Self::Enroll => "enroll",
             Self::SetAffiliation => "set_affiliation",
+            Self::BindSpace => "bind_space",
+            Self::SetSpaceAffiliations => "set_space_affiliations",
             Self::Retire => "retire",
             Self::Exhaust => "exhaust",
             Self::Restore => "restore",
@@ -395,6 +399,8 @@ impl OperationKind {
         [
             Self::Enroll,
             Self::SetAffiliation,
+            Self::BindSpace,
+            Self::SetSpaceAffiliations,
             Self::Retire,
             Self::Exhaust,
             Self::Restore,

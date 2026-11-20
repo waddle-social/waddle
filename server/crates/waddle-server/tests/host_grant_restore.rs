@@ -107,7 +107,7 @@ const SERVICE_UNAVAILABLE: (ErrorType, DefinedCondition) =
 
 /// Every relation of the canonical host-grant store: what a restore of the
 /// database brings back.
-const AUTHORITY_RELATIONS: [&str; 9] = [
+const AUTHORITY_RELATIONS: [&str; 10] = [
     "host_grant_authority",
     "host_grant_scope_lifecycles",
     "host_grant_scopes",
@@ -117,6 +117,7 @@ const AUTHORITY_RELATIONS: [&str; 9] = [
     "host_grant_operation_changes",
     "host_grant_space_bindings",
     "host_grant_space_affiliations",
+    "host_grant_space_operation_changes",
 ];
 
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which

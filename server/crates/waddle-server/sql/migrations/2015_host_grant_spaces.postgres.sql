@@ -46,3 +46,34 @@ CREATE TABLE host_grant_space_affiliations (
         FOREIGN KEY (lifecycle_id, changed_generation)
         REFERENCES host_grant_operations (lifecycle_id, generation)
 );
+
+-- Space mutations participate in the same journal and lifecycle generation
+-- as room mutations. Their affiliation changes carry no room address.
+ALTER TABLE host_grant_operations
+    DROP CONSTRAINT host_grant_operations_kind,
+    ADD CONSTRAINT host_grant_operations_kind CHECK (
+        kind IN (
+            'enroll', 'set_affiliation', 'retire', 'exhaust', 'restore', 'reconstruct',
+            'fence', 'reopen', 'bind_space', 'set_space_affiliations'
+        )
+    );
+
+CREATE TABLE host_grant_space_operation_changes (
+    operation_id TEXT NOT NULL REFERENCES host_grant_operations (operation_id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    subject_jid TEXT NOT NULL,
+    affiliation TEXT NOT NULL,
+    previous_affiliation TEXT NOT NULL,
+    issuance_basis TEXT NOT NULL,
+    PRIMARY KEY (operation_id, ordinal),
+    UNIQUE (operation_id, subject_jid),
+    CONSTRAINT host_grant_space_operation_changes_affiliation CHECK (
+        affiliation IN ('owner', 'publisher', 'publish-only', 'member', 'none', 'outcast')
+    ),
+    CONSTRAINT host_grant_space_operation_changes_previous_affiliation CHECK (
+        previous_affiliation IN ('owner', 'publisher', 'publish-only', 'member', 'none', 'outcast')
+    ),
+    CONSTRAINT host_grant_space_operation_changes_issuance CHECK (
+        issuance_basis IN ('local', 'trusted_home', 'unprivileged')
+    )
+);
