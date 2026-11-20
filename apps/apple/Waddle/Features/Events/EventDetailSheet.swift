@@ -96,7 +96,9 @@ struct EventDetailSheet: View {
                     cancel { try await session.cancelEvent(event.id) }
                 }
             }
-            Button("Keep it", role: .cancel) {}
+            Button("Keep it", role: .cancel) {
+                // Closing the dialog is all it does.
+            }
         } message: {
             Text("It's taken off everyone's calendar.")
         }

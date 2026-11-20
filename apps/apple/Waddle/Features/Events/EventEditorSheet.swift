@@ -103,6 +103,7 @@ struct EventEditorSheet: View {
                 onSaved?()
                 dismiss()
             } catch where Task.isCancelled {
+                // The sheet was closed while saving; nobody is left to tell.
             } catch {
                 errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't save the event. Try again.")
             }
