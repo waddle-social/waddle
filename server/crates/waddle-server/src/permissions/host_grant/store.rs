@@ -3237,7 +3237,7 @@ pub(crate) fn decode_binding(row: &Row) -> Result<Option<AuthorityBinding>, Data
     }))
 }
 
-async fn load_binding(
+pub(super) async fn load_binding(
     tx: &mut Transaction<'_>,
     authority: &str,
 ) -> Result<AuthorityBinding, HostGrantError> {

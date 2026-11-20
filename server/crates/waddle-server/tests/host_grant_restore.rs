@@ -76,16 +76,16 @@ use waddle_server::permissions::host_grant::{
     position_witness_resource, reconstruction_targets, regression, room_witness_digest,
     room_witness_resource, sync_position_witness, sync_witnesses_after_fence, verify_restore_fence,
     verify_restore_fence_with, with_host_grant_commit_fault, with_host_grant_witness_write_fault,
-    Activation, AdmissionState, AuthorityIncarnation, BindSpace, ClosedReason, FenceMemory,
-    GateReadiness, GateState, GrantGeneration, GrantOperationId, HostGrantAction,
-    HostGrantAttachment, HostGrantAuthority, HostGrantCommitFault, HostGrantError, HostGrantStore,
-    LatchKind, MutationReceipt, OperationKind, OperationOutcome, OperatorRevoke,
+    Activation, AdmissionState, AuthorityIncarnation, BindSpace, ClosedReason, EnrolledScopes,
+    FenceMemory, GateReadiness, GateState, GrantGeneration, GrantOperationId, HostGrantAction,
+    HostGrantAttachment, HostGrantAuthority, HostGrantCommitFault, HostGrantError, HostGrantGate,
+    HostGrantStore, LatchKind, MutationReceipt, OperationKind, OperationOutcome, OperatorRevoke,
     PositionAcknowledgement, PositionLatch, PositionStanding, PositionWitness, PositionWriter,
-    PostgresPosition, ProjectedGrant, ProjectedRelationship, ProjectionContradiction,
-    ProjectionIntent, ProjectionMarker, ProjectionWrite, Reconciliation, ReconstructionTarget,
-    ReopenReport, ReopenSelection, ReplicaFailure, RestoreDeclaration, RestoreEpoch,
-    RestoreFenceRefusal, RestoreFenceReport, RetireScope, RoomAffiliation, ScopeLifecycleId,
-    WitnessChange, WitnessSync, HOST_GRANT_PROJECTION_DEFINITION,
+    PostgresPosition, PrincipalEvidence, ProjectedGrant, ProjectedRelationship,
+    ProjectionContradiction, ProjectionIntent, ProjectionMarker, ProjectionWrite, Reconciliation,
+    ReconstructionTarget, ReopenReport, ReopenSelection, ReplicaFailure, RestoreDeclaration,
+    RestoreEpoch, RestoreFenceRefusal, RestoreFenceReport, RetireScope, RoomAffiliation, ScopeKey,
+    ScopeLifecycleId, WitnessChange, WitnessSync, HOST_GRANT_PROJECTION_DEFINITION,
     HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
 use waddle_server::permissions::{
@@ -699,6 +699,20 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     .execute(&pool)
     .await
     .expect("seed the exact enrolled PubSub node");
+    let gate = HostGrantGate::with_enrolled_scopes(
+        fixture.store.clone(),
+        EnrolledScopes::watch(fixture.store.clone()),
+    );
+    assert!(gate.attach(
+        HostGrantAttachment::unfenced_for_test(&fixture.store, served())
+            .await
+            .expect("attach to the current authority")
+    ));
+    let key = ScopeKey::new(
+        "spaces.example.com".parse().expect("service JID"),
+        fixture.scope.space_node.as_str(),
+    )
+    .expect("Space address");
     let command = BindSpace {
         operation: GrantOperationId::generate(),
         lifecycle: fixture.scope.lifecycle,
@@ -745,6 +759,10 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
         ("owner".to_owned(), "none".to_owned())
     );
 
+    assert!(gate
+        .space_grant(&key, &subject(SENDER), &PrincipalEvidence::NoStream)
+        .await
+        .is_none());
     assert_eq!(
         fixture.activate_current(&fixture.scope).await,
         Activation::Activated
@@ -761,6 +779,31 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
         .expect("the verified marker activates the owner"),
         "owner"
     );
+    let granted = gate
+        .space_grant(&key, &subject(SENDER), &PrincipalEvidence::NoStream)
+        .await
+        .expect("the owner has an activated decision");
+    assert_eq!(
+        granted.admit(|standing| standing),
+        Some(waddle_xmpp::pubsub::Affiliation::Owner)
+    );
+    assert!(gate
+        .space_grant(&key, &subject(CAROL), &PrincipalEvidence::NoStream)
+        .await
+        .is_none());
+    let wrong_service = ScopeKey::new(
+        "spaces.other.test".parse().expect("service JID"),
+        key.node(),
+    )
+    .expect("different service");
+    assert!(gate
+        .space_grant(
+            &wrong_service,
+            &subject(SENDER),
+            &PrincipalEvidence::NoStream
+        )
+        .await
+        .is_none());
     sqlx::query(
         "INSERT INTO host_grant_space_affiliations VALUES
          ($1, $2, 'member', 'member', 'unprivileged', $4),
@@ -795,6 +838,10 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
         None
     );
 
+    assert!(gate
+        .space_grant(&key, &subject(SENDER), &PrincipalEvidence::NoStream)
+        .await
+        .is_none());
     let rebind = BindSpace {
         operation: GrantOperationId::generate(),
         owner: subject(OWNER),

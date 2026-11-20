@@ -47,9 +47,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use jid::BareJid;
+use waddle_xmpp::pubsub::Affiliation;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
+use super::issuance::IssuanceBasis;
+use super::model::{GrantSubject, ScopeKey};
 use super::policy::HostGrantAction;
 use super::principal::{
     named_evidence, NoSeats, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, SeatEvidence,
@@ -103,6 +106,20 @@ pub struct HostGrantGate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the host-grant enrolled set is not known")]
 pub struct HostGrantUnavailable;
+
+/// A protected Space decision tied to the replica's lease and scope generation.
+#[derive(Debug)]
+pub struct ManagedSpaceGrant {
+    affiliation: Affiliation,
+    fence: FenceTicket,
+}
+
+impl ManagedSpaceGrant {
+    /// Transfer a protected effect synchronously while the decision is current.
+    pub fn admit<R>(&self, effect: impl FnOnce(Affiliation) -> R) -> Option<R> {
+        self.fence.admit(|| effect(self.affiliation))
+    }
+}
 
 /// What the gate decided for a room.
 #[derive(Clone, Debug)]
@@ -613,6 +630,54 @@ impl HostGrantGate {
             .filter(|channel| set.channel(channel).is_some())
             .map(|channel| (*channel).to_owned())
             .collect())
+    }
+
+    /// Resolve an enrolled Space subject against canonical standing. Missing
+    /// or unusable standing denies the protected effect.
+    pub async fn space_grant(
+        &self,
+        key: &ScopeKey,
+        subject: &GrantSubject,
+        evidence: &PrincipalEvidence,
+    ) -> Option<ManagedSpaceGrant> {
+        let store = self.store.as_ref()?;
+        let attachment = self.attachment()?;
+        let fence = self.fence.as_ref()?;
+        let registration = fence.begin_decision().await?;
+        let standing = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            store.space_standing(key, subject, attachment.binding()),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        let witness = attachment.principals().witness(subject.jid(), evidence);
+        if standing.recorded == Affiliation::Outcast
+            || (matches!(&witness, PrincipalWitness::Remote(_)) && !standing.federated)
+        {
+            return None;
+        }
+        let affiliation = match standing.effective {
+            Affiliation::Member if witness.grants_honoured() => Affiliation::Member,
+            affiliation @ (Affiliation::Owner
+            | Affiliation::Publisher
+            | Affiliation::PublishOnly)
+                if witness.privilege_honoured()
+                    && matches!(
+                        (&witness, standing.issuance_basis),
+                        (PrincipalWitness::Served, IssuanceBasis::Local)
+                            | (PrincipalWitness::Remote(_), IssuanceBasis::TrustedHome)
+                    ) =>
+            {
+                affiliation
+            }
+            _ => return None,
+        };
+        let ticket = fence.ticket(registration, standing.lifecycle, standing.generation);
+        ticket.is_current().then_some(ManagedSpaceGrant {
+            affiliation,
+            fence: ticket,
+        })
     }
 
     /// Whether `node` is the Space node of an enrolled scope. `Err` while

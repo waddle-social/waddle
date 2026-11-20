@@ -20,16 +20,90 @@ use std::collections::BTreeMap;
 
 use jid::BareJid;
 use waddle_xmpp::identity::CanonicalBareJid;
+use waddle_xmpp::pubsub::Affiliation;
 
 use super::enrolled::EnrolledSet;
 use super::error::HostGrantError;
-use super::model::{GrantGeneration, RoomAffiliation, ScopeLifecycleId};
+use super::issuance::IssuanceBasis;
+use super::model::{GrantGeneration, GrantSubject, RoomAffiliation, ScopeKey, ScopeLifecycleId};
 use super::policy::{grant_allows, honoured_affiliation, HostGrantAction};
 use super::principal::{PrincipalEvidence, PrincipalPolicy};
+use super::restore::AuthorityBinding;
 use super::store::{
-    affiliation_column, corrupt, load_incarnation, load_scope, scope_admits, HostGrantStore,
+    affiliation_column, corrupt, load_binding, load_incarnation, load_scope, scope_admits,
+    HostGrantStore,
 };
 use crate::db::Transaction;
+
+pub(super) struct SpaceStanding {
+    pub lifecycle: ScopeLifecycleId,
+    pub generation: GrantGeneration,
+    pub federated: bool,
+    pub recorded: Affiliation,
+    pub effective: Affiliation,
+    pub issuance_basis: IssuanceBasis,
+}
+
+impl HostGrantStore {
+    pub(super) async fn space_standing(
+        &self,
+        key: &ScopeKey,
+        subject: &GrantSubject,
+        attached: &AuthorityBinding,
+    ) -> Result<Option<SpaceStanding>, HostGrantError> {
+        let mut tx = self.begin_interactive_read().await?;
+        if load_binding(&mut tx, "host_grant_authority").await? != *attached {
+            return Err(HostGrantError::IncarnationChanged);
+        }
+        let mut rows = tx.query(
+            "SELECT b.lifecycle_id, b.federated, g.affiliation, g.effective_affiliation, g.issuance_basis \
+             FROM host_grant_space_bindings b \
+             JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id \
+             JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node \
+             JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id \
+             WHERE b.service_jid = ? AND b.space_node = ? AND g.subject_jid = ? \
+             AND b.authority_incarnation = ? AND l.retired_at_ms IS NULL \
+             AND p.access_model = b.access_model AND p.node_type = ?",
+            crate::db_params![
+                key.service().as_str(), key.node(), subject.as_str(),
+                attached.incarnation.to_storage(), waddle_xmpp::xep::xep0503::NS_SPACES
+            ],
+        ).await?;
+        let Some(row) = rows.next().await? else {
+            drop(rows);
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+            .ok_or(corrupt("Space lifecycle"))?;
+        let federated = row.get(1)?;
+        let recorded = row
+            .get::<String>(2)?
+            .parse()
+            .map_err(|_| corrupt("Space affiliation"))?;
+        let effective = row
+            .get::<String>(3)?
+            .parse()
+            .map_err(|_| corrupt("effective Space affiliation"))?;
+        let issuance_basis = IssuanceBasis::from_storage(&row.get::<String>(4)?)
+            .ok_or(corrupt("Space issuance basis"))?;
+        drop(rows);
+        let scope = load_scope(&mut tx, lifecycle, false)
+            .await?
+            .ok_or(corrupt("Space scope"))?;
+        tx.rollback().await?;
+        Ok(
+            scope_admits(&scope, attached.incarnation).then_some(SpaceStanding {
+                lifecycle,
+                generation: scope.generation,
+                federated,
+                recorded,
+                effective,
+                issuance_basis,
+            }),
+        )
+    }
+}
 
 /// How a room is named when its binding is looked up.
 #[derive(Clone, Copy, Debug)]

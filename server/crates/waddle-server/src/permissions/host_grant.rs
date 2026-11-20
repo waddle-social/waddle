@@ -103,7 +103,8 @@ pub use fence::{
     FENCE_LEASE_MARGIN, FENCE_LEASE_TTL, FENCE_TICK,
 };
 pub use gate::{
-    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, RoomGate, StoredRoomGrants,
+    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, ManagedSpaceGrant, RoomGate,
+    StoredRoomGrants,
 };
 pub use issuance::{
     IssuanceBasis, IssuancePolicy, IssuanceRefusal, ServedAccountDomains, SubjectHome,
