@@ -4,8 +4,8 @@ import XCTest
 @testable import WaddleKit
 
 /// Night and Daylight goldens for stickers: the picker with packs, with
-/// none and after a failed load, and the new-pack sheet before and after
-/// pictures are chosen. These screens have no design frame; they are
+/// none and after a failed load, the new-pack sheet before and after
+/// pictures are chosen, and the pack behind a sticker in a conversation. These screens have no design frame; they are
 /// drawn from the styleguide's components. Text fields and scroll views
 /// only draw in a real window, so these are screen snapshots, compared on
 /// the OS the goldens were recorded on (see `assertScreenSnapshot`).
@@ -89,6 +89,48 @@ final class StickerSnapshotTests: XCTestCase {
             asSheet: true,
             testName: testName
         )
+    }
+
+    // MARK: - The pack behind a sticker
+
+    private static let priyasPack = StickerPackLocation(owner: SampleSession.priya, packID: "penguins")
+
+    private static func penguins(isRestricted: Bool = false) -> StickerPack {
+        StickerPack(
+            id: "penguins",
+            name: "Penguins",
+            summary: "For when words are too slow.",
+            isRestricted: isRestricted,
+            stickers: ["👋", "🎉", "😴", "🐟", "❄️"].map(sticker)
+        )
+    }
+
+    func testSomeoneElsesPack() async throws {
+        let sample = SampleSession()
+        sample.port.stickers.packsElsewhere[Self.priyasPack] = .success(Self.penguins())
+        try await assertPack(sample)
+    }
+
+    func testAPackAlreadyInYourStickers() async throws {
+        let sample = SampleSession()
+        sample.port.stickers.packsElsewhere[Self.priyasPack] = .success(Self.penguins())
+        sample.port.stickers.packs = .success([Self.penguins()])
+        try await assertPack(sample)
+    }
+
+    func testAPackItsAuthorKeepsToThemselves() async throws {
+        let sample = SampleSession()
+        sample.port.stickers.packsElsewhere[Self.priyasPack] = .success(Self.penguins(isRestricted: true))
+        try await assertPack(sample)
+    }
+
+    func testAPackThatIsGone() async throws {
+        try await assertPack(SampleSession())
+    }
+
+    private func assertPack(_ sample: SampleSession, testName: String = #function) async throws {
+        let sheet = StickerPackSheet(location: Self.priyasPack, samplePicture: Self.picture)
+        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.sheet, asSheet: true, testName: testName)
     }
 
     // MARK: - A sticker that needs no network

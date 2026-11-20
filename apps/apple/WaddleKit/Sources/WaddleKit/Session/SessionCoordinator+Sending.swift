@@ -295,6 +295,7 @@ extension SessionCoordinator {
             markupSpans: message.options.markupSpans,
             references: message.options.references,
             isSticker: message.options.sticker != nil,
+            stickerPack: message.options.sticker,
             sharedFiles: message.options.sharedFiles,
             authorRealJID: conversation.isRoom ? account.jid : nil
         )

@@ -51,6 +51,13 @@ struct MessageContextMenu: View {
                     Label("Copy text", systemImage: "doc.on.doc")
                 }
             }
+            if let pack = session.stickerPackLocation(of: item), item.tombstone == nil {
+                Button {
+                    actions.showStickerPack(pack)
+                } label: {
+                    Label("View sticker pack", systemImage: "face.smiling")
+                }
+            }
             if item.conversation.isRoom {
                 pinButton
             }

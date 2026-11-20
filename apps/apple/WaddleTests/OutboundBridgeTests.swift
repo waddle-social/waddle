@@ -126,6 +126,7 @@ final class OutboundBridgeTests: XCTestCase {
         XCTAssertEqual(FFIInbound.stickerPack(fetched), StickerPack(
             id: "EpRv28DHHzFrE4zd+xaNpVb4",
             name: "Penguins",
+            isRestricted: true,
             stickers: [
                 Sticker(
                     description: "👋", mediaType: "image/png", size: 2048, width: 512, height: 384,
@@ -134,5 +135,30 @@ final class OutboundBridgeTests: XCTestCase {
                 ),
             ]
         ))
+    }
+
+    // MARK: - The pack a received sticker names
+
+    func testAReceivedStickersPackIsTheSendersUnlessItSaysOtherwise() {
+        XCTAssertEqual(
+            FFIInbound.stickerReference(WaddleStickerRef(packId: "EpRv28DHHzFrE4zd+xaNpVb4", packJid: nil, packNode: nil)),
+            StickerReference(packID: "EpRv28DHHzFrE4zd+xaNpVb4")
+        )
+        XCTAssertEqual(
+            FFIInbound.stickerReference(WaddleStickerRef(packId: "crabs", packJid: "packs.waddle.example", packNode: "shared/packs")),
+            StickerReference(packID: "crabs", owner: BareJID(parsing: "packs.waddle.example"), node: "shared/packs")
+        )
+    }
+
+    /// An address that is not one leaves the pack's place unknown; the
+    /// sender's own packs would be the wrong place to look.
+    func testAPackAtAnUnreadableAddressIsNoReference() {
+        XCTAssertNil(FFIInbound.stickerReference(WaddleStickerRef(packId: "crabs", packJid: "@@", packNode: nil)))
+    }
+
+    func testAPackItsAuthorKeepsToThemselvesSaysSo() {
+        let fetched = WaddleStickerPack(id: "crabs", name: nil, summary: nil, restricted: true, stickers: [])
+
+        XCTAssertTrue(FFIInbound.stickerPack(fetched).isRestricted)
     }
 }

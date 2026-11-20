@@ -19,6 +19,8 @@ final class MessageActionModel {
     var reactionTarget: TimelineItem?
     /// The row whose safety-score breakdown is open.
     var safetyScoresTarget: TimelineItem?
+    /// The sticker pack open in a sheet.
+    var stickerPackTarget: StickerPackLocation?
     var errorMessage: String?
     /// A row the timeline should scroll to, then clear.
     var scrollRequest: String?
@@ -51,6 +53,10 @@ final class MessageActionModel {
 
     func showSafetyScores(for item: TimelineItem) {
         safetyScoresTarget = item
+    }
+
+    func showStickerPack(_ location: StickerPackLocation) {
+        stickerPackTarget = location
     }
 
     func requestDeletion(of item: TimelineItem) {

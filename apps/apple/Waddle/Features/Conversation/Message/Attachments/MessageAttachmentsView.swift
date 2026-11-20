@@ -7,6 +7,8 @@ struct MessageAttachmentsView: View {
     let files: [SharedFile]
     let isSticker: Bool
     let openImage: (SharedFile) -> Void
+    /// Opens the pack a sticker is from; nil when it names none.
+    var openStickerPack: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.s - 2) {
@@ -30,7 +32,7 @@ struct MessageAttachmentsView: View {
     private func plainAttachment(_ file: SharedFile, kind: MessageAttachmentKind) -> some View {
         switch kind {
         case .image where isSticker:
-            MessageStickerView(file: file)
+            MessageStickerView(file: file, openPack: openStickerPack)
         case .image:
             MessageImageAttachment(file: file, open: openImage)
         default:
@@ -144,11 +146,21 @@ struct MessageImageAttachment: View {
 /// replaced by that text.
 struct MessageStickerView: View {
     let file: SharedFile
+    /// Opens the pack the sticker is from; nil when it names none.
+    var openPack: (() -> Void)?
 
     var body: some View {
-        sticker
-            .accessibilityLabel(Text(file.description ?? "Sticker"))
-            .accessibilityAddTraits(.isImage)
+        if let openPack {
+            Button(action: openPack) { sticker }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(file.description ?? "Sticker"))
+                .accessibilityAddTraits(.isImage)
+                .accessibilityHint(Text("Shows the pack this sticker is from"))
+        } else {
+            sticker
+                .accessibilityLabel(Text(file.description ?? "Sticker"))
+                .accessibilityAddTraits(.isImage)
+        }
     }
 
     @ViewBuilder

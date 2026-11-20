@@ -73,6 +73,8 @@ public struct WireMessage: Hashable, Sendable {
     public var forumPostKind: ForumPostKind?
     public var forumTitle: String?
     public var isSticker: Bool
+    /// XEP-0449: the pack a sticker says it is from, when it says.
+    public var stickerPack: StickerReference?
     public var sharedFiles: [SharedFile]
     public var linkPreviews: [LinkPreview]
     public var pinEvent: PinEvent?
@@ -115,6 +117,7 @@ public struct WireMessage: Hashable, Sendable {
         forumPostKind: ForumPostKind? = nil,
         forumTitle: String? = nil,
         isSticker: Bool = false,
+        stickerPack: StickerReference? = nil,
         sharedFiles: [SharedFile] = [],
         linkPreviews: [LinkPreview] = [],
         pinEvent: PinEvent? = nil,
@@ -148,6 +151,7 @@ public struct WireMessage: Hashable, Sendable {
         self.forumPostKind = forumPostKind
         self.forumTitle = forumTitle
         self.isSticker = isSticker
+        self.stickerPack = stickerPack
         self.sharedFiles = sharedFiles
         self.linkPreviews = linkPreviews
         self.pinEvent = pinEvent
