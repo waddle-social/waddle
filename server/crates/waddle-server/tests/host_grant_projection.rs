@@ -33,6 +33,8 @@ mod ingress_support;
 mod live_spicedb;
 #[path = "host_grant_projection/protected_space_contents.rs"]
 mod protected_space_contents;
+#[path = "host_grant_projection/protected_space_subscriptions.rs"]
+mod protected_space_subscriptions;
 #[allow(dead_code, unused_imports)]
 mod s2s_inbound_muc_support;
 
@@ -843,58 +845,18 @@ async fn live_spicedb_the_first_projection_requires_a_fresh_namespace() {
 #[ignore = "requires disposable PostgreSQL and SpiceDB"]
 async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
     use host_grant_revocation_support::{authenticate_unbound, Replica};
+    use protected_space_subscriptions::{receive_sm, wait_for_detach};
     use s2s_inbound_muc_support::Wiring;
     use waddle_server::permissions::host_grant::{BindSpace, FenceAcknowledgement, ScopeKey};
     use waddle_ws_test_support::{
         iq::{receive_iq, round_trip, send_stanza},
         stanza::{get, is_error, is_result, set},
-        WsXmppClient,
     };
     use waddle_xmpp::pubsub::{Affiliation, NodeConfig, NS_PUBSUB_OWNER};
     use waddle_xmpp::stream_management::SM_NS;
     use xmpp_parsers::{iq::Iq, minidom::Element};
 
     const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
-    const STATE_DETACHED: i64 = 2;
-
-    async fn receive_sm(client: &mut WsXmppClient, names: &[&str]) -> Element {
-        client
-            .recv_matching_within(Duration::from_secs(10), |frame| {
-                frame
-                    .parse::<Element>()
-                    .is_ok_and(|element| names.iter().any(|name| element.is(*name, SM_NS)))
-            })
-            .await
-            .expect("stream-management response")
-            .parse()
-            .expect("stream-management XML")
-    }
-
-    async fn wait_for_detach(pool: &sqlx::PgPool, resource: &jid::FullJid, newer_than: i64) -> i64 {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let detached = sqlx::query_as::<_, (i64, i64, i64)>(
-                    "SELECT generation, inbound_handled, outbound_appended FROM sm_durable_sessions
-                     WHERE full_jid = $1 AND state = $2 AND generation > $3",
-                )
-                .bind(resource.as_str())
-                .bind(STATE_DETACHED)
-                .bind(newer_than)
-                .fetch_optional(pool)
-                .await
-                .expect("read detached durable session");
-                if let Some((generation, inbound, outbound)) = detached {
-                    assert_eq!(inbound, 1, "original disco was handled once");
-                    assert_eq!(outbound, 1, "exactly one protected reply is in custody");
-                    return generation;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("session becomes durable and detached")
-    }
-
     let _serial = LIVE_SPICEDB.lock().await;
     let live = Live::start("hg_space_owner_ws").await;
     let wiring = Wiring::new(|_| {}).await;
@@ -1041,6 +1003,15 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         &mut owner,
         &mut member,
         &hidden_scope,
+    )
+    .await;
+    protected_space_subscriptions::assert_local_subscription_lifecycle(
+        &service,
+        node,
+        first,
+        second,
+        &mut member,
+        live.fixture.ingress.db.database_url(),
     )
     .await;
     let scope = live.fixture.state(&live.fixture.scope).await;
