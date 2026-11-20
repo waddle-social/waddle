@@ -711,5 +711,23 @@ pub fn build_sticker_marker_element(marker: &StickerMarker) -> Element {
     builder.build()
 }
 
+/// Read the pack a received `<sticker/>` marker names (XEP-0449
+/// §send-from-pack). `None` for a marker without a `pack`, and for one
+/// whose `jid` does not parse: the pack's location is then unknown, and
+/// the sender's own PEP node would be the wrong place to look.
+#[must_use]
+pub fn parse_sticker_marker_pack(marker: &Element) -> Option<PackRef> {
+    let id = PackId::try_new(marker.attr("pack")?)?;
+    let jid = match marker.attr("jid") {
+        Some(jid) => Some(jid.parse::<BareJid>().ok()?),
+        None => None,
+    };
+    Some(PackRef {
+        id,
+        jid,
+        node: marker.attr("node").map(str::to_owned),
+    })
+}
+
 #[cfg(test)]
 mod tests;

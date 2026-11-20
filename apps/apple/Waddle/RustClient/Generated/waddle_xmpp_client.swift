@@ -6213,6 +6213,11 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      */
     public var isSticker: Bool
     /**
+     * XEP-0449: the pack the sticker is from, when its marker names
+     * one. `pack_jid: None` means the sender's own PEP node.
+     */
+    public var stickerPack: WaddleStickerRef?
+    /**
      * Carries XEP-0045 `muc#user`: a room private message or a room
      * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
      */
@@ -6299,6 +6304,10 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          * XEP-0449: the archived body is a sticker.
          */isSticker: Bool,
         /**
+         * XEP-0449: the pack the sticker is from, when its marker names
+         * one. `pack_jid: None` means the sender's own PEP node.
+         */stickerPack: WaddleStickerRef?,
+        /**
          * Carries XEP-0045 `muc#user`: a room private message or a room
          * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
          */mucUser: Bool,
@@ -6355,6 +6364,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.forumPostKind = forumPostKind
         self.forumTitle = forumTitle
         self.isSticker = isSticker
+        self.stickerPack = stickerPack
         self.mucUser = mucUser
         self.authorRealJid = authorRealJid
         self.callThread = callThread
@@ -6416,6 +6426,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
                 forumTitle: FfiConverterOptionString.read(from: &buf),
                 isSticker: FfiConverterBool.read(from: &buf),
+                stickerPack: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf),
                 mucUser: FfiConverterBool.read(from: &buf),
                 authorRealJid: FfiConverterOptionString.read(from: &buf),
                 callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
@@ -6463,6 +6474,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
         FfiConverterOptionString.write(value.forumTitle, into: &buf)
         FfiConverterBool.write(value.isSticker, into: &buf)
+        FfiConverterOptionTypeWaddleStickerRef.write(value.stickerPack, into: &buf)
         FfiConverterBool.write(value.mucUser, into: &buf)
         FfiConverterOptionString.write(value.authorRealJid, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
@@ -9973,6 +9985,11 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var isSticker: Bool
     /**
+     * XEP-0449: the pack the sticker is from, when its marker names
+     * one. `pack_jid: None` means the sender's own PEP node.
+     */
+    public var stickerPack: WaddleStickerRef?
+    /**
      * XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
      * pipeline output), one entry per previewed URL.
      */
@@ -10106,6 +10123,10 @@ public struct WaddleMessage: Equatable, Hashable {
          * XEP-0449: the message body is a sticker.
          */isSticker: Bool,
         /**
+         * XEP-0449: the pack the sticker is from, when its marker names
+         * one. `pack_jid: None` means the sender's own PEP node.
+         */stickerPack: WaddleStickerRef?,
+        /**
          * XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
          * pipeline output), one entry per previewed URL.
          */linkPreviews: [WaddleLinkPreview],
@@ -10186,6 +10207,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.forumPostKind = forumPostKind
         self.forumTitle = forumTitle
         self.isSticker = isSticker
+        self.stickerPack = stickerPack
         self.linkPreviews = linkPreviews
         self.pinEvent = pinEvent
         self.callThreadEnded = callThreadEnded
@@ -10250,6 +10272,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
                 forumTitle: FfiConverterOptionString.read(from: &buf),
                 isSticker: FfiConverterBool.read(from: &buf),
+                stickerPack: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf),
                 linkPreviews: FfiConverterSequenceTypeWaddleLinkPreview.read(from: &buf),
                 pinEvent: FfiConverterOptionTypeWaddlePinEvent.read(from: &buf),
                 callThreadEnded: FfiConverterOptionTypeWaddleCallThreadEnded.read(from: &buf),
@@ -10300,6 +10323,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
         FfiConverterOptionString.write(value.forumTitle, into: &buf)
         FfiConverterBool.write(value.isSticker, into: &buf)
+        FfiConverterOptionTypeWaddleStickerRef.write(value.stickerPack, into: &buf)
         FfiConverterSequenceTypeWaddleLinkPreview.write(value.linkPreviews, into: &buf)
         FfiConverterOptionTypeWaddlePinEvent.write(value.pinEvent, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadEnded.write(value.callThreadEnded, into: &buf)
@@ -12751,10 +12775,10 @@ public func FfiConverterTypeWaddleStickerPack_lower(_ value: WaddleStickerPack) 
 
 
 /**
- * Reference to the source pack of an outbound sticker send
- * (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
- * `pack_node` locate packs hosted outside the sender's own PEP
- * `urn:xmpp:stickers:0` node.
+ * Reference to the source pack of a sticker, on an outbound send or a
+ * received message (XEP-0449 §"Sending a sticker from a sticker
+ * pack"). `pack_jid` / `pack_node` locate packs hosted outside the
+ * sender's own PEP `urn:xmpp:stickers:0` node.
  */
 public struct WaddleStickerRef: Equatable, Hashable {
     public var packId: String

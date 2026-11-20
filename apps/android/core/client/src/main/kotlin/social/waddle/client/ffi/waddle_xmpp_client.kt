@@ -8043,6 +8043,12 @@ data class WaddleArchivedMessage (
     var `isSticker`: kotlin.Boolean
     ,
     /**
+     * XEP-0449: the pack the sticker is from, when its marker names
+     * one. `pack_jid: None` means the sender's own PEP node.
+     */
+    var `stickerPack`: WaddleStickerRef?
+    ,
+    /**
      * Carries XEP-0045 `muc#user`: a room private message or a room
      * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
      */
@@ -8130,6 +8136,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeWaddleStickerRef.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadAnchor.read(buf),
@@ -8177,6 +8184,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
             FfiConverterOptionalString.allocationSize(value.`forumTitle`) +
             FfiConverterBoolean.allocationSize(value.`isSticker`) +
+            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`stickerPack`) +
             FfiConverterBoolean.allocationSize(value.`mucUser`) +
             FfiConverterOptionalString.allocationSize(value.`authorRealJid`) +
             FfiConverterOptionalTypeWaddleCallThreadAnchor.allocationSize(value.`callThread`) +
@@ -8223,6 +8231,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
             FfiConverterOptionalString.write(value.`forumTitle`, buf)
             FfiConverterBoolean.write(value.`isSticker`, buf)
+            FfiConverterOptionalTypeWaddleStickerRef.write(value.`stickerPack`, buf)
             FfiConverterBoolean.write(value.`mucUser`, buf)
             FfiConverterOptionalString.write(value.`authorRealJid`, buf)
             FfiConverterOptionalTypeWaddleCallThreadAnchor.write(value.`callThread`, buf)
@@ -10954,6 +10963,12 @@ data class WaddleMessage (
     var `isSticker`: kotlin.Boolean
     ,
     /**
+     * XEP-0449: the pack the sticker is from, when its marker names
+     * one. `pack_jid: None` means the sender's own PEP node.
+     */
+    var `stickerPack`: WaddleStickerRef?
+    ,
+    /**
      * XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
      * pipeline output), one entry per previewed URL.
      */
@@ -11073,6 +11088,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeWaddleStickerRef.read(buf),
             FfiConverterSequenceTypeWaddleLinkPreview.read(buf),
             FfiConverterOptionalTypeWaddlePinEvent.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadEnded.read(buf),
@@ -11123,6 +11139,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
             FfiConverterOptionalString.allocationSize(value.`forumTitle`) +
             FfiConverterBoolean.allocationSize(value.`isSticker`) +
+            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`stickerPack`) +
             FfiConverterSequenceTypeWaddleLinkPreview.allocationSize(value.`linkPreviews`) +
             FfiConverterOptionalTypeWaddlePinEvent.allocationSize(value.`pinEvent`) +
             FfiConverterOptionalTypeWaddleCallThreadEnded.allocationSize(value.`callThreadEnded`) +
@@ -11172,6 +11189,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
             FfiConverterOptionalString.write(value.`forumTitle`, buf)
             FfiConverterBoolean.write(value.`isSticker`, buf)
+            FfiConverterOptionalTypeWaddleStickerRef.write(value.`stickerPack`, buf)
             FfiConverterSequenceTypeWaddleLinkPreview.write(value.`linkPreviews`, buf)
             FfiConverterOptionalTypeWaddlePinEvent.write(value.`pinEvent`, buf)
             FfiConverterOptionalTypeWaddleCallThreadEnded.write(value.`callThreadEnded`, buf)
@@ -13051,10 +13069,10 @@ public object FfiConverterTypeWaddleStickerPack: FfiConverterRustBuffer<WaddleSt
 
 
 /**
- * Reference to the source pack of an outbound sticker send
- * (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
- * `pack_node` locate packs hosted outside the sender's own PEP
- * `urn:xmpp:stickers:0` node.
+ * Reference to the source pack of a sticker, on an outbound send or a
+ * received message (XEP-0449 §"Sending a sticker from a sticker
+ * pack"). `pack_jid` / `pack_node` locate packs hosted outside the
+ * sender's own PEP `urn:xmpp:stickers:0` node.
  */
 data class WaddleStickerRef (
     var `packId`: kotlin.String

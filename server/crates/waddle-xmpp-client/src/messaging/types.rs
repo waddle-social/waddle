@@ -411,6 +411,9 @@ pub struct InboundMessage {
     pub safety_scores: Option<SafetyScoresFastening>,
     /// Whether the file is marked as a sticker.
     pub is_sticker: bool,
+    /// XEP-0449: the pack the sticker is from, when the marker names one.
+    /// `jid: None` means the sender's own `urn:xmpp:stickers:0` PEP node.
+    pub sticker_pack: Option<crate::stickers::PackRef>,
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.
     pub pin_event: Option<PinEvent>,

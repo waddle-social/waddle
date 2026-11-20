@@ -303,6 +303,14 @@ pub(super) fn sticker_pack_from_ffi(
     })
 }
 
+fn sticker_pack_ref_to_ffi(pack: stickers::PackRef) -> WaddleStickerRef {
+    WaddleStickerRef {
+        pack_id: pack.id.to_string(),
+        pack_jid: pack.jid.map(|jid| jid.to_string()),
+        pack_node: pack.node,
+    }
+}
+
 fn sticker_marker_from_ffi(sticker: WaddleStickerRef) -> Result<stickers::StickerMarker, String> {
     let id = stickers::PackId::try_new(sticker.pack_id)
         .ok_or_else(|| "sticker pack id must not be empty".to_string())?;
@@ -873,6 +881,7 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
             .and_then(forum_post_kind_to_ffi),
         forum_title: msg.forum_title,
         is_sticker: msg.is_sticker,
+        sticker_pack: msg.sticker_pack.map(sticker_pack_ref_to_ffi),
         link_previews: link_previews_to_ffi(msg.link_previews),
         pin_event: msg.pin_event.map(pin_event_to_ffi),
         call_thread_ended: msg.call_thread_ended.map(call_thread_ended_to_ffi),
@@ -998,6 +1007,9 @@ pub(crate) fn archived_to_ffi(
             .and_then(forum_post_kind_to_ffi),
         forum_title: parsed.and_then(|m| m.forum_title.clone()),
         is_sticker: parsed.is_some_and(|m| m.is_sticker),
+        sticker_pack: parsed
+            .and_then(|m| m.sticker_pack.clone())
+            .map(sticker_pack_ref_to_ffi),
         muc_user: parsed.is_some_and(|m| m.muc_pm),
         author_real_jid: archived.author_real_jid,
         call_thread: parsed
@@ -1783,8 +1795,46 @@ mod tests {
              </message>",
         ));
         assert!(ffi.is_sticker);
+        assert_eq!(
+            ffi.sticker_pack,
+            Some(WaddleStickerRef {
+                pack_id: "crabs".to_string(),
+                pack_jid: None,
+                pack_node: None,
+            })
+        );
         assert_eq!(ffi.shared_files.len(), 1);
         assert_eq!(ffi.shared_files[0].url, "https://cdn.waddle.test/crab.png");
+    }
+
+    #[test]
+    fn xep0449_pack_location_survives_inbound_to_ffi() {
+        // §send-from-pack: `jid` and `node` locate a pack that is not on
+        // the sender's own PEP node; a bare marker names no pack.
+        let hosted = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='bob@waddle.test/phone'>\
+               <body>\u{1F980}</body>\
+               <sticker xmlns='urn:xmpp:stickers:0' pack='crabs' \
+                        jid='packs.waddle.test' node='generic/sticker/node'/>\
+             </message>",
+        ));
+        assert_eq!(
+            hosted.sticker_pack,
+            Some(WaddleStickerRef {
+                pack_id: "crabs".to_string(),
+                pack_jid: Some("packs.waddle.test".to_string()),
+                pack_node: Some("generic/sticker/node".to_string()),
+            })
+        );
+
+        let bare = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='bob@waddle.test/phone'>\
+               <body>\u{1F980}</body>\
+               <sticker xmlns='urn:xmpp:stickers:0'/>\
+             </message>",
+        ));
+        assert!(bare.is_sticker);
+        assert_eq!(bare.sticker_pack, None);
     }
 
     #[test]
@@ -2299,6 +2349,14 @@ mod tests {
         assert_eq!(ffi.forum_post_kind, Some(WaddleForumPostKind::Topic));
         assert_eq!(ffi.forum_title.as_deref(), Some("Release planning"));
         assert!(ffi.is_sticker);
+        assert_eq!(
+            ffi.sticker_pack,
+            Some(WaddleStickerRef {
+                pack_id: "crabs".to_string(),
+                pack_jid: None,
+                pack_node: None,
+            })
+        );
         assert!(!ffi.is_retracted);
         assert!(ffi.retraction_id.is_none());
     }

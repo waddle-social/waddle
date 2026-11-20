@@ -58,6 +58,7 @@ internal fun ownDmEcho(
     // The echo must render like the eventual MAM copy: a send carrying
     // the XEP-0449 sticker ref IS a sticker message.
     isSticker = options.sticker != null,
+    stickerPack = options.sticker,
     linkPreviews = emptyList(),
     pinEvent = null,
     callThreadEnded = null,
