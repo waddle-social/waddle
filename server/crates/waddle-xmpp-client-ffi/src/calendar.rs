@@ -432,10 +432,18 @@ fn apply_input(mut item: CalendarItem, event: WaddleEvent) -> Result<CalendarIte
     if start.is_none() && end.is_some() {
         return Err(WaddleError::InvalidArgument);
     }
-    let recurrence = event
-        .recurrence
-        .map(|recurrence| authored_rule(recurrence, start))
-        .transpose()?;
+    // A rule the caller hands back as it was fetched is kept as stored, so
+    // an edit of the title does not fail on a rule another client wrote.
+    let stored_rule = item.master.rrule.take().filter(|rule| {
+        start.is_some() && Some(WaddleRecurrence::from(rule.clone())) == event.recurrence
+    });
+    let recurrence = match stored_rule {
+        Some(rule) => Some(rule),
+        None => event
+            .recurrence
+            .map(|recurrence| authored_rule(recurrence, start))
+            .transpose()?,
+    };
     // Cancelled and changed occurrences are named by the start they had.
     // Once the series moves, those names would point at other occurrences.
     if start != item.master.dtstart || recurrence.is_none() {

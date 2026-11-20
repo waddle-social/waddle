@@ -15,7 +15,8 @@
 //! | DAILY   | the day                                                      |
 //! | WEEKLY  | BYDAY, else the weekday of DTSTART; weeks start on Monday     |
 //! | MONTHLY | BYMONTHDAY, else every BYDAY weekday, else the day of DTSTART |
-//! | YEARLY  | the month and day of DTSTART                                 |
+//! | YEARLY  | BYMONTHDAY in every month, else every BYDAY weekday, else the |
+//! |         | month and day of DTSTART                                     |
 //!
 //! A day a month does not have (the 31st in April, 29 February outside a
 //! leap year) is skipped, not moved. BYDAY and BYMONTHDAY that do not pick
@@ -181,8 +182,17 @@ fn period_days(rule: &Rrule, first_day: NaiveDate, period: u32) -> Option<Period
         Freq::Yearly => {
             let year = first_day.year().checked_add(i32::try_from(step).ok()?)?;
             let opens = NaiveDate::from_ymd_opt(year, 1, 1)?;
-            let day = NaiveDate::from_ymd_opt(year, first_day.month(), first_day.day());
-            (opens, day.into_iter().collect())
+            let picked = if rule.by_month_day.is_empty() && rule.by_day.is_empty() {
+                NaiveDate::from_ymd_opt(year, first_day.month(), first_day.day())
+                    .into_iter()
+                    .collect()
+            } else {
+                opens
+                    .iter_days()
+                    .take_while(|day| day.year() == year)
+                    .collect()
+            };
+            (opens, picked)
         }
     };
     picked.retain(|day| on_weekday(rule, *day) && on_month_day(rule, *day));
@@ -494,6 +504,17 @@ mod tests {
     }
 
     #[test]
+    fn a_yearly_rule_with_weekdays_or_month_days_takes_each_of_them() {
+        let fridays = friday_evening(Rrule::new(Freq::Yearly).with_by_day([Weekday::Friday]));
+        let fifths = friday_evening(Rrule::new(Freq::Yearly).with_by_month_day([5]));
+        assert_eq!(february(&fridays).len(), 4);
+        assert_eq!(
+            starts(&fifths, at(2027, 1, 1, 0), at(2027, 5, 1, 0)),
+            ["2027-02-05 19:00", "2027-03-05 19:00", "2027-04-05 19:00"]
+        );
+    }
+
+    #[test]
     fn a_leap_day_event_happens_in_leap_years_only() {
         let item = CalendarItem::new(
             VEvent::new("leap", "Leap day")
@@ -575,12 +596,17 @@ mod tests {
 
     #[test]
     fn a_rule_that_never_matches_ends() {
-        // Friday the 5th, limited to Mondays that are the 5th, every 4 years.
-        let rule = Rrule::new(Freq::Yearly)
-            .with_interval(4)
-            .with_by_day([Weekday::Monday]);
-        let item = friday_evening(rule);
-        assert!(starts(&item, at(2027, 1, 1, 0), at(2030, 1, 1, 0)).is_empty());
+        let no_such_day = friday_evening(Rrule::new(Freq::Daily).with_by_month_day([32]));
+        let never_reached = friday_evening(
+            Rrule::new(Freq::Yearly)
+                .with_interval(u32::MAX)
+                .with_count(2),
+        );
+        assert!(starts(&no_such_day, at(2027, 1, 1, 0), at(2030, 1, 1, 0)).is_empty());
+        assert_eq!(
+            starts(&never_reached, at(2027, 1, 1, 0), at(2100, 1, 1, 0)),
+            ["2027-02-05 19:00"]
+        );
     }
 
     #[test]

@@ -404,3 +404,19 @@ fn a_fetched_event_expands_to_its_occurrences() {
             if timestamp_ms == FRIDAY_19 + WEEK_MS + 2 * 3_600_000
     ));
 }
+
+#[test]
+fn an_edit_keeps_a_rule_this_client_would_not_write() {
+    let first_fridays = Rrule::new(Freq::Monthly).with_by_day([Weekday::Friday]);
+    let original = stored(
+        VEvent::new("trip", "London")
+            .with_dtstart(instant(FRIDAY_19))
+            .with_rrule(first_fridays.clone()),
+    );
+    let mut event = input_for(&original);
+    event.summary = "London maintainers".into();
+
+    let changed = apply_input(original, event).expect("the rule is unchanged");
+
+    assert_eq!(changed.master.rrule, Some(first_fridays));
+}
