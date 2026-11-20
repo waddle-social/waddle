@@ -90,22 +90,36 @@ pub(super) async fn handle_pubsub_iq(
                 Err(()) => Ok(true),
             };
             if enrolled != Ok(false) {
-                if let (Ok(true), PubSubRequest::AffiliationsSet { node, changes }) =
-                    (enrolled, request)
-                {
-                    let response = super::pubsub_space_membership::set_space_membership(
-                        iq,
-                        state,
-                        &target_jid,
-                        &user_jid,
-                        authenticated_session,
-                        &node,
-                        changes,
-                    )
-                    .await;
-                    return vec![iq_to_xml(response)];
-                }
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                let response = match (enrolled, request) {
+                    (Ok(true), PubSubRequest::AffiliationsSet { node, changes }) => {
+                        super::pubsub_space_membership::set_space_membership(
+                            iq,
+                            state,
+                            &target_jid,
+                            &user_jid,
+                            authenticated_session,
+                            &node,
+                            changes,
+                        )
+                        .await
+                    }
+                    (
+                        Ok(true),
+                        request @ (PubSubRequest::Publish { .. } | PubSubRequest::Retract { .. }),
+                    ) => {
+                        super::protected_space_bookmarks::write(
+                            iq,
+                            state,
+                            &target_jid,
+                            &user_jid,
+                            authenticated_session,
+                            request,
+                        )
+                        .await
+                    }
+                    _ => build_pubsub_error(iq, PubSubError::Forbidden),
+                };
+                return vec![iq_to_xml(response)];
             }
         }
 

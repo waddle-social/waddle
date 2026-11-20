@@ -123,6 +123,7 @@ mod muji_preparation_tests;
 mod pep_addressing;
 mod permissions;
 mod pin_query;
+mod protected_space_bookmarks;
 mod protected_space_contents;
 mod pubsub_admin;
 mod pubsub_dispatch;

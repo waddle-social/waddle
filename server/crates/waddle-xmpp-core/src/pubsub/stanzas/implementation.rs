@@ -221,6 +221,8 @@ pub enum PubSubRequest {
 pub enum PubSubUnsupportedFeature {
     /// The service does not support subscription administration.
     ManageSubscriptions,
+    /// The addressed node does not support publish options.
+    PublishOptions,
 }
 
 impl PubSubUnsupportedFeature {
@@ -229,6 +231,7 @@ impl PubSubUnsupportedFeature {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ManageSubscriptions => "manage-subscriptions",
+            Self::PublishOptions => "publish-options",
         }
     }
 }
