@@ -185,10 +185,7 @@ impl TryFrom<WaddleRecurrence> for Rrule {
 }
 /// The rule to store for a recurrence a caller wrote. Stricter than what is
 /// read: only rules every client shows the same way are written.
-fn authored_rule(
-    recurrence: WaddleRecurrence,
-    start: Option<CalendarDateValue>,
-) -> Result<Rrule, WaddleError> {
+fn authored_rule(recurrence: WaddleRecurrence) -> Result<Rrule, WaddleError> {
     let weekly = recurrence.frequency == WaddleRecurrenceFrequency::Weekly;
     let monthly = recurrence.frequency == WaddleRecurrenceFrequency::Monthly;
     let days_fit = (weekly || recurrence.weekdays.is_empty())
@@ -201,17 +198,18 @@ fn authored_rule(
     if recurrence.interval == 0 || !days_fit || !counted {
         return Err(WaddleError::InvalidArgument);
     }
-    let rule = Rrule::try_from(recurrence)?;
-    let ends_after_start = match (&rule.end, start) {
+    Rrule::try_from(recurrence)
+}
+/// Whether a series that starts at `start` can follow `rule`. Holds for
+/// every rule written, a stored one handed back unchanged included.
+fn rule_fits_start(rule: &Rrule, start: Option<CalendarDateValue>) -> bool {
+    match (&rule.end, start) {
         (_, None) => false,
         // An all-day series cannot end on an instant: readers drop the item.
         (Some(RruleEnd::Until(_)), Some(CalendarDateValue::Date(_))) => false,
         (Some(RruleEnd::Until(until)), Some(CalendarDateValue::DateTime(start))) => *until >= start,
         _ => true,
-    };
-    ends_after_start
-        .then_some(rule)
-        .ok_or(WaddleError::InvalidArgument)
+    }
 }
 impl From<Rrule> for WaddleRecurrence {
     fn from(rule: Rrule) -> Self {
@@ -434,16 +432,21 @@ fn apply_input(mut item: CalendarItem, event: WaddleEvent) -> Result<CalendarIte
     }
     // A rule the caller hands back as it was fetched is kept as stored, so
     // an edit of the title does not fail on a rule another client wrote.
-    let stored_rule = item.master.rrule.take().filter(|rule| {
-        start.is_some() && Some(WaddleRecurrence::from(rule.clone())) == event.recurrence
-    });
+    let stored_rule = item
+        .master
+        .rrule
+        .take()
+        .filter(|rule| Some(WaddleRecurrence::from(rule.clone())) == event.recurrence);
     let recurrence = match stored_rule {
         Some(rule) => Some(rule),
-        None => event
-            .recurrence
-            .map(|recurrence| authored_rule(recurrence, start))
-            .transpose()?,
+        None => event.recurrence.map(authored_rule).transpose()?,
     };
+    if !recurrence
+        .as_ref()
+        .is_none_or(|rule| rule_fits_start(rule, start))
+    {
+        return Err(WaddleError::InvalidArgument);
+    }
     // Cancelled and changed occurrences are named by the start they had.
     // Once the series moves, those names would point at other occurrences.
     if start != item.master.dtstart || recurrence.is_none() {
