@@ -31,6 +31,8 @@ mod host_grant_support;
 mod ingress_support;
 #[path = "host_grant_support/live_spicedb.rs"]
 mod live_spicedb;
+#[path = "host_grant_projection/protected_space_contents.rs"]
+mod protected_space_contents;
 #[allow(dead_code, unused_imports)]
 mod s2s_inbound_muc_support;
 
@@ -1031,6 +1033,13 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
     )
     .await;
     assert!(is_result(&granted), "{granted:?}");
+    protected_space_contents::assert_canonical_space_children(
+        &live,
+        &authority,
+        first,
+        &mut member,
+    )
+    .await;
     let scope = live.fixture.state(&live.fixture.scope).await;
     assert_eq!(scope.projected_generation, Some(scope.generation));
     let discovered = round_trip(&mut member, discover("space-disco-member")).await;
