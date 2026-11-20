@@ -112,6 +112,7 @@ pub use issuance::{
 pub use marker::{
     ProjectionMarker, HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
+pub(crate) use model::guard_queue_key;
 pub use model::{
     AdmissionState, AuthorityIncarnation, BindSpace, BootstrapGrant, CandidateAdmission,
     ClosedReason, EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject,

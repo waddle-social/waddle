@@ -46,8 +46,8 @@ use managed::{Managed, GUEST_PHONE, STRANGER_PHONE};
 use minidom::Element;
 use s2s_inbound_muc_support::{error_condition, jid};
 use waddle_server::db::s2s_spaces::{
-    lock_space_deletion, FederatedSpaces, SpaceSubscriptions, SubscriptionRecord,
-    SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
+    lock_space_deletion, FederatedSpaces, SpaceSubscriptionGrant, SpaceSubscriptions,
+    SubscriptionRecord, SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
 };
 use waddle_server::permissions::host_grant::{BindSpace, GrantOperationId, StreamEvidence};
 use waddle_server::s2s::conn::AuthenticationStrength;
@@ -450,6 +450,54 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         ],
     ).await.expect("seed the canonical member");
     drop(conn);
+
+    let created_at = storage
+        .get_node(&spaces(), node)
+        .await
+        .expect("read node")
+        .expect("Space exists")
+        .created_at
+        .timestamp_millis();
+    let subscriber = jid(GUEST_PHONE).to_bare();
+    let subscriptions = SpaceSubscriptions::new(fixture.ingress.db.clone());
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let subscription = SubscriptionRequest {
+        account: &subscriber,
+        evidence: StreamEvidence::for_test(AuthenticationStrength::Pkix, None),
+        snapshot: uuid::Uuid::new_v4(),
+        now_ms,
+    };
+    let token = SpaceSubscriptionGrant {
+        lifecycle: command.lifecycle,
+        incarnation: bound.record().authority_incarnation,
+        generation: bound.record().generation,
+    };
+    let stale = SpaceSubscriptionGrant {
+        generation: token.generation.next().expect("next epoch"),
+        ..token
+    };
+    assert_eq!(
+        subscriptions
+            .record_protected(&spaces(), node, created_at, subscription, &|_| true, stale)
+            .await
+            .expect("stale subscription decision")
+            .outcome,
+        SubscriptionRecord::NotFederated
+    );
+    assert_eq!(
+        subscriptions
+            .record_protected(&spaces(), node, created_at, subscription, &|_| true, token)
+            .await
+            .expect("canonical subscription")
+            .outcome,
+        SubscriptionRecord::Recorded
+    );
+    let stored = subscriptions
+        .of_node(&spaces(), node, created_at, now_ms)
+        .await
+        .expect("read the subscription");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].grant, Some(token));
 
     for (from, expected) in [(GUEST_PHONE, "result"), (STRANGER_PHONE, "error")] {
         let answer = ask(

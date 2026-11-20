@@ -48,7 +48,8 @@ use uuid::Uuid;
 
 use super::{Database, DatabaseDriver, Row, Transaction};
 use crate::permissions::host_grant::{
-    AuthorityIncarnation, GrantGeneration, ScopeLifecycleId, StreamEvidence,
+    guard_queue_key, AuthorityIncarnation, GrantGeneration, ScopeLifecycleId, StreamEvidence,
+    HOST_GRANT_POLICY_VERSION,
 };
 use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::verify::TrustProfileKind;
@@ -420,12 +421,69 @@ async fn begin_for_subscription<'a>(
     domain: &str,
     service: &BareJid,
     node: &str,
-) -> Result<Transaction<'a>, SpaceStoreError> {
+    grant: Option<SpaceSubscriptionGrant>,
+) -> Result<Option<Transaction<'a>>, SpaceStoreError> {
     let mut tx = db.begin_immediate().await.map_err(storage)?;
+    if let Some(grant) = grant {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Ok(None);
+        }
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![guard_queue_key(grant.lifecycle)],
+        )
+        .await
+        .map_err(storage)?;
+        let mut rows = tx
+            .query(
+                "SELECT lifecycle_id FROM host_grant_scopes WHERE lifecycle_id = ? FOR SHARE",
+                crate::db_params![grant.lifecycle.to_storage()],
+            )
+            .await
+            .map_err(storage)?;
+        let exists = rows.next().await.map_err(storage)?.is_some();
+        drop(rows);
+        if !exists {
+            tx.rollback().await.map_err(storage)?;
+            return Ok(None);
+        }
+    }
     let key = ["waddle.s2s.space_subscriptions.domain:", domain].concat();
     advisory_lock(db, &mut tx, key).await?;
     lock_space(db, &mut tx, service, node).await?;
-    Ok(tx)
+    Ok(Some(tx))
+}
+
+async fn protected_subscription_still_allowed(
+    tx: &mut Transaction<'_>,
+    service: &BareJid,
+    node: &str,
+    node_created_at_ms: i64,
+    request: &SubscriptionRequest<'_>,
+    grant: SpaceSubscriptionGrant,
+) -> Result<bool, SpaceStoreError> {
+    let mut rows = tx.query(
+        "SELECT 1 FROM host_grant_space_bindings b \
+         JOIN host_grant_scopes s ON s.lifecycle_id = b.lifecycle_id \
+         JOIN host_grant_authority a ON a.singleton AND a.incarnation = s.authority_incarnation \
+         JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node \
+         JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id \
+         WHERE b.lifecycle_id = ? AND b.service_jid = ? AND b.space_node = ? AND b.federated \
+         AND b.authority_incarnation = a.incarnation AND a.incarnation = ? \
+         AND s.admission_state = 'active' AND s.policy_version = ? \
+         AND p.created_at_ms = ? AND p.access_model = b.access_model \
+         AND (p.node_type IS NULL OR p.node_type = ?) \
+         AND g.subject_jid = ? AND g.changed_generation = ? AND g.affiliation <> 'outcast' \
+         AND (g.effective_affiliation = 'member' OR (g.effective_affiliation IN ('owner', 'publisher') \
+              AND g.issuance_basis = 'trusted_home' AND (? <> 0)))",
+        crate::db_params![
+            grant.lifecycle.to_storage(), service.as_str(), node,
+            grant.incarnation.to_storage(), HOST_GRANT_POLICY_VERSION, node_created_at_ms,
+            waddle_xmpp::xep::xep0503::NS_SPACES, request.account.as_str(), grant.generation.value(),
+            request.evidence.strength() == AuthenticationStrength::Pkix
+        ],
+    ).await.map_err(storage)?;
+    Ok(rows.next().await.map_err(storage)?.is_some())
 }
 
 /// The remote domains of the rows of `s2s_space_subscriptions` that match
@@ -737,6 +795,40 @@ impl SpaceSubscriptions {
         request: SubscriptionRequest<'_>,
         admitted: &(dyn Fn(&str) -> bool + Send + Sync),
     ) -> Result<Recording, SpaceStoreError> {
+        self.record_preference(service, node, node_created_at_ms, request, admitted, None)
+            .await
+    }
+
+    /// Record a protected preference under the canonical scope guard.
+    pub async fn record_protected(
+        &self,
+        service: &BareJid,
+        node: &str,
+        node_created_at_ms: i64,
+        request: SubscriptionRequest<'_>,
+        admitted: &(dyn Fn(&str) -> bool + Send + Sync),
+        grant: SpaceSubscriptionGrant,
+    ) -> Result<Recording, SpaceStoreError> {
+        self.record_preference(
+            service,
+            node,
+            node_created_at_ms,
+            request,
+            admitted,
+            Some(grant),
+        )
+        .await
+    }
+
+    async fn record_preference(
+        &self,
+        service: &BareJid,
+        node: &str,
+        node_created_at_ms: i64,
+        request: SubscriptionRequest<'_>,
+        admitted: &(dyn Fn(&str) -> bool + Send + Sync),
+        grant: Option<SpaceSubscriptionGrant>,
+    ) -> Result<Recording, SpaceStoreError> {
         let SubscriptionRequest {
             account,
             evidence,
@@ -752,11 +844,24 @@ impl SpaceSubscriptions {
         }
         let domain = account.domain().as_str();
         let lapsed_before = now_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS);
-        let mut tx = begin_for_subscription(&self.db, domain, service, node).await?;
+        let Some(mut tx) = begin_for_subscription(&self.db, domain, service, node, grant).await?
+        else {
+            return Ok(Recording::only(SubscriptionRecord::NotFederated));
+        };
         // The setting, read again under the Space's lock: turning it off
         // takes that lock, so a subscription is recorded only for a Space
         // whose setting is still on for this very node.
-        let federated = {
+        let federated = if let Some(grant) = grant {
+            protected_subscription_still_allowed(
+                &mut tx,
+                service,
+                node,
+                node_created_at_ms,
+                &request,
+                grant,
+            )
+            .await?
+        } else {
             let mut rows = tx
                 .query(
                     "SELECT node_created_at_ms FROM s2s_federated_spaces \
@@ -821,13 +926,17 @@ impl SpaceSubscriptions {
             .execute(
                 "INSERT INTO s2s_space_subscriptions \
              (service_jid, node_name, subscriber_jid, account_jid, subscriber_domain, \
-              node_created_at_ms, strength, trust_profile, snapshot_generation, subscribed_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+              node_created_at_ms, strength, trust_profile, snapshot_generation, subscribed_at_ms, \
+              grant_lifecycle_id, grant_authority_incarnation, grant_generation) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (service_jid, node_name, subscriber_jid) DO UPDATE SET \
              strength = excluded.strength, trust_profile = excluded.trust_profile, \
              snapshot_generation = excluded.snapshot_generation, \
-             subscribed_at_ms = excluded.subscribed_at_ms \
-             WHERE s2s_space_subscriptions.grant_lifecycle_id IS NULL",
+             subscribed_at_ms = excluded.subscribed_at_ms, \
+             grant_lifecycle_id = excluded.grant_lifecycle_id, \
+             grant_authority_incarnation = excluded.grant_authority_incarnation, \
+             grant_generation = excluded.grant_generation \
+             WHERE excluded.grant_lifecycle_id IS NOT NULL OR s2s_space_subscriptions.grant_lifecycle_id IS NULL",
                 crate::db_params![
                     service.as_str(),
                     node,
@@ -838,7 +947,10 @@ impl SpaceSubscriptions {
                     strength_code(evidence.strength()),
                     evidence.trust_profile().map(trust_profile_code),
                     snapshot.to_string(),
-                    now_ms
+                    now_ms,
+                    grant.map(|grant| grant.lifecycle.to_storage()),
+                    grant.map(|grant| grant.incarnation.to_storage()),
+                    grant.map(|grant| grant.generation.value())
                 ],
             )
             .await
@@ -846,6 +958,21 @@ impl SpaceSubscriptions {
         if recorded != 1 {
             tx.rollback().await.map_err(storage)?;
             return Ok(Recording::only(SubscriptionRecord::NotFederated));
+        }
+        if let Some(grant) = grant {
+            if !protected_subscription_still_allowed(
+                &mut tx,
+                service,
+                node,
+                node_created_at_ms,
+                &request,
+                grant,
+            )
+            .await?
+            {
+                tx.rollback().await.map_err(storage)?;
+                return Ok(Recording::only(SubscriptionRecord::NotFederated));
+            }
         }
         tx.commit().await.map_err(storage)?;
         // The account's own lapsed row was renewed, not removed.
