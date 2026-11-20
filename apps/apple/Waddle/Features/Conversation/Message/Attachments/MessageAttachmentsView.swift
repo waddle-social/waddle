@@ -150,16 +150,19 @@ struct MessageStickerView: View {
     var openPack: (() -> Void)?
 
     var body: some View {
+        tappable
+            .accessibilityLabel(Text(file.description ?? "Sticker"))
+            .accessibilityAddTraits(.isImage)
+    }
+
+    @ViewBuilder
+    private var tappable: some View {
         if let openPack {
             Button(action: openPack) { sticker }
                 .buttonStyle(.plain)
-                .accessibilityLabel(Text(file.description ?? "Sticker"))
-                .accessibilityAddTraits(.isImage)
                 .accessibilityHint(Text("Shows the pack this sticker is from"))
         } else {
             sticker
-                .accessibilityLabel(Text(file.description ?? "Sticker"))
-                .accessibilityAddTraits(.isImage)
         }
     }
 

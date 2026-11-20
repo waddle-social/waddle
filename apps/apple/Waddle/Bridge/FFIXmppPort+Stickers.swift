@@ -24,6 +24,19 @@ extension FFIXmppPort {
         }
     }
 
+    /// The pack is handed back to the core as the core read it, so what
+    /// it holds beyond what the app shows is copied too and the pack
+    /// keeps its id.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String {
+        try await mappingPortErrors {
+            guard let pack = try await client.fetchStickerPack(
+                ownerJid: location.owner.description, node: location.node, packId: location.packID
+            ) else { throw PortError.failed }
+            guard !pack.restricted else { throw PortError.rejected }
+            return try await client.publishStickerPack(pack: pack)
+        }
+    }
+
     /// The core answers only yes or no, so a refusal and a lost
     /// connection look the same here.
     func retractStickerPack(_ packID: String) async throws {

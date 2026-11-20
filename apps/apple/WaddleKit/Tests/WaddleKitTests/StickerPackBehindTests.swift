@@ -49,17 +49,39 @@ struct StickerPackBehindTests {
         #expect(coordinator.stickerPackLocation(of: item) == StickerPackLocation(owner: bob, packID: "pack-1"))
     }
 
-    @Test func aMarkerThatSaysWhereThePackIsWinsOverTheSender() throws {
+    /// Opening a pack sends a request from this account's address. A
+    /// marker may point anywhere, so it is followed only to the sender's
+    /// own account: otherwise whoever sends a sticker could make everyone
+    /// who taps it show their address to a third party.
+    @Test func aPackKeptSomewhereElseThanTheSendersAccountIsNotOpened() throws {
         let (coordinator, _) = online()
         let message = sticker(
             directMessage("👋", from: jid("bob@waddle.test/phone"), to: jid("alice@waddle.test"), id: "m1"),
-            pack: StickerReference(packID: "pack-1", owner: bare("packs.waddle.test"), node: "shared/packs")
+            pack: StickerReference(packID: "pack-1", owner: bare("packs.elsewhere.test"), node: "shared/packs")
+        )
+        var inRoom = sticker(
+            roomMessage("👋", from: "bob", stanzaID: "s1"),
+            pack: StickerReference(packID: "pack-1", owner: bare("mallory@elsewhere.test"))
+        )
+        inRoom.authorRealJID = bob
+
+        let item = try row(message, in: bobConversation, of: coordinator)
+        let roomItem = try row(inRoom, in: roomConversation, of: coordinator)
+
+        #expect(coordinator.stickerPackLocation(of: item) == nil)
+        #expect(coordinator.stickerPackLocation(of: roomItem) == nil)
+    }
+
+    @Test func aPackOnAnotherNodeOfTheSendersAccountIsOpenedThere() throws {
+        let (coordinator, _) = online()
+        let message = sticker(
+            directMessage("👋", from: jid("bob@waddle.test/phone"), to: jid("alice@waddle.test"), id: "m1"),
+            pack: StickerReference(packID: "pack-1", owner: bob, node: "more/stickers")
         )
 
         let item = try row(message, in: bobConversation, of: coordinator)
 
-        #expect(coordinator.stickerPackLocation(of: item)
-            == StickerPackLocation(owner: bare("packs.waddle.test"), node: "shared/packs", packID: "pack-1"))
+        #expect(coordinator.stickerPackLocation(of: item) == StickerPackLocation(owner: bob, node: "more/stickers", packID: "pack-1"))
     }
 
     /// In a room the sender is a nick; only the account the room vouches
@@ -137,18 +159,20 @@ struct StickerPackBehindTests {
 
     // MARK: Copying it
 
+    private let theirPlace = StickerPackLocation(owner: bob, packID: "pack-1")
+
     /// XEP-0449 "Importing a sticker pack": the pack is published again on
-    /// the account's own packs, with the same stickers.
-    @Test func copyingAPackPublishesItToMyOwnPacks() async throws {
+    /// the account's own packs, as it is, so it keeps its id.
+    @Test func copyingAPackPutsTheSamePackInMyOwn() async throws {
         let (coordinator, port) = online()
-        port.stickers.publishedID = "pack-1"
         let theirs = StickerPack(id: "pack-1", name: "Seals", summary: "Flippers", stickers: [wave])
+        port.stickers.packsElsewhere[theirPlace] = .success(theirs)
 
-        let mine = try await coordinator.copyStickerPack(theirs)
+        let mine = try await coordinator.copyStickerPack(theirs, from: theirPlace)
 
-        #expect(port.stickers.published == [StickerPackDraft(name: "Seals", summary: "Flippers", stickers: [wave])])
-        #expect(mine.id == "pack-1")
-        #expect(coordinator.stickers.packs.map(\.id) == ["pack-1"])
+        #expect(port.stickers.copied == [theirPlace])
+        #expect(mine == theirs)
+        #expect(coordinator.stickers.packs == [theirs])
     }
 
     /// The XEP asks apps not to offer copying a pack its author restricted.
@@ -156,17 +180,20 @@ struct StickerPackBehindTests {
         let (coordinator, port) = online()
         let theirs = StickerPack(id: "pack-1", name: "Seals", isRestricted: true, stickers: [wave])
 
-        await #expect(throws: PortError.rejected) { try await coordinator.copyStickerPack(theirs) }
+        await #expect(throws: PortError.rejected) { try await coordinator.copyStickerPack(theirs, from: theirPlace) }
 
-        #expect(port.stickers.published.isEmpty)
+        #expect(port.stickers.copied.isEmpty)
         #expect(coordinator.stickers.packs.isEmpty)
     }
 
-    @Test func aPackWithoutANameIsCopiedAsStickers() async throws {
+    @Test func aCopyTheServerRefusesAddsNothing() async {
         let (coordinator, port) = online()
+        port.stickers.copyResult = .failure(.timeout)
 
-        try await coordinator.copyStickerPack(StickerPack(id: "pack-1", stickers: [wave]))
+        await #expect(throws: PortError.timeout) {
+            try await coordinator.copyStickerPack(StickerPack(id: "pack-1", stickers: [wave]), from: theirPlace)
+        }
 
-        #expect(port.stickers.published.map(\.name) == ["Stickers"])
+        #expect(coordinator.stickers.packs.isEmpty)
     }
 }

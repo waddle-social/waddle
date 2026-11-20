@@ -1,10 +1,6 @@
 import SwiftUI
 import WaddleKit
 
-extension StickerPackLocation: @retroactive Identifiable {
-    public var id: Self { self }
-}
-
 /// The whole pack a sticker in a conversation is from, with a way to add
 /// it to your own stickers.
 struct StickerPackSheet: View {
@@ -16,6 +12,9 @@ struct StickerPackSheet: View {
 
     @State private var phase: Phase = .loading
     @State private var isAdding = false
+    /// Added from this sheet. The copy can end up under another id than
+    /// the pack shown, so the list of own packs alone does not tell.
+    @State private var wasAdded = false
     @State private var errorMessage: String?
 
     private enum Phase {
@@ -26,7 +25,7 @@ struct StickerPackSheet: View {
         case failed(String)
     }
 
-    private let columns = [GridItem(.adaptive(minimum: StickerCell.side), spacing: Theme.Spacing.xs)]
+    private let columns = [GridItem(.adaptive(minimum: StickerTile.side), spacing: Theme.Spacing.xs)]
 
     var body: some View {
         NavigationStack {
@@ -109,7 +108,7 @@ struct StickerPackSheet: View {
     /// Add the pack, or say why there is nothing to add.
     @ViewBuilder
     private func ownership(of pack: StickerPack) -> some View {
-        if location.owner == session.account.jid || session.stickers.packs.contains(where: { $0.id == pack.id }) {
+        if wasAdded || location.owner == session.account.jid || session.stickers.packs.contains(where: { $0.id == pack.id }) {
             Label("In your stickers", systemImage: "checkmark.circle")
                 .huddleText(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.fgMuted)
@@ -144,7 +143,13 @@ struct StickerPackSheet: View {
         Task {
             defer { isAdding = false }
             do {
-                try await session.copyStickerPack(pack)
+                try await session.copyStickerPack(pack, from: location)
+                wasAdded = true
+            } catch PortError.invalidRequest {
+                // The pack itself is one that cannot be published, for
+                // example a sticker in it has no description: nothing to
+                // check and try again.
+                errorMessage = "\(pack.title) can't be added to your stickers."
             } catch {
                 errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't add \(pack.title). Try again.")
             }

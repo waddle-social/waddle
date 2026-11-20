@@ -16,6 +16,8 @@ final class FakeStickers {
     /// Packs kept somewhere other than the account's own packs.
     var packsElsewhere: [StickerPackLocation: Result<StickerPack, PortError>] = [:]
     var packLookups: [StickerPackLocation] = []
+    var copied: [StickerPackLocation] = []
+    var copyResult: Result<Void, PortError> = .success(())
 
     /// The packs fetch waits for `releasePackFetch()` before answering
     /// with the packs it saw when it was asked.
@@ -61,10 +63,20 @@ extension FakePort {
             return try stickers.packsElsewhere[location]?.get()
         }
         let id = location.packID
+        if let copy = stickers.copied.last(where: { $0.packID == id }), let pack = try stickers.packsElsewhere[copy]?.get() {
+            return pack
+        }
         guard id == stickers.publishedID, let draft = stickers.published.last else {
             return try stickers.packs.get().first { $0.id == id }
         }
         return StickerPack(id: id, name: draft.name, summary: draft.summary, stickers: draft.stickers)
+    }
+
+    /// A copy keeps the id it had, and reads back as the pack it was.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String {
+        try stickers.copyResult.get()
+        stickers.copied.append(location)
+        return location.packID
     }
 
     func publishStickerPack(_ draft: StickerPackDraft) async throws -> String {

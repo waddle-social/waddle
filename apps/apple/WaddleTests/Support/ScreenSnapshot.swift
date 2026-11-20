@@ -120,23 +120,23 @@ private func renderScreen<V: View>(
 @MainActor
 private func placeOffScreen(_ window: NSWindow) {
     let far: CGFloat = 20_000
-    var origins = [CGPoint(x: -far, y: -far)]
-    if let sharpest = NSScreen.screens.max(by: { $0.backingScaleFactor < $1.backingScaleFactor }) {
-        let frame = sharpest.frame
-        origins = [
-            CGPoint(x: frame.midX, y: frame.minY - far),
-            CGPoint(x: frame.maxX + far, y: frame.midY),
-            CGPoint(x: frame.minX - far, y: frame.midY),
-            CGPoint(x: frame.midX, y: frame.maxY + far),
-        ] + origins
-        for origin in origins {
-            window.setFrameOrigin(origin)
-            window.orderFrontRegardless()
-            if window.backingScaleFactor == sharpest.backingScaleFactor { return }
-        }
-    }
-    window.setFrameOrigin(origins[origins.count - 1])
+    let fallback = CGPoint(x: -far, y: -far)
+    window.setFrameOrigin(fallback)
     window.orderFrontRegardless()
+    guard let sharpest = NSScreen.screens.max(by: { $0.backingScaleFactor < $1.backingScaleFactor }) else { return }
+    let frame = sharpest.frame
+    let besideSharpest = [
+        CGPoint(x: frame.midX, y: frame.minY - far),
+        CGPoint(x: frame.maxX + far, y: frame.midY),
+        CGPoint(x: frame.minX - far, y: frame.midY),
+        CGPoint(x: frame.midX, y: frame.maxY + far),
+    ]
+    for origin in besideSharpest where window.backingScaleFactor != sharpest.backingScaleFactor {
+        window.setFrameOrigin(origin)
+    }
+    if window.backingScaleFactor != sharpest.backingScaleFactor {
+        window.setFrameOrigin(fallback)
+    }
 }
 
 /// The window's frame view at 2x.

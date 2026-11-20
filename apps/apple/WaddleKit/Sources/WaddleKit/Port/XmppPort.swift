@@ -223,6 +223,10 @@ public protocol StickerPort: AnyObject, Sendable {
     func fetchStickerPack(at location: StickerPackLocation) async throws -> StickerPack?
     /// Publishes a pack and answers with the id its content gives it.
     func publishStickerPack(_ draft: StickerPackDraft) async throws -> String
+    /// Publishes the pack at `location` again on the account's own
+    /// packs, as it is, and answers with its id there. A pack its author
+    /// restricted is refused.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String
     /// Removing a pack that is already gone succeeds.
     func retractStickerPack(_ packID: String) async throws
 }

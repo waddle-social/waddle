@@ -95,7 +95,7 @@ public struct StickerReference: Hashable, Sendable, Codable {
 
 /// Where a sticker pack can be fetched: whose it is, and its id. `node`
 /// is nil for the usual place, the owner's own sticker packs.
-public struct StickerPackLocation: Hashable, Sendable {
+public struct StickerPackLocation: Hashable, Sendable, Identifiable {
     public let owner: BareJID
     public let node: String?
     public let packID: String
@@ -105,6 +105,8 @@ public struct StickerPackLocation: Hashable, Sendable {
         self.node = node
         self.packID = packID
     }
+
+    public var id: Self { self }
 }
 
 /// A sticker pack about to be published; its stickers' pictures are
