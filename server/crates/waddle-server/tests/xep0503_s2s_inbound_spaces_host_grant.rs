@@ -558,6 +558,35 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         error_condition(&unlisted).as_deref(),
         Some("item-not-found")
     );
+    for (from, expected) in [(GUEST_PHONE, "result"), (STRANGER_PHONE, "error")] {
+        let subscription = naming("subscribe", NS_PUBSUB, node)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                jid(from).to_bare().to_string(),
+            )
+            .build();
+        let reply = ask(
+            &managed,
+            request(
+                from,
+                format!("protected-subscribe-{expected}"),
+                true,
+                pubsub(NS_PUBSUB, subscription),
+            ),
+        )
+        .await;
+        assert_eq!(reply.attr("type"), Some(expected), "{reply:?}");
+        if expected == "result" {
+            let subscription = reply
+                .get_child("pubsub", NS_PUBSUB)
+                .and_then(|pubsub| pubsub.get_child("subscription", NS_PUBSUB))
+                .expect("subscription result");
+            assert_eq!(subscription.attr("subscription"), Some("subscribed"));
+            assert_eq!(subscription.attr("jid"), Some(subscriber.as_str()));
+        } else {
+            assert_eq!(error_condition(&reply).as_deref(), Some("item-not-found"));
+        }
+    }
     managed.deployment.close().await;
 }
 

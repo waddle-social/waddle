@@ -38,6 +38,7 @@ use crate::db::Transaction;
 pub(super) struct SpaceStanding {
     pub lifecycle: ScopeLifecycleId,
     pub generation: GrantGeneration,
+    pub affiliation_generation: GrantGeneration,
     pub federated: bool,
     pub recorded: Affiliation,
     pub effective: Affiliation,
@@ -56,7 +57,7 @@ impl HostGrantStore {
             return Err(HostGrantError::IncarnationChanged);
         }
         let mut rows = tx.query(
-            "SELECT b.lifecycle_id, b.federated, g.affiliation, g.effective_affiliation, g.issuance_basis \
+            "SELECT b.lifecycle_id, b.federated, g.affiliation, g.effective_affiliation, g.issuance_basis, g.changed_generation \
              FROM host_grant_space_bindings b \
              JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id \
              JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node \
@@ -87,6 +88,8 @@ impl HostGrantStore {
             .map_err(|_| corrupt("effective Space affiliation"))?;
         let issuance_basis = IssuanceBasis::from_storage(&row.get::<String>(4)?)
             .ok_or(corrupt("Space issuance basis"))?;
+        let affiliation_generation = GrantGeneration::new(row.get::<i64>(5)?)
+            .ok_or(corrupt("Space affiliation generation"))?;
         drop(rows);
         let scope = load_scope(&mut tx, lifecycle, false)
             .await?
@@ -96,6 +99,7 @@ impl HostGrantStore {
             scope_admits(&scope, attached.incarnation).then_some(SpaceStanding {
                 lifecycle,
                 generation: scope.generation,
+                affiliation_generation,
                 federated,
                 recorded,
                 effective,

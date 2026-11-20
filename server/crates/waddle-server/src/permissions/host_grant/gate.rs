@@ -63,6 +63,7 @@ use super::rate_limited::RateLimitedWarning;
 use super::runtime_attach::{HostGrantAttachment, HostGrantAttachmentGate};
 use super::standing::{RoomBinding, RoomGrants, RoomLookup};
 use super::store::HostGrantStore;
+use crate::db::s2s_spaces::SpaceSubscriptionGrant;
 use crate::db::Database;
 use crate::s2s::conn::AuthenticationStrength;
 use crate::s2s::route::RemotePrincipal;
@@ -117,6 +118,7 @@ pub struct ManagedSpaceGrant {
     fence: FenceTicket,
     remote_reply: Option<RemoteSpaceReply>,
     room_dependencies: Vec<FenceTicket>,
+    subscription_grant: SpaceSubscriptionGrant,
 }
 
 #[derive(Debug)]
@@ -142,6 +144,10 @@ impl ManagedSpaceGrant {
                 && stanza.attr("to") == Some(reply.recipient.as_str())
                 && stanza.attr("id") == Some(reply.id.as_str())
         })
+    }
+
+    pub(crate) fn subscription_grant(&self) -> SpaceSubscriptionGrant {
+        self.subscription_grant
     }
 
     /// Transfer a protected effect synchronously while the decision is current.
@@ -684,8 +690,32 @@ impl HostGrantGate {
         principal: &RemotePrincipal,
         request: &Iq,
     ) -> Option<ManagedSpaceGrant> {
-        if !matches!(request, Iq::Get { .. })
-            || request.from() != Some(principal.address())
+        if !matches!(request, Iq::Get { .. }) {
+            return None;
+        }
+        self.space_remote_request(key, principal, request).await
+    }
+
+    /// Authorize a subscription opened by the authenticated remote account.
+    pub(crate) async fn space_subscribe_remote(
+        &self,
+        key: &ScopeKey,
+        principal: &RemotePrincipal,
+        request: &Iq,
+    ) -> Option<ManagedSpaceGrant> {
+        if !matches!(request, Iq::Set { .. }) {
+            return None;
+        }
+        self.space_remote_request(key, principal, request).await
+    }
+
+    async fn space_remote_request(
+        &self,
+        key: &ScopeKey,
+        principal: &RemotePrincipal,
+        request: &Iq,
+    ) -> Option<ManagedSpaceGrant> {
+        if request.from() != Some(principal.address())
             || request.to().map(Jid::as_str) != Some(key.service().as_str())
         {
             return None;
@@ -751,6 +781,11 @@ impl HostGrantGate {
             fence: ticket,
             remote_reply: None,
             room_dependencies: Vec::new(),
+            subscription_grant: SpaceSubscriptionGrant {
+                lifecycle: standing.lifecycle,
+                incarnation: attachment.binding().incarnation,
+                generation: standing.affiliation_generation,
+            },
         })
     }
 

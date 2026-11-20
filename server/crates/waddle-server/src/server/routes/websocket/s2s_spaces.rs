@@ -1354,6 +1354,81 @@ impl Asked<'_> {
         answer(build_pubsub_items_result(self.iq, node, &items))
     }
 
+    async fn protected_subscribe(&self, principal: &RemotePrincipal) -> Option<SpaceReply> {
+        if self.iq_payload_ns() != Some(NS_PUBSUB) {
+            return None;
+        }
+        let PubSubRequest::Subscribe { node, jid } = parse_pubsub_iq(self.iq).ok()? else {
+            return None;
+        };
+        if jid.to_bare() != self.account {
+            return None;
+        }
+        let key = ScopeKey::new(self.service.clone(), node.as_str()).ok()?;
+        let grant = self
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .space_subscribe_remote(&key, principal, self.iq)
+            .await?;
+        let PrincipalEvidence::Stream(evidence) = self.evidence else {
+            return None;
+        };
+        let space = match self.storage().get_node(&self.service, &node).await {
+            Ok(Some(space)) => space,
+            Ok(None) => return Some(SpaceReply::Ordinary(self.refuse(no_such_node()))),
+            Err(_) => return Some(SpaceReply::Ordinary(self.refuse(internal()))),
+        };
+        let subscriptions = SpaceSubscriptions::new(database(self.state).clone());
+        let recorded = subscriptions
+            .record_protected(
+                &self.service,
+                &node,
+                space.created_at.timestamp_millis(),
+                SubscriptionRequest {
+                    account: &self.account,
+                    evidence,
+                    snapshot: self.snapshot,
+                    now_ms: chrono::Utc::now().timestamp_millis(),
+                },
+                &admitted_now(self.state),
+                grant.subscription_grant(),
+            )
+            .await;
+        let recorded = match recorded {
+            Ok(recording) if recording.outcome == SubscriptionRecord::Recorded => recording,
+            Ok(recording) if recording.outcome == SubscriptionRecord::Bounds => {
+                telemetry::subscription_limited();
+                return Some(SpaceReply::Ordinary(self.refuse(busy())));
+            }
+            Ok(_) => return Some(SpaceReply::Ordinary(self.refuse(no_such_node()))),
+            Err(_) => return Some(SpaceReply::Ordinary(self.refuse(internal()))),
+        };
+        self.forget_removed(&recorded.removed).await;
+        #[cfg(feature = "test-support")]
+        subscription_gates::recorded(&node, &self.account).await;
+
+        // The canonical preference is the one subscription for this bare
+        // JID. No subscription identifier or legacy affiliation is needed.
+        let subscription = Element::builder("subscription", NS_PUBSUB)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                self.account.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("subscription").to_owned(),
+                "subscribed",
+            )
+            .build();
+        let payload = Element::builder("pubsub", NS_PUBSUB)
+            .append(subscription)
+            .build();
+        let stanza = result(self.iq, Some(payload)).pop()?;
+        Some(SpaceReply::Protected { stanza, grant })
+    }
+
     /// XEP-0503, "Joining a space": a subscription to the Space's node, for
     /// the sender's own account only. The PubSub service keeps one
     /// subscription for an account, under its bare JID, whichever of its
@@ -1655,6 +1730,9 @@ impl LocalSpaces for WebSocketLocalSpaces {
             },
             SpaceOperation::PubSub => {
                 if let Some(reply) = asked.protected_items(&request.principal).await {
+                    return reply;
+                }
+                if let Some(reply) = asked.protected_subscribe(&request.principal).await {
                     return reply;
                 }
                 asked.pubsub(SpaceOperation::PubSub).await
