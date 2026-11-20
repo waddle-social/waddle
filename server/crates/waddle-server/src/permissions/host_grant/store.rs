@@ -983,6 +983,193 @@ impl HostGrantStore {
         Ok(MutationReceipt::Recorded(record))
     }
 
+    /// Record an atomic membership change from an authenticated served owner.
+    pub async fn set_space_affiliations(
+        &self,
+        command: &super::SetSpaceAffiliations,
+        policy: &IssuancePolicy,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        if command.changes.is_empty() || command.changes.len() > 64 {
+            return Err(HostGrantError::InvalidSpaceMembershipBatch);
+        }
+        if policy.check(&command.initiator, RoomAffiliation::Member)? != IssuanceBasis::Local {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        let mut command = command.clone();
+        command
+            .changes
+            .sort_by(|a, b| a.subject.as_str().cmp(b.subject.as_str()));
+        if command
+            .changes
+            .windows(2)
+            .any(|pair| pair[0].subject == pair[1].subject)
+        {
+            return Err(HostGrantError::InvalidSpaceMembershipBatch);
+        }
+        let bases = command
+            .changes
+            .iter()
+            .map(|change| match change.affiliation {
+                super::SpaceMembership::Member => policy
+                    .check(&change.subject, RoomAffiliation::Member)
+                    .map(Some),
+                super::SpaceMembership::None => Ok(None),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let store = self.clone();
+        let mode = commit_mode();
+        own(async move {
+            store
+                .set_space_affiliations_owned(&command, &bases, mode)
+                .await
+        })
+        .await
+    }
+
+    async fn set_space_affiliations_owned(
+        &self,
+        command: &super::SetSpaceAffiliations,
+        bases: &[Option<IssuanceBasis>],
+        mode: CommitMode,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let fingerprint = command.fingerprint();
+        let mut tx = self.begin_write().await?;
+        let scope = load_scope(&mut tx, command.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+            .ok_or(HostGrantError::UnknownScope)?;
+        if let Some(recorded) = load_operation(&mut tx, command.operation).await? {
+            tx.rollback().await?;
+            return recorded.replay(&fingerprint);
+        }
+        let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        refuse_unusable_scope(&scope, current)?;
+        if !scope_admits(&scope, current) {
+            return Err(HostGrantError::SpaceNotBindable);
+        }
+        if scope.generation != command.expected_generation {
+            return Err(HostGrantError::StaleGeneration {
+                current: scope.generation,
+            });
+        }
+        let lifecycle = command.lifecycle.to_storage();
+        let operation = command.operation.to_storage();
+        let mut rows = tx
+            .query(
+                "SELECT g.subject_jid, g.affiliation, g.effective_affiliation, g.issuance_basis
+             FROM host_grant_space_bindings b
+             JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id
+             JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
+             JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id
+             WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
+             AND l.retired_at_ms IS NULL AND p.access_model = b.access_model
+             AND (p.node_type IS NULL OR p.node_type = ?) LIMIT ? FOR SHARE OF p",
+                crate::db_params![
+                    lifecycle.as_str(),
+                    current.to_storage(),
+                    waddle_xmpp::xep::xep0503::NS_SPACES,
+                    i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1)
+                        .expect("bounded grant limit")
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)
+            .map_err(statement_failure)?;
+        let mut held = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            held.insert(
+                row.get::<String>(0)?,
+                (
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                ),
+            );
+        }
+        drop(rows);
+        if !held
+            .get(command.initiator.as_str())
+            .is_some_and(|(recorded, effective, basis)| {
+                recorded == "owner"
+                    && effective == "owner"
+                    && basis == IssuanceBasis::Local.as_storage()
+            })
+        {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        let mut changes = Vec::new();
+        let mut new_rows = 0;
+        for (change, basis) in command.changes.iter().zip(bases) {
+            let previous = held.get(change.subject.as_str());
+            let recorded = previous.map_or("none", |row| row.0.as_str());
+            let effective = previous.map_or("none", |row| row.1.as_str());
+            if !matches!(recorded, "none" | "member") || !matches!(effective, "none" | "member") {
+                return Err(HostGrantError::InitiatorNotAuthorized);
+            }
+            let requested = change.affiliation.as_storage();
+            if recorded != requested {
+                new_rows += usize::from(previous.is_none());
+                let basis = basis
+                    .or_else(|| previous.and_then(|row| IssuanceBasis::from_storage(&row.2)))
+                    .ok_or(corrupt("Space issuance basis"))?;
+                changes.push((change, basis, recorded));
+            }
+        }
+        if held.len() + new_rows > HOST_GRANT_SCOPE_MAX_GRANT_ROWS {
+            return Err(HostGrantError::GrantLimit);
+        }
+        let Some(generation) = scope.generation.next() else {
+            return self
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
+                .await;
+        };
+        // Journal no-op requests for replay without changing a subject's
+        // preference era or interrupting its subscription.
+        let now = Utc::now().timestamp_millis();
+        let record = OperationRecord {
+            operation: command.operation,
+            lifecycle: command.lifecycle,
+            generation,
+            kind: OperationKind::SetSpaceAffiliations,
+            authority_incarnation: current,
+            projection_digest: current_digest(&mut tx, &scope).await?,
+        };
+        insert_operation(
+            &mut tx,
+            &record,
+            &fingerprint,
+            Some(command.initiator.as_str()),
+            now,
+        )
+        .await?;
+        for (ordinal, (change, basis, previous)) in changes.into_iter().enumerate() {
+            let requested = change.affiliation.as_storage();
+            tx.execute(
+                "INSERT INTO host_grant_space_affiliations
+                 (lifecycle_id, subject_jid, affiliation, effective_affiliation, issuance_basis, changed_generation)
+                 VALUES (?, ?, ?, 'none', ?, ?) ON CONFLICT (lifecycle_id, subject_jid) DO UPDATE SET
+                 affiliation = EXCLUDED.affiliation, effective_affiliation = EXCLUDED.effective_affiliation,
+                 issuance_basis = EXCLUDED.issuance_basis, changed_generation = EXCLUDED.changed_generation",
+                crate::db_params![
+                    lifecycle.as_str(), change.subject.as_str(), requested, basis.as_storage(),
+                    generation.value()
+                ],
+            ).await.map_err(HostGrantError::from_database)?;
+            tx.execute(
+                "INSERT INTO host_grant_space_operation_changes
+                 (operation_id, ordinal, subject_jid, affiliation, previous_affiliation, issuance_basis)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                crate::db_params![
+                    operation.as_str(), i32::try_from(ordinal).expect("bounded batch"),
+                    change.subject.as_str(), requested, previous, basis.as_storage()
+                ],
+            ).await.map_err(HostGrantError::from_database)?;
+        }
+        advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        commit(tx, mode).await?;
+        Ok(MutationReceipt::Recorded(record))
+    }
+
     /// Record one affiliation change whose initiator's request no S2S
     /// stream carried, for suites; a caller names the initiator's evidence
     /// ([`Self::set_affiliation_as`]).

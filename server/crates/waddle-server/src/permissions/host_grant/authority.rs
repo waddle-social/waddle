@@ -281,6 +281,19 @@ impl HostGrantAuthority {
         Ok(receipt)
     }
 
+    /// Record a served owner's Space membership updates and schedule journal witnessing.
+    pub async fn set_space_affiliations(
+        &self,
+        command: &super::SetSpaceAffiliations,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let receipt = self
+            .store
+            .set_space_affiliations(command, &self.issuance)
+            .await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
+    }
+
     /// Close a scope for good, as [`HostGrantStore::retire_scope`] does,
     /// and witness the retirement after the commit. Owner phase only.
     pub async fn retire_scope(

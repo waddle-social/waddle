@@ -118,8 +118,8 @@ pub use model::{
     ClosedReason, EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject,
     GrantSubjectError, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome,
     OperationRecord, ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId,
-    ScopeState, SetAffiliation, HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
-    HOST_GRANT_SCOPE_MAX_ROOMS,
+    ScopeState, SetAffiliation, SetSpaceAffiliations, SpaceAffiliationChange, SpaceMembership,
+    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use principal::{

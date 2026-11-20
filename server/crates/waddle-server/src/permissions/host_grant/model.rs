@@ -350,6 +350,53 @@ impl BindSpace {
     }
 }
 
+/// Space affiliations writable by a served owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceMembership {
+    None,
+    Member,
+}
+
+impl SpaceMembership {
+    pub(super) fn as_storage(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Member => "member",
+        }
+    }
+}
+
+/// One target in a canonical Space membership request.
+#[derive(Clone, Debug)]
+pub struct SpaceAffiliationChange {
+    pub subject: GrantSubject,
+    pub affiliation: SpaceMembership,
+}
+
+/// An atomic membership change requested by an authenticated served account.
+#[derive(Clone, Debug)]
+pub struct SetSpaceAffiliations {
+    pub operation: GrantOperationId,
+    pub lifecycle: ScopeLifecycleId,
+    pub expected_generation: GrantGeneration,
+    pub initiator: GrantSubject,
+    pub changes: Vec<SpaceAffiliationChange>,
+}
+
+impl SetSpaceAffiliations {
+    pub(super) fn fingerprint(&self) -> String {
+        let mut fingerprint = Fingerprint::new("waddle:host-grant:set-space-membership:v1");
+        fingerprint.text(&self.lifecycle.to_storage());
+        fingerprint.number(self.expected_generation.value());
+        fingerprint.text(self.initiator.as_str());
+        for change in &self.changes {
+            fingerprint.text(change.subject.as_str());
+            fingerprint.text(change.affiliation.as_storage());
+        }
+        fingerprint.finish()
+    }
+}
+
 /// Set one subject's affiliation in one managed room.
 #[derive(Clone, Debug)]
 pub struct SetAffiliation {

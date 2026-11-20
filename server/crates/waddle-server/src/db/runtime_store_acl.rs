@@ -159,13 +159,13 @@ const HOST_GRANT_RELATIONS: &[Relation] = &[
     },
     Relation {
         name: "host_grant_space_affiliations",
-        insert: false,
+        insert: true,
         update: true,
         delete: false,
     },
     Relation {
         name: "host_grant_space_operation_changes",
-        insert: false,
+        insert: true,
         update: false,
         delete: false,
     },

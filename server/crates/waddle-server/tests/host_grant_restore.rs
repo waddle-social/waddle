@@ -57,7 +57,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use host_grant_support::{
-    room_submission, served, subject, GrantFixture, OWNER, PEER, PEER_RESOURCE, SENDER,
+    issuance_policy, room_submission, served, subject, GrantFixture, OWNER, PEER, PEER_RESOURCE,
+    SENDER,
 };
 use ingress_support::IngressFixture;
 use kameo::actor::{ActorRef, Spawn};
@@ -85,8 +86,8 @@ use waddle_server::permissions::host_grant::{
     ProjectionIntent, ProjectionMarker, ProjectionWrite, Reconciliation, ReconstructionTarget,
     ReopenReport, ReopenSelection, ReplicaFailure, RestoreDeclaration, RestoreEpoch,
     RestoreFenceRefusal, RestoreFenceReport, RetireScope, RoomAffiliation, ScopeKey,
-    ScopeLifecycleId, WitnessChange, WitnessSync, HOST_GRANT_PROJECTION_DEFINITION,
-    HOST_GRANT_PROJECTION_MARKER_RELATION,
+    ScopeLifecycleId, SetSpaceAffiliations, SpaceAffiliationChange, SpaceMembership, WitnessChange,
+    WitnessSync, HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
 use waddle_server::permissions::{
     CheckPermission, ClearHostGrantWitnesses, EnsureAuthzCodecIncarnation, EnsureSchema, Object,
@@ -901,6 +902,95 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     let mut expected = [SENDER, PEER, CAROL, remote];
     expected.sort_unstable();
     assert_eq!(revoked, expected);
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Activated
+    );
+    let policy = issuance_policy(&[]);
+    let change = SetSpaceAffiliations {
+        operation: GrantOperationId::generate(),
+        lifecycle: fixture.scope.lifecycle,
+        expected_generation: fixture.state(&fixture.scope).await.generation,
+        initiator: subject(OWNER),
+        changes: vec![SpaceAffiliationChange {
+            subject: subject(PEER),
+            affiliation: SpaceMembership::Member,
+        }],
+    };
+    let invalid = SetSpaceAffiliations {
+        initiator: subject(SENDER),
+        ..change.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .set_space_affiliations(&invalid, &policy)
+            .await,
+        Err(HostGrantError::InitiatorNotAuthorized)
+    ));
+    let receipt = fixture
+        .store
+        .set_space_affiliations(&change, &policy)
+        .await
+        .expect("record the Space membership");
+    assert_eq!(receipt.record().kind, OperationKind::SetSpaceAffiliations);
+    assert_eq!(
+        fixture
+            .store
+            .set_space_affiliations(&change, &policy)
+            .await
+            .expect("exact replay"),
+        MutationReceipt::Replayed(receipt.record().clone())
+    );
+    let revoke = SetSpaceAffiliations {
+        changes: vec![SpaceAffiliationChange {
+            subject: subject(PEER),
+            affiliation: SpaceMembership::None,
+        }],
+        ..change
+    };
+    assert!(matches!(
+        fixture.store.set_space_affiliations(&revoke, &policy).await,
+        Err(HostGrantError::OperationConflict)
+    ));
+    let effective = "SELECT effective_affiliation FROM host_grant_space_affiliations
+        WHERE lifecycle_id = $1 AND subject_jid = $2";
+    for expected in ["none", "member"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(effective)
+                .bind(&lifecycle)
+                .bind(PEER)
+                .fetch_one(&pool)
+                .await
+                .expect("read the effective membership"),
+            expected
+        );
+        if expected == "none" {
+            assert_eq!(
+                fixture.activate_current(&fixture.scope).await,
+                Activation::Activated
+            );
+        }
+    }
+    let revoke = SetSpaceAffiliations {
+        operation: GrantOperationId::generate(),
+        expected_generation: receipt.record().generation,
+        ..revoke
+    };
+    fixture
+        .store
+        .set_space_affiliations(&revoke, &policy)
+        .await
+        .expect("revoke");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(effective)
+            .bind(&lifecycle)
+            .bind(PEER)
+            .fetch_one(&pool)
+            .await
+            .expect("revocation takes effect at commit"),
+        "none"
+    );
     pool.close().await;
     fixture.close().await;
 }
@@ -1946,8 +2036,9 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
              host_grant_rooms, _lineage TO {role}"
         ),
-        format!("GRANT SELECT ON host_grant_space_bindings, host_grant_space_operation_changes TO {role}"),
-        format!("GRANT SELECT, UPDATE ON host_grant_space_affiliations TO {role}"),
+        format!("GRANT SELECT ON host_grant_space_bindings TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
         format!(
@@ -2218,8 +2309,9 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
              host_grant_rooms, _lineage TO {role}"
         ),
-        format!("GRANT SELECT ON host_grant_space_bindings, host_grant_space_operation_changes TO {role}"),
-        format!("GRANT SELECT, UPDATE ON host_grant_space_affiliations TO {role}"),
+        format!("GRANT SELECT ON host_grant_space_bindings TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(

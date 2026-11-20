@@ -1412,8 +1412,9 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
              host_grant_rooms, _lineage TO {role}"
         ),
-        format!("GRANT SELECT ON host_grant_space_bindings, host_grant_space_operation_changes TO {role}"),
-        format!("GRANT SELECT, UPDATE ON host_grant_space_affiliations TO {role}"),
+        format!("GRANT SELECT ON host_grant_space_bindings TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(

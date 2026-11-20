@@ -84,6 +84,8 @@ pub enum HostGrantError {
     SpaceNotBindable,
     #[error("the scope already holds a Space binding")]
     SpaceAlreadyBound,
+    #[error("the Space membership batch is empty, too large or contains a duplicate account")]
+    InvalidSpaceMembershipBatch,
     #[error("the scope is at a different generation than the command expected")]
     StaleGeneration { current: GrantGeneration },
     #[error("the operation identity is already recorded for a different operation")]
@@ -191,6 +193,7 @@ impl HostGrantError {
             Self::UnknownRoom => "unknown_room",
             Self::SpaceNotBindable => "space_not_bindable",
             Self::SpaceAlreadyBound => "space_already_bound",
+            Self::InvalidSpaceMembershipBatch => "invalid_space_membership_batch",
             Self::StaleGeneration { .. } => "stale_generation",
             Self::OperationConflict => "operation_conflict",
             Self::InitiatorNotAuthorized => "initiator_not_authorized",
