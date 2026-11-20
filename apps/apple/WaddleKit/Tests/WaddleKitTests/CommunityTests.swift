@@ -6,8 +6,8 @@ import Testing
 private let now = date(1000)
 private let picture = URL(string: "https://upload.waddle.test/rink.jpg")!
 
-private func post(_ id: String, _ body: String = "hello") -> FeedPost {
-    FeedPost(id: id, body: body, author: bob, publishedAt: date(0))
+private func post(_ id: String, at seconds: TimeInterval = 0) -> FeedPost {
+    FeedPost(id: id, body: "hello", author: bob, publishedAt: date(seconds))
 }
 
 private func story(_ id: String, postedAt seconds: TimeInterval = 0, expiresIn lifetime: TimeInterval? = 86400) -> Story {
@@ -39,12 +39,12 @@ struct CommunityTests {
 
     @Test func refreshLoadsTheFeedAndStories() async {
         let (coordinator, port) = online()
-        port.community.feed = .success([post("p1"), post("p2")])
+        port.community.feed = .success([post("p1", at: 10), post("p2", at: 20)])
         port.community.stories = .success([story("s1")])
 
         await coordinator.refreshCommunity(at: now)
 
-        #expect(coordinator.community.posts.map(\.id) == ["p1", "p2"])
+        #expect(coordinator.community.posts.map(\.id) == ["p2", "p1"])
         #expect(coordinator.community.stories.map(\.id) == ["s1"])
         #expect(coordinator.community.hasLoaded)
         #expect(!coordinator.community.isLoading)
@@ -100,7 +100,7 @@ struct CommunityTests {
             story("gone", postedAt: 10, expiresIn: 60),
             story("new", postedAt: 500),
             story("forever", postedAt: 100, expiresIn: nil),
-        ])
+        ], refresh: 0)
 
         #expect(store.activeStories(at: now).map(\.id) == ["new", "forever", "old"])
     }
@@ -113,6 +113,48 @@ struct CommunityTests {
         #expect(Story(id: "c", media: clip).isWebM)
         #expect(Story(id: "d", media: picture, mediaType: "video/webm").isWebM)
         #expect(!Story(id: "e", media: picture, mediaType: "image/jpeg").isVideo)
+    }
+
+    @Test func theFeedIsNewestFirstWhateverOrderTheServerUses() async {
+        let (coordinator, port) = online()
+        port.community.feed = .success([post("old", at: 10), post("newest", at: 30), post("newer", at: 20)])
+
+        await coordinator.refreshCommunity(at: now)
+
+        #expect(coordinator.community.posts.map(\.id) == ["newest", "newer", "old"])
+    }
+
+    @Test func postsWithoutADateKeepTheServersOrderNewestLast() {
+        let store = CommunityStore()
+        store.publish(posts: [FeedPost(id: "first", body: "a"), FeedPost(id: "second", body: "b")], refresh: 0)
+
+        #expect(store.posts.map(\.id) == ["second", "first"])
+    }
+
+    @Test func aPostMadeDuringARefreshSurvivesItsOlderAnswer() async throws {
+        let (coordinator, port) = online()
+        port.community.feed = .success([post("p1")])
+        port.community.held = ["fetchStories"]
+        let refresh = Task { await coordinator.refreshCommunity(at: now) }
+        while port.community.storyRequests == 0 { await Task.yield() }
+
+        try await coordinator.postToFeed(#require(FeedPostDraft(body: "hi")))
+        try await coordinator.postStory(StoryDraft(body: nil, media: picture, mediaType: "image/jpeg"), at: now)
+        port.community.release()
+        await refresh.value
+
+        #expect(coordinator.community.posts.map(\.id) == ["post-1", "p1"])
+        #expect(coordinator.community.stories.map(\.id) == ["story-1"])
+    }
+
+    @Test func aRefreshBegunAfterAPostTrustsTheServersList() async throws {
+        let (coordinator, port) = online()
+        try await coordinator.postToFeed(#require(FeedPostDraft(body: "hi")))
+
+        port.community.feed = .success([post("p1")])
+        await coordinator.refreshCommunity(at: now)
+
+        #expect(coordinator.community.posts.map(\.id) == ["p1"])
     }
 
     // MARK: Reactions
@@ -184,6 +226,48 @@ struct CommunityTests {
         #expect(coordinator.community.reactions(of: "s1") == reactions([("🎉", 1)], mine: ["🎉"]))
         port.community.release()
         try await toggle.value
+    }
+
+    @Test func quickTapsAreSentOneAfterAnotherAndEndAsTheLastOne() async throws {
+        let (coordinator, port) = online()
+        port.community.stories = .success([story("s1")])
+        await coordinator.refreshCommunity(at: now)
+        port.community.held = ["setStoryReactions"]
+
+        let add = Task { try await coordinator.toggleStoryReaction("🎉", on: "s1") }
+        while port.community.reactionWrites.isEmpty { await Task.yield() }
+        let remove = Task { try await coordinator.toggleStoryReaction("🎉", on: "s1") }
+        for _ in 0..<20 { await Task.yield() }
+
+        // The removal waits for the add, so it cannot be answered first.
+        #expect(port.community.reactionWrites.map(\.emojis) == [["🎉"]])
+        port.community.held = []
+        port.community.release()
+        try await add.value
+        try await remove.value
+
+        #expect(port.community.reactionWrites.map(\.emojis) == [["🎉"], []])
+        #expect(coordinator.community.reactions(of: "s1") == .none)
+    }
+
+    @Test func refusedQuickTapsGoBackToWhatTheServerLastAgreedTo() async {
+        let (coordinator, port) = online()
+        port.community.stories = .success([story("s1")])
+        port.community.reactions["s1"] = .success(reactions([("👍", 2)]))
+        await coordinator.refreshCommunity(at: now)
+        port.community.held = ["setStoryReactions"]
+        port.community.reactionResult = .failure(.rejected)
+
+        let first = Task { try await coordinator.toggleStoryReaction("👍", on: "s1") }
+        while port.community.reactionWrites.isEmpty { await Task.yield() }
+        let second = Task { try await coordinator.toggleStoryReaction("🎉", on: "s1") }
+        for _ in 0..<20 { await Task.yield() }
+        port.community.held = []
+        port.community.release()
+        _ = await first.result
+        _ = await second.result
+
+        #expect(coordinator.community.reactions(of: "s1") == reactions([("👍", 2)]))
     }
 
     @Test func aThirteenthReactionIsRefusedWithoutAsking() async {

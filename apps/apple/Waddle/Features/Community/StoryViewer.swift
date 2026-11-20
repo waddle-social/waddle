@@ -1,4 +1,5 @@
 import AVKit
+import Combine
 import SwiftUI
 import WaddleKit
 
@@ -197,32 +198,48 @@ private struct StoryMedia: View {
     /// Shown in place of the fetched picture.
     let picture: Image?
     @State private var player: AVPlayer?
+    @State private var didFail = false
+
+    /// Starts the video and watches for it failing: a file that is gone,
+    /// cannot be fetched, or is in a format the player does not decode.
+    private func play() async {
+        let item = AVPlayerItem(url: story.media)
+        let player = AVPlayer(playerItem: item)
+        self.player = player
+        player.play()
+        for await status in item.publisher(for: \.status).values where status == .failed {
+            didFail = true
+            return
+        }
+    }
+
+    private func failure(_ message: String, symbol: String) -> some View {
+        Label(message, systemImage: symbol)
+            .huddleText(Theme.Typography.body)
+            .foregroundStyle(.white.opacity(0.7))
+    }
 
     var body: some View {
         if let picture {
             picture.resizable().scaledToFit()
         } else if story.isWebM {
-            Label("This video can't be played here.", systemImage: "film")
-                .huddleText(Theme.Typography.body)
-                .foregroundStyle(.white.opacity(0.7))
+            failure("This video can't be played here.", symbol: "film")
         } else if story.isVideo {
-            VideoPlayer(player: player)
-                .onAppear {
-                    let player = AVPlayer(url: story.media)
-                    self.player = player
-                    player.play()
-                }
-                .onDisappear { player?.pause() }
-                .accessibilityLabel(Text("Video from \(CommunityCopy.name(of: story.author))"))
+            if didFail {
+                failure("This video didn't load.", symbol: "film")
+            } else {
+                VideoPlayer(player: player)
+                    .task { await play() }
+                    .onDisappear { player?.pause() }
+                    .accessibilityLabel(Text("Video from \(CommunityCopy.name(of: story.author))"))
+            }
         } else {
             AsyncImage(url: story.media) { phase in
                 switch phase {
                 case let .success(image):
                     image.resizable().scaledToFit()
                 case .failure:
-                    Label("This story didn't load.", systemImage: "photo.badge.exclamationmark")
-                        .huddleText(Theme.Typography.body)
-                        .foregroundStyle(.white.opacity(0.7))
+                    failure("This story didn't load.", symbol: "photo.badge.exclamationmark")
                 default:
                     ProgressView().tint(.white)
                 }

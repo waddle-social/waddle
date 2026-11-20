@@ -32,21 +32,55 @@ final class StoryComposer {
         self.errorMessage = errorMessage
     }
 
+    /// A chosen picture is still being read; posting waits for it.
+    private(set) var isPicking = false
+    /// Counts choices, so a slow earlier one cannot replace a later one.
+    private var choice = 0
+
     var isPosting: Bool { phase != .editing }
-    var canPost: Bool { picture != nil && !isPosting }
+    var canPost: Bool { picture != nil && !isPosting && !isPicking }
 
     /// Takes a picture from the photo library, with its metadata removed.
-    func pick(_ data: Data, mediaType: String?, fileExtension: String?) async {
+    /// `read` fetches its bytes, which can take a while for a picture
+    /// kept in iCloud. Only the latest choice is kept.
+    func pick(
+        mediaType: String?,
+        fileExtension: String?,
+        reading read: () async -> Data?
+    ) async {
+        choice += 1
+        let choice = choice
+        isPicking = true
         errorMessage = nil
+        let outcome = await Self.load(mediaType: mediaType, fileExtension: fileExtension, reading: read)
+        guard choice == self.choice else { return }
+        isPicking = false
+        switch outcome {
+        case let .success(payload): picture = payload
+        case let .failure(message): errorMessage = message.text
+        }
+    }
+
+    private struct PickFailure: Error {
+        let text: String
+    }
+
+    private static func load(
+        mediaType: String?,
+        fileExtension: String?,
+        reading read: () async -> Data?
+    ) async -> Result<AttachmentPayload, PickFailure> {
+        guard let data = await read() else {
+            return .failure(PickFailure(text: "Couldn't read that picture. Try another one."))
+        }
         do {
             let payload = try await AttachmentLoader.payload(fromPhoto: data, mediaType: mediaType, fileExtension: fileExtension)
-            guard payload.data.count <= Self.maxBytes else {
-                errorMessage = "Pictures in a story can be up to 10 MB."
-                return
+            guard payload.data.count <= maxBytes else {
+                return .failure(PickFailure(text: "Pictures in a story can be up to 10 MB."))
             }
-            picture = payload
+            return .success(payload)
         } catch {
-            errorMessage = AttachmentUploadError.message(for: error)
+            return .failure(PickFailure(text: AttachmentUploadError.message(for: error)))
         }
     }
 

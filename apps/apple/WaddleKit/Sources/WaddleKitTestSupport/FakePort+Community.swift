@@ -40,7 +40,7 @@ final class FakeCommunity {
 }
 
 extension FakePort {
-    func fetchFeed(max: Int?) async throws -> [FeedPost] {
+    func fetchFeed(max _: Int?) async throws -> [FeedPost] {
         community.feedRequests += 1
         await community.hold("fetchFeed")
         return try community.feed.get()
@@ -53,8 +53,9 @@ extension FakePort {
         return FeedPost(id: "post-\(community.posts.count)", body: draft.body, author: me.jid, publishedAt: date(500))
     }
 
-    func fetchStories(max: Int?) async throws -> [Story] {
+    func fetchStories(max _: Int?) async throws -> [Story] {
         community.storyRequests += 1
+        await community.hold("fetchStories")
         return try community.stories.get()
     }
 

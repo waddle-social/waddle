@@ -102,7 +102,8 @@ final class CommunitySnapshotTests: XCTestCase {
 
     /// A flat two-tone picture, drawn here so it never changes.
     private static let pictureData: Data = {
-        let width = 360, height = 480
+        let width = 360
+        let height = 480
         let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue

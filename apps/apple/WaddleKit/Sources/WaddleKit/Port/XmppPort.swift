@@ -172,7 +172,7 @@ public protocol CommandPort: AnyObject, Sendable {
 /// The community feed (XEP-0472) and stories (XEP-0501) of the account's
 /// own server.
 public protocol CommunityPort: AnyObject, Sendable {
-    /// Newest first.
+    /// The newest posts, in the server's order.
     func fetchFeed(max: Int?) async throws -> [FeedPost]
     /// Returns the post as published.
     func publishFeedPost(_ draft: FeedPostDraft) async throws -> FeedPost

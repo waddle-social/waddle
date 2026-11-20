@@ -59,13 +59,11 @@ struct StoryComposerSheet: View {
         #endif
         .onChange(of: pickedItem) { _, item in
             guard let item else { return }
+            let type = item.supportedContentTypes.first
             Task {
-                guard let data = try? await item.loadTransferable(type: Data.self) else {
-                    composer.errorMessage = "Couldn't read that picture. Try another one."
-                    return
+                await composer.pick(mediaType: type?.preferredMIMEType, fileExtension: type?.preferredFilenameExtension) {
+                    try? await item.loadTransferable(type: Data.self)
                 }
-                let type = item.supportedContentTypes.first
-                await composer.pick(data, mediaType: type?.preferredMIMEType, fileExtension: type?.preferredFilenameExtension)
             }
         }
     }

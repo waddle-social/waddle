@@ -123,7 +123,7 @@ final class SampleSession {
     /// seen), and reactions on the first story.
     func seedCommunity() {
         let store = coordinator.community
-        _ = store.begin()
+        let refresh = store.begin()
         store.publish(posts: [
             FeedPost(
                 id: "post-3",
@@ -139,7 +139,7 @@ final class SampleSession {
                 author: Self.theo,
                 publishedAt: date(-90_000)
             ),
-        ])
+        ], refresh: refresh)
         store.publish(stories: [
             Self.rink,
             Story(
@@ -150,7 +150,7 @@ final class SampleSession {
                 id: "story-huddle", media: URL(string: "https://upload.waddle.test/story-huddle.jpg")!,
                 mediaType: "image/jpeg", author: Self.theo, postedAt: date(-9000), expiresAt: date(60_000)
             ),
-        ])
+        ], refresh: refresh)
         store.mergeReads(["story-huddle": date(-600)])
         store.set(
             StoryReactions(

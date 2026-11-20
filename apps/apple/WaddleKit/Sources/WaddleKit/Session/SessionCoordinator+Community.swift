@@ -20,8 +20,8 @@ extension SessionCoordinator {
         async let storiesAnswer = Self.attempt { try await port.fetchStories(max: Self.communityPageSize) }
         let (feed, stories) = await (feedAnswer, storiesAnswer)
         guard community.isCurrent(refresh) else { return }
-        if let feed { community.publish(posts: feed) }
-        if let stories { community.publish(stories: stories) }
+        if let feed { community.publish(posts: feed, refresh: refresh) }
+        if let stories { community.publish(stories: stories, refresh: refresh) }
 
         await syncStoryReads(at: now)
         guard community.isCurrent(refresh) else { return }
@@ -54,17 +54,23 @@ extension SessionCoordinator {
     }
 
     /// Adds the user's reaction to a story, or takes it back. Shown at
-    /// once and undone if the server refuses. Throws `PortError`.
+    /// once and undone if the server refuses. Changes to one story are
+    /// sent one after another, each with all the user's emoji, so quick
+    /// taps end as the last one left them. Throws `PortError`.
     public func toggleStoryReaction(_ emoji: String, on storyID: String) async throws {
         guard !isStopped, connection == .online else { throw PortError.notConnected }
         let previous = community.reactions(of: storyID)
         guard let next = previous.toggling(emoji) else { throw PortError.invalidRequest }
         let edit = community.edit(next, of: storyID)
-        do {
+        let port = self.port
+        let write = community.afterEarlierReactionWrites(of: storyID) {
             try await port.setStoryReactions(next.mine, on: storyID)
-            community.sent(storyID)
+        }
+        do {
+            try await write.value
+            community.sent(next, of: storyID)
         } catch {
-            community.undo(edit, of: storyID, to: previous)
+            community.undo(edit, of: storyID)
             throw error
         }
     }
