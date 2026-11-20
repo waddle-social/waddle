@@ -147,6 +147,33 @@ impl ConnectionEntry {
 }
 
 impl ConnectionRegistry {
+    /// Offer a validated bookmark event to the currently published local socket
+    /// for this exact binding. Enqueue is best effort and grants no wire authority.
+    pub fn try_send_protected_space_event_if_owner(
+        &self,
+        jid: &jid::FullJid,
+        owner: LocalConnectionBindingId,
+        payload: crate::stream_management::persistence::SmReplayPayload,
+    ) -> super::ProtectedSpaceEventEnqueue {
+        use super::ProtectedSpaceEventEnqueue;
+        use crate::stream_management::ProtectedSpaceReplyKind;
+
+        if !payload.protected_space_reply().is_some_and(|descriptor| {
+            descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent
+                && descriptor.recipient() == jid
+        }) {
+            return ProtectedSpaceEventEnqueue::InvalidPayload;
+        }
+        let Some(entry) = self
+            .connections
+            .get(jid)
+            .filter(|entry| entry.is_locally_hosted() && entry.binding_id() == owner)
+        else {
+            return ProtectedSpaceEventEnqueue::Unavailable;
+        };
+        entry.endpoint.try_send_protected_space(payload)
+    }
+
     /// Wait for pending-delivery capacity before marking the row offered.
     /// No durable offer exists while this operation awaits backpressure.
     pub async fn reserve_pending_flush(

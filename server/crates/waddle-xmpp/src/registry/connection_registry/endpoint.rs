@@ -3,6 +3,7 @@
 use super::outbound::LocalConnectionBindingId;
 use super::{mpsc, OutboundStanza};
 use crate::ownership::BindingRef;
+use crate::stream_management::persistence::SmReplayPayload;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 struct OutboundQueue {
     sender: QueueSender,
     receiver_identity: Option<Arc<()>>,
+    protected_space: Option<mpsc::Sender<SmReplayPayload>>,
 }
 
 #[derive(Debug)]
@@ -72,12 +74,28 @@ pub struct SocketOutboundEndpoint {
     queue: Arc<OutboundQueue>,
 }
 
+/// One live outbound frame on the owning socket task.
+pub enum SocketOutboundFrame {
+    Ordinary(OutboundStanza),
+    ProtectedSpace(SmReplayPayload),
+}
+
+/// Outcome of offering a protected bookmark event to an exact local socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedSpaceEventEnqueue {
+    Enqueued,
+    Unavailable,
+    Full,
+    InvalidPayload,
+}
+
 /// The sole receiving half of a socket queue, paired with its endpoint.
 ///
 /// While this wrapper exists, callers cannot replace the receiver used to
 /// prove that an exact sealed endpoint has no accepted queued frames.
 pub struct SocketOutboundReceiver {
     receiver: mpsc::Receiver<OutboundStanza>,
+    protected_space: mpsc::Receiver<SmReplayPayload>,
     identity: Arc<()>,
 }
 
@@ -85,6 +103,20 @@ impl SocketOutboundReceiver {
     /// Receive one outbound envelope on the connection's owning task.
     pub async fn recv(&mut self) -> Option<OutboundStanza> {
         self.receiver.recv().await
+    }
+
+    /// Receive either lane without exposing or flattening a protected payload.
+    pub async fn recv_next(&mut self) -> Option<SocketOutboundFrame> {
+        tokio::select! {
+            ordinary = self.receiver.recv() => match ordinary {
+                Some(frame) => Some(SocketOutboundFrame::Ordinary(frame)),
+                None => self.protected_space.recv().await.map(SocketOutboundFrame::ProtectedSpace),
+            },
+            protected = self.protected_space.recv() => match protected {
+                Some(frame) => Some(SocketOutboundFrame::ProtectedSpace(frame)),
+                None => self.receiver.recv().await.map(SocketOutboundFrame::Ordinary),
+            },
+        }
     }
 
     /// Give shutdown cleanup the receiver after live registration has ended.
@@ -102,6 +134,7 @@ impl SocketOutboundEndpoint {
                 queue: Arc::new(OutboundQueue {
                     sender: QueueSender::Legacy(sender),
                     receiver_identity: None,
+                    protected_space: None,
                 }),
             },
             receiver,
@@ -113,14 +146,20 @@ impl SocketOutboundEndpoint {
     pub fn channel_with_socket_receiver(capacity: usize) -> (Self, SocketOutboundReceiver) {
         let (sender, receiver) = mpsc::channel(capacity);
         let identity = Arc::new(());
+        let (protected_space, protected_receiver) = mpsc::channel(capacity);
         (
             Self {
                 queue: Arc::new(OutboundQueue {
                     sender: QueueSender::Legacy(sender),
                     receiver_identity: Some(identity.clone()),
+                    protected_space: Some(protected_space),
                 }),
             },
-            SocketOutboundReceiver { receiver, identity },
+            SocketOutboundReceiver {
+                receiver,
+                protected_space: protected_receiver,
+                identity,
+            },
         )
     }
 
@@ -149,6 +188,7 @@ impl From<mpsc::Sender<OutboundStanza>> for SocketOutboundEndpoint {
             queue: Arc::new(OutboundQueue {
                 sender: QueueSender::Legacy(sender),
                 receiver_identity: None,
+                protected_space: None,
             }),
         }
     }
@@ -216,6 +256,23 @@ impl BindingOutboundEndpoint {
         }
     }
 
+    pub(super) fn try_send_protected_space(
+        &self,
+        payload: SmReplayPayload,
+    ) -> ProtectedSpaceEventEnqueue {
+        let Ok(admitted) = self.admit() else {
+            return ProtectedSpaceEventEnqueue::Unavailable;
+        };
+        let Some(sender) = &admitted.queue.protected_space else {
+            return ProtectedSpaceEventEnqueue::Unavailable;
+        };
+        match sender.try_send(payload) {
+            Ok(()) => ProtectedSpaceEventEnqueue::Enqueued,
+            Err(mpsc::error::TrySendError::Full(_)) => ProtectedSpaceEventEnqueue::Full,
+            Err(mpsc::error::TrySendError::Closed(_)) => ProtectedSpaceEventEnqueue::Unavailable,
+        }
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn activate(
         &self,
@@ -271,7 +328,14 @@ impl BindingOutboundEndpoint {
                     }
             }
         };
-        if !sealed_for_binding || !queue_empty {
+        let protected_empty = self.queue.protected_space.as_ref().is_none_or(|sender| {
+            !sender.is_closed()
+                && match receiver {
+                    Some(receiver) => receiver.protected_space.is_empty(),
+                    None => sender.capacity() == sender.max_capacity(),
+                }
+        });
+        if !sealed_for_binding || !queue_empty || !protected_empty {
             return Err(self);
         }
 

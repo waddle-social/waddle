@@ -30,10 +30,10 @@ pub use connection_registry::{
     LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo,
     OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
     PendingFlushCommitRejection, PendingFlushReservation, PendingFlushReserveError, PresenceState,
-    ProvisionalConnectionEntry, SendResult, SocketCleanupState, SocketLifecycle,
-    SocketLifecycleProbe, SocketOutboundEndpoint, SocketOutboundReceiver, SocketWriteInterruption,
-    StaleBinding, TerminalOrderingRetryLease, WriteAcceptanceEnqueueOutcome,
-    WriteAcceptanceEnqueueRejection,
+    ProtectedSpaceEventEnqueue, ProvisionalConnectionEntry, SendResult, SocketCleanupState,
+    SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint, SocketOutboundFrame,
+    SocketOutboundReceiver, SocketWriteInterruption, StaleBinding, TerminalOrderingRetryLease,
+    WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 pub use selection::{
     available_resources_for_user, get_resources_for_user, routing_resources_for_user,

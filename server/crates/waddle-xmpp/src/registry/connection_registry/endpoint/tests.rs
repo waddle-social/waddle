@@ -640,3 +640,85 @@ fn concurrent_close_never_returns_an_accepted_envelope() {
         }
     }
 }
+
+#[tokio::test]
+async fn protected_lane_is_bounded_and_prevents_nonempty_binding_handback() {
+    use super::{ProtectedSpaceEventEnqueue, SocketOutboundFrame};
+    use crate::stream_management::persistence::SmReplayPayload;
+    use crate::stream_management::{ProtectedSpaceReplyDescriptor, ProtectedSpaceRoomDependency};
+    use uuid::Uuid;
+
+    let (socket, mut receiver) = SocketOutboundEndpoint::channel_with_socket_receiver(1);
+    let owner = LocalConnectionBindingId::fresh();
+    let binding_ref = BindingRef::fresh(crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    ));
+    let endpoint = socket.bind(
+        owner,
+        Some(binding_ref.clone()),
+        BindingAdmissionState::Active,
+    );
+    let room = ProtectedSpaceRoomDependency::new(
+        "room@muc.example.test".parse().unwrap(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        9,
+    )
+    .unwrap();
+    let descriptor = ProtectedSpaceReplyDescriptor::new(
+        "spaces.example.test".parse().unwrap(),
+        "docs".into(),
+        "alice@example.test/dev".parse().unwrap(),
+        String::new(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        3,
+    )
+    .unwrap()
+    .with_bookmark_event(
+        crate::pubsub::SubId::generate(),
+        Uuid::new_v4(),
+        room,
+        false,
+    )
+    .unwrap();
+    let frame = SmReplayPayload::from_protected_space_reply(
+        "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test/dev'><event xmlns='http://jabber.org/protocol/pubsub#event'><items node='docs'><retract id='room@muc.example.test'/></items></event></message>".into(),
+        descriptor,
+    ).unwrap();
+
+    assert_eq!(
+        endpoint.try_send_protected_space(frame.clone()),
+        ProtectedSpaceEventEnqueue::Enqueued
+    );
+    assert_eq!(
+        endpoint.try_send_protected_space(frame.clone()),
+        ProtectedSpaceEventEnqueue::Full
+    );
+    assert!(endpoint.seal(owner, &binding_ref));
+    assert_eq!(
+        endpoint.try_send_protected_space(frame.clone()),
+        ProtectedSpaceEventEnqueue::Unavailable
+    );
+    assert!(endpoint
+        .clone()
+        .into_socket_endpoint_if_empty(owner, &binding_ref, Some(&receiver))
+        .is_err());
+    let Some(SocketOutboundFrame::ProtectedSpace(received)) = receiver.recv_next().await else {
+        panic!("expected protected event");
+    };
+    assert_eq!(received.to_storage(), frame.to_storage());
+    let socket = endpoint
+        .into_socket_endpoint_if_empty(owner, &binding_ref, Some(&receiver))
+        .unwrap();
+    let rebound = socket.bind(
+        LocalConnectionBindingId::fresh(),
+        Some(binding_ref),
+        BindingAdmissionState::Active,
+    );
+    drop(receiver);
+    assert_eq!(
+        rebound.try_send_protected_space(frame),
+        ProtectedSpaceEventEnqueue::Unavailable
+    );
+}
