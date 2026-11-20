@@ -494,6 +494,22 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
     )
     .await;
     assert_eq!(error_condition(&hidden).as_deref(), Some("item-not-found"));
+    let listed = ask(
+        &managed,
+        children(GUEST_PHONE, "protected-children-member", node),
+    )
+    .await;
+    assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
+    assert_eq!(item_names(&listed), [room.to_string()]);
+    let unlisted = ask(
+        &managed,
+        children(STRANGER_PHONE, "protected-children-stranger", node),
+    )
+    .await;
+    assert_eq!(
+        error_condition(&unlisted).as_deref(),
+        Some("item-not-found")
+    );
     managed.deployment.close().await;
 }
 

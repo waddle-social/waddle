@@ -1545,6 +1545,12 @@ async fn host_grant_fence_state(
     app_state.permission_actor = permission_actor;
     app_state.host_grants = host_grants;
     app_state.s2s_federation = s2s_federation;
+    let pubsub = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some(database.database_url()))
+            .await
+            .expect("PubSub storage in the host-grant database"),
+    );
+    app_state.pubsub_storage = pubsub.clone();
     let pending_delivery_storage = Arc::new(
         DatabasePendingDeliveryStorage::from_database(
             database.clone(),
@@ -1563,6 +1569,7 @@ async fn host_grant_fence_state(
         TestStateOverrides {
             db_pool: Some(db_pool),
             app_state: Some(Arc::new(app_state)),
+            database_pubsub_storage: Some(pubsub),
             pending_delivery_storage: Some(pending_delivery_storage),
             notification_settings_projection: Some(notification_settings_projection),
             share_app_room_registry: true,

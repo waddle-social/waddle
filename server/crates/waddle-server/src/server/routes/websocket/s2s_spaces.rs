@@ -417,6 +417,14 @@ fn refuse(iq: &Iq, error: StanzaError) -> Vec<Stanza> {
 }
 
 /// The result answering the request `iq`, from the address it was sent to.
+fn protect_reply(stanza: Stanza, grant: ManagedSpaceGrant) -> SpaceReply {
+    if matches!(&stanza, Stanza::Iq(iq) if matches!(iq.as_ref(), Iq::Result { .. })) {
+        SpaceReply::Protected { stanza, grant }
+    } else {
+        SpaceReply::Ordinary(vec![stanza])
+    }
+}
+
 fn result(iq: &Iq, payload: Option<Element>) -> Vec<Stanza> {
     vec![Stanza::Iq(Box::new(Iq::Result {
         from: iq.to().cloned(),
@@ -911,12 +919,13 @@ impl Asked<'_> {
         id: &str,
         payload: Option<&Element>,
         grant: &mut ManagedSpaceGrant,
-    ) -> bool {
+    ) -> Option<bool> {
         let Some(room) = bookmarked_room(self.state, id, payload) else {
-            return false;
+            return Some(false);
         };
-        if room_open(self.state, &room).await != Some(true) {
-            return false;
+        match room_open(self.state, &room).await {
+            Some(true) => {}
+            closed_or_unknown => return closed_or_unknown,
         }
         match self
             .state
@@ -926,14 +935,27 @@ impl Asked<'_> {
             .room(RoomBinding::Room(&room))
             .await
         {
-            RoomGate::Unmanaged => true,
+            RoomGate::Unmanaged => Some(true),
             RoomGate::Managed(decision)
                 if decision.allows_as(&self.account, &self.evidence, HostGrantAction::View) =>
             {
                 grant.require_room(decision);
-                true
+                Some(true)
             }
-            RoomGate::Managed(_) | RoomGate::Unavailable => false,
+            RoomGate::Managed(_) => Some(false),
+            RoomGate::Unavailable => None,
+        }
+    }
+
+    async fn child_visibility(
+        &self,
+        id: &str,
+        payload: Option<&Element>,
+        grant: Option<&mut ManagedSpaceGrant>,
+    ) -> Option<bool> {
+        match grant {
+            Some(grant) => self.protected_child_visible(id, payload, grant).await,
+            None => self.child_visible(id, payload).await,
         }
     }
 
@@ -1021,12 +1043,20 @@ impl Asked<'_> {
         let mut replies = self
             .item_response(&node, max_items, &item_ids, Some(&mut grant))
             .await;
-        match replies.pop()? {
-            stanza if matches!(&stanza, Stanza::Iq(iq) if matches!(iq.as_ref(), Iq::Result { .. })) => {
-                Some(SpaceReply::Protected { stanza, grant })
-            }
-            error => Some(SpaceReply::Ordinary(vec![error])),
-        }
+        Some(protect_reply(replies.pop()?, grant))
+    }
+
+    async fn protected_children(&self, principal: &RemotePrincipal) -> Option<SpaceReply> {
+        let Iq::Get { payload, .. } = self.iq else {
+            return None;
+        };
+        let query = DiscoItemsQuery::try_from(payload.clone()).ok()?;
+        let node = query.node?;
+        let mut grant = self.protected_read(&node, principal).await?;
+        let mut replies = self
+            .children_response(node, query.rsm.as_ref(), Some(&mut grant))
+            .await;
+        Some(protect_reply(replies.pop()?, grant))
     }
 
     async fn node_info(&self, node: String) -> Element {
@@ -1137,6 +1167,15 @@ impl Asked<'_> {
         if !reads(space.node.config.access_model, space.affiliation) {
             return self.refuse(forbidden("You may not read this Space."));
         }
+        self.children_response(node, rsm, None).await
+    }
+
+    async fn children_response(
+        &self,
+        node: String,
+        rsm: Option<&SetQuery>,
+        mut grant: Option<&mut ManagedSpaceGrant>,
+    ) -> Vec<Stanza> {
         // One more than the bound is read to tell whether any was left out;
         // the oldest of them is then dropped.
         let Ok(mut stored) = self
@@ -1165,7 +1204,10 @@ impl Asked<'_> {
             if item.payload.is_none() {
                 continue;
             }
-            match self.child_visible(&id, item.payload.as_ref()).await {
+            match self
+                .child_visibility(&id, item.payload.as_ref(), grant.as_deref_mut())
+                .await
+            {
                 Some(true) => items.push(xmpp_parsers::disco::Item {
                     jid: Jid::from(self.service.clone()),
                     node: None,
@@ -1293,13 +1335,11 @@ impl Asked<'_> {
                 Some(id) if SpaceImage::from_item_id(id).is_some() => {
                     item.payload.is_some() && space_image(id, item.payload.as_ref())
                 }
-                Some(id) => match grant.as_deref_mut() {
-                    Some(grant) => {
-                        self.protected_child_visible(id, item.payload.as_ref(), grant)
-                            .await
-                    }
-                    None => self.child_visible(id, item.payload.as_ref()).await == Some(true),
-                },
+                Some(id) => {
+                    self.child_visibility(id, item.payload.as_ref(), grant.as_deref_mut())
+                        .await
+                        == Some(true)
+                }
                 None => false,
             };
             if told {
@@ -1603,7 +1643,12 @@ impl LocalSpaces for WebSocketLocalSpaces {
                 }
                 asked.disco_info().await
             }
-            SpaceOperation::DiscoItems => asked.disco_items().await,
+            SpaceOperation::DiscoItems => {
+                if let Some(reply) = asked.protected_children(&request.principal).await {
+                    return reply;
+                }
+                asked.disco_items().await
+            }
             SpaceOperation::Ping => match iq {
                 Iq::Get { .. } => result(iq, None),
                 _ => refuse(iq, bad_request()),
