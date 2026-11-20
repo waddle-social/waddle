@@ -21,7 +21,9 @@ use waddle_xmpp::identity::CanonicalDomain;
 use crate::db::lineage::PgSchemaName;
 use crate::db::physical_attestation::{validate_identifier, PgRoleName, PhysicalAttestationError};
 use crate::db::runtime_startup::valid_git_sha;
-use crate::permissions::host_grant::{GrantSubject, PositionWitness, ScopeLifecycleId};
+use crate::permissions::host_grant::{
+    GrantGeneration, GrantSubject, PositionWitness, ScopeLifecycleId,
+};
 
 const ABOUT: &str = "Waddle XMPP server";
 
@@ -369,6 +371,32 @@ pub(super) struct HostGrantArgs {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum HostGrantActionArgs {
+    /// Bootstrap the enrolled whitelist Space, or rebind it after restore
+    BindSpace {
+        /// Lifecycle of the enrolled scope
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+        /// Scope generation the operator reviewed
+        #[arg(long, value_name = "GENERATION", value_parser = parse_grant_generation)]
+        expected_generation: GrantGeneration,
+        /// Bare account JID of the first owner, on the served domain
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        owner: GrantSubject,
+        /// Operation ID; reuse it with the same arguments when retrying
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// Permit remote access when the Space's runtime admission path is enabled
+        #[arg(long)]
+        federated: bool,
+        /// Account domain served by this deployment
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+    },
     /// Reopen scopes whose reconstruction after a declared restore was
     /// verified; the operator's acknowledgement of the restore
     Reopen {
@@ -628,6 +656,14 @@ pub(super) enum ArgumentError {
     #[cfg(feature = "clustering")]
     #[error("expected a whole number followed by ms, s, m or h, such as 30s")]
     Duration,
+}
+
+fn parse_grant_generation(value: &str) -> Result<GrantGeneration, &'static str> {
+    value
+        .parse()
+        .ok()
+        .and_then(GrantGeneration::new)
+        .ok_or("expected a positive scope generation")
 }
 
 fn parse_lifecycle(value: &str) -> Result<ScopeLifecycleId, ArgumentError> {

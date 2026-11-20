@@ -21,9 +21,9 @@ use uuid::Uuid;
 use crate::config::SpiceDbConfig;
 use crate::permissions::host_grant::{
     position_witness_resource, read_position_witness, sync_journal_witness, sync_journal_witnesses,
-    sync_position_witness, FenceAcknowledgement, GrantOperationId, HostGrantError, HostGrantStore,
-    OperatorRevoke, PositionStanding, PositionWriter, ReopenSelection, RoomAffiliation,
-    ScopeLifecycleId, ServedAccountDomains, WitnessSync,
+    sync_position_witness, BindSpace, FenceAcknowledgement, GrantOperationId, HostGrantError,
+    HostGrantStore, OperatorRevoke, PositionStanding, PositionWriter, ReopenSelection,
+    RoomAffiliation, ScopeLifecycleId, ServedAccountDomains, WitnessSync,
 };
 use crate::permissions::{EnsureAuthzCodecIncarnation, PermissionActor};
 
@@ -42,6 +42,47 @@ pub(super) async fn run(args: HostGrantArgs) -> Result<(), OwnerCliError> {
     }
     .flatten();
     match args.action {
+        HostGrantActionArgs::BindSpace {
+            scope,
+            expected_generation,
+            owner,
+            operation_id,
+            federated,
+            account_domain,
+        } => {
+            let receipt = store
+                .bind_space(
+                    &BindSpace {
+                        operation: GrantOperationId::from_uuid(operation_id),
+                        lifecycle: scope,
+                        expected_generation,
+                        owner,
+                        federated,
+                    },
+                    &ServedAccountDomains::new([account_domain]),
+                )
+                .await
+                .map_err(OwnerCliError::HostGrant)?;
+            let record = receipt.record();
+            println!(
+                "{}",
+                json!({
+                    "operation_id": record.operation.as_uuid().to_string(),
+                    "scope": scope.to_storage(),
+                    "generation": record.generation.value(),
+                })
+            );
+            eprintln!("the recorded generation requires a verified scope marker for activation");
+            if let Some(permissions) = &permissions {
+                let journal = sync_journal_witness(&store, permissions, scope).await;
+                let position =
+                    sync_position_witness(&store, permissions, PositionWriter::Commit, None).await;
+                report_witnesses(journal.is_err() || position.is_err());
+                if let Ok((sync, standing)) = position {
+                    report_position(sync, standing);
+                }
+            }
+        }
         HostGrantActionArgs::Reopen {
             scope,
             lost_operations_reapplied,

@@ -1,8 +1,9 @@
 # Canonical PubSub admission for enrolled Spaces
 
-**Status:** PostgreSQL migration 2015 adds the empty Space binding and
-affiliation relations. The store still has no Space writer or admission
-path. The writer and effect boundaries below require separate review.
+**Status:** PostgreSQL migration 2015 adds Space bindings and affiliations.
+An operator can bind the enrolled node and stage an owner grant. The verified
+scope marker activates the grant. The protocol admission and ongoing
+affiliation mutation paths below are proposed.
 
 [Issue #2047](https://github.com/waddle-social/waddle/issues/2047) requires
 host-authorized private Space discovery and event delivery. The enrolled
@@ -132,3 +133,11 @@ restore-incarnation transition closes Space admission. Reopening rooms
 leaves Spaces closed until an audited operator rebootstrap verifies the
 node binding and replaces restored grants in the canonical ledger. Verify
 that restoring a snapshot from before a revoke cannot regrant access.
+
+The owner command `host-grant bind-space` takes the lifecycle, expected
+scope generation, explicit served owner JID, and a stable operation UUID.
+Use the same arguments and operation ID to retry an uncertain result.
+`--federated` records opt-in for future S2S admission. The command reports
+the recorded generation, which the running authority must reconcile before
+the owner grant becomes effective. After a restore, reconstruct and reopen
+the scope before issuing a new bind operation.
