@@ -169,6 +169,11 @@ pub(crate) async fn route_to_connection(
         }
         Vec::new()
     } else {
+        // RFC 6120 §10.4: an IQ for an unserved domain belongs to the remote
+        // route, not to local resource selection.
+        if let Some(target) = super::remote::unserved_iq_target(deps, &jid, stanza.as_ref()) {
+            return super::remote::route_unserved_iq(deps, target, *stanza, call_setup).await;
+        }
         // Notification activity ingest (slice 2b): when the routed
         // stanza is a typed XEP-0085 chat-state on a DM Message (type
         // chat/normal), record the sender's `(sender_bare,
