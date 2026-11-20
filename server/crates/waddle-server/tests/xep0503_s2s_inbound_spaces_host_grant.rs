@@ -53,8 +53,9 @@ use waddle_server::permissions::host_grant::{
     BindSpace, GrantOperationId, ScopeKey, StreamEvidence,
 };
 use waddle_server::s2s::conn::AuthenticationStrength;
-use waddle_server::test_support::host_spaces_for_remote_principals;
-use waddle_xmpp::pubsub::{NodeConfig, PubSubItem};
+use waddle_server::s2s::route::SpacePublication;
+use waddle_server::test_support::{host_spaces_for_remote_principals, notify_space_publication};
+use waddle_xmpp::pubsub::{build_pubsub_event, NodeConfig, PubSubEvent, PubSubItem};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
 use xmpp_parsers::iq::Iq;
 
@@ -622,6 +623,79 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .space_subscription_event(&key, &old_subscription)
         .await
         .is_none());
+
+    let publication = |id: &str| {
+        let mut event = build_pubsub_event(
+            &jid(SPACES),
+            &jid(GUEST_PHONE),
+            &PubSubEvent::new(node, vec![bookmark.clone()]),
+        );
+        event.id = Some(id.to_owned());
+        SpacePublication {
+            service: spaces(),
+            node: node.to_owned(),
+            node_created_at_ms: created_at,
+            event,
+        }
+    };
+    notify_space_publication(
+        &managed.hosted.state,
+        &managed.hosted.router,
+        &publication("protected-space-event"),
+    )
+    .await;
+    let event = managed.hosted.answered("protected-space-event").await;
+    assert_eq!(event.name(), "message");
+    assert_eq!(event.attr("to"), Some(subscriber.as_str()));
+
+    // A concurrent removal holds the row before the event is queued. The
+    // connection's locked recheck must see the deletion, even though the
+    // notification worker admitted the pre-commit subscription snapshot.
+    let mut removal = fixture
+        .ingress
+        .db
+        .begin()
+        .await
+        .expect("removal transaction");
+    let mut rows = removal
+        .query(
+            "SELECT 1 FROM s2s_space_subscriptions WHERE subscriber_jid = ? FOR UPDATE",
+            waddle_server::db_params![subscriber.as_str()],
+        )
+        .await
+        .expect("lock preference");
+    assert!(rows.next().await.expect("subscription row").is_some());
+    drop(rows);
+    notify_space_publication(
+        &managed.hosted.state,
+        &managed.hosted.router,
+        &publication("removed-space-event"),
+    )
+    .await;
+    removal
+        .execute(
+            "DELETE FROM s2s_space_subscriptions WHERE subscriber_jid = ?",
+            waddle_server::db_params![subscriber.as_str()],
+        )
+        .await
+        .expect("delete locked preference");
+    removal.commit().await.expect("commit removal");
+    let barrier = ask(&managed, items(GUEST_PHONE, "post-event-barrier", node)).await;
+    assert_eq!(barrier.attr("type"), Some("result"));
+    assert!(managed
+        .hosted
+        .captured
+        .stanzas()
+        .iter()
+        .all(|stanza| stanza.attr("id") != Some("removed-space-event")));
+    assert_eq!(
+        subscriptions
+            .record_protected(&spaces(), node, created_at, subscription, &|_| true, token)
+            .await
+            .expect("subscribe again")
+            .outcome,
+        SubscriptionRecord::Recorded
+    );
 
     for (attempt, expected) in [("first", "result"), ("repeat", "error")] {
         let unsubscribe = naming("unsubscribe", NS_PUBSUB, node)

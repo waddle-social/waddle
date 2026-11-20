@@ -306,7 +306,8 @@ async fn notify_publications(
                     discard_queued(&mut queued);
                     return;
                 };
-                notify_remote_subscribers(&state, &publication).await;
+                notify_remote_subscribers(&state, state.deps.remote_route.as_ref(), &publication)
+                    .await;
             }
             Queued::Settled(settled) => {
                 let _ = settled.send(());
@@ -1907,7 +1908,11 @@ pub(crate) fn queue_remote_notification(
 /// accounts; what does not fit a domain pair's queue is dropped, as a
 /// headline may be. Nothing is sent to an address at a domain this
 /// deployment serves.
-async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePublication) {
+pub(crate) async fn notify_remote_subscribers(
+    state: &WebSocketState,
+    route: &dyn crate::destination::RemoteRoute,
+    publication: &SpacePublication,
+) {
     // Without an S2S snapshot nothing leaves for another server, and
     // nothing is read to find that out.
     if state.deps.app_state.s2s_federation.is_none() {
@@ -2008,7 +2013,7 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
                 }
             }
             let subscriber = Jid::from(subscription.account);
-            if !state.deps.remote_route.protected_space_event(
+            if !route.protected_space_event(
                 service,
                 &subscriber,
                 Stanza::Message(for_remote_subscriber(event, &subscriber)),
@@ -2051,7 +2056,7 @@ async fn notify_remote_subscribers(state: &WebSocketState, publication: &SpacePu
                 Some(room) => room_admits(state, room, account, &evidence).await == Some(true),
                 None => true,
             }
-            && state.deps.remote_route.space_event(
+            && route.space_event(
                 service,
                 &subscriber,
                 Stanza::Message(for_remote_subscriber(event, &subscriber)),

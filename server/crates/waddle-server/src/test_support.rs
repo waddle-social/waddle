@@ -387,6 +387,21 @@ pub async fn spaces_publications_settled(router: &crate::s2s::route::S2sRouter) 
     router.spaces_publications_settled().await;
 }
 
+/// Process one publication through the Spaces host against a live test router.
+#[cfg(feature = "test-support")]
+pub async fn notify_space_publication(
+    state: &WebSocketState,
+    router: &crate::s2s::route::S2sRouter,
+    publication: &crate::s2s::route::SpacePublication,
+) {
+    crate::server::routes::websocket::s2s_spaces::notify_remote_subscribers(
+        state,
+        router,
+        publication,
+    )
+    .await;
+}
+
 /// Have admin commands run against the application state of `state`
 /// notify the subscribers of what they take out of a node, as startup
 /// binds it once the WebSocket state exists. The state is held weakly, so
