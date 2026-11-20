@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use waddle_xmpp_client::error::STANZA_CONDITION_ITEM_NOT_FOUND;
 use waddle_xmpp_client::stickers::{
-    build_pack_publish_iq, build_pack_retract_iq, build_sticker_pack_items_iq,
-    build_sticker_packs_items_iq, parse_sticker_packs_result, PackId, StickerPackDoc,
-    STICKERS_NODE,
+    build_pack_import_iq, build_pack_publish_iq, build_pack_retract_iq,
+    build_sticker_pack_items_iq, build_sticker_packs_items_iq, parse_sticker_packs_result, PackId,
+    PackImport, StickerPackDoc, STICKERS_NODE,
 };
 use waddle_xmpp_client::ClientError;
 
@@ -53,6 +53,26 @@ pub(crate) fn sticker_pack_publish_stanza(doc: &StickerPackDoc) -> (PackId, Elem
 /// XEP-0060 §7.2 retract IQ for one pack on the own PEP node.
 pub(crate) fn sticker_pack_retract_stanza(pack_id: &PackId) -> Element {
     build_pack_retract_iq(&Uuid::new_v4().to_string(), pack_id)
+}
+
+/// XEP-0449 §import: the publish IQ that duplicates a fetched pack to
+/// the own PEP node, payload untouched and under the same id. A pack
+/// that is not there (by stanza error or by an answer without it) is
+/// `item-not-found`; a restricted pack is `InvalidArgument`.
+pub(crate) fn sticker_pack_import_stanza(
+    fetched: Result<Element, ClientError>,
+    node: &str,
+    pack_id: &PackId,
+) -> Result<Element, WaddleError> {
+    let fetched = fetched.map_err(|e| client_error_to_waddle(&e))?;
+    match build_pack_import_iq(&Uuid::new_v4().to_string(), &fetched, node, pack_id) {
+        PackImport::Publish(iq) => Ok(iq),
+        PackImport::Missing => Err(WaddleError::Stanza {
+            condition: STANZA_CONDITION_ITEM_NOT_FOUND.to_string(),
+            text: None,
+        }),
+        PackImport::Restricted => Err(WaddleError::InvalidArgument),
+    }
 }
 
 /// Map a whole-node fetch reply. `item-not-found` (the node was never
@@ -174,6 +194,40 @@ impl WaddleClient {
             Ok(_) => Ok(id.to_string()),
             Err(e) => {
                 self.emit_error(format!("publish_sticker_pack failed: {e}"));
+                Err(client_error_to_waddle(&e))
+            }
+        }
+    }
+
+    /// XEP-0449 §import: copy another user's pack to the account's own
+    /// PEP node. The pack is fetched from `owner_jid` (`node: None` is
+    /// their PEP `urn:xmpp:stickers:0` node) and published again as it
+    /// is, under the same id, which is returned. A pack that is gone
+    /// fails with `item-not-found`; one its author marked
+    /// `<restricted/>` with `InvalidArgument`.
+    pub async fn import_sticker_pack(
+        &self,
+        owner_jid: String,
+        node: Option<String>,
+        pack_id: String,
+    ) -> Result<String, WaddleError> {
+        let owner = owner_jid
+            .parse::<BareJid>()
+            .map_err(|_| WaddleError::InvalidJid)?;
+        let pack_id = PackId::try_new(pack_id).ok_or(WaddleError::InvalidArgument)?;
+        let node = node
+            .filter(|node| !node.trim().is_empty())
+            .unwrap_or_else(|| STICKERS_NODE.to_string());
+        let Some(handle) = self.clone_handle().await else {
+            return Err(WaddleError::NotConnected);
+        };
+        let fetch = sticker_pack_fetch_stanza(&owner, &node, &pack_id);
+        let fetched = send_iq_with_timeout(&handle, fetch).await;
+        let publish = sticker_pack_import_stanza(fetched, &node, &pack_id)?;
+        match send_iq_with_timeout(&handle, publish).await {
+            Ok(_) => Ok(pack_id.to_string()),
+            Err(e) => {
+                self.emit_error(format!("import_sticker_pack failed: {e}"));
                 Err(client_error_to_waddle(&e))
             }
         }

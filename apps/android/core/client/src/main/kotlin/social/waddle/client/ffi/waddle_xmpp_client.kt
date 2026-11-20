@@ -913,6 +913,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_st
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_import_sticker_pack(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack(
@@ -1197,6 +1199,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_status_p
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_packs(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_import_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_sticker_pack(`ptr`: Long,`pack`: RustBuffer.ByValue,
 ): Long
@@ -1708,6 +1712,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs() != 18633) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_import_sticker_pack() != 51887) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack() != 16031) {
@@ -3150,6 +3157,16 @@ public interface WaddleClientInterface {
      * first-run state and returns an empty list.
      */
     suspend fun `fetchStickerPacks`(`ownerJid`: kotlin.String?): List<WaddleStickerPack>
+
+    /**
+     * XEP-0449 §import: copy another user's pack to the account's own
+     * PEP node. The pack is fetched from `owner_jid` (`node: None` is
+     * their PEP `urn:xmpp:stickers:0` node) and published again as it
+     * is, under the same id, which is returned. A pack that is gone
+     * fails with `item-not-found`; one its author marked
+     * `<restricted/>` with `InvalidArgument`.
+     */
+    suspend fun `importStickerPack`(`ownerJid`: kotlin.String, `node`: kotlin.String?, `packId`: kotlin.String): kotlin.String
 
     /**
      * XEP-0449: publish (create or update/import) a sticker pack on
@@ -6388,6 +6405,35 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeWaddleStickerPack.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0449 §import: copy another user's pack to the account's own
+     * PEP node. The pack is fetched from `owner_jid` (`node: None` is
+     * their PEP `urn:xmpp:stickers:0` node) and published again as it
+     * is, under the same id, which is returned. A pack that is gone
+     * fails with `item-not-found`; one its author marked
+     * `<restricted/>` with `InvalidArgument`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `importStickerPack`(`ownerJid`: kotlin.String, `node`: kotlin.String?, `packId`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_import_sticker_pack(
+                uniffiHandle,
+                FfiConverterString.lower(`ownerJid`),FfiConverterOptionalString.lower(`node`),FfiConverterString.lower(`packId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
