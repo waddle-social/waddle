@@ -142,7 +142,7 @@ pub async fn child_rooms(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         .concat(),
     );
     let node = support::id("space");
-    let rooms: Vec<String> = (0..3)
+    let mut rooms: Vec<String> = (0..3)
         .map(|_| {
             [
                 support::id("child").as_str(),
@@ -169,7 +169,15 @@ pub async fn child_rooms(h: &mut Harness, peer: Peer) -> Result<Outcome> {
         ),
     )
     .await?;
-    for room in item_ids(&items) {
+    let mut listed_rooms = item_ids(&items);
+    listed_rooms.sort_unstable();
+    rooms.sort_unstable();
+    outcome.check(
+        "lists every published child room exactly once",
+        is_result(&items) && listed_rooms == rooms,
+        format!("expected {rooms:?}, returned {listed_rooms:?}"),
+    );
+    for room in rooms {
         let joined = muc::join(&mut member, &room, "member").await;
         outcome.check(
             ["joins ", &room].concat(),

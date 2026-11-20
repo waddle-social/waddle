@@ -46,8 +46,12 @@ pub async fn join_with(
         .await?;
     let presence = session
         .wait_for(ANSWER, |element| {
-            stanza::is_self_presence(element)
-                || (element.name() == "presence" && element.attr("type") == Some("error"))
+            let from_room = element
+                .attr("from")
+                .is_some_and(|from| from.split_once('/').map_or(from, |(bare, _)| bare) == room);
+            from_room
+                && (stanza::is_self_presence(element)
+                    || (element.name() == "presence" && element.attr("type") == Some("error")))
         })
         .await?;
     anyhow::ensure!(
