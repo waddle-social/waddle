@@ -102,7 +102,6 @@ pub(super) async fn assert_local_subscription_lifecycle(
     service: &BareJid,
     node: &str,
     first: &Replica,
-    second: &Replica,
     member: &mut WsXmppClient,
     database_url: &str,
 ) {
@@ -179,7 +178,7 @@ pub(super) async fn assert_local_subscription_lifecycle(
             .attr(xml_ncname!("h").to_owned(), "0")
             .build()
     };
-    let mut resumed = authenticate_unbound(&second.url, "alice").await;
+    let mut resumed = authenticate_unbound(&first.url, "alice").await;
     send_stanza(&mut resumed, resume()).await;
     let confirmation = receive_sm(&mut resumed, &["resumed", "failed"]).await;
     assert!(confirmation.is("resumed", SM_NS), "{confirmation:?}");
@@ -241,8 +240,8 @@ pub(super) async fn assert_local_subscription_lifecycle(
         "a new preference has a different subid"
     );
 
-    let mut resumed = authenticate_unbound(&second.url, "alice").await;
-    let registry = &second.state.deps.protocol.connection_registry;
+    let mut resumed = authenticate_unbound(&first.url, "alice").await;
+    let registry = &first.state.deps.protocol.connection_registry;
     let registration_lock = registry.lock_bind(&resource).await;
     let mut pending_bind = registry.observe_next_pending_bind(&resource);
     send_stanza(&mut resumed, resume()).await;

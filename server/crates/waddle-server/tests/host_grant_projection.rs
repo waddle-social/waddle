@@ -1009,7 +1009,6 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         &service,
         node,
         first,
-        second,
         &mut member,
         live.fixture.ingress.db.database_url(),
     )
