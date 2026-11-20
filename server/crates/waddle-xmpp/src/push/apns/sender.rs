@@ -356,6 +356,7 @@ mod tests {
                 item: "stanza-1",
                 node: "node-1",
                 badge_count: Some(2),
+                content: None,
             })
             .expect("alert class")
             .encode()

@@ -1,17 +1,23 @@
-//! Minimal APNs alert payload.
+//! APNs alert payload.
 //!
 //! XEP-0357 keeps message content away from the push service, and #529
 //! makes the Apple payload minimal by default: a localized generic
 //! banner chosen by notification class, the unread badge, a thread id
 //! for grouping, and the same routing context the Web Push envelope
-//! carries. There is deliberately no sender and no body field, and no
-//! `mutable-content` flag, so nothing downstream of APNs can learn who
-//! wrote what.
+//! carries. By default there is no sender and no body, so nothing
+//! downstream of APNs can learn who wrote what.
 //!
-//! The payload is built from serde structs and serialized once by
-//! [`ApnsPayload::encode`], which also enforces Apple's 4096-byte limit.
+//! The alert names the sender and shows the body only when the publisher
+//! put them in the XEP-0357 summary ([`ApnsAlertContent`]), which the
+//! user server does only for a conversation whose owner opted in
+//! (`urn:waddle:push:rich:0`). There is never a `mutable-content` flag.
+//!
+//! The payload is built from serde structs and serialized by
+//! [`ApnsPayload::encode`], which keeps it within Apple's 4096-byte
+//! limit: content that does not fit is shortened, then dropped in favour
+//! of the generic banner.
 
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use serde::{Serialize, Serializer};
 use thiserror::Error;
 use xmpp_parsers::jingle::SessionId;
@@ -24,6 +30,15 @@ pub const MAX_APNS_PAYLOAD_BYTES: usize = 4096;
 /// Schema version of the `waddle` routing object. Matches the Web Push
 /// envelope's `"v": 1`.
 const WADDLE_ROUTING_VERSION: u8 = 1;
+
+/// Longest alert body sent, in UTF-8 bytes before JSON escaping. A
+/// banner shows a few lines; the rest of the message is in the app.
+const MAX_ALERT_BODY_BYTES: usize = 1024;
+
+/// Longest alert title sent, in UTF-8 bytes before JSON escaping.
+const MAX_ALERT_TITLE_BYTES: usize = 256;
+
+const ELLIPSIS: char = '…';
 
 /// `aps.sound`: the system default alert sound.
 const DEFAULT_SOUND: &str = "default";
@@ -70,13 +85,16 @@ impl ApnsAlertLocKey {
 }
 
 /// Top-level APNs JSON document.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ApnsPayload<'a> {
     aps: Aps<'a>,
     waddle: WaddleRouting<'a>,
+    /// The banner used when the content does not fit.
+    #[serde(skip)]
+    generic_loc_key: ApnsAlertLocKey,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 struct Aps<'a> {
     alert: Alert,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,10 +104,100 @@ struct Aps<'a> {
     thread_id: &'a str,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// `aps.alert`. `body` and `loc-key` are alternatives: Apple shows the
+/// localized string only when there is no literal body.
+#[derive(Clone, Serialize)]
 struct Alert {
-    #[serde(rename = "loc-key")]
-    loc_key: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+    #[serde(rename = "loc-key", skip_serializing_if = "Option::is_none")]
+    loc_key: Option<&'static str>,
+}
+
+impl Alert {
+    fn generic(loc_key: ApnsAlertLocKey) -> Self {
+        Self {
+            title: None,
+            body: None,
+            loc_key: Some(loc_key.as_str()),
+        }
+    }
+
+    fn with_content(
+        loc_key: ApnsAlertLocKey,
+        class: NotificationClass,
+        content: ApnsAlertContent<'_>,
+    ) -> Self {
+        // A message is never shown without its sender.
+        let Some(title) = alert_title(class, content.sender) else {
+            return Self::generic(loc_key);
+        };
+        let title = Some(truncated(title, MAX_ALERT_TITLE_BYTES));
+        match content.body.filter(|body| !body.is_empty()) {
+            Some(body) => Self {
+                title,
+                body: Some(truncated(body, MAX_ALERT_BODY_BYTES)),
+                loc_key: None,
+            },
+            None => Self {
+                title,
+                ..Self::generic(loc_key)
+            },
+        }
+    }
+}
+
+/// The name shown for the sender: the account's localpart in a 1:1
+/// conversation, the occupant's nick in a room. The push service knows
+/// no display names.
+fn alert_title(class: NotificationClass, sender: &Jid) -> Option<&str> {
+    let name = match class {
+        NotificationClass::Call => None,
+        NotificationClass::MissedCall | NotificationClass::Dm | NotificationClass::DmMention => {
+            sender.node().map(|node| node.as_str())
+        }
+        NotificationClass::PersonalMention
+        | NotificationClass::ChannelMention
+        | NotificationClass::ActiveChannelMention
+        | NotificationClass::NotifyAll => sender.resource().map(|nick| nick.as_str()),
+    };
+    name.filter(|name| !name.is_empty())
+}
+
+/// `text` cut to at most `max_bytes` on a character boundary, ending in
+/// an ellipsis when something was cut.
+fn truncated(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = max_bytes.saturating_sub(ELLIPSIS.len_utf8());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cut = text[..end].trim_end().to_owned();
+    cut.push(ELLIPSIS);
+    cut
+}
+
+/// Who wrote the last message and what it says, as the XEP-0357 summary
+/// carried them (`last-message-sender`, `last-message-body`).
+#[derive(Clone, Copy)]
+pub struct ApnsAlertContent<'a> {
+    /// Full JID: the sending resource in a 1:1 conversation, the
+    /// occupant JID in a room.
+    pub sender: &'a Jid,
+    pub body: Option<&'a str>,
+}
+
+/// Message content stays out of logs.
+impl std::fmt::Debug for ApnsAlertContent<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApnsAlertContent")
+            .field("has_body", &self.body.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Routing context for the notification tap, mirroring the Web Push
@@ -122,14 +230,19 @@ pub struct ApnsPayloadFields<'a> {
     /// This is deliberately independent of XEP-0357's per-conversation
     /// summary `message-count`.
     pub badge_count: Option<u64>,
+    /// Sender and body to show. `None` keeps the generic banner.
+    pub content: Option<ApnsAlertContent<'a>>,
 }
 
 impl<'a> ApnsPayload<'a> {
     pub fn new(fields: ApnsPayloadFields<'a>) -> Result<Self, ApnsPayloadError> {
+        let loc_key = ApnsAlertLocKey::for_class(fields.class)?;
         Ok(Self {
+            generic_loc_key: loc_key,
             aps: Aps {
-                alert: Alert {
-                    loc_key: ApnsAlertLocKey::for_class(fields.class)?.as_str(),
+                alert: match fields.content {
+                    Some(content) => Alert::with_content(loc_key, fields.class, content),
+                    None => Alert::generic(loc_key),
                 },
                 badge: fields.badge_count,
                 sound: DEFAULT_SOUND,
@@ -148,12 +261,35 @@ impl<'a> ApnsPayload<'a> {
 
     /// Serialize to the request body, rejecting anything over
     /// [`MAX_APNS_PAYLOAD_BYTES`] before it reaches Apple.
+    ///
+    /// Content never costs the notification: JSON escaping can grow a
+    /// body several times over, so an oversized payload is retried with
+    /// half the body, and at last with the generic banner.
     pub fn encode(&self) -> Result<EncodedApnsPayload, ApnsPayloadError> {
         let bytes = serde_json::to_vec(self).map_err(ApnsPayloadError::Serialize)?;
-        if bytes.len() > MAX_APNS_PAYLOAD_BYTES {
-            return Err(ApnsPayloadError::TooLarge { size: bytes.len() });
+        if bytes.len() <= MAX_APNS_PAYLOAD_BYTES {
+            return Ok(EncodedApnsPayload(bytes));
         }
-        Ok(EncodedApnsPayload(bytes))
+        let alert = &self.aps.alert;
+        let smaller = match alert.body.as_deref() {
+            Some(body) if body.len() > 2 * ELLIPSIS.len_utf8() => Alert {
+                body: Some(truncated(body, body.len() / 2)),
+                ..alert.clone()
+            },
+            _ if alert.title.is_some() || alert.body.is_some() => {
+                Alert::generic(self.generic_loc_key)
+            }
+            _ => return Err(ApnsPayloadError::TooLarge { size: bytes.len() }),
+        };
+        Self {
+            aps: Aps {
+                alert: smaller,
+                ..self.aps.clone()
+            },
+            waddle: self.waddle.clone(),
+            generic_loc_key: self.generic_loc_key,
+        }
+        .encode()
     }
 }
 
@@ -229,8 +365,17 @@ pub enum ApnsPayloadError {
 }
 
 /// A serialized payload known to fit Apple's size limit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncodedApnsPayload(Vec<u8>);
+
+/// The bytes may hold message content, which stays out of logs.
+impl std::fmt::Debug for EncodedApnsPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncodedApnsPayload")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
 
 impl EncodedApnsPayload {
     pub fn as_slice(&self) -> &[u8] {
@@ -250,6 +395,7 @@ mod tests {
             item: "stanza-1",
             node: "node-1",
             badge_count,
+            content: None,
         }
     }
 
@@ -259,6 +405,136 @@ mod tests {
             .encode()
             .expect("encodes");
         String::from_utf8(encoded.as_slice().to_vec()).expect("utf-8 JSON")
+    }
+
+    fn alert_of(fields: ApnsPayloadFields<'_>) -> serde_json::Value {
+        let json = encode_to_string(fields);
+        assert!(json.len() <= MAX_APNS_PAYLOAD_BYTES);
+        serde_json::from_str::<serde_json::Value>(&json).expect("JSON")["aps"]["alert"].clone()
+    }
+
+    fn content<'a>(sender: &'a Jid, body: Option<&'a str>) -> Option<ApnsAlertContent<'a>> {
+        Some(ApnsAlertContent { sender, body })
+    }
+
+    #[test]
+    fn direct_message_content_shows_the_senders_localpart_and_the_body() {
+        let sender: Jid = "mallory@example.com/phone".parse().expect("jid");
+        assert_eq!(
+            alert_of(ApnsPayloadFields {
+                content: content(&sender, Some("see you at 5")),
+                ..fields(NotificationClass::Dm, None)
+            }),
+            serde_json::json!({ "title": "mallory", "body": "see you at 5" })
+        );
+    }
+
+    #[test]
+    fn room_content_shows_the_occupants_nick() {
+        let sender: Jid = "general@rooms.example.com/Mallory M".parse().expect("jid");
+        assert_eq!(
+            alert_of(ApnsPayloadFields {
+                content: content(&sender, Some("@alice ping")),
+                ..fields(NotificationClass::PersonalMention, None)
+            }),
+            serde_json::json!({ "title": "Mallory M", "body": "@alice ping" })
+        );
+    }
+
+    #[test]
+    fn a_sender_without_a_body_keeps_the_generic_banner_under_their_name() {
+        let sender: Jid = "mallory@example.com/phone".parse().expect("jid");
+        for body in [None, Some("")] {
+            assert_eq!(
+                alert_of(ApnsPayloadFields {
+                    content: content(&sender, body),
+                    ..fields(NotificationClass::MissedCall, None)
+                }),
+                serde_json::json!({ "title": "mallory", "loc-key": "WADDLE_PUSH_MISSED_CALL" })
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_body_is_cut_on_a_character_boundary() {
+        let sender: Jid = "mallory@example.com/phone".parse().expect("jid");
+        let body = "é".repeat(2000);
+        let alert = alert_of(ApnsPayloadFields {
+            content: content(&sender, Some(&body)),
+            ..fields(NotificationClass::Dm, None)
+        });
+        let sent = alert["body"].as_str().expect("body");
+        assert!(sent.len() <= MAX_ALERT_BODY_BYTES);
+        assert_eq!(sent, format!("{}…", "é".repeat(510)));
+    }
+
+    #[test]
+    fn a_body_that_escapes_past_the_limit_is_shortened_not_dropped() {
+        let sender: Jid = "mallory@example.com/phone".parse().expect("jid");
+        // Each control character is six bytes of JSON.
+        let body = "\u{1}".repeat(1000);
+        let alert = alert_of(ApnsPayloadFields {
+            content: content(&sender, Some(&body)),
+            ..fields(NotificationClass::Dm, None)
+        });
+        let sent = alert["body"].as_str().expect("body");
+        assert!(sent.starts_with('\u{1}') && sent.ends_with('…'));
+        assert_eq!(alert["title"], "mallory");
+    }
+
+    #[test]
+    fn content_that_can_never_fit_falls_back_to_the_generic_banner() {
+        let sender: Jid = "mallory@example.com/phone".parse().expect("jid");
+        // The longest conversation whose generic payload still fits.
+        let overhead = encode_to_string(ApnsPayloadFields {
+            conversation: "",
+            ..fields(NotificationClass::Dm, None)
+        })
+        .len();
+        let conversation = "a".repeat((MAX_APNS_PAYLOAD_BYTES - overhead) / 2);
+        assert_eq!(
+            alert_of(ApnsPayloadFields {
+                conversation: &conversation,
+                content: content(&sender, Some("hello")),
+                ..fields(NotificationClass::Dm, None)
+            }),
+            serde_json::json!({ "loc-key": "WADDLE_PUSH_DM" })
+        );
+    }
+
+    #[test]
+    fn a_body_without_a_nameable_sender_keeps_the_generic_banner() {
+        // A room message needs the occupant's nick, a 1:1 message a localpart.
+        for (class, sender) in [
+            (
+                NotificationClass::PersonalMention,
+                "general@rooms.example.com",
+            ),
+            (NotificationClass::Dm, "example.com/phone"),
+        ] {
+            let sender: Jid = sender.parse().expect("jid");
+            let alert = alert_of(ApnsPayloadFields {
+                content: content(&sender, Some("hello")),
+                ..fields(class, None)
+            });
+            assert_eq!(alert.as_object().expect("alert").len(), 1, "{alert}");
+            assert!(alert["loc-key"].is_string());
+        }
+    }
+
+    #[test]
+    fn debug_output_omits_the_body() {
+        let sender: Jid = "mallory@example.com/phone".parse().expect("jid");
+        let content = content(&sender, Some("the launch code"));
+        assert!(!format!("{content:?}").contains("launch"));
+        let encoded = ApnsPayload::new(ApnsPayloadFields {
+            content,
+            ..fields(NotificationClass::Dm, None)
+        })
+        .expect("alert class")
+        .encode()
+        .expect("encodes");
+        assert!(!format!("{encoded:?}").contains("launch"));
     }
 
     #[test]
@@ -332,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_never_carries_sender_body_or_mutable_content() {
+    fn payload_without_content_carries_no_sender_body_or_mutable_content() {
         let json = encode_to_string(fields(NotificationClass::Dm, Some(1)));
         let value: serde_json::Value = serde_json::from_str(&json).expect("JSON");
         let aps = value["aps"].as_object().expect("aps object");
