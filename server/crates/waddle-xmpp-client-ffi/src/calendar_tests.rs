@@ -420,3 +420,35 @@ fn an_edit_keeps_a_rule_this_client_would_not_write() {
 
     assert_eq!(changed.master.rrule, Some(first_fridays));
 }
+
+#[test]
+fn a_kept_rule_must_still_fit_the_start_it_is_given() {
+    let until = instant(FRIDAY_19 + 4 * WEEK_MS);
+    let original = stored(
+        VEvent::new("trip", "London")
+            .with_dtstart(instant(FRIDAY_19))
+            .with_rrule(Rrule::new(Freq::Weekly).with_until(until)),
+    );
+    let unchanged = input_for(&original);
+    let mut all_day = unchanged.clone();
+    all_day.start = Some(day("2027-02-05"));
+    let mut past_the_end = unchanged.clone();
+    past_the_end.start = Some(timed(FRIDAY_19 + 5 * WEEK_MS));
+    let mut undated = unchanged.clone();
+    undated.start = None;
+
+    assert!(apply_input(original.clone(), unchanged).is_ok());
+    for (edit, why) in [
+        (all_day, "an all-day series cannot end on an instant"),
+        (past_the_end, "a series cannot start after it ends"),
+        (undated, "a series needs a start"),
+    ] {
+        assert!(
+            matches!(
+                apply_input(original.clone(), edit),
+                Err(WaddleError::InvalidArgument)
+            ),
+            "{why}"
+        );
+    }
+}
