@@ -438,7 +438,9 @@ enum Purpose {
         payload_namespace: Option<String>,
     },
     /// A response or error the router generated for a stanza it received.
-    Reply,
+    Reply {
+        space_grant: Option<Arc<crate::permissions::host_grant::ManagedSpaceGrant>>,
+    },
     /// A local resource's message or presence for a remote room it
     /// occupies or is joining (ADR-0020 D7's room exception). If it cannot
     /// be sent, its sender is answered with an error, and a join that never
@@ -1288,7 +1290,7 @@ impl Inner {
                 ..
             } => Some((pending.key.clone(), *generation)),
             Purpose::Response { .. }
-            | Purpose::Reply
+            | Purpose::Reply { .. }
             | Purpose::Room { .. }
             | Purpose::Departure
             | Purpose::Verify { .. }
@@ -2599,7 +2601,7 @@ impl Inner {
     /// pair's worker if it has none: `false` when a full queue, too many
     /// pairs or shutdown refused it, and it was dropped.
     fn enqueue(self: &Arc<Self>, pair: Pair, queued: Queued) -> bool {
-        let reply = matches!(queued.purpose, Purpose::Reply);
+        let reply = matches!(queued.purpose, Purpose::Reply { .. });
         match self.reserve(pair, reply) {
             Some(permit) => {
                 permit.send(queued);
@@ -2753,7 +2755,7 @@ impl Inner {
                 return;
             }
             Purpose::Response { .. }
-            | Purpose::Reply
+            | Purpose::Reply { .. }
             | Purpose::Departure
             | Purpose::RoomReply
             | Purpose::Notice { .. }
@@ -2960,13 +2962,22 @@ impl Inner {
     /// leaves on the outbound stream of the same pair. A full queue drops
     /// it: a reply is never worth blocking the stream that asked.
     fn reply(self: &Arc<Self>, stream: &VerifiedPeerStream, reply: Stanza) {
+        self.reply_with_space_grant(stream, reply, None);
+    }
+
+    fn reply_with_space_grant(
+        self: &Arc<Self>,
+        stream: &VerifiedPeerStream,
+        reply: Stanza,
+        space_grant: Option<Arc<crate::permissions::host_grant::ManagedSpaceGrant>>,
+    ) {
         let pair = Pair {
             local: stream.local().clone(),
             remote: stream.remote().clone(),
         };
         let queued = Queued {
             stanza: reply,
-            purpose: Purpose::Reply,
+            purpose: Purpose::Reply { space_grant },
         };
         if !self.enqueue(pair, queued) {
             tracing::debug!("dropping a reply to an s2s stanza: the queue is full");
@@ -3518,7 +3529,7 @@ impl PairWorker {
             }
             Purpose::Request { .. }
             | Purpose::Response { .. }
-            | Purpose::Reply
+            | Purpose::Reply { .. }
             | Purpose::Room { .. }
             | Purpose::Departure
             | Purpose::Account { .. }
@@ -3579,7 +3590,7 @@ impl PairWorker {
                 }
             }
             Purpose::Response { .. }
-            | Purpose::Reply
+            | Purpose::Reply { .. }
             | Purpose::Room { .. }
             | Purpose::Departure
             | Purpose::Seat { .. }
@@ -3592,8 +3603,22 @@ impl PairWorker {
         let mut offered_again = false;
         loop {
             let deadline = self.router.limits.transmit_deadline;
-            let written =
-                tokio::time::timeout(deadline, transport.transmit(&stream, element)).await;
+            let transmit = async {
+                if let Purpose::Reply {
+                    space_grant: Some(grant),
+                } = &queued.purpose
+                {
+                    if !self.router.admits(&self.pair.remote) {
+                        return Err(TransmitError::AuthorizationExpired);
+                    }
+                    transport
+                        .transmit_space_reply(&stream, element, Arc::clone(grant))
+                        .await
+                } else {
+                    transport.transmit(&stream, element).await
+                }
+            };
+            let written = tokio::time::timeout(deadline, transmit).await;
             match written {
                 Ok(Ok(())) => return,
                 Ok(Err(TransmitError::NotTaken(returned))) if !offered_again => {

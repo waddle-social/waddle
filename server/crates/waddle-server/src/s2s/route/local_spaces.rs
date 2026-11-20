@@ -21,6 +21,7 @@ use xmpp_parsers::message::Message;
 
 use super::principal::RemotePrincipal;
 use super::reach::SpaceOperation;
+use crate::permissions::host_grant::ManagedSpaceGrant;
 
 /// One IQ request a remote principal addressed to the Spaces PubSub
 /// service.
@@ -54,6 +55,15 @@ pub struct SpacePublication {
     pub event: Message,
 }
 
+/// A Spaces response and, for protected data, the grant for its write.
+pub enum SpaceReply {
+    Ordinary(Vec<Stanza>),
+    Protected {
+        stanza: Stanza,
+        grant: ManagedSpaceGrant,
+    },
+}
+
 /// The Spaces of this deployment, as the S2S router reaches them.
 ///
 /// [`LocalSpaces::handle`] is called off the stream's task, one request of
@@ -63,7 +73,7 @@ pub trait LocalSpaces: Send + Sync {
     /// Decide one request and answer it: the IQ result or error for its
     /// sender, from the address it was sent to. An empty answer drops the
     /// request.
-    async fn handle(&self, request: SpaceRequest) -> Vec<Stanza>;
+    async fn handle(&self, request: SpaceRequest) -> SpaceReply;
 
     /// Take `publication` for its subscribers at other servers. It only
     /// queues: who is notified is decided later, off the publisher's

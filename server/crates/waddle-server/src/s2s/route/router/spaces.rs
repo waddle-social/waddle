@@ -13,7 +13,7 @@ use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
-use super::super::local_spaces::{SpaceRequest, MAX_SPACE_REPLIES};
+use super::super::local_spaces::{SpaceReply, SpaceRequest, MAX_SPACE_REPLIES};
 use super::super::principal::RemotePrincipal;
 use super::super::reach::SpaceOperation;
 use super::super::replies;
@@ -180,8 +180,15 @@ impl Inner {
             telemetry::space_request_timed_out();
             return;
         };
-        for answer in answers.into_iter().take(MAX_SPACE_REPLIES) {
-            self.reply(&stream, answer);
+        match answers {
+            SpaceReply::Ordinary(answers) => {
+                for answer in answers.into_iter().take(MAX_SPACE_REPLIES) {
+                    self.reply(&stream, answer);
+                }
+            }
+            SpaceReply::Protected { stanza, grant } => {
+                self.reply_with_space_grant(&stream, stanza, Some(Arc::new(grant)));
+            }
         }
     }
 

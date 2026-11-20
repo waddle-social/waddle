@@ -40,6 +40,7 @@ mod managed;
 #[allow(dead_code, unused_imports)]
 mod s2s_inbound_muc_support;
 
+use host_grant_support::{served, subject, OWNER};
 use jid::BareJid;
 use managed::{Managed, GUEST_PHONE, STRANGER_PHONE};
 use minidom::Element;
@@ -48,7 +49,7 @@ use waddle_server::db::s2s_spaces::{
     lock_space_deletion, FederatedSpaces, SpaceSubscriptions, SubscriptionRecord,
     SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
 };
-use waddle_server::permissions::host_grant::StreamEvidence;
+use waddle_server::permissions::host_grant::{BindSpace, GrantOperationId, StreamEvidence};
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::test_support::host_spaces_for_remote_principals;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem};
@@ -404,6 +405,75 @@ async fn the_space_of_an_enrolled_scope_is_served_to_nobody() {
     .await;
     assert_eq!(listed.attr("type"), Some("result"), "{listed:?}");
     assert!(item_ids(&listed).is_empty(), "{listed:?}");
+    managed.deployment.close().await;
+}
+
+#[tokio::test]
+async fn protected_space_disco_requires_a_canonical_remote_grant() {
+    let Some(managed) = serving_spaces("s2s_protected_space_disco").await else {
+        return;
+    };
+    let fixture = &managed.deployment.grants;
+    let node = fixture.scope.space_node.as_str();
+    let storage = &managed.hosted.state.deps.protocol.pubsub_storage;
+    storage
+        .get_or_create_node(&spaces(), node)
+        .await
+        .expect("create node");
+    storage
+        .update_node_config(&spaces(), node, &NodeConfig::spaces_private())
+        .await
+        .expect("whitelisted Space");
+    let command = BindSpace {
+        operation: GrantOperationId::generate(),
+        lifecycle: fixture.scope.lifecycle,
+        expected_generation: fixture.state(&fixture.scope).await.generation,
+        owner: subject(OWNER),
+        federated: true,
+    };
+    let bound = fixture
+        .store
+        .bind_space(&command, &served())
+        .await
+        .expect("bind Space");
+    fixture.activate_current(&fixture.scope).await;
+
+    let mut conn = fixture.ingress.db.guard().await.expect("database");
+    conn.execute(
+        "INSERT INTO host_grant_space_affiliations
+         (lifecycle_id, subject_jid, affiliation, effective_affiliation, issuance_basis, changed_generation)
+         VALUES (?, ?, 'member', 'member', 'unprivileged', ?)",
+        waddle_server::db_params![
+            command.lifecycle.to_storage(),
+            jid(GUEST_PHONE).to_bare().to_string(),
+            bound.record().generation.value(),
+        ],
+    ).await.expect("seed the canonical member");
+    drop(conn);
+
+    for (from, expected) in [(GUEST_PHONE, "result"), (STRANGER_PHONE, "error")] {
+        let answer = ask(
+            &managed,
+            request(
+                from,
+                format!("protected-disco-{expected}"),
+                false,
+                naming("query", NS_DISCO_INFO, node).build(),
+            ),
+        )
+        .await;
+        assert_eq!(answer.attr("type"), Some(expected), "{answer:?}");
+        if expected == "error" {
+            assert_eq!(error_condition(&answer).as_deref(), Some("item-not-found"));
+        } else {
+            assert_eq!(
+                answer
+                    .get_child("query", NS_DISCO_INFO)
+                    .and_then(|query| query.attr("node")),
+                Some(node),
+            );
+        }
+    }
     managed.deployment.close().await;
 }
 

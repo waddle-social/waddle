@@ -87,10 +87,10 @@ use crate::db::s2s_spaces::{
 };
 use crate::db::Database;
 use crate::permissions::host_grant::{
-    HostGrantAction, PrincipalEvidence, PrincipalWitness, RoomBinding, RoomGate,
+    HostGrantAction, PrincipalEvidence, PrincipalWitness, RoomBinding, RoomGate, ScopeKey,
 };
 use crate::s2s::route::SpacePublication;
-use crate::s2s::route::{LocalSpaces, SpaceOperation, SpaceRequest};
+use crate::s2s::route::{LocalSpaces, RemotePrincipal, SpaceOperation, SpaceReply, SpaceRequest};
 use crate::space_identity::SpaceNode;
 
 /// The field of a Space's configuration form that says whether accounts at
@@ -947,6 +947,27 @@ impl Asked<'_> {
         if space.affiliation.is_outcast() {
             return self.refuse(forbidden("You are banned from this Space."));
         }
+        result(self.iq, Some(self.node_info(node).await))
+    }
+
+    async fn protected_disco_info(&self, principal: &RemotePrincipal) -> Option<SpaceReply> {
+        let Iq::Get { payload, .. } = self.iq else {
+            return None;
+        };
+        let node = DiscoInfoQuery::try_from(payload.clone()).ok()?.node?;
+        let key = ScopeKey::new(self.service.clone(), node.as_str()).ok()?;
+        let grant = self
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .space_read_remote(&key, principal)
+            .await?;
+        let stanza = result(self.iq, Some(self.node_info(node).await)).pop()?;
+        Some(SpaceReply::Protected { stanza, grant })
+    }
+
+    async fn node_info(&self, node: String) -> Element {
         let title = self.title(&node).await;
         let form = build_spaces_metadata_form_for_remote(&title);
         let info = DiscoInfoResult {
@@ -962,7 +983,7 @@ impl Asked<'_> {
         };
         let mut query = Element::from(info);
         query.append_child(form);
-        result(self.iq, Some(query))
+        query
     }
 
     /// XEP-0503, "Fetching spaces from a spaces service": the Spaces this
@@ -1453,16 +1474,16 @@ impl Asked<'_> {
 
 #[async_trait]
 impl LocalSpaces for WebSocketLocalSpaces {
-    async fn handle(&self, request: SpaceRequest) -> Vec<Stanza> {
+    async fn handle(&self, request: SpaceRequest) -> SpaceReply {
         let Some(state) = self.state.upgrade() else {
-            return Vec::new();
+            return SpaceReply::Ordinary(Vec::new());
         };
         let Stanza::Iq(iq) = &request.stanza else {
-            return Vec::new();
+            return SpaceReply::Ordinary(Vec::new());
         };
         let iq = iq.as_ref();
         if !matches!(iq, Iq::Get { .. } | Iq::Set { .. }) {
-            return Vec::new();
+            return SpaceReply::Ordinary(Vec::new());
         }
         let account = request.principal.account().as_bare_jid().clone();
         let evidence = PrincipalEvidence::of(&request.principal);
@@ -1473,7 +1494,10 @@ impl LocalSpaces for WebSocketLocalSpaces {
             .filter(PrincipalWitness::grants_honoured)
         else {
             telemetry::not_admitted();
-            return refuse(iq, forbidden("This service does not admit your server."));
+            return SpaceReply::Ordinary(refuse(
+                iq,
+                forbidden("This service does not admit your server."),
+            ));
         };
         // The service is its bare domain: no node of it and no Space has
         // an address of its own for a remote principal.
@@ -1483,7 +1507,7 @@ impl LocalSpaces for WebSocketLocalSpaces {
             .map(Jid::to_bare)
             .filter(|to| to.as_str() == state.deps.service_domains.spaces)
         else {
-            return refuse(iq, unavailable());
+            return SpaceReply::Ordinary(refuse(iq, unavailable()));
         };
         let asked = Asked {
             state: &state,
@@ -1494,8 +1518,13 @@ impl LocalSpaces for WebSocketLocalSpaces {
             witness,
             snapshot: request.principal.generation(),
         };
-        match request.operation {
-            SpaceOperation::DiscoInfo => asked.disco_info().await,
+        let answers = match request.operation {
+            SpaceOperation::DiscoInfo => {
+                if let Some(reply) = asked.protected_disco_info(&request.principal).await {
+                    return reply;
+                }
+                asked.disco_info().await
+            }
             SpaceOperation::DiscoItems => asked.disco_items().await,
             SpaceOperation::Ping => match iq {
                 Iq::Get { .. } => result(iq, None),
@@ -1504,7 +1533,8 @@ impl LocalSpaces for WebSocketLocalSpaces {
             operation @ (SpaceOperation::PubSub | SpaceOperation::Owner) => {
                 asked.pubsub(operation).await
             }
-        }
+        };
+        SpaceReply::Ordinary(answers)
     }
 
     fn published(&self, publication: SpacePublication) -> bool {
