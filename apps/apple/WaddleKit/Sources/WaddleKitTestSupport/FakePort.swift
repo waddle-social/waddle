@@ -24,6 +24,15 @@ final class FakePort: XmppPort {
     var heldCallVerbs: Set<String> = []
     var heldCallSends: [CheckedContinuation<Void, Never>] = []
 
+    struct NotifySettingsWrite: Equatable {
+        let conversation: ConversationID
+        let mode: NotifyMode
+        let showsMessagesInPush: Bool
+    }
+    var notifySettingsWrites: [NotifySettingsWrite] = []
+    var notifySettingsWriteResult: Result<Void, PortError> = .success(())
+    var notifySettings = NotifySettings()
+
     var sent: [OutboundMessage] = []
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
     var reactions: [(target: String, emojis: [String])] = []
@@ -300,8 +309,11 @@ final class FakePort: XmppPort {
         BareJID(localpart: "group", domain: "muc.waddle.test")!
     }
 
-    func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {}
-    func fetchNotifyModes() async throws -> [ConversationID: NotifyMode] { [:] }
+    func setNotifyMode(_ mode: NotifyMode, showsMessagesInPush: Bool, for conversation: ConversationID) async throws {
+        notifySettingsWrites.append(.init(conversation: conversation, mode: mode, showsMessagesInPush: showsMessagesInPush))
+        try notifySettingsWriteResult.get()
+    }
+    func fetchNotifySettings() async throws -> NotifySettings { notifySettings }
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
         avatarLookups.append(jid)
         return avatarLookup(jid, knownID)

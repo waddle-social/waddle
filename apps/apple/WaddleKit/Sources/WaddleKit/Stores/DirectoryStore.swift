@@ -30,6 +30,7 @@ public final class DirectoryStore {
     /// DMs, most recent first.
     public private(set) var directConversations: [DirectConversation] = []
     public private(set) var notifyModes: [ConversationID: NotifyMode] = [:]
+    private var showingMessagesInPush: Set<ConversationID> = []
     public private(set) var hasLoadedTopology = false
 
     @ObservationIgnored private var roomJIDs: Set<BareJID> = []
@@ -60,6 +61,12 @@ public final class DirectoryStore {
 
     public func notifyMode(for conversation: ConversationID) -> NotifyMode {
         notifyModes[conversation] ?? (conversation.isRoom ? .onMention : .always)
+    }
+
+    /// Whether push notifications for the conversation show who wrote and
+    /// what. Off unless the account turned it on.
+    public func showsMessagesInPush(for conversation: ConversationID) -> Bool {
+        showingMessagesInPush.contains(conversation)
     }
 
     public func apply(_ topology: Topology) {
@@ -95,6 +102,7 @@ public final class DirectoryStore {
         groupDMs.removeAll { $0.roomJID == room }
         roomJIDs.remove(room)
         notifyModes.removeValue(forKey: .room(room))
+        showingMessagesInPush.remove(.room(room))
     }
 
     /// Records 1:1 activity, moving the peer to the top of the DM list.
@@ -116,8 +124,17 @@ public final class DirectoryStore {
         notifyModes[conversation] = mode
     }
 
-    public func replaceNotifyModes(_ modes: [ConversationID: NotifyMode]) {
-        notifyModes = modes
+    public func setShowsMessagesInPush(_ shows: Bool, for conversation: ConversationID) {
+        if shows {
+            showingMessagesInPush.insert(conversation)
+        } else {
+            showingMessagesInPush.remove(conversation)
+        }
+    }
+
+    public func replaceNotifySettings(_ settings: NotifySettings) {
+        notifyModes = settings.modes
+        showingMessagesInPush = settings.showingMessagesInPush
     }
 
     public func clear() {
@@ -126,6 +143,7 @@ public final class DirectoryStore {
         groupDMs = []
         directConversations = []
         notifyModes = [:]
+        showingMessagesInPush = []
         roomJIDs = []
         hasLoadedTopology = false
     }

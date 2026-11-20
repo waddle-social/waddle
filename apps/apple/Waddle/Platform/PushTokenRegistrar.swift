@@ -32,6 +32,7 @@ final class PushTokenRegistrar {
     private var isFinishingRegistration = false
     private var registrationRetryRequested = false
     private weak var registrationFencedCoordinator: SessionCoordinator?
+    private var retirementTask: Task<Void, Never>?
 
     func attach(_ appState: AppState) {
         self.appState = appState
@@ -47,6 +48,14 @@ final class PushTokenRegistrar {
         }
     }
 
+    /// Turns push off for this install: every account's registration of
+    /// this topic is retired, and none is made until push is enabled
+    /// again. A retirement the server could not confirm stays queued.
+    func turnOff() {
+        setEnabled(false)
+        invalidate()
+    }
+
     func didRegister(deviceToken: Data) {
         guard isEnabled else { return }
         if registrationTask != nil { registrationRetryRequested = true }
@@ -55,7 +64,11 @@ final class PushTokenRegistrar {
     }
 
     func startPendingRegistrationIfPossible() {
-        guard isEnabled, registrationTask == nil,
+        guard isEnabled else {
+            retirePendingRegistrationsIfPossible()
+            return
+        }
+        guard registrationTask == nil, retirementTask == nil,
               !isFinishingRegistration,
               let deviceToken = pendingDeviceToken,
               let appState,
@@ -95,6 +108,31 @@ final class PushTokenRegistrar {
             if outcome == .superseded || retryRequested || self.pendingDeviceToken != deviceToken {
                 self.startPendingRegistrationIfPossible()
             }
+        }
+    }
+
+    /// While push is off no registration runs, so retirements left over
+    /// from an offline moment are sent here once the account is online.
+    private func retirePendingRegistrationsIfPossible() {
+        guard retirementTask == nil, registrationTask == nil, !isFinishingRegistration,
+              let appState,
+              let coordinator = appState.session?.coordinator,
+              coordinator.connection == .online
+        else { return }
+        let owner = PushRegistrationStore.Owner(server: appState.server, account: coordinator.account.jid)
+        let kind = self.kind
+        let pending = PushRegistrationStore.pendingRetirements(for: owner, kind: kind)
+        guard !pending.isEmpty else { return }
+        retirementTask = Task { [weak self] in
+            for registration in pending {
+                if await coordinator.disablePush(registration) {
+                    PushRegistrationStore.removePendingRetirement(registration, for: owner, kind: kind)
+                }
+            }
+            guard let self else { return }
+            self.retirementTask = nil
+            // Push may have been turned on again meanwhile.
+            if self.isEnabled { self.startPendingRegistrationIfPossible() }
         }
     }
 

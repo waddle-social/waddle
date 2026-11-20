@@ -176,7 +176,15 @@ register-device command) and enables XEP-0357 on the account. The Push Service
 sends each device a minimal alert: a generic banner chosen by notification
 class (the strings live in `Waddle/en.lproj/Localizable.strings`), the unread
 badge, and a routing object that opens the right account and conversation when
-tapped. It never carries the sender or the message.
+tapped. It carries the sender and the message only for a conversation where
+the account turned on "Show messages in notifications" (its details screen);
+the system draws that alert, so the app's own preview setting does not apply
+to it.
+
+"Push notifications" in Settings turns push off for the install: it retires
+this device's registrations (`PushTokenRegistrar.turnOff`), for alerts and
+calls and for every account on it, and stops asking Apple for tokens. The
+account's other devices share the push node and keep receiving.
 
 To receive pushes, add the Push Notifications capability to your signing
 team's App ID. The server needs `WADDLE_APNS_KEY_PATH`, `WADDLE_APNS_TEAM_ID`,

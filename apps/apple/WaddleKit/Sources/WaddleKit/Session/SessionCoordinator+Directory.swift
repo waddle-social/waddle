@@ -63,8 +63,8 @@ extension SessionCoordinator {
     }
 
     func loadNotifyModes() async {
-        guard let modes = try? await port.fetchNotifyModes() else { return }
-        directory.replaceNotifyModes(modes)
+        guard let settings = try? await port.fetchNotifySettings() else { return }
+        directory.replaceNotifySettings(settings)
     }
 
     /// XEP-0492 notification mode for a conversation. Optimistic, rolled
@@ -73,9 +73,25 @@ extension SessionCoordinator {
         let previous = directory.notifyMode(for: conversation)
         directory.setNotifyMode(mode, for: conversation)
         do {
-            try await port.setNotifyMode(mode, for: conversation)
+            try await port.setNotifyMode(
+                mode, showsMessagesInPush: directory.showsMessagesInPush(for: conversation), for: conversation)
         } catch {
             directory.setNotifyMode(previous, for: conversation)
+            throw error
+        }
+    }
+
+    /// Whether push notifications for a conversation show who wrote and
+    /// what, on every device of the account. Optimistic, rolled back if
+    /// the server rejects it.
+    public func setShowsMessagesInPush(_ shows: Bool, for conversation: ConversationID) async throws {
+        let previous = directory.showsMessagesInPush(for: conversation)
+        directory.setShowsMessagesInPush(shows, for: conversation)
+        do {
+            try await port.setNotifyMode(
+                directory.notifyMode(for: conversation), showsMessagesInPush: shows, for: conversation)
+        } catch {
+            directory.setShowsMessagesInPush(previous, for: conversation)
             throw error
         }
     }
