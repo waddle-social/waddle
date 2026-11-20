@@ -48,6 +48,8 @@ postgres-only host_grant_operations
 postgres-only host_grant_rooms
 postgres-only host_grant_scope_lifecycles
 postgres-only host_grant_scopes
+postgres-only host_grant_space_affiliations
+postgres-only host_grant_space_bindings
 postgres-only host_grants
 
 # The manifest of the PostgreSQL epoch-guard triggers.

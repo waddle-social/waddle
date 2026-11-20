@@ -1,11 +1,12 @@
 # Canonical PubSub admission for enrolled Spaces
 
-**Status:** proposed. This design needs an architecture decision before
-changing an enrolled Space’s admission behavior.
+**Status:** PostgreSQL migration 2015 adds the empty Space binding and
+affiliation relations. The store still has no Space writer or admission
+path. The writer and effect boundaries below require separate review.
 
 [Issue #2047](https://github.com/waddle-social/waddle/issues/2047) requires
-host-authorized private Space discovery and event delivery. The enrolled scope key already contains the canonical service JID
-and opaque node. The current ledger records only room affiliations, and
+host-authorized private Space discovery and event delivery. The enrolled
+scope key already contains the canonical service JID and opaque node. The current ledger records only room affiliations, and
 the server hides an enrolled Space while its authority is undefined.
 
 ## Proposed authority
@@ -22,10 +23,10 @@ ownership from a child room, the legacy PubSub affiliation table or SpiceDB.
 
 Keep PubSub subscription rows as delivery preferences. A persistent row alone
 confers no read or delivery authority. Explicit Space affiliations supply
-XEP-0060 standing for whitelist resources. Use the whitelist access model for the first enrolled profile. XEP-0503
-v0.3.0 permits open public nodes and either authorize or whitelist private
-nodes. Child rooms keep independent XEP-0045
-affiliations.
+XEP-0060 standing for whitelist resources. Use the whitelist access model
+for the first enrolled profile. XEP-0503 v0.3.0 permits open public nodes
+and either authorize or whitelist private nodes. Child rooms keep
+independent XEP-0045 affiliations.
 
 A local bound subject and a verified S2S subject both resolve through the
 existing principal policy. A foreign member needs grant-eligible provenance.
