@@ -746,6 +746,35 @@ pub(super) async fn verify_marker_shape_and_data_tx(
     verify_marker_data(tx, identity).await
 }
 
+/// Verify the baseline PubSub layout before Space bindings retain its nodes.
+pub(crate) async fn verify_space_binding_baseline(
+    tx: &mut Transaction<'_>,
+) -> Result<(), DatabaseError> {
+    let schema = {
+        let mut rows = tx.query("SELECT current_schema()::text", ()).await?;
+        let row = rows.next().await?.ok_or_else(|| {
+            DatabaseError::QueryFailed("no schema for the Space bindings migration".to_owned())
+        })?;
+        row.get::<String>(0)?
+    };
+    for table in TABLES
+        .iter()
+        .filter(|table| table.name != PUBSUB_SCHEMA_MARKER_TABLE)
+    {
+        async {
+            verify_table(tx, &schema, table).await?;
+            verify_columns(tx, &schema, table).await?;
+            verify_constraints(tx, &schema, table).await?;
+            verify_indexes(tx, &schema, table).await
+        }
+        .await
+        .map_err(|error| {
+            DatabaseError::QueryFailed(format!("Space bindings require PubSub v8: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) async fn verify_owner_schema_shape_tx(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -1454,15 +1483,22 @@ async fn verify_table_connection(
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint fk \
            LEFT JOIN pg_catalog.pg_class child ON child.oid = fk.conrelid \
            WHERE fk.contype = 'f' AND fk.confrelid = c.oid AND NOT \
-             (c.relname = 'pubsub_nodes' AND child.relnamespace = n.oid AND child.relname IN \
-              ('pubsub_items','pubsub_subscriptions','pubsub_affiliations','pubsub_owner_configured'))) \
+             (c.relname = 'pubsub_nodes' AND child.relnamespace = n.oid AND (child.relname IN ('pubsub_items','pubsub_subscriptions','pubsub_affiliations','pubsub_owner_configured') OR (child.relname = 'host_grant_space_bindings' \
+                AND fk.conname = 'host_grant_space_bindings_node' \
+                AND fk.conkey = ARRAY[2,3]::smallint[] AND fk.confkey = ARRAY[1,2]::smallint[] \
+                AND fk.confdeltype = 'r' AND fk.confupdtype = 'a' AND fk.confmatchtype = 's' \
+                AND fk.convalidated AND NOT fk.condeferrable)))) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND t.tgisinternal \
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint fk \
              JOIN pg_catalog.pg_class child ON child.oid = fk.conrelid \
              JOIN pg_catalog.pg_class parent ON parent.oid = fk.confrelid \
              WHERE fk.oid = t.tgconstraint AND fk.contype = 'f' AND parent.relname = 'pubsub_nodes' \
                AND parent.relnamespace = n.oid AND child.relnamespace = n.oid \
-               AND child.relname IN ('pubsub_items','pubsub_subscriptions','pubsub_affiliations','pubsub_owner_configured') \
+               AND (child.relname IN ('pubsub_items','pubsub_subscriptions','pubsub_affiliations','pubsub_owner_configured') OR (child.relname = 'host_grant_space_bindings' \
+                AND fk.conname = 'host_grant_space_bindings_node' \
+                AND fk.conkey = ARRAY[2,3]::smallint[] AND fk.confkey = ARRAY[1,2]::smallint[] \
+                AND fk.confdeltype = 'r' AND fk.confupdtype = 'a' AND fk.confmatchtype = 's' \
+                AND fk.convalidated AND NOT fk.condeferrable)) \
                AND (fk.conrelid = c.oid OR fk.confrelid = c.oid))) \
          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = ? AND c.relname = ?",

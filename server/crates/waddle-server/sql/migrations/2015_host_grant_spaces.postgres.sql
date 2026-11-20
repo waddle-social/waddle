@@ -2,6 +2,14 @@
 -- Record that version for a baseline database whose PubSub owner phase has
 -- not run yet. That initializer must preserve the node relation now that
 -- canonical Space bindings can refer to it.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pubsub_schema_version WHERE version <> 8) THEN
+        RAISE EXCEPTION 'upgrade PubSub to schema version 8 before installing Space bindings';
+    END IF;
+END
+$$;
+
 INSERT INTO pubsub_schema_version (version)
 SELECT 8 WHERE NOT EXISTS (SELECT 1 FROM pubsub_schema_version);
 

@@ -210,6 +210,18 @@ impl MigrationRunner {
                 // A previous migration body may have changed its local path.
                 ledger.set_search_path(tx).await?;
             }
+            if driver == DatabaseDriver::Postgres
+                && migration.version == after_baseline::HOST_GRANT_SPACES_VERSION
+                && self.baseline.is_some()
+            {
+                crate::pubsub::runtime_attach::verify_space_binding_baseline(tx)
+                    .await
+                    .map_err(|source| DatabaseError::MigrationApply {
+                        version: migration.version,
+                        description: migration.description.clone(),
+                        source: Box::new(source),
+                    })?;
+            }
             let apply_result =
                 if self.baseline.is_some() && migration.version == baseline::BASELINE_VERSION {
                     baseline::apply(tx, driver, migration).await
