@@ -17,46 +17,51 @@ public final class StickerStore {
     public private(set) var packs: [StickerPack] = []
     public private(set) var phase: Phase = .idle
 
-    /// Counts loads and changes, so an answer asked for before a pack was
-    /// added or removed here does not undo that.
+    /// Counts loads; only the newest one's answer is taken.
     @ObservationIgnored private var serial = 0
+    /// Packs added and removed here while a load is under way: its answer
+    /// may have been written before them.
+    @ObservationIgnored private var addedWhileLoading: [StickerPack] = []
+    @ObservationIgnored private var removedWhileLoading: Set<String> = []
 
     public init() {}
 
     func begin() -> Int {
         serial += 1
         phase = .loading
+        addedWhileLoading = []
+        removedWhileLoading = []
         return serial
     }
 
-    func finish(_ load: Int, with packs: [StickerPack]?) {
+    func finish(_ load: Int, with fetched: [StickerPack]?) {
         guard load == serial else { return }
-        if let packs {
-            self.packs = packs
+        if let fetched {
+            let kept = fetched.filter { !removedWhileLoading.contains($0.id) }
+            let known = Set(kept.map(\.id))
+            packs = kept + addedWhileLoading.filter { !known.contains($0.id) }
         }
-        phase = packs == nil ? .failed : .loaded
+        phase = fetched == nil ? .failed : .loaded
     }
 
     func add(_ pack: StickerPack) {
-        settle()
         packs.removeAll { $0.id == pack.id }
         packs.append(pack)
+        guard phase == .loading else { return }
+        removedWhileLoading.remove(pack.id)
+        addedWhileLoading.append(pack)
     }
 
     func remove(_ packID: String) {
-        settle()
         packs.removeAll { $0.id == packID }
+        guard phase == .loading else { return }
+        addedWhileLoading.removeAll { $0.id == packID }
+        removedWhileLoading.insert(packID)
     }
 
     func reset() {
         serial += 1
         packs = []
         phase = .idle
-    }
-
-    /// A change made here outdates any load still under way.
-    private func settle() {
-        serial += 1
-        phase = .loaded
     }
 }

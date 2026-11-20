@@ -217,10 +217,10 @@ struct StickerCell: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(Text(sticker.description))
+        .accessibilityLabel(Text(sticker.text))
         .accessibilityAddTraits(.isImage)
         .accessibilityHint(Text("Sends this sticker"))
-        .help(sticker.description)
+        .help(sticker.text)
     }
 
     @ViewBuilder

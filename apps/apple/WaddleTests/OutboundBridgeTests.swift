@@ -126,7 +126,6 @@ final class OutboundBridgeTests: XCTestCase {
         XCTAssertEqual(FFIInbound.stickerPack(fetched), StickerPack(
             id: "EpRv28DHHzFrE4zd+xaNpVb4",
             name: "Penguins",
-            isRestricted: true,
             stickers: [
                 Sticker(
                     description: "👋", mediaType: "image/png", size: 2048, width: 512, height: 384,

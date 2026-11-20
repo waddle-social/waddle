@@ -37,7 +37,6 @@ extension FFIInbound {
             id: pack.id,
             name: pack.name,
             summary: pack.summary,
-            isRestricted: pack.restricted,
             stickers: pack.stickers.compactMap(sticker)
         )
     }

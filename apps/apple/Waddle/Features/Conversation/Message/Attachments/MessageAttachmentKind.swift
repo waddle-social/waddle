@@ -62,8 +62,12 @@ enum MessageAttachmentKind: Hashable {
 /// Which parts of a row's content are shown.
 enum MessageContent {
     /// The body, unless it only repeats an attachment URL (attachment-only
-    /// sends carry the first file URL as their body for older clients).
+    /// sends carry the first file URL as their body for older clients) or
+    /// describes a sticker that is shown as its picture.
     static func visibleBody(of item: TimelineItem) -> String? {
+        if item.message.isSticker, item.message.sharedFiles.contains(where: \.isImage) {
+            return nil
+        }
         let trimmed = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if item.message.sharedFiles.contains(where: { $0.url.absoluteString == trimmed }) {

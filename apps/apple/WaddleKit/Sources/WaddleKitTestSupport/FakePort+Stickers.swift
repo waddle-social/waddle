@@ -13,12 +13,41 @@ final class FakeStickers {
     var packRequests = 0
     var published: [StickerPackDraft] = []
     var retracted: [String] = []
+
+    /// The packs fetch waits for `releasePackFetch()` before answering
+    /// with the packs it saw when it was asked.
+    var holdsPackFetch = false
+    private var heldFetch: CheckedContinuation<Void, Never>?
+    private var fetchWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func hold() async {
+        guard holdsPackFetch else { return }
+        await withCheckedContinuation { continuation in
+            heldFetch = continuation
+            fetchWaiters.forEach { $0.resume() }
+            fetchWaiters = []
+        }
+    }
+
+    /// Returns once a packs fetch is being held.
+    func fetchHeld() async {
+        guard heldFetch == nil else { return }
+        await withCheckedContinuation { fetchWaiters.append($0) }
+    }
+
+    func releasePackFetch() {
+        holdsPackFetch = false
+        heldFetch?.resume()
+        heldFetch = nil
+    }
 }
 
 extension FakePort {
     func fetchStickerPacks() async throws -> [StickerPack] {
         stickers.packRequests += 1
-        return try stickers.packs.get()
+        let answer = stickers.packs
+        await stickers.hold()
+        return try answer.get()
     }
 
     /// A published pack reads back as it was sent.

@@ -99,7 +99,7 @@ public enum MessageComposer {
             requestDisplayedMarker: true,
             sticker: StickerReference(packID: pack.id)
         )
-        return ((quote?.prefix ?? "") + sticker.description, options)
+        return ((quote?.prefix ?? "") + sticker.text, options)
     }
 
     /// Trims surrounding whitespace; returns the trimmed text and how many

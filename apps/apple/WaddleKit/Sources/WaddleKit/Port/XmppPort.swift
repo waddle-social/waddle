@@ -214,7 +214,6 @@ public protocol EventsPort: AnyObject, Sendable {
     @MainActor func occurrences(of event: CommunityEvent, in range: Range<Date>) -> [EventOccurrence]
 }
 
-/// The full surface the session coordinator drives.
 /// The account's own XEP-0449 sticker packs.
 public protocol StickerPort: AnyObject, Sendable {
     /// Every pack the account has published; none is an empty list.
@@ -227,4 +226,5 @@ public protocol StickerPort: AnyObject, Sendable {
     func retractStickerPack(_ packID: String) async throws
 }
 
+/// The full surface the session coordinator drives.
 public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort & StickerPort

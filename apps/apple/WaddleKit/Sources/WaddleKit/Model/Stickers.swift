@@ -32,6 +32,12 @@ public struct Sticker: Hashable, Sendable {
         self.sources = sources
     }
 
+    /// The description, or "Sticker" for one published without any: a
+    /// sticker message always carries text.
+    public var text: String {
+        description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Sticker" : description
+    }
+
     /// The picture as the XEP-0447 file a sticker message carries.
     public var file: SharedFile? {
         guard let url = sources.first else { return nil }
@@ -41,7 +47,7 @@ public struct Sticker: Hashable, Sendable {
             size: size,
             width: width,
             height: height,
-            description: description,
+            description: text,
             disposition: .inline,
             digests: digests
         )
@@ -53,15 +59,12 @@ public struct StickerPack: Hashable, Sendable, Identifiable {
     public let id: String
     public let name: String?
     public let summary: String?
-    /// The author asked that others do not copy the pack.
-    public let isRestricted: Bool
     public let stickers: [Sticker]
 
-    public init(id: String, name: String? = nil, summary: String? = nil, isRestricted: Bool = false, stickers: [Sticker]) {
+    public init(id: String, name: String? = nil, summary: String? = nil, stickers: [Sticker]) {
         self.id = id
         self.name = name
         self.summary = summary
-        self.isRestricted = isRestricted
         self.stickers = stickers
     }
 

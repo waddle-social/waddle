@@ -23,7 +23,7 @@ extension SessionCoordinator {
         thread: String? = nil
     ) async -> String? {
         guard let composed = MessageComposer.compose(sticker, from: pack, reply: reply, thread: thread) else { return nil }
-        return await send(composed, preview: sticker.description, in: conversation)
+        return await send(composed, preview: sticker.text, in: conversation)
     }
 
     /// `preview` is what the conversation list shows for a 1:1 send.

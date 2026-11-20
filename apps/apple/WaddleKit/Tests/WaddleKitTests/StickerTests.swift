@@ -101,6 +101,17 @@ struct StickerTests {
         #expect(port.corrections.isEmpty)
     }
 
+    /// A pack from another app may describe a sticker with nothing; the
+    /// message still needs text for apps that do not draw stickers.
+    @Test func aStickerWithoutADescriptionIsSentAsTheWordSticker() throws {
+        let blank = Sticker(description: "  ", mediaType: "image/png", sources: wave.sources)
+
+        let composed = try #require(MessageComposer.compose(blank, from: pack("pack-1")))
+
+        #expect(composed.body == "Sticker")
+        #expect(composed.options.sharedFiles.first?.description == "Sticker")
+    }
+
     // MARK: Packs
 
     @Test func loadingShowsThePacksOfTheAccount() async {
@@ -195,5 +206,23 @@ struct StickerTests {
         await #expect(throws: PortError.timeout) { try await coordinator.removeStickerPack("a") }
 
         #expect(coordinator.stickers.packs.map(\.id) == ["a"])
+    }
+
+    /// A pack made while the packs are still loading must not hide the
+    /// packs that load was about to show.
+    @Test func aPackMadeWhileThePacksLoadDoesNotHideTheOthers() async throws {
+        let (coordinator, port) = online()
+        port.stickers.packs = .success([pack("a")])
+        port.stickers.holdsPackFetch = true
+        let loading = Task { await coordinator.loadStickerPacks() }
+        await port.stickers.fetchHeld()
+        port.stickers.publishedID = "fresh"
+
+        try await coordinator.createStickerPack(StickerPackDraft(name: "Seals", stickers: [wave]))
+        port.stickers.releasePackFetch()
+        await loading.value
+
+        #expect(coordinator.stickers.packs.map(\.id) == ["a", "fresh"])
+        #expect(coordinator.stickers.phase == .loaded)
     }
 }
