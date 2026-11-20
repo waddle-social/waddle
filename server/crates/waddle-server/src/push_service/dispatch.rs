@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use minidom::Element;
 use url::Url;
 use waddle_xmpp::push::apns::ApnsCall;
@@ -34,6 +34,10 @@ use super::{PushDevicePlatform, PushSecretCipher};
 const NS_WADDLE_PUSH_CONTEXT: &str = "urn:waddle:push:context:0";
 /// XEP-0357 §4 data-form FORM_TYPE value.
 const XEP0357_SUMMARY_FORM_TYPE: &str = "urn:xmpp:push:summary";
+/// XEP-0357 §4 summary form fields.
+const SUMMARY_MESSAGE_COUNT: &str = "message-count";
+const SUMMARY_LAST_MESSAGE_SENDER: &str = "last-message-sender";
+const SUMMARY_LAST_MESSAGE_BODY: &str = "last-message-body";
 /// XEP-0004 data-forms namespace.
 const NS_DATA_FORMS: &str = "jabber:x:data";
 
@@ -121,6 +125,26 @@ pub(crate) struct ParsedPushPayload {
     pub stanza_id: Option<ContextStanzaId>,
     /// Validated call metadata; required for call notifications only.
     pub call: Option<ApnsCall>,
+    /// Who wrote the last message and what, when the publisher put them
+    /// in the summary form. The user server does so only for a
+    /// conversation whose owner opted in (`urn:waddle:push:rich:0`).
+    pub content: Option<SummaryContent>,
+}
+
+/// XEP-0357 §4 `last-message-sender` and `last-message-body`.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SummaryContent {
+    pub sender: Jid,
+    pub body: Option<String>,
+}
+
+/// Message content stays out of logs.
+impl std::fmt::Debug for SummaryContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SummaryContent")
+            .field("has_body", &self.body.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Non-empty XEP-0359 stanza-id lifted off the typed context at the
@@ -230,9 +254,10 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
     } else {
         None
     };
-    let message_count = parse_summary_message_count(&payload);
+    let summary = parse_summary(&payload);
     Ok(ParsedPushPayload {
-        message_count,
+        message_count: summary.message_count,
+        content: summary.content,
         conversation,
         thread,
         class,
@@ -251,34 +276,40 @@ pub(super) fn has_call_context(payload_xml: &str) -> bool {
     })
 }
 
-fn parse_summary_message_count(notification: &Element) -> Option<u64> {
-    let form = notification
+#[derive(Default)]
+struct Summary {
+    message_count: Option<u64>,
+    content: Option<SummaryContent>,
+}
+
+/// Reads the XEP-0357 §4 summary form. Fields of a form with another
+/// `FORM_TYPE` are not trusted. The optional content never fails the
+/// publish: a sender that is not a JID leaves the notification minimal.
+fn parse_summary(notification: &Element) -> Summary {
+    let Some(form) = notification
         .children()
-        .find(|child| child.is("x", NS_DATA_FORMS))?;
-    let mut saw_form_type = false;
-    let mut count: Option<u64> = None;
-    for field in form.children().filter(|c| c.is("field", NS_DATA_FORMS)) {
-        let var = field.attr("var").unwrap_or_default();
-        if var == "FORM_TYPE" {
-            let v = field
-                .get_child("value", NS_DATA_FORMS)
-                .map(|el| el.text())
-                .unwrap_or_default();
-            if v == XEP0357_SUMMARY_FORM_TYPE {
-                saw_form_type = true;
-            }
-        } else if var == "message-count" {
-            let v = field
-                .get_child("value", NS_DATA_FORMS)
-                .map(|el| el.text())
-                .unwrap_or_default();
-            count = v.parse().ok();
-        }
+        .find(|child| child.is("x", NS_DATA_FORMS))
+    else {
+        return Summary::default();
+    };
+    let value_of = |var: &str| {
+        form.children()
+            .filter(|field| field.is("field", NS_DATA_FORMS))
+            .find(|field| field.attr("var") == Some(var))
+            .and_then(|field| field.get_child("value", NS_DATA_FORMS))
+            .map(Element::text)
+    };
+    if value_of("FORM_TYPE").as_deref() != Some(XEP0357_SUMMARY_FORM_TYPE) {
+        return Summary::default();
     }
-    if saw_form_type {
-        count
-    } else {
-        None
+    Summary {
+        message_count: value_of(SUMMARY_MESSAGE_COUNT).and_then(|count| count.parse().ok()),
+        content: value_of(SUMMARY_LAST_MESSAGE_SENDER)
+            .and_then(|sender| sender.parse::<Jid>().ok())
+            .map(|sender| SummaryContent {
+                sender,
+                body: value_of(SUMMARY_LAST_MESSAGE_BODY).filter(|body| !body.is_empty()),
+            }),
     }
 }
 
@@ -765,6 +796,69 @@ mod tests {
         let xml = String::from(&notification);
         let parsed = parse_publish_payload(&xml).expect("payload parses");
         assert_eq!(parsed.message_count, None);
+    }
+
+    fn summary_field(var: &str, value: &str) -> Element {
+        Element::builder("field", NS_DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+            .append(
+                Element::builder("value", NS_DATA_FORMS)
+                    .append(value)
+                    .build(),
+            )
+            .build()
+    }
+
+    fn notification_xml_with_form(form_type: &str, sender: &str, body: Option<&str>) -> String {
+        let mut form = Element::builder("x", NS_DATA_FORMS)
+            .append(summary_field("FORM_TYPE", form_type))
+            .append(summary_field(SUMMARY_LAST_MESSAGE_SENDER, sender));
+        if let Some(body) = body {
+            form = form.append(summary_field(SUMMARY_LAST_MESSAGE_BODY, body));
+        }
+        let notification = Element::builder("notification", NS_PUSH)
+            .append(form.build())
+            .append(build_context_element("dm", "alice@example.com", None))
+            .build();
+        String::from(&notification)
+    }
+
+    #[test]
+    fn parse_publish_payload_reads_the_summary_sender_and_body() {
+        let xml = notification_xml_with_form(
+            XEP0357_SUMMARY_FORM_TYPE,
+            "alice@example.com/phone",
+            Some("see you at 5"),
+        );
+        let content = parse_publish_payload(&xml)
+            .expect("payload parses")
+            .content
+            .expect("content");
+        assert_eq!(content.sender.to_string(), "alice@example.com/phone");
+        assert_eq!(content.body.as_deref(), Some("see you at 5"));
+        assert!(!format!("{content:?}").contains("see you"));
+    }
+
+    #[test]
+    fn parse_publish_payload_keeps_a_sender_whose_body_was_withheld() {
+        let xml =
+            notification_xml_with_form(XEP0357_SUMMARY_FORM_TYPE, "alice@example.com/phone", None);
+        let content = parse_publish_payload(&xml)
+            .expect("payload parses")
+            .content
+            .expect("content");
+        assert_eq!(content.body, None);
+    }
+
+    #[test]
+    fn parse_publish_payload_ignores_content_it_cannot_trust() {
+        for xml in [
+            notification_xml_with_form("some:other:form", "alice@example.com/phone", Some("hi")),
+            notification_xml_with_form(XEP0357_SUMMARY_FORM_TYPE, "not a jid@", Some("hi")),
+        ] {
+            let parsed = parse_publish_payload(&xml).expect("payload parses");
+            assert!(parsed.content.is_none());
+        }
     }
 
     #[test]
