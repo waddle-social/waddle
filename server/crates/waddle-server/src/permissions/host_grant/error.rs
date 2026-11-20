@@ -80,6 +80,10 @@ pub enum HostGrantError {
     UnknownScope,
     #[error("the room is not managed by the scope")]
     UnknownRoom,
+    #[error("the scope has no active whitelisted Space node at its enrolled address")]
+    SpaceNotBindable,
+    #[error("the scope already holds a Space binding")]
+    SpaceAlreadyBound,
     #[error("the scope is at a different generation than the command expected")]
     StaleGeneration { current: GrantGeneration },
     #[error("the operation identity is already recorded for a different operation")]
@@ -185,6 +189,8 @@ impl HostGrantError {
             Self::RoomAlreadyBound => "room_already_bound",
             Self::UnknownScope => "unknown_scope",
             Self::UnknownRoom => "unknown_room",
+            Self::SpaceNotBindable => "space_not_bindable",
+            Self::SpaceAlreadyBound => "space_already_bound",
             Self::StaleGeneration { .. } => "stale_generation",
             Self::OperationConflict => "operation_conflict",
             Self::InitiatorNotAuthorized => "initiator_not_authorized",

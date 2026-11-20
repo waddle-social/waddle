@@ -329,6 +329,27 @@ pub struct EnrollScope {
     pub bootstrap: Vec<BootstrapGrant>,
 }
 
+/// Bind the scope's existing whitelist Space and record a served owner.
+#[derive(Clone, Debug)]
+pub struct BindSpace {
+    pub operation: GrantOperationId,
+    pub lifecycle: ScopeLifecycleId,
+    pub expected_generation: GrantGeneration,
+    pub owner: GrantSubject,
+    pub federated: bool,
+}
+
+impl BindSpace {
+    pub(crate) fn fingerprint(&self) -> String {
+        let mut fingerprint = Fingerprint::new("waddle:host-grant:bind-space:v1");
+        fingerprint.text(&self.lifecycle.to_storage());
+        fingerprint.number(self.expected_generation.value());
+        fingerprint.text(self.owner.as_str());
+        fingerprint.number(i64::from(self.federated));
+        fingerprint.finish()
+    }
+}
+
 /// Set one subject's affiliation in one managed room.
 #[derive(Clone, Debug)]
 pub struct SetAffiliation {

@@ -112,11 +112,11 @@ pub use marker::{
     ProjectionMarker, HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
 pub use model::{
-    AdmissionState, AuthorityIncarnation, BootstrapGrant, CandidateAdmission, ClosedReason,
-    EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject, GrantSubjectError,
-    ManagedRoom, MutationReceipt, OperationKind, OperationOutcome, OperationRecord,
-    ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState,
-    SetAffiliation, HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    AdmissionState, AuthorityIncarnation, BindSpace, BootstrapGrant, CandidateAdmission,
+    ClosedReason, EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject,
+    GrantSubjectError, ManagedRoom, MutationReceipt, OperationKind, OperationOutcome,
+    OperationRecord, ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId,
+    ScopeState, SetAffiliation, HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
     HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};

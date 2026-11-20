@@ -76,16 +76,17 @@ use waddle_server::permissions::host_grant::{
     position_witness_resource, reconstruction_targets, regression, room_witness_digest,
     room_witness_resource, sync_position_witness, sync_witnesses_after_fence, verify_restore_fence,
     verify_restore_fence_with, with_host_grant_commit_fault, with_host_grant_witness_write_fault,
-    Activation, AdmissionState, AuthorityIncarnation, ClosedReason, FenceMemory, GateReadiness,
-    GateState, GrantGeneration, GrantOperationId, HostGrantAction, HostGrantAttachment,
-    HostGrantAuthority, HostGrantCommitFault, HostGrantError, HostGrantStore, LatchKind,
-    MutationReceipt, OperationKind, OperationOutcome, OperatorRevoke, PositionAcknowledgement,
-    PositionLatch, PositionStanding, PositionWitness, PositionWriter, PostgresPosition,
-    ProjectedGrant, ProjectedRelationship, ProjectionContradiction, ProjectionIntent,
-    ProjectionMarker, ProjectionWrite, Reconciliation, ReconstructionTarget, ReopenReport,
-    ReopenSelection, ReplicaFailure, RestoreDeclaration, RestoreEpoch, RestoreFenceRefusal,
-    RestoreFenceReport, RetireScope, RoomAffiliation, ScopeLifecycleId, WitnessChange, WitnessSync,
-    HOST_GRANT_PROJECTION_DEFINITION, HOST_GRANT_PROJECTION_MARKER_RELATION,
+    Activation, AdmissionState, AuthorityIncarnation, BindSpace, ClosedReason, FenceMemory,
+    GateReadiness, GateState, GrantGeneration, GrantOperationId, HostGrantAction,
+    HostGrantAttachment, HostGrantAuthority, HostGrantCommitFault, HostGrantError, HostGrantStore,
+    LatchKind, MutationReceipt, OperationKind, OperationOutcome, OperatorRevoke,
+    PositionAcknowledgement, PositionLatch, PositionStanding, PositionWitness, PositionWriter,
+    PostgresPosition, ProjectedGrant, ProjectedRelationship, ProjectionContradiction,
+    ProjectionIntent, ProjectionMarker, ProjectionWrite, Reconciliation, ReconstructionTarget,
+    ReopenReport, ReopenSelection, ReplicaFailure, RestoreDeclaration, RestoreEpoch,
+    RestoreFenceRefusal, RestoreFenceReport, RetireScope, RoomAffiliation, ScopeLifecycleId,
+    WitnessChange, WitnessSync, HOST_GRANT_PROJECTION_DEFINITION,
+    HOST_GRANT_PROJECTION_MARKER_RELATION,
 };
 use waddle_server::permissions::{
     CheckPermission, ClearHostGrantWitnesses, EnsureAuthzCodecIncarnation, EnsureSchema, Object,
@@ -698,16 +699,51 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
     .execute(&pool)
     .await
     .expect("seed the exact enrolled PubSub node");
-    sqlx::query(
-        "INSERT INTO host_grant_space_bindings
-         (lifecycle_id, service_jid, space_node, access_model, federated, authority_incarnation)
-         SELECT lifecycle_id, service_jid, space_node, 'whitelist', true, incarnation
-         FROM host_grant_scope_lifecycles CROSS JOIN host_grant_authority WHERE lifecycle_id = $1",
-    )
-    .bind(&lifecycle)
-    .execute(&pool)
-    .await
-    .expect("seed a Space binding under the live incarnation");
+    let command = BindSpace {
+        operation: GrantOperationId::generate(),
+        lifecycle: fixture.scope.lifecycle,
+        expected_generation: fixture.state(&fixture.scope).await.generation,
+        owner: subject(SENDER),
+        federated: true,
+    };
+    let MutationReceipt::Recorded(record) = fixture
+        .store
+        .bind_space(&command, &served())
+        .await
+        .expect("bootstrap the Space through the scope journal")
+    else {
+        panic!("first bind records a new operation");
+    };
+    assert_eq!(record.kind, OperationKind::BindSpace);
+    assert_eq!(Some(record.generation), command.expected_generation.next());
+    assert_eq!(
+        fixture
+            .store
+            .bind_space(&command, &served())
+            .await
+            .expect("retry"),
+        MutationReceipt::Replayed(record)
+    );
+    let changed = BindSpace {
+        federated: false,
+        ..command
+    };
+    assert!(matches!(
+        fixture.store.bind_space(&changed, &served()).await,
+        Err(HostGrantError::OperationConflict)
+    ));
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT affiliation, effective_affiliation FROM host_grant_space_affiliations
+             WHERE lifecycle_id = $1 AND subject_jid = $2"
+        )
+        .bind(&lifecycle)
+        .bind(SENDER)
+        .fetch_one(&pool)
+        .await
+        .expect("first owner was recorded"),
+        ("owner".to_owned(), "none".to_owned())
+    );
 
     let binding =
         "SELECT authority_incarnation FROM host_grant_space_bindings WHERE lifecycle_id = $1";

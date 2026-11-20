@@ -847,6 +847,120 @@ impl HostGrantStore {
         own(async move { store.enroll_owned(&command, &bases, mode).await }).await
     }
 
+    /// Owner-phase bootstrap of the exact enrolled Space. The recorded
+    /// owner awaits activation at the operation's shared scope generation.
+    pub async fn bind_space(
+        &self,
+        command: &super::BindSpace,
+        served: &ServedAccountDomains,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        if served.home_of(command.owner.jid()) != super::SubjectHome::Served {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        let store = self.clone();
+        let command = command.clone();
+        let mode = commit_mode();
+        own(async move { store.bind_space_owned(&command, mode).await }).await
+    }
+
+    async fn bind_space_owned(
+        &self,
+        command: &super::BindSpace,
+        mode: CommitMode,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let mut tx = self.begin_write().await?;
+        let scope = load_scope(&mut tx, command.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+            .ok_or(HostGrantError::UnknownScope)?;
+        // This lock requires owner-phase privileges and serializes the
+        // binding write with rotation of the restore incarnation.
+        let mut authority = tx
+            .query(
+                "SELECT incarnation FROM host_grant_authority WHERE singleton FOR SHARE",
+                (),
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+        let current = authority
+            .next()
+            .await?
+            .ok_or(corrupt("authority incarnation"))?;
+        let current = AuthorityIncarnation::from_storage(&current.get::<String>(0)?)
+            .ok_or(corrupt("authority incarnation"))?;
+        drop(authority);
+        let fingerprint = command.fingerprint();
+        if let Some(recorded) = load_operation(&mut tx, command.operation).await? {
+            tx.rollback().await?;
+            return recorded.replay(&fingerprint);
+        }
+        refuse_unusable_scope(&scope, current)?;
+        if !scope_admits(&scope, current) {
+            return Err(HostGrantError::SpaceNotBindable);
+        }
+        if scope.generation != command.expected_generation {
+            return Err(HostGrantError::StaleGeneration {
+                current: scope.generation,
+            });
+        }
+        let Some(generation) = scope.generation.next() else {
+            return self
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
+                .await;
+        };
+        let lifecycle = command.lifecycle.to_storage();
+        let incarnation = current.to_storage();
+        let mut node = tx
+            .query(
+                "SELECT l.service_jid, l.space_node FROM host_grant_scope_lifecycles l \
+             JOIN pubsub_nodes p ON p.owner_jid = l.service_jid AND p.node_name = l.space_node \
+             WHERE l.lifecycle_id = ? AND l.retired_at_ms IS NULL \
+             AND p.access_model = 'whitelist' AND p.node_type = ? FOR SHARE OF p",
+                crate::db_params![lifecycle.as_str(), waddle_xmpp::xep::xep0503::NS_SPACES],
+            )
+            .await
+            .map_err(HostGrantError::from_database)?;
+        let row = node.next().await?.ok_or(HostGrantError::SpaceNotBindable)?;
+        let service = row.get::<String>(0)?;
+        let name = row.get::<String>(1)?;
+        drop(node);
+        let inserted = tx.execute(
+            "INSERT INTO host_grant_space_bindings \
+             (lifecycle_id, service_jid, space_node, access_model, federated, authority_incarnation) \
+             VALUES (?, ?, ?, 'whitelist', ?, ?) ON CONFLICT (lifecycle_id) DO NOTHING",
+            crate::db_params![lifecycle.as_str(), service, name, command.federated, incarnation],
+        ).await.map_err(HostGrantError::from_database)?;
+        if inserted != 1 {
+            return Err(HostGrantError::SpaceAlreadyBound);
+        }
+        let now = Utc::now().timestamp_millis();
+        let operation = command.operation.to_storage();
+        let record = OperationRecord {
+            operation: command.operation,
+            lifecycle: command.lifecycle,
+            generation,
+            kind: OperationKind::BindSpace,
+            authority_incarnation: current,
+            projection_digest: current_digest(&mut tx, &scope).await?,
+        };
+        insert_operation(&mut tx, &record, &fingerprint, None, now).await?;
+        tx.execute(
+            "INSERT INTO host_grant_space_affiliations \
+             (lifecycle_id, subject_jid, affiliation, effective_affiliation, issuance_basis, changed_generation) \
+             VALUES (?, ?, 'owner', 'none', 'local', ?)",
+            crate::db_params![lifecycle.as_str(), command.owner.as_str(), generation.value()],
+        ).await.map_err(HostGrantError::from_database)?;
+        tx.execute(
+            "INSERT INTO host_grant_space_operation_changes \
+             (operation_id, ordinal, subject_jid, affiliation, previous_affiliation, issuance_basis) \
+             VALUES (?, 0, ?, 'owner', 'none', 'local')",
+            crate::db_params![operation.as_str(), command.owner.as_str()],
+        ).await.map_err(HostGrantError::from_database)?;
+        advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        commit(tx, mode).await?;
+        Ok(MutationReceipt::Recorded(record))
+    }
+
     /// Record one affiliation change whose initiator's request no S2S
     /// stream carried, for suites; a caller names the initiator's evidence
     /// ([`Self::set_affiliation_as`]).
