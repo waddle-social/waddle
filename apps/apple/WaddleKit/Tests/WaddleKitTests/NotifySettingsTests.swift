@@ -75,6 +75,18 @@ struct NotifySettingsTests {
         #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
     }
 
+    /// Without the stored mode in hand, writing would risk undoing a
+    /// change made on another device.
+    @Test func nothingIsWrittenWhenTheStoredSettingsCannotBeRead() async {
+        let (coordinator, port) = online()
+        port.failsNotifySettingsFetch = true
+        await #expect(throws: PortError.timeout) {
+            try await coordinator.setShowsMessagesInPush(true, for: roomConversation)
+        }
+        #expect(port.notifySettingsWrites.isEmpty)
+        #expect(!coordinator.directory.showsMessagesInPush(for: roomConversation))
+    }
+
     @Test func loadingReplacesBothSettings() async {
         let (coordinator, port) = online()
         coordinator.directory.setShowsMessagesInPush(true, for: roomConversation)

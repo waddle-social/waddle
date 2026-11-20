@@ -98,6 +98,8 @@ extension SessionCoordinator {
     /// one never repeats a value an earlier one is about to roll back.
     /// The setting that is not changing is read from the server first: it
     /// may have changed on another device since this session loaded it.
+    /// If that read fails nothing is written, since a stale value could
+    /// undo the other device's change.
     private func storeNotifySettings(
         for conversation: ConversationID,
         changing changed: NotifySetting,
@@ -107,20 +109,16 @@ extension SessionCoordinator {
         let write = Task { @MainActor [self] in
             _ = await earlier?.result
             do {
-                let stored = try? await port.fetchNotifySettings()
+                let stored = try await port.fetchNotifySettings()
                 // The new value is applied again: a write that ran in
                 // between may have refreshed it away.
                 switch changed {
                 case let .mode(mode):
-                    if let stored {
-                        directory.setShowsMessagesInPush(
-                            stored.showingMessagesInPush.contains(conversation), for: conversation)
-                    }
+                    directory.setShowsMessagesInPush(
+                        stored.showingMessagesInPush.contains(conversation), for: conversation)
                     directory.setNotifyMode(mode, for: conversation)
                 case let .showsMessagesInPush(shows):
-                    if let stored {
-                        directory.setStoredNotifyMode(stored.modes[conversation], for: conversation)
-                    }
+                    directory.setStoredNotifyMode(stored.modes[conversation], for: conversation)
                     directory.setShowsMessagesInPush(shows, for: conversation)
                 }
                 try await port.setNotifyMode(
