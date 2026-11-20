@@ -1412,6 +1412,8 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
              host_grant_rooms, _lineage TO {role}"
         ),
+        format!("GRANT SELECT ON host_grant_space_bindings, host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(
@@ -1587,6 +1589,9 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         "DELETE FROM host_grant_operation_changes".to_owned(),
         "UPDATE host_grant_operation_changes SET affiliation = 'owner'".to_owned(),
         "DELETE FROM host_grants".to_owned(),
+        "UPDATE host_grant_space_bindings SET authority_incarnation = NULL".to_owned(),
+        "DELETE FROM host_grant_space_affiliations".to_owned(),
+        "DELETE FROM host_grant_space_operation_changes".to_owned(),
         "DELETE FROM host_grant_scopes".to_owned(),
         "TRUNCATE host_grant_scopes".to_owned(),
         "TRUNCATE host_grants".to_owned(),

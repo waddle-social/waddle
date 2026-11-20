@@ -928,7 +928,7 @@ impl HostGrantStore {
         let inserted = tx.execute(
             "INSERT INTO host_grant_space_bindings \
              (lifecycle_id, service_jid, space_node, access_model, federated, authority_incarnation) \
-             VALUES (?, ?, ?, 'whitelist', ?, ?) ON CONFLICT (lifecycle_id) DO UPDATE SET \
+             VALUES (?, ?, ?, 'whitelist', (? <> 0), ?) ON CONFLICT (lifecycle_id) DO UPDATE SET \
              federated = EXCLUDED.federated, authority_incarnation = EXCLUDED.authority_incarnation \
              WHERE host_grant_space_bindings.authority_incarnation IS NULL",
             crate::db_params![lifecycle.as_str(), service, name, command.federated, incarnation],
@@ -2029,6 +2029,23 @@ impl HostGrantStore {
             "UPDATE host_grants SET effective_affiliation = affiliation \
              WHERE lifecycle_id = ? AND effective_affiliation <> affiliation",
             crate::db_params![scope.lifecycle.to_storage()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)?;
+        // A room projection cannot reactivate an invalidated Space binding.
+        tx.execute(
+            "UPDATE host_grant_space_affiliations AS grant_row \
+             SET effective_affiliation = grant_row.affiliation \
+             FROM host_grant_space_bindings AS binding \
+             WHERE binding.lifecycle_id = grant_row.lifecycle_id \
+             AND binding.lifecycle_id = ? AND binding.authority_incarnation = ? \
+             AND grant_row.changed_generation <= ? \
+             AND grant_row.effective_affiliation <> grant_row.affiliation",
+            crate::db_params![
+                scope.lifecycle.to_storage(),
+                marker.incarnation.to_storage(),
+                marker.generation.value()
+            ],
         )
         .await
         .map_err(HostGrantError::from_database)?;

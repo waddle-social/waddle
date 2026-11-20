@@ -745,15 +745,22 @@ async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_nod
         ("owner".to_owned(), "none".to_owned())
     );
 
-    sqlx::query(
-        "UPDATE host_grant_space_affiliations SET effective_affiliation = 'owner'
-         WHERE lifecycle_id = $1 AND subject_jid = $2",
-    )
-    .bind(&lifecycle)
-    .bind(SENDER)
-    .execute(&pool)
-    .await
-    .expect("simulate a previously effective Space owner");
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Activated
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT effective_affiliation FROM host_grant_space_affiliations
+             WHERE lifecycle_id = $1 AND subject_jid = $2",
+        )
+        .bind(&lifecycle)
+        .bind(SENDER)
+        .fetch_one(&pool)
+        .await
+        .expect("the verified marker activates the owner"),
+        "owner"
+    );
     sqlx::query(
         "INSERT INTO host_grant_space_affiliations VALUES
          ($1, $2, 'member', 'member', 'unprivileged', $4),
@@ -1883,6 +1890,8 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
              host_grant_rooms, _lineage TO {role}"
         ),
+        format!("GRANT SELECT ON host_grant_space_bindings, host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
         format!(
@@ -2153,6 +2162,8 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
             "GRANT SELECT ON host_grant_authority, host_grant_scope_lifecycles, \
              host_grant_rooms, _lineage TO {role}"
         ),
+        format!("GRANT SELECT ON host_grant_space_bindings, host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(

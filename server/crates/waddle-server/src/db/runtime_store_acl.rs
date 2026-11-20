@@ -152,6 +152,24 @@ const HOST_GRANT_RELATIONS: &[Relation] = &[
         delete: false,
     },
     Relation {
+        name: "host_grant_space_bindings",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_affiliations",
+        insert: false,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_operation_changes",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
         name: "host_grant_fence_replicas",
         insert: true,
         update: true,

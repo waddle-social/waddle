@@ -365,6 +365,9 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("host_grants", READ_INSERT_UPDATE),
     ("host_grant_operations", READ_INSERT),
     ("host_grant_operation_changes", READ_INSERT),
+    ("host_grant_space_bindings", READ),
+    ("host_grant_space_affiliations", READ_UPDATE),
+    ("host_grant_space_operation_changes", READ),
     // The revocation fence: a replica inserts its lease and renews it, and
     // inserts and advances its acknowledgement of each scope. It deletes
     // neither; an expired lease is a row that no longer counts.
