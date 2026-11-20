@@ -88,6 +88,20 @@ struct StickerTests {
         #expect(composed.options.thread == "t1")
     }
 
+    /// A sticker's description is its pack author's words, not something
+    /// the sender typed: "@everyone" in it must not alert a room.
+    @Test func aStickersDescriptionMentionsNobody() async throws {
+        let (coordinator, port) = online()
+        let shout = Sticker(description: "@everyone", mediaType: "image/png", sources: wave.sources)
+
+        await coordinator.send(shout, from: pack("pack-1"), in: roomConversation)
+        await coordinator.send(Draft(text: "@everyone"), in: roomConversation)
+
+        #expect(port.sent.count == 2)
+        #expect(port.sent[0].options.mentionDirectory == nil)
+        #expect(port.sent[1].options.mentionDirectory != nil)
+    }
+
     /// A correction re-sends the message as text, which would turn the
     /// sticker into its description.
     @Test func aSentStickerCannotBeEdited() async throws {

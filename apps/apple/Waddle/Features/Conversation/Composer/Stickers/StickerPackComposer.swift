@@ -91,7 +91,9 @@ final class StickerPackComposer {
         do {
             var stickers: [Sticker] = []
             for entry in entries {
-                let file = try await uploader.upload(entry.payload) { _ in }
+                let file = try await uploader.upload(entry.payload) { _ in
+                    // Progress is counted in pictures, not bytes.
+                }
                 try Task.checkCancellation()
                 stickers.append(Self.sticker(for: entry, at: file.url, packName: name))
                 phase = .creating(done: stickers.count, total: entries.count)

@@ -33,7 +33,11 @@ extension SessionCoordinator {
         in conversation: ConversationID
     ) async -> String? {
         var options = composed.options
-        options.mentionDirectory = mentionDirectory(for: conversation)
+        // A sticker's text is its pack's description, not something the
+        // sender typed, so nothing in it is taken as a mention.
+        if options.sticker == nil {
+            options.mentionDirectory = mentionDirectory(for: conversation)
+        }
         let message = OutboundMessage(
             clientID: Self.makeClientID(),
             conversation: conversation,
