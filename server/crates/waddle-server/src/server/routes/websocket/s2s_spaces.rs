@@ -1593,6 +1593,43 @@ impl Asked<'_> {
     /// withdrawn, the Space was closed to other servers); the answer is
     /// then the one a node that does not exist gets, as for every other
     /// request.
+    async fn protected_unsubscribe(&self, principal: &RemotePrincipal) -> Option<SpaceReply> {
+        if self.iq_payload_ns() != Some(NS_PUBSUB) {
+            return None;
+        }
+        let PubSubRequest::Unsubscribe { node, jid, .. } = parse_pubsub_iq(self.iq).ok()? else {
+            return None;
+        };
+        if jid.to_bare() != self.account {
+            return None;
+        }
+        let key = ScopeKey::new(self.service.clone(), node.as_str()).ok()?;
+        let grant = self
+            .state
+            .deps
+            .app_state
+            .host_grants
+            .space_subscribe_remote(&key, principal, self.iq)
+            .await?;
+        let subscriptions = SpaceSubscriptions::new(database(self.state).clone());
+        match subscriptions
+            .remove_protected(
+                &self.service,
+                &node,
+                &self.account,
+                grant.subscription_grant(),
+            )
+            .await
+        {
+            Ok(true) => Some(SpaceReply::Protected {
+                stanza: Stanza::Iq(Box::new(build_pubsub_success(self.iq))),
+                grant,
+            }),
+            Ok(false) => Some(SpaceReply::Ordinary(self.refuse(not_subscribed()))),
+            Err(_) => Some(SpaceReply::Ordinary(self.refuse(internal()))),
+        }
+    }
+
     async fn unsubscribe(&self, node: &str, jid: &Jid, subid: Option<&str>) -> Vec<Stanza> {
         if !matches!(self.iq, Iq::Set { .. }) {
             return self.refuse(bad_request());
@@ -1733,6 +1770,9 @@ impl LocalSpaces for WebSocketLocalSpaces {
                     return reply;
                 }
                 if let Some(reply) = asked.protected_subscribe(&request.principal).await {
+                    return reply;
+                }
+                if let Some(reply) = asked.protected_unsubscribe(&request.principal).await {
                     return reply;
                 }
                 asked.pubsub(SpaceOperation::PubSub).await

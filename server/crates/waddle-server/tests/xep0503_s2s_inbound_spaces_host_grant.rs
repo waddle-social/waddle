@@ -587,6 +587,52 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
             assert_eq!(error_condition(&reply).as_deref(), Some("item-not-found"));
         }
     }
+    subscriptions
+        .remove(&spaces(), node, &subscriber)
+        .await
+        .expect("legacy removal finishes");
+    assert!(!subscriptions
+        .remove_protected(&spaces(), node, &subscriber, stale)
+        .await
+        .expect("stale removal finishes"));
+    let still_subscribed = subscriptions
+        .of_node(&spaces(), node, created_at, now_ms)
+        .await
+        .expect("read current preference");
+    assert_eq!(still_subscribed.len(), 1);
+    assert_eq!(still_subscribed[0].grant, Some(token));
+
+    for (attempt, expected) in [("first", "result"), ("repeat", "error")] {
+        let unsubscribe = naming("unsubscribe", NS_PUBSUB, node)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                subscriber.as_str(),
+            )
+            .attr(minidom::rxml::xml_ncname!("subid").to_owned(), "unused")
+            .build();
+        let reply = ask(
+            &managed,
+            request(
+                GUEST_PHONE,
+                format!("protected-unsubscribe-{attempt}"),
+                true,
+                pubsub(NS_PUBSUB, unsubscribe),
+            ),
+        )
+        .await;
+        assert_eq!(reply.attr("type"), Some(expected), "{reply:?}");
+        if expected == "error" {
+            assert_eq!(
+                error_condition(&reply).as_deref(),
+                Some("unexpected-request")
+            );
+        }
+    }
+    assert!(subscriptions
+        .of_node(&spaces(), node, created_at, now_ms)
+        .await
+        .expect("read after unsubscribe")
+        .is_empty());
     managed.deployment.close().await;
 }
 

@@ -1094,13 +1094,46 @@ impl SpaceSubscriptions {
         lock_space(&self.db, &mut tx, service, node).await?;
         tx.execute(
             "DELETE FROM s2s_space_subscriptions \
-             WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ?",
+             WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ? \
+             AND grant_lifecycle_id IS NULL",
             crate::db_params![service.as_str(), node, account.as_str()],
         )
         .await
         .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         Ok(())
+    }
+
+    /// Remove only the protected preference recorded under this grant.
+    pub async fn remove_protected(
+        &self,
+        service: &BareJid,
+        node: &str,
+        account: &BareJid,
+        grant: SpaceSubscriptionGrant,
+    ) -> Result<bool, SpaceStoreError> {
+        let Some(mut tx) = begin_for_subscription(
+            &self.db,
+            account.domain().as_str(),
+            service,
+            node,
+            Some(grant),
+        )
+        .await?
+        else {
+            return Ok(false);
+        };
+        let removed = tx.execute(
+            "DELETE FROM s2s_space_subscriptions \
+             WHERE service_jid = ? AND node_name = ? AND subscriber_jid = ? \
+             AND grant_lifecycle_id = ? AND grant_authority_incarnation = ? AND grant_generation = ?",
+            crate::db_params![
+                service.as_str(), node, account.as_str(), grant.lifecycle.to_storage(),
+                grant.incarnation.to_storage(), grant.generation.value()
+            ],
+        ).await.map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        Ok(removed == 1)
     }
 
     /// The subscriptions remote accounts made to the node `node` of
