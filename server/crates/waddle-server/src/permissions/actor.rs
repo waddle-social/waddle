@@ -291,6 +291,15 @@ impl PermissionActor {
             PermissionActorBackend::Local { .. } => Ok(()),
         }
     }
+
+    async fn ensure_codec_incarnation(&self) -> Result<(), PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => backend.ensure_codec_incarnation().await,
+            // The local backend stores identifiers unencoded in its own
+            // tables, so it has no codec to bind.
+            PermissionActorBackend::Local { .. } => Ok(()),
+        }
+    }
 }
 
 /// Ensure the external authorization backend has Waddle's built-in schema.
@@ -305,6 +314,24 @@ impl kameo::message::Message<EnsureSchema> for PermissionActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.ensure_schema().await
+    }
+}
+
+/// Bind the external authorization store to the current ID codec, or refuse
+/// it, before the server serves any request. Run after [`EnsureSchema`]: the
+/// marker relationship lives in the built-in schema. See
+/// `permissions::authz_incarnation` for the protocol.
+pub struct EnsureAuthzCodecIncarnation;
+
+impl kameo::message::Message<EnsureAuthzCodecIncarnation> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        _msg: EnsureAuthzCodecIncarnation,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ensure_codec_incarnation().await
     }
 }
 
