@@ -50,7 +50,8 @@ use waddle_server::db::s2s_spaces::{
     SubscriptionRecord, SubscriptionRequest, MAX_REMOTE_SUBSCRIPTIONS,
 };
 use waddle_server::permissions::host_grant::{
-    BindSpace, FenceAcknowledgement, GrantOperationId, OperatorRevoke, ScopeKey, StreamEvidence,
+    BindSpace, FenceAcknowledgement, GrantOperationId, OperatorRevoke, ScopeKey,
+    SetSpaceAffiliations, SpaceAffiliationChange, SpaceMembership, StreamEvidence,
 };
 use waddle_server::s2s::conn::AuthenticationStrength;
 use waddle_server::s2s::route::SpacePublication;
@@ -441,18 +442,24 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .expect("bind Space");
     fixture.activate_current(&fixture.scope).await;
 
-    let conn = fixture.ingress.db.guard().await.expect("database");
-    conn.execute(
-        "INSERT INTO host_grant_space_affiliations
-         (lifecycle_id, subject_jid, affiliation, effective_affiliation, issuance_basis, changed_generation)
-         VALUES (?, ?, 'member', 'member', 'unprivileged', ?)",
-        waddle_server::db_params![
-            command.lifecycle.to_storage(),
-            jid(GUEST_PHONE).to_bare().to_string(),
-            bound.record().generation.value(),
-        ],
-    ).await.expect("seed the canonical member");
-    drop(conn);
+    let member = fixture
+        .store
+        .set_space_affiliations(
+            &SetSpaceAffiliations {
+                operation: GrantOperationId::generate(),
+                lifecycle: command.lifecycle,
+                expected_generation: bound.record().generation,
+                initiator: subject(OWNER),
+                changes: vec![SpaceAffiliationChange {
+                    subject: subject(jid(GUEST_PHONE).to_bare().as_str()),
+                    affiliation: SpaceMembership::Member,
+                }],
+            },
+            &fixture.policy,
+        )
+        .await
+        .expect("grant Space membership");
+    fixture.activate_current(&fixture.scope).await;
 
     let created_at = storage
         .get_node(&spaces(), node)
@@ -472,8 +479,8 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
     };
     let token = SpaceSubscriptionGrant {
         lifecycle: command.lifecycle,
-        incarnation: bound.record().authority_incarnation,
-        generation: bound.record().generation,
+        incarnation: member.record().authority_incarnation,
+        generation: member.record().generation,
     };
     let stale = SpaceSubscriptionGrant {
         generation: token.generation.next().expect("next epoch"),
@@ -815,6 +822,77 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .await
         .expect("read after unsubscribe")
         .is_empty());
+    let membership = |generation, affiliation| SetSpaceAffiliations {
+        operation: GrantOperationId::generate(),
+        lifecycle: command.lifecycle,
+        expected_generation: generation,
+        initiator: subject(OWNER),
+        changes: vec![SpaceAffiliationChange {
+            subject: subject(subscriber.as_str()),
+            affiliation,
+        }],
+    };
+    let current = fixture.state(&fixture.scope).await.generation;
+    let revoked = fixture
+        .store
+        .set_space_affiliations(&membership(current, SpaceMembership::None), &fixture.policy)
+        .await
+        .expect("revoke Space membership");
+    let generation = revoked.record().generation;
+    let acknowledged = fixture
+        .store
+        .await_revocation_fence(
+            command.lifecycle,
+            generation,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("Space revocation fence");
+    assert_eq!(
+        acknowledged,
+        FenceAcknowledgement::Acknowledged { replicas: 1 }
+    );
+    fixture.activate_current(&fixture.scope).await;
+    let denied = ask(
+        &managed,
+        request(
+            GUEST_PHONE,
+            "protected-disco-revoked",
+            false,
+            naming("query", NS_DISCO_INFO, node).build(),
+        ),
+    )
+    .await;
+    assert_eq!(error_condition(&denied).as_deref(), Some("item-not-found"));
+
+    fixture
+        .store
+        .set_space_affiliations(
+            &membership(generation, SpaceMembership::Member),
+            &fixture.policy,
+        )
+        .await
+        .expect("regrant Space membership");
+    fixture.activate_current(&fixture.scope).await;
+    let restored = ask(
+        &managed,
+        request(
+            GUEST_PHONE,
+            "protected-disco-regranted",
+            false,
+            naming("query", NS_DISCO_INFO, node).build(),
+        ),
+    )
+    .await;
+    assert_eq!(restored.attr("type"), Some("result"), "{restored:?}");
+    assert_eq!(
+        subscriptions
+            .record_protected(&spaces(), node, created_at, subscription, &|_| true, token)
+            .await
+            .expect("the old affiliation cannot subscribe")
+            .outcome,
+        SubscriptionRecord::NotFederated
+    );
     managed.deployment.close().await;
 }
 
