@@ -840,15 +840,58 @@ async fn live_spicedb_the_first_projection_requires_a_fresh_namespace() {
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL and SpiceDB"]
 async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
-    use host_grant_revocation_support::Replica;
+    use host_grant_revocation_support::{authenticate_unbound, Replica};
     use s2s_inbound_muc_support::Wiring;
     use waddle_server::permissions::host_grant::{BindSpace, FenceAcknowledgement, ScopeKey};
     use waddle_ws_test_support::{
-        iq::round_trip,
-        stanza::{is_error, is_result, set},
+        iq::{receive_iq, round_trip, send_stanza},
+        stanza::{get, is_error, is_result, set},
+        WsXmppClient,
     };
     use waddle_xmpp::pubsub::{Affiliation, NodeConfig, NS_PUBSUB_OWNER};
-    use xmpp_parsers::minidom::Element;
+    use waddle_xmpp::stream_management::SM_NS;
+    use xmpp_parsers::{iq::Iq, minidom::Element};
+
+    const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
+    const STATE_DETACHED: i64 = 2;
+
+    async fn receive_sm(client: &mut WsXmppClient, names: &[&str]) -> Element {
+        client
+            .recv_matching_within(Duration::from_secs(10), |frame| {
+                frame
+                    .parse::<Element>()
+                    .is_ok_and(|element| names.iter().any(|name| element.is(*name, SM_NS)))
+            })
+            .await
+            .expect("stream-management response")
+            .parse()
+            .expect("stream-management XML")
+    }
+
+    async fn wait_for_detach(pool: &sqlx::PgPool, resource: &jid::FullJid, newer_than: i64) -> i64 {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let detached = sqlx::query_as::<_, (i64, i64, i64)>(
+                    "SELECT generation, inbound_handled, outbound_appended FROM sm_durable_sessions
+                     WHERE full_jid = $1 AND state = $2 AND generation > $3",
+                )
+                .bind(resource.as_str())
+                .bind(STATE_DETACHED)
+                .bind(newer_than)
+                .fetch_optional(pool)
+                .await
+                .expect("read detached durable session");
+                if let Some((generation, inbound, outbound)) = detached {
+                    assert_eq!(inbound, 1, "original disco was handled once");
+                    assert_eq!(outbound, 1, "exactly one protected reply is in custody");
+                    return generation;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session becomes durable and detached")
+    }
 
     let _serial = LIVE_SPICEDB.lock().await;
     let live = Live::start("hg_space_owner_ws").await;
@@ -932,6 +975,15 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
             .build()
     };
     let change = |affiliation: &str| affiliations(&[(PEER, affiliation)]);
+    let discover = |id: &str| {
+        get(
+            id,
+            service.as_str(),
+            Element::builder("query", NS_DISCO_INFO)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .build(),
+        )
+    };
     let key = ScopeKey::new(service.clone(), node).expect("Space key");
     let second_gate = &second.state.deps.app_state.host_grants;
     assert!(second_gate
@@ -941,6 +993,11 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
     let mut owner = first.client("owner", "desk").await;
     let mut member = second.client("alice", "phone").await;
     let original = live.fixture.generation().await;
+    let undisclosed = round_trip(&mut member, discover("space-disco-before")).await;
+    assert!(
+        is_error(&undisclosed, DefinedCondition::ItemNotFound),
+        "{undisclosed:?}"
+    );
     let denied = round_trip(
         &mut member,
         set("space-denied", service.as_str(), change("member")),
@@ -976,6 +1033,21 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
     assert!(is_result(&granted), "{granted:?}");
     let scope = live.fixture.state(&live.fixture.scope).await;
     assert_eq!(scope.projected_generation, Some(scope.generation));
+    let discovered = round_trip(&mut member, discover("space-disco-member")).await;
+    let Iq::Result {
+        from: Some(from),
+        to: Some(to),
+        id,
+        payload: Some(info),
+    } = discovered
+    else {
+        panic!("protected Space disco returned {discovered:?}");
+    };
+    assert_eq!(from.as_str(), service.as_str());
+    assert_eq!(Some(to.as_str()), member.full_jid.as_deref());
+    assert_eq!(id, "space-disco-member");
+    assert!(info.is("query", NS_DISCO_INFO), "{info:?}");
+    assert_eq!(info.attr("node"), Some(node));
     let before = second_gate
         .space_read_local(&key, &subject(PEER))
         .await
@@ -999,6 +1071,51 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         "{member_denied:?}"
     );
     assert_eq!(live.fixture.generation().await, scope.generation);
+    send_stanza(
+        &mut member,
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    )
+    .await;
+    let enabled = receive_sm(&mut member, &["enabled", "failed"]).await;
+    assert!(enabled.is("enabled", SM_NS), "{enabled:?}");
+    let token = enabled.attr("id").expect("durable resume token");
+    let resume = || {
+        Element::builder("resume", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("previd").to_owned(), token)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+            .build()
+    };
+    let resource: jid::FullJid = member
+        .full_jid
+        .as_deref()
+        .expect("bound")
+        .parse()
+        .expect("JID");
+    let retained = round_trip(&mut member, discover("space-disco-retained")).await;
+    assert!(is_result(&retained), "{retained:?}");
+    drop(member);
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(live.fixture.ingress.db.database_url())
+        .await
+        .expect("test readback pool");
+    let first_detach = wait_for_detach(&pool, &resource, 0).await;
+    let mut resumed = authenticate_unbound(&second.url, "alice").await;
+    send_stanza(&mut resumed, resume()).await;
+    let confirmation = receive_sm(&mut resumed, &["resumed", "failed"]).await;
+    assert!(confirmation.is("resumed", SM_NS), "{confirmation:?}");
+    assert_eq!(confirmation.attr("previd"), Some(token));
+    assert_eq!(confirmation.attr("h"), Some("1"));
+    let replay = receive_iq(&mut resumed, "space-disco-retained").await;
+    assert_eq!(
+        replay, retained,
+        "the authorized protected reply replays exactly"
+    );
+    drop(resumed);
+    wait_for_detach(&pool, &resource, first_detach).await;
     let revoked = round_trip(
         &mut owner,
         set("space-revoked", service.as_str(), change("none")),
@@ -1022,6 +1139,41 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         .space_read_local(&key, &subject(PEER))
         .await
         .is_none());
+    let mut member = authenticate_unbound(&second.url, "alice").await;
+    let registry = &second.state.deps.protocol.connection_registry;
+    // The stale resume must return its original handled count without
+    // entering the protected resource's registration lock.
+    let registration_lock = registry.lock_bind(&resource).await;
+    let mut pending_bind = registry.observe_next_pending_bind(&resource);
+    send_stanza(&mut member, resume()).await;
+    let failure = tokio::select! {
+        biased;
+        observed = &mut pending_bind => panic!("revoked replay reached registration: {observed:?}"),
+        failure = receive_sm(&mut member, &["resumed", "failed"]) => failure,
+    };
+    assert!(failure.is("failed", SM_NS), "{failure:?}");
+    assert!(
+        failure
+            .get_child("item-not-found", xmpp_parsers::ns::XMPP_STANZAS)
+            .is_some(),
+        "{failure:?}"
+    );
+    assert_eq!(failure.attr("h"), Some("1"));
+    assert!(!registry.list_connections().contains(&resource));
+    drop(registration_lock);
+    assert_eq!(
+        member
+            .bind("phone")
+            .await
+            .expect("fresh bind after refused resume"),
+        resource.as_str()
+    );
+    pool.close().await;
+    let no_longer_disclosed = round_trip(&mut member, discover("space-disco-after")).await;
+    assert!(
+        is_error(&no_longer_disclosed, DefinedCondition::ItemNotFound),
+        "{no_longer_disclosed:?}"
+    );
     drop((owner, member, replicas));
     live.close().await;
 }

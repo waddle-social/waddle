@@ -259,6 +259,18 @@ pub async fn connect(url: &str, localpart: &str, resource: &str) -> WsXmppClient
         .expect("authenticated client")
 }
 
+/// Authenticate over SCRAM and leave the socket unbound for XEP-0198 resume.
+pub async fn authenticate_unbound(url: &str, localpart: &str) -> WsXmppClient {
+    let mut client = WsXmppClient::connect(url)
+        .await
+        .expect("WebSocket connection");
+    client
+        .authenticate(DOMAIN, localpart, PASSWORD)
+        .await
+        .expect("SCRAM authentication");
+    client
+}
+
 /// The fixture's scope served by `replicas.len()` replicas.
 pub struct Deployment {
     pub grants: GrantFixture,
