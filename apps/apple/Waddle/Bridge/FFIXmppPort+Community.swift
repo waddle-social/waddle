@@ -4,7 +4,7 @@ import WaddleKit
 /// The community feed (XEP-0472) and stories (XEP-0501) on
 /// `community.<domain>`, and the account's private "seen" state.
 extension FFIXmppPort {
-    private func communityService() throws -> String {
+    func communityService() throws -> String {
         guard let service = account.flatMap({ BareJID(localpart: nil, domain: "community.\($0.domain)") }) else {
             throw PortError.invalidRequest
         }

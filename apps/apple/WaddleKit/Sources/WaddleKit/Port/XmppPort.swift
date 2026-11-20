@@ -189,5 +189,29 @@ public protocol CommunityPort: AnyObject, Sendable {
     func setStoryReactions(_ emojis: [String], on storyID: String) async throws
 }
 
+/// The community calendar of the account's own server: xCal events on
+/// `community.<domain>`, each member's replies beside them.
+public protocol EventsPort: AnyObject, Sendable {
+    /// Every event, each with every member's reply.
+    func fetchEvents() async throws -> [CommunityEvent]
+    /// Creates the event, or replaces it when the draft names one. Returns
+    /// it as stored.
+    func publishEvent(_ draft: EventDraft) async throws -> CommunityEvent
+    /// Removes the event, every date of a series.
+    func cancelEvent(_ eventID: String) async throws
+    /// Cancels the one date of a series that `recurrenceStart` names, and
+    /// returns the series.
+    func cancelOccurrence(_ recurrenceStart: CalendarMoment, of eventID: String) async throws -> CommunityEvent
+    /// Sets the account's reply to the event, every date of a series.
+    func reply(_ reply: EventReply, toEvent uid: String) async throws
+    /// Whether the account may create, edit and cancel events. False when
+    /// that cannot be found out.
+    func isCommunityOwner() async -> Bool
+    /// The dates of `event` that may fall in `range`, worked out by the
+    /// shared core so every client names the same ones. Empty if they
+    /// cannot be worked out.
+    @MainActor func occurrences(of event: CommunityEvent, in range: Range<Date>) -> [EventOccurrence]
+}
+
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort
+public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort

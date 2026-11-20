@@ -55,6 +55,13 @@ enum SplitSection: Hashable {
     case inbox
     /// The community feed and stories.
     case feed
+    /// The community calendar.
+    case events
+}
+
+/// A screen pushed inside the phone's Feed tab.
+enum FeedRoute: Hashable {
+    case events
 }
 
 /// Panels shown beside the conversation on iPad and Mac.
@@ -94,6 +101,8 @@ final class NavigationModel {
     var homePath: [Route] = []
     var directPath: [Route] = []
     var inboxPath: [Route] = []
+    /// The phone has no Events tab: Events opens from the Feed.
+    var feedPath: [FeedRoute] = []
 
     /// Quick switcher (⌘K) visibility.
     var isQuickSwitcherPresented = false
@@ -114,7 +123,8 @@ final class NavigationModel {
         }
     }
 
-    /// Leaves the conversation on iPad and Mac for Home, Inbox or the Feed.
+    /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed or
+    /// Events.
     func show(_ section: SplitSection) {
         selection = nil
         inspector = nil
@@ -130,6 +140,10 @@ final class NavigationModel {
             inboxPath = []
         case .feed:
             tab = .feed
+            feedPath = []
+        case .events:
+            tab = .feed
+            feedPath = [.events]
         }
     }
 

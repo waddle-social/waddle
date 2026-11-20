@@ -69,6 +69,13 @@ struct Sidebar: View {
         ) {
             navigation.show(.feed)
         }
+        SidebarDestinationRow(
+            title: "Events",
+            symbol: "calendar",
+            isSelected: isShowing(.events)
+        ) {
+            navigation.show(.events)
+        }
     }
 
     private func isShowing(_ section: SplitSection) -> Bool {

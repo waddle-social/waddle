@@ -33,8 +33,13 @@ struct PhoneShell: View {
             .badge(session.unreadOverviewRoomCount)
             .tag(PhoneTab.inbox)
 
-            NavigationStack {
-                FeedView()
+            NavigationStack(path: $navigation.feedPath) {
+                FeedView(opensEvents: true)
+                    .navigationDestination(for: FeedRoute.self) { route in
+                        switch route {
+                        case .events: EventsView()
+                        }
+                    }
             }
             .tabItem { Label("Feed", systemImage: "newspaper") }
             .tag(PhoneTab.feed)
