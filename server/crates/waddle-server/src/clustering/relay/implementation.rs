@@ -109,6 +109,7 @@ pub(in crate::clustering::relay) enum RelayDispatchKind {
     ExtensionRoomSend,
     MucAdminQuery,
     RemoteRoomRequest,
+    SpaceBookmarkPublication,
     EventPlanningAccess,
 }
 
@@ -134,6 +135,7 @@ impl RelayDispatchKind {
             Self::ExtensionRoomSend => "extension_room_send",
             Self::MucAdminQuery => "muc_admin_query",
             Self::RemoteRoomRequest => "remote_room_request",
+            Self::SpaceBookmarkPublication => "space_bookmark_publication",
             Self::EventPlanningAccess => "event_planning_access",
         }
     }
@@ -1414,6 +1416,45 @@ impl Message<RelayRemoteRoomRequest> for RelayActor {
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
             bridge.remote_room_request_local(msg).await
+        })
+    }
+}
+
+/// Ask an exact peer incarnation to resolve a committed Space publication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelaySpaceBookmarkPublication {
+    pub target_node_id: String,
+    pub target_node_epoch: String,
+    pub service: jid::BareJid,
+    pub node: String,
+    pub room: jid::BareJid,
+    pub operation: uuid::Uuid,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+/// Result of processing the hint on the addressed peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelaySpaceBookmarkPublicationReply {
+    /// The peer processed the hint. Individual socket delivery is best effort.
+    Processed,
+    Unavailable,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.space_bookmark_publication.v1")]
+impl Message<RelaySpaceBookmarkPublication> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelaySpaceBookmarkPublicationReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelaySpaceBookmarkPublication,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::SpaceBookmarkPublication, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.service));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.space_bookmark_publication_local(msg).await
         })
     }
 }
@@ -2870,6 +2911,34 @@ impl RelayHandle {
                     Err(error) => Err(send_error(error)),
                 }
             } => result,
+        }
+    }
+
+    /// Offer one best-effort hint, with one deadline covering lookup and ask.
+    pub(crate) async fn space_bookmark_publication(
+        &mut self,
+        mut message: RelaySpaceBookmarkPublication,
+    ) -> Result<RelaySpaceBookmarkPublicationReply, RelayAskError> {
+        const HINT_TIMEOUT: Duration = Duration::from_secs(2);
+
+        message.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = tokio::time::timeout(HINT_TIMEOUT, async {
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }) => result.unwrap_or_else(|_| Err(RelayAskError::Send {
+                failure: RelaySendFailure::ReplyTimeout,
+                effect: RelaySendEffect::MaybeCommitted,
+                message: "Space bookmark publication hint deadline elapsed".to_owned(),
+            })),
         }
     }
 

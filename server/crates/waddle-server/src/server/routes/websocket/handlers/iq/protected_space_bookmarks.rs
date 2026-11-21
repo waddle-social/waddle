@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use jid::{BareJid, Jid};
 use waddle_xmpp::pubsub::{
     build_pubsub_error, build_pubsub_event, build_pubsub_publish_result, build_pubsub_success,
@@ -106,7 +108,7 @@ pub(super) async fn write(
     let action = published
         .as_ref()
         .and_then(|item| item.payload.clone())
-        .map_or(SpaceBookmarkAction::Retract, |payload| {
+        .map_or(SpaceBookmarkAction::Retract { notify }, |payload| {
             SpaceBookmarkAction::Publish { payload }
         });
     let result = store
@@ -154,13 +156,14 @@ pub(super) async fn write(
         .await
     {
         let sender = Jid::from(service.clone());
+        let local_audience: Arc<[_]> = written.local_audience.into();
         for version in written.versions {
             let event = if version.present {
                 let Some(mut item) = published.clone() else {
                     continue;
                 };
                 item.publisher = None;
-                if !record.config.deliver_payloads {
+                if !written.deliver_payloads || !record.config.deliver_payloads {
                     item.payload = None;
                 }
                 build_pubsub_event(
@@ -168,11 +171,19 @@ pub(super) async fn write(
                     &sender,
                     &PubSubEvent::new(node.clone(), vec![item]),
                 )
-            } else if notify || record.config.notify_retract {
+            } else if written.notify_retract {
                 build_pubsub_retract_event(&sender, &sender, &node, version.room.as_str())
             } else {
                 continue;
             };
+            crate::server::routes::websocket::local_space_events::queue(
+                state,
+                service,
+                &node,
+                &event,
+                &version,
+                Arc::clone(&local_audience),
+            );
             queue_space_notification(state, service, &record, &event, Some(version));
         }
     }

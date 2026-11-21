@@ -161,6 +161,7 @@ pub use implementation::RelayStreamStrength;
 pub use implementation::RelayTrustProfile;
 pub use implementation::RelayUnregisterRemoteUserResource;
 pub use implementation::RelayUpdateRemoteUserResource;
+pub use implementation::{RelaySpaceBookmarkPublication, RelaySpaceBookmarkPublicationReply};
 
 #[cfg(test)]
 use implementation::REREGISTER_INTERVAL;
