@@ -16,6 +16,7 @@ struct AdminSpaceSheet: View {
     @State private var changing: Set<BareJID> = []
     @State private var memberError: String?
     @State private var pendingRemoval: AdminSpaceMember?
+    @State private var isAdding = false
 
     init(subject: AdminSheetSubject<AdminSpace>, spaces: AdminList<AdminSpace>) {
         self.spaces = spaces
@@ -68,14 +69,30 @@ struct AdminSpaceSheet: View {
             titleVisibility: .visible,
             presenting: pendingRemoval
         ) { member in
-            Button("Remove", role: .destructive) { setRole(.none, of: member) }
+            Button("Remove", role: .destructive) { setRole(.none, of: member.jid, from: member.role) }
             Button("Cancel", role: .cancel) {
                 // Nothing to undo: the dialog closes itself.
             }
         } message: { member in
             Text("\(member.jid.description) loses their role in \(opened?.name ?? "this space").")
         }
+        .sheet(isPresented: $isAdding) {
+            AdminPersonPicker(
+                title: "Add member",
+                confirmTitle: "Add",
+                roles: Self.roles,
+                role: .member,
+                roleTitle: AdminSpaceCopy.title,
+                held: Dictionary((members?.rows ?? []).map { ($0.jid, $0.role) }) { first, _ in first }
+            ) { user, role in
+                let held = members?.rows.first { $0.jid == user.jid }?.role
+                setRole(role, of: user.jid, from: held ?? .none)
+            }
+            .carryingCallDock()
+        }
     }
+
+    private static let roles: [AdminSpaceRole] = [.owner, .admin, .member]
 
     // MARK: Name and description
 
@@ -118,16 +135,17 @@ struct AdminSpaceSheet: View {
 
     private var membersSection: some View {
         AdminPeopleSection(
-            title: "Members", list: members, noun: "members", emptyText: "No members yet.", error: memberError
+            title: "Members", list: members, noun: "members", emptyText: "No members yet.", error: memberError,
+            addTitle: "Add member", add: { isAdding = true }
         ) { member in
             AdminRoleRow(
                 address: member.jid.description,
                 role: member.role,
-                choices: [AdminSpaceRole.owner, .admin, .member],
+                choices: Self.roles,
                 title: AdminSpaceCopy.title,
                 removeTitle: "Remove from space",
                 isChanging: changing.contains(member.jid),
-                choose: { setRole($0, of: member) },
+                choose: { setRole($0, of: member.jid, from: member.role) },
                 remove: { pendingRemoval = member }
             )
         }
@@ -141,27 +159,26 @@ struct AdminSpaceSheet: View {
         }
     }
 
-    /// Shows the role the server answers with; someone given no role is
-    /// no longer a member.
-    private func setRole(_ role: AdminSpaceRole, of member: AdminSpaceMember) {
-        guard let opened, let members, role != member.role, changing.insert(member.jid).inserted else { return }
+    /// Shows the role the server answers with: someone given no role is
+    /// no longer a member, and someone not listed is added first.
+    private func setRole(_ role: AdminSpaceRole, of jid: BareJID, from held: AdminSpaceRole) {
+        guard let opened, let members, role != held, changing.insert(jid).inserted else { return }
         memberError = nil
         Task {
             do {
-                let changed = try await session.setAdminSpaceRole(role, of: member.jid, in: opened)
+                let changed = try await session.setAdminSpaceRole(role, of: jid, in: opened)
+                let wasListed = members.rows.contains { $0.id == changed.id }
                 if changed.role == .none {
                     members.remove(changed.id)
-                    if let current { spaces.replace(current.removingMembers(1)) }
+                    if wasListed, let current { spaces.replace(current.removingMembers(1)) }
                 } else {
-                    members.replace(changed)
+                    members.add(changed)
+                    if !wasListed, let current { spaces.replace(current.addingMembers(1)) }
                 }
             } catch {
-                memberError = ActionErrorCopy.message(
-                    for: error,
-                    fallback: "Couldn't change the role of \(member.jid.description). Try again."
-                )
+                memberError = AdminSpaceCopy.roleFailure(error, role: role, address: jid.description)
             }
-            changing.remove(member.jid)
+            changing.remove(jid)
         }
     }
 }

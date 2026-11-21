@@ -110,6 +110,13 @@ public final class AdminList<Row: Identifiable & Sendable> {
         rows = Self.applying([.replace(row)], to: rows)
     }
 
+    /// Shows a row the server now holds: where it was, or first when it
+    /// was not listed.
+    public func add(_ row: Row) {
+        noteChange(.add(row))
+        rows = Self.applying([.add(row)], to: rows)
+    }
+
     /// Takes out a row the server no longer has.
     public func remove(_ id: Row.ID) {
         noteChange(.remove(id))
@@ -124,6 +131,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
 
     private enum Change {
         case replace(Row)
+        case add(Row)
         case remove(Row.ID)
     }
 
@@ -133,6 +141,12 @@ public final class AdminList<Row: Identifiable & Sendable> {
             switch change {
             case let .replace(row):
                 if let index = rows.firstIndex(where: { $0.id == row.id }) { rows[index] = row }
+            case let .add(row):
+                if let index = rows.firstIndex(where: { $0.id == row.id }) {
+                    rows[index] = row
+                } else {
+                    rows.insert(row, at: 0)
+                }
             case let .remove(id):
                 rows.removeAll { $0.id == id }
             }

@@ -84,6 +84,26 @@ final class AdminSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
     }
 
+    /// Adding a member: the role to give, and everyone with an account,
+    /// with the role each member of the space already holds.
+    func testAddMember() async throws {
+        let sample = SampleSession()
+        sample.port.admin.users[.init()] = .success(AdminPage(
+            rows: [
+                AdminUser(jid: SampleSession.ana.jid, displayName: "Ana Lindqvist", isOwner: true),
+                AdminUser(jid: SampleSession.mika, displayName: nil, isOwner: false),
+                AdminUser(jid: SampleSession.priya, displayName: "Priya Raman", isOwner: false),
+            ],
+            nextCursor: "after-priya"
+        ))
+        let picker = AdminPersonPicker(
+            title: "Add member", confirmTitle: "Add", roles: [AdminSpaceRole.owner, .admin, .member],
+            role: .member, roleTitle: AdminSpaceCopy.title,
+            held: [SampleSession.ana.jid: .owner, SampleSession.mika: .member]
+        ) { _, _ in }
+        try await assertScreenSnapshot(of: sample.host(picker), size: Self.size)
+    }
+
     func testNewSpace() async throws {
         let sample = SampleSession()
         let sheet = AdminSpaceSheet(subject: .new, spaces: sample.coordinator.adminSpacesList())

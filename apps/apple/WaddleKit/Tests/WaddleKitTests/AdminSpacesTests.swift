@@ -388,4 +388,56 @@ struct AdminSpacesTests {
         #expect(port.admin.spaceWrites == [.setRole(node: "design", member: bo.jid, .admin)])
         #expect(changed == AdminSpaceMember(jid: bo.jid, role: .admin))
     }
+
+    // MARK: Adding a member
+
+    /// Someone who was not listed shows first; someone listed changes
+    /// where they are.
+    @Test func someoneAddedIsListedFirst() async {
+        let (coordinator, port) = online()
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        let list = coordinator.adminSpaceMembersList(of: design)
+        await list.load()
+
+        list.add(bo)
+        #expect(list.rows == [bo, ada])
+
+        let boAdmin = AdminSpaceMember(jid: bo.jid, role: .admin)
+        list.add(boAdmin)
+        #expect(list.rows == [boAdmin, ada])
+    }
+
+    /// A page asked for before someone was added does not know of them.
+    @Test func someoneAddedWhileAPageIsOnItsWayIsKept() async {
+        let (coordinator, port) = online()
+        let adaUser = AdminUser(jid: ada.jid, displayName: nil, isOwner: false)
+        let boUser = AdminUser(jid: bo.jid, displayName: nil, isOwner: false)
+        port.admin.users[.init()] = .success(AdminPage(rows: [adaUser], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        port.admin.usersFetches.isHolding = true
+        let refresh = Task { await list.load() }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        list.add(boUser)
+        port.admin.usersFetches.release()
+        await refresh.value
+
+        #expect(list.rows == [boUser, adaUser])
+    }
+
+    @Test func addingMembersRaisesTheCount() {
+        #expect(design.addingMembers(1).memberCount == 13)
+        #expect(design.addingMembers(1).id == design.id)
+    }
+
+    /// The server gives owner and admin only to accounts of this
+    /// deployment and its trusted servers, and says `not-allowed`.
+    @Test func aRoleTheServerRefusesIsThrown() async {
+        let (coordinator, port) = online()
+        port.admin.writeFailure = .rejected
+
+        await #expect(throws: PortError.rejected) {
+            try await coordinator.setAdminSpaceRole(.owner, of: bare("cy@elsewhere.test"), in: design)
+        }
+    }
 }

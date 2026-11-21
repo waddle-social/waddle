@@ -184,7 +184,8 @@ struct AdminNameFields: View {
 }
 
 /// A section of people in a sheet: what went wrong with the last change
-/// to one of them, then the list, or that it is on its way.
+/// to one of them, then the list, or that it is on its way, and a way to
+/// add someone.
 struct AdminPeopleSection<Row: Identifiable & Sendable, RowView: View>: View {
     let title: String
     var footer: String?
@@ -193,6 +194,9 @@ struct AdminPeopleSection<Row: Identifiable & Sendable, RowView: View>: View {
     let noun: String
     let emptyText: String
     var error: String?
+    /// "Add member", and what it does; nil for a list nothing is added to.
+    var addTitle: String?
+    var add: (() -> Void)?
     @ViewBuilder let row: (Row) -> RowView
 
     var body: some View {
@@ -205,6 +209,12 @@ struct AdminPeopleSection<Row: Identifiable & Sendable, RowView: View>: View {
             } else {
                 Text("Loading…")
                     .foregroundStyle(Theme.Colors.fgMuted)
+            }
+            if let addTitle, let add {
+                Button(action: add) {
+                    Label(addTitle, systemImage: "plus")
+                }
+                .disabled(list == nil)
             }
         } header: {
             Text(title)

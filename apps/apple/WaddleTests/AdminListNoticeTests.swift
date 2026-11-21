@@ -83,6 +83,14 @@ final class AdminErrorTests: XCTestCase {
         XCTAssertEqual(AdminRoomSheet.PendingAction.removeRole(member).title, "Remove role?")
     }
 
+    /// Only the server's `not-allowed` says a role was refused: owner and
+    /// admin go only to accounts here and on trusted servers.
+    func testOnlyNotAllowedMeansARoleWasRefused() {
+        XCTAssertEqual(FFIXmppPort.roleError(WaddleError.Stanza(condition: "not-allowed", text: nil)), .rejected)
+        XCTAssertEqual(FFIXmppPort.roleError(WaddleError.Stanza(condition: "item-not-found", text: nil)), .failed)
+        XCTAssertEqual(FFIXmppPort.roleError(WaddleError.Timeout), .timeout)
+    }
+
     func testOtherErrorsKeepTheirMeaning() {
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.NotConnected), .notConnected)
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Timeout), .timeout)
@@ -95,6 +103,17 @@ final class AdminSpaceCopyTests: XCTestCase {
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 1, members: 1), "1 room · 1 member")
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 3, members: 12), "3 rooms · 12 members")
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 0, members: 0), "0 rooms · 0 members")
+    }
+
+    func testARefusedOwnerOrAdminSaysWhoCanBeOne() {
+        XCTAssertEqual(
+            AdminSpaceCopy.roleFailure(PortError.rejected, role: .admin, address: "cy@elsewhere.test"),
+            "cy@elsewhere.test can't be an owner or admin. Only people with an account here or on a trusted server can."
+        )
+        XCTAssertEqual(
+            AdminSpaceCopy.roleFailure(PortError.failed, role: .owner, address: "cy@elsewhere.test"),
+            "Couldn't change the role of cy@elsewhere.test. Try again."
+        )
     }
 
     func testTheDeleteWarningSaysRoomsGoToo() {

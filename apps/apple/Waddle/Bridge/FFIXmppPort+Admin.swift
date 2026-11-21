@@ -91,12 +91,16 @@ extension FFIXmppPort {
         return AdminPage(rows: members, nextCursor: page.nextCursor)
     }
 
+    /// `rejected` means the server refused this role to this person.
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember {
-        let result = try await mappingPortErrors {
-            try await client.adminSpacesSetRole(
+        let result: WaddleAdminSpacesSetRoleResult
+        do {
+            result = try await client.adminSpacesSetRole(
                 spaceJid: space.service.description, spaceNode: space.node,
                 memberJid: member.description, role: Self.role(role)
             )
+        } catch {
+            throw Self.roleError(error)
         }
         return AdminSpaceMember(jid: member, role: Self.role(result.role))
     }
@@ -284,6 +288,14 @@ extension FFIXmppPort {
         } catch {
             throw Self.adminError(error)
         }
+    }
+
+    /// The server answers `not-allowed` when it gives owner or admin only
+    /// to accounts of this deployment and its trusted servers; any other
+    /// error it answers with is a failure that can be tried again.
+    static func roleError(_ error: Error) -> PortError {
+        if case let WaddleError.Stanza(condition, _) = error, condition != "not-allowed" { return .failed }
+        return FFIOutbound.portError(error)
     }
 
     static func adminError(_ error: Error) -> PortError {
