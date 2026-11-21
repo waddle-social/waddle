@@ -405,20 +405,20 @@ fn matches_protected_space_reply(
     element: &minidom::Element,
     descriptor: &ProtectedSpaceReplyDescriptor,
 ) -> bool {
-    if element.attr("from") != Some(descriptor.service().as_str())
-        || element.attr("to") != Some(descriptor.recipient().as_str())
-    {
-        return false;
-    }
     if descriptor.kind() == ProtectedSpaceReplyKind::DeleteEvent {
         return descriptor.deletion_operation().is_some()
             && waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
                 element,
                 descriptor.service().as_str(),
-                descriptor.recipient().as_str(),
+                descriptor.recipient().to_bare().as_str(),
                 descriptor.node(),
                 descriptor.id(),
             );
+    }
+    if element.attr("from") != Some(descriptor.service().as_str())
+        || element.attr("to") != Some(descriptor.recipient().as_str())
+    {
+        return false;
     }
     if descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent {
         return matches_protected_bookmark_event(element, descriptor);
@@ -2633,7 +2633,7 @@ mod protected_space_reply_storage_tests {
         .expect("deletion descriptor")
         .with_kind(ProtectedSpaceReplyKind::DeleteEvent);
         let wire = format!(
-            "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test/dev' id='{id}'><event xmlns='http://jabber.org/protocol/pubsub#event'><delete node='docs'/></event></message>"
+            "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test' id='{id}'><event xmlns='http://jabber.org/protocol/pubsub#event'><delete node='docs'/></event></message>"
         );
         let parsed = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
             .expect("exact deletion event");
@@ -2646,7 +2646,8 @@ mod protected_space_reply_storage_tests {
         for wrong in [
             wire.replace("node='docs'", "node='other'"),
             wire.replace(&id, &uuid::Uuid::new_v4().simple().to_string()),
-            wire.replace("/dev", "/other"),
+            wire.replace("alice@example.test", "alice@example.test/dev"),
+            wire.replace("alice@example.test", "other@example.test"),
             wire.replace(
                 "<delete node='docs'/>",
                 "<delete node='docs'><redirect uri='xmpp:other.example.test'/></delete>",

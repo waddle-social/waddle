@@ -388,7 +388,7 @@ async fn exercise(exercise: Exercise) {
             waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
                 &notice,
                 service.as_str(),
-                &expected_recipient,
+                "alice@localhost",
                 node,
                 id,
             )

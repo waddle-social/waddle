@@ -133,7 +133,7 @@ pub(crate) async fn offer_on_socket(
     };
     let mut notice = build_pubsub_delete_event(
         &Jid::from(key.service().clone()),
-        &Jid::from(target.resource.clone()),
+        &Jid::from(subject.jid().clone()),
         key.node(),
     );
     notice.id = Some(Id(target.operation.simple().to_string()));
