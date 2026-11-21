@@ -29,15 +29,22 @@ public struct ThreadHistory: Equatable, Sendable {
 
     /// Live replies from the conversation timeline plus fetched ones it
     /// does not have, oldest first. A live row wins over its fetched copy,
-    /// matched by any of its ids.
+    /// matched by room stanza ID, by the room archive's ID, or by an
+    /// unambiguous verified author alias.
     public static func merged(live: [TimelineItem], fetched: [TimelineItem]) -> [TimelineItem] {
-        var known = Set<String>()
-        for item in live {
-            known.insert(item.id)
-            known.formUnion(item.identity.all)
-        }
-        let missing = fetched.filter { item in
-            !known.contains(item.id) && known.isDisjoint(with: item.identity.all)
+        let missing = fetched.indices.compactMap { index -> TimelineItem? in
+            let item = fetched[index]
+            if item.roomStanzaMatch(in: live) != nil { return nil }
+            if let uid = item.roomArchiveUID, live.contains(where: { twin in
+                twin.conversation == item.conversation && twin.roomArchiveUID == uid
+                    && (twin.roomStanzaID == nil || item.roomStanzaID == nil)
+            }) { return nil }
+
+            guard let liveIndex = item.roomAuthoredMatch(in: live) else { return item }
+            let liveItem = live[liveIndex]
+            // A reused alias must select a single counterpart in both lists.
+            let fetchedMatch = liveItem.roomStanzaMatch(in: fetched) ?? liveItem.roomAuthoredMatch(in: fetched)
+            return fetchedMatch == index ? nil : item
         }
         guard !missing.isEmpty else { return live }
         return (live + missing).enumerated()

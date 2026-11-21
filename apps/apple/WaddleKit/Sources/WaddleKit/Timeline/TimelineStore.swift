@@ -404,8 +404,8 @@ public final class TimelineStore {
         }
         // The room assigns this identity independently of occupant nick or
         // sender-chosen aliases. Resolve it before considering those aliases.
-        if let roomID = incoming.roomStanzaID,
-           let index = list.firstIndex(where: { $0.item.roomStanzaID == roomID }) {
+        let items = list.lazy.map(\.item)
+        if let index = incoming.roomStanzaMatch(in: items) {
             return index
         }
         if let uid = roomArchiveUID(of: incoming) {
@@ -419,27 +419,13 @@ public final class TimelineStore {
                 return index
             }
         }
-        guard let author = incoming.message.authorRealJID else { return nil }
-        let authoredIDs = Set([incoming.identity.originID, incoming.identity.messageID].compactMap { $0 })
-        let matches = list.indices.filter { index in
-            let existing = list[index].item
-            // Distinct authoritative ids always identify distinct messages.
-            if incoming.roomStanzaID != nil, existing.roomStanzaID != nil { return false }
-            guard existing.message.authorRealJID == author else { return false }
-            let existingIDs = Set([existing.identity.originID, existing.identity.messageID].compactMap { $0 })
-            return !existingIDs.isDisjoint(with: authoredIDs)
-        }
-        // Reused aliases can claim several rows even for a verified author.
-        return matches.count == 1 ? matches[0] : nil
+        return incoming.roomAuthoredMatch(in: items)
     }
 
     /// MAM UIDs belong to this room archive, never to sender-chosen wire
     /// aliases. `Entry.archiveID` separately follows the paging payload.
     private func roomArchiveUID(of item: TimelineItem) -> String? {
-        guard item.conversation.isRoom,
-              case let .archive(uid) = item.message.source,
-              !uid.isEmpty else { return nil }
-        return uid
+        item.roomArchiveUID
     }
 
     private func drainParked(into entry: Entry, conversation: ConversationID) -> Entry {

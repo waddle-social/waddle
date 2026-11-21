@@ -399,4 +399,118 @@ struct UnreadOverviewTests {
 
         #expect(ThreadHistory.merged(live: live, fetched: fetched).map(\.body) == ["a", "b", "c"])
     }
+
+    @Test func mergedThreadRepliesKeepDistinctRoomIDsWhenANickChangesHands() {
+        let live = threadReply(
+            "new holder", at: 2, roomID: "new-room-id", originID: "shared", author: "new@example.test"
+        )
+        let fetched = threadReply(
+            "old holder", at: 1, roomID: "old-room-id", originID: "shared", author: "old@example.test",
+            source: .archive(mamID: "old-room-id")
+        )
+
+        #expect(ThreadHistory.merged(live: [live], fetched: [fetched]).map(\.body) == ["old holder", "new holder"])
+    }
+
+    @Test func mergedThreadRepliesPreferLiveCopyWithTheSameRoomID() {
+        let live = threadReply("live copy", at: 2, roomID: "room-id", originID: "live-origin")
+        let fetched = threadReply(
+            "archived copy", at: 1, roomID: "room-id", originID: "archive-origin", source: .archive(mamID: "mam-id")
+        )
+
+        #expect(ThreadHistory.merged(live: [live], fetched: [fetched]).map(\.body) == ["live copy"])
+    }
+
+    @Test func mergedThreadRepliesMatchTwoCopiesFromTheRoomArchiveWithoutAStanzaID() {
+        let live = threadReply("loaded earlier", at: 1, originID: "one", source: .archive(mamID: "mam-id"))
+        let fetched = threadReply("fetched again", at: 1, originID: "two", source: .archive(mamID: "mam-id"))
+
+        #expect(ThreadHistory.merged(live: [live], fetched: [fetched]).map(\.body) == ["loaded earlier"])
+    }
+
+    @Test func mergedThreadRepliesMatchAnAuthoredIDForTheSameVerifiedAuthor() {
+        let live = threadReply("live copy", at: 2, originID: "shared", author: "sam@example.test")
+        let fetched = threadReply(
+            "archived copy", at: 1, roomID: "room-id", messageID: "shared", author: "sam@example.test",
+            source: .archive(mamID: "mam-id")
+        )
+
+        #expect(ThreadHistory.merged(live: [live], fetched: [fetched]).map(\.body) == ["live copy"])
+    }
+
+    @Test(arguments: [nil, "old@example.test"] as [String?])
+    func mergedThreadRepliesKeepAuthoredIDCollisionsWithoutAMatchingVerifiedAuthor(fetchedAuthor: String?) {
+        let live = threadReply("live reply", at: 2, originID: "shared", author: "new@example.test")
+        let fetched = threadReply(
+            "older reply", at: 1, roomID: "room-id", originID: "shared", author: fetchedAuthor,
+            source: .archive(mamID: "mam-id")
+        )
+
+        #expect(ThreadHistory.merged(live: [live], fetched: [fetched]).map(\.body) == ["older reply", "live reply"])
+    }
+
+    @Test func mergedThreadRepliesPreserveChronologicalOrderAndBreakTiesWithLiveFirst() {
+        let live = [
+            threadReply("live at two", at: 2, roomID: "live-two"),
+            threadReply("live at three", at: 3, roomID: "live-three"),
+        ]
+        let fetched = [
+            threadReply("copy of three", at: 0, roomID: "live-three", source: .archive(mamID: "mam-three")),
+            threadReply("fetched at one", at: 1, roomID: "fetched-one", source: .archive(mamID: "mam-one")),
+            threadReply("fetched at two", at: 2, roomID: "fetched-two", source: .archive(mamID: "mam-two")),
+        ]
+
+        #expect(ThreadHistory.merged(live: live, fetched: fetched).map(\.body) == [
+            "fetched at one", "live at two", "fetched at two", "live at three",
+        ])
+    }
+
+    @Test func mergedThreadRepliesIgnoreAStanzaIDFromAForeignAuthority() {
+        let live = threadReply("room-assigned reply", at: 2, roomID: "room-id", author: "sam@example.test")
+        var fetched = threadReply(
+            "foreign-id reply", at: 1, originID: "other-origin", author: "sam@example.test",
+            source: .archive(mamID: "mam-id")
+        )
+        fetched.message.identity.stanzaID = StanzaID(id: "room-id", by: bare("foreign.example.test"))
+
+        #expect(ThreadHistory.merged(live: [live], fetched: [fetched]).map(\.body) == [
+            "foreign-id reply", "room-assigned reply",
+        ])
+    }
+
+    @Test(arguments: [true, false])
+    func mergedThreadRepliesKeepAmbiguousAliasesOnEitherSide(canonicalRowsAreLive: Bool) {
+        let canonical = [
+            threadReply("first reply", at: 1, roomID: "room-one", originID: "shared", author: "sam@example.test"),
+            threadReply("second reply", at: 2, roomID: "room-two", originID: "shared", author: "sam@example.test"),
+        ]
+        let unstamped = [threadReply("unresolved reply", at: 3, originID: "shared", author: "sam@example.test")]
+        let live = canonicalRowsAreLive ? canonical : unstamped
+        let fetched = canonicalRowsAreLive ? unstamped : canonical
+
+        #expect(ThreadHistory.merged(live: live, fetched: fetched).map(\.body) == [
+            "first reply", "second reply", "unresolved reply",
+        ])
+    }
+
+    private func threadReply(
+        _ body: String,
+        at seconds: TimeInterval,
+        roomID: String? = nil,
+        originID: String? = nil,
+        messageID: String? = nil,
+        author: String? = nil,
+        source: WireMessage.Source = .live
+    ) -> TimelineItem {
+        var message = roomMessage(body, from: "sam", stanzaID: roomID ?? "unused", at: date(seconds), source: source)
+        message.identity = MessageIdentity(
+            messageID: messageID, originID: originID, stanzaID: roomID.map { StanzaID(id: $0, by: room) }
+        )
+        message.authorRealJID = author.map(bare)
+        message.thread = "root-1"
+        return TimelineItem(
+            id: roomID ?? originID ?? messageID ?? body,
+            conversation: roomConversation, isMine: false, message: message, body: body
+        )
+    }
 }
