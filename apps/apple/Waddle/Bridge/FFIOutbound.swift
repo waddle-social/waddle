@@ -4,6 +4,16 @@ import WaddleKit
 /// Pure WaddleKit → FFI conversions. Offsets that do not fit the FFI's
 /// `u32` are dropped rather than wrapped.
 enum FFIOutbound {
+    static func statusPreference(_ mode: PresenceMode) -> WaddleStatusPreference {
+        switch mode {
+        case .automatic: .automatic
+        case .manual(.available): .manual(status: .available)
+        case .manual(.chat): .manual(status: .chat)
+        case .manual(.away): .manual(status: .away)
+        case .manual(.doNotDisturb): .manual(status: .dnd)
+        }
+    }
+
     /// `stanzaID` is stamped as the stanza `@id` and XEP-0359
     /// `<origin-id/>`; for a send it must be the client id the local
     /// echo is keyed by.

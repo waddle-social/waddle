@@ -50,7 +50,8 @@ final class FFIXmppPort: XmppPort {
         }
     }
 
-    func sendPresence(_ availability: Availability, status: String?) async {
-        await client.sendPresence(status: status, show: availability.showValue, idleSince: nil)
+    func sendPresence(_ availability: Availability, status: String?, idleSince: Date?) async {
+        await client.sendPresence(
+            status: status, show: availability.showValue, idleSince: idleSince?.formatted(.iso8601))
     }
 }

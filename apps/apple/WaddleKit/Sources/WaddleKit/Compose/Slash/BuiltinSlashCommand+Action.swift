@@ -14,11 +14,11 @@ extension BuiltinSlashCommand {
         case .giphy:
             return .searchGIFs(query: argument)
         case .away:
-            return .setAvailability(.away)
+            return .setPresenceMode(.manual(.away))
         case .active:
-            return .setAvailability(.available)
+            return .setPresenceMode(.manual(.available))
         case .dnd:
-            return .setAvailability(.doNotDisturb)
+            return .setPresenceMode(.manual(.doNotDisturb))
         }
     }
 }

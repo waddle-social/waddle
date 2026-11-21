@@ -26,7 +26,7 @@ struct SlashSubmitDecisionTests {
 
     @Test func resolvedCommandsRun() {
         #expect(decide("/shrug ok") == .run(.send("ok ¯\\_(ツ)_/¯")))
-        #expect(decide("/away") == .run(.setAvailability(.away)))
+        #expect(decide("/away") == .run(.setPresenceMode(.manual(.away))))
         #expect(decide("/gif cats") == .run(.searchGIFs(query: "cats")))
         #expect(decide("/poll Lunch?") == .run(.runExtension(poll, .inlineSubmit(field: "question", value: "Lunch?"))))
     }

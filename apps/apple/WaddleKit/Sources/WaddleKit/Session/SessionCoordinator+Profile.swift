@@ -27,15 +27,6 @@ extension SessionCoordinator {
         avatars.set(account.jid, image: nil, id: nil)
     }
 
-    /// RFC 6121 availability with an optional status message.
-    public func setAvailability(_ availability: Availability, statusText: String?) async {
-        let text = statusText?.trimmingCharacters(in: .whitespacesAndNewlines)
-        status.availability = availability
-        status.statusText = (text?.isEmpty ?? true) ? nil : text
-        guard connection == .online else { return }
-        await port.sendPresence(availability, status: status.statusText)
-    }
-
     /// XEP-0107 mood; nil retracts it.
     public func setMood(_ mood: UserMood?) async throws {
         if let mood {

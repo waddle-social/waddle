@@ -46,9 +46,9 @@ struct SlashActionTests {
     }
 
     @Test func presenceCommandsIgnoreTrailing() {
-        #expect(run("/away") == .setAvailability(.away))
-        #expect(run("/active back now") == .setAvailability(.available))
-        #expect(run("/DND") == .setAvailability(.doNotDisturb))
+        #expect(run("/away") == .setPresenceMode(.manual(.away)))
+        #expect(run("/active back now") == .setPresenceMode(.manual(.available)))
+        #expect(run("/DND") == .setPresenceMode(.manual(.doNotDisturb)))
     }
 
     @Test func extensionInlineSubmit() {

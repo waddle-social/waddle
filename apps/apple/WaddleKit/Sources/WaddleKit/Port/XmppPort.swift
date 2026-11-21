@@ -42,6 +42,9 @@ public enum XmppEvent: Sendable {
     /// XEP-0084 metadata notification from a peer's PEP service; `id` is
     /// nil when the avatar was disabled.
     case avatarChanged(jid: BareJID, id: String?)
+    /// Another device of this account picked a status or reset to
+    /// automatic (ADR-010). The server does not send a device its own pick.
+    case presenceModeChanged(PresenceMode)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)
     /// SASL failure: the presented credential is dead.
@@ -56,7 +59,8 @@ public protocol ConnectionPort: AnyObject, Sendable {
     func disconnect() async
     /// Confirms that an online XMPP stream still answers requests.
     func probeConnection() async -> Bool
-    func sendPresence(_ availability: Availability, status: String?) async
+    /// `idleSince` is when input stopped on this device (XEP-0319).
+    func sendPresence(_ availability: Availability, status: String?, idleSince: Date?) async
 }
 
 /// Conversation messaging verbs.
@@ -134,6 +138,10 @@ public protocol ProfilePort: AnyObject, Sendable {
     func fetchMood(of jid: BareJID) async throws -> UserMood?
     func publishMood(_ mood: UserMood) async throws
     func retractMood() async throws
+    /// The account's stored presence mode; automatic when none is stored.
+    func fetchPresenceMode() async throws -> PresenceMode
+    /// Stores the mode for every device of the account to take up.
+    func publishPresenceMode(_ mode: PresenceMode) async throws
 }
 
 /// XEP-0363 upload.

@@ -1,8 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// RFC 6121 availability and status message. The message saves on submit
-/// or after a short pause in typing.
+/// The account's status (ADR-010) and RFC 6121 status message. The
+/// message saves on submit or after a short pause in typing.
 struct ProfileStatusSection: View {
     @Environment(SessionCoordinator.self) private var session
     @State private var statusDraft = ""
@@ -12,10 +12,10 @@ struct ProfileStatusSection: View {
 
     var body: some View {
         Section {
-            Picker("Availability", selection: availabilityBinding) {
-                ForEach(ProfileAvailabilityOption.allCases) { option in
-                    ProfileAvailabilityLabel(option: option)
-                        .tag(option)
+            Picker("Status", selection: choiceBinding) {
+                ForEach(ProfileStatusChoice.allCases) { choice in
+                    ProfileStatusChoiceLabel(choice: choice, automaticShows: automaticShows)
+                        .tag(choice)
                 }
             }
             .pickerStyle(.inline)
@@ -30,16 +30,21 @@ struct ProfileStatusSection: View {
         } header: {
             Text("Status")
         } footer: {
-            Text("Everyone who can see your presence sees this.")
+            Text(ProfileStatusChoice.footer)
         }
     }
 
-    private var availabilityBinding: Binding<ProfileAvailabilityOption> {
+    /// The dot on Automatic: what this device's idle time says, which is
+    /// what is shown only while the mode is automatic.
+    private var automaticShows: Availability {
+        session.status.presenceMode == .automatic ? session.status.availability : .available
+    }
+
+    private var choiceBinding: Binding<ProfileStatusChoice> {
         Binding(
-            get: { ProfileAvailabilityOption(session.status.availability) },
-            set: { option in
-                let text = statusDraft
-                Task { await session.setAvailability(option.availability, statusText: text) }
+            get: { ProfileStatusChoice(session.status.presenceMode) },
+            set: { choice in
+                Task { await session.setPresenceMode(choice.mode) }
             }
         )
     }
@@ -60,21 +65,21 @@ struct ProfileStatusSection: View {
     private func saveStatusText() {
         guard hasLoadedDraft,
               ProfileStatusText.hasChanges(draft: statusDraft, current: session.status.statusText) else { return }
-        let availability = session.status.availability
         let text = statusDraft
-        Task { await session.setAvailability(availability, statusText: text) }
+        Task { await session.setStatusText(text) }
     }
 }
 
-/// A presence dot with the option's name.
-private struct ProfileAvailabilityLabel: View {
-    let option: ProfileAvailabilityOption
+/// A presence dot with the choice's name.
+private struct ProfileStatusChoiceLabel: View {
+    let choice: ProfileStatusChoice
+    let automaticShows: Availability
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
-            PresenceDot(availability: option.availability)
+            PresenceDot(availability: choice.dot(automaticShows: automaticShows))
                 .accessibilityHidden(true)
-            Text(option.title)
+            Text(choice.title)
         }
     }
 }
