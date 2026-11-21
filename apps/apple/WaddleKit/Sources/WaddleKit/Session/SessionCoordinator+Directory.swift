@@ -32,6 +32,8 @@ extension SessionCoordinator {
         guard !Task.isCancelled else { return }
         if case let .success(topology) = result {
             directory.apply(topology)
+            // A room that outlived its space is listed again.
+            roomsOfDeletedSpaces.subtract(topology.channels.map(\.roomJID))
             for mutation in directoryMutations.dropFirst(mutationStart) {
                 switch mutation {
                 case .upsert(let channel): directory.upsert(channel)

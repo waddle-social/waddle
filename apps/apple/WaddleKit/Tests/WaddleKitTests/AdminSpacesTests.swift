@@ -157,7 +157,7 @@ struct AdminSpacesTests {
 
     /// The server deletes the rooms that belong to the space and unlinks
     /// the others. Joining a deleted room could make it again.
-    @Test func roomsDeletedWithTheirSpaceAreGoneAndNeverJoinedAgain() async throws {
+    @Test func aRoomOfADeletedSpaceIsNotJoinedUntilItIsListedAgain() async throws {
         let (coordinator, port) = withRooms()
         port.topology = Topology(spaces: [], channels: [
             Channel(roomJID: sketch, name: "sketch"),
@@ -176,17 +176,35 @@ struct AdminSpacesTests {
         #expect(coordinator.onDemandRooms.contains(lounge))
     }
 
-    /// Without a fresh look, nothing says which rooms are left.
-    @Test func roomsOfADeletedSpaceStayUnjoinedWhenDiscoveryFails() async throws {
+    /// Without a fresh look nothing says which rooms are left; a later
+    /// look that lists one lets it be opened again.
+    @Test func aRoomThatOutlivedItsSpaceCanBeOpenedOnceADiscoveryListsIt() async throws {
         let (coordinator, port) = withRooms()
         port.topologyFailure = .timeout
-
         try await coordinator.deleteAdminSpace(design)
-
         #expect(coordinator.isFenced(critique))
         #expect(coordinator.isFenced(sketch))
         #expect(!coordinator.isFenced(lounge))
         #expect(coordinator.onDemandRooms == [lounge])
+
+        port.topologyFailure = nil
+        port.topology = Topology(spaces: [], channels: [Channel(roomJID: sketch, name: "sketch")])
+        await coordinator.refreshDirectory()
+
+        #expect(!coordinator.isFenced(sketch))
+        #expect(coordinator.isFenced(critique))
+    }
+
+    /// A discovery can leave out a room that is still there, so a room
+    /// it does not list keeps what is known of it.
+    @Test func aRoomMissingFromADiscoveryIsNotTakenAsDeleted() async throws {
+        let (coordinator, port) = withRooms()
+        port.topology = Topology(spaces: [], channels: [])
+
+        try await coordinator.deleteAdminSpace(design)
+
+        #expect(!coordinator.destroyedRooms.contains(critique))
+        #expect(coordinator.isFenced(critique))
     }
 
     @Test func aDeleteTheServerRefusesFencesNoRooms() async {
@@ -216,6 +234,28 @@ struct AdminSpacesTests {
         await refresh.value
 
         #expect(list.rows.isEmpty)
+        #expect(!list.isLoading)
+    }
+
+    /// A change made while a search is on its way keeps the search.
+    @Test func aChangeDuringASearchIsMadeOverItsAnswer() async {
+        let (coordinator, port) = online()
+        let bo = AdminUser(jid: self.bo.jid, displayName: nil, isOwner: false)
+        let boNamed = AdminUser(jid: self.bo.jid, displayName: "Bo", isOwner: false)
+        port.admin.users[.init()] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        port.admin.users[.init(prefix: "b")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let search = Task { await list.load(matching: "b") }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        list.replace(boNamed)
+        port.admin.usersFetches.release()
+        await search.value
+
+        #expect(list.rows == [boNamed])
+        #expect(list.query == "b")
         #expect(!list.isLoading)
     }
 

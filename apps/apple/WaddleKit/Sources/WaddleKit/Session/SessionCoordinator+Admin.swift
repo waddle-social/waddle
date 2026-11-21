@@ -57,30 +57,16 @@ extension SessionCoordinator {
     ///
     /// The server deletes some of the space's rooms and only unlinks
     /// others, and its answer does not say which. Joining a deleted room
-    /// could make it again, so every room the space listed is fenced
-    /// until a fresh discovery says which ones are still there. Those are
-    /// let go; the rest are treated as rooms deleted here are. If the
-    /// discovery fails they all stay fenced, as possibly deleted.
+    /// could make it again, so no room the space listed is joined until
+    /// a discovery lists it again; one is asked for at once. A room
+    /// missing from a discovery is not taken as deleted, only as not
+    /// known to be there: nothing of it is cleared.
     public func deleteAdminSpace(_ space: AdminSpace) async throws {
         try await whileOnline { try await port.deleteAdminSpace(space) }
         let rooms = directory.channels(in: space.node).map(\.roomJID)
         guard !rooms.isEmpty else { return }
-        unconfirmedDeletions.formUnion(rooms)
+        roomsOfDeletedSpaces.formUnion(rooms)
         onDemandRooms.subtract(rooms)
-        let epoch = connectionEpoch
-        guard case let .success(topology) = await port.discoverTopology(),
-              !isStopped, epoch == connectionEpoch else { return }
-        let listed = Set(topology.channels.map(\.roomJID))
-        for room in rooms {
-            unconfirmedDeletions.remove(room)
-            guard !listed.contains(room) else { continue }
-            if calls.groupSlotHolds(room) { await calls.hangUp() }
-            destroyedRooms.insert(room)
-            directory.remove(room)
-            directoryMutations.append(.remove(room))
-            presence.markLeft(room)
-            unread.clearRoom(room)
-        }
         await refreshDirectory()
     }
 
