@@ -702,7 +702,7 @@ pub(super) async fn verify_owner_preflight(
              AND c.relowner = n.nspowner AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND c.reloftype = 0 \
              AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
              AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class = c.oid) \
-             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal) \
+             AND (c.relname = 'pubsub_items' OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)) \
              FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ? AND c.relname = ?",
             crate::db_params![schema, table.name],
@@ -710,6 +710,13 @@ pub(super) async fn verify_owner_preflight(
         if let Some(row) = rows.next().await? {
             if !row.get::<bool>(0)? {
                 return Err(PubSubRuntimeAttachError::InvalidTable { table: table.name });
+            }
+            drop(rows);
+            if table.name == "pubsub_items" {
+                let connection = tx.postgres_connection().ok_or_else(|| {
+                    DatabaseError::QueryFailed("PubSub verification requires PostgreSQL".to_owned())
+                })?;
+                verify_space_item_guard(connection, schema).await?;
             }
             if table.name == "pubsub_schema_version" || table.name == PUBSUB_SCHEMA_MARKER_TABLE {
                 verify_table(tx, schema, table).await?;
@@ -1479,7 +1486,7 @@ async fn verify_table_connection(
          AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND c.reloftype = 0 \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class = c.oid) \
-         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal) \
+         AND (c.relname = 'pubsub_items' OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint fk \
            LEFT JOIN pg_catalog.pg_class child ON child.oid = fk.conrelid \
            WHERE fk.contype = 'f' AND fk.confrelid = c.oid AND NOT \
@@ -1507,7 +1514,63 @@ async fn verify_table_connection(
     if !valid {
         return Err(PubSubRuntimeAttachError::InvalidTable { table: table.name });
     }
+    if table.name == "pubsub_items" {
+        verify_space_item_guard(connection, schema).await?;
+    }
     Ok(())
+}
+
+async fn verify_space_item_guard(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), PubSubRuntimeAttachError> {
+    const MIGRATION: &str =
+        include_str!("../../sql/migrations/2017_host_grant_space_bookmark_versions.postgres.sql");
+    let invalid = || PubSubRuntimeAttachError::InvalidTable {
+        table: "pubsub_items",
+    };
+    let source = MIGRATION
+        .split_once("AS $$")
+        .and_then(|(_, body)| body.split_once("$$").map(|(source, _)| source))
+        .ok_or_else(invalid)?;
+    // Standalone PubSub bootstrap has no host-grant tables. A migrated
+    // schema requires exactly the invoker trigger installed by migration 2017.
+    let valid = query_boolean(
+        connection,
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM pg_catalog.pg_class v
+             WHERE v.relnamespace = n.oid AND v.relname = 'host_grant_space_bookmark_versions'
+         ) THEN (SELECT count(*) FROM pg_catalog.pg_trigger t
+                 WHERE t.tgrelid = c.oid AND NOT t.tgisinternal) = 1
+            AND EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_trigger t
+                 JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+                 JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+                 WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+                   AND t.tgname = 'guard_bound_space_item_write' AND t.tgtype = 31
+                   AND t.tgenabled = 'O' AND t.tgparentid = 0 AND t.tgconstraint = 0
+                   AND t.tgnargs = 0 AND t.tgattr = ''::pg_catalog.int2vector
+                   AND t.tgqual IS NULL AND t.tgoldtable IS NULL AND t.tgnewtable IS NULL
+                   AND p.pronamespace = n.oid AND p.proowner = n.nspowner
+                   AND p.proname = 'guard_bound_space_item_write' AND p.prokind = 'f'
+                   AND l.lanname = 'plpgsql' AND p.pronargs = 0 AND NOT p.proretset
+                   AND p.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+                   AND NOT p.prosecdef AND NOT p.proisstrict AND NOT p.proleakproof
+                   AND p.provolatile = 'v' AND p.proparallel = 'u' AND p.proconfig IS NULL
+                   AND CASE WHEN pg_catalog.pg_column_size(p.prosrc) <= 8192
+                                AND pg_catalog.octet_length(p.prosrc) <= 8192
+                            THEN p.prosrc = ? ELSE false END
+            )
+         ELSE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t
+                          WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)
+         END
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = ? AND c.relname = 'pubsub_items'",
+        crate::db_params![source, schema],
+    )
+    .await?;
+    valid.then_some(()).ok_or_else(invalid)
 }
 
 async fn verify_columns(

@@ -449,6 +449,24 @@ async fn subcommands_prepare_a_database_the_restricted_server_serves() {
     assert_eq!(first.stdout.trim(), identity.trim());
     let lineage = database_identity_from_json(&identity).expect("identity document parses");
 
+    for action in ["DISABLE", "ENABLE"] {
+        sqlx::query(&format!(
+            "ALTER TABLE {SCHEMA}.pubsub_items {action} TRIGGER guard_bound_space_item_write"
+        ))
+        .execute(&provisioned.admin)
+        .await
+        .expect("set fixture bookmark guard state");
+        if action == "DISABLE" {
+            let guarded = operator.owner_phase(&[], &enroll).await;
+            assert_exit(&guarded, REFUSED, "owner phase without the bookmark guard");
+            assert!(
+                guarded.stderr.contains("PubSub relation pubsub_items"),
+                "{}",
+                guarded.stderr
+            );
+        }
+    }
+
     // A second run finds nothing to do.
     let stable = owner_phase_stable_entries(&provisioned.admin).await;
     let second = operator.owner_phase(&[], &enroll).await;
