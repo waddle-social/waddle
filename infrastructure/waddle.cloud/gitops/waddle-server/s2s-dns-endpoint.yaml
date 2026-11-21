@@ -1,0 +1,22 @@
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: waddle-xmpp-s2s-srv
+  namespace: waddle
+spec:
+  endpoints:
+    - dnsName: _xmpp-server._tcp.waddle.social
+      recordTTL: 300
+      recordType: SRV
+      targets:
+        - 0 5 5269 xmpp.waddle.social
+    - dnsName: _xmpp-server._tcp.muc.waddle.social
+      recordTTL: 300
+      recordType: SRV
+      targets:
+        - 0 5 5269 xmpp.waddle.social
+    - dnsName: _xmpp-server._tcp.spaces.waddle.social
+      recordTTL: 300
+      recordType: SRV
+      targets:
+        - 0 5 5269 xmpp.waddle.social

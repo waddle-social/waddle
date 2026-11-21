@@ -8,6 +8,10 @@ resources:
   - spicedb-postgres-cluster.yaml
   - spicedb-cluster.yaml
   - xmpp-certificate.yaml
+  - s2s-configmap.yaml
+  - s2s-service.yaml
+  - s2s-networkpolicy.yaml
+  - s2s-dns-endpoint.yaml
   - runtime-external-secret.yaml
   - apns-external-secret.yaml
   - openrouter-external-secret.yaml

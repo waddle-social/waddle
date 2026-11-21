@@ -10,3 +10,6 @@ spec:
     kind: ClusterIssuer
   dnsNames:
     - xmpp.waddle.social
+    - waddle.social
+    - muc.waddle.social
+    - spaces.waddle.social

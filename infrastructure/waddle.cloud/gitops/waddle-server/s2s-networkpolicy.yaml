@@ -1,0 +1,16 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: waddle-server-s2s
+  namespace: waddle
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: waddle-server
+      app.kubernetes.io/name: waddle-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 5269

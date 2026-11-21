@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: waddle-server-s2s
+  namespace: waddle
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  externalIPs:
+    - 51.159.109.202
+  selector:
+    app.kubernetes.io/instance: waddle-server
+    app.kubernetes.io/name: waddle-server
+  ports:
+    - name: xmpp-s2s
+      port: 5269
+      targetPort: 5269
+      nodePort: 30269
+      protocol: TCP

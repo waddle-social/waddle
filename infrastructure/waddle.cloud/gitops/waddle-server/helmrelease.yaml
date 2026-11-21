@@ -95,12 +95,18 @@ spec:
           items:
             - key: WADDLE_APNS_KEY_PEM
               path: AuthKey.p8
+      - name: s2s-config
+        configMap:
+          name: waddle-server-s2s-config
     extraVolumeMounts:
       - name: openrouter-api-key
         mountPath: /var/run/secrets/waddle-ai
         readOnly: true
       - name: apns-auth-key
         mountPath: /var/run/secrets/waddle-apns
+        readOnly: true
+      - name: s2s-config
+        mountPath: /etc/waddle/s2s
         readOnly: true
     # Ship traces + OTel-native metrics to Grafana Cloud via the
     # in-cluster Alloy collector. `telemetry.rs` reads these env vars
@@ -140,6 +146,10 @@ spec:
           secretKeyRef:
             name: postgresql-app
             key: uri
+      - name: WADDLE_S2S_ENABLED
+        value: "true"
+      - name: WADDLE_S2S_CONFIG_FILE
+        value: /etc/waddle/s2s/s2s.toml
     xmpp:
       domain: waddle.social
       publicWebsocketUrl: wss://xmpp.waddle.social/ws

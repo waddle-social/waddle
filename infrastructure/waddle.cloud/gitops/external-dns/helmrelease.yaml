@@ -32,4 +32,5 @@ spec:
       - gateway-httproute
       - gateway-grpcroute
       - gateway-tlsroute
+      - crd
     txtOwnerId: waddle-cluster

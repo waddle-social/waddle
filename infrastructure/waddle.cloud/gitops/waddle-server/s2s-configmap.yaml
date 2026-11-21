@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: waddle-server-s2s-config
+  namespace: waddle
+data:
+  s2s.toml: |
+    generation = "e8c7f1a4-3b2d-4c5e-9a10-204700000001"
+    peer_scope = "public"
+    listen = "0.0.0.0:5269"
+    local_domains = [
+      "waddle.social",
+      "muc.waddle.social",
+      "spaces.waddle.social",
+    ]
+
+    [discovery]
+    enabled = true
+
+    [admission]
+    mode = "open"
+
+    [dialback]
+    outbound = false
+    inbound = false
+
+    [host_policy]
+    require_pkix = false
+    federate_new_rooms = false
+
+    [[credentials]]
+    domain = "waddle.social"
+    certificate_chain = "/etc/waddle/tls/tls.crt"
+    private_key = "/etc/waddle/tls/tls.key"
+
+    [[credentials]]
+    domain = "muc.waddle.social"
+    certificate_chain = "/etc/waddle/tls/tls.crt"
+    private_key = "/etc/waddle/tls/tls.key"
+
+    [[credentials]]
+    domain = "spaces.waddle.social"
+    certificate_chain = "/etc/waddle/tls/tls.crt"
+    private_key = "/etc/waddle/tls/tls.key"
