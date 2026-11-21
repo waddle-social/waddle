@@ -10,9 +10,9 @@ use waddle_xmpp::pubsub::{
 use xmpp_parsers::iq::Iq;
 
 use crate::permissions::host_grant::{
-    AdmissionState, AuthorityIncarnation, ConfigureSpace, GrantGeneration, GrantOperationId,
-    GrantSubject, HostGrantAuthority, HostGrantError, HostGrantGate, OperationRecord,
-    Reconciliation, ScopeKey, ScopeLifecycleId, SetSpaceAffiliations,
+    AdmissionState, AuthorityIncarnation, ConfigureSpace, DeleteSpace, GrantGeneration,
+    GrantOperationId, GrantSubject, HostGrantAuthority, HostGrantError, HostGrantGate,
+    OperationRecord, Reconciliation, ScopeKey, ScopeLifecycleId, SetSpaceAffiliations,
     FENCE_ACKNOWLEDGEMENT_DEADLINE,
 };
 
@@ -263,6 +263,71 @@ pub(super) async fn configure_enrolled_space(
             iq,
             resource_constraint_iq_error(
                 "The configuration change was recorded and is awaiting confirmation.",
+            ),
+        ))
+    }
+}
+
+pub(super) async fn delete_enrolled_space(
+    iq: &Iq,
+    state: &WebSocketState,
+    requester: Option<&FullJid>,
+    session: Option<&Session>,
+) -> Option<ResponseFrame> {
+    let Iq::Set { payload, to, .. } = iq else {
+        return None;
+    };
+    if !payload.is("pubsub", NS_PUBSUB_OWNER)
+        || to.as_ref()?.as_str() != state.deps.service_domains.spaces.as_str()
+    {
+        return None;
+    }
+    let delete = payload.get_child("delete", NS_PUBSUB_OWNER)?;
+    let node = delete.attr("node")?;
+    let ordinary = |reply| Some(ResponseFrame::from(iq_to_xml(reply)));
+    let owner = match enrolled_space_owner(iq, state, requester, session, node).await {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return None,
+        Err(error) => return ordinary(error),
+    };
+    if !payload.attrs().is_empty()
+        || payload.children().count() != 1
+        || !payload.text().trim().is_empty()
+        || delete.attrs().len() != 1
+        || delete.children().next().is_some()
+        || !delete.text().trim().is_empty()
+    {
+        return ordinary(build_pubsub_error(iq, PubSubError::BadRequest));
+    }
+    let command = DeleteSpace {
+        operation: GrantOperationId::generate(),
+        key: owner.key,
+        lifecycle: owner.lifecycle,
+        expected_incarnation: owner.incarnation,
+        expected_generation: owner.generation,
+        initiator: owner.initiator,
+    };
+    let mut result = owner.authority.delete_space(&command).await;
+    if matches!(result, Err(HostGrantError::CommitOutcomeUnknown)) {
+        result = owner.authority.delete_space(&command).await;
+    }
+    let receipt = match result {
+        Ok(receipt) => receipt,
+        Err(error) => return ordinary(membership_mutation_error(iq, error)),
+    };
+    if settle_owner_mutation(
+        &state.deps.app_state.host_grants,
+        &owner.authority,
+        receipt.record(),
+    )
+    .await
+    {
+        ordinary(build_pubsub_success(iq))
+    } else {
+        ordinary(error(
+            iq,
+            resource_constraint_iq_error(
+                "The Space deletion was recorded and is awaiting confirmation.",
             ),
         ))
     }

@@ -798,14 +798,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             &websocket_state,
             server_config.clustering.orphan_reaper_interval,
         );
-        if let Some(router) = s2s_router {
-            super::space_deletion_delivery::spawn_remote(
-                websocket_state.deps.app_state.host_grants.clone(),
-                router,
-                websocket_state.deps.app_state.node_lifecycle.clone(),
-                shutdown_stop_token.clone(),
-            );
-        }
+        super::space_deletion_delivery::spawn(
+            Arc::clone(&websocket_state),
+            s2s_router,
+            shutdown_stop_token.clone(),
+        );
     }
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),

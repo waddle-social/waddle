@@ -1,4 +1,4 @@
-//! Deliver durable enrolled Space deletion notices to remote subscribers.
+//! Deliver durable enrolled Space deletion notices to subscribers.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,16 +17,60 @@ use crate::permissions::host_grant::{
     SpaceDeletionDeliveryKind,
 };
 use crate::s2s::route::{S2sRouter, SpaceDeletionCompletion};
+use crate::server::routes::websocket::{local_space_deletion, WebSocketState};
 
 const BATCH_LIMIT: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const COMPLETION_DEADLINE: Duration = Duration::from_secs(30);
 
-pub(super) fn spawn_remote(
+enum DeliveryRoute {
+    Local(Arc<WebSocketState>),
+    Remote(S2sRouter),
+}
+
+impl DeliveryRoute {
+    fn kind(&self) -> SpaceDeletionDeliveryKind {
+        match self {
+            Self::Local(_) => SpaceDeletionDeliveryKind::Local,
+            Self::Remote(_) => SpaceDeletionDeliveryKind::Remote,
+        }
+    }
+
+    async fn offer(
+        &self,
+        grants: &HostGrantGate,
+        attempt: &SpaceDeletionAttempt,
+    ) -> Option<SpaceDeletionAttemptOutcome> {
+        match self {
+            Self::Local(state) => local_space_deletion::offer(state, attempt).await,
+            Self::Remote(router) => offer_remote_attempt(grants, router, attempt).await,
+        }
+    }
+}
+
+pub(super) fn spawn(
+    state: Arc<WebSocketState>,
+    router: Option<S2sRouter>,
+    stop: CancellationToken,
+) {
+    let grants = &state.deps.app_state.host_grants;
+    let lifecycle = state.deps.app_state.node_lifecycle.clone();
+    if let Some(router) = router {
+        spawn_route(
+            grants.clone(),
+            lifecycle.clone(),
+            stop.clone(),
+            DeliveryRoute::Remote(router),
+        );
+    }
+    spawn_route(grants.clone(), lifecycle, stop, DeliveryRoute::Local(state));
+}
+
+fn spawn_route(
     grants: HostGrantGate,
-    router: S2sRouter,
     lifecycle: NodeLifecycle,
     stop: CancellationToken,
+    route: DeliveryRoute,
 ) {
     let Some(store) = grants.store().cloned() else {
         return;
@@ -35,52 +79,51 @@ pub(super) fn spawn_remote(
         tokio::select! {
             biased;
             () = stop.cancelled() => {}
-            () = deliver_remote(grants, store, router, lifecycle) => {}
+            () = deliver(grants, store, lifecycle, route) => {}
         }
     });
 }
 
-async fn deliver_remote(
+async fn deliver(
     grants: HostGrantGate,
     store: HostGrantStore,
-    router: S2sRouter,
     lifecycle: NodeLifecycle,
+    route: DeliveryRoute,
 ) {
+    let kind = route.kind();
     loop {
         if lifecycle.is_ready() && grants.attachment().is_some() {
-            match store
-                .claim_space_deletion_jobs(SpaceDeletionDeliveryKind::Remote, BATCH_LIMIT)
-                .await
-            {
+            match store.claim_space_deletion_jobs(kind, BATCH_LIMIT).await {
                 Ok(attempts) => {
                     stream::iter(attempts)
                         .for_each_concurrent(BATCH_LIMIT, |attempt| {
-                            settle_remote_attempt(&grants, &store, &router, attempt)
+                            settle_attempt(&grants, &store, &route, attempt)
                         })
-                        .await
+                        .await;
                 }
-                Err(error) => warn!(%error, "could not claim remote Space deletion notices"),
+                Err(error) => warn!(?kind, %error, "could not claim Space deletion notices"),
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-async fn settle_remote_attempt(
+async fn settle_attempt(
     grants: &HostGrantGate,
     store: &HostGrantStore,
-    router: &S2sRouter,
+    route: &DeliveryRoute,
     attempt: SpaceDeletionAttempt,
 ) {
-    let Some(outcome) = offer_remote_attempt(grants, router, &attempt).await else {
-        // A vanished worker or an elapsed observation deadline provides no
-        // transfer evidence. The persisted phase settles when the lease expires.
+    let Some(outcome) = route.offer(grants, &attempt).await else {
+        // The persisted phase settles when an unobserved attempt expires.
         return;
     };
     match store.finish_space_deletion_attempt(&attempt, outcome).await {
         Ok(true) => {}
-        Ok(false) => debug!("remote Space deletion attempt no longer owns its lease"),
-        Err(error) => warn!(%error, "could not settle remote Space deletion notice"),
+        Ok(false) => {
+            debug!(kind = ?attempt.kind, "Space deletion attempt no longer owns its lease")
+        }
+        Err(error) => warn!(kind = ?attempt.kind, %error, "could not settle Space deletion notice"),
     }
 }
 
