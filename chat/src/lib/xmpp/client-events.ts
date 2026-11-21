@@ -40,6 +40,7 @@ import type {
   RoomAuthority,
   RoomHats,
   RoomPresence,
+  RosterContact,
   SessionLifecycleEvent,
   XmppErrorEvent,
   XmppStatusSnapshot,
@@ -56,6 +57,12 @@ import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
 export interface AvatarChangedEvent {
   jid: string;
   avatarId?: string;
+}
+
+/** RFC 6121 §2.1.6 / XEP-0237 live roster push from the user's server. */
+export interface RosterPushEvent {
+  ver?: string;
+  items: RosterContact[];
 }
 
 /** Event name → payload tuple. */
@@ -157,6 +164,7 @@ export type ClientEvents = {
   dmSafetyScores: [fastening: SafetyScoresFastening];
   dmDisplayed: [event: DmDisplayedEvent];
   presenceUpdate: [event: PresenceUpdateEvent];
+  rosterPush: [push: RosterPushEvent];
   /** `bareJid` null: the nick's current holder no longer has a known real JID. */
   memberJid: [nick: string, bareJid: string | null];
   hats: [hats: RoomHats];

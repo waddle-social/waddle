@@ -365,7 +365,7 @@ describe("navigation during connection discovery", () => {
 
   test.each([false, true])("a room choice cancels bootstrap while extension discovery waits (group: %s)", async (isGroupDm) => {
     const group = { id: "crew", name: "Crew", jid: "crew@muc.example.com", channelType: "text" as const, isGroupDm: true };
-    const h = harness("/dm/alice%40example.com", { ...topology, rooms: [...topology.rooms, group] });
+    const h = harness("/r/general/x/polls/gallery", { ...topology, rooms: [...topology.rooms, group] });
     await h.waddles.loadStructure(null, { noChannelSelect: true });
     let finishExtensions!: () => void;
     const pendingExtensions = new Promise<void>((resolve) => { finishExtensions = resolve; });
@@ -384,6 +384,20 @@ describe("navigation during connection discovery", () => {
     expect(h.dmConversations.activePeerJid.value).toBeNull();
     expect(h.isApplyingRoute.value).toBe(false);
     expect(h.dmMessaging.loadMessages).not.toHaveBeenCalled();
+  });
+
+  test("non-extension routes apply immediately without waiting for extension discovery", async () => {
+    const h = harness("/dm/alice%40example.com", topology);
+    await h.waddles.loadStructure(null, { noChannelSelect: true });
+    const pendingExtensions = new Promise<void>(() => {});
+    h.refreshExtensionRoutes.mockImplementation(() => pendingExtensions);
+    h.connectionStore.appState = "ready";
+    await flush();
+
+    expect(h.refreshExtensionRoutes).toHaveBeenCalledTimes(1);
+    expect(h.isApplyingRoute.value).toBe(false);
+    expect(h.ui.sidebarMode.value).toBe("dms");
+    expect(h.dmConversations.activePeerJid.value).toBe("alice@example.com");
   });
 
   test("history navigation to a group DM keeps its route and explicit room retry", async () => {

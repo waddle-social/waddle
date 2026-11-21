@@ -520,7 +520,7 @@ pub(crate) fn close_call_setup_from_outcome(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DetachedDeliveryOutcome {
+pub(crate) enum DetachedDeliveryOutcome {
     Queued,
     Unavailable,
     Failed,
@@ -1120,7 +1120,7 @@ pub(super) async fn append_detached_at(
 }
 
 /// Queue a fallback replay stanza in the detached resource's SM session.
-pub(super) async fn deliver_to_detached_at(
+pub(crate) async fn deliver_to_detached_at(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,

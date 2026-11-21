@@ -122,6 +122,8 @@ pub(crate) use cleanup::retain_abandoned_muc_occupancy_sweep;
 pub(crate) use cleanup::retire_occupancy_before_bind;
 pub(crate) use cleanup::run_durable_sm_sweep;
 pub(crate) use cleanup::sweep_abandoned_muc_occupancy;
+#[cfg(feature = "clustering")]
+pub(crate) use cleanup::sweep_abandoned_room_occupancy;
 pub use cleanup::MucCleanupOutcome;
 pub(crate) use cleanup::{
     ack_departure_receipt, acknowledge_in_flight, ask_leave_bounded, echo_muc_self_unavailable,

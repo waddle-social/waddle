@@ -27,7 +27,6 @@ import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.IdleAge
 import social.waddle.android.client.idleAgeOf
-import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.presenceShowsIdle
 import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.feature.conversation.ConversationKind
@@ -59,14 +58,12 @@ fun DmScreen(
         factory = DmViewModel.factory(graph, peerJid),
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
-    val contacts by graph.sessionManager.presenceStore.contacts.collectAsStateWithLifecycle()
-    val directory by graph.sessionManager.peopleDirectory.collectAsStateWithLifecycle()
-    val peerBare = normalizedBareJid(peerJid)
+    val peer by viewModel.peerPresence.collectAsStateWithLifecycle()
+    val directoryShow by viewModel.peerDirectoryShow.collectAsStateWithLifecycle()
     // Same lookup as the DM list: the People directory (rooms and contacts,
     // most-available), then contact presence. Seen nowhere this stream is
     // unknown, not "offline": no dot and no presence word.
-    val peer = contacts[peerBare]
-    val peerShow: PresenceShow? = directory.people.firstOrNull { it.bareJid == peerBare }?.show ?: peer?.show
+    val peerShow: PresenceShow? = directoryShow ?: peer?.show
     val scope = rememberCoroutineScope()
     var newGroupOpen by remember { mutableStateOf(false) }
 

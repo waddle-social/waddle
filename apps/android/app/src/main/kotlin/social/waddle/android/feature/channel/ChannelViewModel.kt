@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import social.waddle.android.AppGraph
@@ -48,17 +49,21 @@ class ChannelViewModel(
     typingNames = sessionManager.chatStateStore.composingNames(roomJid),
     pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
     mentionCandidates = sessionManager.presenceStore.occupants
-        .map { rooms -> mentionCandidatesOf(rooms[roomJid].orEmpty()) },
+        .map { rooms -> rooms[roomJid].orEmpty() }
+        .distinctUntilChanged()
+        .map(::mentionCandidatesOf),
     mentionDirectorySearch = { query -> sessionManager.searchRoomMentionUsers(roomJid, query) },
     occupantPresence = sessionManager.presenceStore.occupants
-        .map { rooms -> rooms[roomJid].orEmpty() },
+        .map { rooms -> rooms[roomJid].orEmpty() }
+        .distinctUntilChanged(),
     occupantJids = sessionManager.occupantJidStore.jidsIn(roomJid),
     botJids = sessionManager.declaredBotJids(roomJid),
     // No public/private discriminator on the topology yet (web
     // parity): every MUC resolves as a private group (§3: always).
     notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),
     canModerate = sessionManager.presenceStore.occupants
-        .map { rooms -> canModerateOf(rooms[roomJid].orEmpty()) },
+        .map { rooms -> canModerateOf(rooms[roomJid].orEmpty()) }
+        .distinctUntilChanged(),
     timelineDirection = timelineDirection,
     uploader = uploader,
     onConversationRead = onConversationRead,
@@ -72,11 +77,13 @@ class ChannelViewModel(
      */
     val canManageMembers: StateFlow<Boolean> = sessionManager.presenceStore.occupants
         .map { rooms -> canManageMembersOf(rooms[roomJid].orEmpty()) }
+        .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** §10 owner use cases (settings sheet, destroy) are owner-only. */
     val isRoomOwner: StateFlow<Boolean> = sessionManager.presenceStore.occupants
         .map { rooms -> isRoomOwnerOf(rooms[roomJid].orEmpty()) }
+        .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     companion object {

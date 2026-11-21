@@ -221,7 +221,12 @@ impl AccountCoordinatorActor {
     }
 
     async fn ensure_loaded(&mut self) -> Reply<()> {
+        self.ensure_loaded_settling().await.map(|_| ())
+    }
+
+    async fn ensure_loaded_settling(&mut self) -> Reply<usize> {
         self.ensure_claim(ClaimNeed::Taken).await?;
+        let mut initial_retired = 0;
         if self.resources.is_none() {
             let loaded = self.load().await;
             self.note_claim_loss(&loaded);
@@ -236,9 +241,9 @@ impl AccountCoordinatorActor {
                 self.resources = None;
             }
             self.note_claim_loss(&settled);
-            settled?;
+            initial_retired = settled?;
         }
-        Ok(())
+        Ok(initial_retired)
     }
 
     /// Build the account's slots from its stored rows. A row that holds no
@@ -493,14 +498,60 @@ impl AccountCoordinatorActor {
     }
 
     /// Detach an active binding on a lost connection when it names a
-    /// stream-management session and this claim holds it. Returns whether
-    /// the slot now holds it as detached.
+    /// stream-management session. If the binding was left unadopted (for
+    /// example because its host node was `Draining` or `Unknown` when this
+    /// coordinator took over the account), adopt it under this claim first and
+    /// immediately detach it in the same actor turn so it is never exposed as
+    /// routable while preserving its stream-management resume right. Returns
+    /// whether the slot now holds it as detached.
     async fn detach_expired(
         &mut self,
         claim: &UserClaimIdentity,
         full_jid: &FullJid,
         binding_ref: &BindingRef,
     ) -> Reply<bool> {
+        let Some(slot) = self.resources()?.slot(full_jid) else {
+            return Ok(false);
+        };
+        if slot.claim_identity() != claim {
+            return Ok(false);
+        }
+        let Some(binding) = slot.binding_receipt().filter(|binding| {
+            binding.binding_ref() == binding_ref
+                && binding.state() == AccountResourceBindingState::Active
+                && binding.snapshot().stream_management_ref.is_some()
+                && binding.publication().is_some()
+        }) else {
+            return Ok(false);
+        };
+        let needs_adoption = binding.binding_claim_identity() != claim;
+        if needs_adoption {
+            let adopt = fresh_operation(AccountResourceMutation::AdoptBinding {
+                claim_identity: slot.claim_identity().clone(),
+                expected_revision: slot.revision(),
+                binding_ref: binding_ref.clone(),
+                expected_binding_claim_identity: binding.binding_claim_identity().clone(),
+                actor_registration: binding.registration().is_some().then(|| {
+                    ActorRegistrationReceipt::observed(
+                        claim.clone(),
+                        BindingEvidence::for_binding(binding_ref),
+                    )
+                }),
+            });
+            let adopted = matches!(
+                self.execute(full_jid.clone(), adopt).await?,
+                BindingReply::Executed(
+                    AccountResourceExecution::Applied(
+                        AccountResourceOperationOutcome::Committed { .. }
+                    ) | AccountResourceExecution::Replayed(
+                        AccountResourceOperationOutcome::Committed { .. }
+                    )
+                )
+            );
+            if !adopted {
+                return Ok(false);
+            }
+        }
         let Some(slot) = self.resources()?.slot(full_jid) else {
             return Ok(false);
         };
@@ -1388,13 +1439,13 @@ impl Message<SettleExpired> for AccountCoordinatorActor {
         _message: SettleExpired,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.ensure_loaded().await?;
+        let initial = self.ensure_loaded_settling().await?;
         let settled = self.settle_expired().await;
         self.note_claim_loss(&settled);
         if settled.is_ok() {
             self.release_claim_if_unbound().await;
         }
-        settled
+        settled.map(|count| initial + count)
     }
 }
 

@@ -46,6 +46,9 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), DatabaseError> 
         "CREATE INDEX IF NOT EXISTS idx_sm_durable_sessions_resource \
          ON sm_durable_sessions (full_jid)"
             .to_owned(),
+        "CREATE INDEX IF NOT EXISTS idx_sm_durable_sessions_bare_state \
+         ON sm_durable_sessions (bare_jid, state)"
+            .to_owned(),
         format!(
             "CREATE TABLE IF NOT EXISTS sm_durable_operations (
                 operation_id TEXT PRIMARY KEY,

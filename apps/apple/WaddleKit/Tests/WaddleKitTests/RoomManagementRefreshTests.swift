@@ -85,22 +85,24 @@ struct RoomManagementRefreshTests {
 
     @Test func deletionWhileAnEarlierJoinWaitsSkipsTheDeletedRoom() async throws {
         let port = FakePort()
-        let first = bare("first@muc.waddle.test")
-        port.topology = Topology(spaces: [], channels: [
-            Channel(roomJID: first, name: "First", position: 0),
-            Channel(roomJID: room, name: "Second", position: 1),
-        ])
+        let concurrency = SessionCoordinator.maxConcurrentAutoJoins
+        let inFlight = (0..<concurrency).map { bare("first-\($0)@muc.waddle.test") }
+        let channels = inFlight.enumerated().map { index, jid in
+            Channel(roomJID: jid, name: "First \(index)", position: index)
+        } + [Channel(roomJID: room, name: "Queued", position: concurrency)]
+        port.topology = Topology(spaces: [], channels: channels)
         port.heldDirectoryVerbs = ["joinRoom"]
         let coordinator = SessionCoordinator(account: me, port: port)
         coordinator.start()
         port.emit(.connected)
-        await eventually { port.heldDirectoryRequests.count == 1 }
-        try #require(port.heldDirectoryRequests.count == 1)
+        await eventually { port.heldDirectoryRequests.count == concurrency }
+        try #require(port.heldDirectoryRequests.count == concurrency)
         try await coordinator.deleteRoom(room)
         port.heldDirectoryVerbs = []
         port.releaseDirectoryRequests()
         await coordinator.readyTask?.value
-        #expect(port.joined == [bare("first@muc.waddle.test")])
+        #expect(Set(port.joined) == Set(inFlight))
+        #expect(!port.joined.contains(room))
         #expect(coordinator.directory.channel(for: room) == nil)
         await coordinator.stop()
     }

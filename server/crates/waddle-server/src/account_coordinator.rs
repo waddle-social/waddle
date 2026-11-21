@@ -54,6 +54,6 @@ pub use routed::{
     AccountRoutingPolicy, ForwardFailure, RoutedAccountAuthority,
 };
 pub use selection::{
-    warn_if_removed_selector_set, AccountAuthoritySelection, AccountAuthoritySelectionError,
-    REMOVED_ACCOUNT_AUTHORITY_ENV,
+    retire_expired_bindings_page, warn_if_removed_selector_set, AccountAuthoritySelection,
+    AccountAuthoritySelectionError, EXPIRED_BINDING_SWEEP_ACCOUNTS, REMOVED_ACCOUNT_AUTHORITY_ENV,
 };

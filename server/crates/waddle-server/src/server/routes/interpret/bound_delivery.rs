@@ -164,8 +164,21 @@ pub(crate) async fn deliver_to_bound_resource(
                 .await
             }
             BindingHost::Remote(node) if reach.remote => {
-                deliver_to_remote_binding(deps, target, binding, node, stanza, kind, received_at)
-                    .await
+                let outcome = deliver_to_remote_binding(
+                    deps,
+                    target,
+                    binding,
+                    node,
+                    stanza,
+                    kind,
+                    received_at,
+                )
+                .await;
+                if outcome == FullJidDeliveryOutcome::Unavailable && reach.detached {
+                    detached().await
+                } else {
+                    outcome
+                }
             }
             BindingHost::Remote(_) => detached().await,
         },

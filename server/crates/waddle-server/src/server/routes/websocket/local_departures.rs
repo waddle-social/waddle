@@ -797,6 +797,53 @@ impl PendingLocalMucDepartures {
         inventory.record_gauges();
     }
 
+    /// Hand off a live task's write-ahead [`LocalDepartureItem::InFlight`]
+    /// entry to a retained [`LocalDepartureItem::RoomDeparture`] retry,
+    /// preserving its accumulated `notified` set and arming retry backoff
+    /// immediately.
+    ///
+    /// Used when a room departure committed on the actor but the synchronous
+    /// presence fan-out timed out with unfinished recipients: replacing the
+    /// `InFlight` entry lifts the live-task barrier and schedules the janitor
+    /// after one backoff step instead of waiting out [`IN_FLIGHT_REPLAY_DELAY`],
+    /// while leaving the actor's departure receipt unacknowledged until every
+    /// occupant is notified.
+    pub fn handoff_in_flight_to_retry(&self, item: &LocalDepartureItem) {
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        let existing = inventory.remove(&item.key()).map(|pending| pending.item);
+        let source = existing.as_ref().unwrap_or(item);
+        let LocalDepartureItem::InFlight {
+            room,
+            jid,
+            cause,
+            selector,
+            attempt,
+            notified,
+            removal,
+        } = source.clone()
+        else {
+            inventory.record_gauges();
+            return;
+        };
+        let retry = PendingLocalDeparture {
+            item: LocalDepartureItem::RoomDeparture {
+                room,
+                jid,
+                cause,
+                selector,
+                attempt,
+                notified,
+                removal,
+            },
+            attempts: 1,
+            not_before: Instant::now() + jittered(backoff(1)),
+        };
+        if !inventory.merge_into_existing(retry.clone()) {
+            inventory.insert(retry);
+        }
+        inventory.record_gauges();
+    }
+
     /// The acknowledgement still owed for this full JID in this room, if any.
     /// A retained departure retry of the same JID must deliver it FIRST: the
     /// receipt it names was already effected, and a retry's JID fallback
@@ -2202,5 +2249,46 @@ mod tests {
         assert!(
             matches!(&due[0].item, LocalDepartureItem::FullJidSweep { jid, .. } if jid.as_str() == "a@example.com/web")
         );
+    }
+
+    #[test]
+    fn handoff_in_flight_to_retry_preserves_notified_and_lifts_barrier() {
+        let inventory = PendingLocalMucDepartures::default();
+        let room: BareJid = "room@muc.example.com".parse().unwrap();
+        let alice = jid("alice@example.com/web");
+        let bob = jid("bob@example.com/web");
+        let attempt = LeaveAttemptId::generate();
+        let in_flight = LocalDepartureItem::InFlight {
+            room: room.clone(),
+            jid: alice.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
+            attempt,
+            notified: HashSet::new(),
+            removal: MucRemovalCause::Voluntary,
+        };
+        inventory.record_in_flight(in_flight.clone());
+        inventory.note_notified(&in_flight, &bob);
+        assert!(inventory.in_flight_exists_for(&room, &alice));
+
+        inventory.handoff_in_flight_to_retry(&in_flight);
+        assert!(
+            !inventory.in_flight_exists_for(&room, &alice),
+            "handoff must drop the live-task barrier immediately"
+        );
+        // Backoff(1) is 2s (jittered up to 2.5s), much shorter than IN_FLIGHT_REPLAY_DELAY (30s).
+        let due = inventory.take_due(Instant::now() + Duration::from_secs(4));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempts, 1);
+        assert!(matches!(
+            &due[0].item,
+            LocalDepartureItem::RoomDeparture {
+                room: r,
+                jid: j,
+                attempt: a,
+                notified,
+                ..
+            } if r == &room && j == &alice && *a == attempt && notified == &HashSet::from([bob])
+        ));
     }
 }

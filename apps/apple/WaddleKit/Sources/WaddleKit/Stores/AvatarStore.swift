@@ -44,6 +44,8 @@ public final class AvatarStore {
     /// JIDs with held bytes, least recently used first.
     @ObservationIgnored private var useOrder: [BareJID] = []
     @ObservationIgnored private var queue: [BareJID] = []
+    @ObservationIgnored private var queueHead = 0
+    @ObservationIgnored private var queued: Set<BareJID> = []
     @ObservationIgnored private var inFlight: [BareJID: Ticket] = [:]
     /// Bumped per JID by events and local writes that supersede a lookup.
     @ObservationIgnored private var changes: [BareJID: Int] = [:]
@@ -66,7 +68,7 @@ public final class AvatarStore {
     public func request(_ jid: BareJID) {
         if images[jid] != nil { markUsed(jid) }
         guard isDue(jid) else { return }
-        queue.append(jid)
+        enqueue(jid)
         drain()
     }
 
@@ -74,10 +76,10 @@ public final class AvatarStore {
     /// avatar, nil when the peer disabled it. JIDs never shown are left to
     /// their first render.
     public func avatarChanged(_ jid: BareJID, id: String?) {
-        guard entries[jid] != nil || inFlight[jid] != nil || queue.contains(jid) else { return }
+        guard entries[jid] != nil || inFlight[jid] != nil || queued.contains(jid) else { return }
         guard let id else {
             changes[jid, default: 0] += 1
-            queue.removeAll { $0 == jid }
+            removeFromQueue(jid)
             images[jid] = nil
             useOrder.removeAll { $0 == jid }
             entries[jid] = Entry(id: nil, dueAt: now().addingTimeInterval(Self.retryAfter))
@@ -106,7 +108,7 @@ public final class AvatarStore {
     /// while it is unchanged.
     public func set(_ jid: BareJID, image: AvatarImage?, id: String?) {
         changes[jid, default: 0] += 1
-        queue.removeAll { $0 == jid }
+        removeFromQueue(jid)
         if let image {
             remember(image, id: id, for: jid)
         } else {
@@ -123,20 +125,54 @@ public final class AvatarStore {
         entries.removeAll()
         useOrder.removeAll()
         queue.removeAll()
+        queueHead = 0
+        queued.removeAll()
         inFlight.removeAll()
         changes.removeAll()
     }
 
     private func isDue(_ jid: BareJID) -> Bool {
-        guard inFlight[jid] == nil, !queue.contains(jid) else { return false }
+        guard inFlight[jid] == nil, !queued.contains(jid) else { return false }
         guard let entry = entries[jid] else { return true }
         return entry.isStale || now() >= entry.dueAt
     }
 
+    private func enqueue(_ jid: BareJID) {
+        guard queued.insert(jid).inserted else { return }
+        queue.append(jid)
+    }
+
+    private func removeFromQueue(_ jid: BareJID) {
+        guard queued.remove(jid) != nil else { return }
+        // Keep queueHead valid; stale entries are skipped on dequeue.
+        if queued.isEmpty {
+            queue.removeAll(keepingCapacity: true)
+            queueHead = 0
+        }
+    }
+
+    private func dequeueNext() -> BareJID? {
+        while queueHead < queue.count {
+            let jid = queue[queueHead]
+            queueHead += 1
+            if queueHead >= 32, queueHead * 2 >= queue.count {
+                queue.removeFirst(queueHead)
+                queueHead = 0
+            }
+            if queued.remove(jid) != nil {
+                return jid
+            }
+        }
+        if queueHead > 0 {
+            queue.removeAll(keepingCapacity: true)
+            queueHead = 0
+        }
+        return nil
+    }
+
     private func drain() {
         guard let fetch else { return }
-        while inFlight.count < Self.maxConcurrentLookups, !queue.isEmpty {
-            let jid = queue.removeFirst()
+        while inFlight.count < Self.maxConcurrentLookups, let jid = dequeueNext() {
             let ticket = Ticket(session: session, generation: generation, change: changes[jid, default: 0])
             inFlight[jid] = ticket
             let knownID = images[jid] == nil ? nil : entries[jid]?.id
@@ -153,7 +189,7 @@ public final class AvatarStore {
         defer { drain() }
         guard ticket.change == changes[jid, default: 0] else {
             // Superseded while in flight: a change with a new id asks again.
-            if isDue(jid) { queue.append(jid) }
+            if isDue(jid) { enqueue(jid) }
             return
         }
         let current = entries[jid]
@@ -178,11 +214,12 @@ public final class AvatarStore {
             // Started before the reconnect: its row's own request after the
             // reconnect was absorbed by this lookup, so ask again now.
             entries[jid]?.isStale = true
-            queue.append(jid)
+            enqueue(jid)
         }
     }
 
     private func markUsed(_ jid: BareJID) {
+        if useOrder.last == jid { return }
         useOrder.removeAll { $0 == jid }
         useOrder.append(jid)
     }

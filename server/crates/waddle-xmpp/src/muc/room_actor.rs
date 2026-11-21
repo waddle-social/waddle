@@ -42,9 +42,10 @@ mod snapshot_handlers;
 mod tests;
 
 pub use admin_handlers::{
-    enforce_members_only_from_room, AdminItemsApplied, ApplyAdminItems, ApplyAdminItemsIfAdmitted,
+    enforce_members_only_from_room, AdminItemsApplied, AdminListAuthorization, AdminListFilter,
+    AdminListOutcome, AdminListRoleItem, ApplyAdminItems, ApplyAdminItemsIfAdmitted,
     ApplyAffiliationChange, EnforceMembersOnly, EnforceMembersOnlyAffiliations, GetAdminContext,
-    IsOwner, RemoveUnadmittedOccupant,
+    GetAdminList, IsOwner, RemoveUnadmittedOccupant,
 };
 use mediated_invites::MediatedInviteOperationRecord;
 pub use mediated_invites::{

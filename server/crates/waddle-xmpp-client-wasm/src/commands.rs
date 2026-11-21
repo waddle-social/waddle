@@ -136,8 +136,17 @@ async fn send_iq_roundtrip(
         iq_reply_from_oneshot(rx).await
     };
     let (deadline, cancel_deadline) = sleep_ms(IQ_REPLY_DEADLINE_MS);
+    struct DeadlineGuard<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for DeadlineGuard<F> {
+        fn drop(&mut self) {
+            if let Some(cancel) = self.0.take() {
+                cancel();
+            }
+        }
+    }
+    let _deadline_guard = DeadlineGuard(Some(cancel_deadline));
     let outcome = wait_iq_reply_with_deadline(round_trip, deadline).await;
-    cancel_deadline();
+    drop(_deadline_guard);
     match outcome {
         IqReplyWait::Reply(reply) => Ok(reply),
         IqReplyWait::Disconnected => Err(js_error("client is disconnected")),
@@ -326,7 +335,7 @@ pub(crate) fn try_request_stream_management_ack_for_pagehide(
     }
 
     let outcome = if core.runtime.commit_pagehide_ack_written(chrono::Utc::now()) {
-        publish_resume_state_snapshot(inner, &core.runtime, false);
+        publish_resume_state_snapshot(inner, &core.runtime, core.explicit_disconnect);
         PagehideSmAckEnqueueOutcome::Sent
     } else {
         PagehideSmAckEnqueueOutcome::AlreadyPending
@@ -474,6 +483,10 @@ fn drain_pagehide_command(
                 completions,
             );
             let failed = result.is_err();
+            if !failed {
+                core.explicit_disconnect = true;
+                publish_resume_state_snapshot(inner, &core.runtime, true);
+            }
             completions.push(PagehideCommandCompletion::Disconnect { responder, result });
             if failed {
                 Err(())

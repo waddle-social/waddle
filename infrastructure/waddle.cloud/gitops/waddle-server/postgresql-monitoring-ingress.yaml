@@ -397,3 +397,22 @@ data:
         - oldest_unsettled_age_seconds:
             usage: GAUGE
             description: Age in seconds of the oldest direct request that is not settled, or zero.
+
+    waddle_ingress_mailbox_dead_letters:
+      target_databases: ["waddle"]
+      query: |
+        -- Always emits one row so absent() detects collector failure rather than zero dead letters.
+        SELECT
+          count(*) AS pending_entries,
+          coalesce(extract(epoch FROM now() - min(dead_lettered_at)), 0) AS oldest_age_seconds
+        FROM ingress_mailbox_entries
+        WHERE disposition = 0
+          AND dead_lettered_at IS NOT NULL
+      primary: true
+      metrics:
+        - pending_entries:
+            usage: GAUGE
+            description: Pending durable-mailbox entries currently parked as dead letters and awaiting operator repair.
+        - oldest_age_seconds:
+            usage: GAUGE
+            description: Age in seconds of the oldest pending dead-lettered mailbox entry, or zero.

@@ -85,14 +85,12 @@ impl AccountAuthorityPeers for ClusterAccountAuthorityPeers {
     async fn owner(&self, account: &BareJid) -> Result<AccountOwner, AccountClaimError> {
         match self.handles.account_owner(account).await {
             Ok(Ownership::Remote(node)) => Ok(AccountOwner::Remote(node)),
-            // Nobody live holds the account, or this node does: the local
-            // coordinator takes the claim, or takes the account over.
-            Ok(
-                Ownership::NotClustered
-                | Ownership::Unclaimed
-                | Ownership::Local
-                | Ownership::Stale,
-            ) => Ok(AccountOwner::Local),
+            Ok(Ownership::Unclaimed) => Ok(AccountOwner::Unclaimed),
+            // This node holds the account, or the prior holder's lease expired
+            // (`Stale`) and the local coordinator must take the account over.
+            Ok(Ownership::NotClustered | Ownership::Local | Ownership::Stale) => {
+                Ok(AccountOwner::Local)
+            }
             Err(_) => Err(AccountClaimError::LookupFailed),
         }
     }

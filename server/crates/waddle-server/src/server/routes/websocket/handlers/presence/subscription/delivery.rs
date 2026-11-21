@@ -6,6 +6,7 @@ use super::{
 #[cfg(feature = "clustering")]
 use crate::server::routes::interpret::FullJidDeliveryOutcome;
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use futures::StreamExt as _;
 
 pub(super) async fn send_subscription_presence_side_effects(
     state: &WebSocketState,
@@ -110,8 +111,9 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
     to: &BareJid,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
-    for resource in available_live_and_detached_resources_for_user(state, from).await {
-        let presence_state = presence_state_for_available_resource(state, &resource).await;
+    for (resource, presence_state) in
+        available_live_and_detached_presences_for_user(state, from).await
+    {
         let mut presence = build_available_presence(
             &resource,
             to,
@@ -151,8 +153,9 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
     to: &Jid,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
-    for resource in available_live_and_detached_resources_for_user(state, from).await {
-        let presence_state = presence_state_for_available_resource(state, &resource).await;
+    for (resource, presence_state) in
+        available_live_and_detached_presences_for_user(state, from).await
+    {
         let mut presence = build_available_presence(
             &resource,
             &to.to_bare(),
@@ -321,36 +324,39 @@ pub async fn broadcast_unavailable_for_terminated_session(
         }
     };
 
-    for subscriber in subscribers {
-        let mut presence =
-            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
-        presence.from = Some(Jid::from(from.clone()));
-        presence.to = Some(Jid::from(subscriber.clone()));
-        // RFC 6121 §4.5.2: a remote contact's server is told through the
-        // remote route (gate G18); a refusal drops it.
-        if crate::server::routes::websocket::handlers::presence::is_remote_contact(
-            state,
-            &subscriber,
-        ) {
-            // XEP-0191 §3.3: nothing is routed to a JID the account blocks.
-            if !super::recipient_blocks_sender(state, &from_bare, &subscriber).await {
-                let _ = crate::server::routes::websocket::handlers::presence::offer_presence(
-                    state, presence,
-                )
-                .await;
+    let from_bare_ref = &from_bare;
+    futures::stream::iter(subscribers)
+        .for_each_concurrent(16, |subscriber| async move {
+            let mut presence =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+            presence.from = Some(Jid::from(from.clone()));
+            presence.to = Some(Jid::from(subscriber.clone()));
+            // RFC 6121 §4.5.2: a remote contact's server is told through the
+            // remote route (gate G18); a refusal drops it.
+            if crate::server::routes::websocket::handlers::presence::is_remote_contact(
+                state,
+                &subscriber,
+            ) {
+                // XEP-0191 §3.3: nothing is routed to a JID the account blocks.
+                if !super::recipient_blocks_sender(state, from_bare_ref, &subscriber).await {
+                    let _ = crate::server::routes::websocket::handlers::presence::offer_presence(
+                        state, presence,
+                    )
+                    .await;
+                }
+                return;
             }
-            continue;
-        }
-        let stanza = Stanza::Presence(presence);
-        send_stanza_to_available_user_resources_and_detached_available(
-            state,
-            &subscriber,
-            &stanza,
-            "expired detached unavailable presence",
-            None,
-        )
+            let stanza = Stanza::Presence(presence);
+            send_stanza_to_available_user_resources_and_detached_available(
+                state,
+                &subscriber,
+                &stanza,
+                "expired detached unavailable presence",
+                None,
+            )
+            .await;
+        })
         .await;
-    }
 
     let mut presence =
         xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
@@ -399,40 +405,55 @@ async fn available_live_and_detached_resources_for_user(
     resources
 }
 
-async fn presence_state_for_available_resource(
+async fn available_live_and_detached_presences_for_user(
     state: &WebSocketState,
-    resource: &FullJid,
-) -> Option<PresenceStateSnapshot> {
-    if let Some(state) =
-        crate::server::routes::websocket::handlers::account_reads::presence_state(state, resource)
-            .await
-    {
-        return Some(PresenceStateSnapshot {
-            show: state.show.as_deref().and_then(show_from_name),
-            status: state.status,
-            priority: state.priority,
-            payloads: state.payloads,
-        });
-    }
+    user: &BareJid,
+) -> Vec<(FullJid, Option<PresenceStateSnapshot>)> {
+    let mut results: Vec<(FullJid, Option<PresenceStateSnapshot>)> =
+        crate::server::routes::websocket::handlers::account_reads::available_resources_with_presence(
+            state, user,
+        )
+        .await
+        .into_iter()
+        .map(|(jid, presence_state)| {
+            let snapshot = presence_state.map(|stored| PresenceStateSnapshot {
+                show: stored.show.as_deref().and_then(show_from_name),
+                status: stored.status,
+                priority: stored.priority,
+                payloads: stored.payloads,
+            });
+            (jid, snapshot)
+        })
+        .collect();
     match state
         .deps
         .protocol
         .sm_session_registry
-        .detached_presence_state(resource)
+        .available_detached_presence_states_for_user(user)
         .await
     {
-        Ok(Some(detached)) => Some(PresenceStateSnapshot {
-            show: detached.show,
-            status: detached.status,
-            priority: detached.priority,
-            payloads: detached.payloads,
-        }),
-        Ok(None) => None,
+        Ok(detached_list) => {
+            for detached in detached_list {
+                if results.iter().any(|(live, _)| *live == detached.resource) {
+                    continue;
+                }
+                let resource = detached.resource;
+                results.push((
+                    resource,
+                    Some(PresenceStateSnapshot {
+                        show: detached.show,
+                        status: detached.status,
+                        priority: detached.priority,
+                        payloads: detached.payloads,
+                    }),
+                ));
+            }
+        }
         Err(error) => {
-            warn!(error = %error, resource = %resource, "Failed to read detached presence state");
-            None
+            warn!(error = %error, user = %user, "Failed to list detached available presence states");
         }
     }
+    results
 }
 
 struct PresenceStateSnapshot {
@@ -506,24 +527,39 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn try_route_
     stanza: &Stanza,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) -> bool {
+    try_route_presence_to_bare_remote_for_app_state(
+        &state.deps.app_state,
+        target,
+        stanza,
+        ordered_relay_origin,
+    )
+    .await
+}
+
+pub(in crate::server::routes::websocket::handlers::presence) async fn try_route_presence_to_bare_remote_for_app_state(
+    app_state: &crate::server::AppState,
+    target: &BareJid,
+    stanza: &Stanza,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
+) -> bool {
     #[cfg(feature = "clustering")]
     {
         let Some(origin) = ordered_relay_origin else {
             return false;
         };
-        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
+        let Some(addressing) = app_state.clustering_claims.addressing() else {
             return false;
         };
         remote_presence_outcome_consumed(addressing.account(target).deliver(stanza, origin).await)
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (state, target, stanza, ordered_relay_origin);
+        let _ = (app_state, target, stanza, ordered_relay_origin);
         false
     }
 }
 
-pub(in crate::server::routes::websocket::handlers::presence::subscription) async fn try_route_presence_to_full_remote(
+pub(in crate::server::routes::websocket::handlers::presence) async fn try_route_presence_to_full_remote(
     state: &WebSocketState,
     target: &FullJid,
     stanza: &Stanza,

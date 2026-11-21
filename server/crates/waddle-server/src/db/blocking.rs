@@ -115,6 +115,78 @@ impl DatabaseBlockingStorage {
         self.get_blocklist(user_jid).await
     }
 
+    /// Load a user's blocklist as an evaluated XEP-0191 [`waddle_xmpp::protocol::Blocklist`].
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
+    pub async fn load_blocklist(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<waddle_xmpp::protocol::Blocklist, BlockingStorageError> {
+        Ok(waddle_xmpp::protocol::Blocklist::new(
+            self.list_blocked_jid_entries(user_jid).await?,
+        ))
+    }
+
+    /// Return the subset of `recipients` whose XEP-0191 blocklist matches `sender`.
+    ///
+    /// Evaluates full-JID, bare-JID, domain, and domain/resource matching rules
+    /// via [`waddle_xmpp::protocol::Blocklist::contains_jid`] while fetching all
+    /// recipients' rows in bounded SQL chunks (at most 500 recipients per query)
+    /// instead of one round-trip per recipient.
+    #[instrument(skip(self, recipients, sender), fields(recipient_count = recipients.len(), sender = %sender))]
+    pub async fn filter_blocking_recipients(
+        &self,
+        recipients: &[BareJid],
+        sender: &Jid,
+    ) -> Result<std::collections::HashSet<BareJid>, BlockingStorageError> {
+        const CHUNK_SIZE: usize = 500;
+        let mut blocking = std::collections::HashSet::new();
+        if recipients.is_empty() {
+            return Ok(blocking);
+        }
+
+        for chunk in recipients.chunks(CHUNK_SIZE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT user_jid, blocked_jid FROM blocking_list WHERE user_jid IN ({placeholders})"
+            );
+            let params: Vec<crate::db::Value> = chunk
+                .iter()
+                .map(|jid| crate::db::Value::Text(jid.to_string()))
+                .collect();
+            let mut rows = self.query_with_persistent(&sql, params).await?;
+            let mut entries_by_user: std::collections::HashMap<BareJid, Vec<String>> =
+                std::collections::HashMap::new();
+            while let Some(row) = rows.next().await.map_err(|e| {
+                BlockingStorageError::QueryFailed(format!("Failed to read row: {}", e))
+            })? {
+                let raw_user: String = row.get(0).map_err(|e| {
+                    BlockingStorageError::QueryFailed(format!("Failed to get user_jid: {}", e))
+                })?;
+                let raw_blocked: String = row.get(1).map_err(|e| {
+                    BlockingStorageError::QueryFailed(format!("Failed to get blocked_jid: {}", e))
+                })?;
+                if let Ok(user_jid) = raw_user.parse::<BareJid>() {
+                    entries_by_user
+                        .entry(user_jid)
+                        .or_default()
+                        .push(raw_blocked);
+                }
+            }
+            for (user_jid, raw_entries) in entries_by_user {
+                let blocklist = waddle_xmpp::protocol::Blocklist::new(parse_blocklist_entries(
+                    &user_jid,
+                    raw_entries,
+                ));
+                if blocklist.contains_jid(sender) {
+                    blocking.insert(user_jid);
+                }
+            }
+        }
+        Ok(blocking)
+    }
+
     /// Check if a JID is blocked by a user.
     #[instrument(skip(self, user_jid, blocked_jid), fields(user = %user_jid, blocked = %blocked_jid))]
     pub async fn is_blocked(
@@ -133,8 +205,7 @@ impl DatabaseBlockingStorage {
         user_jid: &BareJid,
         blocked_jid: &Jid,
     ) -> Result<bool, BlockingStorageError> {
-        let blocklist =
-            waddle_xmpp::protocol::Blocklist::new(self.list_blocked_jid_entries(user_jid).await?);
+        let blocklist = self.load_blocklist(user_jid).await?;
         let is_blocked = blocklist.contains_jid(blocked_jid);
         debug!(is_blocked, "Checked if JID is blocked");
         Ok(is_blocked)

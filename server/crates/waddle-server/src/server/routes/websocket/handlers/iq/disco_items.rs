@@ -592,15 +592,29 @@ pub(super) async fn handle_disco_items_iq(
                                 continue;
                             }
                             let visible = match requester.as_ref() {
-                                Some(requester) => crate::pubsub_authz::can_subscribe(
-                                    &state.deps.protocol.pubsub_storage,
-                                    &spaces_jid,
-                                    &node,
-                                    requester,
-                                    false,
-                                )
-                                .await
-                                .unwrap_or(false),
+                                Some(requester) => {
+                                    match crate::pubsub_authz::effective_affiliation(
+                                        &state.deps.protocol.pubsub_storage,
+                                        &spaces_jid,
+                                        &node,
+                                        requester,
+                                        false,
+                                    )
+                                    .await
+                                    {
+                                        Ok(affiliation) => {
+                                            crate::pubsub_authz::can_subscribe_with_config(
+                                                &space_node.config,
+                                                affiliation,
+                                                &spaces_jid,
+                                                &node,
+                                                requester,
+                                                false,
+                                            )
+                                        }
+                                        Err(_) => false,
+                                    }
+                                }
                                 None => matches!(
                                     space_node.config.access_model,
                                     waddle_xmpp::pubsub::AccessModel::Open

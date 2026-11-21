@@ -179,11 +179,16 @@ impl AccountCoordinators {
 /// Which node decides an account's requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountOwner {
-    /// This node: it holds the claim, or nobody live does and this node
-    /// takes it.
+    /// This node: it holds the claim, or the prior holder's lease expired and
+    /// this node takes the account over.
     Local,
     /// Another node holds the claim under a fresh lease.
     Remote(NodeIdentity),
+    /// Nobody holds an active claim on this account (and no stale holder needs
+    /// takeover). Read-only `View` requests can answer empty immediately, while
+    /// mutations and `SlotStatus` still go through the local coordinator to
+    /// acquire a claim.
+    Unclaimed,
 }
 
 /// Why a request sent to another node has no answer.
@@ -336,7 +341,12 @@ impl RoutedAccountAuthority {
         let mut backoff = self.policy.first_backoff;
         loop {
             let attempt = match peers.owner(&account).await {
-                Ok(AccountOwner::Local) => {
+                Ok(AccountOwner::Unclaimed)
+                    if matches!(request, AccountAuthorityRequest::View { .. }) =>
+                {
+                    Attempt::Decided(Ok(AccountAuthorityAnswer::View(AccountView::default())))
+                }
+                Ok(AccountOwner::Local | AccountOwner::Unclaimed) => {
                     Attempt::Decided(self.local.serve(request.clone()).await)
                 }
                 Ok(AccountOwner::Remote(owner)) => {

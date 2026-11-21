@@ -2542,13 +2542,13 @@ mod implementation;
 pub(crate) use implementation::deliver_room_presence_locally;
 #[cfg(test)]
 use implementation::deny_join_admission;
+pub(crate) use implementation::fan_out_room_presences;
 #[cfg(any(test, feature = "clustering"))]
 pub use implementation::handle_muc_join;
 pub use implementation::handle_muc_join_with_ordered_relay;
 pub use implementation::handle_muc_leave;
 #[cfg(test)]
 use implementation::internal_join_failure_description;
-pub(crate) use implementation::registered_remote_resource_delivery;
 pub(crate) use implementation::registered_remote_resource_write_accepted_delivery;
 #[cfg(feature = "clustering")]
 #[cfg(test)]
@@ -2561,7 +2561,6 @@ pub(crate) use implementation::route_room_presence_to_occupant;
 use implementation::run_resolver_affiliation_sync_worker;
 #[cfg(test)]
 use implementation::sync_resolver_affiliation_on_rejection_with_registry;
-pub(crate) use implementation::try_deliver_registered_remote_resource;
 #[cfg(feature = "test-support")]
 pub(crate) use implementation::undone_join_recipients;
 #[cfg(test)]

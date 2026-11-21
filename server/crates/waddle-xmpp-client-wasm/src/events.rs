@@ -178,6 +178,26 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 }
             }
         }
+        ClientEvent::RosterPush { version, items } => {
+            let callback = inner.borrow().on_roster_push.clone();
+            if let Some(callback) = callback {
+                let push = super::WaddleRosterPush {
+                    ver: version,
+                    items: items
+                        .into_iter()
+                        .map(|item| super::WaddleRosterContact {
+                            jid: item.jid.to_string(),
+                            name: item.name,
+                            subscription: Some(item.subscription.to_string()),
+                            groups: item.groups,
+                        })
+                        .collect(),
+                };
+                if let Ok(value) = to_js_value(&push) {
+                    let _ = callback.call1(&JsValue::NULL, &value);
+                }
+            }
+        }
         // Emitted by the runtime alongside the Messaging event that
         // carried the notification. The web client already receives
         // retracts and attachment summaries through the

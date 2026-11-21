@@ -168,7 +168,7 @@ describe("useDirectMessageConversations", () => {
       unreadCount: 2,
     });
     expect(composable.totalUnreadCount.value).toBe(2);
-    expect(client.subscribeToPeerPresence).toHaveBeenCalledWith("bob@example.com");
+    expect(client.subscribeToPeerPresence).not.toHaveBeenCalled();
   });
 
   test("hydrateFromInbox preserves newer live DM activity", async () => {
@@ -579,7 +579,7 @@ describe("useDirectMessageConversations", () => {
       expect(composable.totalUnreadCount.value).toBe(4);
       expect(subscribeToPeerPresence).not.toHaveBeenCalledWith(room);
       expect(subscribeToPeerPresence).not.toHaveBeenCalledWith(occupant);
-      if (!attachLate) expect(subscribeToPeerPresence).toHaveBeenCalledWith(account);
+      expect(subscribeToPeerPresence).not.toHaveBeenCalledWith(account);
 
       await composable.openDm(room);
       composable.markRead(room);

@@ -4,12 +4,13 @@
 use super::RemoteResourceStateUpdate;
 use super::{
     build_roster_push, build_roster_result, build_roster_result_empty, build_xmpp_error_response,
-    global_database, iq_to_xml, local_account_jid_exists, mark_span_error, parse_roster_get,
-    parse_roster_set, warn, AskType, BareJid, DatabaseRosterStorage, FullJid, RosterItem,
-    RosterItemRow, RosterRowChange, RosterRowMutationKind, RosterSetResult, RosterStorageError,
-    RosterVersion, Subscription, WebSocketState, XmppError,
+    iq_to_xml, local_account_jid_exists, mark_span_error, parse_roster_get, parse_roster_set, warn,
+    AskType, BareJid, DatabaseRosterStorage, FullJid, RosterItem, RosterItemRow, RosterRowChange,
+    RosterRowMutationKind, RosterSetResult, RosterStorageError, RosterVersion, Subscription,
+    WebSocketState, XmppError,
 };
 use super::{send_roster_push_to_sibling_resources, send_roster_remove_subscription_side_effects};
+use crate::db::roster::RosterSnapshot;
 
 pub(in crate::server::routes::websocket::handlers::iq) async fn handle_roster_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -31,22 +32,12 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_roster_iq
         return vec![build_xmpp_error_response(iq, XmppError::forbidden(None))];
     }
 
-    let storage = match roster_storage_for_state(state).await {
-        Ok(storage) => storage,
-        Err(error) => {
-            mark_span_error("failed to access roster storage");
-            warn!(error = %error, "Failed to access roster storage");
-            return vec![build_xmpp_error_response(
-                iq,
-                XmppError::internal_server_error(None),
-            )];
-        }
-    };
+    let storage = state.deps.app_state.db_pool.roster_storage();
 
     if waddle_xmpp::roster::is_roster_get(iq) {
         return handle_roster_get(
             iq,
-            &storage,
+            storage,
             state,
             &user_jid,
             full_jid,
@@ -56,7 +47,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_roster_iq
         .await;
     }
     if waddle_xmpp::roster::is_roster_set(iq) {
-        return handle_roster_set(iq, &storage, state, &user_jid, full_jid).await;
+        return handle_roster_set(iq, storage, state, &user_jid, full_jid).await;
     }
 
     vec![build_xmpp_error_response(iq, XmppError::bad_request(None))]
@@ -76,10 +67,14 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         Err(error) => return vec![build_xmpp_error_response(iq, error)],
     };
 
-    // Atomic snapshot: items + version under the same per-user lock so the
-    // returned ver always identifies the returned roster state (XEP-0237 §2.6).
-    let (rows, version) = match storage.snapshot_roster(user_jid).await {
-        Ok(pair) => pair,
+    // Atomic snapshot with XEP-0237 §2.6 fast path: checks `roster_versions`
+    // first under the per-user lock and skips loading/parsing `roster_items`
+    // when the client's cached `ver` already matches.
+    let snapshot = match storage
+        .snapshot_roster_if_changed(user_jid, query.ver.cached())
+        .await
+    {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             mark_span_error("failed to snapshot roster");
             warn!(user = %user_jid, error = %error, "Failed to snapshot roster");
@@ -89,16 +84,19 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
             )];
         }
     };
-    let items = match roster_rows_to_items(rows) {
-        Ok(items) => items,
-        Err(error) => {
-            mark_span_error("failed to convert roster rows");
-            warn!(user = %user_jid, error = %error, "Failed to convert roster rows");
-            return vec![build_xmpp_error_response(
-                iq,
-                XmppError::internal_server_error(None),
-            )];
-        }
+    let full_payload = match snapshot {
+        RosterSnapshot::Unchanged(_) => None,
+        RosterSnapshot::Full(rows, version) => match roster_rows_to_items(rows) {
+            Ok(items) => Some((items, version)),
+            Err(error) => {
+                mark_span_error("failed to convert roster rows");
+                warn!(user = %user_jid, error = %error, "Failed to convert roster rows");
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::internal_server_error(None),
+                )];
+            }
+        },
     };
 
     #[cfg(test)]
@@ -119,12 +117,10 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
     mirror_remote_roster_interest(state, full_jid, owner).await;
     // XEP-0237 §2.6: matching ver -> empty <iq type='result'/> (no <query>);
     // anything else (Absent, Bootstrap, Cached(stale)) -> full roster + ver.
-    if let Some(cached) = query.ver.cached() {
-        if cached == &version {
-            return vec![iq_to_xml(build_roster_result_empty(iq))];
-        }
+    match full_payload {
+        None => vec![iq_to_xml(build_roster_result_empty(iq))],
+        Some((items, version)) => vec![iq_to_xml(build_roster_result(iq, &items, Some(&version)))],
     }
-    vec![iq_to_xml(build_roster_result(iq, &items, Some(&version)))]
 }
 
 #[cfg(feature = "clustering")]
@@ -434,8 +430,7 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) enum RosterConver
 pub(in crate::server::routes::websocket::handlers::iq) async fn roster_storage_for_state(
     state: &WebSocketState,
 ) -> Result<DatabaseRosterStorage, RosterStorageError> {
-    let db = global_database(state).await?;
-    Ok(DatabaseRosterStorage::new(db))
+    Ok(state.deps.app_state.db_pool.roster_storage().clone())
 }
 
 pub(in crate::server::routes::websocket::handlers::iq::roster) fn roster_rows_to_items(

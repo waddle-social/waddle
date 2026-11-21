@@ -398,7 +398,15 @@ async fn work_lane(
                 let decided =
                     seat_room_occupancy(services, authority, &claimed.request.room, target).await
                         && decide_request(services, authority, &claimed, target).await;
-                record_attempt(authority, claimed.lane, claimed.operation, target, decided).await
+                let outcome =
+                    record_attempt(authority, claimed.lane, claimed.operation, target, decided)
+                        .await;
+                if outcome == MailboxDeliveryOutcome::ExhaustedRejected
+                    && claimed.request.kind == RoomRequestKind::Join
+                {
+                    reconcile_exhausted_join(services, authority, &claimed.request).await;
+                }
+                outcome
             }
             Ok(MailboxLaneHead::ReadyDirect(claimed)) => {
                 let decided = decide_direct(services, authority, &claimed, target).await;
@@ -410,15 +418,102 @@ async fn work_lane(
             }
         };
         waddle_xmpp::telemetry::reliability::increment_mailbox_delivery(outcome);
-        if outcome != MailboxDeliveryOutcome::Decided {
+        if !matches!(
+            outcome,
+            MailboxDeliveryOutcome::Decided | MailboxDeliveryOutcome::ExhaustedRejected
+        ) {
             return;
         }
     }
 }
 
+/// Whether `lookup` proves `generation` is already durably seated by a
+/// confirmed (remote or local) join rather than an unconfirmed
+/// `record_seat_before_join` row left behind by an exhausted remote `RoomJoin`.
+///
+/// `RoomActor::record_seat_before_join` writes `(join_request: NULL,
+/// presence: NULL)` before `commit_projection` and before
+/// `decide_room_request` (`confirm_join`). Completed remote joins populate
+/// `join_request` and `presence`; completed direct local joins populate
+/// `presence`. An unconfirmed row has neither and must be evicted alongside
+/// any in-memory `RoomActor` seat when the join exhausts its retry budget.
+fn is_confirmed_same_generation_seat(
+    lookup: &RoomOccupantLookup,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+) -> bool {
+    matches!(
+        lookup,
+        RoomOccupantLookup::Seated(row)
+            if row.generation == generation
+                && (row.join_request.is_some() || row.presence.is_some())
+    )
+}
+
+/// Evict an un-persisted in-memory seat (and any unconfirmed
+/// `record_seat_before_join` row) left behind by a `RoomJoin` that exhausted
+/// its retry budget and was settled as `Rejected`.
+///
+/// An earlier attempt may have written `record_seat_before_join` and seated
+/// `(request.occupant, request.generation)` in the local `RoomActor` before
+/// `decide_room_request` failed to commit. Confirm that this exact generation
+/// is NOT already durably confirmed (from an earlier accepted join) before
+/// asking only `request.room`'s actor to remove that generation with status
+/// 333 and reconcile its durable occupancy record.
+async fn reconcile_exhausted_join(
+    services: &Arc<OrderedRelayDeliveryServices>,
+    authority: &Arc<crate::ingress::IngressAuthority>,
+    request: &StoredRoomRequest,
+) {
+    match authority.room_request_occupancy(request).await {
+        Ok(lookup) if is_confirmed_same_generation_seat(&lookup, request.generation) => return,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                room = %request.room,
+                occupant = %request.occupant,
+                "could not verify durable occupancy before reconciling exhausted join"
+            );
+            return;
+        }
+        Ok(_) => {}
+    }
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return;
+    };
+    let _ = crate::server::routes::websocket::sweep_abandoned_room_occupancy(
+        &state,
+        &request.room,
+        &request.occupant,
+        waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(request.generation),
+        waddle_xmpp::muc::MucRemovalCause::TechnicalProblem,
+    )
+    .await;
+    // If an earlier attempt wrote `record_seat_before_join` and failed before
+    // seating the occupant in memory, `LeaveByRealJid` answers `NotOccupant`
+    // without running `report_occupancy`. Ask any loaded actor to reconcile
+    // `recorded_occupancy` against its live roster (a no-op when already in
+    // sync) so the unconfirmed row is deleted from `ingress_room_occupants`.
+    if let Ok(Some(actor)) =
+        crate::server::routes::websocket::get_room_actor_result(&state, &request.room).await
+    {
+        if let Err(error) = actor
+            .ask(ReportOccupancy)
+            .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                room = %request.room,
+                "room occupancy not reported after exhausted join reconciliation"
+            );
+        }
+    }
+}
+
 /// Record how an attempt at a lane head ended. A decided entry has its
-/// owner obligations delivered; a failed attempt is counted and deferred, or
-/// parked for an operator once its retry budget is spent.
+/// owner obligations delivered; a failed attempt is counted and deferred,
+/// settled as rejected for an exhausted session-scoped room request, or parked
+/// for an operator once its retry budget is spent.
 async fn record_attempt(
     authority: &Arc<crate::ingress::IngressAuthority>,
     lane: MailboxLaneId,
@@ -435,13 +530,16 @@ async fn record_attempt(
         .await
     {
         Ok(MailboxAttemptRecord::DeadLettered) => MailboxDeliveryOutcome::DeadLettered,
+        Ok(MailboxAttemptRecord::ExhaustedSettled) => MailboxDeliveryOutcome::ExhaustedRejected,
         // The commit landed although the attempt did not finish; its
         // effects were not executed here.
         Ok(MailboxAttemptRecord::Settled) => {
             authority.deliver_owner_obligations(operation).await;
             MailboxDeliveryOutcome::Decided
         }
-        Ok(MailboxAttemptRecord::Deferred { .. }) | Err(_) => MailboxDeliveryOutcome::Retried,
+        Ok(MailboxAttemptRecord::Deferred { .. } | MailboxAttemptRecord::ClaimNotHeld) | Err(_) => {
+            MailboxDeliveryOutcome::Retried
+        }
     }
 }
 
@@ -1057,4 +1155,74 @@ async fn accept(
     )
     .await
     .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use jid::{BareJid, FullJid};
+    use waddle_xmpp::ingress::mailbox::RoomRequestKey;
+    use waddle_xmpp::ownership::ClaimEpoch;
+    use waddle_xmpp_core::{Affiliation, OccupancySeatId, OccupancySessionGeneration, Role};
+
+    use super::is_confirmed_same_generation_seat;
+    use crate::ingress_uow::{RoomOccupantLookup, RoomOccupantRecord};
+
+    fn seat_row(
+        generation: OccupancySessionGeneration,
+        join_request: Option<RoomRequestKey>,
+        presence: Option<xmpp_parsers::presence::Presence>,
+    ) -> RoomOccupantLookup {
+        let room: BareJid = "room@muc.example.com".parse().unwrap();
+        let occupant: FullJid = "alice@example.com/web".parse().unwrap();
+        RoomOccupantLookup::Seated(Box::new(RoomOccupantRecord {
+            room,
+            occupant,
+            nick: "alice".to_owned(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            generation,
+            seat: Some(OccupancySeatId::mint()),
+            join_request,
+            presence,
+            room_epoch: ClaimEpoch(1),
+        }))
+    }
+
+    #[test]
+    fn unconfirmed_pre_join_row_is_not_treated_as_confirmed_seat() {
+        let gen1 = OccupancySessionGeneration::mint();
+        let unconfirmed = seat_row(gen1, None, None);
+        assert!(
+            !is_confirmed_same_generation_seat(&unconfirmed, gen1),
+            "record_seat_before_join row with neither join_request nor presence must be reconciled on exhausted join"
+        );
+    }
+
+    #[test]
+    fn confirmed_remote_and_local_seats_are_preserved_for_same_generation() {
+        let gen1 = OccupancySessionGeneration::mint();
+        let gen2 = OccupancySessionGeneration::mint();
+        let remote_confirmed = seat_row(gen1, Some(RoomRequestKey::mint()), None);
+        let local_confirmed = seat_row(
+            gen1,
+            None,
+            Some(xmpp_parsers::presence::Presence::new(
+                xmpp_parsers::presence::Type::None,
+            )),
+        );
+        assert!(is_confirmed_same_generation_seat(&remote_confirmed, gen1));
+        assert!(is_confirmed_same_generation_seat(&local_confirmed, gen1));
+        assert!(
+            !is_confirmed_same_generation_seat(&remote_confirmed, gen2),
+            "different generation must not block generation-pinned reconciliation"
+        );
+        assert!(!is_confirmed_same_generation_seat(
+            &RoomOccupantLookup::Absent,
+            gen1
+        ));
+        assert!(!is_confirmed_same_generation_seat(
+            &RoomOccupantLookup::Unparseable,
+            gen1
+        ));
+    }
 }

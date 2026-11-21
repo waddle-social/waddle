@@ -71,6 +71,10 @@ export class PresenceManager {
   private roomAuthorityByRoom = new Map<string, RoomAuthority>();
   private roomPresenceByRoom = new Map<string, RoomPresence>();
   private roomMemberJidsByRoom = new Map<string, Record<string, string>>();
+  /** Incremental reverse index: bareJidKey -> ("room\0nick" -> OccupantPresence). */
+  private occupantShowsByBareJid = new Map<string, Map<string, OccupantPresence>>();
+  /** Cached snapshot updated only for affected bare JIDs; emitted as a shallow copy. */
+  private occupantPresenceSnapshot: Record<string, OccupantPresence[]> = {};
 
   constructor(private readonly deps: PresenceManagerDeps) {}
 
@@ -146,38 +150,66 @@ export class PresenceManager {
     return cached;
   }
 
-  clearRoom(roomJid: string): void {
+  private occupantIndexKey(room: string, nick: string): string {
+    return `${room}\0${nick}`;
+  }
+
+  private removeOccupantIndexEntry(bareKey: string, entryKey: string): boolean {
+    const entries = this.occupantShowsByBareJid.get(bareKey);
+    if (!entries || !entries.delete(entryKey)) return false;
+    if (entries.size === 0) {
+      this.occupantShowsByBareJid.delete(bareKey);
+      delete this.occupantPresenceSnapshot[bareKey];
+    } else {
+      this.occupantPresenceSnapshot[bareKey] = [...entries.values()];
+    }
+    return true;
+  }
+
+  private setOccupantIndexEntry(bareKey: string, entryKey: string, show: OccupantPresence): boolean {
+    let entries = this.occupantShowsByBareJid.get(bareKey);
+    if (!entries) {
+      entries = new Map();
+      this.occupantShowsByBareJid.set(bareKey, entries);
+    }
+    if (entries.get(entryKey) === show) return false;
+    entries.set(entryKey, show);
+    this.occupantPresenceSnapshot[bareKey] = [...entries.values()];
+    return true;
+  }
+
+  private emitOccupantPresence(): void {
+    this.deps.events.emitSafe("occupantPresence", { ...this.occupantPresenceSnapshot });
+  }
+
+  clearRoom(roomJid: string): boolean {
     const key = bareJidKey(roomJid);
-    for (const map of [this.roomHatsByRoom, this.roomAuthorityByRoom, this.roomPresenceByRoom, this.roomMemberJidsByRoom]) {
+    let changed = false;
+    for (const [room, memberJids] of [...this.roomMemberJidsByRoom.entries()]) {
+      if (bareJidKey(room) !== key) continue;
+      for (const [nick, jid] of Object.entries(memberJids)) {
+        if (this.removeOccupantIndexEntry(bareJidKey(jid), this.occupantIndexKey(room, nick))) {
+          changed = true;
+        }
+      }
+      this.roomMemberJidsByRoom.delete(room);
+    }
+    for (const map of [this.roomHatsByRoom, this.roomAuthorityByRoom, this.roomPresenceByRoom]) {
       for (const room of [...map.keys()]) if (bareJidKey(room) === key) map.delete(room);
     }
-    this.emitOccupantPresence();
+    if (changed) this.emitOccupantPresence();
+    return changed;
   }
 
   clearAll(): void {
+    const hadEntries = this.occupantShowsByBareJid.size > 0;
     this.roomHatsByRoom.clear();
     this.roomAuthorityByRoom.clear();
     this.roomPresenceByRoom.clear();
     this.roomMemberJidsByRoom.clear();
-    this.emitOccupantPresence();
-  }
-
-  /**
-   * Every joined room's occupant shows, keyed by the occupant's disclosed
-   * real bare JID, so a person's dot can render outside the focused room.
-   * ponytail: rebuilt from all rooms per occupant presence; index by JID if
-   * room sizes make this show up in profiles.
-   */
-  private emitOccupantPresence(): void {
-    const byJid: Record<string, OccupantPresence[]> = {};
-    for (const [room, memberJids] of this.roomMemberJidsByRoom) {
-      const presence = this.roomPresenceByRoom.get(room) ?? {};
-      for (const [nick, jid] of Object.entries(memberJids)) {
-        const show = presence[nick];
-        if (show) (byJid[bareJidKey(jid)] ??= []).push(show);
-      }
-    }
-    this.deps.events.emitSafe("occupantPresence", byJid);
+    this.occupantShowsByBareJid.clear();
+    this.occupantPresenceSnapshot = {};
+    if (hadEntries) this.emitOccupantPresence();
   }
 
   /** Replay the focused room's cached presence state to the room handlers. */
@@ -225,6 +257,8 @@ export class PresenceManager {
       const roomPresence = this.presenceFor(room);
       const roomMemberJids = this.memberJidsFor(room);
       const isFocusedRoom = room === this.deps.currentRoom();
+      const indexKey = this.occupantIndexKey(room, nick);
+      const prevMemberJid = roomMemberJids[nick];
       if (presence.presence_type === "unavailable") {
         // XEP-0045 §7.6: a nick change sends an unavailable presence for
         // the old nick carrying our own status 110 *and* 303. That is not
@@ -243,19 +277,31 @@ export class PresenceManager {
           // during a nick change before the new available self-presence.
           this.deps.events.emitSafe("ownOccupantNick", room, null);
         }
+        const hadHats = nick in roomHats;
+        const hadAuthority = nick in roomAuthority;
+        const prevPresence = roomPresence[nick];
         delete roomHats[nick];
         delete roomAuthority[nick];
         roomPresence[nick] = "offline";
         delete roomMemberJids[nick];
+        const removedFromIndex = prevMemberJid
+          ? this.removeOccupantIndexEntry(bareJidKey(prevMemberJid), indexKey)
+          : false;
         // Once we have left (or were removed), the room tells us nothing more,
         // so its remaining occupants would show stale presence app-wide. A
         // rejoin rebuilds the cache from the room's fresh occupant list.
-        if (this.isOwnMucSelfPresence(presence) && !isNickChange) this.clearRoom(room);
-        else this.emitOccupantPresence();
+        if (this.isOwnMucSelfPresence(presence) && !isNickChange) {
+          const clearedEmitted = this.clearRoom(room);
+          if (removedFromIndex && !clearedEmitted) {
+            this.emitOccupantPresence();
+          }
+        } else if (removedFromIndex) {
+          this.emitOccupantPresence();
+        }
         if (isFocusedRoom) {
-          this.deps.events.emit("hats", { ...roomHats });
-          this.deps.events.emit("authority", { ...roomAuthority });
-          this.deps.events.emit("presence", { ...roomPresence });
+          if (hadHats) this.deps.events.emit("hats", { ...roomHats });
+          if (hadAuthority) this.deps.events.emit("authority", { ...roomAuthority });
+          if (prevPresence !== "offline") this.deps.events.emit("presence", { ...roomPresence });
           this.deps.events.emit("lastSeen", nick, Date.now());
         }
         return;
@@ -264,19 +310,44 @@ export class PresenceManager {
       // No client-side fabrication from muc_affiliation/muc_role —
       // those flow as `roomAuthority` and drive authority chips
       // independently (see `parseMucAffiliation` / `parseMucRole`).
-      roomHats[nick] = (presence.hats ?? []).map((hat) => ({
+      const nextHats = (presence.hats ?? []).map((hat) => ({
         uri: hat.uri,
         title: hat.title,
       }));
-      roomAuthority[nick] = {
+      const prevHats = roomHats[nick];
+      const hatsChanged = !prevHats
+        || prevHats.length !== nextHats.length
+        || nextHats.some((hat, idx) => prevHats[idx]?.uri !== hat.uri || prevHats[idx]?.title !== hat.title);
+      if (hatsChanged) roomHats[nick] = nextHats;
+
+      const nextAuthority = {
         affiliation: parseMucAffiliation(presence.muc_affiliation),
         role: parseMucRole(presence.muc_role),
       };
-      roomPresence[nick] = parsePresenceShow(presence.show);
+      const prevAuthority = roomAuthority[nick];
+      const authorityChanged = !prevAuthority
+        || prevAuthority.affiliation !== nextAuthority.affiliation
+        || prevAuthority.role !== nextAuthority.role;
+      if (authorityChanged) roomAuthority[nick] = nextAuthority;
+
+      const nextShow = parsePresenceShow(presence.show);
+      const presenceChanged = roomPresence[nick] !== nextShow;
+      roomPresence[nick] = nextShow;
+
+      let occupantIndexChanged = false;
       if (presence.muc_jid) {
         const bare = barePeerJid(presence.muc_jid);
+        const nextBareKey = bareJidKey(bare);
+        if (prevMemberJid && bareJidKey(prevMemberJid) !== nextBareKey) {
+          if (this.removeOccupantIndexEntry(bareJidKey(prevMemberJid), indexKey)) {
+            occupantIndexChanged = true;
+          }
+        }
         roomMemberJids[nick] = bare;
-        const isBot = this.deps.isKnownMucRoom(room) && roomHats[nick].some((hat) => hat.uri === BOT_HAT_URI);
+        if (this.setOccupantIndexEntry(nextBareKey, indexKey, nextShow)) {
+          occupantIndexChanged = true;
+        }
+        const isBot = this.deps.isKnownMucRoom(room) && roomHats[nick]!.some((hat) => hat.uri === BOT_HAT_URI);
         this.deps.events.emitSafe("occupantRealJid", room, nick, bare, isBot);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, bare);
       } else {
@@ -285,15 +356,20 @@ export class PresenceManager {
         // previous holder's JID must stop naming the nick's current holder.
         // The shell's nick map keeps a JID across the holder's departure,
         // so it is told even when this manager already dropped it.
+        if (prevMemberJid) {
+          if (this.removeOccupantIndexEntry(bareJidKey(prevMemberJid), indexKey)) {
+            occupantIndexChanged = true;
+          }
+        }
         delete roomMemberJids[nick];
         this.deps.events.emitSafe("occupantRealJid", room, nick, null);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, null);
       }
-      this.emitOccupantPresence();
+      if (occupantIndexChanged) this.emitOccupantPresence();
       if (isFocusedRoom) {
-        this.deps.events.emit("hats", { ...roomHats });
-        this.deps.events.emit("authority", { ...roomAuthority });
-        this.deps.events.emit("presence", { ...roomPresence });
+        if (hatsChanged) this.deps.events.emit("hats", { ...roomHats });
+        if (authorityChanged) this.deps.events.emit("authority", { ...roomAuthority });
+        if (presenceChanged) this.deps.events.emit("presence", { ...roomPresence });
       }
       return;
     }

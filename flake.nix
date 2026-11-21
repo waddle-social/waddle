@@ -871,6 +871,8 @@
               pname = "waddle-server-doctest";
               doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
+              # Keep one rustc job on 16 GB runners to avoid OOM.
+              CARGO_BUILD_JOBS = "1";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoTestExtraArgs = "--doc";

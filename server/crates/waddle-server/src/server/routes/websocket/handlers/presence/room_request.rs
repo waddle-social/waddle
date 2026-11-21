@@ -172,11 +172,39 @@ pub(crate) async fn route_room_request(
             return RoomRequestRoute::Answered(unavailable(DefinedCondition::ServiceUnavailable));
         }
     };
-    match authority.await_room_request(&pending, || false).await {
-        Ok(resolution) => RoomRequestRoute::Answered(resolution.responses),
+    let resolution = authority.await_room_request(&pending, || false).await;
+    RoomRequestRoute::Answered(finalize_room_request_resolution(
+        &stanza, room, occupant, resolution,
+    ))
+}
+
+pub(crate) fn finalize_room_request_resolution(
+    stanza: &Stanza,
+    room: &BareJid,
+    occupant: &FullJid,
+    resolution: Result<
+        crate::ingress::room_request::RoomRequestResolution,
+        crate::ingress::origin_gate::RoomAcceptanceUnresolved,
+    >,
+) -> Vec<Stanza> {
+    let unavailable =
+        |condition| room_request_error(stanza, room, occupant, ErrorType::Wait, condition);
+    match resolution {
+        Ok(resolution)
+            if resolution.decision
+                == waddle_xmpp::ingress::mailbox::MailboxOwnerDecision::Rejected
+                && resolution.responses.is_empty() =>
+        {
+            tracing::warn!(
+                room = %room,
+                "room request was rejected without frozen responses; answering with service-unavailable"
+            );
+            unavailable(DefinedCondition::ServiceUnavailable)
+        }
+        Ok(resolution) => resolution.responses,
         Err(reason) => {
             tracing::warn!(%reason, room = %room, "room request unresolved");
-            RoomRequestRoute::Answered(unavailable(DefinedCondition::ServiceUnavailable))
+            unavailable(DefinedCondition::ServiceUnavailable)
         }
     }
 }

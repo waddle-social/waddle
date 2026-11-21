@@ -753,6 +753,114 @@ impl kameo::message::Message<GetAdminContext> for RoomActor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminListFilter {
+    Roles(Option<Role>),
+    Affiliations(Option<Affiliation>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminListRoleItem {
+    pub nick: String,
+    pub role: Role,
+    pub affiliation: Affiliation,
+    pub real_jid: FullJid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminListOutcome {
+    Forbidden,
+    Roles(Vec<AdminListRoleItem>),
+    Affiliations(Vec<(BareJid, Affiliation)>),
+}
+
+/// Lightweight XEP-0045 §9 admin list query: checks authorization and reads
+/// only the requested role or affiliation slice inside the actor without
+/// deep-cloning the full `MucRoom`.
+#[derive(Debug, Clone)]
+pub enum AdminListAuthorization {
+    /// Local C2S session: authorize directly from room affiliation and live role.
+    CheckInRoom {
+        sender_jid: FullJid,
+        member_list_only: bool,
+    },
+    /// Caller already enforced ADR-0020 D8 honoured standing for a remote principal.
+    PreAuthorized,
+}
+
+pub struct GetAdminList {
+    pub authorization: AdminListAuthorization,
+    pub filter: AdminListFilter,
+}
+
+impl kameo::message::Message<GetAdminList> for RoomActor {
+    type Reply = Result<AdminListOutcome, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: GetAdminList,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let (has_admin_affiliation, member_list_get) = match &msg.authorization {
+            AdminListAuthorization::PreAuthorized => (true, true),
+            AdminListAuthorization::CheckInRoom {
+                sender_jid,
+                member_list_only,
+            } => {
+                let sender_affiliation = self.room.affiliation(&sender_jid.to_bare());
+                let sender_role = self
+                    .room
+                    .find_occupant_by_real_jid(sender_jid)
+                    .map(|o| o.role)
+                    .unwrap_or(Role::None);
+                let has_admin_affiliation =
+                    matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin);
+                let is_admin = has_admin_affiliation || matches!(sender_role, Role::Moderator);
+                let member_list_get =
+                    *member_list_only && sender_affiliation >= Affiliation::Member;
+                if !is_admin && !member_list_get {
+                    return Ok(AdminListOutcome::Forbidden);
+                }
+                (has_admin_affiliation, member_list_get)
+            }
+        };
+        match msg.filter {
+            AdminListFilter::Roles(role_filter) => Ok(AdminListOutcome::Roles(
+                self.room
+                    .occupants
+                    .values()
+                    .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
+                    .map(|occupant| AdminListRoleItem {
+                        nick: occupant.nick.clone(),
+                        role: occupant.role,
+                        affiliation: occupant.affiliation,
+                        real_jid: occupant.real_jid.clone(),
+                    })
+                    .collect(),
+            )),
+            AdminListFilter::Affiliations(affiliation_filter) => {
+                if !has_admin_affiliation && !member_list_get {
+                    return Ok(AdminListOutcome::Forbidden);
+                }
+                let entries = if let Some(affiliation) = affiliation_filter {
+                    self.room
+                        .jids_by_affiliation(affiliation)
+                        .into_iter()
+                        .map(|jid| (jid, affiliation))
+                        .collect()
+                } else {
+                    self.room
+                        .all_affiliations()
+                        .into_iter()
+                        .map(|entry| (entry.jid, entry.affiliation))
+                        .collect()
+                };
+                Ok(AdminListOutcome::Affiliations(entries))
+            }
+        }
+    }
+}
+
 pub struct ApplyAdminItems {
     /// Minted by the caller so recovery can identify this ask even if the
     /// predecessor disappears before returning its snapshot.

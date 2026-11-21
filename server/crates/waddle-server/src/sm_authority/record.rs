@@ -424,24 +424,58 @@ async fn load_resource_with(
     Ok(sessions)
 }
 
-/// Every session of one account that awaits a resume, `Detached` or
-/// `TransferHydrating`, in session-key order, without locking the rows.
-pub(super) async fn load_awaiting_resume_account(
-    tx: &mut Transaction<'_>,
+const COLUMNS_D: &str = "d.session_id, d.full_jid, d.state, d.terminal_reason, d.generation, \
+    d.binding, d.bare_jid, d.auth_context_id, d.auth_context_version, d.principal_auth_epoch, \
+    d.owner_node_id, d.owner_node_epoch, d.claim_epoch, d.inbound_handled, d.outbound_acked, \
+    d.outbound_exposure_ceiling, d.outbound_appended, d.outbound_unacked_bytes, d.max_resume_secs, \
+    d.detached_at_ms, d.enable_operation, d.last_operation, d.occupancy_session";
+
+const DURABLE_COLUMNS_COUNT: usize = 23;
+
+const SNAPSHOT_COLUMNS_R: &str = "r.stream_id, r.user_id, r.full_jid, r.occupancy_session, \
+    r.inbound_count, r.outbound_count, r.last_acked, r.max_resume_secs, r.detached_at_ms, \
+    r.max_resume_duration_ms, r.carbons_enabled, r.roster_interested, r.blocklist_interested, \
+    r.presence_available, r.presence_show, r.presence_status, r.presence_priority, \
+    r.replay_gap_through, r.presence_payloads";
+
+/// Every session of one account that awaits a resume (`Detached` or
+/// `TransferHydrating`), paired with its optional `sm_sessions` resource
+/// snapshot in a single `LEFT JOIN` query without an explicit transaction.
+pub(super) async fn load_awaiting_resume_account_with_snapshots(
+    db: &crate::db::Database,
     account: &jid::BareJid,
-) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
-    let mut rows = tx
+) -> Result<
+    Vec<(
+        DurableSessionRecord,
+        Option<waddle_xmpp::stream_management::persistence::PersistedSession>,
+    )>,
+    DurableSmError,
+> {
+    let conn = db.guard().await?;
+    let mut rows = conn
         .query(
             &format!(
-                "SELECT {COLUMNS} FROM sm_durable_sessions WHERE bare_jid = ? \
-                 AND state IN (2, 3) ORDER BY session_id"
+                "SELECT {COLUMNS_D}, {SNAPSHOT_COLUMNS_R} \
+                 FROM sm_durable_sessions d \
+                 LEFT JOIN sm_sessions r ON r.stream_id = d.session_id \
+                 WHERE d.bare_jid = ? AND d.state IN (2, 3) \
+                 ORDER BY d.session_id"
             ),
             crate::db_params![account.to_string()],
         )
         .await?;
     let mut sessions = Vec::new();
     while let Some(row) = rows.next().await? {
-        sessions.push(decode(&row)?);
+        let record = decode(&row)?;
+        let snapshot = if row.get::<Option<String>>(DURABLE_COLUMNS_COUNT)?.is_some() {
+            Some(crate::sm_persistence::codec::decode_session_at(
+                &row,
+                DURABLE_COLUMNS_COUNT,
+            )?)
+        } else {
+            None
+        };
+        sessions.push((record, snapshot));
     }
     Ok(sessions)
 }

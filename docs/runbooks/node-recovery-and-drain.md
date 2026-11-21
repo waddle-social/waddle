@@ -279,3 +279,85 @@ holds the session:
 ```sql
 SELECT entity_type, entity, node_id, claim_epoch FROM public.clustering_claims ORDER BY claim_epoch DESC LIMIT 50;
 ```
+
+## Dead-lettered mailbox lanes
+
+Durable-mailbox entries for durable room acceptances (`room_acceptance`) and
+direct requests (`direct`), or any entry whose canonical parent row is missing
+or malformed (`canonical_evidence_invalid`), park in `ingress_mailbox_entries`
+(`disposition = 0 AND dead_lettered_at IS NOT NULL`) after exhausting their
+retry budget. While an entry is parked at a lane head, the lane's cursor
+(`last_dispositioned`) does not advance.
+
+Session-scoped room requests (`room_join`, `room_presence`, `room_leave`,
+`room_iq`) automatically settle as rejected on retry exhaustion (counted under
+`ingress.mailbox.deliveries{outcome="exhausted_rejected"}`) so they do not hold
+their lane open indefinitely. Older dead-lettered rows left from an earlier
+release, or dead-lettered `room_acceptance`/`direct` entries, are repaired
+through the `waddle-server mailbox-dead-letters` operator subcommand.
+
+Signals and alerts:
+
+- `IngressMailboxDeadLetters` (`cnpg_waddle_ingress_mailbox_dead_letters_pending_entries > 0` for 5m)
+- `IngressRoomRequestUnconsumedDecisions` (`max(ingress_mailbox_room_requests_unconsumed_decisions) > 0` for 15m)
+- `ingress.mailbox.deliveries{outcome="dead_lettered"}` / `ingress.mailbox.deliveries{outcome="exhausted_rejected"}`
+
+Inspect pending dead-lettered entries read-only with SQL:
+
+```sql
+SELECT e.lane_id, e.sequence, e.operation_kind,
+       coalesce(e.message_key, e.request_key, e.direct_key) AS parent_key,
+       l.target_node_id, l.target_node_epoch,
+       e.attempt_count, e.dead_letter_reason, e.dead_lettered_at
+  FROM public.ingress_mailbox_entries e
+  JOIN public.ingress_mailbox_lanes l USING (lane_id)
+ WHERE e.disposition = 0
+   AND e.dead_lettered_at IS NOT NULL
+ ORDER BY e.dead_lettered_at ASC;
+```
+
+Or via the operator CLI (runs online while server pods are serving; takes no
+exclusive database lock and writes inside an epoch-proven ingress transaction):
+
+```sh
+# List pending dead-lettered entries as JSON (migrator login in WADDLE_DATABASE_URL,
+# deployment UUID in WADDLE_DEPLOYMENT_UUID):
+waddle-server mailbox-dead-letters \
+  --schema public \
+  --migrator-login "$WADDLE_DB_MIGRATOR_LOGIN" \
+  --schema-owner "$WADDLE_XMPP_MAM_SCHEMA_OWNER" \
+  list
+
+# Repair one entry (requeues with attempt_count = 0, dead_lettered_at = NULL):
+waddle-server mailbox-dead-letters \
+  --schema public \
+  --migrator-login "$WADDLE_DB_MIGRATOR_LOGIN" \
+  --schema-owner "$WADDLE_XMPP_MAM_SCHEMA_OWNER" \
+  repair --lane <LANE_UUID> --operation <KIND>:<PARENT_UUID>
+
+# Repair all eligible entries (skips canonical_evidence_invalid unless --force):
+waddle-server mailbox-dead-letters \
+  --schema public \
+  --migrator-login "$WADDLE_DB_MIGRATOR_LOGIN" \
+  --schema-owner "$WADDLE_XMPP_MAM_SCHEMA_OWNER" \
+  repair --all
+```
+
+Notes:
+
+1. **Never edit `ingress_mailbox_entries` by hand with raw `UPDATE` SQL**: the
+   `waddle_ingress_epoch_guard()` trigger rejects writes without the
+   transaction-local epoch proof, and `mailbox-dead-letters` acquires the lane
+   lock (`FOR UPDATE`) before clearing the dead-letter marker.
+2. **Entries parked for `canonical_evidence_invalid`** (`dead_letter_reason = 2`)
+   indicate missing or corrupt parent rows. `repair` refuses them by default so
+   a blind requeue does not loop; investigate the parent row first and pass
+   `--force` only when the parent evidence has been verified.
+3. **Lanes targeting a stopped node incarnation** (`target_node_id` no longer
+   in `clustering_nodes` or marked `expired = true`): repairing the entry
+   clears its dead-letter marker immediately. A live node adopts the lane on
+   its next adoption pass (`adopt_transferred_lanes`, every ~5 s) once that
+   node holds the room or account claim. If a room is currently dormant and
+   unclaimed, the repaired entry stays queued (not dead-lettered) until the
+   room is next claimed.
+

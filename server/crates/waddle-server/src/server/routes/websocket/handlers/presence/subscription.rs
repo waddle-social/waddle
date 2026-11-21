@@ -1,6 +1,6 @@
 use super::{
     build_available_presence, build_subscription_presence, debug, warn, AskType, BareJid,
-    DatabaseBlockingStorage, DatabaseRosterStorage, Element, FullJid, GetDatabase, Jid, RosterItem,
+    DatabaseBlockingStorage, DatabaseRosterStorage, Element, FullJid, Jid, RosterItem,
     RosterItemRow, RosterRowChange, RosterStorageError, Stanza, Subscription,
     SubscriptionStateMachine, SubscriptionType, WebSocketState,
 };
@@ -15,6 +15,8 @@ mod storage;
 
 pub(super) use delivery::record_stanza_for_detached_available_resources_excluding;
 pub(super) use delivery::try_route_presence_to_bare_remote;
+pub(super) use delivery::try_route_presence_to_bare_remote_for_app_state;
+pub(super) use delivery::try_route_presence_to_full_remote;
 pub use delivery::{
     broadcast_unavailable_for_terminated_session, TerminatedPresenceBroadcastOutcome,
 };
@@ -25,7 +27,7 @@ pub(in crate::server::routes::websocket::handlers) use delivery::{
 pub(super) use directed::handle_directed_presence;
 pub(super) use roster_state::parse_subscription_state;
 pub(super) use roster_state::{load_existing_roster_item, roster_item_to_row};
-pub(super) use storage::{recipient_blocks_sender, roster_storage};
+pub(super) use storage::{blocking_storage, recipient_blocks_sender, roster_storage};
 
 use delivery::{
     record_stanza_for_detached_available_resources,

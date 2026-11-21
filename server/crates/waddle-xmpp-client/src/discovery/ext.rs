@@ -1,5 +1,6 @@
 //! Native client service-discovery and roster request operations.
 
+use futures::stream::{self, StreamExt};
 use jid::BareJid;
 use std::collections::HashSet;
 
@@ -22,6 +23,8 @@ use super::types::{
 use super::{
     STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_GROUP_DM_FEATURE_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
 };
+
+const DISCO_CONCURRENCY: usize = 8;
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -210,11 +213,18 @@ impl DiscoveryExt for ClientHandle {
 
     async fn discover_upload_service(&self, server_domain: &str) -> ClientResult<Option<String>> {
         let items = self.discover_items(server_domain, None).await?;
-        for item in items {
-            if let Ok(info) = self.discover_info(&item.jid, None).await {
-                if info.has_feature(UPLOAD_NS) {
-                    return Ok(Some(item.jid));
-                }
+        let mut probes = std::pin::pin!(stream::iter(items)
+            .map(|item| async move {
+                let is_upload = self
+                    .discover_info(&item.jid, None)
+                    .await
+                    .is_ok_and(|info| info.has_feature(UPLOAD_NS));
+                (item.jid, is_upload)
+            })
+            .buffered(DISCO_CONCURRENCY));
+        while let Some((jid, is_upload)) = probes.next().await {
+            if is_upload {
+                return Ok(Some(jid));
             }
         }
         Ok(None)
@@ -257,22 +267,24 @@ impl DiscoveryExt for ClientHandle {
         // service, with per-node PubSub metadata declaring
         // `pubsub#type=urn:xmpp:spaces:0`. Skip entries whose node metadata
         // cannot be verified as an XEP-0503 Space.
-        let items = self.discover_items(&spaces_jid.to_string(), None).await?;
-        let mut spaces = Vec::new();
-        for item in items {
-            let Some(node) = item.node.as_deref() else {
-                continue;
-            };
-            let Ok(info) = self
-                .discover_info(&spaces_jid.to_string(), Some(node))
-                .await
-            else {
-                continue;
-            };
-            if let Some(space) = space_from_disco_item(spaces_jid, item, &info) {
-                spaces.push(space);
-            }
-        }
+        let spaces_jid_str = spaces_jid.to_string();
+        let items = self.discover_items(&spaces_jid_str, None).await?;
+        let spaces: Vec<DiscoveredSpace> = stream::iter(items)
+            .map(|item| {
+                let spaces_jid_str = spaces_jid_str.as_str();
+                async move {
+                    let node = item.node.clone()?;
+                    let info = self
+                        .discover_info(spaces_jid_str, Some(node.as_str()))
+                        .await
+                        .ok()?;
+                    space_from_disco_item(spaces_jid, item, &info)
+                }
+            })
+            .buffered(DISCO_CONCURRENCY)
+            .filter_map(|space| async move { space })
+            .collect()
+            .await;
         Ok(spaces)
     }
 
@@ -283,36 +295,38 @@ impl DiscoveryExt for ClientHandle {
     ) -> ClientResult<Vec<DiscoveredChannel>> {
         let iq = build_pubsub_items_iq(spaces_jid, space_id);
         let result = self.send_iq(iq).await?;
-        let mut channels =
-            parse_space_channels_result(&result, space_id).ok_or_else(parse_error)?;
-        for channel in &mut channels {
-            if let Ok(info) = self
-                .discover_info(&channel.room_jid.to_string(), None)
-                .await
-            {
-                if let Some(channel_type) = info
-                    .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
-                    .and_then(DiscoveredChannelType::from_metadata)
-                {
-                    channel.channel_type = channel_type;
+        let channels = parse_space_channels_result(&result, space_id).ok_or_else(parse_error)?;
+        let hydrated = stream::iter(channels)
+            .map(|mut channel| async move {
+                let room_jid = channel.room_jid.to_string();
+                if let Ok(info) = self.discover_info(&room_jid, None).await {
+                    if let Some(channel_type) = info
+                        .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
+                        .and_then(DiscoveredChannelType::from_metadata)
+                    {
+                        channel.channel_type = channel_type;
+                    }
+                    // The space item keeps the name it was published with, so
+                    // it goes stale when an owner renames the room. The room's
+                    // own answer is current.
+                    if let Some(name) = info.room_name() {
+                        channel.name = name.to_string();
+                    }
+                    channel.description = info
+                        .form_value(
+                            "http://jabber.org/protocol/muc#roominfo",
+                            "muc#roominfo_description",
+                        )
+                        .filter(|description| !description.trim().is_empty())
+                        .map(str::to_string);
+                    channel.is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
                 }
-                // The space item keeps the name it was published with, so
-                // it goes stale when an owner renames the room. The room's
-                // own answer is current.
-                if let Some(name) = info.room_name() {
-                    channel.name = name.to_string();
-                }
-                channel.description = info
-                    .form_value(
-                        "http://jabber.org/protocol/muc#roominfo",
-                        "muc#roominfo_description",
-                    )
-                    .filter(|description| !description.trim().is_empty())
-                    .map(str::to_string);
-                channel.is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
-            }
-        }
-        Ok(channels)
+                channel
+            })
+            .buffered(DISCO_CONCURRENCY)
+            .collect()
+            .await;
+        Ok(hydrated)
     }
 
     async fn discover_component_services(
@@ -360,14 +374,18 @@ impl DiscoveryExt for ClientHandle {
         // service-selection logic can dispatch on advertised features.
         // Disco#info failures are tolerated: they downgrade the entry
         // to "feature unknown", which never wins against the fallback.
-        let mut hydrated: Vec<(BareJid, Option<DiscoInfoResult>)> = Vec::new();
-        for item in items {
-            let Ok(jid) = item.jid.parse::<BareJid>() else {
-                continue;
-            };
-            let info = self.discover_info(&item.jid, None).await.ok();
-            hydrated.push((jid, info));
-        }
+        let valid_items: Vec<(BareJid, String)> = items
+            .into_iter()
+            .filter_map(|item| item.jid.parse::<BareJid>().ok().map(|jid| (jid, item.jid)))
+            .collect();
+        let hydrated: Vec<(BareJid, Option<DiscoInfoResult>)> = stream::iter(valid_items)
+            .map(|(jid, raw_jid)| async move {
+                let info = self.discover_info(&raw_jid, None).await.ok();
+                (jid, info)
+            })
+            .buffered(DISCO_CONCURRENCY)
+            .collect()
+            .await;
         Ok(resolve_component_services(
             &hydrated,
             fallback_muc,
@@ -377,23 +395,34 @@ impl DiscoveryExt for ClientHandle {
 
     async fn discover_topology(&self, server_domain: &str) -> ClientResult<DiscoveredTopology> {
         let services = self.discover_component_services(server_domain).await?;
+        let muc_jid_str = services.muc.to_string();
 
-        // (1) XEP-0503 space bookmarks via the Spaces component.
-        // discover_spaces returns an empty list when the user has no
-        // spaces; that's fine — we still want to surface raw MUC rooms.
-        let spaces = self
-            .discover_spaces(&services.spaces)
-            .await
-            .unwrap_or_default();
-        let mut channels: Vec<DiscoveredChannel> = Vec::new();
-        for space in &spaces {
-            if let Ok(space_channels) = self
-                .discover_space_channels(&services.spaces, &space.id)
+        // Issue the three top-level topology queries concurrently:
+        // (1) XEP-0503 spaces, (2) direct MUC catalog, and (3) XEP-0402 user bookmarks.
+        let spaces_fut = async {
+            self.discover_spaces(&services.spaces)
                 .await
-            {
-                channels.extend(space_channels);
-            }
-        }
+                .unwrap_or_default()
+        };
+        let muc_rooms_fut = self.discover_items(&muc_jid_str, None);
+        let bookmarks_fut = super::bookmarks::fetch_user_bookmarks(self);
+        let (mut spaces, muc_rooms_res, bookmarks) =
+            tokio::join!(spaces_fut, muc_rooms_fut, bookmarks_fut);
+
+        // Hydrate channels across spaces concurrently while preserving space order.
+        let space_ids: Vec<SpaceNode> = spaces.iter().map(|space| space.id.clone()).collect();
+        let spaces_jid = &services.spaces;
+        let space_channel_batches: Vec<Vec<DiscoveredChannel>> = stream::iter(space_ids)
+            .map(|space_id| async move {
+                self.discover_space_channels(spaces_jid, &space_id)
+                    .await
+                    .unwrap_or_default()
+            })
+            .buffered(DISCO_CONCURRENCY)
+            .collect()
+            .await;
+        let mut channels: Vec<DiscoveredChannel> =
+            space_channel_batches.into_iter().flatten().collect();
 
         // (2) Direct MUC component enumeration. Any room not already
         // surfaced as a space bookmark is attached to a synthetic
@@ -405,64 +434,73 @@ impl DiscoveryExt for ClientHandle {
             .map(|channel| channel.room_jid.clone())
             .collect();
 
-        let mut spaces = spaces;
         let standalone_space_id =
             SpaceNode::try_new(STANDALONE_SPACE_ID).ok_or_else(parse_error)?;
         let mut standalone_count = 0usize;
-        if let Ok(rooms) = self.discover_items(&services.muc.to_string(), None).await {
-            for (offset, room) in rooms.into_iter().enumerate() {
-                let Ok(room_jid) = room.jid.parse::<BareJid>() else {
-                    continue;
-                };
-                if bookmarked.contains(&room_jid) {
-                    continue;
-                }
-                let mut channel_type = DiscoveredChannelType::Text;
-                let mut description = None;
-                let mut is_group_dm = false;
-                if let Ok(info) = self.discover_info(&room.jid, None).await {
-                    if let Some(parsed_type) = info
-                        .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
-                        .and_then(DiscoveredChannelType::from_metadata)
-                    {
-                        channel_type = parsed_type;
+        if let Ok(rooms) = muc_rooms_res {
+            let standalone_candidates: Vec<(usize, DiscoItem, BareJid)> = rooms
+                .into_iter()
+                .enumerate()
+                .filter_map(|(offset, room)| {
+                    let room_jid = room.jid.parse::<BareJid>().ok()?;
+                    (!bookmarked.contains(&room_jid)).then_some((offset, room, room_jid))
+                })
+                .collect();
+            let standalone_channels: Vec<DiscoveredChannel> = stream::iter(standalone_candidates)
+                .map(|(offset, room, room_jid)| {
+                    let standalone_space_id = standalone_space_id.clone();
+                    async move {
+                        let mut channel_type = DiscoveredChannelType::Text;
+                        let mut description = None;
+                        let mut is_group_dm = false;
+                        if let Ok(info) = self.discover_info(&room.jid, None).await {
+                            if let Some(parsed_type) = info
+                                .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
+                                .and_then(DiscoveredChannelType::from_metadata)
+                            {
+                                channel_type = parsed_type;
+                            }
+                            description = info
+                                .form_value(
+                                    "http://jabber.org/protocol/muc#roominfo",
+                                    "muc#roominfo_description",
+                                )
+                                .filter(|description| !description.trim().is_empty())
+                                .map(str::to_string);
+                            is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
+                        }
+                        let name = room
+                            .name
+                            .filter(|name| !name.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                room_jid
+                                    .node()
+                                    .map(|node| node.as_str().to_string())
+                                    .unwrap_or_else(|| room_jid.to_string())
+                            });
+                        let id = format!("{}::{}", STANDALONE_SPACE_ID, room_jid);
+                        DiscoveredChannel {
+                            id,
+                            room_jid,
+                            name,
+                            description,
+                            channel_type,
+                            position: offset as i32,
+                            space_id: standalone_space_id,
+                            // Non-bookmarked catalog rooms default to
+                            // autojoin (web parity); the user's XEP-0402
+                            // bookmark below can override this.
+                            autojoin: true,
+                            bookmark_name: None,
+                            is_group_dm,
+                        }
                     }
-                    description = info
-                        .form_value(
-                            "http://jabber.org/protocol/muc#roominfo",
-                            "muc#roominfo_description",
-                        )
-                        .filter(|description| !description.trim().is_empty())
-                        .map(str::to_string);
-                    is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
-                }
-                let name = room
-                    .name
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        room_jid
-                            .node()
-                            .map(|node| node.as_str().to_string())
-                            .unwrap_or_else(|| room_jid.to_string())
-                    });
-                let id = format!("{}::{}", STANDALONE_SPACE_ID, room_jid);
-                channels.push(DiscoveredChannel {
-                    id,
-                    room_jid,
-                    name,
-                    description,
-                    channel_type,
-                    position: offset as i32,
-                    space_id: standalone_space_id.clone(),
-                    // Non-bookmarked catalog rooms default to
-                    // autojoin (web parity); the user's XEP-0402
-                    // bookmark below can override this.
-                    autojoin: true,
-                    bookmark_name: None,
-                    is_group_dm,
-                });
-                standalone_count += 1;
-            }
+                })
+                .buffered(DISCO_CONCURRENCY)
+                .collect()
+                .await;
+            standalone_count = standalone_channels.len();
+            channels.extend(standalone_channels);
         }
 
         // (3) XEP-0402: the user's own-PEP bookmarks stamp
@@ -470,7 +508,6 @@ impl DiscoveryExt for ClientHandle {
         // rooms (kept only when disco#info confirms MUC). A failed
         // bookmarks fetch yields an empty list, degrading to the
         // catalog-only result (web parity).
-        let bookmarks = super::bookmarks::fetch_user_bookmarks(self).await;
         let appended = super::bookmarks::merge_bookmarks_into_channels(
             self,
             &mut channels,

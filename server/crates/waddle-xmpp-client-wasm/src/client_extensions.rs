@@ -1,5 +1,7 @@
 //! Browser discovery of extension routes and retrieval of their PubSub-backed items.
 
+use futures::stream::{self, StreamExt};
+
 use super::{
     build_disco_info_iq, build_disco_items_iq, build_extension_route_items_iq,
     discover_extension_command_service, discovery, future_to_promise, jid_domain, js_error,
@@ -27,21 +29,33 @@ impl WaddleClient {
                 send_iq_command(inner.clone(), build_disco_items_iq(&service_jid, None)).await?;
             let items = discovery::parse_disco_items_result(&items_result)
                 .ok_or_else(|| js_error("could not parse extension route disco#items result"))?;
-            for item in items {
-                let Some(node) = item.node.as_deref() else {
-                    continue;
-                };
-                let item_service_jid = item.jid.as_str();
-                let info_result = send_iq_command(
-                    inner.clone(),
-                    build_disco_info_iq(item_service_jid, Some(node)),
-                )
-                .await?;
-                if let Some(info) =
-                    discovery::parse_disco_info_result(&info_result, item_service_jid)
-                {
-                    routes.extend(parse_extension_routes_from_info(&info, item_service_jid));
-                }
+            let node_items: Vec<(String, String)> = items
+                .into_iter()
+                .filter_map(|item| item.node.map(|node| (item.jid, node)))
+                .collect();
+            let probed = stream::iter(node_items)
+                .map(|(item_service_jid, node)| {
+                    let inner = inner.clone();
+                    async move {
+                        let info_result = send_iq_command(
+                            inner,
+                            build_disco_info_iq(&item_service_jid, Some(&node)),
+                        )
+                        .await?;
+                        Ok::<_, JsValue>(
+                            discovery::parse_disco_info_result(&info_result, &item_service_jid)
+                                .map(|info| {
+                                    parse_extension_routes_from_info(&info, &item_service_jid)
+                                })
+                                .unwrap_or_default(),
+                        )
+                    }
+                })
+                .buffered(8)
+                .collect::<Vec<_>>()
+                .await;
+            for result in probed {
+                routes.extend(result?);
             }
 
             if routes.is_empty() {

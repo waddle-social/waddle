@@ -180,6 +180,17 @@ changes per release, so a deployment composes the handoff for a new image by
 replacing that field; --verify checks a stored document against the database
 and the release it is about to start.";
 
+const MAILBOX_DEAD_LETTERS_ENVIRONMENT: &str = "\
+Environment (no flag; secret values are never printed):
+  WADDLE_DATABASE_URL      PostgreSQL URL of the migrator login, as for
+                           owner-phase.
+  WADDLE_DEPLOYMENT_UUID   Deployment identity the lineage row names.
+
+Runs online while server pods are serving; takes no exclusive database lock.
+Each write runs inside an epoch-proven ingress transaction. Repairing an entry
+whose lane still targets a stopped node incarnation returns it to pending work;
+a live node adopts and works the lane once it holds the room or account claim.";
+
 #[derive(Debug, Parser)]
 #[command(name = "waddle-server", version, about = ABOUT, long_about = LONG_ABOUT)]
 pub(super) struct Cli {
@@ -205,6 +216,9 @@ pub(super) enum Command {
     /// Retire an account so that its JID is never issued again
     #[command(after_help = ACCOUNT_ENVIRONMENT)]
     Account(AccountArgs),
+    /// Inspect or repair dead-lettered durable-mailbox entries online
+    #[command(after_help = MAILBOX_DEAD_LETTERS_ENVIRONMENT)]
+    MailboxDeadLetters(MailboxDeadLettersArgs),
 }
 
 /// The owner connection: the migrator login acting as the schema owner.
@@ -630,6 +644,56 @@ pub(super) struct EmitHandoffArgs {
     pub(super) verify: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+pub(super) struct MailboxDeadLettersArgs {
+    #[command(flatten)]
+    pub(super) connection: OwnerConnectionArgs,
+    #[command(subcommand)]
+    pub(super) action: MailboxDeadLettersAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum MailboxDeadLettersAction {
+    /// List pending dead-lettered durable-mailbox entries, oldest first
+    List {
+        /// Maximum number of dead-lettered entries to print
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Return dead-lettered entries to ordinary pending work with a fresh retry budget
+    Repair {
+        /// Lane UUID of the dead-lettered entry to repair (required unless --all is set)
+        #[arg(
+            long,
+            value_name = "UUID",
+            requires = "operation",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
+        lane: Option<Uuid>,
+        /// Operation key in `<kind>:<uuid>` form as printed by `list`
+        #[arg(
+            long,
+            value_name = "KIND:UUID",
+            requires = "lane",
+            required_unless_present = "all",
+            conflicts_with = "all",
+            value_parser = super::mailbox_dead_letters::parse_operation_key
+        )]
+        operation: Option<waddle_xmpp::ingress::mailbox::MailboxOperationKey>,
+        /// Repair all pending dead-lettered entries up to --limit (skips
+        /// canonical_evidence_invalid entries unless --force is also passed)
+        #[arg(long)]
+        all: bool,
+        /// Maximum number of dead-lettered entries examined with --all
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Also repair entries dead-lettered for canonical_evidence_invalid
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 fn parse_role(value: &str) -> Result<PgRoleName, PhysicalAttestationError> {
     PgRoleName::new(value)
 }
@@ -751,5 +815,93 @@ mod tests {
             parse_git_sha(&sha.to_uppercase()),
             Err(ArgumentError::GitSha)
         );
+    }
+
+    #[test]
+    fn mailbox_dead_letters_subcommand_parses_list_and_repair_forms() {
+        use clap::Parser;
+        use uuid::Uuid;
+        use waddle_xmpp::ingress::mailbox::{MailboxOperationKey, RoomRequestKey};
+
+        let base = [
+            "waddle-server",
+            "mailbox-dead-letters",
+            "--schema",
+            "public",
+            "--migrator-login",
+            "migrator",
+            "--schema-owner",
+            "waddle_owner",
+        ];
+
+        // `list` with custom limit
+        let parsed = Cli::try_parse_from(base.into_iter().chain(["list", "--limit", "25"]))
+            .expect("list parses");
+        assert!(matches!(
+            parsed.command,
+            super::Command::MailboxDeadLetters(super::MailboxDeadLettersArgs {
+                action: super::MailboxDeadLettersAction::List { limit: 25 },
+                ..
+            })
+        ));
+
+        // `repair --lane <UUID> --operation <KIND:UUID>`
+        let lane = Uuid::new_v4();
+        let key = Uuid::new_v4();
+        let lane_str = lane.to_string();
+        let op_str = format!("room_presence:{key}");
+        let parsed = Cli::try_parse_from(base.into_iter().chain([
+            "repair",
+            "--lane",
+            &lane_str,
+            "--operation",
+            &op_str,
+        ]))
+        .expect("single repair parses");
+        assert!(matches!(
+            parsed.command,
+            super::Command::MailboxDeadLetters(super::MailboxDeadLettersArgs {
+                action: super::MailboxDeadLettersAction::Repair {
+                    lane: Some(parsed_lane),
+                    operation: Some(parsed_op),
+                    all: false,
+                    force: false,
+                    ..
+                },
+                ..
+            }) if parsed_lane == lane
+                && parsed_op == MailboxOperationKey::RoomPresence(RoomRequestKey::from_storage(key))
+        ));
+
+        // `repair --all --force`
+        let parsed = Cli::try_parse_from(base.into_iter().chain(["repair", "--all", "--force"]))
+            .expect("repair --all --force parses");
+        assert!(matches!(
+            parsed.command,
+            super::Command::MailboxDeadLetters(super::MailboxDeadLettersArgs {
+                action: super::MailboxDeadLettersAction::Repair {
+                    lane: None,
+                    operation: None,
+                    all: true,
+                    force: true,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        // Conflicting `--all` + `--lane` must be rejected by clap.
+        assert!(Cli::try_parse_from(base.into_iter().chain([
+            "repair",
+            "--all",
+            "--lane",
+            &lane_str,
+            "--operation",
+            &op_str,
+        ]))
+        .is_err());
+
+        // Missing both `--all` and `--lane`/`--operation` must be rejected.
+        assert!(Cli::try_parse_from(base.into_iter().chain(["repair"])).is_err());
     }
 }

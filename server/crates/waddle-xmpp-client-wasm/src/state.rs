@@ -404,6 +404,7 @@ pub(crate) struct WaddleClientInner {
     /// optional in-band avatar item id.
     pub(crate) on_avatar_changed: Option<Function>,
     pub(crate) on_pubsub_event: Option<Function>,
+    pub(crate) on_roster_push: Option<Function>,
     pub(crate) on_call: Option<Function>,
     pub(crate) on_stream_management: Option<Function>,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
@@ -415,6 +416,7 @@ pub(crate) struct WaddleClientInner {
 pub(crate) struct WasmDriverCore {
     pub(crate) runtime: XmppRuntime,
     pub(crate) web_socket: web_sys::WebSocket,
+    pub(crate) explicit_disconnect: bool,
 }
 
 pub(crate) enum WasmCommand {
@@ -771,7 +773,6 @@ pub(crate) struct WasmDriverTask {
     pub(crate) pending_mam_queries: HashMap<String, PendingMamQuery>,
     pub(crate) pending_inbox_queries: HashMap<String, PendingInboxQuery>,
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
-    pub(crate) explicit_disconnect: bool,
     /// Browser-owned wakeup only: XEP-0198 timing and outcomes remain in the
     /// Rust runtime. These exist only while an acknowledgement deadline is
     /// pending, rather than for the whole lifetime of an idle client.

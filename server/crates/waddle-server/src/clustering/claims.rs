@@ -64,8 +64,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, NodeIdentity, ResumeIdentityProof,
-    StalePredicate,
+    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, NodeIdentity, NodeLeaseState,
+    ResumeIdentityProof, StalePredicate,
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 
@@ -1749,15 +1749,15 @@ pub trait NodeLeaseStore: Send + Sync {
         Ok(true)
     }
 
-    /// Whether the lease of this exact node incarnation is unexpired: its
-    /// `clustering_nodes` row exists under the same epoch and its committed
-    /// `expired` flag is not set. This is the predicate a claim's
-    /// `owner_lease_fresh` reads, asked about a node instead of a claim's
-    /// owner; a late heartbeat alone does not make a lease expired.
+    /// Lifecycle state of this exact node incarnation's lease row in
+    /// `clustering_nodes`: `Active` when present and neither `draining` nor
+    /// `expired`, `Draining` when present with `draining = true` and
+    /// `expired = false`, and `Expired` when `expired = true` or absent.
+    /// A late heartbeat alone does not make a lease expired.
     ///
     /// The default is an error, because a store without a lease table
     /// proves nothing about another node.
-    async fn is_unexpired(&self, _node: &NodeIdentity) -> Result<bool, ClaimError> {
+    async fn lease_state(&self, _node: &NodeIdentity) -> Result<NodeLeaseState, ClaimError> {
         Err(ClaimError::Backend(
             "this node lease store cannot read another node's lease".to_string(),
         ))
@@ -2422,21 +2422,34 @@ impl NodeLeaseStore for PostgresClaimStore {
         Ok(out)
     }
 
-    async fn is_unexpired(&self, node: &NodeIdentity) -> Result<bool, ClaimError> {
+    async fn lease_state(&self, node: &NodeIdentity) -> Result<NodeLeaseState, ClaimError> {
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         let mut rows = conn
             .query(
                 r#"
-                SELECT 1 FROM clustering_nodes
+                SELECT expired, draining
+                FROM clustering_nodes
                 WHERE node_id = ?
                   AND node_epoch = ?
-                  AND NOT expired
                 "#,
                 crate::db_params![node.node_id.clone(), node.node_epoch.clone()],
             )
             .await
             .map_err(db_err)?;
-        Ok(rows.next().await.map_err(db_err)?.is_some())
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => {
+                let expired: bool = row.get(0).map_err(db_err)?;
+                let draining: bool = row.get(1).map_err(db_err)?;
+                if expired {
+                    Ok(NodeLeaseState::Expired)
+                } else if draining {
+                    Ok(NodeLeaseState::Draining)
+                } else {
+                    Ok(NodeLeaseState::Active)
+                }
+            }
+            None => Ok(NodeLeaseState::Expired),
+        }
     }
 
     async fn is_fresh(&self, me: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError> {

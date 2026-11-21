@@ -175,7 +175,8 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.decisions{class}` | `ingress_decisions_total` | `IngressInfraDecisions`, `IngressFenceDecisions`, `IngressIdentityDecisions`, `IngressRetryExhausted`, `IngressSeriesMissing` |
 | `ingress.alias.outcomes{outcome}` | `ingress_alias_outcomes_total` | `IngressAliasConflicts` |
 | `ingress.mailbox.room_acceptances{outcome}` | `ingress_mailbox_room_acceptances_total` | None; `unresolved` counts stanzas left unacknowledged because no room-owner decision could be read |
-| `ingress.mailbox.deliveries{outcome}` | `ingress_mailbox_deliveries_total` | None; `dead_lettered` counts entries parked at a lane head for operator repair |
+| `ingress.mailbox.deliveries{outcome}` | `ingress_mailbox_deliveries_total` | None; `dead_lettered` counts entries parked at a lane head for operator repair (`waddle-server mailbox-dead-letters`); `exhausted_rejected` counts session-scoped room requests settled as rejected after retry exhaustion |
+| `ingress.mailbox.room_requests.unconsumed_decisions` | `ingress_mailbox_room_requests_unconsumed_decisions` | `IngressRoomRequestUnconsumedDecisions` |
 | `ingress.mailbox.hints{outcome}` | `ingress_mailbox_hints_total` | None; a lost hint is repaired by the peer's poll interval |
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
@@ -193,6 +194,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
 | CNPG oldest non-terminal message older than 10m (seconds; zero when empty) | `cnpg_waddle_ingress_nonterminal_age_oldest_seconds` | `IngressNonTerminalAge`, `IngressCnpgQueriesMissing` |
 | CNPG GC eligibility and oldest eligible age | `cnpg_waddle_ingress_gc_eligible_messages`, `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds` | `IngressGcBacklog`, `IngressGcAge`, `IngressCnpgQueriesMissing` |
+| CNPG pending dead-lettered mailbox entries and oldest age | `cnpg_waddle_ingress_mailbox_dead_letters_pending_entries`, `cnpg_waddle_ingress_mailbox_dead_letters_oldest_age_seconds` | `IngressMailboxDeadLetters`, `IngressCnpgQueriesMissing` (repair procedure in `docs/runbooks/node-recovery-and-drain.md#dead-lettered-mailbox-lanes`) |
 
 `IngressInfraDecisions` is critical: a positive rate of storage, serialization
 exhaustion, timeout or ambiguous-commit decisions for 10m means messages are

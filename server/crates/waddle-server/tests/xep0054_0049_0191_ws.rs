@@ -212,6 +212,20 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
     bob.send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("bob available for presence updates");
+    // RFC 6121 §4.3.1: Bob's initial available presence triggers a server-side
+    // probe for subscribed contacts, delivering Alice's current presence to Bob.
+    let alice_initial = bob
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains("from='alice@localhost/")
+                && !frame.contains("type='unavailable'")
+        })
+        .await
+        .expect("bob receives alice initial presence from §4.3.1 probe");
+    assert!(
+        alice_initial.contains("from='alice@localhost/"),
+        "expected alice full-JID initial presence: {alice_initial}"
+    );
 
     // The connection processes frames in order; this reply fences Bob's
     // availability update before Alice broadcasts on her separate stream.

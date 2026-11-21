@@ -124,6 +124,10 @@ pub enum OwnerCliError {
          its sessions: run the command again"
     )]
     SessionsUnconfirmed { pending: usize },
+    #[error("the mailbox dead-letter operation did not complete")]
+    MailboxRepair(#[source] crate::ingress_uow::IngressUowError),
+    #[error("{0}")]
+    MailboxRepairRefused(String),
 }
 
 impl OwnerCliError {
@@ -138,7 +142,7 @@ impl OwnerCliError {
             | Self::RevokeAccountIncomplete { .. }
             | Self::OfflineSweep(_)
             | Self::SessionEnding(_) => ExitStatus::Failed,
-            Self::RevokesRefused { .. } => ExitStatus::Refused,
+            Self::RevokesRefused { .. } | Self::MailboxRepairRefused(_) => ExitStatus::Refused,
             Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {
                 ExitStatus::Usage
             }
@@ -161,7 +165,11 @@ impl OwnerCliError {
                     ExitStatus::Refused
                 }
             }
-            Self::OwnerPhase(_) | Self::Attestor(_) | Self::Handoff(_) | Self::Preflight(_) => {
+            Self::OwnerPhase(_)
+            | Self::Attestor(_)
+            | Self::Handoff(_)
+            | Self::Preflight(_)
+            | Self::MailboxRepair(_) => {
                 if transient_failure(self) {
                     ExitStatus::Failed
                 } else {
@@ -202,6 +210,22 @@ fn transient_failure(error: &(dyn Error + 'static)) -> bool {
             || error
                 .downcast_ref::<PhysicalAttestationError>()
                 .is_some_and(attestation_error_is_transient)
+            || error
+                .downcast_ref::<crate::ingress_uow::IngressUowError>()
+                .is_some_and(|uow_error| {
+                    matches!(
+                        uow_error,
+                        crate::ingress_uow::IngressUowError::Timeout
+                            | crate::ingress_uow::IngressUowError::AmbiguousCommit
+                            | crate::ingress_uow::IngressUowError::Database { .. }
+                            | crate::ingress_uow::IngressUowError::Substrate(
+                                crate::ingress_substrate::IngressSubstrateError::Database { .. }
+                                    | crate::ingress_substrate::IngressSubstrateError::Timeout
+                                    | crate::ingress_substrate::IngressSubstrateError::EpochChangedDuringPreparation
+                                    | crate::ingress_substrate::IngressSubstrateError::ReceiptCommitIndeterminate
+                            )
+                    )
+                })
             || clustering_transient_failure(error)
         {
             return true;
@@ -358,5 +382,41 @@ mod tests {
             OwnerCliError::Attestor(PhysicalAttestationError::NotPrimary).exit_status(),
             ExitStatus::Refused
         );
+    }
+
+    #[test]
+    fn mailbox_repair_errors_classify_transient_vs_refusal() {
+        use crate::ingress_substrate::IngressSubstrateError;
+        use crate::ingress_uow::IngressUowError;
+
+        for transient in [
+            IngressUowError::Timeout,
+            IngressUowError::AmbiguousCommit,
+            IngressUowError::Substrate(IngressSubstrateError::Timeout),
+            IngressUowError::Substrate(IngressSubstrateError::EpochChangedDuringPreparation),
+            IngressUowError::Substrate(IngressSubstrateError::ReceiptCommitIndeterminate),
+        ] {
+            let text = transient.to_string();
+            assert_eq!(
+                OwnerCliError::MailboxRepair(transient).exit_status(),
+                ExitStatus::Failed,
+                "transient ingress error must exit retryable Failed: {text}"
+            );
+        }
+
+        for refusal in [
+            OwnerCliError::MailboxRepair(IngressUowError::Lineage(DatabaseError::Lineage(
+                LineageError::MissingRow,
+            ))),
+            OwnerCliError::MailboxRepair(IngressUowError::EpochProofMissing),
+            OwnerCliError::MailboxRepairRefused("canonical_evidence_invalid".to_owned()),
+        ] {
+            let text = refusal.to_string();
+            assert_eq!(
+                refusal.exit_status(),
+                ExitStatus::Refused,
+                "verdict error must exit Refused: {text}"
+            );
+        }
     }
 }
