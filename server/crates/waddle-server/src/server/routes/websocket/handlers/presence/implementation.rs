@@ -132,6 +132,26 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
     {
         strip_client_authored_room_payloads(&mut presence);
     }
+    // RFC 6120 §10.4: presence for a domain this deployment does not serve,
+    // a subscription request or response included, goes to the remote route
+    // before any roster, subscription or room handling sees it.
+    if let Some(sender) = context.phase.bound_jid() {
+        if let Some(destination) =
+            crate::server::routes::websocket::handlers::unserved_route::unserved_destination(
+                presence.to.as_ref(),
+                context.domain,
+                context.state,
+            )
+        {
+            return crate::server::routes::websocket::handlers::unserved_route::route_unserved_presence(
+                presence,
+                destination,
+                sender,
+                context.state,
+            )
+            .await;
+        }
+    }
     let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
 
     // Check if this is a MUC presence (to room@muc.domain/nick)
@@ -332,6 +352,8 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
                 occupancy_session: *context.occupancy_session,
                 registry_owner: context.registry_owner,
                 ordered_relay_origin: context.ordered_relay_origin,
+                evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                owned_state: None,
             },
         )
         .await;

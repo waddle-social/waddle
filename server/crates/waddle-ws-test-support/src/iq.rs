@@ -1,4 +1,5 @@
-//! Typed IQ transport plumbing shared by WebSocket protocol suites.
+//! Typed stanza transport plumbing, chiefly IQs, shared by WebSocket
+//! protocol suites.
 //! Payloads and expected replies belong to the calling suite.
 
 use xmpp_parsers::iq::Iq;
@@ -16,6 +17,18 @@ pub async fn send_iq(client: &mut WsXmppClient, iq: Iq) {
         .send(&String::from_utf8(bytes).expect("IQ UTF-8"))
         .await
         .expect("send IQ");
+}
+
+/// Serialize any typed stanza (a presence, a message or an IQ) onto an
+/// already connected socket.
+pub async fn send_stanza(client: &mut WsXmppClient, stanza: impl Into<Element>) {
+    let element: Element = stanza.into();
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize stanza");
+    client
+        .send(&String::from_utf8(bytes).expect("stanza UTF-8"))
+        .await
+        .expect("send stanza");
 }
 
 /// Await a correlated IQ under the harness's existing overall receive budget.

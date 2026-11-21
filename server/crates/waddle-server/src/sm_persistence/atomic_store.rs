@@ -350,7 +350,7 @@ pub(super) async fn apply_snapshot_in_transaction(
         .map_err(SnapshotApplyError::Storage)?;
 
     for stanza in prepared.unacked {
-        let xml = stanza.stanza.wire();
+        let xml = stanza.stanza.to_storage().into_owned();
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
         tx.execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \

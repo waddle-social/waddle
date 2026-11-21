@@ -228,6 +228,22 @@ pub(super) async fn deliver_full(
         );
         return FullJidDeliveryOutcome::Delivered;
     }
+    // An occupant a local room seats from another server holds no account
+    // here: its copy is a peer route the acceptance freezes like any other
+    // occupant's, executed by handing it to server-to-server routing.
+    if deps.connection_registry.foreign_takes(target, stanza) {
+        record(
+            deps,
+            ExternalDeliveryEffect::RouteToPeer {
+                route_identity: deps.direct_route_identity.clone(),
+                jid: target.clone(),
+                stanza: Box::new(stanza.clone()),
+                kind: PeerDeliveryKind::PeerStanza,
+                call_setup,
+            },
+        );
+        return FullJidDeliveryOutcome::Delivered;
+    }
     if remote_owner(deps, &target.to_bare()).await {
         record(
             deps,

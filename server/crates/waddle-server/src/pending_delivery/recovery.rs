@@ -103,6 +103,20 @@ impl RecoveryWork {
                 }
             }
         }
+        // Remote senders' messages are delivered only while their domain
+        // is still admitted (ADR-0020 D1; gate G18).
+        crate::server::routes::websocket::s2s_accounts::forget_unadmitted_remote_messages(
+            &self.state.deps.app_state,
+            self.state
+                .deps
+                .service_domains
+                .served_domains(self.state.deps.auth_state.xmpp_domain.as_str())
+                .as_ref(),
+            storage,
+            &protocol.mam_storage,
+            &self.recipient,
+        )
+        .await;
         let resolver = MamArchiveResolver {
             mam_storage: protocol.mam_storage.clone(),
         };

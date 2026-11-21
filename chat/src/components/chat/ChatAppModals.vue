@@ -5,6 +5,7 @@ import WaddleSettingsDialog from "@/components/modals/WaddleSettingsDialog.vue";
 import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
 import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
+import RemoteCommunitiesDialog from "@/components/modals/RemoteCommunitiesDialog.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import { jidLocalpart } from "@/lib/xmpp/jid";
@@ -16,6 +17,7 @@ const props = defineProps<{
 const {
   ui,
   waddles,
+  remoteCommunities,
   messaging,
   members,
   displayedMembers,
@@ -48,6 +50,13 @@ const groupDmSeed = computed(() => {
 
 <template>
     <!-- Dialogs -->
+    <RemoteCommunitiesDialog
+      v-if="waddles.federationAvailable.value"
+      v-model:open="ui.showRemoteCommunities.value"
+      :remote="remoteCommunities"
+      :suggestions="waddles.remoteRoomSuggestions.value"
+      :home-spaces="waddles.sortedSpaces.value"
+    />
     <NewDmDialog
       v-model:open="ui.showNewDm.value"
       :search-recipients="searchDmRecipients"
@@ -84,7 +93,8 @@ const groupDmSeed = computed(() => {
       :form="waddles.editChannelForm.value"
       :is-submitting="waddles.isSubmitting.value"
       :spaces="waddles.sortedSpaces.value"
-      :can-move-channel="waddles.canManageChannels.value"
+      :can-move-channel="waddles.canManageCurrentChannel.value"
+      :federation-available="waddles.federationAvailable.value"
       @update:form="waddles.editChannelForm.value = $event"
       @save="handleUpdateChannel"
       @delete="handleDeleteChannel"
@@ -100,7 +110,8 @@ const groupDmSeed = computed(() => {
       :new-member-affiliation="members.newMemberAffiliation.value"
       :search-results="members.memberSearchResults.value"
       :is-searching="members.isSearchingUsers.value"
-      :can-manage-members="waddles.canManageMembers.value"
+      :can-manage-members="waddles.canManageCurrentMembers.value"
+      :home-domain="controller.selfDomain.value"
       :room-presence="messaging.roomPresence.value"
       :room-last-seen="messaging.roomLastSeen.value"
       @update:member-query="members.memberQuery.value = $event"
@@ -133,9 +144,9 @@ const groupDmSeed = computed(() => {
 
     <ConfirmDialog
       :open="ui.confirmRemoveMember.value !== null"
-      title="Remove member?"
-      :message="`Are you sure you want to remove ${ui.confirmRemoveMember.value ?? 'this member'} from the waddle?`"
-      confirm-label="Remove member"
+      title="Revoke access?"
+      :message="`${ui.confirmRemoveMember.value ?? 'This member'} will no longer be a member of this room. If it is members-only, they can't join again until someone adds them. This does not change their own bookmarks or the room's history.`"
+      confirm-label="Revoke access"
       destructive
       @update:open="(v: boolean) => { if (!v) ui.confirmRemoveMember.value = null }"
       @confirm="confirmRemoveMember"

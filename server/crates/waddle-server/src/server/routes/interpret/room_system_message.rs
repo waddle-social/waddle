@@ -8,7 +8,10 @@
 //!    can be referenced by clients (jump-to-from-pin-list).
 //! 2. Persists the message to MAM via the regular groupchat archive
 //!    helper.
-//! 3. Routes a copy to every joined occupant (per-resource fan-out).
+//! 3. Routes a copy to every joined occupant (per-resource fan-out). In a
+//!    room an enrolled host-grant scope manages, only to the occupants
+//!    whose canonical grants allow reading the room, decided again after
+//!    the archive write and asked again before each copy is routed.
 //!
 //! Bypasses the occupancy gate, rich-target validation, and extension
 //! enrichment — the sender is the room itself.
@@ -19,6 +22,7 @@ use super::{
     ArchiveGroupchatOutcome, BareJid, Deps, GetRoom, GetRoomSnapshot, Jid, Message, Stanza,
 };
 use crate::ingress::RoomManifestSnapshot;
+use waddle_xmpp::muc::room_actor::RoomChainOccupant;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
 pub(super) async fn broadcast_room_system_message_event(
@@ -106,6 +110,20 @@ pub(super) async fn broadcast_room_system_message_with_identity(
             return None;
         }
     };
+
+    // A room an enrolled host-grant scope manages archives its own message
+    // like any other, but delivers it only to occupants whose canonical
+    // grants allow reading the room: the actor's roster may still seat an
+    // occupant whose grant was revoked. When that cannot be decided nothing
+    // is archived or sent, and the caller's own retry applies.
+    if system_message_audience(deps, &room, &snapshot.occupants)
+        .await
+        .is_none()
+    {
+        deps.effects
+            .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
+        return None;
+    }
 
     // Stamp a canonical XEP-0359 `<stanza-id by='room'/>` so the
     // message is uniquely addressable in MAM and from clients.
@@ -247,13 +265,28 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         }
     };
 
+    // The audience was decided before the archive write. A revoke
+    // acknowledged meanwhile must keep its occupant from receiving the
+    // message, so the audience is decided again for the delivery, and each
+    // occupant is asked again before its copy is routed.
+    crate::permissions::host_grant::reach_checkpoint(
+        crate::permissions::host_grant::DecisionCheckpoint::SystemMessageArchived,
+        &room,
+    )
+    .await;
+    let mut audience = delivery_audience(deps, &room, &snapshot.occupants).await;
+
     // Fan out to every joined occupant. One `RouteToConnection`
     // per occupant full JID with the message's `to` set to that
     // occupant's full JID, matching `ReflectorHandler`'s
     // per-recipient personalization. Without this, downstream
     // recipient-pass logic (incoming-blocking, archive, inbox) sees
     // a stanza addressed to the room bare JID and may misroute.
-    for occupant in &snapshot.occupants {
+    let mut occupants = Vec::with_capacity(audience.occupants.len());
+    for occupant in std::mem::take(&mut audience.occupants) {
+        if !audience.still_reads(deps, &room, occupant).await {
+            continue;
+        }
         let mut copy = (*message).clone();
         copy.to = Some(Jid::from(occupant.full_jid.clone()));
         route_to_connection(
@@ -264,8 +297,9 @@ pub(super) async fn broadcast_room_system_message_with_identity(
             None,
         )
         .await;
+        occupants.push(occupant);
     }
-    if !snapshot.occupants.is_empty() {
+    if !occupants.is_empty() {
         let room_generation = snapshot
             .claim_fence
             .as_ref()
@@ -275,8 +309,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         deps.capture_intent(
             waddle_xmpp::ingress::IngressEffectIntent::RouteMucSystemBroadcast {
                 room: room.clone(),
-                occupants: snapshot
-                    .occupants
+                occupants: occupants
                     .iter()
                     .map(|occupant| occupant.full_jid.clone())
                     .collect(),
@@ -290,6 +323,149 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         );
     }
     Some(stanza_id)
+}
+
+/// The occupants a room's own message is delivered to, and the decision
+/// that named them in a managed room.
+#[derive(Default)]
+struct SystemMessageAudience<'o> {
+    occupants: Vec<&'o RoomChainOccupant>,
+    /// The managed room's decision, `None` for a room no scope manages.
+    decision: Option<crate::permissions::host_grant::ManagedRoomGrants>,
+}
+
+impl SystemMessageAudience<'_> {
+    /// Whether `occupant` still reads the room as its copy is about to be
+    /// routed: always in a room no scope manages; in a managed room, by the
+    /// audience's decision while its ticket is current, otherwise by a
+    /// decision read now, which then serves the remaining occupants.
+    async fn still_reads(
+        &mut self,
+        deps: &Deps<'_>,
+        room: &BareJid,
+        occupant: &RoomChainOccupant,
+    ) -> bool {
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
+        let Some(decision) = &self.decision else {
+            return true;
+        };
+        if !decision.fence.is_current() {
+            let Some(state) = deps.web_socket_state else {
+                return false;
+            };
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .room(RoomBinding::Room(room))
+                .await
+            {
+                RoomGate::Managed(now) => self.decision = Some(now),
+                RoomGate::Unmanaged | RoomGate::Unavailable => return false,
+            }
+        }
+        let Some(state) = deps.web_socket_state else {
+            return false;
+        };
+        self.decision
+            .as_ref()
+            .is_some_and(|decision| occupant_reads(state, decision, room, occupant))
+    }
+}
+
+/// Whether the managed room's grants let `occupant` read `room`. The
+/// occupant is named without a request of its own, so it is decided on the
+/// evidence of each seat it holds on this replica, and without stream
+/// evidence when it holds none: an occupant at another server reads the
+/// room only while every stream its seats were admitted on would admit it.
+fn occupant_reads(
+    state: &crate::server::routes::websocket::WebSocketState,
+    grants: &crate::permissions::host_grant::ManagedRoomGrants,
+    room: &BareJid,
+    occupant: &RoomChainOccupant,
+) -> bool {
+    let account = occupant.full_jid.to_bare();
+    state
+        .deps
+        .app_state
+        .host_grants
+        .named_evidence(room, &account)
+        .iter()
+        .all(|evidence| {
+            grants.allows_as(
+                &account,
+                evidence,
+                crate::permissions::host_grant::HostGrantAction::Read,
+            )
+        })
+}
+
+/// At most one warning a minute that a room's own message, already
+/// archived, was delivered to no occupant because its audience could not be
+/// decided again; only the kind of the failure is logged.
+static UNDELIVERED: crate::permissions::host_grant::RateLimitedWarning =
+    crate::permissions::host_grant::RateLimitedWarning::new();
+
+/// How many times the audience of an archived room message is read before
+/// it is delivered to no one.
+const DELIVERY_AUDIENCE_READS: usize = 2;
+
+/// The audience of a room's own message after its archive write. The message
+/// is already archived, so a read that cannot decide is made once more; when
+/// neither decides, the message is delivered to no occupant and a warning
+/// naming only the kind of the failure is logged at most once a minute.
+async fn delivery_audience<'o>(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    occupants: &'o [RoomChainOccupant],
+) -> SystemMessageAudience<'o> {
+    for _ in 0..DELIVERY_AUDIENCE_READS {
+        if let Some(audience) = system_message_audience(deps, room, occupants).await {
+            return audience;
+        }
+    }
+    if UNDELIVERED.due() {
+        warn!(
+            kind = "audience_undecided",
+            "an archived room system message was delivered to no occupant: \
+             the room's grants could not be read again after the archive write"
+        );
+    }
+    SystemMessageAudience::default()
+}
+
+/// The occupants a room's own message is delivered to: every seated
+/// occupant of a room no enrolled scope manages; in a managed room, those
+/// whose canonical grants allow `read`. `None` when a managed room's grants
+/// cannot be read, and when the interpreter holds no WebSocket state, whose
+/// host-grant gate is the only way to tell whether a scope manages the room.
+async fn system_message_audience<'o>(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    occupants: &'o [RoomChainOccupant],
+) -> Option<SystemMessageAudience<'o>> {
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
+    let state = deps.web_socket_state?;
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room))
+        .await
+    {
+        RoomGate::Unmanaged => Some(SystemMessageAudience {
+            occupants: occupants.iter().collect(),
+            decision: None,
+        }),
+        RoomGate::Managed(grants) => Some(SystemMessageAudience {
+            occupants: occupants
+                .iter()
+                .filter(|occupant| occupant_reads(state, &grants, room, occupant))
+                .collect(),
+            decision: Some(grants),
+        }),
+        RoomGate::Unavailable => None,
+    }
 }
 
 fn system_archive_sequence(

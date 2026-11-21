@@ -24,6 +24,7 @@ mod muc;
 mod server_info;
 mod services;
 mod spaces;
+pub(super) use spaces::{guard_unmanaged_space_info, local_protected_space_info};
 
 #[derive(Clone, Copy)]
 struct DiscoInfoRequest<'a> {
@@ -32,6 +33,10 @@ struct DiscoInfoRequest<'a> {
     node: Option<&'a str>,
     target_to: Option<&'a str>,
     requester: Option<&'a FullJid>,
+    /// How the request reached this server: without an S2S stream for a
+    /// session of this deployment, or on the inbound stream that carried a
+    /// remote asker's request.
+    evidence: crate::permissions::host_grant::PrincipalEvidence,
     domain: &'a str,
     muc_domain: &'a str,
     upload_domain: &'a str,
@@ -89,6 +94,47 @@ fn disco_info_xml(response: DiscoInfoResponse<'_>) -> Vec<String> {
     vec![response.into_xml()]
 }
 
+/// XEP-0030 `disco#info` of the MUC service or one of its rooms for an
+/// asker at another server (ADR-0020 D10), decided for `requester` on
+/// `evidence`, the inbound S2S stream that carried the request. The answer
+/// is the one a session of this deployment receives, which the caller
+/// reduces to what remote askers are told. `None` when the address is not
+/// at the MUC service.
+pub(crate) async fn muc_disco_info_for_remote(
+    state: &WebSocketState,
+    iq: &xmpp_parsers::iq::Iq,
+    requester: Option<&FullJid>,
+    evidence: crate::permissions::host_grant::PrincipalEvidence,
+) -> Option<Result<xmpp_parsers::iq::Iq, xmpp_parsers::stanza_error::StanzaError>> {
+    let target = iq.to().map(ToString::to_string);
+    let from = iq.from().map(ToString::to_string);
+    let Ok(query) = parse_disco_info_query(iq) else {
+        return Some(Err(bad_request_iq_error("Malformed IQ payload.")));
+    };
+    let service = &state.deps.service_domains;
+    let request = DiscoInfoRequest {
+        request_iq: iq,
+        id: iq.id(),
+        node: query.node.as_deref(),
+        target_to: target.as_deref(),
+        requester,
+        evidence,
+        domain: state.deps.auth_state.xmpp_domain.as_str(),
+        muc_domain: service.muc.as_str(),
+        upload_domain: service.upload.as_str(),
+        spaces_domain: service.spaces.as_str(),
+        community_domain: service.community.as_str(),
+        extensions_domain: service.extensions.as_str(),
+        push_domain: service.push.as_str(),
+        response_from: target.as_deref(),
+        response_to: from.as_deref(),
+    };
+    Some(match muc::handle_muc_disco_info(&request, state).await? {
+        DiscoInfoResponse::Iq(iq) => Ok(iq),
+        DiscoInfoResponse::IqError { error, .. } => Err(error),
+    })
+}
+
 pub(super) async fn handle_disco_info_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -119,21 +165,9 @@ pub(super) async fn handle_disco_info_iq(
         }
     };
 
-    if let Some(reply) = phase.bound_jid().and_then(|sender| {
-        super::remote_destination::remote_iq_error(
-            ctx.iq,
-            ctx.domain,
-            &state.deps.service_domains,
-            sender,
-        )
-    }) {
-        info!(id = %ctx.id, target = %target, handler = "remote_destination", "disco#info answered");
-        return disco_info_xml(DiscoInfoResponse::iq(reply));
-    }
-
     // The per-handler "answered" debug below is the load-bearing trace
     // for #750-style silent-drops: every disco#info that reaches this
-    // dispatcher ends in exactly one such line (one of the ten arms or
+    // dispatcher ends in exactly one such line (one of the nine arms or
     // the fallback). Absence of any "answered" line for a request id is
     // the silent-drop signature. `parse_disco_info_query` already emits
     // a "Parsed disco#info query" debug per request, so we do not need
@@ -145,6 +179,7 @@ pub(super) async fn handle_disco_info_iq(
         node: query.node.as_deref(),
         target_to: ctx.target_to,
         requester: phase.bound_jid(),
+        evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
         domain: ctx.domain,
         muc_domain: ctx.muc_domain,
         upload_domain: ctx.upload_domain,

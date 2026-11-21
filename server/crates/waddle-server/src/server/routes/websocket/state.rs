@@ -7,6 +7,7 @@ use super::{
 use crate::call_teardown_outbox::CallTeardownOutboxStore;
 use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
 use crate::config::LinkPreviewConfig;
+use crate::destination::{RemoteRoute, ServedDomains, ServedService};
 use crate::dnd_projection::DndProjectionStore;
 use crate::dnd_reader::PepDndReader;
 use crate::ingress::IngressAuthority;
@@ -26,8 +27,11 @@ use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
 use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
 use crate::server::routes::interpret::effects::ClientRoomOrigin;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
+use jid::DomainPart;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use waddle_xmpp::identity::CanonicalDomain;
+use waddle_xmpp::protocol::handlers::jingle::MIXER_LOCALPART;
 
 #[derive(Debug, Clone)]
 pub struct ActiveCallThread {
@@ -1415,11 +1419,87 @@ impl XmppServiceDomains {
             community: format!("community.{xmpp_domain}"),
         }
     }
+
+    /// The host-grant issuance policy of a replica deciding under
+    /// `principals`: its served account domains, the trusted-home list of
+    /// the S2S snapshot it runs, and the domains of its own services, the
+    /// call mixer of each served account domain included, as
+    /// [`Self::served_domains`] serves them. While S2S is off no trusted
+    /// home is listed, so an owner or admin grant to a remote account is
+    /// refused (ADR-0020 D8). `None` when a service domain is not in
+    /// canonical form, or a trusted home is one of them.
+    pub(crate) fn host_grant_issuance_policy(
+        &self,
+        principals: &crate::permissions::host_grant::PrincipalPolicy,
+    ) -> Option<crate::permissions::host_grant::IssuancePolicy> {
+        let mixers: Vec<String> = principals
+            .served()
+            .domains()
+            .map(|account| format!("{MIXER_LOCALPART}.{account}"))
+            .collect();
+        let services = [
+            &self.muc,
+            &self.spaces,
+            &self.upload,
+            &self.extensions,
+            &self.push,
+            &self.community,
+        ]
+        .into_iter()
+        .chain(&mixers)
+        .map(|domain| waddle_xmpp::identity::CanonicalDomain::parse_exact(domain))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+        crate::permissions::host_grant::IssuancePolicy::for_principals(principals, services).ok()
+    }
+
+    /// The exact typed domain inventory for destination classification:
+    /// `local` plus every configured service and the call mixer, each in the
+    /// identity profile's canonical domain form so that it compares equal to
+    /// canonical addresses. Returns `None` only when `local` cannot be
+    /// prepared; a service domain that cannot be prepared cannot match any
+    /// canonical address and is skipped. Startup refuses such configuration
+    /// before any connection is accepted.
+    pub(crate) fn served_domains(&self, local: &str) -> Option<ServedDomains> {
+        let local_part = canonical_domain_part(local)?;
+        let mixer = format!("{MIXER_LOCALPART}.{local}");
+        let services = [
+            (ServedService::Muc, self.muc.as_str()),
+            (ServedService::Spaces, self.spaces.as_str()),
+            (ServedService::Upload, self.upload.as_str()),
+            (ServedService::Community, self.community.as_str()),
+            (ServedService::Extensions, self.extensions.as_str()),
+            (ServedService::Push, self.push.as_str()),
+            (ServedService::CallsMixer, mixer.as_str()),
+        ];
+        Some(
+            services
+                .into_iter()
+                .filter_map(|(service, domain)| {
+                    canonical_domain_part(domain).map(|domain| (service, domain))
+                })
+                .fold(
+                    ServedDomains::new(local_part),
+                    |served, (service, domain)| served.with_service(service, domain),
+                ),
+        )
+    }
+}
+
+/// `domain` in the identity profile's canonical form, as a typed domainpart.
+fn canonical_domain_part(domain: &str) -> Option<DomainPart> {
+    CanonicalDomain::prepare(domain)
+        .ok()
+        .map(CanonicalDomain::into_domain_part)
 }
 
 /// WebSocket route dependencies kept narrower than the full server graph.
 pub struct WebSocketState {
     pub deps: WebSocketDeps,
+    pub(crate) local_space_publications: Arc<tokio::sync::Semaphore>,
+    /// The rooms this replica's MUC service may list, read at most once at
+    /// a time for each audience of its `disco#items`.
+    pub(crate) room_listings: super::handlers::iq::RoomListings,
     /// Explicit SASL2 negotiation switch for isolated protocol fixtures.
     /// Production builds cannot set this field, and test fixtures default it
     /// off unless they opt into the dedicated SASL2 helper.
@@ -1438,6 +1518,18 @@ impl WebSocketState {
             false
         }
     }
+
+    /// Whether `address` is at a domain this deployment serves: its
+    /// account domain or one of its services, such as an extension's bot.
+    /// Any other address is an entity at another server: it holds no
+    /// account, inbox or device here.
+    pub(crate) fn serves(&self, address: &jid::BareJid) -> bool {
+        let local = self.deps.auth_state.xmpp_domain.as_str();
+        match self.deps.service_domains.served_domains(local) {
+            Some(served) => served.serves(address.domain()),
+            None => address.domain().as_str() == local,
+        }
+    }
 }
 
 pub struct WebSocketDeps {
@@ -1447,6 +1539,11 @@ pub struct WebSocketDeps {
     pub auth_state: Arc<AuthState>,
     /// Authoritative XMPP component/service JIDs used by this deployment.
     pub service_domains: XmppServiceDomains,
+    /// Egress for client stanzas addressed to unserved domains. Production
+    /// wires [`FederationDisabled`] until server-to-server transport exists.
+    ///
+    /// [`FederationDisabled`]: crate::destination::FederationDisabled
+    pub remote_route: Arc<dyn RemoteRoute>,
     /// Protocol/runtime services used by the WebSocket C2S path.
     pub protocol: ProtocolServices,
     /// Per-deployment XEP-0421 occupant-id HMAC key. Cheap-clone via the
@@ -1638,6 +1735,10 @@ pub struct ProtocolServices {
     pub extension_bot_rooms: BotRoomLocks,
     /// Local departures retained until the owning room actor can project them.
     pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
+    /// The retired accounts whose requests to end their sessions this
+    /// replica has taken up: a binding of one is refused, and a live stream
+    /// of one is closed with `<not-authorized/>`.
+    pub retired_accounts: Arc<super::RetiredAccounts>,
     /// At most one detached resolver-affiliation repair per room/member pair.
     /// Rejected joins coalesce here instead of spawning unbounded retry tasks.
     pub resolver_affiliation_syncs: Arc<ResolverAffiliationSyncScheduler>,

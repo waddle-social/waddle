@@ -74,7 +74,13 @@ impl ExtensionManager {
         None
     }
 
-    /// Extract a valid bare room JID from the named plugin's matching PubSub node pattern.
+    /// The room named by the `{room}` segment of the first of the named
+    /// plugin's PubSub node patterns that `node` matches. `None` when no
+    /// pattern matches or that segment is not a bare JID.
+    ///
+    /// Only the first matching pattern is read, the rule the server's
+    /// extension route lookup also follows: a node whose first match names
+    /// no valid room does not resolve to a room through a later pattern.
     #[must_use]
     pub fn room_for_plugin_pubsub_node(
         &self,
@@ -85,10 +91,14 @@ impl ExtensionManager {
             .iter()
             .find(|actor| actor.manifest().id == *plugin)
             .and_then(|actor| {
-                actor.manifest().pubsub_nodes.iter().find_map(|pattern| {
-                    pubsub_node_placeholder_value(pattern.as_str(), node.as_str(), "room")
-                        .and_then(|room| RoomJid::try_new(room).ok())
-                })
+                actor
+                    .manifest()
+                    .pubsub_nodes
+                    .iter()
+                    .find_map(|pattern| {
+                        pubsub_node_placeholder_value(pattern.as_str(), node.as_str(), "room")
+                    })
+                    .and_then(|room| RoomJid::try_new(room).ok())
             })
     }
 

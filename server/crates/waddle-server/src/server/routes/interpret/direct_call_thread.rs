@@ -74,6 +74,12 @@ pub(super) async fn mark_direct_call_thread_ended(
         return;
     };
     for (owner, partner) in [(peer_a.clone(), peer_b.clone()), (peer_b, peer_a)] {
+        // A peer at another server keeps its inbox there: only the side
+        // this deployment serves is projected, so that a remote peer's
+        // `finish` ends the thread in the local account's inbox alone.
+        if !deps.serves(&owner) {
+            continue;
+        }
         let mutation = InboxProjectionMutation::DirectCallThreadEnded {
             peer: partner.clone(),
             thread_id: thread_id.clone(),

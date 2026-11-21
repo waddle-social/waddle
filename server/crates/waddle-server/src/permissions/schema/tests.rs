@@ -28,13 +28,13 @@ fn test_channel_schema() {
 
     // Check permission computation
     let delete_perm = channel_schema.permission("delete").unwrap();
-    match delete_perm {
-        ComputedPermission::Arrow(rel, perm) => {
-            assert_eq!(rel, "parent");
-            assert_eq!(perm, "admin");
-        }
-        _ => panic!("Expected Arrow permission"),
-    }
+    assert_eq!(
+        delete_perm,
+        &ComputedPermission::exclusion(
+            ComputedPermission::arrow("parent", "admin"),
+            ComputedPermission::direct("outcast"),
+        )
+    );
 }
 
 #[test]
@@ -42,14 +42,15 @@ fn test_message_schema() {
     let schema = PermissionSchema::default();
     let message_schema = schema.schema(ObjectType::Message).unwrap();
 
-    // Author can edit
+    // Author can edit unless banned from the message's channel
     let edit_perm = message_schema.permission("edit").unwrap();
-    match edit_perm {
-        ComputedPermission::DirectRelation(rel) => {
-            assert_eq!(rel, "author");
-        }
-        _ => panic!("Expected DirectRelation permission"),
-    }
+    assert_eq!(
+        edit_perm,
+        &ComputedPermission::exclusion(
+            ComputedPermission::direct("author"),
+            ComputedPermission::arrow("channel", "outcast"),
+        )
+    );
 }
 
 #[test]

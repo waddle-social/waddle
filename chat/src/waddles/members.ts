@@ -64,7 +64,7 @@ export function useWaddleMembers(
 
   async function addMember(userId: string) {
     clearActionError();
-    if (!xmppClient.value || !activeChannelId.value) return;
+    if (!canManageMembers.value || !xmppClient.value || !activeChannelId.value) return;
     await xmppClient.value.setRoomAffiliation(activeChannelId.value, userId, newMemberAffiliation.value);
     members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
     clearSearch();
@@ -72,14 +72,14 @@ export function useWaddleMembers(
 
   async function updateMemberAffiliation(member: MemberSummary, affiliation: EditableAffiliation) {
     clearActionError();
-    if (!xmppClient.value || !activeChannelId.value) return;
+    if (!canManageMembers.value || !xmppClient.value || !activeChannelId.value) return;
     await xmppClient.value.setRoomAffiliation(activeChannelId.value, member.jid, affiliation);
     members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
   }
 
   async function removeMember(member: MemberSummary) {
     clearActionError();
-    if (!xmppClient.value || !activeChannelId.value) return;
+    if (!canManageMembers.value || !xmppClient.value || !activeChannelId.value) return;
     await xmppClient.value.setRoomAffiliation(activeChannelId.value, member.jid, "none");
     members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
   }

@@ -23,8 +23,12 @@ use waddle_xmpp::ScramCredentials;
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
-use super::directory::canonical_account_jid;
+use super::directory::{canonical_account_jid, exact_account_jid};
+use super::retirement::JID_NOT_RETIRED_SQL;
 use super::AuthError;
+use waddle_xmpp::identity::{
+    AccountLocalpart, CanonicalBareJid, CanonicalDomain, ACCOUNT_LOCALPART_MAX_BYTES,
+};
 
 /// Default PBKDF2 iteration count for SCRAM key derivation.
 /// 4096 is the minimum recommended by RFC 7677.
@@ -65,13 +69,12 @@ impl NativeUserStore {
     ///
     /// Returns the user ID on success.
     pub async fn register(&self, request: RegisterRequest) -> Result<i64, AuthError> {
-        // Validate username format (must be valid JID localpart)
-        validate_username(&request.username)?;
-        let jid = canonical_account_jid(&request.username, &request.domain).ok_or_else(|| {
-            AuthError::InvalidUsername("Username is not a valid JID localpart".to_string())
-        })?;
+        // A new account must be in the account profile; its canonical bare
+        // JID is its lookup key.
+        let jid = Self::validate_new_account(&request.username, &request.domain)?;
 
-        // Check if username already exists
+        // Check if the JID is already held, including by a name registered
+        // before the account profile that folds to the same key.
         if self.user_exists(&request.username, &request.domain).await? {
             return Err(AuthError::UserAlreadyExists(request.username));
         }
@@ -98,12 +101,14 @@ impl NativeUserStore {
         let rows = self
             .actor
             .ask(DbQuery {
-                sql: r#"
-                    INSERT INTO native_users (username, domain, jid_key, password_hash, salt, iterations, stored_key, server_key, email)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    RETURNING id
-                "#
-                .to_string(),
+                // The account is created only where the ledger of retired
+                // JIDs does not hold its JID: the condition is part of the
+                // statement that creates the row (`auth::retirement`).
+                sql: format!(
+                    "INSERT INTO native_users (username, domain, jid_key, password_hash, salt, \
+                     iterations, stored_key, server_key, email) \
+                     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE {JID_NOT_RETIRED_SQL} RETURNING id"
+                ),
                 params: vec![
                     request.username.as_str().into(),
                     request.domain.as_str().into(),
@@ -114,15 +119,17 @@ impl NativeUserStore {
                     stored_key.into(),
                     server_key.into(),
                     email_str.into(),
+                    jid.as_str().into(),
                 ],
             })
             .await
             .map_err(db_err)?;
 
+        // No row: the JID is retired, and is never issued again.
         let user_id: i64 = rows
             .into_iter()
             .next()
-            .ok_or_else(|| AuthError::DatabaseError("insert did not return id".to_string()))?
+            .ok_or(AuthError::JidRetired)?
             .first()
             .cloned()
             .ok_or_else(|| AuthError::DatabaseError("insert did not return id".to_string()))
@@ -142,6 +149,23 @@ impl NativeUserStore {
         );
 
         Ok(user_id)
+    }
+
+    /// The canonical bare JID a new account `username@domain` would hold,
+    /// or why it cannot be provisioned: the username must be in the account
+    /// profile ([`AccountLocalpart`]) and the domain already canonical, each
+    /// exactly as given. Callers that act on an account by name before
+    /// registering it validate first, because lookups by a name outside the
+    /// profile fold it onto another account's key.
+    pub fn validate_new_account(
+        username: &str,
+        domain: &str,
+    ) -> Result<CanonicalBareJid, AuthError> {
+        let localpart = validate_username(username)?;
+        let domain = CanonicalDomain::parse_canonical(domain).map_err(|_| {
+            AuthError::InvalidRequest("account domain is not in canonical form".to_string())
+        })?;
+        Ok(localpart.account_jid(&domain))
     }
 
     /// Check if an account holds the JID `username@domain`, in whatever case
@@ -164,13 +188,16 @@ impl NativeUserStore {
         Ok(row.is_some() || !self.unkeyed_ids(&jid).await?.is_empty())
     }
 
-    /// Get SCRAM credentials for a user.
+    /// Get SCRAM credentials for the account holding exactly
+    /// `username@domain`. A username that preparation would change (`ALICE`
+    /// for `alice`) names no account, so it never authenticates as the
+    /// account its folded form keys.
     pub async fn get_scram_credentials(
         &self,
         username: &str,
         domain: &str,
     ) -> Result<Option<ScramCredentials>, AuthError> {
-        let Some(jid) = canonical_account_jid(username, domain) else {
+        let Some(jid) = exact_account_jid(username, domain) else {
             return Ok(None);
         };
         let row = self
@@ -404,44 +431,15 @@ fn db_err<E: std::fmt::Display>(e: E) -> AuthError {
     AuthError::DatabaseError(e.to_string())
 }
 
-/// Validate a username for JID localpart compliance.
-///
-/// Per RFC 7622, the localpart must:
-/// - Not be empty
-/// - Not exceed 1023 bytes in UTF-8
-/// - Not contain prohibited characters
-fn validate_username(username: &str) -> Result<(), AuthError> {
-    if username.is_empty() {
-        return Err(AuthError::InvalidUsername(
-            "Username cannot be empty".to_string(),
-        ));
-    }
-
-    if username.len() > 1023 {
-        return Err(AuthError::InvalidUsername("Username too long".to_string()));
-    }
-
-    // Check for prohibited characters in JID localpart
-    let prohibited = ['@', '/', '"', '&', '\'', '<', '>', ' ', '\t', '\n', '\r'];
-    for ch in prohibited {
-        if username.contains(ch) {
-            return Err(AuthError::InvalidUsername(format!(
-                "Username contains prohibited character: '{}'",
-                ch
-            )));
-        }
-    }
-
-    // Check for control characters
-    for ch in username.chars() {
-        if ch.is_control() {
-            return Err(AuthError::InvalidUsername(
-                "Username contains control characters".to_string(),
-            ));
-        }
-    }
-
-    Ok(())
+/// Validate a username for a new account: it must be in the account profile
+/// ([`AccountLocalpart`]) exactly as given. Nothing is lowercased or removed,
+/// so the account's name, its bound JID and its lookup key are one spelling.
+fn validate_username(username: &str) -> Result<AccountLocalpart, AuthError> {
+    AccountLocalpart::parse(username).map_err(|_| {
+        AuthError::InvalidUsername(format!(
+            "Username must be 1 to {ACCOUNT_LOCALPART_MAX_BYTES} lowercase ASCII letters, digits, '.', '_', '-' or '+'"
+        ))
+    })
 }
 
 #[cfg(test)]

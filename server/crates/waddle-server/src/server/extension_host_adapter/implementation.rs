@@ -237,22 +237,53 @@ impl ExtensionHostAdapter {
         Err(ExtensionHostAdapterError::NotAuthorized)
     }
 
+    /// Decide again, after a protected read of `archive`, whether the
+    /// invoking account may still view it, for a room an enrolled
+    /// host-grant scope manages. [`Self::authorize_archive`] decided before
+    /// the read; a revoke acknowledged while the read ran must keep what was
+    /// read from being returned. The account's own archive and a room no
+    /// scope manages keep their single check.
+    pub(in crate::server::extension_host_adapter) async fn archive_still_authorized(
+        &self,
+        invocation: &ExtensionInvocation,
+        archive: &BareJid,
+    ) -> Result<(), ExtensionHostAdapterError> {
+        if archive == &invocation.actor_jid.to_bare()
+            || archive.domain().as_str() != self.state.deps.service_domains.muc
+        {
+            return Ok(());
+        }
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(archive) else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        let Some(session) = invocation.session.as_ref() else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        match crate::server::managed_channel_policy::host_grant_channel_permission(
+            &self.state.deps.app_state.host_grants,
+            &session.user_jid,
+            &channel_id,
+            &Permission::View,
+        )
+        .await
+        {
+            Ok(None | Some(true)) => Ok(()),
+            Ok(Some(false)) => Err(ExtensionHostAdapterError::NotAuthorized),
+            Err(error) => Err(ExtensionHostAdapterError::Storage(error)),
+        }
+    }
+
     pub(in crate::server::extension_host_adapter) async fn authorize_room(
         &self,
         invocation: &ExtensionInvocation,
         room: &BareJid,
         permission: Permission,
     ) -> Result<(), ExtensionHostAdapterError> {
-        self.ensure_not_outcast(invocation, room).await?;
         let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
         if self
-            .allowed(
-                invocation,
-                Object::new(ObjectType::Channel, channel_id),
-                permission,
-            )
+            .channel_allowed(invocation, &channel_id, permission)
             .await?
         {
             Ok(())
@@ -261,29 +292,64 @@ impl ExtensionHostAdapter {
         }
     }
 
-    pub(in crate::server::extension_host_adapter) async fn ensure_not_outcast(
+    /// Whether the invoking account holds `permission` on the channel
+    /// `channel_id`.
+    ///
+    /// A room an enrolled host-grant scope manages is decided from its
+    /// canonical grants alone (`host_grant_channel_permission`): a ban there
+    /// denies everything, and neither deployment ownership nor a relation
+    /// the legacy stores still hold admits anything. Any other channel is
+    /// decided by its relations, a channel ban first, with the deployment
+    /// owner admitted to every permission.
+    pub(in crate::server::extension_host_adapter) async fn channel_allowed(
         &self,
         invocation: &ExtensionInvocation,
-        room: &BareJid,
-    ) -> Result<(), ExtensionHostAdapterError> {
-        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
-            return Err(ExtensionHostAdapterError::NotAuthorized);
-        };
+        channel_id: &str,
+        permission: Permission,
+    ) -> Result<bool, ExtensionHostAdapterError> {
         let Some(session) = invocation.session.as_ref() else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
-        let subject = Subject::user(&session.user_jid);
-        if self
-            .permission_allowed(
-                subject,
-                Object::new(ObjectType::Channel, channel_id),
-                Permission::Custom("outcast".into()),
-            )
-            .await?
+        match crate::server::managed_channel_policy::host_grant_channel_permission(
+            &self.state.deps.app_state.host_grants,
+            &session.user_jid,
+            channel_id,
+            &permission,
+        )
+        .await
         {
-            return Err(ExtensionHostAdapterError::NotAuthorized);
+            Ok(Some(allowed)) => return Ok(allowed),
+            Ok(None) => {}
+            Err(error) => return Err(ExtensionHostAdapterError::Storage(error)),
         }
-        Ok(())
+        if self.channel_outcast(invocation, channel_id).await? {
+            return Ok(false);
+        }
+        self.allowed(
+            invocation,
+            Object::new(ObjectType::Channel, channel_id),
+            permission,
+        )
+        .await
+    }
+
+    /// Whether the invoking account is an outcast of the channel
+    /// `channel_id` by its legacy relation. Only a channel no enrolled scope
+    /// manages is asked: a managed room's ban is a canonical grant.
+    async fn channel_outcast(
+        &self,
+        invocation: &ExtensionInvocation,
+        channel_id: &str,
+    ) -> Result<bool, ExtensionHostAdapterError> {
+        let Some(session) = invocation.session.as_ref() else {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        };
+        self.permission_allowed(
+            Subject::user(&session.user_jid),
+            Object::new(ObjectType::Channel, channel_id),
+            Permission::Custom("outcast".into()),
+        )
+        .await
     }
 
     pub(in crate::server::extension_host_adapter) async fn permission_allowed(

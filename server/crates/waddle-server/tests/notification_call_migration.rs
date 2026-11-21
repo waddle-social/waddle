@@ -4,7 +4,9 @@
 mod support;
 
 use sqlx::PgPool;
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::db::{
+    Database, DatabaseConfig, DatabaseDriver, MigrationRunner, BASELINE_VERSION,
+};
 
 use support::{
     assert_rows_preserved_and_insert_call, install_baseline_only, seed_notification_rows,
@@ -19,7 +21,7 @@ async fn sqlite_baseline_notification_rows_survive_call_migration() {
     assert_eq!(indexes.len(), 8);
     assert_eq!(
         MigrationRunner::single().run(&db).await.expect("upgrade"),
-        [2001, 2002]
+        versions_after_baseline()
     );
     assert_rows_preserved_and_insert_call(&db).await;
     let upgraded_indexes = sqlite_indexes(&db).await;
@@ -35,6 +37,15 @@ async fn sqlite_baseline_notification_rows_survive_call_migration() {
         .await
         .expect("rerun")
         .is_empty());
+}
+
+/// Every version after the baseline, from 2001 on: what an upgrade of a
+/// baseline-only database applies. The catalog numbers them without a gap.
+fn versions_after_baseline() -> Vec<i64> {
+    let latest = MigrationRunner::single()
+        .latest_version()
+        .expect("a catalog");
+    (BASELINE_VERSION + 1..=latest).collect()
 }
 
 async fn sqlite_indexes(db: &Database) -> Vec<(String, String)> {
@@ -73,7 +84,7 @@ async fn postgres_baseline_notification_rows_survive_call_migration() {
     seed_notification_rows(&db).await;
     assert_eq!(
         MigrationRunner::single().run(&db).await.expect("upgrade"),
-        [2001, 2002]
+        versions_after_baseline()
     );
     assert_rows_preserved_and_insert_call(&db).await;
     assert!(MigrationRunner::single()

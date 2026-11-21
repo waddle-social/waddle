@@ -26,6 +26,17 @@ use support::{
     install_baseline_only, seed_notification_rows,
 };
 
+fn versions_from(first: i64) -> Vec<i64> {
+    std::iter::once(BASELINE_VERSION)
+        .chain(
+            after_baseline::all()
+                .into_iter()
+                .map(|migration| migration.version),
+        )
+        .filter(|version| *version >= first)
+        .collect()
+}
+
 async fn install_2001_with_calls(db: &Database, schema: &str) {
     install_baseline_only(db, schema).await;
     seed_notification_rows(db).await;
@@ -123,7 +134,7 @@ async fn sqlite_fresh_database_supports_missed_calls() {
             .run(&db)
             .await
             .expect("fresh migrations"),
-        [2000, 2001, 2002]
+        versions_from(BASELINE_VERSION)
     );
     assert_missed_calls_supported(&db).await;
 }
@@ -136,7 +147,7 @@ async fn sqlite_2001_call_rows_survive_missed_call_migration() {
     install_2001_with_calls(&db, "main").await;
     assert_eq!(
         MigrationRunner::single().run(&db).await.expect("upgrade"),
-        [2002]
+        versions_from(2002)
     );
     assert_call_preserved(&db).await;
     assert_missed_calls_supported(&db).await;
@@ -169,7 +180,7 @@ async fn postgres_missed_call_migration(upgrade: bool) {
         install_2001_with_calls(&db, &schema).await;
         assert_eq!(
             MigrationRunner::single().run(&db).await.expect("upgrade"),
-            [2002]
+            versions_from(2002)
         );
         assert_call_preserved(&db).await;
     } else {
@@ -178,7 +189,7 @@ async fn postgres_missed_call_migration(upgrade: bool) {
                 .run(&db)
                 .await
                 .expect("fresh migrations"),
-            [2000, 2001, 2002]
+            versions_from(BASELINE_VERSION)
         );
     }
     assert_missed_calls_supported(&db).await;

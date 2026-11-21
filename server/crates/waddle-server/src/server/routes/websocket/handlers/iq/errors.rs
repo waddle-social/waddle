@@ -151,6 +151,18 @@ pub(crate) fn internal_server_error_iq_error(text: &str) -> StanzaError {
     )
 }
 
+/// `<remote-server-timeout/>` (wait) — the answer could not be determined
+/// in time. XEP-0410 §4 has a client read it, unlike any other error to a
+/// self-ping, as no decision about whether it is still joined.
+pub(crate) fn remote_server_timeout_iq_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::RemoteServerTimeout,
+        DEFAULT_LANG,
+        text,
+    )
+}
+
 /// `<resource-constraint/>` (wait) — the server could not service the request
 /// within its time budget (the #808 per-connection wedge backstop). RFC 6120
 /// §8.3.3 pairs `resource-constraint` with error type `wait`: a temporary,

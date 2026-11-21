@@ -513,6 +513,56 @@ async fn owner_phase_prepares_the_stores_the_runtime_role_attaches() {
     prepared.cleanup().await;
 }
 
+/// The physical attestor requires that the restricted runtime role cannot
+/// call `pg_control_system()`. On its attested pool the host-grant store
+/// still reads the PostgreSQL position its restore fence compares with the
+/// position witness: the system identifier is the attested identity's,
+/// checked in the same transaction, and the timeline and WAL position come
+/// from functions the provisioned profile leaves to every role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_runtime_role_reads_the_host_grant_position_on_its_attested_pool() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    let mut runtime = runtime_connection(&prepared).await;
+    let error = sqlx::query("SELECT system_identifier FROM pg_catalog.pg_control_system()")
+        .execute(&mut runtime)
+        .await
+        .expect_err("the runtime role must not read the control file");
+    assert_eq!(sqlstate(&error).as_deref(), Some("42501"), "{error}");
+    runtime.close().await.expect("close runtime probe");
+
+    let pool = attach_serving_pool(&prepared).await;
+    let store = waddle_server::permissions::host_grant::HostGrantStore::open(pool.global().clone())
+        .expect("host-grant store");
+    store
+        .verify_runtime_privileges()
+        .await
+        .expect("the runtime role holds exactly the host-grant store's privileges");
+    let position = store
+        .postgres_position()
+        .await
+        .expect("the runtime role reads the PostgreSQL position");
+    let identity = prepared
+        .lineage
+        .postgres_identity
+        .as_ref()
+        .expect("the attested physical identity");
+    assert_eq!(position.system_identifier, identity.system_identifier.0);
+    assert!(position.timeline >= 1);
+    assert!(position.lsn > 0);
+    let later = store.postgres_position().await.expect("a second read");
+    assert_eq!(
+        (later.system_identifier, later.timeline),
+        (position.system_identifier, position.timeline)
+    );
+    assert!(later.lsn >= position.lsn);
+    drop(store);
+    drop(pool);
+    prepared.cleanup().await;
+}
+
 /// A baseline-only deployment upgrades before the owner attests its stores;
 /// the runtime then attaches the full schema and writes the new call class.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -628,6 +678,36 @@ async fn restricted_runtime_refuses_instead_of_creating_a_missing_relation() {
     .await;
     assert_runtime_owns_nothing(&prepared).await;
 
+    prepared.cleanup().await;
+}
+
+/// Every account provisioning, session creation and offline-store write
+/// reads the ledger of retired account JIDs. A runtime role that cannot
+/// read it is refused at startup, with an error that names the ledger,
+/// rather than on each of those writes later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_runtime_refuses_a_role_that_cannot_read_the_retired_jid_ledger() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    execute(
+        &prepared.admin,
+        &format!(
+            "REVOKE SELECT ON {SCHEMA}.retired_account_jids FROM {}",
+            prepared.roles.runtime
+        ),
+    )
+    .await;
+    let (output, listener_published) = prepared.refused_startup(&[]).await;
+    assert!(
+        output.contains("cannot read retired_account_jids"),
+        "a role that cannot read the ledger must be refused by name: {output}"
+    );
+    assert!(
+        !listener_published,
+        "a refused startup published a listener"
+    );
     prepared.cleanup().await;
 }
 
@@ -1856,12 +1936,14 @@ async fn restricted_runtime_role_serves_without_ddl() {
         return;
     };
     let prepared = Prepared::new(&url).await;
-    // An upgraded database can hold a roster item whose contact is not a
-    // local account. Startup prunes it together with the owner's version.
+    // An upgraded database can hold a roster item whose contact is no
+    // account of a domain the deployment serves. Startup prunes it together
+    // with the owner's version; a contact at a domain the deployment does
+    // not serve is a remote contact and stays.
     for statement in [
         format!(
             "INSERT INTO {SCHEMA}.roster_items (user_jid, contact_jid) \
-             VALUES ('alice@localhost', 'ghost@elsewhere.example')"
+             VALUES ('alice@localhost', 'ghost@localhost')"
         ),
         format!(
             "INSERT INTO {SCHEMA}.roster_versions (user_jid, version) \
@@ -1897,7 +1979,7 @@ async fn restricted_runtime_role_serves_without_ddl() {
     );
     let dangling: i64 = sqlx::query_scalar(&format!(
         "SELECT (SELECT pg_catalog.count(*) FROM {SCHEMA}.roster_items \
-                  WHERE contact_jid = 'ghost@elsewhere.example') \
+                  WHERE contact_jid = 'ghost@localhost') \
               + (SELECT pg_catalog.count(*) FROM {SCHEMA}.roster_versions \
                   WHERE version = 'stale')"
     ))

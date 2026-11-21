@@ -28,8 +28,8 @@ use crate::server::routes::websocket::InFlightLease;
 use crate::server::routes::websocket::LeaveAskFailure;
 use crate::server::routes::websocket::LocalDepartureItem;
 use crate::server::routes::websocket::PendingLocalMucDepartures;
-use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use jid::{BareJid, FullJid};
@@ -64,13 +64,13 @@ use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::db::actor::{DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::{
-    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError, Relation,
-    Subject, SubjectType, Tuple, WriteTuple,
+    AuthzUserJid, CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError,
+    Relation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::server::routes::websocket::WebSocketState;
 use crate::server::xmpp_state::{
-    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
-    XmppChannelRecord, XmppChannelUpsert,
+    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, set_xmpp_channel_federated,
+    upsert_xmpp_channel, XmppChannelRecord, XmppChannelUpsert,
 };
 use crate::server::AppState;
 use crate::space_identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
@@ -587,7 +587,7 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_list(&state, &args).await {
+    match run_list(&state, &args, &ctx.from.to_bare()).await {
         Ok(result) => CommandResult::Completed {
             session_id: None,
             form: Some(build_list_form(&result)),
@@ -881,10 +881,17 @@ fn parse_required_text(form: &DataForm, var: &str) -> Result<String, String> {
     parse_optional_text(form, var).ok_or_else(|| format!("'{var}' is required"))
 }
 
+/// A required bare-JID field, taken exactly under the identity profile
+/// ([`DataForm::bare_jid`]): a spelling preparation would change is refused
+/// rather than folded onto another account, room or space.
 fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String> {
-    let raw = parse_required_text(form, var)?;
-    raw.parse()
-        .map_err(|e| format!("'{var}' is not a valid bare JID '{raw}': {e}"))
+    parse_optional_bare_jid(form, var)?.ok_or_else(|| format!("'{var}' is required"))
+}
+
+fn parse_optional_bare_jid(form: &DataForm, var: &str) -> Result<Option<BareJid>, String> {
+    form.bare_jid(var)
+        .transpose()
+        .map_err(|error| format!("'{var}' is not a bare JID in canonical form: {error}"))
 }
 
 fn parse_optional_bool(form: &DataForm, var: &str) -> Result<Option<bool>, String> {
@@ -959,13 +966,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
             after_cursor: None,
         });
     }
-    let space_jid = match form.value("space_jid") {
-        Some(raw) if !raw.is_empty() => Some(
-            raw.parse::<BareJid>()
-                .map_err(|e| format!("space_jid invalid: {e}"))?,
-        ),
-        _ => None,
-    };
+    let space_jid = parse_optional_bare_jid(form, "space_jid")?;
     let prefix = form
         .value("prefix")
         .map(|s| s.trim().to_lowercase())
@@ -987,13 +988,7 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
     let topic = parse_optional_text(form, "topic");
-    let space_jid = match form.value("space_jid") {
-        Some(raw) if !raw.is_empty() => Some(
-            raw.parse::<BareJid>()
-                .map_err(|e| format!("space_jid invalid: {e}"))?,
-        ),
-        _ => None,
-    };
+    let space_jid = parse_optional_bare_jid(form, "space_jid")?;
     let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let channel_type =
         parse_optional_channel_type(form, "channel_type")?.unwrap_or(ChannelType::Text);
@@ -1015,21 +1010,14 @@ pub fn parse_group_dm_create_args(form: Option<&DataForm>) -> Result<GroupDmCrea
     let form = form.ok_or_else(|| "group-dm:create requires an args form".to_string())?;
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
-    let member_values = form
-        .values("member_jids")
-        .ok_or_else(|| "member_jids is required".to_string())?;
-    let mut member_jids = Vec::with_capacity(member_values.len());
-    for value in member_values
-        .iter()
-        .filter(|value| !value.trim().is_empty())
-    {
-        member_jids.push(
-            value
-                .trim()
-                .parse::<BareJid>()
-                .map_err(|e| format!("member_jids contains invalid JID '{value}': {e}"))?,
-        );
-    }
+    // Each member is taken exactly under the identity profile; a spelling
+    // preparation would change is refused, never folded onto an account.
+    let mut member_jids = form
+        .bare_jids("member_jids")
+        .ok_or_else(|| "member_jids is required".to_string())?
+        .map_err(|error| {
+            format!("member_jids contains a JID that is not in canonical form: {error}")
+        })?;
     member_jids.sort();
     member_jids.dedup();
     if member_jids.len() < 2 {
@@ -1132,6 +1120,9 @@ pub fn parse_set_affiliation_args(
     let form = form.ok_or_else(|| "channels:set-affiliation requires an args form".to_string())?;
     let channel_jid = parse_required_bare_jid(form, "channel_jid")?;
     let member_jid = parse_required_bare_jid(form, "member_jid")?;
+    // Channel affiliations are stored as authorization relationships.
+    AuthzUserJid::new(member_jid.clone())
+        .map_err(|error| format!("'member_jid' must be a bare account JID: {error}"))?;
     let affiliation = WireAffiliation::parse(&parse_required_text(form, "affiliation")?)?;
     let reason = parse_optional_text(form, "reason");
     Ok(ChannelsSetAffiliationArgs {
@@ -1165,6 +1156,7 @@ fn send_err<E: std::fmt::Display>(prefix: &'static str) -> impl FnOnce(E) -> Adm
 async fn run_list(
     state: &AppState,
     args: &ChannelsListArgs,
+    caller: &BareJid,
 ) -> Result<ChannelsListResult, AdminErr> {
     // Inventory is durable; room actor residency is only used for enrichment.
     // Preserve instant rooms too, using serialized JIDs for sorting and cursors.
@@ -1216,6 +1208,8 @@ async fn run_list(
         }
         Err(error) => tracing::warn!(%error, "Admin channel inventory has no local room details"),
     }
+
+    let managed = withhold_managed_rooms(state, caller, &mut rooms).await?;
 
     // Space links may live in a separate database; use their storage interface.
     let space_node = match args.space_jid.as_ref() {
@@ -1280,6 +1274,21 @@ async fn run_list(
     // Counts describe available local snapshots, not cluster-wide presence.
     // Dormant, remote, or disappearing actors must never remove catalog rows.
     for entry in &mut entries {
+        if let Some(grants) = managed.get(entry.channel_jid.as_str()) {
+            use crate::permissions::host_grant::RoomAffiliation;
+            let count = |affiliation| {
+                u32::try_from(grants.grants.recorded(affiliation).len()).unwrap_or(u32::MAX)
+            };
+            entry.affiliation_owner_count = count(RoomAffiliation::Owner);
+            entry.affiliation_admin_count = count(RoomAffiliation::Admin);
+            entry.affiliation_member_count = count(RoomAffiliation::Member);
+            entry.affiliation_outcast_count = count(RoomAffiliation::Outcast);
+            if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
+                entry.occupant_count =
+                    u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
+            }
+            continue;
+        }
         if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
             entry.occupant_count =
                 u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
@@ -1298,6 +1307,68 @@ async fn run_list(
         entries,
         next_cursor,
     })
+}
+
+/// Remove from `rooms` every room an enrolled host-grant scope manages that
+/// `caller`'s canonical grants do not allow to view, and every managed room
+/// whose grants cannot be read now. The community-owner role the channel
+/// commands require is not one of a managed room's grants. A room that is
+/// kept is shown members-only, its binding's access model, and its grants
+/// are returned by room address so that its counts are its recorded grants
+/// rather than the room actor's mirror.
+async fn withhold_managed_rooms(
+    state: &AppState,
+    caller: &BareJid,
+    rooms: &mut BTreeMap<String, (BareJid, RoomConfig, ChannelType)>,
+) -> Result<HashMap<String, crate::permissions::host_grant::ManagedRoomGrants>, AdminErr> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    let channel_ids: Vec<String> = rooms
+        .values()
+        .filter_map(|(room_jid, _, _)| waddle_xmpp::parse_managed_room_jid(room_jid))
+        .collect();
+    let channel_refs: Vec<&str> = channel_ids.iter().map(String::as_str).collect();
+    let enrolled = state
+        .host_grants
+        .enrolled_channels(&channel_refs)
+        .await
+        .map_err(|_| internal_err("the host-grant authority is unavailable"))?;
+    let mut managed = HashMap::new();
+    let mut withheld = Vec::new();
+    for (key, (room_jid, config, _)) in rooms.iter_mut() {
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid)
+            .filter(|channel_id| enrolled.contains(channel_id))
+        else {
+            continue;
+        };
+        // Read by the channel, the same key the enrolled check used, so the
+        // grants are those of the binding whatever domain the listing built
+        // the room's address with.
+        match state
+            .host_grants
+            .room(RoomBinding::Channel(&channel_id))
+            .await
+        {
+            RoomGate::Managed(grants)
+                if grants.allows_as(
+                    caller,
+                    &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    HostGrantAction::View,
+                ) =>
+            {
+                config.members_only = true;
+                managed.insert(key.clone(), grants);
+            }
+            // The enrolled set named it, so a room the gate then answers as
+            // unmanaged is not one to describe either.
+            RoomGate::Managed(_) | RoomGate::Unavailable | RoomGate::Unmanaged => {
+                withheld.push(key.clone());
+            }
+        }
+    }
+    for key in withheld {
+        rooms.remove(&key);
+    }
+    Ok(managed)
 }
 
 async fn local_channel_snapshot(
@@ -1379,6 +1450,7 @@ async fn existing_space_node(
     space_node: Option<&SpaceNode>,
 ) -> Result<(SpaceNode, BareJid), AdminErr> {
     let (node, canonical_jid) = canonical_space_jid(&state.spaces_jid, space_jid, space_node)?;
+    super::refuse_host_grant_space(state, &node).await?;
     let exists = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node)
@@ -1574,16 +1646,58 @@ fn channel_affiliation_relation(affiliation: Affiliation) -> Option<&'static str
     }
 }
 
+/// The explicit channel affiliation of each JID.
+///
+/// For a room an enrolled host-grant scope manages, it is the standing the
+/// canonical grants honour (`HostGrantGate`); the legacy relation names are
+/// not read there, since they neither subtract a ban nor know which grants
+/// are effective. Elsewhere it is read from the channel's relations.
 pub(crate) async fn explicit_channel_affiliations_for_jids(
     state: &AppState,
     channel_id: &str,
     jids: impl IntoIterator<Item = BareJid>,
 ) -> Result<Vec<(BareJid, Affiliation)>, String> {
+    use crate::permissions::host_grant::{RoomAffiliation, RoomBinding, RoomGate};
+    match state
+        .host_grants
+        .room(RoomBinding::Channel(channel_id))
+        .await
+    {
+        RoomGate::Unmanaged => {}
+        RoomGate::Unavailable => return Err("the host-grant authority is unavailable".into()),
+        RoomGate::Managed(room) => {
+            let mut seen = BTreeSet::new();
+            return Ok(jids
+                .into_iter()
+                .filter(|jid| seen.insert(jid.clone()))
+                .map(|jid| {
+                    let affiliation = match room.standing_as(
+                        &jid,
+                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                    ) {
+                        RoomAffiliation::Outcast => Affiliation::Outcast,
+                        RoomAffiliation::None => Affiliation::None,
+                        RoomAffiliation::Member => Affiliation::Member,
+                        RoomAffiliation::Admin => Affiliation::Admin,
+                        RoomAffiliation::Owner => Affiliation::Owner,
+                    };
+                    (jid, affiliation)
+                })
+                .collect());
+        }
+    }
     let object = Object::new(ObjectType::Channel, channel_id);
     let mut seen = BTreeSet::new();
     let mut affiliations = Vec::new();
     for jid in jids {
         if !seen.insert(jid.clone()) {
+            continue;
+        }
+        // A JID that cannot be an authorization subject (domain-only, or over
+        // the codec's length limit) can never have been granted a channel
+        // relationship, so its explicit affiliation is `None`.
+        if AuthzUserJid::new(jid.clone()).is_err() {
+            affiliations.push((jid, Affiliation::None));
             continue;
         }
         let subject = Subject::user(jid.to_string());
@@ -1716,12 +1830,15 @@ struct RemovedChannelBookmark {
     parent_tuple_deleted: bool,
 }
 
+/// Retract the bookmark of `channel_jid` from every Space other than
+/// `keep_node`, restoring what was retracted on a failure. Returns the
+/// Spaces it was retracted from, whose subscribers the caller notifies.
 async fn retract_duplicate_channel_bookmarks(
     state: &AppState,
     keep_node: &str,
     channel_id: &str,
     channel_jid: &BareJid,
-) -> Result<(), AdminErr> {
+) -> Result<Vec<String>, AdminErr> {
     let item_id = channel_jid.to_string();
     let nodes = state
         .pubsub_storage
@@ -1766,7 +1883,7 @@ async fn retract_duplicate_channel_bookmarks(
             }
         }
     }
-    Ok(())
+    Ok(removed.into_iter().map(|removed| removed.node).collect())
 }
 
 fn channel_type_from_config(config: &RoomConfig) -> &'static str {
@@ -1823,7 +1940,12 @@ async fn upsert_channel_catalog(
         members_only: config.members_only,
         public_room: config.public_room,
     };
-    upsert_xmpp_channel(db_actor, &record)
+    upsert_xmpp_channel(db_actor.clone(), &record)
+        .await
+        .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))?;
+    // The catalog upsert leaves the federated setting as stored; the row
+    // follows the room's configuration here.
+    set_xmpp_channel_federated(db_actor, channel_id, config.federated)
         .await
         .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))
 }
@@ -1862,7 +1984,11 @@ pub(super) async fn restore_channel_catalog_record(state: &AppState, record: &Xm
         members_only: record.members_only,
         public_room: record.public_room,
     };
-    if let Err(error) = upsert_xmpp_channel(db_actor, &upsert).await {
+    let restored = match upsert_xmpp_channel(db_actor.clone(), &upsert).await {
+        Ok(()) => set_xmpp_channel_federated(db_actor, &record.id, record.federated).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = restored {
         tracing::warn!(
             channel = %record.id,
             error = %error,
@@ -1983,6 +2109,10 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     apply_channel_type(&mut config, args.channel_type);
     config.max_occupants = 0;
     config.enable_logging = true;
+    // A new channel starts with the deployment's federated setting; its
+    // owner changes it in the room's configuration.
+    config.federated = state.federates_new_rooms();
+    let config = config.normalized();
 
     state
         .room_registry
@@ -2104,6 +2234,11 @@ async fn run_group_dm_create(
 ) -> Result<GroupDmRef, AdminErr> {
     validate_group_dm_members(state, creator_jid, &args.member_jids).await?;
     let localpart = format!("group-dm-{}", mint_channel_localpart(&args.name));
+    // The identifier is checked before anything is written: no room actor
+    // or catalog row is created under a managed room's identifier.
+    refuse_enrolled_group_dm(state, &localpart)
+        .await
+        .map_err(|error| Box::new(CommandResult::Error(error)))?;
     let muc_domain = state.muc_domain.to_string();
     let room_jid: BareJid = format!("{localpart}@{muc_domain}")
         .parse()
@@ -2701,6 +2836,25 @@ pub(crate) async fn acquire_room_config_lock(room_jid: &BareJid) -> OwnedSemapho
     lock.acquire_owned()
         .await
         .expect("room config lock semaphore is never closed")
+}
+
+/// Longest a client's request waits for a room's configuration lock. An
+/// administration request of a managed room holds it while it records the
+/// change in the host-grant store (up to 3 s for the scope's guard), waits
+/// for the revocation fence's acknowledgement (up to 10 s) and has the room
+/// actor apply it; a request that would wait longer is answered as busy
+/// instead of queueing behind it without bound.
+pub(crate) const ROOM_CONFIG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// [`acquire_room_config_lock`] for at most `limit`: `None` when the lock
+/// was not free by then.
+pub(crate) async fn acquire_room_config_lock_within(
+    room_jid: &BareJid,
+    limit: std::time::Duration,
+) -> Option<OwnedSemaphorePermit> {
+    tokio::time::timeout(limit, acquire_room_config_lock(room_jid))
+        .await
+        .ok()
 }
 
 async fn hydrate_group_dm_member_affiliations(
@@ -3870,6 +4024,7 @@ pub(crate) async fn persist_group_dm_member_tuple(
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
+    refuse_enrolled_group_dm(state, group_dm_id).await?;
     persist_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
     if let Err(error) = persist_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await
     {
@@ -3899,6 +4054,27 @@ async fn persist_group_dm_member_actor_tuple(
         }
     }
     Ok(())
+}
+
+/// Refuse a group-DM member write whose identifier is the authorization
+/// object of a room an enrolled host-grant scope manages.
+///
+/// The group-DM member writers keep a mirror of the member relation in
+/// `permission_tuples` with their own SQL, beside the permission actor. The
+/// actor refuses the same object for an enrolled scope, but the mirror's
+/// statements do not pass through it, so both are refused here first: a
+/// group DM and a managed room share the channel identifier space, and the
+/// host-grant authority alone writes a managed room's grants.
+async fn refuse_enrolled_group_dm(state: &AppState, group_dm_id: &str) -> Result<(), XmppError> {
+    match state.host_grants.channel_enrolled(group_dm_id).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(XmppError::not_allowed(Some(
+            "The group DM identifier belongs to an enrolled community".to_string(),
+        ))),
+        Err(_) => Err(XmppError::service_unavailable(Some(
+            "The host-grant authority is unavailable".to_string(),
+        ))),
+    }
 }
 
 async fn persist_durable_group_dm_member_tuple(
@@ -3945,6 +4121,7 @@ async fn delete_group_dm_member_tuple(
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
+    refuse_enrolled_group_dm(state, group_dm_id).await?;
     delete_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
     match delete_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await {
         Ok(()) => Ok(()),
@@ -4105,6 +4282,7 @@ async fn run_update(
     args: &ChannelsUpdateArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelRef, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let mut actor = state
         .room_registry
         .ask(GetRoom {
@@ -4352,33 +4530,48 @@ async fn run_update(
                 return Err(error);
             }
         };
-        if let Err(error) =
-            retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid).await
-        {
-            config_reservation.clear_members_only_enforcement();
-            if rollback_room_config_or_arm(
-                websocket_state,
-                &actor,
-                expected_revision,
-                existing.clone(),
-                config_reservation.reservation().cloned(),
-            )
-            .await
+        let moved_from =
+            match retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid)
+                .await
             {
-                restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
-                    .await;
-                restore_channel_space_bookmark(
-                    state,
-                    &node,
-                    &item_id,
-                    &channel_id,
-                    previous_bookmark.as_ref(),
-                    parent_tuple_created,
-                )
+                Ok(moved_from) => moved_from,
+                Err(error) => {
+                    config_reservation.clear_members_only_enforcement();
+                    if rollback_room_config_or_arm(
+                        websocket_state,
+                        &actor,
+                        expected_revision,
+                        existing.clone(),
+                        config_reservation.reservation().cloned(),
+                    )
+                    .await
+                    {
+                        restore_channel_catalog_snapshot(
+                            state,
+                            &channel_id,
+                            catalog_snapshot.as_ref(),
+                        )
+                        .await;
+                        restore_channel_space_bookmark(
+                            state,
+                            &node,
+                            &item_id,
+                            &channel_id,
+                            previous_bookmark.as_ref(),
+                            parent_tuple_created,
+                        )
+                        .await;
+                    }
+                    config_reservation.clear();
+                    return Err(error);
+                }
+            };
+        // Nothing below restores the bookmarks the move retracted: the
+        // Spaces the room left tell their subscribers.
+        for stale in &moved_from {
+            state
+                .notify_space_retracted(stale, &args.channel_jid.to_string())
                 .await;
-            }
-            config_reservation.clear();
-            return Err(error);
         }
     }
 
@@ -4457,6 +4650,7 @@ async fn run_update(
 }
 
 async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let link = state
         .channel_space_link_store
         .get(&args.channel_jid)
@@ -4718,6 +4912,11 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         return Err(error);
     }
     forget_extension_bot_room(state, &args.channel_jid).await;
+    // The deletion stands: each Space the room was taken out of tells its
+    // subscribers, as a retract of the room's bookmark there would.
+    for removed in &removed_bookmarks {
+        state.notify_space_retracted(&removed.node, &item_id).await;
+    }
     Ok(())
 }
 
@@ -4851,6 +5050,7 @@ async fn run_occupants(
     state: &AppState,
     args: &ChannelsOccupantsArgs,
 ) -> Result<ChannelsOccupantsResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -4899,6 +5099,7 @@ async fn run_affiliations(
     state: &AppState,
     args: &ChannelsAffiliationsArgs,
 ) -> Result<ChannelsAffiliationsResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -4952,6 +5153,7 @@ async fn run_set_affiliation(
     args: &ChannelsSetAffiliationArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelsSetAffiliationResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid)
         .ok_or_else(|| bad_request("channel_jid must be a managed MUC room JID"))?;
     let _config_guard = acquire_room_config_lock(&args.channel_jid).await;
@@ -4985,6 +5187,63 @@ async fn run_set_affiliation(
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
     let next_affiliation = args.affiliation.to_muc();
+    // ADR-0020 D8 at issuance: this command writes the room's legacy
+    // affiliation stores for any JID, so an owner or admin standing is
+    // written only for an account of this deployment or of a trusted home
+    // of the S2S snapshot the replica runs, as the `muc#admin` writer
+    // does. A standing written for any other home would not be honoured
+    // at the effect either. A fixture that runs the command without a
+    // WebSocket state has no snapshot to ask, and the rule is not applied
+    // to it.
+    if matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin)
+        && websocket_state.is_some_and(|websocket_state| {
+            !crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::privileged_standing_may_be_issued(
+                websocket_state,
+                &args.member_jid,
+            )
+        })
+    {
+        return Err(Box::new(CommandResult::Error(XmppError::not_allowed(Some(
+            "owner and admin standing is granted to accounts of this deployment and of its \
+             trusted servers only"
+                .to_string(),
+        )))));
+    }
+    // The room makes every occupant of an owner or admin a moderator. A
+    // remote occupant holds that role only on a seat whose stream carries
+    // it, so the standing is not written while one of the account's seats
+    // in this room does not, as the `muc#admin` writer refuses it. This
+    // command may run on a replica other than the one that holds the
+    // room, so the seats are read from the table every replica shares.
+    if let Some(websocket_state) = websocket_state
+        .filter(|_| matches!(next_affiliation, Affiliation::Owner | Affiliation::Admin))
+    {
+        let honoured = crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::seats_honour_privilege_anywhere(
+            websocket_state,
+            state.db_pool.global(),
+            &args.channel_jid,
+            &args.member_jid,
+        )
+        .await;
+        match honoured {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Box::new(CommandResult::Error(XmppError::not_allowed(
+                    Some(
+                        "this account is in the room over a stream that does not carry owner or \
+                     admin standing; grant it once that occupant has left or has entered over \
+                     a certificate-authenticated stream of a trusted server"
+                            .to_string(),
+                    ),
+                ))));
+            }
+            None => {
+                return Err(internal_err(
+                    "the seats of occupants from other servers could not be read",
+                ))
+            }
+        }
+    }
     if next_affiliation != Affiliation::Owner && previous_affiliation == Affiliation::Owner {
         let owners = actor
             .ask(ListAffiliations {
@@ -5147,6 +5406,7 @@ async fn run_kick(
     args: &ChannelsKickArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelsKickResult, AdminErr> {
+    super::refuse_host_grant_room(state, &args.channel_jid).await?;
     // XEP-0045 §9.1.1 — kicking an occupant is a role-change to "none";
     // the service MUST send `<presence type='unavailable'>` carrying
     // `<status code='307'/>` to every occupant, including the kicked
@@ -5869,6 +6129,7 @@ mod tests {
             pin_permission: PinPermission::Anyone,
             members_only: false,
             public_room: true,
+            federated: false,
             created_at: "2026-06-21T00:00:00Z".to_string(),
             updated_at: None,
         };

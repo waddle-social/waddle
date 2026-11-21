@@ -56,7 +56,8 @@ pub(super) fn classify_auth_failure(failure: AuthFailure<'_>) -> (AuthStage, Aut
                 AuthError::DatabaseError(_)
                 | AuthError::UserAlreadyExists(_)
                 | AuthError::CryptoError(_)
-                | AuthError::RegistrationDisabled => AuthErrorCode::Other,
+                | AuthError::RegistrationDisabled
+                | AuthError::JidRetired => AuthErrorCode::Other,
                 AuthError::HttpError(_) | AuthError::ProviderUnreachable(_) => {
                     AuthErrorCode::ProviderUnreachable
                 }

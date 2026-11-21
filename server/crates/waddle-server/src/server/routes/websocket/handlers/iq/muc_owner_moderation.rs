@@ -1,13 +1,12 @@
 use super::{
-    add_stanza_id_xep0359, apply_muc_owner_config, bad_request_iq_error, build_iq_error_xml_typed,
-    build_iq_result_xml, build_moderation_result_message, build_muc_owner_config_response, chrono,
-    debug, forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error,
-    is_muc_room_jid, item_not_found_iq_error, jid_malformed_iq_error, muc_owner_authorized,
-    not_authorized_iq_error, parse_moderation_iq, response_batch_from_inline_room_effect_frames,
-    stanza_to_xml, warn, ArchivedMessage, ArchivedModeration, ArchivedRichMessage,
-    ArchivedRichPayload, BareJid, ConnectionPhase, FullJid, GetAdminContext, GetSnapshot,
-    IqHandlerContext, Jid, ResponseBatch, RichMessageId, RichText, Session, Stanza, WebSocketState,
-    Xep0359StanzaId,
+    add_stanza_id_xep0359, bad_request_iq_error, build_iq_error_xml_typed, build_iq_result_xml,
+    build_moderation_result_message, build_muc_owner_config_response, chrono, debug,
+    forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error, is_muc_room_jid,
+    item_not_found_iq_error, jid_malformed_iq_error, muc_owner_authorized, not_authorized_iq_error,
+    parse_moderation_iq, response_batch_from_inline_room_effect_frames, stanza_to_xml, warn,
+    ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload, BareJid,
+    ConnectionPhase, FullJid, GetAdminContext, GetSnapshot, IqHandlerContext, Jid, ResponseBatch,
+    RichMessageId, RichText, Session, Stanza, WebSocketState, Xep0359StanzaId,
 };
 use crate::db::actor::DbExecute;
 use crate::db::actor::DbQuery;
@@ -1284,12 +1283,49 @@ async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
     }
 }
 
+/// Who makes an owner or moderation request of a room, and how the request
+/// reached it.
+#[derive(Clone, Copy)]
+pub(super) struct RoomRequester<'a> {
+    /// The requester's full JID: a session's bound resource, or the
+    /// address an inbound S2S stream proved for a remote principal.
+    pub(super) jid: Option<&'a FullJid>,
+    /// The requester's session of this deployment. A remote principal has
+    /// none, and nothing is written for it that a session's request writes
+    /// for its account.
+    pub(super) session: Option<&'a Session>,
+    /// None for a session, and for a remote principal the stream that
+    /// carried the request. Every decision about the requester names it.
+    pub(super) evidence: crate::permissions::host_grant::PrincipalEvidence,
+}
+
 pub(super) async fn handle_muc_owner_and_moderation_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: Option<&Session>,
 ) -> ResponseBatch {
+    handle_muc_owner_and_moderation_iq_as(
+        ctx,
+        state,
+        RoomRequester {
+            jid: phase.bound_jid(),
+            session: authenticated_session,
+            evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
+        },
+    )
+    .await
+}
+
+/// XEP-0045 `muc#owner` requests (configuration and destruction) and
+/// XEP-0425 moderation requests of `requester`.
+pub(super) async fn handle_muc_owner_and_moderation_iq_as(
+    ctx: IqHandlerContext<'_>,
+    state: &WebSocketState,
+    requester: RoomRequester<'_>,
+) -> ResponseBatch {
+    let authenticated_session = requester.session;
+    let evidence = &requester.evidence;
     let iq = ctx.iq;
     let id = ctx.id;
     let payload_ns = ctx.payload_ns;
@@ -1334,7 +1370,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             .into();
         }
 
-        let Some(sender_jid) = phase.bound_jid() else {
+        let Some(sender_jid) = requester.jid else {
             return vec![build_iq_error_xml_typed(
                 id,
                 response_from,
@@ -1343,7 +1379,46 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             )]
             .into();
         };
-        match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session).await {
+        // A room an enrolled host-grant scope manages is configured by the
+        // canonical grants' `manage` and destroyed by their `delete`, which
+        // no room affiliation confers: such a room ends only when its scope
+        // is retired. The room actor's affiliations decide nothing there.
+        let authorized = {
+            use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+            let action = if has_destroy {
+                HostGrantAction::Delete
+            } else {
+                HostGrantAction::Manage
+            };
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .allows_as(
+                    RoomBinding::Room(&room_jid),
+                    &sender_jid.to_bare(),
+                    evidence,
+                    action,
+                )
+                .await
+            {
+                RoomGate::Unmanaged => {
+                    muc_owner_authorized(
+                        state,
+                        &room_jid,
+                        sender_jid,
+                        authenticated_session,
+                        evidence,
+                    )
+                    .await
+                }
+                RoomGate::Managed(allowed) => Ok(allowed),
+                RoomGate::Unavailable => Err(waddle_xmpp::XmppError::internal(
+                    "the host-grant authority is unavailable",
+                )),
+            }
+        };
+        match authorized {
             Ok(true) => {}
             Ok(false) => {
                 return vec![build_iq_error_xml_typed(
@@ -1622,16 +1697,42 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             }
         }
 
-        let mut batch = match apply_muc_owner_config(
+        crate::permissions::host_grant::reach_checkpoint(
+            crate::permissions::host_grant::DecisionCheckpoint::OwnerConfigAuthorized,
+            &room_jid,
+        )
+        .await;
+        let mut batch = match super::muc_owner_config::apply_muc_owner_config_as(
             state,
             &room_jid,
             iq,
             authenticated_session,
-            phase.bound_jid(),
+            requester.jid,
+            evidence,
         )
         .await
         {
             Ok(batch) => batch,
+            Err(super::muc_owner_config::OwnerConfigError::Forbidden) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    forbidden_iq_error("Operation not permitted."),
+                )]
+                .into();
+            }
+            Err(super::muc_owner_config::OwnerConfigError::Busy) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    super::errors::resource_constraint_iq_error(
+                        "The room is being administered; try again.",
+                    ),
+                )]
+                .into();
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -1660,7 +1761,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
     }
 
     if let Some(request) = parse_moderation_iq(iq) {
-        let Some(sender_jid) = phase.bound_jid() else {
+        let Some(sender_jid) = requester.jid else {
             return vec![build_iq_error_xml_typed(
                 id,
                 response_from,
@@ -1723,7 +1824,49 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         // extent that they cause the room to grant the Moderator *role* on
         // entry; if an owner has explicitly taken a non-moderator role
         // (e.g. visitor), that signal is intentional and must be honoured.
-        if !matches!(context.role, waddle_xmpp::Role::Moderator) {
+        //
+        // A room an enrolled host-grant scope manages is moderated by the
+        // canonical grants' `moderate` alone: the role the room actor holds
+        // for the sender, like its affiliation list, is a mirror that may
+        // still name a revoked moderator.
+        let moderates =
+            {
+                use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+                match state
+                    .deps
+                    .app_state
+                    .host_grants
+                    .allows_as(
+                        RoomBinding::Room(&room_jid),
+                        &sender_jid.to_bare(),
+                        evidence,
+                        HostGrantAction::Moderate,
+                    )
+                    .await
+                {
+                    // The role a room no scope manages holds for a remote
+                    // principal counts only as the effect boundary honours
+                    // room moderation for its stream (ADR-0020 D8).
+                    RoomGate::Unmanaged => matches!(context.role, waddle_xmpp::Role::Moderator)
+                        && crate::server::routes::websocket::handlers::presence::principal_witness(
+                            state,
+                            &sender_jid.to_bare(),
+                            evidence,
+                        )
+                        .is_some_and(|witness| witness.privilege_honoured()),
+                    RoomGate::Managed(allowed) => allowed,
+                    RoomGate::Unavailable => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )]
+                        .into();
+                    }
+                }
+            };
+        if !moderates {
             return vec![build_iq_error_xml_typed(
                 id,
                 response_from,

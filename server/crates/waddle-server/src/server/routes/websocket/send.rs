@@ -1,7 +1,10 @@
 use super::connection::{RetirementFence, RetirementRefusal};
 use super::{debug, error, Arc, Message, Sink, SinkExt};
 use crate::clustering::NodeAdmissionPermit;
+use crate::permissions::host_grant::SpaceReplyAuthority;
+use crate::websocket_transport::{OutputError, WebSocketMessageSink};
 use waddle_xmpp::ownership::ConnectionRef;
+use waddle_xmpp::stream_management::persistence::SmReplayPayload;
 
 /// Interrupt ordinary writes when a verified detach targets this physical
 /// connection, and refuse them once the connection has retired. Protocol
@@ -67,6 +70,19 @@ impl<S> InterruptibleSink<S> {
             .and_then(|(fence, generation)| fence.admit(generation).err())
     }
 
+    fn start_with_authority<E>(
+        &mut self,
+        start: impl FnOnce(&mut S) -> Result<(), E>,
+    ) -> Result<(), InterruptedWrite<E>> {
+        if let Some(refusal) = self.retired() {
+            return Err(InterruptedWrite::Retired(refusal));
+        }
+        self.interrupt
+            .with_uninterrupted(|| start(&mut self.inner))
+            .ok_or(InterruptedWrite::Detached)?
+            .map_err(InterruptedWrite::Transport)
+    }
+
     /// Conflict closure is optional and bounded by its caller, but still gets
     /// one attempt after ordinary writes have been interrupted.
     pub(super) fn uninterrupted(&mut self) -> &mut S {
@@ -79,6 +95,35 @@ impl<S> InterruptibleSink<S> {
     pub(super) fn retirement_close(&mut self) -> RetirementClose<'_, S> {
         self.retirement_close = true;
         RetirementClose(self)
+    }
+}
+
+/// A protected frame and the decision the pump must check before transfer.
+pub(super) struct ProtectedSpaceSocketReply {
+    pub(super) connection: ConnectionRef,
+    pub(super) requester: jid::FullJid,
+    pub(super) payload: SmReplayPayload,
+    pub(super) grant: SpaceReplyAuthority,
+}
+
+/// Physical staging operation provided by the live transport. A generic
+/// response writer without this operation cannot send a protected frame.
+pub(super) type StartProtectedSpaceReply<S, E> =
+    fn(&mut S, ProtectedSpaceSocketReply) -> Result<(), E>;
+
+impl<E: Send + Sync + 'static> InterruptibleSink<WebSocketMessageSink<E>> {
+    pub(super) fn start_protected_space_reply(
+        &mut self,
+        reply: ProtectedSpaceSocketReply,
+    ) -> Result<(), InterruptedWrite<OutputError<E>>> {
+        self.start_with_authority(|inner| {
+            inner.start_protected_space_reply(
+                &reply.connection,
+                &reply.requester,
+                reply.payload,
+                reply.grant,
+            )
+        })
     }
 }
 
@@ -212,14 +257,8 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
     }
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
-        let this = self.get_mut();
-        if let Some(refusal) = this.retired() {
-            return Err(InterruptedWrite::Retired(refusal));
-        }
-        this.interrupt
-            .with_uninterrupted(|| std::pin::Pin::new(&mut this.inner).start_send(item))
-            .ok_or(InterruptedWrite::Detached)?
-            .map_err(InterruptedWrite::Transport)
+        self.get_mut()
+            .start_with_authority(|inner| std::pin::Pin::new(inner).start_send(item))
     }
 
     fn poll_flush(
@@ -391,6 +430,28 @@ where
     send_ws_message_with_binding(sender, message, failure_message, authority, None).await
 }
 
+/// Send one protected frame through the same readiness, admission and
+/// flush path as an ordinary frame, with the live transport's typed starter.
+pub(super) async fn send_ws_protected_space_reply<S, E>(
+    sender: &mut S,
+    reply: ProtectedSpaceSocketReply,
+    start: StartProtectedSpaceReply<S, E>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
+) -> AuthoritySendOutcome
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: WebSocketWriteError,
+{
+    send_ws_frame_with_binding(
+        sender,
+        "Failed to send protected Space reply",
+        authority,
+        None,
+        move |sender| start(sender, reply),
+    )
+    .await
+}
+
 /// Node admission, socket control, binding cell, and physical interruption
 /// gate are held in that order only for synchronous `start_send`.
 pub(super) async fn send_ws_message_with_binding<S, E>(
@@ -402,6 +463,26 @@ pub(super) async fn send_ws_message_with_binding<S, E>(
         &waddle_xmpp::registry::LocalBindingPermit,
         &waddle_xmpp::registry::LiveResumeControl,
     )>,
+) -> AuthoritySendOutcome
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: WebSocketWriteError,
+{
+    send_ws_frame_with_binding(sender, failure_message, authority, binding, move |sender| {
+        std::pin::Pin::new(sender).start_send(message)
+    })
+    .await
+}
+
+async fn send_ws_frame_with_binding<S, E>(
+    sender: &mut S,
+    failure_message: &'static str,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
+    binding: Option<(
+        &waddle_xmpp::registry::LocalBindingPermit,
+        &waddle_xmpp::registry::LiveResumeControl,
+    )>,
+    start_frame: impl FnOnce(&mut S) -> Result<(), E>,
 ) -> AuthoritySendOutcome
 where
     S: Sink<Message, Error = E> + Unpin,
@@ -471,10 +552,10 @@ where
     }
     let start = || {
         let result = match binding {
-            Some((permit, control)) => control.start_sm_enable_if_current(permit, || {
-                std::pin::Pin::new(&mut *sender).start_send(message)
-            }),
-            None => Some(std::pin::Pin::new(&mut *sender).start_send(message)),
+            Some((permit, control)) => {
+                control.start_sm_enable_if_current(permit, || start_frame(sender))
+            }
+            None => Some(start_frame(sender)),
         };
         result
             .ok_or(StartError::BindingRevoked)?

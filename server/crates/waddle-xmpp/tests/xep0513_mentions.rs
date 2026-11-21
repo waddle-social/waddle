@@ -520,3 +520,88 @@ fn xep0513_extract_returns_none_when_no_mention_payloads() {
     assert!(!has_explicit_mentions(&msg));
     assert!(extract_explicit_mentions(&msg).is_none());
 }
+
+// ── Who may broadcast a channel mention ─────────────────────────────
+
+/// The `sender_can_broadcast_channel_mention` flag of every inbox
+/// projection the room chain emits for a groupchat from a moderator-role
+/// occupant, with `decision` passed in as the interpreter's pre-dispatch
+/// decision.
+fn channel_mention_flags(decision: Option<bool>) -> Vec<bool> {
+    use waddle_xmpp::protocol::event::OutboundEvent;
+    use waddle_xmpp::protocol::id_gen::FixedIdGenerator;
+    use waddle_xmpp::protocol::room::context::{OccupantSnapshot, RoomContext};
+    use waddle_xmpp::protocol::room::inbox::MucInboxHandler;
+    use waddle_xmpp::protocol::room::traits::{RoomHandler, RoomHandlerOutcome};
+    use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+
+    let room: BareJid = "team@conference.example.com".parse().expect("room");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let occupants = vec![OccupantSnapshot {
+        full_jid: sender.clone(),
+        nick: "alice".to_string(),
+        affiliation: Affiliation::Member,
+        role: Role::Moderator,
+    }];
+    let durable = vec!["bob@example.com".parse::<BareJid>().expect("recipient")];
+    let id_gen = FixedIdGenerator("fixed-stanza-id".to_string());
+    let secret =
+        OccupantIdSecret::try_new(vec![7u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("secret");
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &sender,
+        occupants: &occupants,
+        durable_recipient_bare_jids: &durable,
+        mention_recipients: waddle_xmpp::protocol::room::MentionRecipients::Empty,
+        managed_room_forbidden: false,
+        room_moderated: false,
+        room_occupants_may_change_subject: false,
+        room_members_only: true,
+        pin_permission: waddle_xmpp::muc::PinPermission::default(),
+        id_gen: &id_gen,
+        occupant_id_secret: &secret,
+        sender_nickname_generation: 0,
+        project_sender_inbox: true,
+        synthetic_sender_authority: None,
+        channel_mention_decision: decision,
+        dispatch_timestamp: 0,
+    };
+    let mut message = Message::new(Some(jid::Jid::from(room.clone())));
+    message.from = Some(jid::Jid::from(sender.clone()));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello all".to_string());
+    set_explicit_mentions(
+        &mut message,
+        &ExplicitMentions::new().with_mention(ExplicitMention::channel()),
+    );
+    let RoomHandlerOutcome::Continue(events) = MucInboxHandler.handle(&mut message, &ctx) else {
+        panic!("the inbox projection halted the chain");
+    };
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            OutboundEvent::ProjectGroupchatInbox {
+                sender_can_broadcast_channel_mention,
+                ..
+            } => Some(sender_can_broadcast_channel_mention),
+            _ => None,
+        })
+        .collect()
+}
+
+/// §"Multi-User Chats Permissions": the room decides who may broadcast a
+/// channel mention. Without a decision of the server's own, a
+/// moderator-role sender may. Where the server decided it before dispatch
+/// (in a room whose grants are held outside the room's own roles), that
+/// decision applies to every projection, whatever role the room seats the
+/// sender with.
+#[test]
+fn xep0513_a_servers_decision_on_channel_mentions_overrides_the_seated_role() {
+    let by_role = channel_mention_flags(None);
+    assert_eq!(by_role, vec![true, true], "role-decided projections");
+    let refused = channel_mention_flags(Some(false));
+    assert_eq!(refused, vec![false, false], "server-refused projections");
+}

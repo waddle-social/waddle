@@ -269,6 +269,7 @@ fn run_chain(
         sender_nickname_generation: 0,
         project_sender_inbox: true,
         synthetic_sender_authority: None,
+        channel_mention_decision: None,
         dispatch_timestamp: 0,
     };
     let mut events = Vec::new();

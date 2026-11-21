@@ -12,6 +12,7 @@ use super::{Database, DatabaseError};
 enum AuthTable {
     Users,
     Sessions,
+    RetiredJids,
 }
 
 impl AuthTable {
@@ -19,6 +20,7 @@ impl AuthTable {
         match self {
             Self::Users => "users",
             Self::Sessions => "sessions",
+            Self::RetiredJids => "retired_account_jids",
         }
     }
 }
@@ -149,6 +151,33 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
             ],
         )
         .await?;
+
+        // The insert above creates the account row of a JID that has none.
+        // A retired JID gets neither that row nor a session: the ledger is
+        // read in this transaction, after the insert, so a retirement that
+        // commits meanwhile is seen (`auth::retirement`).
+        if let Some(key) = msg
+            .user_jid
+            .parse::<jid::BareJid>()
+            .ok()
+            .and_then(|jid| crate::auth::retirement::retirement_key_of(&jid))
+        {
+            let retired = auth_table_reference(&self.db, AuthTable::RetiredJids);
+            let mut rows = tx
+                .query(
+                    &format!("SELECT 1 FROM {retired} WHERE jid_key = ?"),
+                    crate::db_params![key],
+                )
+                .await?;
+            let is_retired = rows.next().await?.is_some();
+            drop(rows);
+            if is_retired {
+                tx.rollback().await?;
+                return Err(DatabaseError::QueryFailed(
+                    crate::auth::retirement::RETIRED_JID_REFUSAL.to_owned(),
+                ));
+            }
+        }
 
         // The column is TEXT on both engines (index-served principal
         // resolution with one shared SQL string); bind the string form.

@@ -237,6 +237,18 @@ async fn send_presence_stanza_to_jid(
     context: &'static str,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
+    // A remote JID is reached through the remote route (gate G18), as the
+    // presence a block or an unblock sends it (XEP-0191 §3.3).
+    if crate::server::routes::websocket::handlers::presence::is_remote_contact(state, &to.to_bare())
+    {
+        if let Stanza::Presence(presence) = stanza {
+            let _ = crate::server::routes::websocket::handlers::presence::offer_presence(
+                state, presence,
+            )
+            .await;
+        }
+        return;
+    }
     if let Ok(full_to) = to.clone().try_into_full() {
         if try_route_presence_to_full_remote(state, &full_to, &stanza, ordered_relay_origin).await {
             return;
@@ -314,6 +326,21 @@ pub async fn broadcast_unavailable_for_terminated_session(
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(Jid::from(from.clone()));
         presence.to = Some(Jid::from(subscriber.clone()));
+        // RFC 6121 §4.5.2: a remote contact's server is told through the
+        // remote route (gate G18); a refusal drops it.
+        if crate::server::routes::websocket::handlers::presence::is_remote_contact(
+            state,
+            &subscriber,
+        ) {
+            // XEP-0191 §3.3: nothing is routed to a JID the account blocks.
+            if !super::recipient_blocks_sender(state, &from_bare, &subscriber).await {
+                let _ = crate::server::routes::websocket::handlers::presence::offer_presence(
+                    state, presence,
+                )
+                .await;
+            }
+            continue;
+        }
         let stanza = Stanza::Presence(presence);
         send_stanza_to_available_user_resources_and_detached_available(
             state,

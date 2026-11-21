@@ -36,7 +36,7 @@ use super::{
     XmppChannelRecord,
 };
 use super::{get_managed_channel_for_room, parse_room_jid_context};
-use super::{resolve_managed_channel_affiliation, server_permission_allowed};
+use super::{resolve_managed_channel_admission, server_permission_allowed};
 
 #[cfg(any(test, feature = "clustering"))]
 pub async fn handle_muc_join(
@@ -60,6 +60,8 @@ pub async fn handle_muc_join(
             authenticated_session: connection.authenticated_session,
             registry_owner: connection.registry_owner,
             ordered_relay_origin: None,
+            evidence: crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            owned_state: None,
         },
     )
     .await
@@ -103,6 +105,15 @@ pub struct MucJoinRequest<'a> {
     pub authenticated_session: Option<&'a Session>,
     pub registry_owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
+    /// How the join reached the room: without an S2S stream for a session
+    /// of this deployment, or on the inbound stream that carried a remote
+    /// principal's join. Every decision the join takes for the joiner
+    /// names it.
+    pub evidence: crate::permissions::host_grant::PrincipalEvidence,
+    /// The state, owned, where the caller holds it so: work the join
+    /// starts that must not be cut short with the join's own handling runs
+    /// on a task of its own with it. `None` runs that work inline.
+    pub owned_state: Option<&'a std::sync::Arc<WebSocketState>>,
 }
 
 pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoinWork<'a> {
@@ -120,6 +131,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoin
         Option<&'a Session>,
     pub(in crate::server::routes::websocket::handlers::presence::muc) ordered_relay_origin:
         Option<OrderedRelayRouteOrigin>,
+    pub(in crate::server::routes::websocket::handlers::presence::muc) evidence:
+        crate::permissions::host_grant::PrincipalEvidence,
+    pub(in crate::server::routes::websocket::handlers::presence::muc) owned_state:
+        Option<&'a std::sync::Arc<WebSocketState>>,
 }
 
 pub async fn handle_muc_join_with_ordered_relay(
@@ -146,6 +161,8 @@ pub async fn handle_muc_join_with_ordered_relay(
             registry_owner: request.registry_owner,
             authenticated_session: request.authenticated_session,
             ordered_relay_origin: request.ordered_relay_origin,
+            evidence: request.evidence,
+            owned_state: request.owned_state,
         },
     )
     .await
@@ -386,12 +403,170 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn run_r
     }
 }
 
+/// Of the occupants a room seats now (`seated`), those told that a remote
+/// joiner left when its unannounced seat was undone: every one but the
+/// joiner itself, those the room answered the joiner with (`present`), and
+/// those that now hold the joiner's nickname (`nick_holders`), whose own
+/// occupant JID the presence would name.
+pub(crate) fn undone_join_recipients(
+    seated: Vec<FullJid>,
+    present: &HashSet<FullJid>,
+    joiner: &FullJid,
+    nick_holders: &[FullJid],
+) -> Vec<FullJid> {
+    seated
+        .into_iter()
+        .filter(|occupant| {
+            occupant != joiner && !present.contains(occupant) && !nick_holders.contains(occupant)
+        })
+        .collect()
+}
+
+/// How long the room is read for its occupants after a remote joiner's
+/// seat was undone.
+const UNDONE_JOIN_READ: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A remote joiner's seat undone without being announced, and what the
+/// room had answered the joiner with: what telling the occupants that
+/// entered since needs, owned so that it can run on a task of its own.
+///
+/// Nobody present when the room seated the joiner was told of it, which is
+/// why the removal is announced to nobody. An occupant that entered between
+/// the seat and its removal was: the answer to its own join named the
+/// joiner among those present. Those are the occupants the room seats now
+/// that were not among the ones it answered the joiner with, and each is
+/// sent the joiner's unavailable presence with status 333 (XEP-0045 §11.1).
+/// An occupant that entered after the removal is among them and is told of
+/// an occupant it never saw, which a client ignores. An occupant that left
+/// and entered again under the same full JID meanwhile is not told, and
+/// neither is one that now holds the joiner's nickname, whose own occupant
+/// JID the presence would name. The room is read once, for its occupants
+/// and who holds that nickname together.
+struct UndoneJoin {
+    room_actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: BareJid,
+    joiner: FullJid,
+    nick: String,
+    affiliation: Affiliation,
+    present: HashSet<FullJid>,
+}
+
+impl UndoneJoin {
+    fn new(
+        room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        room_jid: &BareJid,
+        joiner: &FullJid,
+        nick: &str,
+        outcome: &waddle_xmpp::muc::room_actor::JoinOutcome,
+    ) -> Self {
+        Self {
+            room_actor: room_actor.clone(),
+            room_jid: room_jid.clone(),
+            joiner: joiner.clone(),
+            nick: nick.to_owned(),
+            affiliation: outcome.new_occupant_affiliation,
+            present: outcome
+                .existing_occupants
+                .iter()
+                .map(|existing| existing.jid.clone())
+                .collect(),
+        }
+    }
+
+    /// Tell the occupants that entered after the joiner was seated, on a
+    /// task of its own where `owned` is given, so that a bound on the
+    /// join's own handling does not cut the notices short; inline
+    /// otherwise.
+    async fn tell(self, state: &WebSocketState, owned: Option<&std::sync::Arc<WebSocketState>>) {
+        match owned {
+            Some(owned) => {
+                tokio::spawn(self.told_by(std::sync::Arc::clone(owned)));
+            }
+            None => self.tell_later_entrants(state).await,
+        }
+    }
+
+    /// [`Self::tell_later_entrants`] as a task of its own. The join that
+    /// starts it is itself reached from the delivery it awaits, so its
+    /// type is named here rather than inferred.
+    fn told_by(
+        self,
+        state: std::sync::Arc<WebSocketState>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(async move { self.tell_later_entrants(&state).await })
+    }
+
+    async fn tell_later_entrants(self, state: &WebSocketState) {
+        let snapshot = self
+            .room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(UNDONE_JOIN_READ)
+            .await;
+        let Ok(snapshot) = snapshot else {
+            warn!(
+                room = %self.room_jid,
+                "the occupants of a room whose join was undone could not be read"
+            );
+            return;
+        };
+        let Ok(from) = self.room_jid.with_resource_str(&self.nick) else {
+            return;
+        };
+        let recipients = undone_join_recipients(
+            snapshot
+                .room
+                .seated_session_generations()
+                .into_iter()
+                .map(|(occupant, _)| occupant)
+                .collect(),
+            &self.present,
+            &self.joiner,
+            &snapshot.room.occupant_sessions(&self.nick),
+        );
+        let joiner_bare = self.joiner.to_bare();
+        for occupant in recipients {
+            let identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                bare_jid: &joiner_bare,
+                real_jid: Some(&self.joiner),
+                secret: &state.deps.occupant_id_secret,
+                hats: &state.deps.app_state.server_hats,
+            };
+            let presence = waddle_xmpp::muc::build_leave_presence(
+                &from,
+                &occupant,
+                self.affiliation,
+                waddle_xmpp::muc::MucPresenceStatus::new(false, false)
+                    .removed_by(waddle_xmpp::muc::MucRemovalCause::TechnicalProblem),
+                &identity,
+            );
+            route_room_presence_to_occupant(
+                state,
+                &self.room_jid,
+                &occupant,
+                Stanza::Presence(presence),
+            )
+            .await;
+        }
+    }
+}
+
 pub(crate) async fn route_room_presence_to_occupant(
     state: &WebSocketState,
     room_jid: &BareJid,
     recipient: &FullJid,
     stanza: Stanza,
 ) {
+    // An occupant the room seats from another server is reached through
+    // server-to-server routing, which takes only what a room sends a seat.
+    let stanza = match state
+        .deps
+        .protocol
+        .connection_registry
+        .offer_foreign(recipient, stanza)
+    {
+        Ok(()) => return,
+        Err(stanza) => *stanza,
+    };
     if super::try_deliver_registered_remote_resource(state, recipient, &stanza).await {
         return;
     }
@@ -876,9 +1051,39 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         authenticated_session,
         registry_owner,
         ordered_relay_origin,
+        evidence,
+        owned_state,
     } = request;
     #[cfg(not(feature = "clustering"))]
     let _ = &ordered_relay_origin;
+    // A remote principal's join (ADR-0020 D10) is decided on the evidence
+    // of the stream that carried it. Whatever the room holds for it counts
+    // only while its domain is admitted under the S2S snapshot this replica
+    // runs (D1), which is decided here, at the join, and not taken from the
+    // stream's own admission.
+    let remote = matches!(
+        evidence,
+        crate::permissions::host_grant::PrincipalEvidence::Stream(_)
+    );
+    if remote
+        && !super::access::principal_witness(state, &sender_jid.to_bare(), &evidence)
+            .is_some_and(|witness| witness.grants_honoured())
+    {
+        return deny_join_admission(
+            room_jid,
+            sender_jid,
+            &nick,
+            false,
+            JoinAdmissionDenial {
+                condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                error_type: ErrorType::Auth,
+                deny_reason:
+                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
+                resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+                message: "This room does not admit your server.",
+            },
+        );
+    }
 
     // Resolver-derived first joins bump the admission revision, so a
     // burst of concurrent first-time joiners can hit several stale
@@ -983,6 +1188,47 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             .as_ref()
             .map(|snapshot| snapshot.admission_revision)
             .unwrap_or(0);
+        // A room an enrolled host-grant scope manages is entered through its
+        // channel row and its canonical grants only. Without a channel row it
+        // would be joined as an instant room under the room actor's own
+        // admission, so it is refused instead, as is a room whose management
+        // cannot be read.
+        if managed_channel.is_none() {
+            use crate::permissions::host_grant::{RoomBinding, RoomGate};
+            match state
+                .deps
+                .app_state
+                .host_grants
+                .room(RoomBinding::Room(room_jid))
+                .await
+            {
+                RoomGate::Unmanaged => {}
+                RoomGate::Managed(_) | RoomGate::Unavailable => {
+                    return deny_join_admission(
+                        room_jid,
+                        sender_jid,
+                        &nick,
+                        false,
+                        JoinAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ServiceUnavailable,
+                            error_type: ErrorType::Cancel,
+                            deny_reason:
+                                waddle_xmpp::telemetry::attributes::MucJoinDenyReason::ManagedChannelLookup,
+                            resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+                            message: "The room is not available.",
+                        },
+                    );
+                }
+            }
+        }
+        // Whether an enrolled host-grant scope manages the room: its actor
+        // is then created members-only whatever its channel row says.
+        let mut host_grant_managed = false;
+        // The revocation-fence ticket of the decision that admits the joiner
+        // to a managed room. The room actor asks it in the turn that seats
+        // the occupant.
+        let mut host_grant_ticket = None;
         let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
             let Some(session) = authenticated_session else {
                 return deny_join_admission(
@@ -1022,9 +1268,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     },
                 );
             };
-            match resolve_managed_channel_affiliation(
+            let resolved = resolve_managed_channel_admission(
                 state,
                 &session_bare,
+                &evidence,
                 room_jid,
                 &channel.id,
                 admission_members_only,
@@ -1032,7 +1279,18 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 true,
             )
             .await
-            {
+            .map(|(resolved, ticket)| {
+                host_grant_ticket = ticket;
+                resolved
+            });
+            let admission_members_only = match &resolved {
+                Ok(resolved) => {
+                    host_grant_managed = resolved.host_grant_managed;
+                    resolved.members_only
+                }
+                Err(()) => admission_members_only,
+            };
+            match resolved.map(|resolved| resolved.affiliation) {
                 Ok(Some(Affiliation::Outcast)) => {
                     // The resolver's Outcast comes from the permission
                     // graph (resolver-derived), so mirror it into a live
@@ -1136,6 +1394,62 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             .map(ManagedAdmissionResolverOutcome::Resolved)
             .unwrap_or(ManagedAdmissionResolverOutcome::NotConsulted);
 
+        // A room no enrolled scope manages keeps explicit affiliations in
+        // its actor, which a resolver's answer does not replace. An owner
+        // or admin entry of a remote principal counts only for a trusted
+        // home on a `pkix` stream (ADR-0020 D8); one that is not honoured
+        // contributes nothing, and the actor would count it, so the join is
+        // refused. A room without a channel row is never created for a
+        // remote principal: creating a room makes its creator the owner.
+        if remote && !host_grant_managed {
+            let stored = existing_room_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.room.affiliation(&sender_jid.to_bare()));
+            let refusal = match stored {
+                None if managed_channel.is_none() => Some((
+                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ItemNotFound,
+                    ErrorType::Cancel,
+                    waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomCreationNotPermitted,
+                    "Requested item not found.",
+                )),
+                // A channel-backed room whose actor is not live yet is
+                // decided once it has seated the joiner, below.
+                None => None,
+                Some(stored)
+                    if super::access::honoured_legacy_affiliation(
+                        state,
+                        &sender_jid.to_bare(),
+                        &evidence,
+                        Some(stored),
+                    ) != Some(stored) =>
+                {
+                    Some((
+                        waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                        ErrorType::Auth,
+                        waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
+                        "Your standing in this room is honoured only over a \
+                         certificate-authenticated stream from a trusted server.",
+                    ))
+                }
+                Some(_) => None,
+            };
+            if let Some((condition, error_type, deny_reason, message)) = refusal {
+                return deny_join_admission(
+                    room_jid,
+                    sender_jid,
+                    &nick,
+                    managed_channel.is_some(),
+                    JoinAdmissionDenial {
+                        condition,
+                        error_type,
+                        deny_reason,
+                        resolver_outcome,
+                        message,
+                    },
+                );
+            }
+        }
+
         let (room_actor, created_instant_room) = match existing_room_actor {
             Some(actor) => (actor, false),
             None => {
@@ -1166,7 +1480,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     );
                 }
 
-                let config = managed_channel
+                let mut config = managed_channel
                     .as_ref()
                     .map(XmppChannelRecord::room_config)
                     .unwrap_or_else(|| RoomConfig {
@@ -1175,8 +1489,15 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string()),
                         members_only: false,
+                        // A room its first occupant creates starts with the
+                        // deployment's federated setting; one built from
+                        // the catalog keeps the setting stored for it.
+                        federated: state.deps.app_state.federates_new_rooms(),
                         ..Default::default()
                     });
+                // The room binding of an enrolled scope is members-only
+                // (`host_grant_rooms.access_model`).
+                config.members_only |= host_grant_managed;
 
                 let (waddle_id, channel_id) = managed_channel
                     .as_ref()
@@ -1421,17 +1742,42 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             debug!(room = %room_jid, sender = %sender_jid, "MUC join abandoned: connection superseded before commit");
             return Vec::new();
         }
-        let join_outcome = match room_actor
-            .ask(JoinWithAffiliation {
-                sender_jid: sender_jid.clone(),
-                nick: nick.clone(),
-                affiliation_grant,
-                session: occupancy_session,
-                local_domain: domain.clone(),
-                admission_revision,
-            })
-            .await
-        {
+        let join = JoinWithAffiliation {
+            sender_jid: sender_jid.clone(),
+            nick: nick.clone(),
+            affiliation_grant,
+            session: occupancy_session,
+            local_domain: domain.clone(),
+            admission_revision,
+        };
+        // A managed room's joiner was admitted by a decision the revocation
+        // fence can overtake while the join waits for the actor: the actor
+        // asks the decision's ticket before it seats the occupant, and a
+        // decision that is no longer current is made again like a stale
+        // admission revision.
+        let joined = match host_grant_ticket.clone() {
+            Some(ticket) => room_actor
+                .ask(
+                    waddle_xmpp::muc::room_actor::JoinWithAffiliationIfAdmitted {
+                        join,
+                        admission: waddle_xmpp::muc::room_actor::AdmissionCheck::new(move || {
+                            ticket.is_current()
+                        }),
+                    },
+                )
+                .await
+                .map_err(|error| error.map_msg(|admitted| admitted.join)),
+            None => room_actor.ask(join).await,
+        };
+        // A seat that was admitted and then recorded while a newer
+        // generation was installed is one the sweep has not seen: it sweeps
+        // the scope again.
+        if let (Ok(_), Some(ticket)) = (&joined, &host_grant_ticket) {
+            if !ticket.is_current() {
+                ticket.request_sweep();
+            }
+        }
+        let join_outcome = match joined {
             Ok(outcome) => outcome,
             Err(error) => {
                 // #1108: sealed-for-destruction room actor, or an ask
@@ -1702,6 +2048,55 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             }
         };
 
+        // ADR-0020 D8 where the seat is taken: whatever the room held for a
+        // remote principal, it holds an owner or admin affiliation or the
+        // moderator role only when its home is a trusted home and a `pkix`
+        // stream carried the join. A seat the room gave on a standing that
+        // is not honoured is given up before anyone is told of it, and so
+        // without telling anyone that it ended: the occupants were not
+        // sent the joiner's presence yet, and the joiner is answered with
+        // the refusal.
+        if remote {
+            let privileged = matches!(
+                join_outcome.new_occupant_affiliation,
+                Affiliation::Owner | Affiliation::Admin
+            ) || join_outcome.new_occupant_role == waddle_xmpp::Role::Moderator;
+            let honoured =
+                super::access::principal_witness(state, &sender_jid.to_bare(), &evidence)
+                    .is_some_and(|witness| witness.privilege_honoured());
+            if privileged && !honoured {
+                crate::server::routes::websocket::cleanup::sweep_abandoned_room_occupancy(
+                    state,
+                    room_jid,
+                    sender_jid,
+                    waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                        occupancy_session,
+                    ),
+                    waddle_xmpp::muc::MucRemovalCause::Unannounced,
+                )
+                .await;
+                UndoneJoin::new(&room_actor, room_jid, sender_jid, &nick, &join_outcome)
+                    .tell(state, owned_state)
+                    .await;
+                return deny_join_admission(
+                    room_jid,
+                    sender_jid,
+                    &nick,
+                    managed_channel.is_some(),
+                    JoinAdmissionDenial {
+                        condition:
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                        error_type: ErrorType::Auth,
+                        deny_reason:
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::MembershipRequired,
+                        resolver_outcome,
+                        message: "Your standing in this room is honoured only over a \
+                                  certificate-authenticated stream from a trusted server.",
+                    },
+                );
+            }
+        }
+
         let occupant_count = join_outcome.occupant_count;
         let self_muji = join_outcome
             .existing_occupants
@@ -1725,13 +2120,17 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         // presence carried a typed `<show/>` token; on first join (or
         // when no `<show/>` is present) we record `None` so the column
         // stays NULL until the user actually broadcasts a state.
-        crate::server::routes::interpret::record_presence_available_activity_on_state(
-            state,
-            &sender_jid.to_bare(),
-            room_jid,
-            presence_show,
-        )
-        .await;
+        // The activity projection feeds this deployment's push filter; a
+        // remote occupant has no devices here.
+        if !remote {
+            crate::server::routes::interpret::record_presence_available_activity_on_state(
+                state,
+                &sender_jid.to_bare(),
+                room_jid,
+                presence_show,
+            )
+            .await;
+        }
 
         let mut responses = Vec::new();
 

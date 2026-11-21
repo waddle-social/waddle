@@ -1,4 +1,4 @@
-use super::{Element, Feature, WebSocketState};
+use super::{Element, Feature, WebSocketState, HOME_FEDERATION_FEATURE};
 use crate::push_service::commands::DISABLE_DEVICE_NODE;
 use crate::push_service::commands::REGISTER_DEVICE_NODE;
 
@@ -82,7 +82,14 @@ pub(super) fn extension_features_for_disco(state: &WebSocketState) -> Vec<Featur
 }
 
 pub(super) fn extension_namespaces_for_disco(namespaces: Vec<String>) -> Vec<Feature> {
-    namespaces.into_iter().map(|ns| Feature::new(&ns)).collect()
+    namespaces
+        .into_iter()
+        .filter_map(|ns| extension_namespace_feature(&ns))
+        .collect()
+}
+
+pub(super) fn extension_namespace_feature(namespace: &str) -> Option<Feature> {
+    (namespace != HOME_FEDERATION_FEATURE).then(|| Feature::new(namespace))
 }
 
 pub(super) fn extension_route_metadata_form(

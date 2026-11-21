@@ -45,9 +45,11 @@ function createDiscoveryXmpp(
     async send_raw_iq(xml: string): Promise<string> {
       if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
         if (xml.includes('to="example.test"')) {
+          // The MUC service is not at its conventional name, so a room
+          // address cached from discovery is told from the fallback guess.
           return discoItemsXml([
             { jid: "spaces.example.test", name: "Spaces" },
-            { jid: "muc.example.test", name: "Chatrooms" },
+            { jid: "rooms.example.test", name: "Chatrooms" },
           ]);
         }
         if (xml.includes('to="spaces.example.test"')) {
@@ -57,7 +59,7 @@ function createDiscoveryXmpp(
               ])
             : discoItemsXml([]);
         }
-        if (xml.includes('to="muc.example.test"')) {
+        if (xml.includes('to="rooms.example.test"')) {
           if (!state.mucCatalogAvailable) {
             throw new Error("temporary MUC catalog failure");
           }
@@ -79,7 +81,7 @@ function createDiscoveryXmpp(
           throw new Error("temporary room hydration failure");
         }
         if (
-          xml.includes('to="muc.example.test"')
+          xml.includes('to="rooms.example.test"')
           || state.roomJids.some((jid) => xml.includes(`to="${jid}"`))
           || state.bookmarks.some(({ id }) => xml.includes(`to="${id}"`))
         ) {

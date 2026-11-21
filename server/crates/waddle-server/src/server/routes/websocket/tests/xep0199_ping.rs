@@ -69,7 +69,7 @@ async fn dispatch(state: &WebSocketState, conn: &mut WsConnState, iq: Iq) -> Vec
     .collect()
 }
 
-fn assert_remote_not_allowed(reply: &Iq, request: &Iq) {
+fn assert_remote_unroutable(reply: &Iq, request: &Iq) {
     assert_eq!(reply.id(), request.id());
     assert_eq!(reply.from(), request.to(), "RFC 6120 swapped target");
     assert_eq!(reply.to(), Some(&Jid::from(origin())), "bound origin");
@@ -77,7 +77,10 @@ fn assert_remote_not_allowed(reply: &Iq, request: &Iq) {
         panic!("foreign destination must never produce a pong: {reply:?}");
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(
         error.by,
         Some(DOMAIN.parse().expect("local error generator"))
@@ -109,7 +112,7 @@ async fn foreign_ping_get_and_set_return_locally_attributed_error() {
                 let iq = request(Some(target), set, from);
                 let responses = dispatch(&state, &mut conn, iq.clone()).await;
                 assert_eq!(responses.len(), 1, "{target}, set={set}, from={from:?}");
-                assert_remote_not_allowed(&responses[0], &iq);
+                assert_remote_unroutable(&responses[0], &iq);
             }
         }
     }
@@ -122,11 +125,11 @@ async fn foreign_occupant_ping_cannot_confirm_room_membership() {
     let iq = request(Some("room@muc.remote.test/alice"), false, Some(ORIGIN));
     let responses = dispatch(&state, &mut conn, iq.clone()).await;
     assert_eq!(responses.len(), 1);
-    assert_remote_not_allowed(&responses[0], &iq);
-    // Exercise the existing XEP-0410 interpretation on the actual parsed wire
-    // response: service-unavailable would incorrectly mean still joined.
+    assert_remote_unroutable(&responses[0], &iq);
+    // XEP-0410 §3.2 on the actual parsed wire response: remote-server-not-found
+    // is undecided, never "still joined" as service-unavailable would be.
     let membership = interpret_self_ping_response(&responses[0]);
-    assert_eq!(membership, SelfPingResult::Disconnected);
+    assert_eq!(membership, SelfPingResult::Timeout);
     assert!(membership.should_rejoin());
 }
 
@@ -204,7 +207,7 @@ async fn configured_service_domains_are_owned_and_replaced_defaults_are_foreign(
         let iq = request(Some(target), false, Some(ORIGIN));
         let responses = dispatch(&state, &mut conn, iq.clone()).await;
         assert_eq!(responses.len(), 1);
-        assert_remote_not_allowed(&responses[0], &iq);
+        assert_remote_unroutable(&responses[0], &iq);
     }
 }
 
@@ -346,7 +349,7 @@ async fn foreign_rejection_settles_sm_inbound_once_and_does_not_block_local_prog
     let iq = request(Some("remote.test"), false, Some(ORIGIN));
     let responses = dispatch(&state, &mut conn, iq.clone()).await;
     assert_eq!(responses.len(), 1);
-    assert_remote_not_allowed(&responses[0], &iq);
+    assert_remote_unroutable(&responses[0], &iq);
     assert_eq!(conn.sm_state.inbound_count(), 1);
     let local = dispatch(&state, &mut conn, request(None, false, Some(ORIGIN))).await;
     assert!(matches!(local.as_slice(), [Iq::Result { .. }]));
@@ -354,7 +357,7 @@ async fn foreign_rejection_settles_sm_inbound_once_and_does_not_block_local_prog
 }
 
 #[tokio::test]
-async fn foreign_ping_before_binding_keeps_authentication_error() {
+async fn foreign_ping_before_binding_is_refused_as_not_authorized() {
     let state = create_test_websocket_state().await;
     for phase in [
         ConnectionPhase::new(),
@@ -365,12 +368,9 @@ async fn foreign_ping_before_binding_keeps_authentication_error() {
         let responses =
             dispatch(&state, &mut conn, request(Some("remote.test"), false, None)).await;
         let [Iq::Error { error, .. }] = responses.as_slice() else {
-            panic!("authentication error: {responses:?}")
+            panic!("RFC 6120 §7.1 not-authorized refusal: {responses:?}")
         };
         assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
-        assert!(
-            error.by.is_none(),
-            "remote routing gate must run after authentication"
-        );
+        assert!(error.by.is_none(), "an unbound stream has nothing routed");
     }
 }

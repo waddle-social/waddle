@@ -2,16 +2,20 @@ use super::{
     bad_request_iq_error, build_admin_result, build_admin_set_result, build_iq_error_xml_typed,
     build_iq_error_xml_with_payload, build_role_result, build_xmpp_error_response,
     conflict_iq_error, forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error,
-    iq_to_xml, is_role_change_query, item_not_found_iq_error, not_allowed_iq_error,
-    not_authorized_iq_error, parse_admin_query, response_batch_from_inline_room_effect_frames,
-    stanza_to_xml, warn, AdminItem, Affiliation, ApplyAdminItems, BareJid, FullJid,
-    GetAdminContext, GetSnapshot, Jid, Object, ObjectType, Relation, ResponseBatch, Stanza,
-    Subject, WebSocketState,
+    iq_to_xml, is_role_change_query, item_not_found_iq_error, jid_malformed_iq_error,
+    not_allowed_iq_error, not_authorized_iq_error, parse_admin_query,
+    response_batch_from_inline_room_effect_frames, stanza_to_xml, warn, AdminItem, Affiliation,
+    ApplyAdminItems, BareJid, FullJid, GetAdminContext, GetSnapshot, Jid, Object, ObjectType,
+    Relation, ResponseBatch, Stanza, Subject, WebSocketState,
 };
 use crate::admin::channels::{
-    acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
+    acquire_room_config_lock_within, explicit_channel_affiliations_for_jids,
+    reacquire_config_actor, ROOM_CONFIG_LOCK_WAIT,
 };
-use crate::permissions::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
+use crate::permissions::host_grant::PrincipalEvidence;
+use crate::permissions::{
+    AuthzUserJid, ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation,
+};
 use crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary;
 use crate::room_effect_outbox::RoomEffectOutboxError;
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
@@ -84,6 +88,22 @@ fn can_change_affiliation(
     }
 }
 
+/// A managed channel stores every affiliation as an authorization
+/// relationship whose subject must be a bare account JID within the codec
+/// limits. Checked for the whole batch before any state changes, so a
+/// domain-only or oversized target is a client error (`jid-malformed`), not a
+/// failed write halfway through the batch. Unmanaged rooms keep affiliations
+/// in room state only and accept any bare JID.
+fn managed_affiliation_targets_are_accounts(
+    room_jid: &BareJid,
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> bool {
+    waddle_xmpp::parse_managed_room_jid(room_jid).is_none()
+        || affiliation_updates
+            .iter()
+            .all(|(jid, _)| AuthzUserJid::new(jid.clone()).is_ok())
+}
+
 pub(in crate::server::routes::websocket::handlers) async fn persist_managed_channel_affiliation(
     state: &WebSocketState,
     channel_id: &str,
@@ -105,6 +125,135 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
         })
         .await
         .map_err(|error| format!("replace affiliation tuple failed: {error}"))
+}
+
+/// What a room an enrolled host-grant scope manages accepts of an
+/// administration set, before anything is recorded: one affiliation change
+/// per request, so that what is recorded is what the room actor applies,
+/// an owner or admin standing only for an account none of whose seats in
+/// the room would hold the moderator role it derives on a stream that does
+/// not carry it, and the moderator role only for occupants whose witness
+/// honours room moderation (accounts of a served domain, and remote
+/// occupants seated on a trusted home's `pkix` stream).
+async fn check_host_grant_admin_items(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    items: &[AdminItem],
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
+    if affiliation_updates.len() > 1 {
+        return Err(Box::new(super::not_acceptable_iq_error(
+            "This room takes one affiliation change per request.",
+        )));
+    }
+    check_privileged_seats(state, room_jid, affiliation_updates).await?;
+    check_moderator_role_items(state, room_actor, room_jid, items).await
+}
+
+/// Refuse a set that gives an owner or admin standing to an account one of
+/// whose seats in the room would not honour it (ADR-0020 D8): the room
+/// would make that occupant a moderator with the standing.
+///
+/// A remote occupant's seat is held by the replica that took its join,
+/// which need not be the one that holds the room, and another replica may
+/// adopt it, so the seats are read from the table every replica shares as
+/// well as from this replica's own. A set is refused while that table
+/// cannot be read.
+async fn check_privileged_seats(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
+    let global = state.deps.app_state.db_pool.global();
+    for (jid, affiliation) in affiliation_updates {
+        if !matches!(affiliation, Affiliation::Owner | Affiliation::Admin) {
+            continue;
+        }
+        match super::muc_admin_host_grant::seats_honour_privilege_anywhere(
+            state, global, room_jid, jid,
+        )
+        .await
+        {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Box::new(not_allowed_iq_error(
+                    "This account is in the room over a stream that does not carry owner or \
+                     admin standing. Grant it once that occupant has left, or has entered over \
+                     a certificate-authenticated stream of a trusted server.",
+                )));
+            }
+            None => {
+                return Err(Box::new(internal_server_error_iq_error(
+                    "The seats of occupants from other servers could not be read.",
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a room no enrolled scope manages accepts of an administration set
+/// under ADR-0020 D8, before its own checks: an owner or admin standing
+/// only for an account of this deployment or of a trusted home none of
+/// whose seats in the room would hold the moderator role it derives on a
+/// stream that does not carry it, and the moderator role only for
+/// occupants whose witness honours room moderation. The room's legacy
+/// stores are written without asking any of this.
+async fn check_legacy_admin_items(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    items: &[AdminItem],
+    affiliation_updates: &[(BareJid, Affiliation)],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
+    let privileged_refused = affiliation_updates.iter().any(|(jid, affiliation)| {
+        matches!(affiliation, Affiliation::Owner | Affiliation::Admin)
+            && !super::muc_admin_host_grant::privileged_standing_may_be_issued(state, jid)
+    });
+    if privileged_refused {
+        return Err(Box::new(not_allowed_iq_error(
+            "Owner and admin standing is granted to accounts of this deployment and of its \
+             trusted servers only.",
+        )));
+    }
+    check_privileged_seats(state, room_jid, affiliation_updates).await?;
+    check_moderator_role_items(state, room_actor, room_jid, items).await
+}
+
+/// Refuse a set that grants the moderator role to an occupant whose
+/// witness does not honour room moderation (ADR-0020 D8).
+async fn check_moderator_role_items(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    items: &[AdminItem],
+) -> Result<(), Box<xmpp_parsers::stanza_error::StanzaError>> {
+    let moderator_nicks: Vec<&str> = items
+        .iter()
+        .filter(|item| item.role == Some(waddle_xmpp::Role::Moderator))
+        .filter_map(|item| item.nick.as_deref())
+        .collect();
+    if moderator_nicks.is_empty() {
+        return Ok(());
+    }
+    match super::muc_admin_host_grant::occupants_may_moderate(
+        state,
+        room_actor,
+        room_jid,
+        &moderator_nicks,
+    )
+    .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Box::new(not_allowed_iq_error(
+            "The moderator role is granted to accounts of this deployment and, over a \
+             certificate-authenticated stream, of its trusted servers only.",
+        ))),
+        Err(()) => Err(Box::new(internal_server_error_iq_error(
+            "Internal server error.",
+        ))),
+    }
 }
 
 /// The mutually exclusive channel relations one managed affiliation occupies.
@@ -1038,6 +1187,69 @@ impl AdminListAnswer {
     }
 }
 
+/// Answer a muc#admin list GET for a room an enrolled host-grant scope
+/// manages. The role list is read from the room actor after the sender was
+/// decided a moderator, so the sender is decided again once it has been
+/// read: a list read after a revoke acknowledged meanwhile is not sent.
+async fn answer_host_grant_admin_list_get(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room: &crate::permissions::host_grant::ManagedRoomGrants,
+    sender_jid: &FullJid,
+    evidence: &PrincipalEvidence,
+    query: &waddle_xmpp::muc::AdminQuery,
+) -> AdminListAnswer {
+    use super::muc_admin_host_grant::{host_grant_affiliation_list, sender_moderates};
+    use crate::permissions::host_grant::{reach_checkpoint, DecisionCheckpoint, HostGrantAction};
+    if query.items.iter().any(admin_item_has_role_shape) {
+        if !sender_moderates(room, sender_jid, evidence) {
+            return AdminListAnswer::Denied(AdminListDenial::Forbidden);
+        }
+        let snapshot = match room_actor
+            .ask(GetSnapshot)
+            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+            .await
+        {
+            Ok(snapshot) => snapshot.room,
+            Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
+        };
+        reach_checkpoint(DecisionCheckpoint::AdminRoleListRead, &query.room_jid).await;
+        if !state
+            .deps
+            .app_state
+            .host_grants
+            .still_allows(
+                room,
+                &sender_jid.to_bare(),
+                evidence,
+                HostGrantAction::Moderate,
+            )
+            .await
+        {
+            return AdminListAnswer::Denied(AdminListDenial::Forbidden);
+        }
+        let role_filter = query.items.iter().find_map(|item| item.role);
+        return AdminListAnswer::Roles(
+            snapshot
+                .occupants
+                .values()
+                .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
+                .map(|occupant| AdminRoleEntry {
+                    nick: occupant.nick.clone(),
+                    role: occupant.role,
+                    affiliation: occupant.affiliation,
+                    real_jid: occupant.real_jid.clone(),
+                })
+                .collect(),
+        );
+    }
+    let filter = query.items.iter().find_map(|item| item.affiliation);
+    match host_grant_affiliation_list(room, sender_jid, evidence, filter) {
+        Ok(list) => AdminListAnswer::Affiliations(list),
+        Err(_) => AdminListAnswer::Denied(AdminListDenial::Forbidden),
+    }
+}
+
 /// Answer a muc#admin list GET from the room actor that owns the room.
 ///
 /// The requester's affiliation and role come from the live actor, and so
@@ -1045,11 +1257,33 @@ impl AdminListAnswer {
 /// only the actor holds. The local path and the owner side of a forwarded
 /// GET (#1298) both answer here, so a requester sees the same authorization
 /// and list whichever node it is connected to.
+///
+/// A room an enrolled host-grant scope manages answers from its canonical
+/// grants instead (`muc_admin_host_grant`): the requester's authority is
+/// the standing they honour, and the affiliation lists are the recorded
+/// grants. Only the role list still comes from the actor's occupants.
+///
+/// `evidence` is how the request reached the room: none for a session of
+/// this deployment, and the stream that carried it for a remote principal,
+/// whose standing is honoured as the effect boundary says (ADR-0020 D8).
 pub(super) async fn answer_admin_list_get(
+    state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     sender_jid: &FullJid,
+    evidence: &PrincipalEvidence,
     query: &waddle_xmpp::muc::AdminQuery,
 ) -> AdminListAnswer {
+    use crate::permissions::host_grant::RoomGate;
+    match super::muc_admin_host_grant::managed_room(state, &query.room_jid).await {
+        RoomGate::Unmanaged => {}
+        RoomGate::Unavailable => return AdminListAnswer::Denied(AdminListDenial::Internal),
+        RoomGate::Managed(room) => {
+            return answer_host_grant_admin_list_get(
+                state, room_actor, &room, sender_jid, evidence, query,
+            )
+            .await
+        }
+    }
     let context = match room_actor
         .ask(GetAdminContext {
             sender_jid: sender_jid.clone(),
@@ -1057,7 +1291,7 @@ pub(super) async fn answer_admin_list_get(
         .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
     {
-        Ok(context) => context,
+        Ok(context) => honoured_admin_context(state, sender_jid, evidence, context),
         Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
     };
     let has_admin_affiliation =
@@ -1120,11 +1354,46 @@ pub(super) async fn answer_admin_list_get(
     })
 }
 
+/// The standing a room no enrolled scope manages gives the sender of an
+/// administration request, as it is honoured for a request that reached
+/// the room with `evidence` (ADR-0020 D8): as the room holds it for a
+/// session of this deployment; for a remote principal an owner or admin
+/// affiliation and the moderator role only for a trusted home on a `pkix`
+/// stream, and nothing for a domain that is not admitted.
+fn honoured_admin_context(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    evidence: &PrincipalEvidence,
+    mut context: waddle_xmpp::muc::room_actor::AdminContext,
+) -> waddle_xmpp::muc::room_actor::AdminContext {
+    use crate::server::routes::websocket::handlers::presence::{
+        honoured_legacy_affiliation, principal_witness,
+    };
+    if matches!(evidence, PrincipalEvidence::NoStream) {
+        return context;
+    }
+    let account = sender_jid.to_bare();
+    context.affiliation =
+        honoured_legacy_affiliation(state, &account, evidence, Some(context.affiliation))
+            .unwrap_or(Affiliation::None);
+    let moderation_honoured = principal_witness(state, &account, evidence)
+        .is_some_and(|witness| witness.privilege_honoured());
+    if context.role == waddle_xmpp::Role::Moderator && !moderation_honoured {
+        context.role = waddle_xmpp::Role::Participant;
+    }
+    context
+}
+
+/// Handle a XEP-0045 `muc#admin` request of `sender_jid`, which reached
+/// the room with `evidence`: none for a session of this deployment, and
+/// for a remote principal the inbound S2S stream that carried the request.
+/// Every decision about the sender names that evidence.
 pub(super) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
     state: &WebSocketState,
     sender_jid: Option<&FullJid>,
+    evidence: &PrincipalEvidence,
     response_from: Option<&str>,
     response_to: Option<&str>,
 ) -> ResponseBatch {
@@ -1147,9 +1416,12 @@ pub(super) async fn handle_muc_admin_iq(
     let room_actor = match get_room_actor_result(state, &query.room_jid).await {
         Ok(Some(room_actor)) => room_actor,
         // #1298: another node may own the room's actor. A list GET is
-        // answered by that owner; nothing else is forwarded.
+        // answered by that owner; nothing else is forwarded. The forward
+        // names its requester without stream evidence, so only a session's
+        // request takes it: a remote principal's request is carried to the
+        // room's owner with its evidence before it reaches this handler.
         #[cfg(feature = "clustering")]
-        Ok(None) if query.is_get => {
+        Ok(None) if query.is_get && matches!(evidence, PrincipalEvidence::NoStream) => {
             return vec![
                 super::muc_admin_relay::forward_admin_list_get(
                     state,
@@ -1183,10 +1455,41 @@ pub(super) async fn handle_muc_admin_iq(
         }
     };
     if query.is_get {
-        let answer = answer_admin_list_get(&room_actor, sender_jid, &query).await;
+        let answer = answer_admin_list_get(state, &room_actor, sender_jid, evidence, &query).await;
         return vec![answer.into_frame(&query, sender_jid, response_from, response_to)].into();
     }
-    let _config_guard = acquire_room_config_lock(&query.room_jid).await;
+    // A room an enrolled host-grant scope manages is administered under its
+    // canonical grants (`muc_admin_host_grant`): they decide the sender's
+    // authority, and an affiliation change is recorded there before the
+    // room actor applies it, with no authorization relationship written
+    // here and no rollback.
+    let host_grant_room = {
+        use crate::permissions::host_grant::RoomGate;
+        match super::muc_admin_host_grant::managed_room(state, &query.room_jid).await {
+            RoomGate::Unmanaged => None,
+            RoomGate::Managed(room) => Some(room),
+            RoomGate::Unavailable => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    super::service_unavailable_iq_error("The room is not available."),
+                )]
+                .into();
+            }
+        }
+    };
+    let Some(_config_guard) =
+        acquire_room_config_lock_within(&query.room_jid, ROOM_CONFIG_LOCK_WAIT).await
+    else {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            resource_constraint_iq_error("The room is being administered; try again."),
+        )]
+        .into();
+    };
     let context = match room_actor
         .ask(GetAdminContext {
             sender_jid: sender_jid.clone(),
@@ -1194,7 +1497,10 @@ pub(super) async fn handle_muc_admin_iq(
         .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
     {
-        Ok(context) => context,
+        // In a room no scope manages the standing the room holds for the
+        // sender is what decides, as honoured for the request's evidence;
+        // the room actor applies the request under that standing.
+        Ok(context) => honoured_admin_context(state, sender_jid, evidence, context),
         Err(_) => {
             return vec![build_iq_error_xml_typed(
                 iq.id(),
@@ -1205,9 +1511,26 @@ pub(super) async fn handle_muc_admin_iq(
             .into();
         }
     };
-    let has_admin_affiliation =
-        matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
-    let is_admin = has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
+    let (sender_affiliation, has_admin_affiliation, is_admin) = match host_grant_room.as_ref() {
+        Some(room) => {
+            let moderates =
+                super::muc_admin_host_grant::sender_moderates(room, sender_jid, evidence);
+            (
+                super::muc_admin_host_grant::sender_affiliation(room, sender_jid, evidence),
+                moderates,
+                moderates,
+            )
+        }
+        None => {
+            let has_admin_affiliation =
+                matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
+            (
+                context.affiliation,
+                has_admin_affiliation,
+                has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator),
+            )
+        }
+    };
     if !is_admin {
         return vec![build_iq_error_xml_typed(
             iq.id(),
@@ -1254,6 +1577,30 @@ pub(super) async fn handle_muc_admin_iq(
             .filter_map(|item| item.jid.clone().zip(item.affiliation))
             .collect()
     };
+    let checked = if host_grant_room.is_some() {
+        check_host_grant_admin_items(state, &room_actor, &room_jid, &items, &affiliation_updates)
+            .await
+    } else {
+        check_legacy_admin_items(state, &room_actor, &room_jid, &items, &affiliation_updates).await
+    };
+    if let Err(error) = checked {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            *error,
+        )]
+        .into();
+    }
+    if !managed_affiliation_targets_are_accounts(&room_jid, &affiliation_updates) {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            jid_malformed_iq_error("Channel affiliations require a bare account JID."),
+        )]
+        .into();
+    }
     let pre_apply_snapshot = if is_role_change_query(&items) || !affiliation_updates.is_empty() {
         match room_actor
             .ask(GetSnapshot)
@@ -1270,6 +1617,21 @@ pub(super) async fn handle_muc_admin_iq(
                 let current_owner_count =
                     snapshot.room.jids_by_affiliation(Affiliation::Owner).len();
                 for (jid, affiliation) in &affiliation_updates {
+                    // A room an enrolled scope manages is decided by the
+                    // store, under its guard, from the canonical grants;
+                    // the room actor's list below is only its mirror.
+                    if host_grant_room.is_some() {
+                        if *affiliation == Affiliation::Outcast && *jid == sender_jid.to_bare() {
+                            return vec![build_iq_error_xml_typed(
+                                iq.id(),
+                                response_from,
+                                response_to,
+                                conflict_iq_error("Cannot ban yourself from a room."),
+                            )]
+                            .into();
+                        }
+                        continue;
+                    }
                     if *affiliation == Affiliation::Owner
                         && context.affiliation != Affiliation::Owner
                     {
@@ -1322,7 +1684,8 @@ pub(super) async fn handle_muc_admin_iq(
                         final_affiliations.insert(jid.clone(), *affiliation);
                     }
                 }
-                if current_owner_count > 0
+                if host_grant_room.is_none()
+                    && current_owner_count > 0
                     && !final_affiliations
                         .values()
                         .any(|affiliation| *affiliation == Affiliation::Owner)
@@ -1353,7 +1716,59 @@ pub(super) async fn handle_muc_admin_iq(
     // Collapse only the external projection, after validating all original
     // items. A failed duplicate write must not leave an intermediate ban.
     let affiliation_updates = final_affiliation_writes(&affiliation_updates);
-    let managed_channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid);
+    // A change the store recorded is what every admission reads; the room
+    // actor only mirrors it. The repair is armed before the first change is
+    // recorded, so that a batch refused part-way, or a change whose commit
+    // could not be confirmed, still puts the mirror back in line with
+    // whatever the store holds. Unless the actor applies every change
+    // below, that happens in the background.
+    let mirror_repair = host_grant_room
+        .as_ref()
+        .filter(|_| !affiliation_updates.is_empty())
+        .map(|_| {
+            super::muc_admin_host_grant::MirrorRepair::arm(
+                state,
+                &room_jid,
+                affiliation_updates
+                    .iter()
+                    .map(|(jid, _)| jid.clone())
+                    .collect(),
+            )
+        });
+    let mut mirror_repair = mirror_repair;
+    if let Some(room) = host_grant_room.as_ref() {
+        for (index, (jid, affiliation)) in affiliation_updates.iter().enumerate() {
+            if let Err(refusal) = super::muc_admin_host_grant::record_host_grant_affiliation(
+                state,
+                room,
+                &sender_jid.to_bare(),
+                evidence,
+                jid,
+                *affiliation,
+            )
+            .await
+            {
+                // Nothing of the batch is in the store: the mirror already
+                // matches it.
+                if index == 0 && !refusal.maybe_recorded {
+                    if let Some(repair) = mirror_repair.take() {
+                        repair.disarm();
+                    }
+                }
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    *refusal.error,
+                )]
+                .into();
+            }
+        }
+    }
+    // A room an enrolled scope manages writes no authorization relationship
+    // here and so has nothing to roll back.
+    let managed_channel_id =
+        waddle_xmpp::parse_managed_room_jid(&room_jid).filter(|_| host_grant_room.is_none());
     let durable_previous_affiliations = if affiliation_updates.is_empty() {
         Vec::new()
     } else if let Some(channel_id) = managed_channel_id.as_deref() {
@@ -1415,17 +1830,59 @@ pub(super) async fn handle_muc_admin_iq(
     }
     let mut suppress_direct_admin_effects = false;
     let mutation_attempt = waddle_xmpp::muc::AdminMutationId::generate();
-    let applied = match room_actor
-        .ask(ApplyAdminItems {
-            attempt: mutation_attempt,
-            sender_jid: sender_jid.clone(),
-            sender_affiliation: context.affiliation,
-            sender_role: context.role,
-            items,
-        })
-        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-        .await
-    {
+    let apply = ApplyAdminItems {
+        attempt: mutation_attempt,
+        sender_jid: sender_jid.clone(),
+        sender_affiliation,
+        sender_role: context.role,
+        items,
+    };
+    // A request that changes roles only records nothing in the store, so
+    // nothing has revalidated the sender since the grants were read: the
+    // room actor asks the decision's revocation-fence ticket in the turn
+    // that applies the request, and applies nothing once a newer generation
+    // of the scope is installed. A request that changes an affiliation was
+    // revalidated by the store under the scope's guard when it was recorded,
+    // and its own commit is what moved the generation.
+    let role_decision = host_grant_room
+        .as_ref()
+        .filter(|_| affiliation_updates.is_empty())
+        .map(|room| room.fence.clone());
+    let asked = match role_decision {
+        Some(ticket) => {
+            match room_actor
+                .ask(waddle_xmpp::muc::room_actor::ApplyAdminItemsIfAdmitted {
+                    apply,
+                    admission: waddle_xmpp::muc::room_actor::AdmissionCheck::new(move || {
+                        ticket.is_current()
+                    }),
+                })
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(Some(applied)) => Ok(applied),
+                Ok(None) => {
+                    return vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        super::errors::resource_constraint_iq_error(
+                            "The room's grants changed; try again.",
+                        ),
+                    )]
+                    .into();
+                }
+                Err(error) => Err(error.map_msg(|admitted| admitted.apply)),
+            }
+        }
+        None => {
+            room_actor
+                .ask(apply)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+        }
+    };
+    let applied = match asked {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
@@ -1750,6 +2207,10 @@ pub(super) async fn handle_muc_admin_iq(
             }
         }
     };
+    // The actor applied the recorded change: its mirror holds it.
+    if let Some(repair) = mirror_repair {
+        repair.disarm();
+    }
     // XEP-0045 §8.2/§9.1 stanza ordering (#1265 item 6): the kicked/
     // banned occupant's unavailable presence goes out first, then the
     // moderator's IQ result, then the broadcast to remaining occupants.

@@ -22,6 +22,11 @@ pub(crate) struct XmppChannelRecord {
     pub members_only: bool,
     /// Whether the room is public in MUC service discovery.
     pub public_room: bool,
+    /// Whether accounts at other servers may reach the room
+    /// (`RoomConfig::federated`). Written only by the room's configuration
+    /// and by channel creation ([`set_xmpp_channel_federated`]); a catalog
+    /// upsert leaves it as stored.
+    pub federated: bool,
     pub created_at: String,
     pub updated_at: Option<String>,
 }
@@ -41,6 +46,7 @@ impl XmppChannelRecord {
             // #422: the persisted pin policy, so the actor's snapshot matches
             // the channel's last-saved value even after eviction.
             pin_permission: self.pin_permission,
+            federated: self.federated,
             ..Default::default()
         }
     }
@@ -117,6 +123,7 @@ fn parse_channel_record(row: &RowValues) -> Result<XmppChannelRecord, String> {
         pin_permission,
         members_only,
         public_room: db_bool(row, 10, "public_room")?,
+        federated: db_bool(row, 11, "federated")?,
         created_at: db_string(row, 7, "created_at")?,
         updated_at: db_optional_string(row, 8, "updated_at")?,
     })
@@ -129,7 +136,7 @@ pub(crate) async fn get_xmpp_channel(
     let row = actor
         .ask(DbQueryOne {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room, federated
                 FROM channels
                 WHERE id = ?
             "#
@@ -150,7 +157,7 @@ pub(crate) async fn list_xmpp_channels(
     let rows = actor
         .ask(DbQuery {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room, federated
                 FROM channels
                 ORDER BY position ASC, created_at ASC, id ASC
                 LIMIT ? OFFSET ?
@@ -160,6 +167,38 @@ pub(crate) async fn list_xmpp_channels(
         })
         .await
         .map_err(|e| format!("Failed to query channels: {e}"))?;
+
+    rows.iter().map(parse_channel_record).collect()
+}
+
+/// At most `limit` catalog rows of the rooms MUC service discovery may list
+/// to accounts at other servers: public (`public_room`), open to other
+/// servers (`federated`) and no group conversation, in the catalog's order.
+/// Whether a room an enrolled host-grant scope manages is listed is the
+/// caller's to decide.
+pub(crate) async fn list_listed_federated_xmpp_channels(
+    actor: ActorRef<DbActor>,
+    limit: usize,
+) -> Result<Vec<XmppChannelRecord>, String> {
+    let rows = actor
+        .ask(DbQuery {
+            sql: r#"
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room, federated
+                FROM channels
+                WHERE federated = ? AND public_room = ? AND channel_type <> ?
+                ORDER BY position ASC, created_at ASC, id ASC
+                LIMIT ?
+            "#
+            .to_string(),
+            params: vec![
+                true.into(),
+                true.into(),
+                waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.into(),
+                (limit as i64).into(),
+            ],
+        })
+        .await
+        .map_err(|e| format!("Failed to query federated channels: {e}"))?;
 
     rows.iter().map(parse_channel_record).collect()
 }
@@ -210,6 +249,27 @@ pub(crate) async fn upsert_xmpp_channel(
     Ok(())
 }
 
+/// Record whether accounts at other servers may reach the channel's room.
+/// A channel without a catalog row is left without one.
+pub(crate) async fn set_xmpp_channel_federated(
+    actor: ActorRef<DbActor>,
+    channel_id: &str,
+    federated: bool,
+) -> Result<(), String> {
+    actor
+        .ask(DbExecute {
+            sql: "UPDATE channels SET federated = ?, updated_at = ? WHERE id = ?".to_string(),
+            params: vec![
+                federated.into(),
+                chrono::Utc::now().to_rfc3339().into(),
+                channel_id.into(),
+            ],
+        })
+        .await
+        .map_err(|e| format!("Failed to record the channel's federated setting: {e}"))?;
+    Ok(())
+}
+
 pub(crate) async fn delete_xmpp_channel(
     actor: ActorRef<DbActor>,
     channel_id: &str,
@@ -257,6 +317,7 @@ mod tests {
             crate::db::Value::Text("admins-only".to_string()),
             crate::db::Value::Text("2026-07-14T00:00:00Z".to_string()),
             crate::db::Value::NullText,
+            crate::db::Value::Integer(0),
             crate::db::Value::Integer(0),
             crate::db::Value::Integer(0),
         ];

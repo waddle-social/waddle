@@ -59,6 +59,9 @@ use super::{
     Provisioned, SessionWatch, DOMAIN, POOL_LIMITS, SCHEMA,
 };
 
+#[path = "cluster_space_bookmark.rs"]
+mod space_bookmark;
+
 /// The attested serving pool with the separate control-plane pool a
 /// clustered runtime holds.
 async fn attach_clustered_pool(prepared: &Prepared) -> DatabasePool {

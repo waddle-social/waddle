@@ -199,8 +199,16 @@ pub(in crate::server::routes::websocket) async fn present_pending_subscriptions(
     {
         return;
     }
-    let subscribe_stanzas = registry.pending_subscription_stanzas(&resource.to_bare());
+    let account = resource.to_bare();
+    let mut subscribe_stanzas = registry.pending_subscription_stanzas(&account);
+    // Requests from remote senders are recorded durably and delivered on
+    // every new session until answered (gate G18).
+    subscribe_stanzas.extend(super::remote::pending_remote_subscriptions(state, &account).await);
     spawn_session_recovery_delivery(state, resource, owner, None, subscribe_stanzas);
+    // RFC 6121 §4.2.2: a new presence session probes the remote contacts
+    // whose presence the account is subscribed to; local contacts' presence
+    // is known here already.
+    super::remote::spawn_probe_remote_contacts(state, &account);
 }
 
 #[cfg(feature = "clustering")]
@@ -353,6 +361,11 @@ fn spawn_session_recovery_delivery(
     let blocking_storage = std::sync::Arc::clone(&state.deps.protocol.blocking_storage);
     let mam_storage = std::sync::Arc::clone(&state.deps.protocol.mam_storage);
     let server_domain = state.deps.auth_state.xmpp_domain.clone();
+    let app_state = std::sync::Arc::clone(&state.deps.app_state);
+    let served = state
+        .deps
+        .service_domains
+        .served_domains(server_domain.as_str());
     let recipient = resource.to_bare();
     let resource = resource.clone();
     let owner = *owner;
@@ -379,6 +392,16 @@ fn spawn_session_recovery_delivery(
             }
             let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
             if let Some(plan) = flush_plan.filter(|_| still_owner) {
+                // Remote senders' messages are delivered only while their
+                // domain is still admitted (ADR-0020 D1; gate G18).
+                crate::server::routes::websocket::s2s_accounts::forget_unadmitted_remote_messages(
+                    &app_state,
+                    served.as_ref(),
+                    &storage,
+                    &mam_storage,
+                    &recipient,
+                )
+                .await;
                 let resolver = MamArchiveResolver { mam_storage };
                 let outcome = crate::pending_delivery::flush_for_resource_with_retry(
                     &storage,
@@ -473,6 +496,13 @@ async fn broadcast_presence_to_subscribers(
         let mut relayed = presence.clone();
         relayed.from = Some(Jid::from(sender_jid.clone()));
         relayed.to = Some(Jid::from(subscriber_bare.clone()));
+        // A remote contact's server receives the presence through the
+        // remote route (RFC 6121 §4.2.2, §4.4.2; gate G18). A refusal, such
+        // as a full queue for the contact's domain, drops it.
+        if super::remote::is_remote_contact(state, &subscriber_bare) {
+            let _ = super::remote::offer_presence(state, relayed).await;
+            continue;
+        }
         let stanza = Stanza::Presence(relayed);
         if super::subscription::try_route_presence_to_bare_remote(
             state,

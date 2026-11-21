@@ -11,11 +11,11 @@ use super::{
     extract_correction_from_message, extract_forum_action, extract_retraction_from_message,
     info_span, interpret_with_depth, item_not_found_error, message_has_framework_envelope,
     parse_managed_room_jid, remove_framework_envelopes, remove_stanza_ids_by, set_thread_id,
-    validate_groupchat_rich_targets, waddle_id_for_room_jid, warn, BareJid, CheckPermission, Deps,
-    ForumAction, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid, MamArchivedMessage,
-    Message, Object, ObjectType, OccupantSnapshot, OutboundEvent, Permission, RetractionKind,
-    RoomContext, Stanza, Subject, ToElementString, UuidV4Generator, WebSocketState,
-    Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
+    validate_groupchat_rich_targets_of, waddle_id_for_room_jid, warn, BareJid, CheckPermission,
+    Deps, ForumAction, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid,
+    MamArchivedMessage, Message, Object, ObjectType, OccupantSnapshot, OutboundEvent, Permission,
+    RetractionKind, RichTargetSender, RoomContext, Stanza, Subject, ToElementString,
+    UuidV4Generator, WebSocketState, Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
 };
 
 #[cfg(feature = "clustering")]
@@ -629,6 +629,7 @@ pub(super) async fn dispatch_to_room(
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
         synthetic_sender_authority: None,
+        channel_mention_decision: None,
         dispatch_timestamp,
     };
     let mut gate_working = prototype.clone();
@@ -695,16 +696,24 @@ pub(super) async fn dispatch_to_room(
     if let Some(sender_room_nick_jid) = sender_room_nick_jid.as_ref() {
         prototype.from = Some(sender_room_nick_jid.clone());
     }
-    let _extension_outcome = state
-        .deps
-        .protocol
-        .extension_manager
-        .process_message_enrichments_for_waddle_with_requester(
-            &mut prototype,
-            waddle_id,
-            Some(sender_full.to_bare()),
-        )
-        .await;
+    // The enrichment hooks of this deployment's extensions run for the
+    // messages of its own accounts. A message of an occupant at another
+    // server reaches the room reduced to the standard payloads a room
+    // carries, and no extension is handed it as its requester: an
+    // extension decides for the accounts it knows, and its hooks have not
+    // been reviewed to act for a principal that holds none here.
+    if state.serves(&sender_full.to_bare()) {
+        let _extension_outcome = state
+            .deps
+            .protocol
+            .extension_manager
+            .process_message_enrichments_for_waddle_with_requester(
+                &mut prototype,
+                waddle_id,
+                Some(sender_full.to_bare()),
+            )
+            .await;
+    }
     // 6. Rich-target validation against the room archive. Runs only
     //    after the gate has admitted the sender, so non-occupants /
     //    managed-room-forbidden senders never see archive-derived
@@ -713,13 +722,16 @@ pub(super) async fn dispatch_to_room(
     //    validation), so derive that view here for the same-sender
     //    comparison rather than relying on `prototype.from` (alice's
     //    real full JID).
-    let correction_target = match validate_groupchat_rich_targets(
+    let correction_target = match validate_groupchat_rich_targets_of(
         deps,
         &room_jid,
         &prototype,
-        sender_room_nick_jid.as_ref(),
+        RichTargetSender {
+            room_nick_jid: sender_room_nick_jid.as_ref(),
+            real_jid: Some(&sender_full),
+            nickname_generation: snapshot.sender_nickname_generation,
+        },
         &room_actor,
-        snapshot.sender_nickname_generation,
     )
     .await
     {
@@ -794,6 +806,19 @@ pub(super) async fn dispatch_to_room(
         );
     }
 
+    // XEP-0513 channel-wide mentions are a moderator's: in a room an
+    // enrolled host-grant scope manages, the sender's canonical grants
+    // decide (the `moderate` action), not the role the room actor mirrors.
+    // When the grants cannot be read the mention is not broadcast. A message
+    // without any channel mention has nothing to decide, and reads nothing.
+    let carries_channel_mention = waddle_xmpp::xep::extract_explicit_mentions(&prototype)
+        .is_some_and(|mentions| mentions.has_channel());
+    let channel_mention_decision = if carries_channel_mention {
+        host_grant_channel_mention(state, &room_jid, &sender_full).await
+    } else {
+        None
+    };
+
     // 8. Build context + run the rest of the chain (canonicalize,
     //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
     //    snapshot, same managed-room flag, same id-gen.
@@ -823,6 +848,7 @@ pub(super) async fn dispatch_to_room(
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
         synthetic_sender_authority: None,
+        channel_mention_decision,
         dispatch_timestamp,
     };
     let mut working = prototype;
@@ -1309,5 +1335,32 @@ async fn revised_archive_target(
             );
             None
         }
+    }
+}
+
+/// Whether `sender` may broadcast a channel-wide mention in `room`, when an
+/// enrolled host-grant scope manages the room: its canonical grants allow
+/// `moderate`. `None` for a room no scope manages, whose role check applies.
+async fn host_grant_channel_mention(
+    state: &WebSocketState,
+    room: &BareJid,
+    sender: &jid::FullJid,
+) -> Option<bool> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .allows_as(
+            RoomBinding::Room(room),
+            &sender.to_bare(),
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            HostGrantAction::Moderate,
+        )
+        .await
+    {
+        RoomGate::Unmanaged => None,
+        RoomGate::Managed(allowed) => Some(allowed),
+        RoomGate::Unavailable => Some(false),
     }
 }

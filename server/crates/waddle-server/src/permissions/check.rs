@@ -2,7 +2,7 @@
 //!
 //! Implements the Zanzibar-style permission check algorithm with:
 //! - Direct tuple lookups
-//! - Computed permissions (union, intersection, arrow)
+//! - Computed permissions (union, intersection, arrow, exclusion)
 //! - Userset expansion
 //! - LRU caching for performance
 
@@ -152,6 +152,24 @@ impl PermissionChecker {
             subject, permission, object, depth
         );
 
+        let computation = self.schema.permission(object.object_type, permission);
+
+        // 0. A subtracted relation (for example a channel `outcast`) wins over
+        // every grant, so it is decided before the direct and userset
+        // shortcuts below, which would otherwise allow without consulting it.
+        if let Some(ComputedPermission::Exclusion(_, subtracted)) = computation {
+            if self
+                .subtracted_holds(subject, subtracted, object, depth)
+                .await?
+            {
+                debug!(
+                    "Excluded: {} holds the subtracted part of {} on {}",
+                    subject, permission, object
+                );
+                return Ok(CheckResponse::denied());
+            }
+        }
+
         // 1. Check for direct relation (permission name equals relation name)
         if self.tuple_store.exists(object, permission, subject).await? {
             debug!(
@@ -202,7 +220,7 @@ impl PermissionChecker {
         }
 
         // 3. Check computed permissions from schema
-        if let Some(computation) = self.schema.permission(object.object_type, permission) {
+        if let Some(computation) = computation {
             let result = self
                 .check_computed(subject, computation, object, depth, visited)
                 .await?;
@@ -297,6 +315,17 @@ impl PermissionChecker {
                     Ok(CheckResponse::allowed("intersection"))
                 }
 
+                ComputedPermission::Exclusion(granted, subtracted) => {
+                    if self
+                        .subtracted_holds(subject, subtracted, object, depth)
+                        .await?
+                    {
+                        return Ok(CheckResponse::denied());
+                    }
+                    self.check_computed(subject, granted, object, depth + 1, visited)
+                        .await
+                }
+
                 ComputedPermission::Arrow(relation, target_permission) => {
                     // Follow the relation to find parent objects and check permission there
                     let parent_tuples = self
@@ -344,6 +373,27 @@ impl PermissionChecker {
             }
         })
     }
+    /// Whether the subtracted part of an exclusion holds.
+    ///
+    /// It is evaluated with its own visited set. The cycle guard reads a node
+    /// that is already marked as denied, so marks left by other branches of
+    /// the same check would let the exclusion fail open; and its own marks
+    /// must not deny the granted part evaluated after it. A real cycle is
+    /// still bounded by the depth limit, which fails the check.
+    async fn subtracted_holds(
+        &self,
+        subject: &Subject,
+        subtracted: &ComputedPermission,
+        object: &Object,
+        depth: usize,
+    ) -> Result<bool, PermissionError> {
+        let mut visited = HashSet::new();
+        let result = self
+            .check_computed(subject, subtracted, object, depth + 1, &mut visited)
+            .await?;
+        Ok(result.allowed)
+    }
+
     /// Clear the entire cache
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.lock().await;

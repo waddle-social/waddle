@@ -244,6 +244,10 @@ pub(crate) async fn echo_muc_self_unavailable(
     affiliation: waddle_xmpp_core::Affiliation,
     removal: MucRemovalCause,
 ) {
+    // An occupancy nobody was told of is not told of as ended either.
+    if !removal.is_announced() {
+        return;
+    }
     let from_jid = leaving_room_jid.clone();
     let sender_bare = sender_jid.to_bare();
     let identity = OccupantIdentity {
@@ -305,7 +309,8 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     removal: MucRemovalCause,
     progress: Option<LeaveFanOutProgress<'_>>,
 ) {
-    if !outcome.removed_last_session {
+    // Those who stay never saw an unannounced occupancy begin.
+    if !outcome.removed_last_session || !removal.is_announced() {
         return;
     }
     let from_jid = outcome.leaving_room_jid.clone();
@@ -467,6 +472,40 @@ pub(crate) async fn sweep_abandoned_muc_occupancy(
     removal: MucRemovalCause,
 ) -> MucCleanupOutcome {
     if cleanup_muc_presence(state, jid, session, removal).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
+}
+
+/// Unseat `jid` from `room` alone, for an occupancy the service found it
+/// can no longer reach there, such as the seat of an occupant at another
+/// server whose stream failed. Only that room's actor is asked, so the cost
+/// does not grow with the rooms this process holds; a failure records a
+/// sweep the local-departure janitor retries, pinned to the same session.
+pub(crate) async fn sweep_abandoned_room_occupancy(
+    state: &WebSocketState,
+    room: &BareJid,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+    removal: MucRemovalCause,
+) -> MucCleanupOutcome {
+    let swept = cleanup_muc_presence_in(
+        state,
+        jid,
+        session,
+        None,
+        LocalSweep {
+            remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            recording: SweepFailureRecording::RecordSweep,
+            scope: LocalRoomSweepScope::EveryRoom,
+            removal,
+        },
+        Some(room),
+    )
+    .await;
+    if swept {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -849,7 +888,9 @@ pub(super) async fn cleanup_force_detach_connection_shutdown(
     superseded: bool,
     origin: waddle_xmpp::registry::ForceDetachOrigin,
 ) -> ConnectionShutdownOutcome {
-    if origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement {
+    // A replacing bind and the account's retirement both end the binding
+    // for good: nothing of it is left to resume.
+    if origin.is_terminal() {
         if conn.sm_state.enabled {
             conn.begin_terminal_sm_recovery();
         } else if let Some(jid) = conn.phase.cleanup_jid().cloned() {
@@ -1438,6 +1479,9 @@ async fn cleanup_connection_shutdown_inner(
                         .is_some();
                     if !replacement_bound_during_recovery {
                         state.deps.protocol.caps_resolver.drop_resource(&jid);
+                        // The session was not stored for resumption, so it
+                        // ended for good and leaves its remote rooms.
+                        leave_remote_rooms_if_no_replacement(state, &jid).await;
                     }
                     if !detach_fail_removed {
                         cleanup_muc_presence(
@@ -1903,6 +1947,10 @@ async fn promote_terminal_recovery_inner(
     let detached_snapshot = terminal_recovery_snapshot(jid, conn);
     let Some(mut detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
         cleanup_terminal_muc_presence(state, jid, conn).await;
+        // Nothing can resume this session, so it leaves its remote rooms,
+        // unless a replacement holds its full JID by now. Its own binding
+        // may still be published here; that one is not a replacement.
+        leave_remote_rooms_unless_replaced(state, jid, conn.registry_owner.as_ref()).await;
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     };
@@ -2157,6 +2205,20 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
         let Some(retry_lease) = entry.try_acquire_terminal_ordering_retry() else {
             return TerminalRedriveOutcome::OrderingDeferred;
         };
+        // Remote senders' messages are delivered only while their domain
+        // is still admitted (ADR-0020 D1; gate G18).
+        super::s2s_accounts::forget_unadmitted_remote_messages(
+            &state.deps.app_state,
+            state
+                .deps
+                .service_domains
+                .served_domains(state.deps.auth_state.xmpp_domain.as_str())
+                .as_ref(),
+            &state.deps.protocol.pending_delivery_storage,
+            &state.deps.protocol.mam_storage,
+            recipient,
+        )
+        .await;
         let resolver = MamArchiveResolver {
             mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
         };
@@ -2652,11 +2714,7 @@ async fn promote_terminal_recovery_prefix(
 fn force_detach_requires_actor_unregister(
     origin: waddle_xmpp::registry::ForceDetachOrigin,
 ) -> bool {
-    matches!(
-        origin,
-        waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
-            | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
-    )
+    origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume || origin.is_terminal()
 }
 
 #[cfg(test)]
@@ -2673,6 +2731,11 @@ mod force_detach_tests {
         ));
         assert!(force_detach_requires_actor_unregister(
             waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+        ));
+        // A retirement's cleanup removes the actor entry itself, as a
+        // replacing bind's does.
+        assert!(force_detach_requires_actor_unregister(
+            waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
         ));
     }
 }
@@ -2873,6 +2936,37 @@ async fn cleanup_without_resumable_snapshot(
     Box::pin(cleanup_connection_shutdown(state, outbound_rx, conn, false)).await
 }
 
+/// XEP-0045 §7.14 for remote rooms: a resource whose session ended for
+/// good leaves every remote room it joined through the S2S route. Every
+/// caller of [`broadcast_unavailable_if_no_replacement`] has already removed
+/// its own registry entry, so an entry for the full JID now is a
+/// replacement's. A replacement holds the same full JID, which is all a
+/// remote room knows of its occupant, so its rooms are left to it: leaving
+/// them here could reach the room after the replacement's own join and
+/// remove it.
+async fn leave_remote_rooms_if_no_replacement(state: &WebSocketState, jid: &FullJid) {
+    leave_remote_rooms_unless_replaced(state, jid, None).await;
+}
+
+/// [`leave_remote_rooms_if_no_replacement`] for a caller whose own binding
+/// `own` may still be published: an entry under that binding is the ended
+/// session's, not a replacement's.
+async fn leave_remote_rooms_unless_replaced(
+    state: &WebSocketState,
+    jid: &FullJid,
+    own: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
+) {
+    let replaced = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(jid)
+        .is_some_and(|entry| own.is_none_or(|own| entry.binding_id() != *own));
+    if !replaced {
+        state.deps.remote_route.resource_ended(jid).await;
+    }
+}
+
 /// RFC 6121 §4.5.2: an ungraceful session end (connection drop with no
 /// self-sent unavailable) requires the SERVER to broadcast `<presence
 /// type='unavailable'/>` from this full JID to the user's presence
@@ -2896,6 +2990,7 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
     jid: &FullJid,
     was_presence_available: bool,
 ) -> handlers::presence::TerminatedPresenceBroadcastOutcome {
+    leave_remote_rooms_if_no_replacement(state, jid).await;
     if !was_presence_available {
         return handlers::presence::TerminatedPresenceBroadcastOutcome::Completed;
     }
@@ -3021,6 +3116,19 @@ async fn cleanup_muc_presence_with_origin(
     origin: Option<&OrderedRelayRouteOrigin>,
     sweep: LocalSweep,
 ) -> bool {
+    cleanup_muc_presence_in(state, jid, session, origin, sweep, None).await
+}
+
+/// [`cleanup_muc_presence_with_origin`], sweeping `only` that room when one
+/// is named instead of every room this process holds.
+async fn cleanup_muc_presence_in(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+    origin: Option<&OrderedRelayRouteOrigin>,
+    sweep: LocalSweep,
+    only: Option<&BareJid>,
+) -> bool {
     let LocalSweep {
         remote_retry,
         attempt: sweep_attempt,
@@ -3067,10 +3175,15 @@ async fn cleanup_muc_presence_with_origin(
     ))
     .await;
 
-    let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .list_rooms()
-        .await
-    {
+    let listed = match only {
+        Some(room) => Ok(vec![room.clone()]),
+        None => {
+            RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .list_rooms()
+                .await
+        }
+    };
+    let room_jids = match listed {
         Ok(room_jids) => room_jids,
         Err(error) => {
             completed = false;
@@ -3249,20 +3362,22 @@ async fn cleanup_muc_presence_with_origin(
                     }),
                 )
                 .await;
-                broadcast_muc_muji_clear_to_remaining_resumable(
-                    state,
-                    &room_jid,
-                    jid,
-                    &outcome,
-                    Some(LeaveFanOutProgress {
-                        skip: &NO_SKIP,
-                        record: Some((
-                            &state.deps.protocol.pending_local_muc_departures,
-                            &in_flight,
-                        )),
-                    }),
-                )
-                .await;
+                if removal.is_announced() {
+                    broadcast_muc_muji_clear_to_remaining_resumable(
+                        state,
+                        &room_jid,
+                        jid,
+                        &outcome,
+                        Some(LeaveFanOutProgress {
+                            skip: &NO_SKIP,
+                            record: Some((
+                                &state.deps.protocol.pending_local_muc_departures,
+                                &in_flight,
+                            )),
+                        }),
+                    )
+                    .await;
+                }
                 if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
                     completed = false;
                 }

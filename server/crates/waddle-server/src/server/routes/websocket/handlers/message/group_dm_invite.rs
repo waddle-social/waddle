@@ -317,7 +317,10 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Group-DM invite could not be delivered or queued; rolling back member grant"
         );
         let error_kind = match error {
-            super::muc_invite::MucUserDeliveryError::QuotaExceeded => {
+            // RFC 6121 §8.5.1: an account that does not exist, a retired
+            // one included, is answered as unavailable.
+            super::muc_invite::MucUserDeliveryError::QuotaExceeded
+            | super::muc_invite::MucUserDeliveryError::RecipientRetired => {
                 GroupDmInviteError::ServiceUnavailable
             }
             super::muc_invite::MucUserDeliveryError::Storage(_)
@@ -774,6 +777,20 @@ pub(crate) async fn rollback_group_dm_membership(
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&grant.grant.room) else {
         return;
     };
+    // A group DM shares the channel identifier space with managed rooms. A
+    // room an enrolled host-grant scope manages, or one whose management
+    // cannot be told now, is left alone: its actor's affiliation list is
+    // written only from its canonical grants.
+    if state
+        .deps
+        .app_state
+        .host_grants
+        .channel_enrolled(&channel_id)
+        .await
+        != Ok(false)
+    {
+        return;
+    }
     let Ok(Some(actor)) = state
         .deps
         .protocol

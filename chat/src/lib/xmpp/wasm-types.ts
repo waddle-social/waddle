@@ -283,6 +283,11 @@ export interface WasmPresence {
    * presence carries no status codes.
    */
   muc_status_codes?: number[];
+  /**
+   * The room was destroyed (XEP-0045 §10.9 `<destroy/>`): this unavailable
+   * presence ends the recipient's own occupancy. Absent when false.
+   */
+  muc_destroyed?: boolean;
   vcard_avatar?: string;
   muji?: WasmMujiPresence;
   /**

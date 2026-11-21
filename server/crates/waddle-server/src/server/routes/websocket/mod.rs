@@ -56,6 +56,7 @@ use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
 
 mod account_binding;
+mod account_retirement;
 mod batch_write;
 mod call_signaling_telemetry;
 #[cfg(feature = "test-support")]
@@ -81,6 +82,21 @@ mod remote_muc_retry;
 pub(crate) mod replay;
 mod resource_binding;
 mod resume_replay;
+pub(crate) mod s2s_accounts;
+pub(crate) mod s2s_delivery;
+#[cfg(feature = "clustering")]
+mod s2s_room_relay;
+#[cfg(all(feature = "clustering", feature = "test-support"))]
+pub(crate) use s2s_room_relay::owner_silent;
+#[cfg(feature = "clustering")]
+pub(crate) use s2s_room_relay::{
+    relayed_remote_room_request, REMOTE_ROOM_REQUEST_MAILBOX_TIMEOUT,
+    REMOTE_ROOM_REQUEST_REPLY_TIMEOUT,
+};
+pub(crate) mod local_space_deletion;
+pub(crate) mod local_space_events;
+pub(crate) mod s2s_rooms;
+pub(crate) mod s2s_spaces;
 mod sasl;
 mod send;
 mod session_init;
@@ -116,6 +132,7 @@ pub(crate) use cleanup::{
 /// wedged room must not stall disconnect cleanup, the departure janitor, an
 /// administrative removal, or an explicit leave's wait-class bounce.
 pub(crate) const LEAVE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) use account_retirement::{close_live_streams, end_account_sessions, RetiredAccounts};
 pub(crate) use cleanup::{
     broadcast_muc_leave_to_remaining_resumable, broadcast_muc_muji_clear_to_remaining_resumable,
     maybe_evict_empty_room, LeaveFanOutProgress,

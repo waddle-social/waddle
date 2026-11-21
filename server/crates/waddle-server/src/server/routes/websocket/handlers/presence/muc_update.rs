@@ -133,6 +133,45 @@ fn reflected_muji_entries<'a>(
     entries
 }
 
+/// Why a Muji update in a room an enrolled host-grant scope manages is
+/// refused: the sender's canonical grants do not allow `send_message`, or
+/// they cannot be read now. `None` when the update may proceed, which is
+/// always the case in a room no scope manages.
+async fn host_grant_call_refusal(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> Option<xmpp_parsers::stanza_error::StanzaError> {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .allows_as(
+            RoomBinding::Room(room_jid),
+            &sender_jid.to_bare(),
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            HostGrantAction::SendMessage,
+        )
+        .await
+    {
+        RoomGate::Unmanaged | RoomGate::Managed(true) => None,
+        RoomGate::Managed(false) => Some(StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "en",
+            "You may not take part in calls in this room.",
+        )),
+        RoomGate::Unavailable => Some(StanzaError::new(
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "en",
+            "The room could not be checked; please retry.",
+        )),
+    }
+}
+
 /// Try to broadcast an in-room presence update for an existing
 /// occupant. Returns `Some(replies)` when the room actor confirmed
 /// the sender is already an occupant — even if there's nothing to
@@ -202,6 +241,19 @@ pub(crate) async fn try_handle_muc_presence_update(
     }
 
     let clears_muji_presence = muji.as_ref().is_none_or(Muji::is_empty);
+    // Starting, joining or preparing a call is participation in the room.
+    // In a room an enrolled host-grant scope manages it needs the sender's
+    // canonical `send_message`, whatever the room actor still seats them
+    // with; the call-thread anchor below is built only from an admitted
+    // update. Leaving a call (an empty or absent Muji) is always accepted.
+    // Both the local path and the relayed ordered delivery pass here.
+    if !clears_muji_presence {
+        if let Some(error) = host_grant_call_refusal(state, room_jid, sender_jid).await {
+            return Some(vec![super::muc::build_muc_presence_error_xml(
+                room_jid, nick, sender_jid, error,
+            )]);
+        }
+    }
     let outcome = match muji {
         Some(muji) => match actor
             .ask(UpsertMujiPresence {

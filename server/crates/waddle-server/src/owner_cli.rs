@@ -9,7 +9,14 @@
 //! - `install-attestor` installs the physical attestor as the installer
 //!   login;
 //! - `emit-handoff` composes, or verifies, the handoff document the server
-//!   is started with.
+//!   is started with;
+//! - `host-grant` records an operator's act on the host-grant authority:
+//!   after a restore, reopening reconstructed scopes, acknowledging the
+//!   PostgreSQL position or revoking a grant the restore lost; and at any
+//!   time, listing an account's grants and revoking them through the
+//!   revocation fence;
+//! - `account retire` retires an account, so that its JID is never issued
+//!   again.
 //!
 //! None of them adopts listeners, binds a socket, starts a telemetry
 //! exporter or reads serving configuration. Secrets (the database URL, the
@@ -17,10 +24,12 @@
 //! are never printed. Results go to standard output and diagnostics to
 //! standard error.
 
+mod account;
 mod args;
 mod connection;
 mod emit_handoff;
 mod error;
+mod host_grant;
 mod install_attestor;
 mod output;
 mod owner_phase;
@@ -72,6 +81,8 @@ pub fn run_from_args() -> i32 {
             Command::OwnerPhase(args) => owner_phase::run(args).await,
             Command::InstallAttestor(args) => install_attestor::run(args).await,
             Command::EmitHandoff(args) => emit_handoff::run(args).await,
+            Command::HostGrant(args) => host_grant::run(args).await,
+            Command::Account(args) => account::run(args).await,
         }
     });
     match outcome {

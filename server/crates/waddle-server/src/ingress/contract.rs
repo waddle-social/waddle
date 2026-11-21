@@ -97,6 +97,26 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Let this authority admit rooms that enrolled host-grant scopes
+    /// manage: the replica verified its runtime role's privileges on the
+    /// grant store. Without an attachment every acceptance for such a room
+    /// is refused. The first attachment stays; the answer is whether this
+    /// call set it.
+    pub fn attach_host_grants(
+        &self,
+        attachment: crate::permissions::host_grant::HostGrantAttachment,
+    ) -> bool {
+        self.uow.attach_host_grants(attachment)
+    }
+
+    /// The gate that holds this authority's host-grant attachment, and
+    /// verifies it again when an acceptance finds the authority changed.
+    pub fn host_grant_gate(
+        &self,
+    ) -> std::sync::Arc<crate::permissions::host_grant::HostGrantAttachmentGate> {
+        self.uow.host_grant_gate()
+    }
+
     pub(crate) fn notification_outbox_wake(&self) -> Arc<tokio::sync::Notify> {
         self.uow.notification_outbox_wake()
     }

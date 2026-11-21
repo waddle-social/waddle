@@ -17,6 +17,8 @@ import SpaceDetailDrawer from "@/components/admin/SpaceDetailDrawer.vue";
 
 const props = defineProps<{
   xmppClient: BrowserXmppClient | null;
+  /** Whether the home server federates with other servers. */
+  federationAvailable: boolean;
 }>();
 
 const SEARCH_DEBOUNCE_MS = 200;
@@ -204,6 +206,7 @@ const showEmptyState = computed(
       :open="!!selected"
       :xmpp-client="xmppClient"
       :space="selected"
+      :federation-available="federationAvailable"
       @close="closeDetail"
       @changed="onDetailChanged"
       @deleted="onDetailDeleted"

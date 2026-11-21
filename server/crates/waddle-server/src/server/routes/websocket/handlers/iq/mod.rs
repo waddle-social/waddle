@@ -73,6 +73,8 @@ use xmpp_parsers::minidom::Element;
 use crate::server::routes::websocket::frame::ResponseBatch;
 use crate::telemetry::mark_span_error;
 
+const HOME_FEDERATION_FEATURE: &str = "urn:waddle:s2s:0";
+
 mod archive_inbox_upload;
 pub(crate) mod blocking;
 mod caps_result;
@@ -82,8 +84,11 @@ mod community_publish;
 mod community_retract;
 mod community_rsvp;
 mod conn_state;
+mod destination_route;
 mod disco_info;
+pub(crate) use disco_info::muc_disco_info_for_remote;
 mod disco_items;
+pub(crate) use disco_items::{muc_rooms_for_remote, page_listing, RoomListings};
 pub(crate) mod errors;
 mod event_planning;
 pub(crate) mod event_planning_access;
@@ -99,6 +104,7 @@ pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
 mod mentions_permissions;
 mod muc_admin;
+pub(crate) mod muc_admin_host_grant;
 #[cfg(feature = "clustering")]
 pub(crate) mod muc_admin_relay;
 // XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
@@ -106,6 +112,9 @@ pub(crate) mod muc_admin_relay;
 // the exact same tuple write the admin affiliation path uses.
 pub(in crate::server::routes::websocket::handlers) use muc_admin::persist_managed_channel_affiliation;
 mod muc_occupant_disco;
+mod muc_remote_admin;
+pub(crate) use muc_remote_admin::{muc_admin_for_remote, muc_owner_or_moderation_for_remote};
+pub(crate) use spaces_remote::spaces_change_for_remote;
 mod muc_owner_config;
 pub(crate) mod muc_owner_moderation;
 mod muc_self_ping;
@@ -114,10 +123,13 @@ mod muji_preparation_tests;
 mod pep_addressing;
 mod permissions;
 mod pin_query;
+mod protected_space_bookmarks;
+mod protected_space_contents;
+mod protected_space_subscriptions;
 mod pubsub_admin;
 mod pubsub_dispatch;
+mod pubsub_space_membership;
 mod push;
-mod remote_destination;
 pub(crate) mod roster;
 mod sans_io;
 mod search;
@@ -126,6 +138,7 @@ mod spaces_bookmark_cleanup;
 mod spaces_discovery;
 mod spaces_items;
 mod spaces_publish;
+mod spaces_remote;
 mod spaces_retract;
 mod story_attachments;
 #[cfg(test)]
@@ -142,6 +155,10 @@ use community_retract::handle_community_retract;
 pub use conn_state::IqConnState;
 #[cfg(test)]
 pub(crate) use conn_state::RESOURCE_METADATA_WRITE_GATE;
+use destination_route::{
+    classify_iq_destination, refuse_unbound_unserved_request, route_iq_response,
+    route_unserved_request, unclassified_iq,
+};
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
 use extension_forms::{
@@ -149,12 +166,15 @@ use extension_forms::{
     extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
     CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
+pub(crate) use extension_route_items::{
+    extension_route_account_access, extension_route_room, extension_route_room_access,
+    ExtensionRouteAccess, ExtensionRouteRoom,
+};
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
-use full_jid_forward::route_full_jid_iq;
+use full_jid_forward::{outgoing_block_frames, route_full_jid_iq};
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
-use muc_owner_config::apply_muc_owner_config;
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
 use muc_self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;
@@ -171,7 +191,7 @@ use spaces_discovery::{
 };
 use spaces_items::handle_spaces_items;
 use spaces_publish::handle_spaces_publish;
-use spaces_retract::handle_spaces_retract;
+use spaces_retract::{handle_spaces_retract, SpacesRetract};
 #[cfg(test)]
 pub use test_helpers::handle_iq;
 // Re-exported via `pub(super)` so submodules that wildcard-import the
@@ -186,8 +206,8 @@ pub(super) use errors::{
 };
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
-use remote_destination::handle_sans_io_iq_with_remote_preflight as handle_sans_io_iq;
 use roster::handle_roster_iq;
+use sans_io::handle_sans_io_iq;
 use search::{handle_channel_search_iq, handle_user_search_iq};
 use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 
@@ -200,7 +220,7 @@ use super::super::{
     is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::{
-    get_managed_channel_for_room, resolve_muc_room_archive_access,
+    get_managed_channel_for_room, host_grant_read_still_admitted, resolve_muc_room_archive_access,
     send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
     RoomArchiveAccess,
 };

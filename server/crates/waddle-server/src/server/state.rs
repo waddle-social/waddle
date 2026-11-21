@@ -28,6 +28,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use waddle_xmpp::identity::{CanonicalBareJid, CanonicalDomain};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
 use waddle_xmpp::pubsub::PubSubStorage;
@@ -86,6 +87,17 @@ pub struct AppState {
     /// startup). Used to seed `Affiliation::Owner` rows on Spaces PubSub
     /// nodes so XEP-0060 admin operations work for these accounts.
     pub server_owner_jids: Arc<[BareJid]>,
+    /// The host-grant decision for rooms that enrolled scopes manage, on
+    /// every surface outside room-manifest acceptance. Built from the
+    /// global database; it admits a managed room only once the replica has
+    /// verified its runtime role's privileges on the store.
+    pub host_grants: crate::permissions::host_grant::HostGrantGate,
+    /// The S2S snapshot this replica runs, as host-grant decisions read it:
+    /// peer admission, the trusted-home list and the host-policy `pkix`
+    /// switch (ADR-0020 D1, D2 and D8). `None` while S2S is off. Issuance,
+    /// bootstrap, repair and admission take it, with the served account
+    /// domain, through [`AppState::grant_principals`].
+    pub s2s_federation: Option<crate::permissions::host_grant::FederationSnapshot>,
     /// Sole typed authority for HTTP readiness and WebSocket admission.
     /// Cluster self-fencing moves it to `FencedRecovering`; an unexpected
     /// critical registry death latches `Failed` until this process exits.
@@ -131,6 +143,49 @@ pub struct AppState {
     /// the stream-management authority. Read it through
     /// [`Self::account_authority`].
     account_authority: OnceLock<AccountAuthoritySelection>,
+    /// The gate of the host-grant attachment, published when the ingress
+    /// authority is opened on PostgreSQL. Readiness fails while it has not
+    /// verified an authority that changed under the running replica.
+    pub(crate) host_grant_gate:
+        OnceLock<Arc<crate::permissions::host_grant::HostGrantAttachmentGate>>,
+    /// The WebSocket state built over this state, bound once it exists. A
+    /// write made outside a session's request (an admin command that takes
+    /// a room out of a Space) notifies the node's subscribers through it,
+    /// as the session's own request would. While unbound such a write
+    /// notifies nobody.
+    notifications: OnceLock<std::sync::Weak<crate::server::routes::websocket::WebSocketState>>,
+}
+
+impl AppState {
+    /// Bind the WebSocket state that notifies the subscribers of writes
+    /// made outside a session's request ([`Self::notify_space_retracted`]).
+    /// The first binding stays.
+    pub(crate) fn bind_notifications(
+        &self,
+        websocket_state: &Arc<crate::server::routes::websocket::WebSocketState>,
+    ) {
+        let _ = self.notifications.set(Arc::downgrade(websocket_state));
+    }
+
+    /// Tell the subscribers of the Space `node` that its item `item_id`
+    /// was retracted, as a session's retract of it does (XEP-0060
+    /// §7.2.2.1; a Space node's `pubsub#notify_retract` is on): those at
+    /// other servers through the Spaces host's notification task. Call it
+    /// once the retraction stands. Nothing is sent while no WebSocket state
+    /// is bound.
+    pub(crate) async fn notify_space_retracted(&self, node: &str, item_id: &str) {
+        use crate::server::routes::websocket::handlers::pubsub_fanout;
+        let Some(websocket_state) = self.notifications.get().and_then(std::sync::Weak::upgrade)
+        else {
+            return;
+        };
+        let request = pubsub_fanout::FanOutRetractRequest {
+            owner: &self.spaces_jid,
+            node,
+            item_id,
+        };
+        pubsub_fanout::fan_out_service_retract(&websocket_state, request, false).await;
+    }
 }
 
 impl AppState {
@@ -211,6 +266,8 @@ impl AppState {
             lineage_config,
             clustering_enabled,
         } = deps;
+        let host_grants =
+            crate::permissions::host_grant::HostGrantGate::new(db_pool.global().clone());
         Self {
             db_pool,
             blob_storage,
@@ -225,6 +282,8 @@ impl AppState {
             server_hats,
             permission_actor,
             server_owner_jids,
+            host_grants,
+            s2s_federation: None,
             node_lifecycle,
             websocket_inventory: IoCustodianInventory::new(max_websocket_connections.get())
                 .expect("validated WebSocket capacity is positive"),
@@ -237,6 +296,8 @@ impl AppState {
             clustering_enabled,
             lineage_startup: OnceLock::new(),
             lineage_latched: OnceLock::new(),
+            host_grant_gate: OnceLock::new(),
+            notifications: OnceLock::new(),
             lineage_adopt_matched: Mutex::new(HashSet::new()),
             runtime_progress: Arc::new(RuntimeProgress::new()),
             durable_sm: OnceLock::new(),
@@ -269,6 +330,29 @@ impl WebSocketAdmissionGate<'_> {
 }
 
 impl AppState {
+    /// Whose host grants this replica honours when it serves accounts of
+    /// `account_domain`: that domain and the S2S snapshot it runs. Every
+    /// issuance, bootstrap, repair and admission path builds its policy from
+    /// this one value (ADR-0020 D8).
+    pub fn grant_principals(
+        &self,
+        account_domain: CanonicalDomain,
+    ) -> crate::permissions::host_grant::PrincipalPolicy {
+        crate::permissions::host_grant::PrincipalPolicy::new(
+            crate::permissions::host_grant::ServedAccountDomains::new([account_domain]),
+            self.s2s_federation.clone(),
+        )
+    }
+
+    /// Whether a room created now starts with its `federated` setting on:
+    /// the deployment default of the S2S snapshot this replica runs
+    /// (`host_policy.federate_new_rooms`), and off while S2S is off.
+    pub fn federates_new_rooms(&self) -> bool {
+        self.s2s_federation
+            .as_ref()
+            .is_some_and(crate::permissions::host_grant::FederationSnapshot::federates_new_rooms)
+    }
+
     #[cfg(feature = "test-support")]
     pub fn websocket_inventory_for_test(&self) -> &IoCustodianInventory {
         &self.websocket_inventory
@@ -431,21 +515,32 @@ pub struct AppStateDeps {
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against
-/// `xmpp_domain`. Bad localparts produce a `warn!` and are skipped; they do
-/// not block startup.
+/// `xmpp_domain`, each built exactly from its parts under the identity
+/// profile, never folded onto another account. The localparts are canonical
+/// ([`bootstrap_membership::BootstrapMembershipConfig::try_from_env`]) and
+/// startup refuses a non-canonical domain; an address that still cannot be
+/// built produces a `warn!` and is skipped.
 pub fn resolve_server_owner_jids(
     config: &bootstrap_membership::BootstrapMembershipConfig,
     xmpp_domain: &str,
 ) -> Arc<[BareJid]> {
+    let domain = match CanonicalDomain::parse_canonical(xmpp_domain) {
+        Ok(domain) => domain,
+        Err(error) => {
+            warn!(
+                %error,
+                "skipping server-owner spaces affiliation seeding: the XMPP domain is not canonical",
+            );
+            return Arc::from(Vec::new());
+        }
+    };
     let mut jids = Vec::new();
     for localpart in config.owner_localparts() {
-        let raw = format!("{localpart}@{xmpp_domain}");
-        match raw.parse::<BareJid>() {
-            Ok(jid) => jids.push(jid),
+        match CanonicalBareJid::from_parts(localpart, &domain) {
+            Ok(jid) => jids.push(jid.into_bare_jid()),
             Err(error) => warn!(
                 localpart = %localpart,
-                xmpp_domain = %xmpp_domain,
-                error = %error,
+                %error,
                 "skipping invalid server-owner localpart for spaces affiliation seeding",
             ),
         }

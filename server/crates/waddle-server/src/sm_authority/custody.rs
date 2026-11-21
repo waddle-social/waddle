@@ -246,7 +246,7 @@ impl DurableSmStore {
             return Ok(committed);
         }
 
-        let frame_bytes = frame.payload.wire().len() as u64;
+        let frame_bytes = frame.payload.to_storage().len() as u64;
         let (window, ordinal) = stored
             .window
             .append(exposure, self.bounds, stored.unacked_bytes, frame_bytes)

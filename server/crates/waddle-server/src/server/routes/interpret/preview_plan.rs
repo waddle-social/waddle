@@ -56,6 +56,64 @@ pub(super) async fn clear(deps: &Deps<'_>, archive: &BareJid, message_id: &RichM
     );
 }
 
+/// Unreference the cached preview media of the direct message a
+/// retraction by `author` resolved to: `resolved`, the row of `archive` it
+/// tombstones, which the retraction named by its wire id `wire_id`.
+///
+/// A wire id is the client's and unique only per author, so a reference
+/// kept under it is cleared only when it belongs to that row: its current
+/// revision is the row itself, or a correction of it `author` wrote.
+/// References a correction keeps under the row's own archive id are the
+/// row's whatever their revision. A message another sender wrote under
+/// the same wire id keeps its references.
+pub(super) async fn clear_resolved(
+    deps: &Deps<'_>,
+    archive: &BareJid,
+    wire_id: &RichMessageId,
+    resolved: &StanzaId,
+    author: &BareJid,
+) {
+    let mut mutations = Vec::new();
+    for mutation in current_references(deps, archive, wire_id).await {
+        if mutation.current_archive_stanza_id.id == resolved.id
+            || revision_written_by(deps, archive, &mutation.current_archive_stanza_id, author).await
+        {
+            mutations.push(mutation);
+        }
+    }
+    if let Some(resolved_id) = RichMessageId::try_new(resolved.id.clone()) {
+        if resolved_id != *wire_id {
+            mutations.extend(current_references(deps, archive, &resolved_id).await);
+        }
+    }
+    record(deps, mutations, true);
+}
+
+/// Whether `archive` holds the revision `revision` and `author` wrote it.
+/// A revision that cannot be read is not taken for the author's, and the
+/// plan fails as for any reference that cannot be read.
+async fn revision_written_by(
+    deps: &Deps<'_>,
+    archive: &BareJid,
+    revision: &StanzaId,
+    author: &BareJid,
+) -> bool {
+    let Some(mam_storage) = deps.mam_storage else {
+        return false;
+    };
+    match mam_storage
+        .get_message_by_archive_or_stanza_id(archive, &revision.id)
+        .await
+    {
+        Ok(row) => row.is_some_and(|row| row.from.to_bare() == *author),
+        Err(_) => {
+            warn!("could not read a preview reference's revision during planning");
+            deps.effects.fail_plan(PlanFailure::PreviewReferenceRead);
+            false
+        }
+    }
+}
+
 fn record(deps: &Deps<'_>, mutations: Vec<LinkPreviewMediaRefMutation>, clearing: bool) {
     if mutations.is_empty() {
         return;
@@ -188,12 +246,16 @@ pub(crate) fn mutation_write(
     use crate::db::actor::DbExecute;
     let now = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
     let mut query = match mutation.state {
+        // A reference names an upload slot this deployment holds. One that
+        // names no slot (removed meanwhile, or never this deployment's) is
+        // not written, so that the transaction it is part of still commits.
         LinkPreviewMediaRefState::Current => DbExecute {
             sql: r#"
                 INSERT INTO link_preview_media_refs
                     (upload_slot_id, archive_jid, message_id, current_archive_id,
                      state, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                SELECT ?, ?, ?, ?, ?, ?, ?
+                WHERE EXISTS (SELECT 1 FROM upload_slots WHERE id = ?)
                 ON CONFLICT (upload_slot_id, archive_jid, message_id) DO UPDATE SET
                     current_archive_id = excluded.current_archive_id,
                     state = excluded.state,
@@ -232,6 +294,7 @@ pub(crate) fn mutation_write(
                 "current".to_owned(),
                 now.clone(),
                 now,
+                mutation.upload_slot_id.to_string(),
             ],
         },
         LinkPreviewMediaRefState::Unreferenced => DbExecute {

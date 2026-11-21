@@ -860,6 +860,9 @@ pub struct RoomActor {
         std::sync::Arc<dyn extension_subscriptions::RoomExtensionSubscriber>,
     >,
     pub(in crate::muc::room_actor) room: MucRoom,
+    /// The room's binding requires membership whatever its stored or
+    /// submitted configuration says (see [`Self::with_members_only_binding`]).
+    pub(in crate::muc::room_actor) members_only_binding: bool,
     pub(in crate::muc::room_actor) durable_coordinates:
         Option<super::super::durable::RoomCommittedCoordinates>,
     pub(in crate::muc::room_actor) config_durable_coordinates:
@@ -1124,6 +1127,7 @@ impl RoomActor {
         Self {
             extension_subscribers: HashMap::new(),
             room,
+            members_only_binding: false,
             durable_coordinates: None,
             config_durable_coordinates: None,
             config_revision: 0,
@@ -1161,6 +1165,19 @@ impl RoomActor {
     /// Install the deployment's server-assigned XEP-0317 hats.
     pub fn with_server_hats(mut self, server_hats: ServerHats) -> Self {
         self.server_hats = server_hats;
+        self
+    }
+
+    /// Keep the room members-only for the actor's whole life when `bound`:
+    /// the room's admission belongs to an authority outside this actor
+    /// that admits members only (an enrolled host-grant scope). The
+    /// configuration it starts with, every durable restore and every
+    /// configuration change are held to it.
+    pub fn with_members_only_binding(mut self, bound: bool) -> Self {
+        self.members_only_binding = bound;
+        if bound {
+            self.room.config.members_only = true;
+        }
         self
     }
 
@@ -2053,9 +2070,14 @@ impl RoomActor {
         }
     }
 
-    /// Replace config only after restoring cross-field privacy invariants.
+    /// Replace config only after restoring cross-field privacy invariants,
+    /// the room's members-only binding among them.
     pub(in crate::muc::room_actor) fn replace_config(&mut self, config: RoomConfig) {
-        self.room.config = config.normalized();
+        let mut config = config.normalized();
+        if self.members_only_binding {
+            config.members_only = true;
+        }
+        self.room.config = config;
     }
 
     pub(in crate::muc::room_actor) fn config_effect_recipients(
@@ -2610,6 +2632,24 @@ impl kameo::message::Message<GetOccupantSessionGeneration> for RoomActor {
     ) -> Self::Reply {
         self.room.find_occupant_by_real_jid(&msg.jid)?;
         self.room.session_generation(&msg.jid)
+    }
+}
+
+/// Every session the room seats, with the connection generation each is
+/// seated under: what [`GetOccupantSessionGeneration`] answers for one
+/// session, read for all of them from one consistent state. A session
+/// without a generation to pin is not listed.
+pub struct GetSeatedSessionGenerations;
+
+impl kameo::message::Message<GetSeatedSessionGenerations> for RoomActor {
+    type Reply = Result<Vec<(FullJid, waddle_xmpp_core::OccupancySessionGeneration)>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetSeatedSessionGenerations,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.room.seated_session_generations())
     }
 }
 

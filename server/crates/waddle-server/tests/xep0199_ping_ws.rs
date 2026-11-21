@@ -78,15 +78,19 @@ async fn foreign_occupant_ping_is_denied_and_same_socket_still_answers_local_pin
         panic!("remote ping must not produce a pong: {response:?}")
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
     assert_eq!(
         error.by,
         Some(DOMAIN.parse().expect("home error generator"))
     );
     assert_eq!(echoed.as_ref(), Some(&payload));
+    // XEP-0410 §3.2: remote-server-not-found is undecided, never "joined".
     assert_eq!(
         interpret_self_ping_response(&response),
-        SelfPingResult::Disconnected
+        SelfPingResult::Timeout
     );
 
     let mut local = Iq::from_get("same-socket-local-ping", Ping);

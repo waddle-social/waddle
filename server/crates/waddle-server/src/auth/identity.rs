@@ -1,6 +1,11 @@
 use crate::auth::directory::canonical_localpart;
+use crate::auth::retirement::{retirement_key, JID_NOT_RETIRED_SQL};
 use crate::auth::{localpart_to_jid, username_to_localpart, AuthError, AuthProviderConfig};
 use kameo::actor::ActorRef;
+use waddle_xmpp::identity::AccountLocalpart;
+
+/// The provider part of a fallback account name such as `ext_github_…`.
+const PROVIDER_COMPONENT_MAX_BYTES: usize = 32;
 
 use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
 use crate::db::{row_value, ValueExt};
@@ -173,37 +178,42 @@ impl IdentityService {
         claims: &IdentityClaims,
         issuer: &str,
     ) -> String {
-        if let Some(v) = claims.preferred_username.as_deref() {
-            let slug = username_to_localpart(v);
-            if !slug.is_empty() {
+        // Each source is used only when its slug keeps at least one
+        // character; a name with nothing to transliterate falls through to
+        // the next source and finally to the subject digest.
+        if let Some(slug) = claims
+            .preferred_username
+            .as_deref()
+            .and_then(username_to_localpart)
+        {
+            return slug;
+        }
+
+        if let Some(claim_key) = provider.username_claim.as_deref() {
+            if let Some(slug) = claims
+                .raw_claims
+                .get(claim_key)
+                .and_then(|v| v.as_str())
+                .and_then(username_to_localpart)
+            {
                 return slug;
             }
         }
 
-        if let Some(claim_key) = provider.username_claim.as_deref() {
-            if let Some(v) = claims.raw_claims.get(claim_key).and_then(|v| v.as_str()) {
-                let slug = username_to_localpart(v);
-                if !slug.is_empty() {
-                    return slug;
-                }
-            }
+        if let Some(slug) = claims
+            .email
+            .as_deref()
+            .and_then(|email| email.split_once('@'))
+            .and_then(|(local, _)| username_to_localpart(local))
+        {
+            return slug;
         }
 
-        if let Some(email) = claims.email.as_deref() {
-            if let Some((local, _)) = email.split_once('@') {
-                let slug = username_to_localpart(local);
-                if !slug.is_empty() {
-                    return slug;
-                }
-            }
-        }
-
-        let provider_slug = username_to_localpart(&provider.id);
-        let provider_component = if provider_slug.is_empty() {
-            "provider".to_string()
-        } else {
-            provider_slug
-        };
+        // Keep the fallback within the account profile's length with its
+        // digest intact: `ext_` + provider + `_` + 12 hex digits.
+        let mut provider_component =
+            username_to_localpart(&provider.id).unwrap_or_else(|| "provider".to_string());
+        provider_component.truncate(PROVIDER_COMPONENT_MAX_BYTES);
 
         let digest = Sha256::digest(format!("{}:{}", issuer, claims.subject.trim()).as_bytes());
         let short = hex::encode(&digest[..6]);
@@ -217,6 +227,9 @@ impl IdentityService {
         issuer: &str,
         domain: &str,
     ) -> Result<UserRecord, AuthError> {
+        // The base is a slug of at most 60 bytes or the `ext_` fallback, which
+        // is shorter, so a suffix of up to three digits keeps every candidate
+        // within the account profile.
         let base = Self::derive_base_username(provider, claims, issuer);
 
         for i in 0..200 {
@@ -225,21 +238,37 @@ impl IdentityService {
             } else {
                 format!("{}{}", base, i)
             };
-            let xmpp_localpart = username_to_localpart(&username);
+            // New accounts are named in the account profile exactly; the
+            // localpart, its key and the bare JID are one spelling.
+            let xmpp_localpart = AccountLocalpart::parse(&username)
+                .map_err(|error| {
+                    AuthError::InvalidUsername(format!(
+                        "derived account name is outside the account profile: {error}"
+                    ))
+                })?
+                .to_string();
             // The bare JID is the immutable principal and primary key.
             let jid = localpart_to_jid(&xmpp_localpart, domain)?;
             let now = Utc::now().to_rfc3339();
 
-            let insert = r#"
-                INSERT INTO users (
-                    jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#;
+            // A name whose JID belonged to a retired account is not free:
+            // the account is created only where the ledger of retired JIDs
+            // does not hold the JID, in the statement that creates the row
+            // (`auth::retirement`). A JID without a canonical form is not a
+            // name an account can take either.
+            let Some(retirement_key) = retirement_key(&xmpp_localpart, domain) else {
+                continue;
+            };
+            let insert = format!(
+                "INSERT INTO users (jid, username, xmpp_localpart, localpart_key, display_name, \
+                 avatar_url, primary_email, created_at, updated_at) \
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE {JID_NOT_RETIRED_SQL}"
+            );
 
             let result = self
                 .actor
                 .ask(DbExecute {
-                    sql: insert.to_string(),
+                    sql: insert,
                     params: vec![
                         jid.clone().into(),
                         username.clone().into(),
@@ -253,11 +282,16 @@ impl IdentityService {
                         claims.email.clone().into(),
                         now.clone().into(),
                         now.clone().into(),
+                        retirement_key.into(),
                     ],
                 })
                 .await;
 
             match result {
+                // Nothing was inserted: the JID is retired. Like a name
+                // another account holds, it is passed over, so the account
+                // is given the next free name and never the retired JID.
+                Ok(0) => continue,
                 Ok(_) => {
                     return Ok(UserRecord {
                         jid,

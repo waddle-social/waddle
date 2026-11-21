@@ -1,0 +1,1 @@
+-- Enrolled Space deletion requires PostgreSQL.

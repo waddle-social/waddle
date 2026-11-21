@@ -61,6 +61,37 @@ pub(crate) async fn with_simulated_lost_commit_ack<F: std::future::Future>(futur
         TEST_SUPPORT_AMBIGUOUS_COMMIT.scope(true, future).await
     }
 }
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static HOST_GRANT_ADMISSION_GATE: (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    );
+}
+
+/// Hold an acceptance transaction that the host-grant authority admitted,
+/// with the scope's guard held, until the test releases it. `entered` is
+/// notified when the transaction reaches the gate.
+#[cfg(feature = "test-support")]
+pub(crate) async fn with_host_grant_admission_gate<F: std::future::Future>(
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    proceed: std::sync::Arc<tokio::sync::Notify>,
+    future: F,
+) -> F::Output {
+    HOST_GRANT_ADMISSION_GATE
+        .scope((entered, proceed), future)
+        .await
+}
+
+/// Reached by an acceptance transaction right after the host-grant
+/// authority admitted it. A no-op unless a test holds the gate.
+pub(in crate::ingress) async fn after_host_grant_admission() {
+    #[cfg(feature = "test-support")]
+    if let Ok((entered, proceed)) = HOST_GRANT_ADMISSION_GATE.try_with(Clone::clone) {
+        entered.notify_one();
+        proceed.notified().await;
+    }
+}
 #[cfg(test)]
 pub(crate) use injected::*;
 #[cfg(test)]

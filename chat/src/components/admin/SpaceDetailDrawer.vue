@@ -12,11 +12,17 @@ import type {
   WasmAdminSpaceListEntry,
   WasmAdminSpaceMemberEntry,
 } from "@/lib/xmpp";
+import { jidDomain } from "@/lib/xmpp/jid";
+import { fetchSpaceFederated, setSpaceFederated } from "@/lib/xmpp/federated-settings";
+import { classifyRemoteError } from "@/lib/xmpp/remote-outcome";
 
 const props = defineProps<{
   open: boolean;
   xmppClient: BrowserXmppClient | null;
   space: WasmAdminSpaceListEntry;
+  /** Whether the home server federates with other servers. The Space's
+   * setting for who from other servers can reach it is offered only then. */
+  federationAvailable: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -47,6 +53,73 @@ const membersError = ref("");
 const memberMutating = ref<string | null>(null);
 let membersRequestId = 0;
 
+// Whether accounts on other servers can reach this Space, as its server
+// holds it: `undefined` while loading, `null` when the server does not
+// offer the setting.
+const federated = ref<boolean | null | undefined>(undefined);
+const federatedSaving = ref(false);
+const federatedError = ref("");
+// Bumped whenever a read or a change settles: the checkbox is redrawn from
+// the value the server holds, even when that value did not change and the
+// box was toggled by the click.
+const federatedRenderKey = ref(0);
+let federatedRequestId = 0;
+
+/** The Spaces service: the domain of the Space's address. */
+function spacesService(): string {
+  return jidDomain(props.space.space_jid);
+}
+
+async function loadFederated() {
+  const agent = props.xmppClient?.agent;
+  const requestId = ++federatedRequestId;
+  federatedError.value = "";
+  if (!agent) {
+    federated.value = null;
+    return;
+  }
+  federated.value = undefined;
+  try {
+    const value = await fetchSpaceFederated(agent, spacesService(), props.space.space_node);
+    if (requestId === federatedRequestId) {
+      federated.value = value;
+      federatedRenderKey.value += 1;
+    }
+  } catch (err: unknown) {
+    if (requestId !== federatedRequestId) return;
+    federated.value = null;
+    // Only the node's owner reads its configure form; for anyone else the
+    // setting is simply not offered.
+    if (classifyRemoteError(err).kind === "denial") return;
+    federatedError.value = err instanceof Error ? err.message : "Couldn't read whether this Space is open to other servers.";
+  }
+}
+
+async function changeFederated(next: boolean) {
+  const agent = props.xmppClient?.agent;
+  if (!agent || federatedSaving.value || !props.federationAvailable) return;
+  const requestId = ++federatedRequestId;
+  federatedSaving.value = true;
+  federatedError.value = "";
+  try {
+    const { current, error } = await setSpaceFederated(agent, spacesService(), props.space.space_node, next);
+    if (requestId !== federatedRequestId) return;
+    // Show what the server holds now, whatever was submitted.
+    federated.value = current;
+    if (error || current !== next) {
+      federatedError.value = "The server did not apply the change. The setting shows its current value.";
+    }
+  } catch (err: unknown) {
+    if (requestId !== federatedRequestId) return;
+    federatedError.value = err instanceof Error ? err.message : "Couldn't change whether this Space is open to other servers.";
+  } finally {
+    // Whatever settled the request (its answer, or a newer read of another
+    // Space that superseded it), the setting can be changed again.
+    federatedSaving.value = false;
+    federatedRenderKey.value += 1;
+  }
+}
+
 const showDelete = ref(false);
 const deleting = ref(false);
 const deleteError = ref("");
@@ -56,6 +129,7 @@ watch(() => props.space, (s) => {
   editDescription.value = s.description ?? "";
   editIconUrl.value = s.icon_url ?? "";
   void loadMembers();
+  void loadFederated();
 }, { immediate: false });
 
 async function loadMembers() {
@@ -166,7 +240,10 @@ async function confirmDelete() {
   }
 }
 
-onMounted(() => { void loadMembers(); });
+onMounted(() => {
+  void loadMembers();
+  void loadFederated();
+});
 
 const hasMoreMembers = computed(() => memberCursor.value !== null);
 </script>
@@ -198,6 +275,33 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
       >
         {{ editing ? "Saving…" : "Save changes" }}
       </button>
+
+      <!-- Other servers: offered only while the home server federates, and then
+           when the Space's configure form carries the setting -->
+      <section v-if="federationAvailable && (federated !== null || federatedError)" :class="a.section">
+        <h3>Other servers</h3>
+        <div :class="a.checks">
+          <p v-if="federated === undefined">Loading…</p>
+          <label v-else-if="federated !== null">
+            <input
+              :key="federatedRenderKey"
+              type="checkbox"
+              :checked="federated"
+              :disabled="federatedSaving"
+              aria-describedby="space-federated-help"
+              @change="changeFederated(($event.target as HTMLInputElement).checked)"
+            />
+            <span>Open this Space to accounts on other servers</span>
+          </label>
+          <p id="space-federated-help">
+            Off by default. When on, accounts on every server this one connects to can see the Space, follow
+            it and read which of its rooms are open to them. Following a Space gives no access to its rooms:
+            each room has its own setting and members. Turning it off closes the Space to other servers and ends
+            their subscriptions.
+          </p>
+        </div>
+        <div v-if="federatedError" :class="a.alert" role="alert">{{ federatedError }}</div>
+      </section>
 
       <section :class="a.section">
         <h3>Members</h3>

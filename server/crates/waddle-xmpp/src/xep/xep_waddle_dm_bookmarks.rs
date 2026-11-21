@@ -59,6 +59,7 @@
 //! `waddle_xmpp_core::pubsub::NodeConfig::waddle_dm_bookmarks_defaults`,
 //! so the per-contact overrides are not broadcast to roster contacts.
 
+use crate::identity::CanonicalBareJid;
 use jid::BareJid;
 use minidom::Element;
 use thiserror::Error;
@@ -140,8 +141,10 @@ pub enum DmBookmarkError {
 ///
 /// This is also the publish-time validator. It:
 ///
-/// * parses `item_id` as a [`BareJid`] and requires a localpart
-///   (`localpart@domain`) — a domain-only or empty id is rejected;
+/// * parses `item_id` as a [`BareJid`] that must already be canonical under
+///   the identity profile ([`CanonicalBareJid::parse_exact`]) and requires a
+///   localpart (`localpart@domain`) — a domain-only, empty or non-canonical
+///   id (`Alice@example.com`) is rejected rather than folded;
 /// * pins the payload root to
 ///   `<dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>`;
 /// * rejects ANY attribute on `<dm-bookmark>` (none are defined),
@@ -152,8 +155,8 @@ pub enum DmBookmarkError {
 ///   2+ notify children are [`DmBookmarkError::MultipleNotify`], any
 ///   other child is [`DmBookmarkError::UnknownChild`].
 pub fn parse_dm_bookmark(item_id: &str, payload: &Element) -> Result<DmBookmark, DmBookmarkError> {
-    let jid: BareJid = item_id
-        .parse()
+    let jid = CanonicalBareJid::parse_exact(item_id)
+        .map(CanonicalBareJid::into_bare_jid)
         .map_err(|_| DmBookmarkError::InvalidJid(item_id.to_string()))?;
     if jid.node().is_none() {
         return Err(DmBookmarkError::InvalidJid(item_id.to_string()));
@@ -312,6 +315,23 @@ mod tests {
             parse_dm_bookmark("example.com", &payload).unwrap_err(),
             DmBookmarkError::InvalidJid("example.com".to_string())
         );
+    }
+
+    #[test]
+    fn parse_non_canonical_item_id_rejected() {
+        let payload =
+            dm_bookmark_xml("<notify xmlns='urn:xmpp:notification-settings:1'><never/></notify>");
+        for item_id in [
+            "Alice@example.com",
+            "alice@example.com.",
+            "alice@EXAMPLE.com",
+        ] {
+            assert_eq!(
+                parse_dm_bookmark(item_id, &payload).unwrap_err(),
+                DmBookmarkError::InvalidJid(item_id.to_string()),
+                "{item_id:?}"
+            );
+        }
     }
 
     #[test]

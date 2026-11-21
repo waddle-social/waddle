@@ -114,8 +114,16 @@ impl InboundHandled {
 }
 
 /// One counted outbound stanza offered to the authority.
+#[derive(Clone, Copy)]
+pub(in crate::server::routes::websocket) enum CustodyPayload<'a> {
+    Wire(&'a str),
+    Protected(&'a SmReplayPayload),
+    Retained(&'a str),
+}
+
+/// One counted outbound stanza offered to the authority.
 pub(in crate::server::routes::websocket) struct CustodyFrame<'a> {
-    pub(in crate::server::routes::websocket) xml: &'a str,
+    pub(in crate::server::routes::websocket) payload: CustodyPayload<'a>,
     pub(in crate::server::routes::websocket) original_receipt_at: chrono::DateTime<chrono::Utc>,
     pub(in crate::server::routes::websocket) provenance: &'a SmFrameProvenance,
     pub(in crate::server::routes::websocket) ingress_receipts: &'a [SmIngressFrameReceipt],
@@ -592,7 +600,12 @@ impl DurableSmOwner {
         frame: &CustodyFrame<'_>,
         standing: OwnerStanding,
     ) -> Result<CommittedObligation, CustodyRefusal> {
-        let payload = SmReplayPayload::from_wire(frame.xml.to_owned()).map_err(|error| {
+        let payload = match frame.payload {
+            CustodyPayload::Wire(xml) => SmReplayPayload::from_wire(xml.to_owned()),
+            CustodyPayload::Protected(payload) => Ok(payload.clone()),
+            CustodyPayload::Retained(storage) => SmReplayPayload::from_storage(storage.to_owned()),
+        }
+        .map_err(|error| {
             warn!(session = ?self.fence.session, %error, "counted frame is not a stanza the authority can retain");
             CustodyRefusal::Unavailable
         })?;
@@ -675,7 +688,7 @@ impl DurableSmOwner {
             let committed = self
                 .admit(
                     &CustodyFrame {
-                        xml: &entry.stanza_xml,
+                        payload: CustodyPayload::Retained(&entry.stanza_xml),
                         original_receipt_at: entry.original_receipt_at,
                         provenance: &entry.provenance,
                         ingress_receipts: &entry.ingress_receipts,
@@ -1445,7 +1458,7 @@ fn project_retained_frames(sm_state: &mut StreamManagementState, frames: &[Retai
         // The request cadence starts again with the first live frame.
         let _ = sm_state.record_committed_outbound(
             retained.frame.sequence,
-            retained.frame.stanza.wire().to_owned(),
+            retained.frame.stanza.to_storage().into_owned(),
             retained.frame.original_receipt_at,
             SmEvictionPath::ReplayTail,
             retained.frame.provenance.clone(),

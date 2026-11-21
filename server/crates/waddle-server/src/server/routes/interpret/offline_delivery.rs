@@ -216,6 +216,12 @@ pub(crate) async fn bounce_offline_quota(
     recipient: &BareJid,
     original_message: &Message,
 ) {
+    // A message from a remote sender is never answered, so that its sender
+    // cannot tell an offline account from any other (gate G18).
+    if crate::sm_promotion::is_remote_sender(original_message, deps.local_domain) {
+        debug!(recipient = %recipient, "offline quota exceeded for a remote sender's message; dropped unanswered");
+        return;
+    }
     waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
     // XEP-0160 §3 step 3 + RFC 6120 §8.3 — return a
     // typed `<service-unavailable/>` bounce that

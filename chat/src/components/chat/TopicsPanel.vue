@@ -90,6 +90,8 @@ const rowClass = cx(room(), css({ flex: 1, cursor: "pointer", border: 0, bg: "tr
 const threadRowClass = cx(rowClass, css({ minHeight: "36px", pl: "8", fontSize: "sm", "& svg": { width: "16px", height: "16px" } }));
 const rowWrapClass = css({ display: "flex", alignItems: "center", gap: "1" });
 const metaClass = css({ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", font: "400 12px/1.35 {fonts.body}", color: "fg.muted" });
+// Server name beside a room on another server; capped so the room name keeps most of the row.
+const remoteHostClass = cx(metaClass, css({ minWidth: 0, maxWidth: "45%" }));
 const nameStackClass = css({ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", "& > :first-child": { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "fg", fontWeight: 600 } });
 const countClass = css({ flex: "none", font: "600 12px/1 {fonts.body}", fontVariantNumeric: "tabular-nums", color: "fg.soft" });
 const sectionHeadClass = css({
@@ -393,7 +395,10 @@ function channelRowLabel(
   const preview = callParticipantCount(channel) > 0
     ? callParticipantPreviewForRoom(roomJid)
     : "";
-  const label = `${channel.name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
+  // A room on another server says where it is: two servers can each have
+  // a room of the same name.
+  const name = channel.remoteHost ? `${channel.name} on ${channel.remoteHost}` : channel.name;
+  const label = `${name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
     unread: unread.unread,
     mentions: unread.mentions,
     hasActivity: hasActivity(channel.id),
@@ -745,6 +750,11 @@ watch(
                 >
                   <component :is="channelIcon(channel)" aria-hidden="true" />
                   <span class="wd-room__name">{{ channel.name }}</span>
+                  <span
+                    v-if="channel.remoteHost"
+                    :class="remoteHostClass"
+                    :title="`Hosted on ${channel.remoteHost}`"
+                  >{{ channel.remoteHost }}</span>
                   <span v-if="detectForumChannel(channel)" :class="forumTagClass">Forum</span>
                   <!-- XEP-0272 Muji "call ongoing in this channel" chip, in
                        the live colour. Suppressed on the active channel:

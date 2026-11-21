@@ -88,7 +88,7 @@ where
                     .take_live_custody(
                         &conn.sm_state,
                         CustodyFrame {
-                            xml: &xml,
+                            payload: super::stream_management::CustodyPayload::Wire(&xml),
                             original_receipt_at: receipt_at,
                             provenance: &provenance,
                             ingress_receipts: &[],

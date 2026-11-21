@@ -256,6 +256,28 @@ pub trait PubSubStorage: Send + Sync + 'static {
         affiliation: Affiliation,
     ) -> Result<Affiliation, XmppError>;
 
+    /// Set `affiliation` for `entity` unless its row holds `Outcast`, in
+    /// one step: an outcast stays an outcast. Returns whether the row was
+    /// written. Bootstrap and repair writers use it, so that a reseed can
+    /// never lift a ban; only an explicit affiliation change does.
+    ///
+    /// The default reads the row and then writes it, which is not one step;
+    /// a store that can condition its write implements this itself.
+    async fn set_affiliation_unless_outcast(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<bool, XmppError> {
+        if self.affiliation(owner, node_name, entity).await? == Affiliation::Outcast {
+            return Ok(false);
+        }
+        self.set_affiliation(owner, node_name, entity, affiliation)
+            .await?;
+        Ok(true)
+    }
+
     /// Read the explicit affiliation row for `(owner, node, entity)`.
     /// Returns `Affiliation::None` if no row exists. Owner-derivation for
     /// PEP nodes happens in `pubsub_authz`, *not* here.

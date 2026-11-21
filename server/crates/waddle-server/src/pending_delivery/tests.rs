@@ -2321,6 +2321,7 @@ async fn postgres_two_connections_serialize_the_final_quota_slot() {
     outcomes.sort_by_key(|outcome| match outcome {
         InsertOutcome::Inserted => 0,
         InsertOutcome::QuotaExceeded => 1,
+        InsertOutcome::RecipientRetired => 2,
     });
     assert_eq!(
         outcomes,

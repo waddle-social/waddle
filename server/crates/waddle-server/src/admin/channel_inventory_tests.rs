@@ -47,7 +47,8 @@ async fn catalog_channel(
 }
 
 async fn list(state: &AppState, args: &ChannelsListArgs) -> ChannelsListResult {
-    run_list(state, args)
+    let caller: BareJid = "owner@localhost".parse().expect("caller JID");
+    run_list(state, args, &caller)
         .await
         .unwrap_or_else(|_| panic!("channel inventory"))
 }

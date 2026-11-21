@@ -12,6 +12,7 @@ use waddle_xmpp::ownership::BindingRef;
 use waddle_xmpp::registry::user_actor::ResourceRoutingState;
 
 use super::authority::AccountBindingAuthority;
+use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::AccountView;
 use super::selection::AccountAuthoritySelection;
@@ -25,6 +26,25 @@ impl AccountAuthoritySelection {
             Some(authority) => authority.view(account).await,
             None => Err(AccountCoordinatorError::Unselected),
         }
+    }
+
+    /// Select one connected headline destination, or verify the exact resource
+    /// chosen before a relay hop, from a single authoritative account view.
+    pub(crate) async fn headline_binding(
+        &self,
+        account: &BareJid,
+        selected: Option<&FullJid>,
+    ) -> Result<Option<(FullJid, BindingRef)>, AccountCoordinatorError> {
+        select_headline_binding(&self.coordinator_view(account).await?, selected)
+    }
+
+    /// Read every eligible headline binding from one coordinator snapshot.
+    /// Higher priority sorts first, with full JID as the tie-breaker.
+    pub(crate) async fn headline_bindings(
+        &self,
+        account: &BareJid,
+    ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
+        select_headline_bindings(&self.coordinator_view(account).await?, None)
     }
 
     /// Availability, priority and carbons of every active resource, in the
@@ -149,9 +169,147 @@ impl AccountAuthoritySelection {
     }
 }
 
+fn select_headline_binding(
+    view: &AccountView,
+    selected: Option<&FullJid>,
+) -> Result<Option<(FullJid, BindingRef)>, AccountCoordinatorError> {
+    Ok(select_headline_bindings(view, selected)?.into_iter().next())
+}
+
+fn select_headline_bindings(
+    view: &AccountView,
+    selected: Option<&FullJid>,
+) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
+    let max_resources = AccountCoordinatorConfig::default().max_resources.get();
+    if view.routing.len() > max_resources || view.bindings.len() > max_resources {
+        return Err(AccountCoordinatorError::Diverged);
+    }
+    let mut resources: Vec<_> = view
+        .routing
+        .iter()
+        .filter(|resource| {
+            resource.available
+                && resource.priority >= 0
+                && selected.is_none_or(|jid| &resource.jid == jid)
+        })
+        .collect();
+    resources.sort_unstable_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.jid.cmp(&right.jid))
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    resources
+        .into_iter()
+        .map(|resource| {
+            if !seen.insert(&resource.jid) {
+                return Err(AccountCoordinatorError::Diverged);
+            }
+            let binding = view
+                .binding(&resource.jid)
+                .ok_or(AccountCoordinatorError::Diverged)?;
+            Ok((resource.jid.clone(), binding.clone()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headline_selects_only_an_available_exact_binding() {
+        use waddle_xmpp::ownership::account_coordinator::AccountResourceRouting;
+        use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
+
+        let resource = |name, available, priority| AccountResourceRouting {
+            jid: format!("alice@example.com/{name}")
+                .parse()
+                .expect("resource"),
+            available,
+            priority,
+            carbons_enabled: false,
+        };
+        let phone = resource("phone", true, 0);
+        let desktop = resource("desktop", true, 5);
+        let laptop = resource("laptop", true, 5);
+        let away = resource("away", false, 127);
+        let negative = resource("negative", true, -1);
+        let binding =
+            || BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let phone_binding = binding();
+        let desktop_binding = binding();
+        let laptop_binding = binding();
+        let mut view = AccountView {
+            routing: vec![
+                phone.clone(),
+                laptop.clone(),
+                desktop.clone(),
+                away.clone(),
+                negative.clone(),
+            ],
+            bindings: vec![
+                (phone.jid.clone(), phone_binding.clone()),
+                (desktop.jid.clone(), desktop_binding.clone()),
+                (laptop.jid.clone(), laptop_binding.clone()),
+                (away.jid.clone(), binding()),
+                (negative.jid.clone(), binding()),
+            ],
+            ..AccountView::default()
+        };
+
+        assert_eq!(
+            select_headline_bindings(&view, None).expect("all eligible bindings"),
+            [
+                (desktop.jid.clone(), desktop_binding.clone()),
+                (laptop.jid, laptop_binding),
+                (phone.jid.clone(), phone_binding.clone()),
+            ]
+        );
+        assert_eq!(
+            select_headline_binding(&view, None).expect("authoritative selection"),
+            Some((desktop.jid.clone(), desktop_binding))
+        );
+        assert_eq!(
+            select_headline_binding(&view, Some(&phone.jid)).expect("exact selection"),
+            Some((phone.jid, phone_binding))
+        );
+        assert!(select_headline_binding(&view, Some(&negative.jid))
+            .expect("negative priority")
+            .is_none());
+        view.bindings.retain(|(jid, _)| jid != &desktop.jid);
+        assert!(matches!(
+            select_headline_binding(&view, None),
+            Err(AccountCoordinatorError::Diverged)
+        ));
+        view.routing = vec![away, negative];
+        assert!(select_headline_binding(&view, None)
+            .expect("no available resource")
+            .is_none());
+    }
+
+    #[test]
+    fn headline_inventory_rejects_an_oversized_view() {
+        use waddle_xmpp::ownership::account_coordinator::AccountResourceRouting;
+
+        let view = AccountView {
+            routing: vec![
+                AccountResourceRouting {
+                    jid: "alice@example.com/negative".parse().expect("resource"),
+                    available: true,
+                    priority: -1,
+                    carbons_enabled: false,
+                };
+                AccountCoordinatorConfig::default().max_resources.get() + 1
+            ],
+            ..AccountView::default()
+        };
+        assert!(matches!(
+            select_headline_bindings(&view, None),
+            Err(AccountCoordinatorError::Diverged)
+        ));
+    }
 
     /// An application that never ran startup's selection has no account
     /// authority: every read fails instead of answering from another
@@ -163,6 +321,14 @@ mod tests {
         let resource: FullJid = "alice@example.com/phone".parse().expect("full jid");
         assert!(matches!(
             selection.resources(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.headline_bindings(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.headline_binding(&account, None).await,
             Err(AccountCoordinatorError::Unselected)
         ));
         assert!(matches!(

@@ -1,5 +1,6 @@
 use super::{
-    build_config_form, MucRoom, RoomConfig, DATA_FORMS_NS, FIELD_FORUM_MODE, FIELD_PIN_PERMISSION,
+    build_config_form, MucRoom, RoomConfig, DATA_FORMS_NS, FIELD_FEDERATED, FIELD_FORUM_MODE,
+    FIELD_PIN_PERMISSION,
 };
 
 #[test]
@@ -80,4 +81,61 @@ fn legacy_room_config_deserializes_to_admins_only() {
         config.pin_permission,
         super::super::pin::PinPermission::AdminsOnly
     );
+}
+
+/// The value the owner-config form offers for the `federated` field of a
+/// room configured as `config`.
+fn offered_federated(config: RoomConfig) -> String {
+    let room = MucRoom::new(
+        "room@muc.example.com".parse().unwrap(),
+        "waddle-123".to_string(),
+        "channel-456".to_string(),
+        config,
+    );
+    let form = build_config_form(&room);
+    let field = form
+        .children()
+        .find(|c| c.attr("var") == Some(FIELD_FEDERATED))
+        .expect("the federated field should exist");
+    assert_eq!(field.attr("type"), Some("boolean"));
+    field
+        .get_child("value", DATA_FORMS_NS)
+        .expect("the federated field should contain a value")
+        .text()
+}
+
+/// XEP-0045 §10.1.2: the form offers the `federated` field with the
+/// room's current setting, which is off unless it was turned on.
+#[test]
+fn the_config_form_offers_the_federated_setting() {
+    assert_eq!(offered_federated(RoomConfig::default()), "0");
+    assert_eq!(
+        offered_federated(RoomConfig {
+            federated: true,
+            ..Default::default()
+        }),
+        "1"
+    );
+}
+
+/// A configuration stored before the `federated` field existed reads as
+/// not federated, and a group DM is never federated.
+#[test]
+fn a_stored_room_config_without_the_federated_field_is_not_federated() {
+    let mut value =
+        serde_json::to_value(RoomConfig::default()).expect("default RoomConfig serializes");
+    let obj = value.as_object_mut().expect("object");
+    assert!(obj.remove("federated").is_some());
+    let config: RoomConfig =
+        serde_json::from_value(value).expect("RoomConfig without federated must deserialize");
+    assert!(!config.federated);
+
+    let group_dm = RoomConfig {
+        group_dm: true,
+        federated: true,
+        ..Default::default()
+    }
+    .normalized();
+    assert!(!group_dm.federated);
+    assert!(group_dm.members_only);
 }

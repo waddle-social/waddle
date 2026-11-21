@@ -48,6 +48,7 @@ mod implementation;
 pub use implementation::fan_out_pep_retract;
 pub use implementation::fan_out_publish;
 pub use implementation::fan_out_retract;
+pub use implementation::fan_out_service_retract;
 use implementation::FanOutMetrics;
 pub use implementation::FanOutRequest;
 pub use implementation::FanOutRetractRequest;

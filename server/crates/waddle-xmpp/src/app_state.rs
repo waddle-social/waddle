@@ -3,7 +3,7 @@ use jid::BareJid;
 use waddle_xmpp_core::{ChannelInfo, ChannelRoomInfo, UploadSlotInfo};
 use xmpp_parsers::minidom::Element;
 
-use crate::{inbox, roster, Affiliation, XmppError};
+use crate::{inbox, roster, XmppError};
 
 /// XEP-0503 access models Waddle can currently serve correctly for Spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,14 +131,6 @@ pub trait AppState: Send + Sync + 'static {
         query: &str,
         limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<UserDirectoryEntry>, XmppError>> + Send;
-
-    /// Persist a MUC affiliation relation through the backing authorization system.
-    fn set_room_affiliation(
-        &self,
-        channel_id: &str,
-        jid: &BareJid,
-        affiliation: Affiliation,
-    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 
     /// Lookup SCRAM credentials for a native JID user.
     ///

@@ -12,6 +12,7 @@ use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, Pe
 mod ack_windows;
 mod custody;
 mod recovery_order;
+mod retired;
 mod runtime_attach;
 mod schema;
 

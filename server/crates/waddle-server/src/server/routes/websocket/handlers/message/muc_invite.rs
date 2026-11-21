@@ -249,6 +249,42 @@ pub(super) async fn handle_muc_mediated_invite(
     }
     let (invitee, inbound_invite) = mediated_invitee(incoming)?;
 
+    // An invitation to a room an enrolled host-grant scope manages would
+    // grant membership outside its canonical grants; such a room's members
+    // are made by its administrators through the host-grant store.
+    {
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(&room_jid))
+            .await
+        {
+            RoomGate::Unmanaged => {}
+            RoomGate::Managed(_) => {
+                return Some(vec![error_frame(
+                    incoming,
+                    bound_jid,
+                    deps,
+                    ErrorType::Cancel,
+                    DefinedCondition::NotAllowed,
+                    "Membership of this room is granted by its administrators.",
+                )]);
+            }
+            RoomGate::Unavailable => {
+                return Some(vec![error_frame(
+                    incoming,
+                    bound_jid,
+                    deps,
+                    ErrorType::Cancel,
+                    DefinedCondition::ServiceUnavailable,
+                    "The room is not available.",
+                )]);
+            }
+        }
+    }
+
     if authenticated_session.is_none() {
         return Some(vec![error_frame(
             incoming,
@@ -585,6 +621,25 @@ pub(crate) async fn execute_muc_membership(
     else {
         return EffectOutcome::Unavailable;
     };
+    // An invitation accepted before its room was enrolled grants nothing
+    // once a host-grant scope manages the room: membership there is a
+    // canonical grant. The invitation itself is still delivered.
+    {
+        use crate::permissions::host_grant::{RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .room(RoomBinding::Room(&room_jid))
+            .await
+        {
+            RoomGate::Unmanaged => {}
+            RoomGate::Managed(_) => {
+                return EffectOutcome::Membership(MembershipOutcome::Preserved);
+            }
+            RoomGate::Unavailable => return EffectOutcome::Unavailable,
+        }
+    }
     let previous_invitee_affiliation = snapshot.room.affiliation(&invitee);
     let granted_membership = snapshot.room.config.members_only
         && previous_invitee_affiliation < waddle_xmpp::Affiliation::Member;
@@ -741,6 +796,22 @@ async fn rollback_invite_grant(
     if !granted_membership {
         return;
     }
+    // A room an enrolled host-grant scope manages, or one whose management
+    // cannot be told now, is left alone: its members are its canonical
+    // grants, and its actor's affiliation list is written only from them.
+    {
+        use crate::permissions::host_grant::{Enrollment, RoomBinding};
+        if state
+            .deps
+            .app_state
+            .host_grants
+            .room_enrollment(RoomBinding::Room(room_jid))
+            .await
+            != Enrollment::Unmanaged
+        {
+            return;
+        }
+    }
     if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
         if let Err(error) = super::super::iq::persist_managed_channel_affiliation(
             state,
@@ -797,6 +868,9 @@ pub(super) fn should_compensate_failed_affiliation_grant(
 pub enum MucUserDeliveryError {
     #[error("pending_delivery quota exceeded")]
     QuotaExceeded,
+    /// The invitee's account was retired: its offline store keeps nothing.
+    #[error("the recipient's account was retired")]
+    RecipientRetired,
     #[error("pending_delivery storage failed: {0}")]
     Storage(#[source] waddle_xmpp::pending_delivery::storage::PendingStorageError),
     #[error("delivery effect executor unavailable")]
@@ -874,13 +948,21 @@ pub(super) async fn deliver_muc_user_message(
     }
 }
 
+/// The invitee and `<invite/>` element of an XEP-0045 mediated invitation.
+///
+/// The invitee is taken exactly under the identity profile
+/// ([`waddle_xmpp::identity::parse_bare_jid`]), never folded onto another
+/// address: an invitation grants room membership to the address it names.
+/// `None` when the message carries no invitation or its `to` is not a
+/// canonical bare JID. The C2S frame parser has already refused a client
+/// invitation whose `to` is outside the profile with `<jid-malformed/>`.
 pub(crate) fn mediated_invitee(message: &Message) -> Option<(jid::BareJid, minidom::Element)> {
     let x = message
         .payloads
         .iter()
         .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
     let invite = x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)?;
-    let to = invite.attr("to")?.parse::<jid::BareJid>().ok()?;
+    let to = waddle_xmpp::identity::parse_bare_jid(invite.attr("to")?).ok()?;
     Some((to, invite.clone()))
 }
 

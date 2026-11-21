@@ -49,6 +49,7 @@
 //! </message>
 //! ```
 
+use crate::identity::CanonicalBareJid;
 use crate::pubsub::PubSubItem;
 use jid::BareJid;
 use minidom::Element;
@@ -149,10 +150,25 @@ impl std::fmt::Display for BookmarkError {
 
 impl std::error::Error for BookmarkError {}
 
+/// Parse a bookmark item id: the room's bare JID, which must already be the
+/// canonical text of that JID under the identity profile
+/// ([`CanonicalBareJid::parse_exact`]).
+///
+/// The item id is stored as written and is the key later publishes and
+/// retracts of the same room are matched by, so a spelling the `jid` parser
+/// would fold (`Room@muc.example.com`, a trailing dot, a U-label domain) is
+/// refused instead of naming the folded room under a second key.
+pub fn parse_bookmark_item_id(item_id: &str) -> Result<BareJid, BookmarkError> {
+    CanonicalBareJid::parse_exact(item_id)
+        .map(CanonicalBareJid::into_bare_jid)
+        .map_err(|error| BookmarkError::InvalidJid(error.code().to_owned()))
+}
+
 /// Parse a bookmark from a PubSub item payload.
 ///
 /// Expects a `<conference xmlns='urn:xmpp:bookmarks:1'>` element.
-/// The room JID comes from the item ID, not from within the conference element.
+/// The room JID comes from the item ID, not from within the conference
+/// element, and is parsed with [`parse_bookmark_item_id`].
 pub fn parse_bookmark(item_id: &str, payload: &Element) -> Result<Bookmark, BookmarkError> {
     // Validate element name and namespace
     if payload.name() != "conference" {
@@ -170,10 +186,7 @@ pub fn parse_bookmark(item_id: &str, payload: &Element) -> Result<Bookmark, Book
         )));
     }
 
-    // Parse room JID from item ID
-    let jid: BareJid = item_id
-        .parse()
-        .map_err(|e| BookmarkError::InvalidJid(format!("{}: {}", item_id, e)))?;
+    let jid = parse_bookmark_item_id(item_id)?;
 
     // Parse attributes
     let name = payload.attr("name").map(String::from);

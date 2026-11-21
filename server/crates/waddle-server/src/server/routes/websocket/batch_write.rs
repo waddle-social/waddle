@@ -14,11 +14,13 @@
 
 use super::frame::ResponseFrame;
 use super::send::{
-    send_ws_message_with_authority, send_ws_message_with_binding, AuthoritySendOutcome,
+    send_ws_message_with_authority, send_ws_message_with_binding, send_ws_protected_space_reply,
+    AuthoritySendOutcome, ProtectedSpaceSocketReply, StartProtectedSpaceReply,
 };
 use super::state::WsConnState;
 use super::stream_management::{
-    apply_sm_ack_with_fence, is_countable_stanza, CustodyFrame, CustodyRefusal, LiveCustody,
+    apply_sm_ack_with_fence, is_countable_stanza, CustodyFrame, CustodyPayload, CustodyRefusal,
+    LiveCustody,
 };
 use super::{
     debug, error, info, warn, Message, Sink, SmStanza, StreamExt, WebSocketState, MAX_FRAME_SIZE,
@@ -88,6 +90,8 @@ pub(super) struct BatchWriteReport {
     /// `accepted_frame_indices`, which tracks frames recorded/retained for
     /// XEP-0198 replay whether or not they reached the wire.
     pub(super) written_frame_count: usize,
+    /// Frames durably accepted by the authoritative XEP-0198 session.
+    pub(super) durable_custody_count: usize,
 }
 
 /// Normal upper bound on frames the mid-batch drain may park in
@@ -181,6 +185,11 @@ pub(super) struct BatchAuthority<'a> {
     pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
+pub(super) struct BatchSink<'a, S, SE> {
+    pub(super) sender: &'a mut S,
+    pub(super) protected_start: Option<StartProtectedSpaceReply<S, SE>>,
+}
+
 pub(super) async fn write_response_batch_with_admission<S, SE, R, RE, F>(
     sender: &mut S,
     reader: &mut R,
@@ -205,6 +214,7 @@ where
 }
 
 /// Settle each receipt carrier as soon as its ordered response prefix reaches the wire.
+#[cfg(test)]
 pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
     sender: &mut S,
     reader: &mut R,
@@ -220,14 +230,44 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
-    let report = write_response_batch_report_with_admission(
-        sender,
+    write_ingress_response_batch_with_protected_sink(
+        BatchSink {
+            sender,
+            protected_start: None,
+        },
+        reader,
+        state,
+        conn,
+        responses,
+        policy,
+        authority,
+    )
+    .await
+}
+
+pub(super) async fn write_ingress_response_batch_with_protected_sink<S, SE, R, RE>(
+    sink: BatchSink<'_, S, SE>,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    responses: &mut super::frame::ResponseBatch,
+    policy: BatchSmPolicy,
+    authority: BatchAuthority<'_>,
+) -> BatchWriteReport
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: super::send::WebSocketWriteError,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
+    RE: std::fmt::Display,
+{
+    let report = write_response_batch_impl(
+        sink,
         reader,
         state,
         conn,
         responses.frames.clone(),
         policy,
-        authority,
+        Some((authority.permit, authority.shutdown)),
     )
     .await;
     if matches!(report.outcome, BatchWriteOutcome::Continue) {
@@ -278,7 +318,10 @@ where
     F: Into<ResponseFrame>,
 {
     write_response_batch_impl(
-        sender,
+        BatchSink {
+            sender,
+            protected_start: None,
+        },
         reader,
         state,
         conn,
@@ -290,7 +333,7 @@ where
 }
 
 async fn write_response_batch_impl<S, SE, R, RE>(
-    sender: &mut S,
+    sink: BatchSink<'_, S, SE>,
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
@@ -304,9 +347,14 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
+    let BatchSink {
+        sender,
+        protected_start,
+    } = sink;
     let total_frames = frames.len();
     let mut accepted_frame_indices = Vec::new();
     let mut written_frame_count = 0usize;
+    let mut durable_custody_count = 0usize;
     complete_replayed_ingress_receipts(state, &[]).await;
     let mut frames = frames.into_iter().enumerate();
     if !batch_authoritative(authority) {
@@ -315,6 +363,7 @@ where
             outcome: BatchWriteOutcome::AuthorityRevoked,
             accepted_frame_indices,
             written_frame_count,
+            durable_custody_count,
         };
     }
     // Send-window pacing applies ONLY before frames that would actually grow
@@ -337,6 +386,7 @@ where
                 outcome: BatchWriteOutcome::AuthorityRevoked,
                 accepted_frame_indices,
                 written_frame_count,
+                durable_custody_count,
             };
         }
         // The response is tagged where SM enable succeeds, after enrollment
@@ -365,13 +415,18 @@ where
                     outcome: BatchWriteOutcome::TransportClosed,
                     accepted_frame_indices,
                     written_frame_count,
+                    durable_custody_count,
                 };
             };
             Some(permit)
         } else {
             None
         };
-        let frame_xml = frame.clone().into_serialized_xml();
+        let protected = frame.protected_space_reply();
+        let frame_xml = protected.map_or_else(
+            || frame.clone().into_serialized_xml(),
+            |reply| reply.payload.wire().to_owned(),
+        );
         let current_should_record = should_record(conn, &frame_xml, policy);
         if current_should_record && conn.sm_state.needs_send_pause() {
             match await_send_window_recovery(sender, reader, state, conn, authority).await {
@@ -396,6 +451,7 @@ where
                         outcome: BatchWriteOutcome::DeferredCapExhausted,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
                 SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
@@ -411,6 +467,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
                 SendWindowOutcome::AuthorityRevoked => {
@@ -426,6 +483,7 @@ where
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
             }
@@ -435,22 +493,41 @@ where
             // A durable session takes custody of the frame before the
             // connection's queue or the transport may hold it.
             let provenance = frame.provenance();
+            let deletion_hold =
+                if let Some(grant) = protected.and_then(|reply| reply.initial_deletion()) {
+                    let Some(hold) = grant.hold_delivery(false).await else {
+                        continue;
+                    };
+                    if grant.admit(|| ()).is_none() {
+                        continue;
+                    }
+                    Some(hold)
+                } else {
+                    None
+                };
             let custody = conn
                 .durable_sm
                 .take_live_custody(
                     &conn.sm_state,
                     CustodyFrame {
-                        xml: &frame_xml,
+                        payload: protected.map_or(CustodyPayload::Wire(&frame_xml), |reply| {
+                            CustodyPayload::Protected(&reply.payload)
+                        }),
                         original_receipt_at: policy.receipt_at(),
                         provenance: &provenance,
                         ingress_receipts: frame.ingress_receipts(),
                     },
                 )
                 .await;
+            drop(deletion_hold);
             let committed_sequence = match custody {
                 LiveCustody::Unmanaged => None,
-                LiveCustody::Exposed { sequence } => Some(sequence),
+                LiveCustody::Exposed { sequence } => {
+                    durable_custody_count += 1;
+                    Some(sequence)
+                }
                 LiveCustody::Retained => {
+                    durable_custody_count += 1;
                     // The authority holds the frame; a resume in progress
                     // writes it after its replay.
                     accepted_frame_indices.push(frame_index);
@@ -476,12 +553,16 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
             };
             let (request_ack, accepted) = record_live_sm_frame(
                 conn,
-                frame_xml.clone(),
+                protected.map_or_else(
+                    || frame_xml.clone(),
+                    |reply| reply.payload.to_storage().into_owned(),
+                ),
                 SmEvictionPath::Batch,
                 policy,
                 provenance,
@@ -511,6 +592,7 @@ where
                 outcome: BatchWriteOutcome::AuthorityRevoked,
                 accepted_frame_indices,
                 written_frame_count,
+                durable_custody_count,
             };
         }
         // Only the final carrier bears the ordered prefix's obligations. Settle
@@ -534,10 +616,38 @@ where
                     outcome: BatchWriteOutcome::TransportClosed,
                     accepted_frame_indices,
                     written_frame_count,
+                    durable_custody_count,
                 };
             }
         }
-        let send_outcome = if let Some(binding) = binding_permit.as_ref() {
+        let send_outcome = if let Some(reply) = protected {
+            match (protected_start, conn.phase.bound_jid()) {
+                (Some(start), Some(requester)) => {
+                    match send_ws_protected_space_reply(
+                        sender,
+                        ProtectedSpaceSocketReply {
+                            connection: conn.connection_ref.clone(),
+                            requester: requester.clone(),
+                            payload: reply.payload.clone(),
+                            grant: reply.grant.clone(),
+                        },
+                        start,
+                        authority,
+                    )
+                    .await
+                    {
+                        AuthoritySendOutcome::Sent => Ok(()),
+                        AuthoritySendOutcome::TransportClosed => {
+                            Err(SendWindowOutcome::TransportClosed)
+                        }
+                        AuthoritySendOutcome::AuthorityRevoked => {
+                            Err(SendWindowOutcome::AuthorityRevoked)
+                        }
+                    }
+                }
+                _ => Err(SendWindowOutcome::TransportClosed),
+            }
+        } else if let Some(binding) = binding_permit.as_ref() {
             match send_ws_message_with_binding(
                 sender,
                 Message::Text(frame_xml.into()),
@@ -569,6 +679,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     }
                 }
                 SendWindowOutcome::AuthorityRevoked => {
@@ -581,6 +692,7 @@ where
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     }
                 }
                 SendWindowOutcome::Recovered
@@ -598,6 +710,7 @@ where
                     outcome: BatchWriteOutcome::AuthorityRevoked,
                     accepted_frame_indices,
                     written_frame_count,
+                    durable_custody_count,
                 };
             }
             if let Err(outcome) = send_window_message(
@@ -616,6 +729,7 @@ where
                             outcome: BatchWriteOutcome::TransportClosed,
                             accepted_frame_indices,
                             written_frame_count,
+                            durable_custody_count,
                         }
                     }
                     SendWindowOutcome::AuthorityRevoked => {
@@ -625,6 +739,7 @@ where
                             outcome: BatchWriteOutcome::AuthorityRevoked,
                             accepted_frame_indices,
                             written_frame_count,
+                            durable_custody_count,
                         }
                     }
                     SendWindowOutcome::Recovered
@@ -645,6 +760,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
                 DrainSignal::AuthorityRevoked => {
@@ -654,6 +770,7 @@ where
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
             }
@@ -663,6 +780,7 @@ where
         outcome: BatchWriteOutcome::Continue,
         accepted_frame_indices: (0..total_frames).collect(),
         written_frame_count,
+        durable_custody_count,
     }
 }
 
@@ -1041,8 +1159,18 @@ where
         let frame: ResponseFrame = frame.into();
         let ingress_receipts = frame.ingress_receipts().to_vec();
         let provenance = frame.provenance();
-        let frame_xml = frame.into_serialized_xml();
+        let protected = frame.protected_space_reply();
+        if protected.is_some_and(|reply| reply.initial_deletion().is_some()) {
+            // An initial deletion can enter SM only through the custody hold.
+            continue;
+        }
+        let frame_xml = protected.map_or_else(
+            || frame.clone().into_serialized_xml(),
+            |reply| reply.payload.wire().to_owned(),
+        );
         if should_record(conn, &frame_xml, policy) {
+            let retained =
+                protected.map_or(frame_xml, |reply| reply.payload.to_storage().into_owned());
             let accepted = if conn.sm_recovery_required {
                 let before = conn.terminal_sm_recovery.queue_len();
                 let received_at = match policy {
@@ -1050,7 +1178,7 @@ where
                     BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => chrono::Utc::now(),
                 };
                 conn.record_terminal_recovery_outbound_with_provenance(
-                    frame_xml,
+                    retained,
                     received_at,
                     provenance,
                 );
@@ -1063,7 +1191,7 @@ where
             } else {
                 let (_, accepted) = record_live_sm_frame(
                     conn,
-                    frame_xml,
+                    retained,
                     SmEvictionPath::ReplayTail,
                     policy,
                     provenance,

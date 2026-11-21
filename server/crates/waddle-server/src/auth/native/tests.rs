@@ -219,18 +219,25 @@ async fn test_validate_username() {
     assert!(validate_username("alice-bob").is_ok());
     assert!(validate_username("alice_bob").is_ok());
 
+    assert!(validate_username("alice+work").is_ok());
+
     // Invalid usernames
     assert!(validate_username("").is_err());
     assert!(validate_username("alice@bob").is_err());
     assert!(validate_username("alice/bob").is_err());
     assert!(validate_username("alice bob").is_err());
     assert!(validate_username("alice\tbob").is_err());
+    // Outside the account profile: never lowercased or folded.
+    assert!(validate_username("Alice").is_err());
+    assert!(validate_username("äda").is_err());
+    assert!(validate_username(&"a".repeat(65)).is_err());
 }
 
-/// A native account is its canonical JID: names that nodeprep to the same
-/// localpart are one account for registration and SCRAM lookup.
+/// A new account is named exactly in the account profile, and SCRAM lookup
+/// takes the username exactly: a spelling preparation would change names no
+/// account instead of the account its folded form keys.
 #[tokio::test]
-async fn test_names_resolve_to_their_canonical_jid() {
+async fn test_names_resolve_only_in_their_canonical_spelling() {
     let db = create_test_db().await;
     let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let store = NativeUserStore::new(actor);
@@ -241,19 +248,29 @@ async fn test_names_resolve_to_their_canonical_jid() {
         email: None,
     };
 
-    store.register(register("Äda")).await.expect("register Äda");
-    let duplicate = store.register(register("äda")).await;
+    store.register(register("ada")).await.expect("register ada");
+    for refused in ["Ada", "äda", "no:pe"] {
+        assert!(
+            matches!(
+                store.register(register(refused)).await,
+                Err(AuthError::InvalidUsername(_))
+            ),
+            "{refused}"
+        );
+    }
+    let duplicate = store.register(register("ada")).await;
     assert!(matches!(duplicate, Err(AuthError::UserAlreadyExists(_))));
-    assert!(store.user_exists("äda", "Example.com").await.unwrap());
+    assert!(store.user_exists("ada", "Example.com").await.unwrap());
     assert!(store
-        .get_scram_credentials("ÄDA", "example.com")
+        .get_scram_credentials("ada", "example.com")
         .await
         .unwrap()
         .is_some());
-    assert!(matches!(
-        store.register(register("no:pe")).await,
-        Err(AuthError::InvalidUsername(_))
-    ));
+    assert!(store
+        .get_scram_credentials("ADA", "example.com")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 /// A node predating the lookup keys writes `Bob` without one. Until the

@@ -412,12 +412,22 @@ const fn selector_generation(selector: LeaveSessionSelector) -> Option<Occupancy
 /// redrive will emit. A service-side removal (#1803 ghost eviction) stays
 /// service-side: one of the two sweeps proved the occupancy abandoned, and
 /// `#service-error-kick` requires status 333 on the resulting presence.
+///
+/// An unannounced removal stays unannounced only when both are: once either
+/// sweep is one whose occupancy the room was told of, the departure is
+/// announced.
 fn merge_removal(existing: MucRemovalCause, incoming: MucRemovalCause) -> MucRemovalCause {
     match (existing, incoming) {
         (MucRemovalCause::TechnicalProblem, _) | (_, MucRemovalCause::TechnicalProblem) => {
             MucRemovalCause::TechnicalProblem
         }
-        (MucRemovalCause::Voluntary, MucRemovalCause::Voluntary) => MucRemovalCause::Voluntary,
+        (MucRemovalCause::Unannounced, MucRemovalCause::Unannounced) => {
+            MucRemovalCause::Unannounced
+        }
+        (
+            MucRemovalCause::Voluntary | MucRemovalCause::Unannounced,
+            MucRemovalCause::Voluntary | MucRemovalCause::Unannounced,
+        ) => MucRemovalCause::Voluntary,
     }
 }
 

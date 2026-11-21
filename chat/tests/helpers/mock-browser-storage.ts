@@ -5,6 +5,8 @@ type StorageMock = {
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
   clear(): void;
+  readonly length: number;
+  key(index: number): string | null;
 };
 
 export function createStorageMock(): StorageMock {
@@ -21,6 +23,12 @@ export function createStorageMock(): StorageMock {
     },
     clear() {
       values.clear();
+    },
+    get length() {
+      return values.size;
+    },
+    key(index: number) {
+      return [...values.keys()][index] ?? null;
     },
   };
 }

@@ -38,6 +38,27 @@ postgres-only pubsub_schema_marker
 postgres-only push_service_schema_marker
 postgres-only push_service_vapid_schema_marker
 
+# The canonical host-grant store (ADR-0020 D5) is PostgreSQL only: SQLite
+# holds no enrolled scope.
+postgres-only host_grant_authority
+postgres-only host_grant_fence_acks
+postgres-only host_grant_fence_replicas
+postgres-only host_grant_operation_changes
+postgres-only host_grant_operations
+postgres-only host_grant_rooms
+postgres-only host_grant_scope_lifecycles
+postgres-only host_grant_scopes
+postgres-only host_grant_space_affiliations
+postgres-only host_grant_space_bindings
+postgres-only host_grant_space_bookmark_versions
+postgres-only host_grant_space_deletion_audience
+postgres-only host_grant_space_deletion_bindings
+postgres-only host_grant_space_deletion_jobs
+postgres-only host_grant_space_deletions
+postgres-only host_grant_space_operation_changes
+postgres-only host_grants
+postgres-only local_space_subscriptions
+
 # The manifest of the PostgreSQL epoch-guard triggers.
 postgres-only ingress_epoch_guard_manifest
 

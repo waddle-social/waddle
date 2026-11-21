@@ -4411,7 +4411,10 @@ async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
         .await
         .expect("space node config");
 
-    let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
+    let viewer_jid = format!("{}@example.com/web", viewer.xmpp_localpart)
+        .parse()
+        .expect("bound viewer JID");
+    let viewer_phase = ready_phase(&viewer_jid);
     let query = disco_info_iq_frame("space-node-info", "spaces.example.com", Some("team"));
     let responses = handle_iq(
         &query,
@@ -4462,7 +4465,10 @@ async fn handle_iq_disco_info_spaces_node_reports_whitelist_for_private_space() 
         .await
         .expect("private space node config");
 
-    let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
+    let viewer_jid = format!("{}@example.com/web", viewer.xmpp_localpart)
+        .parse()
+        .expect("bound viewer JID");
+    let viewer_phase = ready_phase(&viewer_jid);
     let query = disco_info_iq_frame(
         "space-node-info-private",
         "spaces.example.com",

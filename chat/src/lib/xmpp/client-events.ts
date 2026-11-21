@@ -18,6 +18,13 @@
  *   must not break the others or the client.
  */
 
+import type { RoomJoinError } from "./room-join-error";
+
+/** What the room's own unavailable presence says beyond its status codes. */
+export interface OwnRoomDeparture {
+  /** The room was destroyed (XEP-0045 §10.9 `<destroy/>`). */
+  destroyed: boolean;
+}
 import type { SmFailureCondition } from "./sm-failure-condition";
 import type {
   ChatStateEvent,
@@ -138,6 +145,12 @@ export type ClientEvents = {
   ownProfilePublished: [ownBareJid: string];
   /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
   ownOccupantNick: [roomJid: string, nick: string | null];
+  /** Our own occupancy of a room ended; `statusCodes` are the room's XEP-0045 status codes. */
+  ownRoomDeparture: [roomJid: string, statusCodes: readonly number[], departure: OwnRoomDeparture];
+  /** A room join was sent and waits for the room's answer; `roomJid` is the room's canonical key. */
+  roomJoinStarted: [roomJid: string];
+  /** A room join failed; `roomJid` is the room's canonical key. */
+  roomJoinFailed: [roomJid: string, error: RoomJoinError];
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
   dmReaction: [event: DmReactionEvent];
@@ -159,6 +172,19 @@ export type ClientEvents = {
   sessionLifecycle: [event: SessionLifecycleEvent];
   catchupFailure: [failure: CatchupConversationFailure];
   roomAccessChanged: [event: RoomAccessChangedEvent];
+  /**
+   * A discovery placed rooms that an earlier one this epoch could not (it
+   * identified the home MUC service and read its catalog): a room list read
+   * from the earlier one is out of date.
+   */
+  roomPlacementChanged: [];
+  /**
+   * A discovery learned the home MUC service or the components the home
+   * server lists, or found them changed. Sent by every discovery that
+   * learns them, including one that could not place rooms, so what decides
+   * which rooms and senders are of this deployment is current everywhere.
+   */
+  homeServicesChanged: [services: { mucService: string | null; components: readonly string[] | null }];
   roomIdAmbiguous: [channelId: string];
   // Observe-only telemetry hooks (multi-listener, error-isolated via
   // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health

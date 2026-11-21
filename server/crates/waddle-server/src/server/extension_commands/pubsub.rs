@@ -47,13 +47,29 @@ async fn authorize_extension_pubsub_publish(
         }
         return Err("requester cannot write extension-owned PubSub state".to_string());
     };
-    let room_jid: jid::BareJid = room
-        .as_str()
-        .parse()
+    // The node is written as named while the permission checks run on the
+    // parsed room, so the room segment must already be the room's canonical
+    // text; a spelling the `jid` parser would fold is refused.
+    let room_jid = waddle_xmpp::identity::CanonicalBareJid::parse_exact(room.as_str())
+        .map(waddle_xmpp::identity::CanonicalBareJid::into_bare_jid)
         .map_err(|error| format!("invalid channel JID in PubSub node: {error}"))?;
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
         return Err("PubSub node is not bound to a managed channel".to_string());
     };
+    // A room an enrolled host-grant scope manages serves no extension state:
+    // its room-bound nodes are neither read nor subscribed to, so nothing is
+    // published to them either. A room whose management cannot be told now
+    // is refused as well.
+    match context
+        .app_state
+        .host_grants
+        .channel_enrolled(&channel_id)
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => return Err("extension state is not served for this room".to_string()),
+        Err(_) => return Err("the host-grant authority is unavailable".to_string()),
+    }
     let object = Object::new(ObjectType::Channel, channel_id.clone());
     let subject = Subject::user(user_id);
     let outcast = context
@@ -102,6 +118,16 @@ pub(crate) async fn managed_channel_permission_allowed(
     channel_id: &str,
     permission: Permission,
 ) -> Result<bool, String> {
+    if let Some(allowed) = crate::server::managed_channel_policy::host_grant_channel_permission(
+        &app_state.host_grants,
+        &subject.id,
+        channel_id,
+        &permission,
+    )
+    .await?
+    {
+        return Ok(allowed);
+    }
     let policy = server_policy_for_managed_channel(channel_id, &permission);
     if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
         let server_owner = app_state

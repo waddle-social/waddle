@@ -1554,6 +1554,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
         synthetic_sender_authority: None,
+        channel_mention_decision: None,
         dispatch_timestamp: 1_777_000_000,
     };
 

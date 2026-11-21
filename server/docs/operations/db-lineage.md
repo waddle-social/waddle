@@ -91,11 +91,19 @@ If the role cannot execute `pg_control_system()`, dedicated store pools
 report `system_identifier_unavailable` at readiness. For the GLOBAL pool
 the same denial is caught by the pre-migration guard instead: the pod
 refuses to start (CrashLoopBackOff) and the typed error appears in its
-logs, since the check runs before the HTTP listener exists. Grant:
+logs, since the check runs before the HTTP listener exists. For an
+unrestricted application role, grant:
 
 ```sql
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO <app role>;
 ```
+
+Never grant it to a restricted runtime role. The physical attestor requires
+that the restricted runtime cannot run `pg_control_system()`, and the
+restricted runtime reads the system identifier from the attested identity
+instead, the host-grant position included; see the
+[host-grant restore runbook](../../../docs/operations/authz-host-grant-restore.md)
+(`position_unreadable`).
 
 Note: a `permission denied` on other objects (for example missing `SELECT`
 on `_lineage`) is reported as a plain verification failure, not

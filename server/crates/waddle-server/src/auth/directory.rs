@@ -26,6 +26,7 @@ use std::collections::HashSet;
 
 use kameo::actor::ActorRef;
 use tracing::warn;
+use waddle_xmpp::identity::{parse_bare_jid, CanonicalBareJid, CanonicalDomain};
 
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
@@ -35,27 +36,50 @@ use super::AuthError;
 #[cfg(test)]
 mod tests;
 
-/// The JID library's canonical (nodeprepped) form of an account name: the
-/// localpart every session, roster item and stanza carries for it. `None`
-/// when the name is no valid localpart. Native usernames keep the case they
-/// were registered with, so `Äda` is the account behind `äda@…`.
+/// The lookup key of an account name: its localpart as the JID library
+/// prepares it (Nodeprep). `None` when the name is no valid localpart.
+///
+/// Keys index the account stores and detect names that fold together, so a
+/// legacy native `Bob` keeps the key `bob` and blocks registering `bob`.
+/// They never resolve an input: lookups take the input exactly
+/// ([`exact_account_jid`]) and refuse a spelling preparation would change.
 pub(crate) fn canonical_localpart(name: &str) -> Option<jid::NodePart> {
     jid::NodePart::new(name).ok().map(Cow::into_owned)
 }
 
-/// The canonical bare JID of the account `name@domain`.
+/// The lookup key of the account `name@domain`: [`canonical_localpart`] at
+/// the domain's canonical form. See [`canonical_localpart`] for its use.
 pub(crate) fn canonical_account_jid(name: &str, domain: &str) -> Option<jid::BareJid> {
     let node = jid::NodePart::new(name).ok()?;
-    let domain = jid::DomainPart::new(domain).ok()?;
-    Some(jid::BareJid::from_parts(Some(&node), &domain))
+    let domain = CanonicalDomain::prepare(domain).ok()?;
+    Some(jid::BareJid::from_parts(
+        Some(&node),
+        domain.as_domain_ref(),
+    ))
+}
+
+/// The account address an input names under the identity profile: `name`
+/// exactly as given at the canonical `domain`. `None` when preparation would
+/// change either part, so a spelling such as `Alice` or `straße` is never
+/// folded onto the account keyed `alice` or `strasse`.
+pub(crate) fn exact_account_jid(name: &str, domain: &str) -> Option<CanonicalBareJid> {
+    let domain = CanonicalDomain::parse_exact(domain).ok()?;
+    CanonicalBareJid::from_parts(name, &domain).ok()
 }
 
 /// Startup pass before the node serves: give every account row written
 /// without one its canonical lookup key, then drop roster items whose
 /// contact is not an account on the owner's domain (rooms, extension bots,
 /// names nobody registered) by the same rule the roster set and subscription
-/// guards apply. Idempotent.
-pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+/// guards apply. `served` names the domains this deployment serves; a
+/// contact at any other domain is a remote contact, which the roster keeps
+/// whether S2S is enabled or not (ADR-0020 D7, gate G18): while S2S is off
+/// it is unreachable, and it is reachable again once S2S is enabled.
+/// Idempotent.
+pub(crate) async fn reconcile_local_accounts(
+    actor: &ActorRef<DbActor>,
+    served: Option<&crate::destination::ServedDomains>,
+) -> Result<(), AuthError> {
     // Nodes starting together can race to key case-variant twins; the
     // loser's UPDATE trips the unique key index. A second pass sees the
     // winner's key and leaves the twin unkeyed, as a lone node would.
@@ -63,7 +87,7 @@ pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Resul
         warn!(%error, "account key backfill failed; retrying once");
         backfill_account_keys(actor).await?;
     }
-    prune_roster_contacts(actor).await
+    prune_roster_contacts(actor, served).await
 }
 
 /// How often a serving node keys account rows written without one. During
@@ -96,7 +120,10 @@ pub(crate) fn spawn_account_key_backfill(actor: &ActorRef<DbActor>, every: std::
 /// Each pruned owner also loses its XEP-0237 version, so a cached roster no
 /// longer matches and is refetched.
 // ponytail: reads every roster row each startup; page by owner if rosters grow large.
-async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+async fn prune_roster_contacts(
+    actor: &ActorRef<DbActor>,
+    served: Option<&crate::destination::ServedDomains>,
+) -> Result<(), AuthError> {
     let items = query(
         actor,
         "SELECT user_jid, contact_jid FROM roster_items",
@@ -111,6 +138,16 @@ async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthErro
             owner.parse::<jid::BareJid>(),
             contact.parse::<jid::BareJid>(),
         ) {
+            (Ok(_), Ok(contact))
+                if served.is_some_and(|served| {
+                    matches!(
+                        served.classify(Some(&jid::Jid::from(contact.clone()))),
+                        crate::destination::Destination::Remote(_)
+                    )
+                }) =>
+            {
+                true
+            }
             (Ok(owner), Ok(contact)) if owner.domain() == contact.domain() => {
                 match accounts.get(&contact) {
                     Some(exists) => *exists,
@@ -249,28 +286,27 @@ const ACCOUNT_EXISTS_SQL: &str = "SELECT 1 FROM users WHERE localpart_key = ? \
 /// account through either the OIDC `users` table or the native `native_users`
 /// table.
 ///
-/// Both sides compare the JID library's canonical keys exactly, so a name
-/// matches whatever case or Unicode form it was registered with. `users` rows
-/// carry no `domain` column — OIDC accounts are always local to the server's
-/// own domain — so they are matched on the localpart alone; native accounts
-/// on their bare JID. Callers are expected to have already constrained
-/// `domain` to the local server domain (group-DM validation, for example,
-/// rejects non-local members before reaching here).
+/// The input is taken exactly under the identity profile: a localpart that
+/// preparation would change (`Alice`, `straße`) names no account. It is then
+/// compared with the stored lookup keys, so an account registered before the
+/// profile is found under the spelling its key records. `users` rows carry
+/// no `domain` column — OIDC accounts are always local to the server's own
+/// domain — so they are matched on the localpart alone; native accounts on
+/// their bare JID. Callers are expected to have already constrained `domain`
+/// to the local server domain (group-DM validation, for example, rejects
+/// non-local members before reaching here).
 pub async fn local_account_exists(
     actor: &ActorRef<DbActor>,
     localpart: &str,
     domain: &str,
 ) -> Result<bool, AuthError> {
-    let (Some(localpart), Some(jid)) = (
-        canonical_localpart(localpart),
-        canonical_account_jid(localpart, domain),
-    ) else {
+    let Some(jid) = exact_account_jid(localpart, domain) else {
         return Ok(false);
     };
     let row = actor
         .ask(DbQueryOne {
             sql: ACCOUNT_EXISTS_SQL.to_string(),
-            params: vec![localpart.as_str().into(), jid.as_str().into()],
+            params: vec![localpart.into(), jid.as_str().into()],
         })
         .await
         .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
@@ -278,24 +314,66 @@ pub async fn local_account_exists(
     Ok(row.is_some())
 }
 
-/// Returns `true` when `jid` is a registered account on `local_domain`.
-/// Waddle has no s2s, so a JID on any other domain (a room, an extension
-/// bot) or one without a localpart is never an account.
+/// The keys an existence check of the account `jid` names at
+/// `local_domain` compares with the stored lookup keys: its localpart, for
+/// `users.localpart_key` (account rows carry no domain), and its bare JID,
+/// for `native_users.jid_key`. `None` when `jid` is at another domain, has
+/// no localpart, or names a localpart preparation would change: such a JID
+/// names no account.
+///
+/// Every check of whether an account exists reads these keys and nothing
+/// else, so that a read outside a transaction and one inside it agree. A
+/// row written without a lookup key is no account to them; the startup
+/// pass keys every row but a case-variant twin of a keyed one, which
+/// retirement removes with the account it folds onto.
+pub(crate) fn account_lookup_keys(
+    jid: &jid::BareJid,
+    local_domain: &str,
+) -> Option<(String, String)> {
+    let node = jid.node()?;
+    if jid.domain().as_str() != local_domain {
+        return None;
+    }
+    let exact = exact_account_jid(node.as_str(), local_domain)?;
+    Some((node.as_str().to_owned(), exact.as_str().to_owned()))
+}
+
+/// Returns `true` when `jid` is a registered account on `local_domain`,
+/// under [`account_lookup_keys`]. A JID on any other domain (a room, an
+/// extension bot, a remote account) or one without a localpart is never an
+/// account.
 pub async fn local_account_jid_exists(
     actor: &ActorRef<DbActor>,
     jid: &jid::BareJid,
     local_domain: &str,
 ) -> Result<bool, AuthError> {
-    match jid.node() {
-        Some(node) if jid.domain().as_str() == local_domain => {
-            local_account_exists(actor, node.as_str(), local_domain).await
-        }
-        _ => Ok(false),
-    }
+    let Some((localpart, jid_key)) = account_lookup_keys(jid, local_domain) else {
+        return Ok(false);
+    };
+    let row = actor
+        .ask(DbQueryOne {
+            sql: ACCOUNT_EXISTS_SQL.to_string(),
+            params: vec![localpart.into(), jid_key.into()],
+        })
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+    Ok(row.is_some())
 }
 
 /// XEP-0055 directory entries from both account stores. Prefer OIDC profile
 /// data for a shared JID, and rank exact identities before the result limit.
+///
+/// A query is free text matched case-insensitively against names. A query
+/// that is a canonical account address at `domain` matches by its localpart;
+/// one that is not canonical stays free text and is never folded into an
+/// address. An entry is returned only under its stored name's canonical
+/// address; a row whose stored name preparation would change is left out
+/// rather than presented under another account's address.
+///
+/// Rows are one account only when their stored names are identical (an OIDC
+/// row and a native row for the same name). Names that differ only
+/// in case are different rows, so a legacy `Bob` never takes the place of
+/// the canonical `bob` before the non-canonical row is left out.
 pub(crate) async fn search_local_accounts(
     actor: &ActorRef<DbActor>,
     domain: &str,
@@ -303,8 +381,7 @@ pub(crate) async fn search_local_accounts(
     limit: usize,
 ) -> Result<Vec<waddle_xmpp::UserDirectoryEntry>, AuthError> {
     let query = query.trim();
-    let address = query
-        .parse::<jid::BareJid>()
+    let address = parse_bare_jid(query)
         .ok()
         .filter(|address| address.domain().as_str() == domain);
     let query = address
@@ -324,7 +401,7 @@ pub(crate) async fn search_local_accounts(
                     FROM native_users WHERE domain = ?
                 ), ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY LOWER(xmpp_localpart) ORDER BY source, username
+                        PARTITION BY xmpp_localpart ORDER BY source, username
                     ) AS position
                     FROM accounts
                 )
@@ -365,10 +442,14 @@ pub(crate) async fn search_local_accounts(
         let localpart = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
-        // Parse the stored localpart as a JID; username slug generation would
-        // change valid native names such as `alice+work` into another account.
-        let jid = jid::BareJid::new(&format!("{localpart}@{domain}"))
-            .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+        // Build the address from the stored localpart exactly; username slug
+        // generation would change valid native names such as `alice+work`
+        // into another account, and preparation would fold a legacy name
+        // such as `Bob` onto the account keyed `bob`.
+        let Some(jid) = exact_account_jid(&localpart, domain).map(CanonicalBareJid::into_bare_jid)
+        else {
+            continue;
+        };
         if !seen.insert(jid.clone()) {
             continue;
         }

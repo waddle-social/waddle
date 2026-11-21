@@ -8,9 +8,11 @@
 //! This first slice holds the conversation timeline. The connection
 //! controller, outbox, presence and read state follow ADR-0019's order.
 
+pub mod identity;
 pub mod judgments;
 pub mod timeline;
 
+pub use identity::{QualifiedMessageId, RoomId, SpaceId};
 pub use timeline::{
     strip_fallback, with_reply_fallback, Attachment, Delivery, Encryption, HistoryPage,
     IncomingMessage, ItemKey, LocalEcho, Reaction, ReactionUpdate, ReplyPreview, ReplyTo, Timeline,

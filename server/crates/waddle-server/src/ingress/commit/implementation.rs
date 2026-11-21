@@ -445,6 +445,40 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     if can_seal && sealed_manifest.is_none() && rejection.is_none() {
         super::super::commit_room::assert_snapshot_coordinates(&mut tx, submission).await?;
     }
+    // A room an enrolled host-grant scope manages accepts nothing new except
+    // through a manifest admitted from the canonical policy state. The check
+    // follows this transaction's ownership claims and precedes every row it
+    // accepts; a replay of an earlier acceptance is not decided again.
+    let fresh_acceptance = sealed_manifest.is_none()
+        && rejection.is_none()
+        && (alias != AliasOutcomeClass::Existing || owner_first);
+    let host_grants = if fresh_acceptance {
+        super::super::commit_room::admit_host_grants(&mut tx, submission, can_seal).await?
+    } else {
+        super::super::commit_room::HostGrantAcceptance::Unmanaged
+    };
+    let host_grant_refusal = match &host_grants {
+        super::super::commit_room::HostGrantAcceptance::Refused(refusal) => {
+            rejection = Some(super::super::rejection::host_grant_refusal_class(*refusal));
+            Some(super::super::rejection::host_grant_refused_plan(
+                &submission.plan,
+                &submission.sender,
+                *refusal,
+            ))
+        }
+        super::super::commit_room::HostGrantAcceptance::Unmanaged
+        | super::super::commit_room::HostGrantAcceptance::Admitted { .. } => None,
+    };
+    // From here on a managed room's acceptance works on its plan as reduced
+    // to the admitted audience: what is recorded, sealed and returned for
+    // execution names no principal the scope's policy does not admit.
+    let submission = match &host_grants {
+        super::super::commit_room::HostGrantAcceptance::Admitted { submission, .. } => {
+            submission.as_ref()
+        }
+        super::super::commit_room::HostGrantAcceptance::Unmanaged
+        | super::super::commit_room::HostGrantAcceptance::Refused(_) => submission,
+    };
     // A recorded denial is authority: any retransmission that resolves to it
     // re-emits the committed reply, whatever today's policy would decide.
     let mut plan = if alias == AliasOutcomeClass::Existing
@@ -464,7 +498,10 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         accepted
     } else if let Some(class) = rejection {
         super::super::rejection::rejection_plan(
-            refused_plan.as_ref().unwrap_or(&submission.plan),
+            host_grant_refusal
+                .as_ref()
+                .or(refused_plan.as_ref())
+                .unwrap_or(&submission.plan),
             class,
             &submission.sender,
         )?
@@ -793,6 +830,17 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     } else {
         sealed_manifest
     };
+    // A managed room accepts nothing through an acceptance that freezes no
+    // children. A decision committed as a rejection accepts nothing at all.
+    if let (None, super::super::commit_room::HostGrantAcceptance::Admitted { audience, .. }) =
+        (&rejection, &host_grants)
+    {
+        super::super::commit_room::assert_admitted_children(
+            sealed_manifest.as_ref(),
+            submission.principal.bare_jid(),
+            audience,
+        )?;
+    }
     if let Some(manifest) = &sealed_manifest {
         intents = manifest.recorded_intents().to_vec();
         plan.intents = intents.clone();
@@ -1051,8 +1099,12 @@ pub(in crate::ingress::commit) async fn commit_attempt(
                         super::super::principal::IngressPrincipal::Authenticated(principal) => {
                             principal.clone()
                         }
+                        // Only a session of this deployment hands a
+                        // stanza to another replica's room; a remote
+                        // occupant is decided where its stream landed.
                         super::super::principal::IngressPrincipal::Extension(_)
-                        | super::super::principal::IngressPrincipal::RoomResult(_) => {
+                        | super::super::principal::IngressPrincipal::RoomResult(_)
+                        | super::super::principal::IngressPrincipal::Remote(_) => {
                             return Err(IngressUowError::ExtensionRemoteRoomUnsupported)
                         }
                     },

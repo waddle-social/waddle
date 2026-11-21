@@ -1,5 +1,7 @@
 export interface SpaceSummary {
   id: string;
+  /** PubSub service that hosts the Space node; `id` is the node on this service. */
+  serviceJid?: string;
   name: string;
   description?: string | null;
   icon_url?: string | null;
@@ -26,6 +28,8 @@ export interface ChannelSummary {
    * `urn:waddle:roomconfig:pinpermission` field. Default
    * `admins-only`. */
   pinPermission?: PinPermission;
+  /** Canonical domain of the server hosting the room, for a room outside this deployment. */
+  remoteHost?: string;
 }
 
 export interface GroupDmSummary {

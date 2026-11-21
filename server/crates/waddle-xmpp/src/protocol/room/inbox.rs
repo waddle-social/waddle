@@ -73,6 +73,9 @@ fn sender_may_broadcast_channel_mention(ctx: &RoomContext<'_>) -> bool {
     ) {
         return true;
     }
+    if let Some(decided) = ctx.channel_mention_decision {
+        return decided;
+    }
     ctx.sender_snapshot()
         .is_some_and(|sender| sender.role >= Role::Moderator)
 }
@@ -302,6 +305,7 @@ mod tests {
             sender_nickname_generation: 0,
             project_sender_inbox: true,
             synthetic_sender_authority: None,
+            channel_mention_decision: None,
             dispatch_timestamp: 0,
         };
         match MucInboxHandler.handle(msg, &ctx) {
@@ -555,6 +559,7 @@ mod tests {
                 sender_nickname_generation: 0,
                 project_sender_inbox: true,
                 synthetic_sender_authority: None,
+                channel_mention_decision: None,
                 dispatch_timestamp: 0,
             };
             assert_eq!(
@@ -602,6 +607,7 @@ mod tests {
             sender_nickname_generation: 0,
             project_sender_inbox: false,
             synthetic_sender_authority: Some(SyntheticSenderAuthority::ServerAuthored),
+            channel_mention_decision: None,
             dispatch_timestamp: 0,
         };
         assert!(
@@ -610,6 +616,56 @@ mod tests {
              MUST bypass the channel-broadcast gate — the bot dispatcher's \
              upstream trust validation is the source of authority"
         );
+    }
+
+    /// A decision the interpreter took before dispatch (in a room an
+    /// enrolled host-grant scope manages, from the room's canonical
+    /// grants) replaces the role check in both directions: a mirrored
+    /// moderator role does not admit a channel-wide mention the grants do
+    /// not allow, and a participant whose grants allow it may.
+    #[test]
+    fn xep0513_a_decided_channel_mention_replaces_the_role_check() {
+        let room = bare("team@conf.example.com");
+        let moderator = full("alice@example.com/web");
+        let participant = full("bob@example.com/desk");
+        let mut moderator_occupant = occ(moderator.clone(), "alice");
+        moderator_occupant.role = Role::Moderator;
+        let mut participant_occupant = occ(participant.clone(), "bob");
+        participant_occupant.role = Role::Participant;
+        let occupants = vec![moderator_occupant, participant_occupant];
+        let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        for (sender, decision, expected) in [
+            (&moderator, Some(false), false),
+            (&participant, Some(true), true),
+            (&moderator, None, true),
+            (&participant, None, false),
+        ] {
+            let ctx = RoomContext {
+                room: &room,
+                sender_full: sender,
+                occupants: &occupants,
+                durable_recipient_bare_jids: &[],
+                mention_recipients: crate::protocol::room::MentionRecipients::Empty,
+                managed_room_forbidden: false,
+                room_moderated: false,
+                room_occupants_may_change_subject: false,
+                room_members_only: true,
+                pin_permission: crate::muc::PinPermission::default(),
+                id_gen: &id_gen,
+                occupant_id_secret: &secret,
+                sender_nickname_generation: 0,
+                project_sender_inbox: true,
+                synthetic_sender_authority: None,
+                channel_mention_decision: decision,
+                dispatch_timestamp: 0,
+            };
+            assert_eq!(
+                sender_may_broadcast_channel_mention(&ctx),
+                expected,
+                "{sender} with decision {decision:?}"
+            );
+        }
     }
 
     /// Regression test for the bypass-via-projection-flag vector (issue
@@ -648,6 +704,7 @@ mod tests {
             // channel-broadcast bypass.
             project_sender_inbox: false,
             synthetic_sender_authority: None,
+            channel_mention_decision: None,
             dispatch_timestamp: 0,
         };
         assert!(

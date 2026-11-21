@@ -1,6 +1,7 @@
 use super::{
     handle_iq_with_conn_state, ConnectionPhase, IqConnState, Session, Stanza, WebSocketState,
 };
+use crate::permissions::host_grant::SpaceReplyAuthority;
 use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
 
 /// Only called from test helpers.
@@ -59,5 +60,24 @@ pub async fn handle_iq(
         &mut conn_state,
     )
     .await
-    .into_serialized_frames()
+    .frames
+    .into_iter()
+    .filter_map(|frame| {
+        let Some(reply) = frame.protected_space_reply() else {
+            return Some(frame.into_serialized_xml());
+        };
+        let SpaceReplyAuthority::Unmanaged(guard) = &reply.grant else {
+            panic!("managed Space replies must be exercised through the WebSocket writer");
+        };
+        let recipient = phase
+            .bound_jid()
+            .expect("protected reply to a bound resource");
+        let element = reply.payload.as_ref().to_element();
+        assert!(
+            guard.permits_reply(&element, recipient),
+            "test reply must match its guard"
+        );
+        guard.admit(|| reply.payload.wire().to_owned())
+    })
+    .collect()
 }

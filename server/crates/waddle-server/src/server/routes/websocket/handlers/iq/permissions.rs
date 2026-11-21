@@ -129,6 +129,19 @@ pub(crate) async fn managed_channel_permission_allowed(
     channel_id: &str,
     permission: Permission,
 ) -> Result<bool, String> {
+    let Some(resolved) = principal else {
+        return Ok(false);
+    };
+    if let Some(allowed) = crate::server::managed_channel_policy::host_grant_channel_permission(
+        &state.deps.app_state.host_grants,
+        &resolved.user_jid,
+        channel_id,
+        &permission,
+    )
+    .await?
+    {
+        return Ok(allowed);
+    }
     let policy = server_policy_for_managed_channel(channel_id, &permission);
     if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
         return server_permission_allowed(state, principal, Permission::Owner).await;
@@ -340,11 +353,28 @@ pub(super) async fn seed_spaces_node_owners(
     if owners.is_empty() {
         return;
     }
+    // A privileged seed names an account of this deployment's account
+    // domain or of a trusted home of the S2S snapshot it runs (ADR-0020
+    // D8). An account domain that yields no issuance policy seeds nothing.
+    let Some(issuance) = crate::spaces_pubsub_seed::replica_seed_issuance(
+        &state.deps.app_state,
+        &state.deps.auth_state.xmpp_domain,
+    ) else {
+        tracing::warn!(
+            kind = "issuance_policy_invalid",
+            "Refused to seed Spaces node owners: the account domain yields no issuance policy"
+        );
+        return;
+    };
     crate::spaces_pubsub_seed::seed_owners_on_node(
         &state.deps.protocol.pubsub_storage,
         spaces_jid,
         node,
         &owners,
+        crate::spaces_pubsub_seed::OwnerSeedPolicy {
+            issuance: &issuance,
+            host_grants: &state.deps.app_state.host_grants,
+        },
     )
     .await;
 }
@@ -379,6 +409,30 @@ pub(super) async fn write_channel_parent_tuple_if_absent(
     .await
 }
 
+/// The Space nodes the channel's parent relationships name.
+pub(super) async fn channel_parent_spaces(
+    state: &WebSocketState,
+    channel_id: &str,
+) -> Result<Vec<String>, String> {
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(crate::permissions::ListSubjects {
+            object: Object::new(ObjectType::Channel, channel_id),
+            relation: Relation::new("parent"),
+        })
+        .await
+        .map(|parents| {
+            parents
+                .into_iter()
+                .filter(|parent| parent.subject_type == SubjectType::Space)
+                .map(|parent| parent.id)
+                .collect()
+        })
+        .map_err(|error| format!("channel parent lookup failed: {error}"))
+}
+
 pub(super) async fn delete_channel_parent_tuple(
     state: &WebSocketState,
     channel_id: &str,
@@ -404,11 +458,17 @@ pub(super) async fn delete_channel_parent_tuple(
     }
 }
 
+/// Whether a room no enrolled scope manages holds `sender_jid` as an
+/// owner, as that standing is honoured for a request that reached the room
+/// with `evidence`: as stored for a session of this deployment, and for a
+/// remote principal only for a trusted home on a `pkix` stream (ADR-0020
+/// D8).
 pub(super) async fn muc_owner_authorized(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
     _session: Option<&Session>,
+    evidence: &crate::permissions::host_grant::PrincipalEvidence,
 ) -> Result<bool, XmppError> {
     let room_actor = get_room_actor_result(state, room_jid)
         .await
@@ -418,14 +478,15 @@ pub(super) async fn muc_owner_authorized(
         .ask(GetSnapshot)
         .await
         .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
-    if matches!(
-        snapshot.room.affiliation(&sender_jid.to_bare()),
-        Affiliation::Owner
-    ) {
-        return Ok(true);
-    }
-
-    Ok(false)
+    let account = sender_jid.to_bare();
+    let honoured =
+        crate::server::routes::websocket::handlers::presence::honoured_legacy_affiliation(
+            state,
+            &account,
+            evidence,
+            Some(snapshot.room.affiliation(&account)),
+        );
+    Ok(honoured == Some(Affiliation::Owner))
 }
 
 pub(super) async fn build_muc_owner_config_response(
