@@ -176,14 +176,16 @@ private struct HuddleChipBody: View {
             .foregroundStyle(isSelected ? Theme.Colors.fg : Theme.Colors.fgMuted)
             .padding(.horizontal, WaddleTokens.Spacing.s2Half)
             .frame(minHeight: WaddleTokens.ControlHeight.sm)
-            .background(Capsule().fill(isSelected ? Theme.Colors.actionSubtle : Theme.Colors.surface))
-            .overlay(Capsule().fill(Theme.Colors.fg.opacity(configuration.isPressed ? 0.1 : 0)))
-            .overlay(
-                Capsule().strokeBorder(
-                    isSelected ? Theme.Colors.actionText : Theme.Colors.border,
-                    lineWidth: isSelected ? WaddleTokens.BorderWidth.strong : WaddleTokens.BorderWidth.hair
-                )
+            // The outline is a capsule filled behind the chip's own fill, not
+            // a stroke: in a window, an animated view's stroked capsule is
+            // drawn as a layer of its own, which leaves a mark at each end.
+            .background(
+                Capsule()
+                    .fill(isSelected ? Theme.Colors.actionSubtle : Theme.Colors.surface)
+                    .padding(isSelected ? WaddleTokens.BorderWidth.strong : WaddleTokens.BorderWidth.hair)
+                    .background(Capsule().fill(isSelected ? Theme.Colors.actionText : Theme.Colors.border))
             )
+            .overlay(Capsule().fill(Theme.Colors.fg.opacity(configuration.isPressed ? 0.1 : 0)))
             .scaleEffect(configuration.isPressed && !reduceMotion ? HuddleMotion.pressScale : 1)
             .huddleTouchTarget()
             .huddleAnimation(.press, value: configuration.isPressed)
