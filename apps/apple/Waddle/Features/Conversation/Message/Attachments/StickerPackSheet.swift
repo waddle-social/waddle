@@ -12,8 +12,8 @@ struct StickerPackSheet: View {
 
     @State private var phase: Phase = .loading
     @State private var isAdding = false
-    /// Added from this sheet. The copy can end up under another id than
-    /// the pack shown, so the list of own packs alone does not tell.
+    /// Added from this sheet, whether or not the list of own packs has
+    /// caught up.
     @State private var wasAdded = false
     @State private var errorMessage: String?
 
@@ -108,7 +108,7 @@ struct StickerPackSheet: View {
     /// Add the pack, or say why there is nothing to add.
     @ViewBuilder
     private func ownership(of pack: StickerPack) -> some View {
-        if wasAdded || location.owner == session.account.jid || session.stickers.packs.contains(where: { $0.id == pack.id }) {
+        if wasAdded || isAmongOwnPacks(pack) {
             Label("In your stickers", systemImage: "checkmark.circle")
                 .huddleText(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.fgMuted)
@@ -121,6 +121,14 @@ struct StickerPackSheet: View {
                 .buttonStyle(.huddle(.primary))
                 .disabled(isAdding)
         }
+    }
+
+    /// The picker shows the packs kept in the usual place on the account;
+    /// a pack kept anywhere else, even by the account itself, is not one
+    /// of them until it is added.
+    private func isAmongOwnPacks(_ pack: StickerPack) -> Bool {
+        (location.owner == session.account.jid && location.node == nil)
+            || session.stickers.packs.contains { $0.id == pack.id }
     }
 
     private func load() async {
@@ -146,9 +154,8 @@ struct StickerPackSheet: View {
                 try await session.copyStickerPack(pack, from: location)
                 wasAdded = true
             } catch PortError.invalidRequest {
-                // The pack itself is one that cannot be published, for
-                // example a sticker in it has no description: nothing to
-                // check and try again.
+                // Its author marked the pack as not to be copied, which
+                // the page normally says before offering to add it.
                 errorMessage = "\(pack.title) can't be added to your stickers."
             } catch {
                 errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't add \(pack.title). Try again.")
