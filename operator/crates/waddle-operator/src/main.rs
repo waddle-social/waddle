@@ -71,37 +71,50 @@ async fn run(args: waddle_operator::RunArgs) -> Result<(), OperatorError> {
 
     let metrics = Arc::new(OperatorMetrics::new());
     let health_state = Arc::new(HealthState::new(Arc::clone(&metrics)));
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ctrl_shutdown_tx, ctrl_shutdown_rx) = watch::channel(false);
+    let (probe_shutdown_tx, mut probe_shutdown_rx) = watch::channel(false);
 
-    let sig_tx = shutdown_tx.clone();
+    let sig_tx = ctrl_shutdown_tx.clone();
     tokio::spawn(async move {
         wait_for_os_signal().await;
         tracing::info!("received termination signal; shutting down waddle-operator");
         let _ = sig_tx.send(true);
     });
 
-    let mut probe_shutdown_rx = shutdown_rx.clone();
-    let probe_fut =
-        health::serve_probes(args.metrics_bind, Arc::clone(&health_state), async move {
+    let probe_health = Arc::clone(&health_state);
+    let probe_bind = args.metrics_bind;
+    let mut probe_task = tokio::spawn(async move {
+        health::serve_probes(probe_bind, probe_health, async move {
             while !*probe_shutdown_rx.borrow() {
                 if probe_shutdown_rx.changed().await.is_err() {
                     break;
                 }
             }
-        });
+        })
+        .await
+    });
 
-    let ctrl_fut = run_controller(client, args, health_state, metrics, shutdown_rx);
-
-    tokio::pin!(probe_fut);
+    let ctrl_fut = run_controller(client, args, health_state, metrics, ctrl_shutdown_rx);
     tokio::pin!(ctrl_fut);
 
-    let res = tokio::select! {
-        probe_res = &mut probe_fut => probe_res,
-        ctrl_res = &mut ctrl_fut => ctrl_res,
-    };
-
-    let _ = shutdown_tx.send(true);
-    res
+    tokio::select! {
+        ctrl_res = &mut ctrl_fut => {
+            let _ = probe_shutdown_tx.send(true);
+            let _ = probe_task.await;
+            ctrl_res
+        }
+        probe_res = &mut probe_task => {
+            let _ = ctrl_shutdown_tx.send(true);
+            let ctrl_res = ctrl_fut.await;
+            match probe_res {
+                Ok(Ok(())) => ctrl_res,
+                Ok(Err(err)) => Err(err),
+                Err(join_err) => Err(OperatorError::InvalidClusterState(format!(
+                    "probe task exited unexpectedly: {join_err}"
+                ))),
+            }
+        }
+    }
 }
 
 async fn wait_for_os_signal() {

@@ -160,3 +160,11 @@ pub fn headless_service_name(ws: &WaddleServer) -> Result<String, OperatorError>
 pub fn s2s_service_name(ws: &WaddleServer) -> Result<String, OperatorError> {
     Ok(format!("{}-s2s", workload_name(ws)?))
 }
+
+/// Clustering swarm `NetworkPolicy` name (`<name>-swarm`).
+///
+/// # Errors
+/// Returns [`OperatorError::MissingMetadata`] when `.metadata.name` is absent.
+pub fn network_policy_name(ws: &WaddleServer) -> Result<String, OperatorError> {
+    Ok(format!("{}-swarm", workload_name(ws)?))
+}

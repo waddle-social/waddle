@@ -29,6 +29,7 @@ struct MockClusterInner {
     spicedb_installed: bool,
     eso_installed: bool,
     resources: BTreeMap<String, Value>,
+    gets: Vec<String>,
     mutations: Vec<(String, String)>,
     events: Vec<Value>,
     rv_counter: u64,
@@ -102,6 +103,14 @@ impl MockCluster {
 
     fn clear_mutations(&self) {
         self.inner.lock().expect("lock").mutations.clear();
+    }
+
+    fn gets(&self) -> Vec<String> {
+        self.inner.lock().expect("lock").gets.clone()
+    }
+
+    fn clear_gets(&self) {
+        self.inner.lock().expect("lock").gets.clear();
     }
 
     fn events(&self) -> Vec<Value> {
@@ -216,6 +225,7 @@ async fn handle_k8s_request(
     }
 
     if method == Method::GET {
+        g.gets.push(path.clone());
         if path.starts_with("/apis/postgresql.cnpg.io/v1/") && !g.cnpg_installed {
             return missing_crd_response();
         }
@@ -319,8 +329,52 @@ async fn handle_k8s_request(
             return json_response(StatusCode::OK, parent);
         }
 
+        let url_name = path.rsplit('/').next().unwrap_or("");
+        if let Some(body_name) = payload["metadata"]["name"].as_str() {
+            if body_name != url_name {
+                return json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    json!({
+                        "kind": "Status",
+                        "apiVersion": "v1",
+                        "status": "Failure",
+                        "reason": "Invalid",
+                        "message": format!("the name of the object ({body_name}) must match the name on the URL ({url_name})"),
+                        "code": 422
+                    }),
+                );
+            }
+        }
+
         let existing = g.resources.get(&path).cloned();
         let mut stored = payload;
+        if path.contains("/externalsecrets/") {
+            if let Some(target) = stored
+                .get_mut("spec")
+                .and_then(|s| s.get_mut("target"))
+                .and_then(Value::as_object_mut)
+            {
+                target
+                    .entry("deletionPolicy".to_owned())
+                    .or_insert_with(|| json!("Retain"));
+            }
+            if let Some(entries) = stored
+                .get_mut("spec")
+                .and_then(|s| s.get_mut("data"))
+                .and_then(Value::as_array_mut)
+            {
+                for item in entries {
+                    if let Some(rr) = item.get_mut("remoteRef").and_then(Value::as_object_mut) {
+                        rr.entry("conversionStrategy".to_owned())
+                            .or_insert_with(|| json!("Default"));
+                        rr.entry("decodingStrategy".to_owned())
+                            .or_insert_with(|| json!("None"));
+                        rr.entry("metadataPolicy".to_owned())
+                            .or_insert_with(|| json!("None"));
+                    }
+                }
+            }
+        }
         let prev_gen = existing
             .as_ref()
             .and_then(|e| e["metadata"]["generation"].as_i64())
@@ -925,4 +979,316 @@ async fn health_and_metrics_endpoints_report_readiness_and_prometheus_counters()
     let text = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(text.contains("waddle_operator_reconciliations_total 1"));
     assert!(text.contains("waddle_operator_resources_by_phase{phase=\"Ready\"} 1"));
+}
+
+#[tokio::test]
+async fn clustered_s2s_eso_lineage_and_defaults_tolerant_reconciliation() {
+    let cluster = MockCluster::start().await;
+    let ns = "cluster-ns";
+    let name = "waddle";
+    let es_name = "waddle-runtime-secrets";
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let mut key_entries = Vec::new();
+    for i in 0..4u8 {
+        let seed = [i + 1; 32];
+        key_entries.push(b64.encode(seed));
+    }
+    let keypool_csv = key_entries.join(",");
+
+    let ws_path = format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{name}");
+    cluster.put(
+        &ws_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleServer",
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+                "uid": "cccccccc-1111-4222-8333-444444444444",
+                "generation": 1
+            },
+            "spec": {
+                "replicas": 2,
+                "baseUrl": "https://chat.example.com",
+                "xmpp": { "domain": "chat.example.com" },
+                "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } },
+                "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } },
+                "deployment": {
+                    "uuid": "dddddddd-1111-4222-8333-444444444444",
+                    "lineageAction": "enroll"
+                },
+                "s3": {
+                    "endpoint": "https://s3.example.com",
+                    "bucket": "waddle-media"
+                },
+                "s2s": {
+                    "enabled": true,
+                    "port": 5269,
+                    "configMapName": "waddle-s2s"
+                },
+                "clustering": {
+                    "enabled": true,
+                    "swarmPort": 7900,
+                    "enrolledKeyCount": 4,
+                    "keypairHeadroom": 2
+                },
+                "persistence": {
+                    "enabled": true,
+                    "accessModes": ["ReadWriteMany"],
+                    "size": "20Gi"
+                },
+                "networkPolicy": { "enabled": true },
+                "secrets": {
+                    "mode": "ExternalSecrets",
+                    "externalSecrets": {
+                        "apiVersion": "V1",
+                        "managed": {
+                            "secretStoreRef": { "kind": "ClusterSecretStore", "name": "vault-backend" },
+                            "remoteRefs": {
+                                "sessionKey": { "key": "kv/waddle", "property": "session" },
+                                "occupantIdSecret": { "key": "kv/waddle", "property": "occupant" },
+                                "spicedbPresharedKey": { "key": "kv/waddle", "property": "spicedb" },
+                                "s3AccessKeyId": { "key": "kv/waddle", "property": "s3_id" },
+                                "s3SecretAccessKey": { "key": "kv/waddle", "property": "s3_secret" },
+                                "clusteringKeypairPool": { "key": "kv/waddle", "property": "pool" }
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    );
+    seed_healthy_cnpg_and_spicedb(&cluster, ns);
+
+    let ctx = make_ctx(
+        &cluster,
+        false,
+        discover_capabilities(&cluster.client()).await,
+    );
+
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("managed ExternalSecret created with ESO defaults");
+    let st1 = cluster.get_waddle(ns, name).status.expect("st");
+    assert_eq!(
+        st1.phase,
+        WaddleServerPhase::Provisioning,
+        "expected Provisioning, got status={st1:?}"
+    );
+
+    let es_path = format!("/apis/external-secrets.io/v1/namespaces/{ns}/externalsecrets/{es_name}");
+    let mut es = cluster
+        .get(&es_path)
+        .expect("managed ExternalSecret present");
+    assert_eq!(
+        es["spec"]["target"]["deletionPolicy"].as_str(),
+        Some("Retain"),
+        "mock should simulate ESO CRD defaults on stored ExternalSecret"
+    );
+    es["status"] = json!({
+        "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced" }]
+    });
+    cluster.put(&es_path, es);
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/{es_name}"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": es_name, "namespace": ns },
+            "data": {
+                "WADDLE_SESSION_KEY": b64.encode("session-secret-key-at-least-32-bytes-long"),
+                "WADDLE_OCCUPANT_ID_SECRET": b64.encode("occupant-secret-key-at-least-32-bytes-long"),
+                "WADDLE_SPICEDB_PRESHARED_KEY": b64.encode("spicedb-psk"),
+                "WADDLE_S3_ACCESS_KEY_ID": b64.encode("minioadmin"),
+                "WADDLE_S3_SECRET_ACCESS_KEY": b64.encode("miniosecret"),
+                "WADDLE_CLUSTERING_KEYPAIR_POOL": b64.encode(keypool_csv),
+            }
+        }),
+    );
+
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("ESO CRD defaults must not trap Provisioning; workload must apply");
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Reconciling
+    );
+
+    let np_path =
+        format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{name}-swarm");
+    let np = cluster
+        .get(&np_path)
+        .expect("<name>-swarm NetworkPolicy applied");
+    assert_eq!(np["metadata"]["name"].as_str(), Some("waddle-swarm"));
+
+    let cm = cluster
+        .get(&format!("/api/v1/namespaces/{ns}/configmaps/{name}-config"))
+        .expect("ConfigMap created");
+    assert_eq!(
+        cm["data"]["WADDLE_DB_LINEAGE_ACTION"].as_str(),
+        Some("enroll"),
+        "spec.deployment.lineageAction must propagate in ExternalSecrets mode"
+    );
+
+    let mut dep = cluster
+        .get(&format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}"))
+        .expect("deployment created");
+    let gen = dep["metadata"]["generation"].as_i64().unwrap_or(1);
+    dep["status"] = json!({
+        "observedGeneration": gen,
+        "replicas": 2,
+        "updatedReplicas": 2,
+        "readyReplicas": 2,
+        "availableReplicas": 2,
+        "conditions": [
+            { "type": "Available", "status": "True", "reason": "MinimumReplicasAvailable" },
+            { "type": "Progressing", "status": "True", "reason": "NewReplicaSetAvailable" }
+        ]
+    });
+    cluster.put(
+        &format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}"),
+        dep,
+    );
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("converge Ready");
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Ready
+    );
+
+    // Disable NetworkPolicy -> must delete `<name>-swarm` cleanly (not `<name>`).
+    let mut updated_ws = cluster.get(&ws_path).expect("ws");
+    updated_ws["spec"]["networkPolicy"]["enabled"] = json!(false);
+    updated_ws["metadata"]["generation"] = json!(2);
+    cluster.put(&ws_path, updated_ws);
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("disable netpol deletes <name>-swarm");
+    assert!(
+        cluster.get(&np_path).is_none(),
+        "<name>-swarm NetworkPolicy must be deleted when networkPolicy.enabled=false"
+    );
+}
+
+#[tokio::test]
+async fn invalid_spec_skips_dependency_gets_and_stale_deadline_stays_reconciling() {
+    let cluster = MockCluster::start().await;
+    let ns = "sec";
+    let name = "bad";
+    let ws_path = format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{name}");
+
+    cluster.put(
+        &ws_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleServer",
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+                "uid": "eeeeeeee-1111-4222-8333-555555555555",
+                "generation": 1
+            },
+            "spec": {
+                "baseUrl": "https://sec.local",
+                "xmpp": { "domain": "sec.local" },
+                "postgres": {
+                    "mode": "External",
+                    "external": { "secretName": "../../other-ns/secrets/stolen" }
+                },
+                "spicedb": {
+                    "mode": "External",
+                    "external": { "endpoint": "http://spicedb:50051", "insecure": true }
+                },
+                "secrets": { "mode": "Yolo" }
+            }
+        }),
+    );
+
+    let ctx = make_ctx(
+        &cluster,
+        true,
+        discover_capabilities(&cluster.client()).await,
+    );
+    cluster.clear_gets();
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("invalid spec transitions cleanly to Failed without Kube path error");
+
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Failed
+    );
+    let gets = cluster.gets();
+    assert!(
+        gets.iter()
+            .all(|p| !p.contains("/secrets/") && !p.contains("other-ns")),
+        "invalid spec MUST NOT query Secrets or traversed namespaces, got gets={gets:?}"
+    );
+
+    // Part 2: Stale gen-1 ProgressDeadlineExceeded while gen-2 is waiting on observedGeneration=1.
+    let name_stale = "rollout";
+    let ws_stale_path =
+        format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{name_stale}");
+    let mut ws_stale = yolo_waddle_json(ns, name_stale);
+    ws_stale["status"] = json!({
+        "phase": "Reconciling",
+        "replicas": 1,
+        "readyReplicas": 0,
+        "updatedReplicas": 0,
+        "readySummary": "0/1",
+        "dependencies": {
+            "postgres": { "phase": "Ready", "reason": "Ready" },
+            "spicedb": { "phase": "Ready", "reason": "Ready" },
+            "secrets": { "phase": "Ready", "reason": "Ready" }
+        }
+    });
+    cluster.put(&ws_stale_path, ws_stale);
+    seed_healthy_cnpg_and_spicedb(&cluster, ns);
+
+    reconcile_single(
+        Arc::new(cluster.get_waddle(ns, name_stale)),
+        Arc::clone(&ctx),
+    )
+    .await
+    .expect("create YOLO secret");
+    reconcile_single(
+        Arc::new(cluster.get_waddle(ns, name_stale)),
+        Arc::clone(&ctx),
+    )
+    .await
+    .expect("create workload");
+
+    let dep_path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name_stale}");
+    let mut dep = cluster.get(&dep_path).expect("dep exists");
+    dep["metadata"]["generation"] = json!(2);
+    dep["status"] = json!({
+        "observedGeneration": 1,
+        "replicas": 1,
+        "updatedReplicas": 1,
+        "readyReplicas": 0,
+        "availableReplicas": 0,
+        "conditions": [
+            {
+                "type": "Progressing",
+                "status": "False",
+                "reason": "ProgressDeadlineExceeded",
+                "message": "ReplicaSet timed out on gen 1"
+            }
+        ]
+    });
+    cluster.put(&dep_path, dep);
+
+    reconcile_single(
+        Arc::new(cluster.get_waddle(ns, name_stale)),
+        Arc::clone(&ctx),
+    )
+    .await
+    .expect("stale ProgressDeadlineExceeded handled cleanly");
+    assert_eq!(
+        cluster.get_waddle(ns, name_stale).status.expect("st").phase,
+        WaddleServerPhase::Reconciling,
+        "stale gen-1 ProgressDeadlineExceeded while observedGeneration=1 < generation=2 must stay Reconciling"
+    );
 }

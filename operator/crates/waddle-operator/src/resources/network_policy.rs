@@ -19,34 +19,46 @@ pub fn build_network_policy(ws: &WaddleServer) -> Result<Option<NetworkPolicy>, 
         return Ok(None);
     }
 
-    let name = format!("{}-swarm", labels::workload_name(ws)?);
+    let name = labels::network_policy_name(ws)?;
     let owner = labels::owner_reference(ws)?;
     let obj_labels = labels::common_labels(ws)?;
     let selector = labels::selector_labels(ws)?;
 
-    let http_rule = NetworkPolicyIngressRule {
-        ports: Some(vec![NetworkPolicyPort {
-            protocol: Some("TCP".to_owned()),
-            port: Some(IntOrString::Int(ws.spec.service.http_port)),
-            ..NetworkPolicyPort::default()
-        }]),
-        ..NetworkPolicyIngressRule::default()
-    };
+    let mut ingress = vec![
+        NetworkPolicyIngressRule {
+            ports: Some(vec![NetworkPolicyPort {
+                protocol: Some("TCP".to_owned()),
+                port: Some(IntOrString::Int(ws.spec.service.http_port)),
+                ..NetworkPolicyPort::default()
+            }]),
+            ..NetworkPolicyIngressRule::default()
+        },
+        NetworkPolicyIngressRule {
+            from: Some(vec![NetworkPolicyPeer {
+                pod_selector: Some(LabelSelector {
+                    match_labels: Some(selector.clone()),
+                    ..LabelSelector::default()
+                }),
+                ..NetworkPolicyPeer::default()
+            }]),
+            ports: Some(vec![NetworkPolicyPort {
+                protocol: Some("TCP".to_owned()),
+                port: Some(IntOrString::Int(i32::from(ws.spec.clustering.swarm_port))),
+                ..NetworkPolicyPort::default()
+            }]),
+        },
+    ];
 
-    let swarm_rule = NetworkPolicyIngressRule {
-        from: Some(vec![NetworkPolicyPeer {
-            pod_selector: Some(LabelSelector {
-                match_labels: Some(selector.clone()),
-                ..LabelSelector::default()
-            }),
-            ..NetworkPolicyPeer::default()
-        }]),
-        ports: Some(vec![NetworkPolicyPort {
-            protocol: Some("TCP".to_owned()),
-            port: Some(IntOrString::Int(i32::from(ws.spec.clustering.swarm_port))),
-            ..NetworkPolicyPort::default()
-        }]),
-    };
+    if ws.spec.s2s.enabled {
+        ingress.push(NetworkPolicyIngressRule {
+            ports: Some(vec![NetworkPolicyPort {
+                protocol: Some("TCP".to_owned()),
+                port: Some(IntOrString::Int(ws.spec.s2s.port)),
+                ..NetworkPolicyPort::default()
+            }]),
+            ..NetworkPolicyIngressRule::default()
+        });
+    }
 
     Ok(Some(NetworkPolicy {
         metadata: ObjectMeta {
@@ -61,7 +73,7 @@ pub fn build_network_policy(ws: &WaddleServer) -> Result<Option<NetworkPolicy>, 
                 ..LabelSelector::default()
             }),
             policy_types: Some(vec!["Ingress".to_owned()]),
-            ingress: Some(vec![http_rule, swarm_rule]),
+            ingress: Some(ingress),
             ..NetworkPolicySpec::default()
         }),
     }))

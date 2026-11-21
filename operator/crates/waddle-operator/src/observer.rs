@@ -8,8 +8,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as KubeCondition;
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::Client;
 use waddle_operator_crd::{
-    ContentDigest, EsoApiVersion, PostgresSourceMode, RestrictedRuntimeSpec, SecretProviderMode,
-    SecretStoreKind, SpiceDbSourceMode, UpdateStrategyKind, ValidatedSpec, WaddleServer,
+    ContentDigest, EsoApiVersion, PostgresSourceMode, ResourceName, RestrictedRuntimeSpec,
+    SecretProviderMode, SecretStoreKind, SpiceDbSourceMode, UpdateStrategyKind, ValidatedSpec,
+    WaddleServer, WaddleServerSpec,
 };
 use waddle_operator_fsm::{
     ConditionKind, ConditionRecord, ConditionStatus, DependencyHealth, ObservedWorld,
@@ -77,12 +78,54 @@ pub async fn observe_world(
 
     let (validated, spec_validation) = match waddle_operator_crd::validate_spec(&ws.spec) {
         Ok(v) => (Some(v), SpecValidationState::Valid),
-        Err(report) => (
-            None,
-            SpecValidationState::Invalid {
-                summary: report.summary(),
-            },
-        ),
+        Err(report) => {
+            let existing_conditions = ws
+                .status
+                .as_ref()
+                .map(|s| parse_existing_conditions(&s.conditions))
+                .unwrap_or_default();
+            let workload =
+                observe_workload(client, ns, ws, None, None, live_deployment.as_ref()).await?;
+            let world = ObservedWorld {
+                generation: ws.metadata.generation.unwrap_or(1),
+                deleting: ws.metadata.deletion_timestamp.is_some(),
+                spec_validation: SpecValidationState::Invalid {
+                    summary: report.summary(),
+                },
+                postgres: DependencyHealth::NotReady {
+                    reason: "SpecInvalid".to_owned(),
+                    detail: "Specification invalid; PostgreSQL lookup skipped".to_owned(),
+                },
+                spicedb: DependencyHealth::NotReady {
+                    reason: "SpecInvalid".to_owned(),
+                    detail: "Specification invalid; SpiceDB lookup skipped".to_owned(),
+                },
+                secrets: SecretsObservation {
+                    source: spec_secret_source_kind(&ws.spec),
+                    yolo_allowed_by_operator: policy.enable_yolo_mode,
+                    cluster_store_allowed: true,
+                    external_secret_synced: None,
+                    external_secret_error: Some(
+                        "Specification invalid; secret lookup skipped".to_owned(),
+                    ),
+                    managed_external_secret_drifted: false,
+                    target_secret_exists: false,
+                    missing_keys: Vec::new(),
+                    invalid_keys: Vec::new(),
+                    checksum: None,
+                    sensitive_key_rotated: None,
+                },
+                workload,
+                existing_conditions,
+                now_rfc3339: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            };
+            return Ok(WorldSnapshot {
+                world,
+                validated: None,
+                bindings: None,
+                resolved_deployment_uuid: None,
+            });
+        }
     };
 
     let (postgres_health, postgres_binding) =
@@ -122,7 +165,7 @@ pub async fn observe_world(
                 .as_ref()
                 .and_then(|e| e.clustering_keypool_secret_name.clone()),
             deployment_uuid: ws.spec.deployment.uuid.clone(),
-            lineage_action: yolo_lineage_action(ws),
+            lineage_action: resolve_lineage_action(ws),
             secrets_checksum: secret_obs.observation.checksum.clone(),
             session_key_fingerprint: secret_obs.session_key_fingerprint,
             occupant_id_fingerprint: secret_obs.occupant_id_fingerprint,
@@ -252,6 +295,17 @@ async fn observe_postgres(
                 .secret_name
                 .clone()
                 .unwrap_or_else(|| cluster_view.resolved_secret_name(&cnpg.cluster_name));
+            if !is_safe_resource_name(&secret_name) {
+                return Ok((
+                    DependencyHealth::NotReady {
+                        reason: "InvalidPostgresSecretName".to_owned(),
+                        detail: format!(
+                            "Resolved CNPG credential Secret name '{secret_name}' is not a valid Kubernetes resource name"
+                        ),
+                    },
+                    None,
+                ));
+            }
             let Some(secret) = Api::<Secret>::namespaced(client.clone(), ns)
                 .get_opt(&secret_name)
                 .await
@@ -593,6 +647,17 @@ async fn observe_spicedb(
                             None,
                         ));
                 };
+                if !is_safe_resource_name(cluster_secret) {
+                    return Ok((
+                        DependencyHealth::NotReady {
+                            reason: "InvalidSpiceDbSecretName".to_owned(),
+                            detail: format!(
+                                "SpiceDBCluster.spec.secretName '{cluster_secret}' is not a valid Kubernetes resource name"
+                            ),
+                        },
+                        None,
+                    ));
+                }
                 if let Some(blocker) = verify_secret_key_present(
                     client,
                     ns,
@@ -882,7 +947,7 @@ async fn observe_eso_secrets(
     let mut target_secret_name = expected_runtime_secret_name(ws)?;
 
     let mut external_secret_synced = Some(false);
-    let external_secret_error;
+    let mut external_secret_error;
     let mut managed_drifted = false;
 
     match eso_version {
@@ -958,13 +1023,21 @@ async fn observe_eso_secrets(
         }
     }
 
-    let secret = Api::<Secret>::namespaced(client.clone(), ns)
-        .get_opt(&target_secret_name)
-        .await
-        .map_err(|source| OperatorError::Kube {
-            context: "get ESO target runtime Secret",
-            source,
-        })?;
+    let secret = if is_safe_resource_name(&target_secret_name) {
+        Api::<Secret>::namespaced(client.clone(), ns)
+            .get_opt(&target_secret_name)
+            .await
+            .map_err(|source| OperatorError::Kube {
+                context: "get ESO target runtime Secret",
+                source,
+            })?
+    } else {
+        external_secret_synced = Some(false);
+        external_secret_error = Some(format!(
+            "ExternalSecret spec.target.name '{target_secret_name}' is not a valid Kubernetes resource name"
+        ));
+        None
+    };
 
     let mut missing_keys = Vec::new();
     let mut invalid_keys = Vec::new();
@@ -1171,6 +1244,16 @@ async fn observe_workload(
     let ready_replicas = status.ready_replicas.unwrap_or(0);
     let available_replicas = status.available_replicas.unwrap_or(0);
     let conditions = status.conditions.as_deref().unwrap_or(&[]);
+
+    if obs_gen < dep_gen {
+        return Ok(WorkloadObservation::RolloutInProgress {
+            desired_replicas,
+            updated_replicas,
+            ready_replicas,
+            available_replicas,
+            drift_detected,
+        });
+    }
 
     if let Some(failed) = conditions.iter().find(|cond| {
         cond.type_ == "Progressing"
@@ -1423,15 +1506,56 @@ fn collect_extra_secret_refs(ws: &WaddleServer) -> Vec<String> {
     }
 }
 
-fn yolo_lineage_action(ws: &WaddleServer) -> Option<String> {
-    let enroll = ws.spec.secrets.mode == SecretProviderMode::Yolo
+fn resolve_lineage_action(ws: &WaddleServer) -> Option<String> {
+    if ws
+        .spec
+        .postgres
+        .restricted_runtime
+        .as_ref()
+        .is_some_and(|rr| rr.enabled)
+    {
+        return None;
+    }
+    if let Some(explicit) = ws
+        .spec
+        .deployment
+        .lineage_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(explicit.to_owned());
+    }
+    let yolo_enroll = ws.spec.secrets.mode == SecretProviderMode::Yolo
         && ws
             .spec
             .secrets
             .yolo
             .as_ref()
             .is_none_or(|y| y.enroll_lineage);
-    enroll.then(|| "enroll".to_owned())
+    yolo_enroll.then(|| "enroll".to_owned())
+}
+
+fn spec_secret_source_kind(spec: &WaddleServerSpec) -> SecretSourceKind {
+    match spec.secrets.mode {
+        SecretProviderMode::Yolo => SecretSourceKind::Yolo,
+        SecretProviderMode::ExternalSecrets => {
+            if spec
+                .secrets
+                .external_secrets
+                .as_ref()
+                .is_some_and(|e| e.managed.is_some())
+            {
+                SecretSourceKind::ExternalSecretsManaged
+            } else {
+                SecretSourceKind::ExternalSecretsUnmanaged
+            }
+        }
+    }
+}
+
+fn is_safe_resource_name(name: &str) -> bool {
+    !name.contains("..") && ResourceName::try_new(name).is_ok()
 }
 
 fn to_raw_byte_map(

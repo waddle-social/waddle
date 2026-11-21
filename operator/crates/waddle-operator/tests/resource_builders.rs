@@ -244,8 +244,50 @@ fn deployment_and_companion_manifests_match_waddle_server_contracts() {
     assert!(build_headless_service(&ws).expect("headless").is_some());
     assert!(build_s2s_service(&ws).expect("s2s").is_some());
     assert!(build_pdb(&ws).expect("pdb").is_some());
-    assert!(build_network_policy(&ws).expect("netpol").is_some());
+    let np = build_network_policy(&ws)
+        .expect("netpol")
+        .expect("netpol present");
+    assert_eq!(np.metadata.name.as_deref(), Some("waddle-prod-swarm"));
+    let allowed_ports: Vec<i32> = np
+        .spec
+        .as_ref()
+        .and_then(|s| s.ingress.as_ref())
+        .into_iter()
+        .flatten()
+        .flat_map(|r| r.ports.as_deref().unwrap_or(&[]))
+        .filter_map(|p| p.port.as_ref())
+        .filter_map(|p| match p {
+            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(v) => Some(*v),
+            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(_) => None,
+        })
+        .collect();
+    assert!(allowed_ports.contains(&ws.spec.service.http_port));
+    assert!(allowed_ports.contains(&7900));
+    assert!(
+        allowed_ports.contains(&5269),
+        "clustered NetworkPolicy must allow S2S ingress port 5269, ports={allowed_ports:?}"
+    );
     assert!(build_pvc(&ws).expect("pvc").is_some());
+
+    let mut no_s2s_ws = ws.clone();
+    no_s2s_ws.spec.s2s.enabled = false;
+    let np_no_s2s = build_network_policy(&no_s2s_ws)
+        .expect("netpol no s2s")
+        .expect("netpol present");
+    let ports_no_s2s: Vec<i32> = np_no_s2s
+        .spec
+        .as_ref()
+        .and_then(|s| s.ingress.as_ref())
+        .into_iter()
+        .flatten()
+        .flat_map(|r| r.ports.as_deref().unwrap_or(&[]))
+        .filter_map(|p| p.port.as_ref())
+        .filter_map(|p| match p {
+            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(v) => Some(*v),
+            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(_) => None,
+        })
+        .collect();
+    assert!(!ports_no_s2s.contains(&5269));
 
     let expected_hash = compute_workload_hash(&ws, dep_spec).expect("workload hash");
     assert_eq!(
@@ -286,6 +328,27 @@ fn managed_external_secret_and_yolo_secret_preserve_keys_and_redact() {
         build_managed_external_secret(&ws, DiscoveredEsoVersion::V1Beta1).expect("es v1beta1");
     assert!(managed_external_secret_drifted(&es_v1, &es_v1beta1));
     assert!(!managed_external_secret_drifted(&es_v1, &es_v1));
+
+    let mut live_with_eso_defaults = es_v1.clone();
+    live_with_eso_defaults.data["spec"]["target"]["deletionPolicy"] = json!("Retain");
+    if let Some(entries) = live_with_eso_defaults.data["spec"]["data"].as_array_mut() {
+        for item in entries {
+            item["remoteRef"]["conversionStrategy"] = json!("Default");
+            item["remoteRef"]["decodingStrategy"] = json!("None");
+            item["remoteRef"]["metadataPolicy"] = json!("None");
+        }
+    }
+    assert!(
+        !managed_external_secret_drifted(&live_with_eso_defaults, &es_v1),
+        "ESO CRD schema defaults must not register as drift"
+    );
+
+    let mut real_drift = live_with_eso_defaults;
+    real_drift.data["spec"]["refreshInterval"] = json!("5m");
+    assert!(
+        managed_external_secret_drifted(&real_drift, &es_v1),
+        "changing refreshInterval must be detected as drift"
+    );
 
     let yolo_ws: WaddleServer = serde_json::from_value(json!({
         "apiVersion": "waddle.social/v1alpha1",

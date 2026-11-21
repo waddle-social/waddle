@@ -19,8 +19,9 @@ pub use deployment::{
 pub use external_secret::{build_managed_external_secret, managed_external_secret_drifted};
 pub use labels::{
     common_labels, config_map_name, headless_service_name, managed_external_secret_name,
-    managed_target_secret_name, owner_reference, pvc_name, s2s_service_name, selector_labels,
-    workload_name, workload_namespace, yolo_secret_name, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
+    managed_target_secret_name, network_policy_name, owner_reference, pvc_name, s2s_service_name,
+    selector_labels, workload_name, workload_namespace, yolo_secret_name, MANAGED_BY_LABEL,
+    MANAGED_BY_VALUE,
 };
 pub use network_policy::build_network_policy;
 pub use pdb::build_pdb;

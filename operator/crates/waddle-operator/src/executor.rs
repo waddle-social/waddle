@@ -272,9 +272,10 @@ async fn apply_workload(
     }
 
     let np_api: Api<NetworkPolicy> = Api::namespaced(client.clone(), ns);
+    let np_name = resources::network_policy_name(ws)?;
     match resources::build_network_policy(ws)? {
-        Some(np) => ssa_apply(&np_api, name, &np).await?,
-        None => delete_if_exists(&np_api, name).await?,
+        Some(np) => ssa_apply(&np_api, &np_name, &np).await?,
+        None => delete_if_exists(&np_api, &np_name).await?,
     }
 
     let deployment = resources::build_deployment(ws, validated, bindings, &cm_digest)?;

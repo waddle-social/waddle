@@ -179,11 +179,16 @@ pub async fn run_controller(
         .owns(
             scoped_api::<NetworkPolicy>(&client, ns),
             watcher::Config::default(),
-        )
-        .owns(
+        );
+
+    // Only watch operator-managed Secrets when YOLO mode is explicitly opted in so production
+    // installations using `config/rbac-eso-only` (`get` only on Secrets) never hit 403 LIST errors.
+    if args.enable_yolo_mode {
+        controller = controller.owns(
             scoped_api::<Secret>(&client, ns),
             watcher::Config::default().labels(&managed_secret_selector),
         );
+    }
 
     let ep_store = store.clone();
     controller = controller.watches_with(

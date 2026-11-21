@@ -88,14 +88,78 @@ pub fn build_managed_external_secret(
     serde_json::from_value(manifest).map_err(|err| OperatorError::Serialization(err.to_string()))
 }
 
-/// Compares whether the live `ExternalSecret` differs from the desired spec.
+/// Compares whether the live `ExternalSecret` differs from the desired operator-managed fields.
+///
+/// Compares only operator-owned fields (`apiVersion`, `refreshInterval`, `secretStoreRef`,
+/// `target.name`, `target.creationPolicy`, and mapped `data` key/property/version pairs) so
+/// OpenAPI schema defaults injected by ESO (`conversionStrategy`, `decodingStrategy`,
+/// `metadataPolicy`, `target.deletionPolicy`, etc.) do not trigger perpetual drift.
 #[must_use]
 pub fn managed_external_secret_drifted(live: &DynamicObject, desired: &DynamicObject) -> bool {
-    let live_spec = live.data.get("spec");
-    let desired_spec = desired.data.get("spec");
     let same_api = live.types.as_ref().map(|t| t.api_version.as_str())
         == desired.types.as_ref().map(|t| t.api_version.as_str());
-    !(same_api && live_spec == desired_spec)
+    if !same_api {
+        return true;
+    }
+
+    let (Some(live_spec), Some(desired_spec)) = (live.data.get("spec"), desired.data.get("spec"))
+    else {
+        return true;
+    };
+
+    if live_spec.get("refreshInterval") != desired_spec.get("refreshInterval") {
+        return true;
+    }
+
+    let (Some(live_store), Some(desired_store)) = (
+        live_spec.get("secretStoreRef"),
+        desired_spec.get("secretStoreRef"),
+    ) else {
+        return true;
+    };
+    if live_store.get("kind") != desired_store.get("kind")
+        || live_store.get("name") != desired_store.get("name")
+    {
+        return true;
+    }
+
+    let (Some(live_target), Some(desired_target)) =
+        (live_spec.get("target"), desired_spec.get("target"))
+    else {
+        return true;
+    };
+    if live_target.get("name") != desired_target.get("name")
+        || live_target.get("creationPolicy") != desired_target.get("creationPolicy")
+    {
+        return true;
+    }
+
+    let (Some(live_data), Some(desired_data)) = (
+        live_spec.get("data").and_then(Value::as_array),
+        desired_spec.get("data").and_then(Value::as_array),
+    ) else {
+        return true;
+    };
+    if live_data.len() != desired_data.len() {
+        return true;
+    }
+
+    live_data
+        .iter()
+        .zip(desired_data.iter())
+        .any(|(live_item, desired_item)| {
+            if live_item.get("secretKey") != desired_item.get("secretKey") {
+                return true;
+            }
+            let (Some(live_rr), Some(desired_rr)) =
+                (live_item.get("remoteRef"), desired_item.get("remoteRef"))
+            else {
+                return true;
+            };
+            live_rr.get("key") != desired_rr.get("key")
+                || live_rr.get("property") != desired_rr.get("property")
+                || live_rr.get("version") != desired_rr.get("version")
+        })
 }
 
 fn remote_entry(secret_key: &str, remote: &EsoRemoteKeyRef) -> Value {
