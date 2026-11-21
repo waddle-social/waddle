@@ -345,24 +345,26 @@ private struct StoryVideo: View {
                     if paused { player?.pause() } else { player?.play() }
                 }
                 .onChange(of: isMuted) { _, muted in player?.isMuted = muted }
-                .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)) { note in
-                    guard let item = player?.currentItem, note.object as? AVPlayerItem === item else { return }
-                    onEnd()
-                }
                 .onDisappear { player?.pause() }
                 .accessibilityElement()
                 .accessibilityLabel(Text("Video from \(CommunityCopy.name(of: story.author))"))
         }
     }
 
-    /// Starts the video, then reports how far it has played until it fails
-    /// (a file that is gone, cannot be fetched or does not decode) or the
-    /// story is left.
+    /// Starts the video, then reports how far it has played and when it
+    /// ends, until it fails (a file that is gone, cannot be fetched or does
+    /// not decode) or the story is left.
     private func play() async {
         let item = AVPlayerItem(url: story.media)
         let player = AVPlayer(playerItem: item)
         player.isMuted = isMuted
         self.player = player
+        let ended = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { onEnd() }
+        }
+        defer { NotificationCenter.default.removeObserver(ended) }
         if !isPaused { player.play() }
         while !Task.isCancelled {
             if item.status == .failed {
