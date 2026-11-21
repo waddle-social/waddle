@@ -366,8 +366,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("host_grant_operations", READ_INSERT),
     ("host_grant_operation_changes", READ_INSERT),
     ("host_grant_space_bindings", READ),
-    ("host_grant_space_affiliations", READ_UPDATE),
-    ("host_grant_space_operation_changes", READ),
+    ("host_grant_space_affiliations", READ_INSERT_UPDATE),
+    ("host_grant_space_operation_changes", READ_INSERT),
+    ("host_grant_space_bookmark_versions", READ_INSERT_UPDATE),
+    ("local_space_subscriptions", READ_WRITE),
     // The revocation fence: a replica inserts its lease and renews it, and
     // inserts and advances its acknowledgement of each scope. It deletes
     // neither; an expired lease is a row that no longer counts.
@@ -685,6 +687,7 @@ const SEQUENCE_GRANTS: &[(&str, &str)] = &[
         "USAGE",
     ),
     ("pubsub_items_seq_seq", "SELECT"),
+    ("local_space_notification_order", "USAGE"),
     ("reactions_id_seq", NONE),
     ("clustering_claim_epoch_seq", NONE),
 ];

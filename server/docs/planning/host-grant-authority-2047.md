@@ -707,12 +707,14 @@ come from the owner phase's grant matrix
 | `host_grant_scopes` | `SELECT`, `UPDATE` | The runtime locks the guard and advances the state; it cannot insert a scope. |
 | `host_grants` | `SELECT`, `INSERT`, `UPDATE` | Grants are upserted; a revoke is a row. |
 | `host_grant_operations`, `host_grant_operation_changes` | `SELECT`, `INSERT` | The journal is append-only. |
+| `host_grant_space_bookmark_versions` | `SELECT`, `INSERT`, `UPDATE` | The current version or retraction fences bookmark notifications. |
+| `local_space_subscriptions` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | A served account can record or remove its own preference. |
+| `local_space_notification_order` | `USAGE` | Order new subscription preferences against committed bookmark versions. The owner phase grants use of the sequence while retaining control of its position and parameters. |
 
-Consequences this slice relies on: the runtime credential cannot enroll a
-scope, bind a room, bootstrap a grant or retire a scope, so no restart,
-configuration value or account name can create authority or end a scope; it
-cannot delete or truncate any host-grant row; and it cannot rewrite an
-operation's outcome.
+Enrollment, room binding, grant bootstrap, and scope retirement require the
+owner credential. The runtime can remove an account's local Space
+subscription. Canonical grant rows and journal entries are retained, and
+the runtime has no truncate privilege on these relations.
 
 Enrollment and retirement are owner-phase operations. Each is one
 transaction that writes the lifecycle ledger: enrollment inserts the scope's

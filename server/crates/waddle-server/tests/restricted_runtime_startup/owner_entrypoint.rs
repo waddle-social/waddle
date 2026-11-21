@@ -425,6 +425,26 @@ async fn subcommands_prepare_a_database_the_restricted_server_serves() {
         .owner_phase(&["--identity-output", identity_arg], &enroll)
         .await;
     assert_exit(&first, SUCCESS, "owner-phase on a fresh database");
+    let space_grants: bool = sqlx::query_scalar(
+        "SELECT
+            has_table_privilege($1, $2, 'SELECT') AND has_table_privilege($1, $2, 'INSERT')
+            AND has_table_privilege($1, $2, 'UPDATE') AND NOT has_table_privilege($1, $2, 'DELETE')
+            AND has_table_privilege($1, $3, 'SELECT') AND has_table_privilege($1, $3, 'INSERT')
+            AND has_table_privilege($1, $3, 'UPDATE') AND has_table_privilege($1, $3, 'DELETE')
+            AND has_sequence_privilege($1, $4, 'USAGE')
+            AND NOT has_sequence_privilege($1, $4, 'SELECT,UPDATE')",
+    )
+    .bind(&provisioned.roles.runtime)
+    .bind(format!("{SCHEMA}.host_grant_space_bookmark_versions"))
+    .bind(format!("{SCHEMA}.local_space_subscriptions"))
+    .bind(format!("{SCHEMA}.local_space_notification_order"))
+    .fetch_one(&provisioned.admin)
+    .await
+    .expect("read protected Space privileges");
+    assert!(
+        space_grants,
+        "owner phase grants the protected Space privilege profile"
+    );
     let identity = std::fs::read_to_string(&identity_path).expect("identity document");
     assert_eq!(first.stdout.trim(), identity.trim());
     let lineage = database_identity_from_json(&identity).expect("identity document parses");
