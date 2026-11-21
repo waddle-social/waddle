@@ -33,6 +33,8 @@ mod ingress_support;
 mod live_spicedb;
 #[path = "host_grant_projection/protected_space_contents.rs"]
 mod protected_space_contents;
+#[path = "host_grant_projection/protected_space_events.rs"]
+mod protected_space_events;
 #[path = "host_grant_projection/protected_space_subscriptions.rs"]
 mod protected_space_subscriptions;
 #[allow(dead_code, unused_imports)]
@@ -996,6 +998,14 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
     )
     .await;
     assert!(is_result(&granted), "{granted:?}");
+    protected_space_events::assert_local_bookmark_events(
+        first,
+        &mut owner,
+        &service,
+        node,
+        &live.fixture.scope.room,
+    )
+    .await;
     protected_space_contents::assert_canonical_space_children(
         &live,
         &authority,
