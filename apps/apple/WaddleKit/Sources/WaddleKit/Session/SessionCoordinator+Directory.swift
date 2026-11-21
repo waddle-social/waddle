@@ -2,10 +2,18 @@ import Foundation
 
 extension SessionCoordinator {
     /// Loads the account's contact list. A lookup that fails keeps the
-    /// list already held: an older list is nearer the truth than none.
+    /// list already held (an older list is nearer the truth than none)
+    /// and is recorded, so a screen can say so and offer to try again.
     public func refreshContacts() async {
-        guard let loaded = try? await port.fetchContacts(), !isStopped else { return }
-        contacts = loaded
+        contactsLoad = .loading
+        let loaded = try? await port.fetchContacts()
+        guard !isStopped else { return }
+        if let loaded {
+            contacts = loaded
+            contactsLoad = .idle
+        } else {
+            contactsLoad = .failed
+        }
     }
 
     /// Rediscovers spaces and rooms, then joins every autojoin room, group

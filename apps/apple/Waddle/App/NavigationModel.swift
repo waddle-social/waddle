@@ -105,7 +105,21 @@ final class NavigationModel {
     var sheet: SheetRoute?
 
     var tab: PhoneTab = .home
-    var homePath: [Route] = []
+    var homePath: [Route] = [] {
+        didSet {
+            // People is pushed here on the phone and is a section of the
+            // split view. Keep the two in step, so an iPad that widens
+            // while showing People still shows it, and one that left
+            // People on the phone does not come back to it.
+            let showsPeople = homePath.last == .people
+            if showsPeople, splitSection != .people || selection != nil {
+                selection = nil
+                splitSection = .people
+            } else if !showsPeople, splitSection == .people, selection == nil, oldValue.last == .people {
+                splitSection = .home
+            }
+        }
+    }
     var directPath: [Route] = []
     var inboxPath: [Route] = []
     /// The phone has no Events tab: Events opens from the Feed.

@@ -12,6 +12,15 @@ public struct Contact: Hashable, Sendable {
     }
 }
 
+/// Where a lookup of the contact list stands.
+public enum ContactsLoad: Equatable, Sendable {
+    /// None is running, and the last one, if any, worked.
+    case idle
+    case loading
+    /// The last one failed; nothing retries it until asked or reconnected.
+    case failed
+}
+
 /// Someone the account knows by address, as the People view lists them.
 public struct Person: Hashable, Sendable, Identifiable {
     public let jid: BareJID

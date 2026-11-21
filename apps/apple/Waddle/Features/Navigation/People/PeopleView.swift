@@ -35,6 +35,15 @@ struct PeopleView: View {
             ToolbarItem(placement: .primaryAction) {
                 NewMessageToolbarButton()
             }
+            ToolbarItem(placement: .secondaryAction) {
+                Button {
+                    Task { await session.refreshContacts() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(session.contactsLoad == .loading)
+                .help("Refresh")
+            }
         }
     }
 
@@ -47,11 +56,26 @@ struct PeopleView: View {
             NoMatchesView(query: query)
         } else if session.contacts == nil {
             // Not known yet is not the same as no one.
-            EmptyStateView(
-                title: session.connection == .online ? "Loading people" : "You're offline",
-                message: "Your contacts show up here once they have loaded.",
-                symbol: "person.2"
-            )
+            switch session.contactsLoad {
+            case .failed:
+                EmptyStateView(
+                    title: "People didn't load",
+                    message: "Refresh to try again.",
+                    symbol: "exclamationmark.triangle"
+                )
+            case .loading:
+                EmptyStateView(
+                    title: "Loading people",
+                    message: "Your contacts show up here once they have loaded.",
+                    symbol: "person.2"
+                )
+            case .idle:
+                EmptyStateView(
+                    title: "You're offline",
+                    message: "Your contacts show up here when you're connected.",
+                    symbol: "person.2"
+                )
+            }
         } else {
             EmptyStateView(
                 title: "No one here yet",

@@ -36,6 +36,8 @@ public final class SessionCoordinator {
     /// The account's contact list; nil until it has been loaded once, so
     /// "not known yet" is never shown as "no contacts".
     public internal(set) var contacts: [Contact]?
+    /// Where the last lookup of the contact list stands.
+    public internal(set) var contactsLoad = ContactsLoad.idle
     public let history: HistoryStore
     @ObservationIgnored let inbox: InboxStore
     @ObservationIgnored let readCursors: ReadCursorStore
@@ -249,6 +251,7 @@ public final class SessionCoordinator {
         connectWatchdog = nil
         resetPresenceMode()
         contacts = nil
+        contactsLoad = .idle
         await stopCalls()
         await port.disconnect()
         eventTask?.cancel()

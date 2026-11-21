@@ -32,6 +32,27 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.homePath, [.people])
     }
 
+    /// The phone opens People by pushing it on Home. An iPad that widens
+    /// then must show People, not the conversation it showed before.
+    func testPushingPeopleOnHomeShowsItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+
+        navigation.homePath = [.people]
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .people)
+    }
+
+    func testGoingBackFromPeopleOnThePhoneLeavesItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.homePath = [.people]
+
+        navigation.homePath = []
+
+        XCTAssertEqual(navigation.splitSection, .home)
+    }
+
     /// Opening a room replaces People on the Home stack; the stack and
     /// its path never disagree.
     func testOpeningARoomFromPeopleReplacesItOnTheHomeStack() {

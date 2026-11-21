@@ -37,6 +37,19 @@ struct ContactListTests {
         let (coordinator, _) = await connected(.failure(.timeout))
 
         #expect(coordinator.contacts == nil)
+        #expect(coordinator.contactsLoad == .failed)
+        await coordinator.stop()
+    }
+
+    /// Nothing retries a failed lookup by itself, so the screen offers to.
+    @Test func tryingAgainAfterAFailedLookupLoadsTheList() async {
+        let (coordinator, port) = await connected(.failure(.timeout))
+        port.contacts = .success([ada])
+
+        await coordinator.refreshContacts()
+
+        #expect(coordinator.contacts == [ada])
+        #expect(coordinator.contactsLoad == .idle)
         await coordinator.stop()
     }
 
@@ -47,6 +60,7 @@ struct ContactListTests {
         await coordinator.refreshContacts()
 
         #expect(coordinator.contacts == [ada])
+        #expect(coordinator.contactsLoad == .failed)
         await coordinator.stop()
     }
 
