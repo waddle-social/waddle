@@ -1072,7 +1072,32 @@ async fn configure_and_delete_space_preserves_room_scope() {
                 .expect("reject expired token"));
             &replacement
         } else {
-            attempt
+            assert!(fixture
+                .store
+                .finish_space_deletion_attempt(attempt, Outcome::Retry)
+                .await
+                .expect("retry a proved unsent local notice"));
+            let backed_off: bool = sqlx::query_scalar(
+                "SELECT state = 'pending' AND due_at_ms > (EXTRACT(EPOCH FROM pg_catalog.statement_timestamp()) * 1000)::bigint
+                 FROM host_grant_space_deletion_jobs WHERE lifecycle_id = $1 AND delivery_kind = 'local'",
+            ).bind(lifecycle.to_storage()).fetch_one(&pool).await.expect("check retry schedule");
+            assert!(backed_off);
+            sqlx::query(
+                "UPDATE host_grant_space_deletion_jobs SET due_at_ms = 0
+                         WHERE lifecycle_id = $1 AND delivery_kind = 'local'",
+            )
+            .bind(lifecycle.to_storage())
+            .execute(&pool)
+            .await
+            .expect("advance retry time");
+            let mut jobs = fixture
+                .store
+                .claim_space_deletion_jobs(kind, 1)
+                .await
+                .expect("claim due retry");
+            replacement = jobs.pop().expect("the due job");
+            assert_ne!(attempt.token, replacement.token);
+            &replacement
         };
         assert_eq!(&attempt.subject, expected);
         assert_eq!(attempt.record, deleted);
