@@ -1426,6 +1426,13 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func fetchStatusPreference() async throws  -> WaddleStatusPreference
 
     /**
+     * Store `preference` as the account's presence mode, for every
+     * device of the account to adopt. A reset is stored as `Automatic`,
+     * never removed. `Ok` means the server accepted it.
+     */
+    func publishStatusPreference(preference: WaddleStatusPreference) async throws
+
+    /**
      * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
      * (XEP-0060 items-by-id). `node: None` defaults to the PEP
      * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
@@ -4185,6 +4192,28 @@ open func fetchStatusPreference()async throws  -> WaddleStatusPreference  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeWaddleStatusPreference_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Store `preference` as the account's presence mode, for every
+     * device of the account to adopt. A reset is stored as `Automatic`,
+     * never removed. `Ok` means the server accepted it.
+     */
+open func publishStatusPreference(preference: WaddleStatusPreference)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_status_preference(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleStatusPreference_lower(preference)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -22102,6 +22131,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference() != 15536) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_status_preference() != 46235) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {

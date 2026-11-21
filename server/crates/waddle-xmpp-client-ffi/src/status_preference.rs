@@ -1,5 +1,5 @@
-//! ADR-010 cross-device manual status over the UniFFI boundary, receive
-//! side: the stored pick is fetched from the account's own
+//! ADR-010 cross-device manual status over the UniFFI boundary: the
+//! stored pick is fetched from and published to the account's own
 //! `urn:waddle:status-preference:0` PEP node, and live picks arrive as
 //! [`crate::WaddleClientEvent::StatusPreferenceChanged`]. The wire shapes
 //! and the own-account guard live in
@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use waddle_xmpp_client::error::STANZA_CONDITION_ITEM_NOT_FOUND;
 use waddle_xmpp_client::status_preference::{
-    build_status_preference_fetch_iq, fetch_result_from_matches_account,
-    parse_status_preference_fetch_result,
+    build_status_preference_fetch_iq, build_status_preference_publish_iq,
+    fetch_result_from_matches_account, parse_status_preference_fetch_result,
 };
 use waddle_xmpp_client::ClientError;
 use waddle_xmpp_core::waddle_status_preference::{ManualStatus, StatusPreference};
@@ -57,6 +57,18 @@ pub(crate) fn status_preference_to_ffi(preference: StatusPreference) -> WaddleSt
     }
 }
 
+pub(crate) fn status_preference_from_ffi(preference: WaddleStatusPreference) -> StatusPreference {
+    match preference {
+        WaddleStatusPreference::Automatic => StatusPreference::Automatic,
+        WaddleStatusPreference::Manual { status } => StatusPreference::Manual(match status {
+            WaddleManualStatus::Available => ManualStatus::Available,
+            WaddleManualStatus::Chat => ManualStatus::Chat,
+            WaddleManualStatus::Away => ManualStatus::Away,
+            WaddleManualStatus::Dnd => ManualStatus::Dnd,
+        }),
+    }
+}
+
 /// The preference a fetch result carries. A result from anyone but the
 /// account's own PEP service (XEP-0223 §Security Considerations) and an
 /// empty node both mean Automatic: absence never pins a status.
@@ -97,5 +109,25 @@ impl WaddleClient {
             }
             Err(e) => Err(client_error_to_waddle(&e)),
         }
+    }
+
+    /// Store `preference` as the account's presence mode, for every
+    /// device of the account to adopt. A reset is stored as `Automatic`,
+    /// never removed. `Ok` means the server accepted it.
+    pub async fn publish_status_preference(
+        &self,
+        preference: WaddleStatusPreference,
+    ) -> Result<(), WaddleError> {
+        let Some(handle) = self.clone_handle().await else {
+            return Err(WaddleError::NotConnected);
+        };
+        let iq = build_status_preference_publish_iq(
+            &Uuid::new_v4().to_string(),
+            &status_preference_from_ffi(preference),
+        );
+        send_iq_with_timeout(&handle, iq)
+            .await
+            .map(|_| ())
+            .map_err(|e| client_error_to_waddle(&e))
     }
 }
