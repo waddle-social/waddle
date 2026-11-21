@@ -66,6 +66,21 @@ pub(super) fn spawn(
     spawn_route(grants.clone(), lifecycle, stop, DeliveryRoute::Local(state));
 }
 
+/// Start the same remote worker on an in-process S2S wire fixture.
+#[cfg(feature = "test-support")]
+pub(crate) fn spawn_remote_for_test(
+    state: &Arc<WebSocketState>,
+    router: S2sRouter,
+    stop: CancellationToken,
+) {
+    spawn_route(
+        state.deps.app_state.host_grants.clone(),
+        state.deps.app_state.node_lifecycle.clone(),
+        stop,
+        DeliveryRoute::Remote(router),
+    );
+}
+
 fn spawn_route(
     grants: HostGrantGate,
     lifecycle: NodeLifecycle,

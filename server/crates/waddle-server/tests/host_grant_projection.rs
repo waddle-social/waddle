@@ -35,6 +35,8 @@ mod live_spicedb;
 mod protected_space_contents;
 #[path = "host_grant_projection/protected_space_events.rs"]
 mod protected_space_events;
+#[path = "host_grant_projection/protected_space_remote_deletion.rs"]
+mod protected_space_remote_deletion;
 #[path = "host_grant_projection/protected_space_subscriptions.rs"]
 mod protected_space_subscriptions;
 #[allow(dead_code, unused_imports)]
