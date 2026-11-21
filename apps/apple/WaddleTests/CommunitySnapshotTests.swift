@@ -60,17 +60,41 @@ final class CommunitySnapshotTests: XCTestCase {
     func testStoryWithReactions() async throws {
         let sample = SampleSession()
         sample.seedCommunity()
-        let viewer = StoryViewer(
-            start: SampleSession.rink,
-            stories: sample.coordinator.community.activeStories(at: date(0)),
-            now: date(0),
-            picture: Self.picture
+        let stories = sample.coordinator.community.activeStories(at: date(0))
+        try await assertViewer(StoryPlaythrough(start: SampleSession.rink, among: stories), in: sample)
+    }
+
+    /// The picture stands in for the video's frame.
+    func testVideoStoryPausedAndMuted() async throws {
+        let sample = SampleSession()
+        sample.seedCommunity()
+        let clip = Story(
+            id: "story-clip",
+            body: "Morning skate before the crowds.",
+            media: URL(string: "https://upload.waddle.test/story-clip.mp4")!,
+            mediaType: "video/mp4",
+            author: SampleSession.jo,
+            postedAt: date(-600),
+            expiresAt: date(80_000)
         )
+        var playthrough = StoryPlaythrough(start: clip, among: [SampleSession.rink, clip])
+        playthrough.isPaused = true
+        playthrough.isMuted = true
+        playthrough.progress = 0.4
+        try await assertViewer(playthrough, in: sample)
+    }
+
+    private func assertViewer(
+        _ playthrough: StoryPlaythrough, in sample: SampleSession, testName: String = #function
+    ) async throws {
+        let viewer = StoryViewer(playthrough: playthrough, now: date(0), picture: Self.picture)
         // A sheet on a Mac, the whole screen on iPhone.
         #if os(macOS)
-        try await assertScreenSnapshot(of: sample.host(viewer.frame(width: 420, height: 720)), size: Self.viewer, asSheet: true)
+        try await assertScreenSnapshot(
+            of: sample.host(viewer.frame(width: 420, height: 720)), size: Self.viewer, asSheet: true, testName: testName
+        )
         #else
-        try await assertScreenSnapshot(of: sample.host(viewer), size: Self.viewer)
+        try await assertScreenSnapshot(of: sample.host(viewer), size: Self.viewer, testName: testName)
         #endif
     }
 
