@@ -13,7 +13,7 @@ use waddle_ws_test_support::{
     stanza::{is_result, pubsub_owner_affiliations, pubsub_subscribe, set},
 };
 use waddle_xmpp::pubsub::{NodeConfig, NS_PUBSUB, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER};
-use waddle_xmpp_core::pubsub::{stanzas::matches_pubsub_delete_event, PubSubNodeType};
+use waddle_xmpp_core::pubsub::PubSubNodeType;
 
 use super::{bare, served, subject, Live, PermissionActor, LIVE_SPICEDB, OWNER};
 use crate::{
@@ -175,10 +175,22 @@ async fn live_spicedb_protected_space_deletion_reaches_the_remote_subscription_o
         .at_peer_after(before, is_node_deletion)
         .await
         .expect("the admitted peer receives the XEP-0060 deletion notice");
-    assert!(
-        matches_pubsub_delete_event(&notice, SERVICE, GUEST, node, &event_id),
-        "{notice:?}"
-    );
+    let expected = Element::builder("message", "jabber:server")
+        .attr(xml_ncname!("from").to_owned(), SERVICE)
+        .attr(xml_ncname!("to").to_owned(), GUEST)
+        .attr(xml_ncname!("id").to_owned(), event_id.as_str())
+        .attr(xml_ncname!("type").to_owned(), "headline")
+        .append(
+            Element::builder("event", NS_PUBSUB_EVENT)
+                .append(
+                    Element::builder("delete", NS_PUBSUB_EVENT)
+                        .attr(xml_ncname!("node").to_owned(), node)
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    assert_eq!(notice, expected);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let jobs: Vec<(String, String)> = sqlx::query_as(
