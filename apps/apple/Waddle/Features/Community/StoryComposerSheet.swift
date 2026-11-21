@@ -47,6 +47,7 @@ struct StoryComposerSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         posting?.cancel()
+                        composer.cancelPicking()
                         dismiss()
                     }
                 }
@@ -60,6 +61,8 @@ struct StoryComposerSheet: View {
         #if os(macOS)
         .frame(width: 440, height: 600)
         #endif
+        // Closed by a swipe too: a conversion still running stops.
+        .onDisappear { composer.cancelPicking() }
         .onChange(of: pickedItem) { _, item in
             guard let item else { return }
             let type = item.supportedContentTypes.first

@@ -51,7 +51,8 @@ final class StoryComposer {
         caption: String = "",
         phase: Phase = .editing,
         errorMessage: String? = nil,
-        maxBytes: Int = StoryComposer.storyLimit
+        maxBytes: Int = StoryComposer.storyLimit,
+        prepareClip: @escaping ClipPreparer = { try await StoryClip.prepare($0, maxBytes: $1) }
     ) {
         self.media = media
         if let preview {
@@ -63,7 +64,13 @@ final class StoryComposer {
         self.phase = phase
         self.errorMessage = errorMessage
         self.maxBytes = maxBytes
+        self.prepareClip = prepareClip
     }
+
+    /// Makes a picked clip ready to upload: `StoryClip.prepare`, or a
+    /// stand-in in tests.
+    typealias ClipPreparer = @Sendable (_ source: URL, _ maxBytes: Int) async throws -> StoryClip.Prepared
+    @ObservationIgnored private let prepareClip: ClipPreparer
 
     /// "10 MB": the cap, as people read it.
     var limitText: String {
@@ -74,6 +81,8 @@ final class StoryComposer {
     private(set) var isPicking = false
     /// Counts choices, so a slow earlier one cannot replace a later one.
     private var choice = 0
+    /// Stops the choice being read or converted.
+    @ObservationIgnored private var cancelChoice: (() -> Void)?
 
     var isPosting: Bool { phase != .editing }
     var canPost: Bool { media != nil && !isPosting && !isPicking }
@@ -84,46 +93,62 @@ final class StoryComposer {
     func pick(
         mediaType: String?,
         fileExtension: String?,
-        reading read: () async -> Data?
+        reading read: @escaping () async -> Data?
     ) async {
-        await choose {
+        await choose { [maxBytes, limitText] in
             guard let data = await read() else {
-                return .failure(PickFailure(text: "Couldn't read that picture. Try another one."))
+                return .failure(.message("Couldn't read that picture. Try another one."))
             }
             do {
                 let payload = try await AttachmentLoader.payload(fromPhoto: data, mediaType: mediaType, fileExtension: fileExtension)
                 guard payload.data.count <= maxBytes else {
-                    return .failure(PickFailure(text: "Pictures in a story can be up to \(limitText)."))
+                    return .failure(.message("Pictures in a story can be up to \(limitText)."))
                 }
                 return .success(Chosen(media: .picture(payload), preview: Image(storyPicture: payload.data)))
             } catch {
-                return .failure(PickFailure(text: AttachmentUploadError.message(for: error)))
+                return .failure(.message(AttachmentUploadError.message(for: error)))
             }
         }
     }
 
     /// Takes a clip from the photo library. `read` copies it to a file,
     /// which this removes. The clip is shared as MP4, without where it was
-    /// filmed (see `StoryClip`). Only the latest choice is kept.
-    func pickVideo(reading read: () async -> URL?) async {
-        await choose {
+    /// filmed (see `StoryClip`). Only the latest choice is kept: a newer
+    /// one, or `cancelPicking()`, stops its conversion.
+    func pickVideo(reading read: @escaping () async -> URL?) async {
+        await choose { [maxBytes, limitText, prepareClip] in
             guard let source = await read() else {
-                return .failure(PickFailure(text: "Couldn't read that video. Try another one."))
+                return .failure(.message("Couldn't read that video. Try another one."))
             }
-            let limit = maxBytes
+            let work = Task.detached(priority: .userInitiated) {
+                try await prepareClip(source, maxBytes)
+            }
             do {
-                let clip = try await Task.detached(priority: .userInitiated) {
-                    try await StoryClip.prepare(source, maxBytes: limit)
-                }.value
+                let clip = try await withTaskCancellationHandler {
+                    try await work.value
+                } onCancel: {
+                    work.cancel()
+                }
                 return .success(Chosen(media: .video(clip.payload), preview: clip.poster.map { Image(decorative: $0, scale: 1) }))
+            } catch is CancellationError {
+                return .failure(.cancelled)
             } catch StoryClip.Failure.tooLarge {
-                return .failure(PickFailure(text: "Videos in a story can be up to \(limitText)."))
+                return .failure(.message("Videos in a story can be up to \(limitText)."))
             } catch StoryClip.Failure.notConverted {
-                return .failure(PickFailure(text: "Couldn't convert that video so everyone can play it. Try another one."))
+                return .failure(.message("Couldn't convert that video so everyone can play it. Try another one."))
             } catch {
-                return .failure(PickFailure(text: "Couldn't use that video. Try another one."))
+                return .failure(.message("Couldn't use that video. Try another one."))
             }
         }
+    }
+
+    /// Stops reading or converting what was chosen, and keeps what was
+    /// there before. For the sheet closing.
+    func cancelPicking() {
+        cancelChoice?()
+        cancelChoice = nil
+        choice += 1
+        isPicking = false
     }
 
     private struct Chosen {
@@ -131,24 +156,36 @@ final class StoryComposer {
         let preview: Image?
     }
 
-    private struct PickFailure: Error {
-        let text: String
+    private enum PickFailure: Error {
+        case message(String)
+        case cancelled
     }
 
-    private func choose(_ load: () async -> Result<Chosen, PickFailure>) async {
+    /// Runs `load` for a new choice, after stopping the one before.
+    private func choose(_ load: @escaping () async -> Result<Chosen, PickFailure>) async {
+        cancelChoice?()
         choice += 1
         let choice = choice
         isPicking = true
         errorMessage = nil
-        let outcome = await load()
+        let loading = Task { await load() }
+        cancelChoice = { loading.cancel() }
+        let outcome = await withTaskCancellationHandler {
+            await loading.value
+        } onCancel: {
+            loading.cancel()
+        }
         guard choice == self.choice else { return }
+        cancelChoice = nil
         isPicking = false
         switch outcome {
         case let .success(chosen):
             media = chosen.media
             preview = chosen.preview
-        case let .failure(failure):
-            errorMessage = failure.text
+        case let .failure(.message(text)):
+            errorMessage = text
+        case .failure(.cancelled):
+            break
         }
     }
 
