@@ -9,14 +9,14 @@ spec:
       recordTTL: 300
       recordType: SRV
       targets:
-        - 0 5 5269 xmpp.waddle.social
+        - 0 5 5269 xmpp.waddle.social.
     - dnsName: _xmpp-server._tcp.muc.waddle.social
       recordTTL: 300
       recordType: SRV
       targets:
-        - 0 5 5269 xmpp.waddle.social
+        - 0 5 5269 xmpp.waddle.social.
     - dnsName: _xmpp-server._tcp.spaces.waddle.social
       recordTTL: 300
       recordType: SRV
       targets:
-        - 0 5 5269 xmpp.waddle.social
+        - 0 5 5269 xmpp.waddle.social.
