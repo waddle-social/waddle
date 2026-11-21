@@ -288,6 +288,26 @@ struct AdminSpacesTests {
         #expect(port.topologyRequests == 3)
     }
 
+    /// Joining a room again makes the server send everyone in it again.
+    @Test func aChangeToASpaceDoesNotJoinRoomsAlreadyJoined() async throws {
+        let (coordinator, port) = online()
+        port.topology = Topology(spaces: [], channels: [
+            Channel(roomJID: lounge, name: "lounge"),
+            Channel(roomJID: sketch, name: "sketch"),
+        ])
+        coordinator.handle(.presence(WirePresence(
+            from: jid("\(lounge)/alice"),
+            kind: .available,
+            occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110])
+        )))
+        #expect(coordinator.presence.joinedRooms.contains(lounge))
+        let draft = try #require(AdminSpaceDraft(name: "Studio", description: ""))
+
+        try await coordinator.createAdminSpace(draft)
+
+        #expect(port.joined == [sketch])
+    }
+
     @Test func aRefusedChangeAsksForNoDirectory() async throws {
         let (coordinator, port) = online()
         port.admin.writeFailure = .rejected

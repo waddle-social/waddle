@@ -49,13 +49,13 @@ extension SessionCoordinator {
 
     public func createAdminSpace(_ draft: AdminSpaceDraft) async throws {
         try await whileOnline { try await port.createAdminSpace(draft) }
-        await refreshDirectory()
+        await refreshDirectory(joiningOnlyNewRooms: true)
     }
 
     /// Answers with the space as the server now holds it.
     public func updateAdminSpace(_ space: AdminSpace, to draft: AdminSpaceDraft) async throws -> AdminSpace {
         let updated = try await whileOnline { try await port.updateAdminSpace(space, to: draft) }
-        await refreshDirectory()
+        await refreshDirectory(joiningOnlyNewRooms: true)
         return updated
     }
 
@@ -72,7 +72,7 @@ extension SessionCoordinator {
         let rooms = directory.channels(in: space.node).map(\.roomJID)
         roomsOfDeletedSpaces.formUnion(rooms)
         onDemandRooms.subtract(rooms)
-        await refreshDirectory()
+        await refreshDirectory(joiningOnlyNewRooms: true)
     }
 
     /// Answers with the member and the role the server gave them.

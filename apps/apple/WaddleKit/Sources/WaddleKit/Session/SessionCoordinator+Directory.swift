@@ -19,7 +19,12 @@ extension SessionCoordinator {
     /// Rediscovers spaces and rooms, then joins every autojoin room, group
     /// DM, and room the user opened or created this session. A failed
     /// discovery keeps the last known directory.
-    func refreshDirectory() async {
+    ///
+    /// A fresh connection is in no room, so every one is joined. A look
+    /// taken mid-session (`joiningOnlyNewRooms`) leaves the rooms we are
+    /// already in alone: joining again makes the server send everyone in
+    /// each of them once more.
+    func refreshDirectory(joiningOnlyNewRooms: Bool = false) async {
         let mutationStart = directoryMutations.count
         directoryRefreshesInFlight += 1
         defer {
@@ -48,6 +53,7 @@ extension SessionCoordinator {
         var joined: Set<BareJID> = []
         for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
             guard directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
+            if joiningOnlyNewRooms, presence.joinedRooms.contains(room) { continue }
             await join(room)
         }
     }
