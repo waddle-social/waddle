@@ -90,6 +90,47 @@ struct SessionCoordinatorTests {
         #expect(coordinator.unread.count(for: bobConversation) == 1)
     }
 
+    @Test func roomAlertUsesTheRoomAssignedPushIdentifier() async {
+        let (coordinator, port) = online()
+        coordinator.directory.setNotifyMode(.always, for: roomConversation)
+        var alerts: [IncomingAlert] = []
+        coordinator.onAlert = { alerts.append($0) }
+        coordinator.start()
+        var message = roomMessage("hello", from: "bob", stanzaID: "room-archive-42", originID: "sender-origin-42")
+        message.identity.stanzaID = StanzaID(id: "sender-stamp-42", by: bob)
+        port.emit(.message(message))
+        await eventually { !alerts.isEmpty }
+        #expect(alerts.map(\.notificationID) == ["room-archive-42"])
+        await coordinator.stop()
+    }
+
+    @Test func directAlertUsesTheRecipientsArchiveIdentifier() async {
+        let (coordinator, port) = online()
+        var alerts: [IncomingAlert] = []
+        coordinator.onAlert = { alerts.append($0) }
+        coordinator.start()
+        var message = directMessage(
+            "hello", from: jid("bob@waddle.test/laptop"), to: jid("alice@waddle.test/phone"),
+            id: "wire-42", archiveID: "recipient-archive-42")
+        message.identity.stanzaID = StanzaID(id: "sender-archive-42", by: bob)
+        port.emit(.message(message))
+        await eventually { !alerts.isEmpty }
+        #expect(alerts.map(\.notificationID) == ["recipient-archive-42"])
+        await coordinator.stop()
+    }
+
+    @Test func alertWithoutAnArchiveIdentifierKeepsTheConversationAndRowIdentifier() async {
+        let (coordinator, port) = online()
+        var alerts: [IncomingAlert] = []
+        coordinator.onAlert = { alerts.append($0) }
+        coordinator.start()
+        port.emit(.message(directMessage(
+            "hello", from: jid("bob@waddle.test/laptop"), to: jid("alice@waddle.test/phone"), id: "wire-42")))
+        await eventually { !alerts.isEmpty }
+        #expect(alerts.map(\.notificationID) == ["direct:bob@waddle.test#wire-42"])
+        await coordinator.stop()
+    }
+
     @Test func mutationsDoNotAlertOrCount() {
         let (coordinator, _) = online()
         coordinator.route(roomMessage("msg", from: "bob", stanzaID: "s1"))

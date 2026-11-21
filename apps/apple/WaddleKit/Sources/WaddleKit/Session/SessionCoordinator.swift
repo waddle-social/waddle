@@ -7,9 +7,13 @@ public struct IncomingAlert: Hashable, Sendable {
     public let conversationTitle: String
     public let senderName: String
     public let body: String
-    /// The row id, for grouping and mark-read actions.
+    /// The timeline row id.
     public let messageID: String
+    fileprivate let pushCollapseID: String?
     public let mentionsMe: Bool
+
+    /// Matches the APNs request for this message when an archive id is present.
+    public var notificationID: String { pushCollapseID ?? "\(conversation)#\(messageID)" }
 }
 
 /// Owns one signed-in session: drives the `XmppPort`, routes its events
@@ -708,12 +712,15 @@ public final class SessionCoordinator {
         case .never: shouldAlert = false
         }
         guard shouldAlert else { return }
+        // Pushes use the room's archive id, or the recipient's for a DM.
+        let archive = conversation.isRoom ? conversation.jid : account.jid
         onAlert?(IncomingAlert(
             conversation: conversation,
             conversationTitle: directory.title(for: conversation),
             senderName: item.authorName,
             body: preview(of: item) ?? "",
             messageID: item.id,
+            pushCollapseID: item.identity.stanzaID(assignedBy: archive),
             mentionsMe: mentionsMe
         ))
     }
