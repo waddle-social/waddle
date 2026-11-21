@@ -18,6 +18,7 @@ mod live_spicedb;
 #[derive(Clone, Copy)]
 enum Exercise {
     BookmarkEvent,
+    Deletion,
     Resume,
 }
 
@@ -33,6 +34,12 @@ async fn live_spicedb_cluster_delivers_protected_space_bookmark_over_websocket()
 #[ignore = "requires disposable PostgreSQL and SpiceDB"]
 async fn live_spicedb_cluster_resumes_protected_space_reply_over_websocket() {
     exercise(Exercise::Resume).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires disposable PostgreSQL and SpiceDB"]
+async fn live_spicedb_cluster_delivers_protected_space_deletion_over_websocket() {
+    exercise(Exercise::Deletion).await;
 }
 
 async fn exercise(exercise: Exercise) {
@@ -330,6 +337,107 @@ async fn exercise(exercise: Exercise) {
         })
         .await
         .expect("node B delivers node A's protected bookmark to the subscribed socket");
+
+    if matches!(exercise, Exercise::Deletion) {
+        use waddle_ws_test_support::iq::send_stanza;
+        use waddle_ws_test_support::stanza::{get, is_error};
+        use waddle_xmpp::pubsub::NS_PUBSUB_OWNER;
+        use xmpp_parsers::stanza_error::DefinedCondition;
+
+        let delete_request = |id| {
+            set(
+                id,
+                service.as_str(),
+                Element::builder("pubsub", NS_PUBSUB_OWNER)
+                    .append(
+                        Element::builder("delete", NS_PUBSUB_OWNER)
+                            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                            .build(),
+                    )
+                    .build(),
+            )
+        };
+        send_stanza(
+            &mut subscriber,
+            Element::builder("presence", "jabber:client").build(),
+        )
+        .await;
+        let denied = round_trip(&mut subscriber, delete_request("member-delete")).await;
+        assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
+        let accepted = round_trip(&mut owner, delete_request("owner-delete")).await;
+        assert!(
+            is_result(&accepted) && result_payload(&accepted).is_none(),
+            "{accepted:?}"
+        );
+        let wire = subscriber
+            .recv_matching_within(Duration::from_secs(20), |wire| {
+                wire.parse::<Element>().is_ok_and(|message| {
+                    message
+                        .get_child("event", NS_PUBSUB_EVENT)
+                        .and_then(|event| event.get_child("delete", NS_PUBSUB_EVENT))
+                        .is_some_and(|delete| delete.attr("node") == Some(node))
+                })
+            })
+            .await
+            .expect("node B delivers node A's deletion to the subscribed socket");
+        let notice: Element = wire.parse().expect("deletion notice");
+        let id = notice.attr("id").expect("stable deletion notice ID");
+        let operation = uuid::Uuid::parse_str(id).expect("deletion operation ID");
+        assert_eq!(operation.simple().to_string(), id);
+        assert!(
+            waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
+                &notice,
+                service.as_str(),
+                &expected_recipient,
+                node,
+                id,
+            )
+        );
+
+        let readback = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&prepared.owner_url)
+            .await
+            .expect("connect custody readback");
+        let operation_id = GrantOperationId::from_uuid(operation).to_storage();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let state = sqlx::query_scalar::<_, String>(
+                    "SELECT j.state FROM host_grant_space_deletion_jobs j
+                      JOIN host_grant_space_deletions d USING (lifecycle_id)
+                      WHERE d.operation_id = $1 AND j.lifecycle_id = $2
+                        AND j.subject_jid = 'alice@localhost' AND j.delivery_kind = 'local'",
+                )
+                .bind(&operation_id)
+                .bind(lifecycle.to_storage())
+                .fetch_optional(&readback)
+                .await
+                .expect("read deletion job");
+                match state.as_deref() {
+                    Some("custody") => break,
+                    Some("ambiguous" | "refused") => panic!("deletion job settled as {state:?}"),
+                    _ => tokio::time::sleep(Duration::from_millis(50)).await,
+                }
+            }
+        })
+        .await
+        .expect("socket receipt settles the exact deletion job");
+        readback.close().await;
+
+        let items = get(
+            "deleted-space-items",
+            service.as_str(),
+            Element::builder("pubsub", NS_PUBSUB)
+                .append(
+                    Element::builder("items", NS_PUBSUB)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                        .build(),
+                )
+                .build(),
+        );
+        let gone = round_trip(&mut subscriber, items).await;
+        assert!(is_error(&gone, DefinedCondition::ItemNotFound), "{gone:?}");
+    }
 
     subscriber.close().await.expect("close subscriber");
     owner.close().await.expect("close owner");
