@@ -38,7 +38,7 @@ enum AdminRoomCopy {
         case .lastOwner:
             "\(address) is the room's last owner. Make someone else an owner first."
         case .notAllowed:
-            "The server doesn't allow this. Only people with an account here or on a trusted server can be an owner or admin, and not while they're in the room over a connection the server hasn't verified. A room that belongs to another community is managed there."
+            "The server doesn't allow this. An owner or admin needs an account here or on a trusted server, and a room that belongs to another community is managed there."
         case nil:
             ActionErrorCopy.message(for: error, fallback: "Couldn't change the role of \(address). Try again.")
         }

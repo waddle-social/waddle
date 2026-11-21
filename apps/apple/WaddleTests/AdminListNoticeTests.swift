@@ -133,7 +133,7 @@ final class AdminSpaceCopyTests: XCTestCase {
     func testARefusedRoleSaysEveryReasonTheServerHas() {
         XCTAssertEqual(
             AdminSpaceCopy.roleFailure(AdminRoleRefusal.notAllowed, address: "cy@elsewhere.test"),
-            "The server doesn't allow this. Only people with an account here or on a trusted server can be an owner or admin, and a space that belongs to another community is managed there."
+            "The server doesn't allow this. An owner or admin needs an account here or on a trusted server, and a space that belongs to another community is managed there."
         )
         XCTAssertEqual(
             AdminSpaceCopy.roleFailure(PortError.rejected, address: "cy@elsewhere.test"),
@@ -197,7 +197,7 @@ final class AdminRoomCopyTests: XCTestCase {
         )
         XCTAssertEqual(
             AdminRoomCopy.roleFailure(AdminRoleRefusal.notAllowed, address: "cy@elsewhere.test"),
-            "The server doesn't allow this. Only people with an account here or on a trusted server can be an owner or admin, and not while they're in the room over a connection the server hasn't verified. A room that belongs to another community is managed there."
+            "The server doesn't allow this. An owner or admin needs an account here or on a trusted server, and a room that belongs to another community is managed there."
         )
         XCTAssertEqual(
             AdminRoomCopy.roleFailure(PortError.timeout, address: "cy@elsewhere.test"),
