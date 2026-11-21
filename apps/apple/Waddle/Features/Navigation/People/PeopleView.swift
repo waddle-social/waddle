@@ -56,7 +56,7 @@ struct PeopleView: View {
             NoMatchesView(query: query)
         } else if session.contacts == nil {
             // Not known yet is not the same as no one.
-            switch session.contactsLoad {
+            switch PeopleLoadNotice(load: session.contactsLoad, isOnline: session.connection == .online) {
             case .failed:
                 EmptyStateView(
                     title: "People didn't load",
@@ -69,7 +69,7 @@ struct PeopleView: View {
                     message: "Your contacts show up here once they have loaded.",
                     symbol: "person.2"
                 )
-            case .idle:
+            case .offline:
                 EmptyStateView(
                     title: "You're offline",
                     message: "Your contacts show up here when you're connected.",
@@ -82,6 +82,24 @@ struct PeopleView: View {
                 message: "Your contacts and the people you message show up here.",
                 symbol: "person.2"
             )
+        }
+    }
+}
+
+/// What People says while the contact list is not known yet.
+enum PeopleLoadNotice: Equatable {
+    case loading
+    case failed
+    case offline
+
+    /// After connecting, the contact list is asked for last, behind the
+    /// rest of the session's start-up. Online with no lookup running yet
+    /// is therefore still loading, not offline.
+    init(load: ContactsLoad, isOnline: Bool) {
+        switch load {
+        case .failed: self = .failed
+        case .loading: self = .loading
+        case .idle: self = isOnline ? .loading : .offline
         }
     }
 }

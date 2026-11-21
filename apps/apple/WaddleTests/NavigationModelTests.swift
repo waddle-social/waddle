@@ -195,4 +195,13 @@ final class NavigationModelTests: XCTestCase {
 
         XCTAssertNil(navigation.sheet)
     }
+
+    /// The contact list is asked for at the end of connecting, so an
+    /// account that is online with no lookup started yet is loading.
+    func testPeopleSaysLoadingNotOfflineOnceConnected() {
+        XCTAssertEqual(PeopleLoadNotice(load: .idle, isOnline: true), .loading)
+        XCTAssertEqual(PeopleLoadNotice(load: .idle, isOnline: false), .offline)
+        XCTAssertEqual(PeopleLoadNotice(load: .loading, isOnline: true), .loading)
+        XCTAssertEqual(PeopleLoadNotice(load: .failed, isOnline: true), .failed)
+    }
 }
