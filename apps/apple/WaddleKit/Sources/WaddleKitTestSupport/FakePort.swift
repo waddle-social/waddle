@@ -97,6 +97,8 @@ final class FakePort: XmppPort {
     let stickers = FakeStickers()
     let calendar = FakeEvents()
     let admin = FakeAdmin()
+    /// When set, discovery fails with it.
+    var topologyFailure: PortError?
     private(set) var heldDirectoryRequests: [CheckedContinuation<Void, Never>] = []
     var topologyRequests = 0
     var topology: Topology = .empty
@@ -325,6 +327,7 @@ final class FakePort: XmppPort {
         if holdsTopology {
             await withCheckedContinuation { heldTopology.append($0) }
         }
+        if let topologyFailure { return .failure(topologyFailure) }
         return .success(snapshot)
     }
 

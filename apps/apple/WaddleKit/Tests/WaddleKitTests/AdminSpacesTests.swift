@@ -141,18 +141,62 @@ struct AdminSpacesTests {
         #expect(port.admin.spaceWrites == [.delete(node: "design")])
     }
 
-    /// Joining a room the server deleted could make it again.
-    @Test func roomsOfADeletedSpaceAreNotRejoinedBecauseTheyWereOpened() async throws {
-        let (coordinator, _) = online()
-        let critique = bare("critique@rooms.waddle.test")
-        let lounge = bare("lounge@rooms.waddle.test")
+    private let critique = bare("critique@rooms.waddle.test")
+    private let sketch = bare("sketch@rooms.waddle.test")
+    private let lounge = bare("lounge@rooms.waddle.test")
+
+    /// Two rooms in Design and one in Ops, all opened this session.
+    private func withRooms() -> (SessionCoordinator, FakePort) {
+        let (coordinator, port) = online()
         coordinator.directory.upsert(Channel(roomJID: critique, name: "critique", spaceID: "design"))
+        coordinator.directory.upsert(Channel(roomJID: sketch, name: "sketch", spaceID: "design"))
         coordinator.directory.upsert(Channel(roomJID: lounge, name: "lounge", spaceID: "ops"))
-        coordinator.onDemandRooms = [critique, lounge]
+        coordinator.onDemandRooms = [critique, sketch, lounge]
+        return (coordinator, port)
+    }
+
+    /// The server deletes the rooms that belong to the space and unlinks
+    /// the others. Joining a deleted room could make it again.
+    @Test func roomsDeletedWithTheirSpaceAreGoneAndNeverJoinedAgain() async throws {
+        let (coordinator, port) = withRooms()
+        port.topology = Topology(spaces: [], channels: [
+            Channel(roomJID: sketch, name: "sketch"),
+            Channel(roomJID: lounge, name: "lounge", spaceID: "ops"),
+        ])
 
         try await coordinator.deleteAdminSpace(design)
 
+        #expect(coordinator.isFenced(critique))
+        #expect(!coordinator.directory.isRoom(critique))
+        #expect(!coordinator.onDemandRooms.contains(critique))
+        #expect(!port.joined.contains(critique))
+        #expect(!coordinator.isFenced(sketch))
+        #expect(coordinator.directory.isRoom(sketch))
+        #expect(!coordinator.isFenced(lounge))
+        #expect(coordinator.onDemandRooms.contains(lounge))
+    }
+
+    /// Without a fresh look, nothing says which rooms are left.
+    @Test func roomsOfADeletedSpaceStayUnjoinedWhenDiscoveryFails() async throws {
+        let (coordinator, port) = withRooms()
+        port.topologyFailure = .timeout
+
+        try await coordinator.deleteAdminSpace(design)
+
+        #expect(coordinator.isFenced(critique))
+        #expect(coordinator.isFenced(sketch))
+        #expect(!coordinator.isFenced(lounge))
         #expect(coordinator.onDemandRooms == [lounge])
+    }
+
+    @Test func aDeleteTheServerRefusesFencesNoRooms() async {
+        let (coordinator, port) = withRooms()
+        port.admin.writeFailure = .rejected
+
+        await #expect(throws: PortError.rejected) { try await coordinator.deleteAdminSpace(design) }
+
+        #expect(!coordinator.isFenced(critique))
+        #expect(coordinator.onDemandRooms == [critique, sketch, lounge])
     }
 
     /// A page asked for before a change does not know of it.

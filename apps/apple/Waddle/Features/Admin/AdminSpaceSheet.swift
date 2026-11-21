@@ -77,7 +77,9 @@ struct AdminSpaceSheet: View {
             presenting: space
         ) { space in
             Button("Delete", role: .destructive) { delete(space) }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                // Nothing to undo: the dialog closes itself.
+            }
         } message: { space in
             Text(AdminSpaceCopy.deleteWarning(name: space.name, rooms: space.roomCount))
         }
@@ -88,7 +90,9 @@ struct AdminSpaceSheet: View {
             presenting: pendingRemoval
         ) { member in
             Button("Remove", role: .destructive) { setRole(.none, of: member) }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                // Nothing to undo: the dialog closes itself.
+            }
         } message: { member in
             Text("\(member.jid.description) loses their role in \(space?.name ?? "this space").")
         }

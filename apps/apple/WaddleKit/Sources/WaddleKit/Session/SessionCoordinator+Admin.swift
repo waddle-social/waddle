@@ -53,15 +53,35 @@ extension SessionCoordinator {
         try await whileOnline { try await port.updateAdminSpace(space, to: draft) }
     }
 
-    /// Deletes the space and the rooms that belong to it. Its rooms are
-    /// no longer rejoined just because they were opened: joining a room
-    /// the server deleted could make it again. One that outlived the
-    /// space is still joined while the directory lists it.
+    /// Deletes the space and the rooms that belong to it.
+    ///
+    /// The server deletes some of the space's rooms and only unlinks
+    /// others, and its answer does not say which. Joining a deleted room
+    /// could make it again, so every room the space listed is fenced
+    /// until a fresh discovery says which ones are still there. Those are
+    /// let go; the rest are treated as rooms deleted here are. If the
+    /// discovery fails they all stay fenced, as possibly deleted.
     public func deleteAdminSpace(_ space: AdminSpace) async throws {
         try await whileOnline { try await port.deleteAdminSpace(space) }
-        for channel in directory.channels(in: space.node) {
-            onDemandRooms.remove(channel.roomJID)
+        let rooms = directory.channels(in: space.node).map(\.roomJID)
+        guard !rooms.isEmpty else { return }
+        unconfirmedDeletions.formUnion(rooms)
+        onDemandRooms.subtract(rooms)
+        let epoch = connectionEpoch
+        guard case let .success(topology) = await port.discoverTopology(),
+              !isStopped, epoch == connectionEpoch else { return }
+        let listed = Set(topology.channels.map(\.roomJID))
+        for room in rooms {
+            unconfirmedDeletions.remove(room)
+            guard !listed.contains(room) else { continue }
+            if calls.groupSlotHolds(room) { await calls.hangUp() }
+            destroyedRooms.insert(room)
+            directory.remove(room)
+            directoryMutations.append(.remove(room))
+            presence.markLeft(room)
+            unread.clearRoom(room)
         }
+        await refreshDirectory()
     }
 
     /// Answers with the member and the role the server gave them.
