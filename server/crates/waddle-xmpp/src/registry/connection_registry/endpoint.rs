@@ -76,8 +76,8 @@ pub struct SocketOutboundEndpoint {
 
 /// One live outbound frame on the owning socket task.
 pub enum SocketOutboundFrame {
-    Ordinary(OutboundStanza),
-    ProtectedSpace(SmReplayPayload),
+    Ordinary(Box<OutboundStanza>),
+    ProtectedSpace(Box<SmReplayPayload>),
 }
 
 /// Outcome of offering a protected bookmark event to an exact local socket.
@@ -109,12 +109,12 @@ impl SocketOutboundReceiver {
     pub async fn recv_next(&mut self) -> Option<SocketOutboundFrame> {
         tokio::select! {
             ordinary = self.receiver.recv() => match ordinary {
-                Some(frame) => Some(SocketOutboundFrame::Ordinary(frame)),
-                None => self.protected_space.recv().await.map(SocketOutboundFrame::ProtectedSpace),
+                Some(frame) => Some(SocketOutboundFrame::Ordinary(Box::new(frame))),
+                None => self.protected_space.recv().await.map(|frame| SocketOutboundFrame::ProtectedSpace(Box::new(frame))),
             },
             protected = self.protected_space.recv() => match protected {
-                Some(frame) => Some(SocketOutboundFrame::ProtectedSpace(frame)),
-                None => self.receiver.recv().await.map(SocketOutboundFrame::Ordinary),
+                Some(frame) => Some(SocketOutboundFrame::ProtectedSpace(Box::new(frame))),
+                None => self.receiver.recv().await.map(|frame| SocketOutboundFrame::Ordinary(Box::new(frame))),
             },
         }
     }

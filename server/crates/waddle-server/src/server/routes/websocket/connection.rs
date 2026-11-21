@@ -559,8 +559,7 @@ enum LoopEvent {
     LiveResumeServiced,
     DeferredInbound,
     Inbound(Option<Result<Message, InputError<axum::Error>>>),
-    // Boxed so the largest payload does not set the size of every event.
-    Outbound(Option<Box<SocketOutboundFrame>>),
+    Outbound(Option<SocketOutboundFrame>),
     OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
     TimerExpired(TimerId),
     SendWindowPauseDeadline,
@@ -1169,7 +1168,7 @@ impl LiveSocketState {
             // source above stays active, so client acks keep arriving and
             // releasing the pause.
             outbound = self.outbound_rx.recv_next(), if !send_window_paused => {
-                LoopEvent::Outbound(outbound.map(Box::new))
+                LoopEvent::Outbound(outbound)
             }
 
             handoff = self.handoff_rx.recv() => LoopEvent::OrderedRelayHandoff(handoff),
@@ -1467,7 +1466,7 @@ impl LiveSocketState {
 
             // Handle outbound messages routed from other connections.
             LoopEvent::Outbound(outbound) => {
-                match outbound.map(|event| *event) {
+                match outbound {
                     Some(SocketOutboundFrame::Ordinary(outbound_stanza)) => {
                         if !handle_outbound_stanza(
                             &mut ws_sender,
@@ -1475,7 +1474,7 @@ impl LiveSocketState {
                             state,
                             &mut *conn,
                             &mut *timers,
-                            outbound_stanza,
+                            *outbound_stanza,
                             OutboundAuthority {
                                 permit: admission_permit,
                                 shutdown: shutdown_token,
@@ -1498,7 +1497,7 @@ impl LiveSocketState {
                             return ControlFlow::Continue(());
                         }
                         let Some(frame) = super::resume_replay::authorize_protected_payload(
-                            payload,
+                            *payload,
                             recipient,
                             &state.deps.app_state.host_grants,
                         )
