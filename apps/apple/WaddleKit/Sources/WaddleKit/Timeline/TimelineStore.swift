@@ -183,7 +183,7 @@ public final class TimelineStore {
             let existing = list[index]
             recordWireDate(item.timestamp, in: conversation)
             var updated = superseding(existing, with: item, isLocalEcho: isLocalEcho)
-            if existing.roomArchiveUID == nil, let uid = roomArchiveUID(of: item) {
+            if existing.roomArchiveUID == nil, let uid = item.roomArchiveUID {
                 // Keep the first UID even when this copy changes no rendered
                 // fields, or a later live payload replaces its archive source.
                 var learned = updated ?? existing
@@ -213,7 +213,7 @@ public final class TimelineStore {
             mutations: MutationState(tombstone: tombstone),
             isLocalEcho: isLocalEcho,
             isArchived: item.message.source != .live,
-            roomArchiveUID: roomArchiveUID(of: item)
+            roomArchiveUID: item.roomArchiveUID
         )
         entry = drainParked(into: entry, conversation: conversation)
         list.append(entry)
@@ -408,7 +408,7 @@ public final class TimelineStore {
         if let index = incoming.roomStanzaMatch(in: items) {
             return index
         }
-        if let uid = roomArchiveUID(of: incoming) {
+        if let uid = incoming.roomArchiveUID {
             let matches = list.indices.filter { list[$0].roomArchiveUID == uid }
             if !matches.isEmpty {
                 guard matches.count == 1 else { return nil }
@@ -420,12 +420,6 @@ public final class TimelineStore {
             }
         }
         return incoming.roomAuthoredMatch(in: items)
-    }
-
-    /// MAM UIDs belong to this room archive, never to sender-chosen wire
-    /// aliases. `Entry.archiveID` separately follows the paging payload.
-    private func roomArchiveUID(of item: TimelineItem) -> String? {
-        item.roomArchiveUID
     }
 
     private func drainParked(into entry: Entry, conversation: ConversationID) -> Entry {

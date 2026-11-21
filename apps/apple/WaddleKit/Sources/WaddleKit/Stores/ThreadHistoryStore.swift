@@ -35,10 +35,7 @@ public struct ThreadHistory: Equatable, Sendable {
         let missing = fetched.indices.compactMap { index -> TimelineItem? in
             let item = fetched[index]
             if item.roomStanzaMatch(in: live) != nil { return nil }
-            if let uid = item.roomArchiveUID, live.contains(where: { twin in
-                twin.conversation == item.conversation && twin.roomArchiveUID == uid
-                    && (twin.roomStanzaID == nil || item.roomStanzaID == nil)
-            }) { return nil }
+            if item.roomArchiveMatch(in: live) != nil { return nil }
 
             guard let liveIndex = item.roomAuthoredMatch(in: live) else { return item }
             let liveItem = live[liveIndex]
