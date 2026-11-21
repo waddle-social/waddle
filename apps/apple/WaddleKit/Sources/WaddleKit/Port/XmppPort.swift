@@ -257,5 +257,13 @@ public protocol StickerPort: AnyObject, Sendable {
     func retractStickerPack(_ packID: String) async throws
 }
 
+/// The admin console of the account's own server, for community owners.
+/// Anyone else is answered `PortError.rejected`.
+public protocol AdminPort: AnyObject, Sendable {
+    /// One page of everyone with an account, by name. `prefix` keeps those
+    /// whose name starts with it; `cursor` is a page's `nextCursor`.
+    func adminUsers(matching prefix: String?, after cursor: String?) async throws -> AdminUsersPage
+}
+
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort & StickerPort
+public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort & StickerPort & AdminPort

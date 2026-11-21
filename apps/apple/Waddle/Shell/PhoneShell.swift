@@ -44,8 +44,13 @@ struct PhoneShell: View {
             .tabItem { Label("Feed", systemImage: "newspaper") }
             .tag(PhoneTab.feed)
 
-            NavigationStack {
-                ProfileView()
+            NavigationStack(path: $navigation.youPath) {
+                ProfileView(opensAdmin: true)
+                    .navigationDestination(for: YouRoute.self) { route in
+                        switch route {
+                        case .admin: AdminView()
+                        }
+                    }
             }
             .tabItem { Label("You", systemImage: "person.crop.circle") }
             .tag(PhoneTab.you)

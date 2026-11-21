@@ -204,4 +204,37 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(PeopleLoadNotice(load: .loading, isOnline: true), .loading)
         XCTAssertEqual(PeopleLoadNotice(load: .failed, isOnline: true), .failed)
     }
+
+    /// The phone opens the admin console from You, so an iPad that shrinks
+    /// to compact width while showing it still shows it.
+    func testShowingAdminLeavesTheConversationAndPushesItOnYou() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+
+        navigation.show(.admin)
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .admin)
+        XCTAssertEqual(navigation.tab, .you)
+        XCTAssertEqual(navigation.youPath, [.admin])
+    }
+
+    func testPushingAdminOnYouShowsItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+
+        navigation.youPath = [.admin]
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .admin)
+    }
+
+    func testGoingBackFromAdminOnThePhoneLeavesItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.youPath = [.admin]
+
+        navigation.youPath = []
+
+        XCTAssertEqual(navigation.splitSection, .home)
+    }
 }

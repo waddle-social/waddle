@@ -15,6 +15,7 @@ final class FakeEvents {
     var occurrences: [String: [EventOccurrence]] = [:]
 
     var fetchRequests = 0
+    var ownerRequests = 0
     var published: [EventDraft] = []
     var retracted: [String] = []
     var cancelledOccurrences: [(event: String, start: CalendarMoment)] = []
@@ -91,7 +92,10 @@ extension FakePort {
     }
 
     func isCommunityOwner() async -> Bool {
-        calendar.isOwner
+        calendar.ownerRequests += 1
+        let answer = calendar.isOwner
+        await calendar.hold("isCommunityOwner")
+        return answer
     }
 
     func occurrences(of event: CommunityEvent, in _: Range<Date>) -> [EventOccurrence] {
