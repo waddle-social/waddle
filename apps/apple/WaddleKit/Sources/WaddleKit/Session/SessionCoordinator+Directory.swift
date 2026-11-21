@@ -160,6 +160,7 @@ extension SessionCoordinator {
         // A room deleted earlier in the session exists again.
         destroyedRooms.remove(room)
         unconfirmedDeletions.remove(room)
+        roomsOfDeletedSpaces.remove(room)
         calls.sealedGroupRooms.remove(room)
         upsertChannel(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
         // create_room joined, configured and then left the room. Its

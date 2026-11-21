@@ -141,9 +141,9 @@ struct AdminSpacesTests {
         #expect(port.admin.spaceWrites == [.delete(node: "design")])
     }
 
-    private let critique = bare("critique@rooms.waddle.test")
-    private let sketch = bare("sketch@rooms.waddle.test")
-    private let lounge = bare("lounge@rooms.waddle.test")
+    private let critique = bare("critique@muc.waddle.test")
+    private let sketch = bare("sketch@muc.waddle.test")
+    private let lounge = bare("lounge@muc.waddle.test")
 
     /// Two rooms in Design and one in Ops, all opened this session.
     private func withRooms() -> (SessionCoordinator, FakePort) {
@@ -205,6 +205,19 @@ struct AdminSpacesTests {
 
         #expect(!coordinator.destroyedRooms.contains(critique))
         #expect(coordinator.isFenced(critique))
+    }
+
+    /// Making a room again under the name of one that went with its
+    /// space is a room that is there.
+    @Test func aRoomMadeAgainAfterItsSpaceWasDeletedIsJoined() async throws {
+        let (coordinator, port) = withRooms()
+        port.topology = Topology(spaces: [], channels: [])
+        try await coordinator.deleteAdminSpace(design)
+        #expect(coordinator.isFenced(critique))
+
+        _ = try await coordinator.createChannel(name: "critique", summary: nil)
+
+        #expect(!coordinator.isFenced(critique))
     }
 
     @Test func aDeleteTheServerRefusesFencesNoRooms() async {
