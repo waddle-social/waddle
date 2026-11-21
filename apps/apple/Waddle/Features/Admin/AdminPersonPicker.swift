@@ -93,11 +93,11 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
     /// The users, once it is known who holds a role.
     @ViewBuilder
     private var people: some View {
-        if let held, let users {
+        if held != nil, let users {
             AdminSheetList(list: users, noun: "users", emptyText: emptyText(users)) { user in
                 AdminPersonChoiceRow(
                     user: user,
-                    role: held[user.jid].map(roleTitle),
+                    role: currentRole(of: user.jid).map(roleTitle),
                     isPicked: user.jid == pickedJID
                 ) {
                     pickedJID = user.jid
@@ -128,10 +128,18 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
         held = Dictionary(every.map { ($0.id, roleOf($0)) }) { first, _ in first }
     }
 
+    /// The role someone holds: what the sheet's list shows now, which
+    /// follows a change made since the picker asked, else the fresh answer.
+    private func currentRole(of jid: BareJID) -> Role? {
+        holders.rows.first { $0.id == jid }.map(roleOf) ?? held?[jid]
+    }
+
     /// The person picked, while the list shows them and they hold no role:
     /// someone a new search hides is not added unseen.
     private var person: AdminUser? {
-        guard let held, let user = users?.rows.first(where: { $0.jid == pickedJID }), held[user.jid] == nil else {
+        guard held != nil, let user = users?.rows.first(where: { $0.jid == pickedJID }),
+              currentRole(of: user.jid) == nil
+        else {
             return nil
         }
         return user
