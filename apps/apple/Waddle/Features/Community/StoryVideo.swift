@@ -177,36 +177,31 @@ private struct VideoSurface: UIViewRepresentable {
     }
 }
 
-/// Outside a call, story video mixes with other apps' audio and follows
-/// the silent switch (the `ambient` category), and the category it
-/// replaced comes back when the viewer closes. During a call the session
-/// belongs to the call (`SystemCallAudio`, the media engine): it is not
-/// touched, and the video stays muted.
+/// The shared `AVAudioSession`, for `StoryAudio`, which decides when story
+/// playback may change it. A call's session belongs to `SystemCallAudio`
+/// and the media engine.
 @MainActor
-struct StoryAudioSession {
-    private struct Setting {
+final class SharedStoryAudioSession: StoryAudioSession {
+    struct Setting {
         let category: AVAudioSession.Category
         let mode: AVAudioSession.Mode
         let options: AVAudioSession.CategoryOptions
     }
 
-    private var replaced: Setting?
+    private var session: AVAudioSession { .sharedInstance() }
 
-    mutating func begin(_ sound: StorySound) {
-        guard sound == .mixed, replaced == nil else { return }
-        let session = AVAudioSession.sharedInstance()
-        guard session.category != .ambient else { return }
-        replaced = Setting(category: session.category, mode: session.mode, options: session.categoryOptions)
+    var isAmbient: Bool { session.category == .ambient }
+
+    func currentSetting() -> Setting {
+        Setting(category: session.category, mode: session.mode, options: session.categoryOptions)
+    }
+
+    func setAmbient() {
         try? session.setCategory(.ambient)
     }
 
-    mutating func end() {
-        guard let replaced else { return }
-        self.replaced = nil
-        let session = AVAudioSession.sharedInstance()
-        // A call that started meanwhile set its own category; it stays.
-        guard session.category == .ambient else { return }
-        try? session.setCategory(replaced.category, mode: replaced.mode, options: replaced.options)
+    func restore(_ setting: Setting) {
+        try? session.setCategory(setting.category, mode: setting.mode, options: setting.options)
     }
 }
 #endif

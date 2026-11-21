@@ -26,7 +26,7 @@ struct StoryViewer: View {
     @State private var video: StoryVideoPlayback?
     @State private var errorMessage: String?
     #if os(iOS)
-    @State private var audio = StoryAudioSession()
+    @State private var audio = StoryAudio(session: SharedStoryAudioSession())
     #endif
     private let now: Date
     private let loadsStories: Bool
@@ -71,17 +71,18 @@ struct StoryViewer: View {
             if loadsStories {
                 playthrough = StoryPlaythrough(start: story, among: session.community.activeStories(at: now))
             }
-            beginSound(sound)
+            updateAudio(sound)
         }
         .onChange(of: sound) { _, sound in
+            // The session is the stories' again before the video is heard.
+            updateAudio(sound)
             video?.setMuted(isMuted(sound))
-            beginSound(sound)
         }
         .onChange(of: playthrough.isMuted) { _, _ in video?.setMuted(isMuted(sound)) }
         .onDisappear {
             video?.pause()
             #if os(iOS)
-            audio.end()
+            audio.close()
             #endif
         }
         .task(id: story.id) {
@@ -102,9 +103,9 @@ struct StoryViewer: View {
         playthrough.isMuted || sound == .silencedByCall
     }
 
-    private func beginSound(_ sound: StorySound) {
+    private func updateAudio(_ sound: StorySound) {
         #if os(iOS)
-        audio.begin(sound)
+        audio.update(sound)
         #endif
     }
 
