@@ -140,7 +140,7 @@ pub(crate) struct LocalSpaceReplyGrant {
 
 #[derive(Debug)]
 enum LocalSpaceReplyAuthority {
-    Active(ManagedSpaceGrant),
+    Active(Box<ManagedSpaceGrant>),
     Deleted(Box<LocalDeletionDelivery>),
 }
 
@@ -1176,7 +1176,7 @@ impl HostGrantGate {
         .ok()?
         .with_kind(kind);
         Some(LocalSpaceReplyGrant {
-            authority: LocalSpaceReplyAuthority::Active(grant),
+            authority: LocalSpaceReplyAuthority::Active(Box::new(grant)),
             replay,
             preference: None,
         })
@@ -1247,7 +1247,7 @@ impl HostGrantGate {
         .ok()?
         .with_kind(ProtectedSpaceReplyKind::OwnerAffiliationRefusals);
         Some(LocalSpaceReplyGrant {
-            authority: LocalSpaceReplyAuthority::Active(grant),
+            authority: LocalSpaceReplyAuthority::Active(Box::new(grant)),
             replay,
             preference: None,
         })
@@ -1293,7 +1293,7 @@ impl HostGrantGate {
             subscription,
         };
         Some(LocalSpaceReplyGrant {
-            authority: LocalSpaceReplyAuthority::Active(grant),
+            authority: LocalSpaceReplyAuthority::Active(Box::new(grant)),
             replay,
             preference: Some(preference),
         })
@@ -1512,7 +1512,7 @@ impl HostGrantGate {
             None
         };
         let result = LocalSpaceReplyGrant {
-            authority: LocalSpaceReplyAuthority::Active(grant),
+            authority: LocalSpaceReplyAuthority::Active(Box::new(grant)),
             replay: replay.clone(),
             preference,
         };
