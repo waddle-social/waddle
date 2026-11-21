@@ -85,14 +85,15 @@ extension SessionCoordinator {
 
     // MARK: Rooms
 
-    /// Every room of this community, for the admin console.
+    /// Every room of this community, or of one space, for the admin
+    /// console.
     public func adminRoomsList() -> AdminList<AdminRoom> {
-        AdminList { [weak self] prefix, cursor in
+        AdminList(narrowedBySpace: { [weak self] prefix, space, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
-                try await self.port.adminRooms(matching: prefix, after: cursor)
+                try await self.port.adminRooms(matching: prefix, in: space, after: cursor)
             }
-        }
+        })
     }
 
     /// The people in `room` now. It is not searched.
@@ -128,16 +129,27 @@ extension SessionCoordinator {
     }
 
     /// Takes someone out of a room. They can come back, unless the room is
-    /// for members only: there the server also ends their membership.
-    public func removeFromAdminRoom(_ occupant: BareJID, room: AdminRoom) async throws {
-        try await whileOnline { try await port.removeFromAdminRoom(occupant, room: room.jid) }
+    /// for members only: there the server also ends their membership. A
+    /// blank reason is none.
+    public func removeFromAdminRoom(_ occupant: BareJID, room: AdminRoom, reason: String? = nil) async throws {
+        let reason = Self.adminReason(reason)
+        try await whileOnline { try await port.removeFromAdminRoom(occupant, room: room.jid, reason: reason) }
     }
 
-    /// Answers with the person and the role the server gave them.
+    /// Answers with the person, the role the server gave them, and the
+    /// reason given. A blank reason is none.
     @discardableResult
     public func setAdminRoomAffiliation(
-        _ affiliation: RoomAffiliation, of member: BareJID, in room: AdminRoom
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: AdminRoom, reason: String? = nil
     ) async throws -> AdminRoomMember {
-        try await whileOnline { try await port.setAdminRoomAffiliation(affiliation, of: member, in: room.jid) }
+        let reason = Self.adminReason(reason)
+        return try await whileOnline {
+            try await port.setAdminRoomAffiliation(affiliation, of: member, in: room.jid, reason: reason)
+        }
+    }
+
+    private static func adminReason(_ reason: String?) -> String? {
+        guard let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty else { return nil }
+        return reason
     }
 }

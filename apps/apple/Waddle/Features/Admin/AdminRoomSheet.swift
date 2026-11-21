@@ -22,8 +22,13 @@ struct AdminRoomSheet: View {
     /// People a change about whom is on its way to the server.
     @State private var changing: Set<BareJID> = []
     @State private var peopleError: String?
-    /// A role change or a removal waiting for a yes.
+    /// A role change or a removal waiting for a yes, and why, if said.
     @State private var pending: PendingAction?
+    @State private var reason = ""
+    @State private var isGivingRole = false
+    /// Who was picked to be given a role, and the role, until the picker
+    /// has closed: a ban is asked about first.
+    @State private var roleToGive: (member: AdminRoomMember, role: RoomAffiliation)?
 
     init(subject: AdminSheetSubject<AdminRoom>, rooms: AdminList<AdminRoom>) {
         self.rooms = rooms
@@ -72,28 +77,48 @@ struct AdminRoomSheet: View {
             } else if spaces == nil {
                 let spaces = session.adminSpacesList()
                 self.spaces = spaces
-                await Self.loadEvery(spaces)
+                await spaces.loadEveryPage()
             }
         }
-        .confirmationDialog(
-            pending?.title ?? "",
-            isPresented: pendingBinding,
-            titleVisibility: .visible,
-            presenting: pending
-        ) { action in
+        // An alert, not a confirmation dialog, since only an alert takes
+        // a text field.
+        .alert(pending?.title ?? "", isPresented: pendingBinding, presenting: pending) { action in
+            TextField("Reason", text: $reason, prompt: Text("Reason (optional)"))
             Button(action.confirmTitle, role: .destructive) { perform(action) }
             Button("Cancel", role: .cancel) {
-                // Nothing to undo: the dialog closes itself.
+                // Nothing to undo: the alert closes itself.
             }
         } message: { action in
             Text(action.message(roomName: opened?.name ?? "this room"))
         }
+        .onChange(of: pending) { _, pending in
+            if pending != nil { reason = "" }
+        }
+        .sheet(isPresented: $isGivingRole, onDismiss: givePickedRole) {
+            if let members {
+                AdminPersonPicker(
+                    title: "Give a role",
+                    confirmTitle: "Give",
+                    roles: Self.roles,
+                    role: .member,
+                    roleTitle: AdminRoomCopy.title,
+                    holders: members,
+                    roleOf: \.affiliation
+                ) { user, role in
+                    roleToGive = (member(user.jid), role)
+                }
+                .carryingCallDock()
+            }
+        }
     }
 
-    /// What is asked about before it is done, because it cannot be put
-    /// back from here.
+    /// The roles that can be given, in the order shown.
+    private static let roles: [RoomAffiliation] = [.owner, .admin, .member, .outcast]
+
+    /// What is asked about before it is done, because it takes something
+    /// away. Each can say why.
     enum PendingAction: Equatable {
-        /// Leaves someone with no role; one cannot be given from here.
+        /// Leaves someone with no role.
         case removeRole(AdminRoomMember)
         /// Also takes them out of the room.
         case ban(AdminRoomMember)
@@ -118,11 +143,11 @@ struct AdminRoomSheet: View {
         func message(roomName: String) -> String {
             switch self {
             case let .removeRole(member):
-                "\(member.jid.description) will have no role in \(roomName). A role can't be given back from here yet."
+                "\(member.jid.description) will have no role in \(roomName)."
             case let .ban(member):
                 "\(member.jid.description) is taken out of \(roomName) and can't join it until the ban is changed."
             case let .removeMember(occupant):
-                "\(roomName) is for members only, so \(occupant.nick) also stops being a member and can't come back. A role can't be given back from here yet."
+                "\(roomName) is for members only, so \(occupant.nick) also stops being a member and can't come back until they're made one again."
             }
         }
     }
@@ -137,9 +162,9 @@ struct AdminRoomSheet: View {
 
     private func perform(_ action: PendingAction) {
         switch action {
-        case let .removeRole(member): setAffiliation(.none, of: member)
-        case let .ban(member): setAffiliation(.outcast, of: member)
-        case let .removeMember(occupant): remove(occupant)
+        case let .removeRole(member): setAffiliation(.none, of: member, reason: reason)
+        case let .ban(member): setAffiliation(.outcast, of: member, reason: reason)
+        case let .removeMember(occupant): remove(occupant, reason: reason)
         }
     }
 
@@ -186,17 +211,9 @@ struct AdminRoomSheet: View {
         }
     }
 
-    /// Every space can be chosen, not only the first page. A page that
-    /// fails stops the loading; trying again starts over.
-    private static func loadEvery(_ spaces: AdminList<AdminSpace>) async {
-        await spaces.reload()
-        while spaces.hasMore, spaces.moreFailure == nil, !Task.isCancelled {
-            await spaces.loadMore()
-        }
-    }
-
-    /// The space a new room goes in. Create waits until the spaces have
-    /// loaded or failed, so a room is not made outside a space by accident.
+    /// The space a new room goes in, from every space, not only the first
+    /// page. Create waits until the spaces have loaded or failed, so a
+    /// room is not made outside a space by accident.
     @ViewBuilder
     private var spacePicker: some View {
         if let spaces, spacesAreSettled {
@@ -210,7 +227,7 @@ struct AdminRoomSheet: View {
             }
             if spaces.failure != nil || spaces.moreFailure != nil {
                 LabeledContent(spaces.rows.isEmpty ? "Spaces didn't load" : "Some spaces didn't load") {
-                    Button("Try again") { Task { await Self.loadEvery(spaces) } }
+                    Button("Try again") { Task { await spaces.loadEveryPage() } }
                 }
             }
         } else {
@@ -222,7 +239,7 @@ struct AdminRoomSheet: View {
     /// on its way.
     private var spacesAreSettled: Bool {
         guard let spaces, !spaces.isLoading, !spaces.isLoadingMore else { return false }
-        return spaces.failure != nil || spaces.moreFailure != nil || (spaces.hasLoaded && !spaces.hasMore)
+        return spaces.failure != nil || spaces.moreFailure != nil || spaces.isComplete
     }
 
     private var draft: AdminRoomDraft? {
@@ -275,7 +292,13 @@ struct AdminRoomSheet: View {
             title: "Here now", list: occupants, noun: "people",
             emptyText: "No one is here right now.", error: peopleError
         ) { occupant in
-            AdminRoomOccupantRow(occupant: occupant, isRemoving: changing.contains(occupant.jid)) {
+            AdminRoomOccupantRow(
+                occupant: occupant,
+                choices: Self.roles,
+                isChanging: changing.contains(occupant.jid),
+                choose: { choose($0, for: member(occupant.jid, holding: occupant.affiliation)) },
+                removeRole: { pending = .removeRole(member(occupant.jid, holding: occupant.affiliation)) }
+            ) {
                 // Someone removed can come straight back, except to a
                 // room for members only.
                 if current?.access.isMembersOnly == true, occupant.affiliation == .member {
@@ -287,36 +310,52 @@ struct AdminRoomSheet: View {
         }
         AdminPeopleSection(
             title: "Roles", footer: "Someone banned can't join the room.", list: members,
-            noun: "roles", emptyText: "No one has a role here yet."
+            noun: "roles", emptyText: "No one has a role here yet.",
+            addTitle: "Give a role", add: { isGivingRole = true }
         ) { member in
             AdminRoleRow(
                 address: member.jid.description,
                 note: member.reason,
                 role: member.affiliation,
-                choices: [RoomAffiliation.owner, .admin, .member, .outcast],
+                choices: Self.roles,
                 title: AdminRoomCopy.title,
                 removeTitle: "Remove role",
                 isChanging: changing.contains(member.jid),
-                choose: { affiliation in
-                    if affiliation == .outcast {
-                        pending = .ban(member)
-                    } else {
-                        setAffiliation(affiliation, of: member)
-                    }
-                },
+                choose: { choose($0, for: member) },
                 remove: { pending = .removeRole(member) }
             )
         }
     }
 
+    /// Someone as the roles list holds them; someone it does not list
+    /// holds `affiliation`, which is no role unless the room says so.
+    private func member(_ jid: BareJID, holding affiliation: RoomAffiliation = .none) -> AdminRoomMember {
+        members?.rows.first { $0.jid == jid } ?? AdminRoomMember(jid: jid, affiliation: affiliation, reason: nil)
+    }
+
+    /// A ban takes them out of the room, so it is asked about first.
+    private func choose(_ affiliation: RoomAffiliation, for member: AdminRoomMember) {
+        if affiliation == .outcast {
+            pending = .ban(member)
+        } else {
+            setAffiliation(affiliation, of: member)
+        }
+    }
+
+    private func givePickedRole() {
+        guard let roleToGive else { return }
+        self.roleToGive = nil
+        choose(roleToGive.role, for: roleToGive.member)
+    }
+
     /// The server takes out one of the names they are there under, and
     /// may end a membership with it, so both lists are asked for again.
-    private func remove(_ occupant: AdminRoomOccupant) {
+    private func remove(_ occupant: AdminRoomOccupant, reason: String? = nil) {
         guard let opened, let occupants, changing.insert(occupant.jid).inserted else { return }
         peopleError = nil
         Task {
             do {
-                try await session.removeFromAdminRoom(occupant.jid, room: opened)
+                try await session.removeFromAdminRoom(occupant.jid, room: opened, reason: reason)
                 async let here: Void = occupants.reload()
                 async let roles: Void? = members?.reload()
                 _ = await (here, roles)
@@ -329,65 +368,89 @@ struct AdminRoomSheet: View {
         }
     }
 
-    /// Shows the role the server answers with; someone left with no role
-    /// is no longer listed. A role shows on the people in the room, and a
-    /// ban takes them out, so who is there is asked for again.
-    private func setAffiliation(_ affiliation: RoomAffiliation, of member: AdminRoomMember) {
+    /// Shows the role the server answers with: someone left with no role
+    /// is no longer listed, and someone not listed is added first. A role
+    /// shows on the people in the room, and a ban takes them out, so who
+    /// is there is asked for again.
+    private func setAffiliation(_ affiliation: RoomAffiliation, of member: AdminRoomMember, reason: String? = nil) {
         guard let opened, let members, affiliation != member.affiliation,
               changing.insert(member.jid).inserted else { return }
         peopleError = nil
         Task {
             do {
-                let changed = try await session.setAdminRoomAffiliation(affiliation, of: member.jid, in: opened)
+                let changed = try await session.setAdminRoomAffiliation(
+                    affiliation, of: member.jid, in: opened, reason: reason
+                )
                 if changed.affiliation == .none {
                     members.remove(changed.id)
                 } else {
-                    members.replace(changed)
+                    members.add(changed)
                 }
                 await occupants?.reload()
             } catch {
-                peopleError = ActionErrorCopy.message(
-                    for: error,
-                    fallback: "Couldn't change the role of \(member.jid.description). Try again."
-                )
+                peopleError = AdminRoomCopy.roleFailure(error, address: member.jid.description)
             }
             changing.remove(member.jid)
         }
     }
 }
 
-/// Someone in the room now, with their role if they hold one.
+/// Someone in the room now, with a menu of their role and a way to take
+/// them out.
 private struct AdminRoomOccupantRow: View {
     let occupant: AdminRoomOccupant
-    let isRemoving: Bool
+    let choices: [RoomAffiliation]
+    let isChanging: Bool
+    let choose: (RoomAffiliation) -> Void
+    let removeRole: () -> Void
     let remove: () -> Void
 
+    /// Side by side while the name fits whole; the controls go under it
+    /// on a narrow screen or with large text.
     var body: some View {
-        HStack(spacing: Theme.Spacing.s) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                Text(occupant.nick)
-                    .lineLimit(1)
-                Text(occupant.jid.description)
-                    .huddleText(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.fgMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Theme.Spacing.s) {
+                name
+                Spacer(minLength: Theme.Spacing.xs)
+                controls
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(spoken))
-            Spacer(minLength: Theme.Spacing.xs)
-            if occupant.affiliation != .none {
-                HuddleTag(AdminRoomCopy.title(occupant.affiliation))
-                    .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+                name
+                controls
             }
-            Button("Remove", action: remove)
-                .disabled(isRemoving)
-                .accessibilityLabel(Text("Remove \(occupant.nick) from the room"))
         }
     }
 
-    private var spoken: String {
-        let role = occupant.affiliation == .none ? nil : AdminRoomCopy.title(occupant.affiliation)
-        return [occupant.nick, occupant.jid.description, role].compactMap { $0 }.joined(separator: ", ")
+    private var name: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+            Text(occupant.nick)
+                .lineLimit(1)
+            Text(occupant.jid.description)
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("\(occupant.nick), \(occupant.jid.description)"))
+    }
+
+    private var controls: some View {
+        HStack(spacing: Theme.Spacing.s) {
+            AdminRoleMenu(
+                role: occupant.affiliation,
+                choices: choices,
+                title: AdminRoomCopy.title,
+                removeTitle: occupant.affiliation == .none ? nil : "Remove role",
+                isChanging: isChanging,
+                choose: choose,
+                remove: removeRole
+            )
+            .accessibilityLabel(Text("Role of \(occupant.nick)"))
+            Button("Remove", action: remove)
+                .adminRowControl()
+                .disabled(isChanging)
+                .accessibilityLabel(Text("Remove \(occupant.nick) from the room"))
+        }
     }
 }

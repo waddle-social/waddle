@@ -84,6 +84,33 @@ final class AdminSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
     }
 
+    /// Adding a member: the role to give, and everyone with an account.
+    /// Members of the space show their role and cannot be picked.
+    func testAddMember() async throws {
+        let sample = SampleSession()
+        sample.port.admin.users[.init()] = .success(AdminPage(
+            rows: [
+                AdminUser(jid: SampleSession.ana.jid, displayName: "Ana Lindqvist", isOwner: true),
+                AdminUser(jid: SampleSession.mika, displayName: nil, isOwner: false),
+                AdminUser(jid: SampleSession.priya, displayName: "Priya Raman", isOwner: false),
+            ],
+            nextCursor: "after-priya"
+        ))
+        sample.port.admin.members[.init(prefix: "design")] = .success(AdminPage(
+            rows: [
+                AdminSpaceMember(jid: SampleSession.ana.jid, role: .owner),
+                AdminSpaceMember(jid: SampleSession.mika, role: .member),
+            ],
+            nextCursor: nil
+        ))
+        let picker = AdminPersonPicker(
+            title: "Add member", confirmTitle: "Add", roles: [AdminSpaceRole.owner, .admin, .member],
+            role: .member, roleTitle: AdminSpaceCopy.title,
+            holders: sample.coordinator.adminSpaceMembersList(of: Self.design), roleOf: \.role
+        ) { _, _ in }
+        try await assertScreenSnapshot(of: sample.host(picker), size: Self.size)
+    }
+
     func testNewSpace() async throws {
         let sample = SampleSession()
         let sheet = AdminSpaceSheet(subject: .new, spaces: sample.coordinator.adminSpacesList())
@@ -95,9 +122,11 @@ final class AdminSnapshotTests: XCTestCase {
         kind: .text, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 4, memberCount: 9
     )
 
-    /// A plain room, a hidden announcements room and a forum.
+    /// A plain room, a hidden announcements room and a forum, with every
+    /// space to narrow them to.
     func testRooms() async throws {
         let sample = SampleSession()
+        sample.port.admin.spaces[.init()] = .success(AdminPage(rows: [Self.design], nextCursor: nil))
         sample.port.admin.rooms[.init()] = .success(AdminPage(
             rows: [
                 Self.lounge,
@@ -116,13 +145,30 @@ final class AdminSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
     }
 
-    /// An open room: its settings, who is there, roles, and deleting it.
+    /// Rooms narrowed to one space, with the space chosen beside the title.
+    func testRoomsInSpace() async throws {
+        let sample = SampleSession()
+        sample.port.admin.spaces[.init()] = .success(AdminPage(rows: [Self.design], nextCursor: nil))
+        sample.port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [Self.lounge], nextCursor: nil))
+        let console = AdminConsole(session: sample.coordinator)
+        console.roomsSpace = Self.design
+        let view = NavigationStack { AdminView(section: .rooms, console: console) }
+        try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
+    }
+
+    /// An open room: its settings, who is there (one name too long for the
+    /// controls beside it), roles, and deleting it.
     func testRoom() async throws {
         let sample = SampleSession()
         sample.port.admin.occupants[.init(prefix: "lounge")] = .success(AdminPage(
             rows: [
                 AdminRoomOccupant(jid: SampleSession.ana.jid, nick: "Ana Lindqvist", role: .moderator, affiliation: .owner),
                 AdminRoomOccupant(jid: SampleSession.mika, nick: "mika", role: .participant, affiliation: .none),
+                // Too long to sit beside the controls: they go under it.
+                AdminRoomOccupant(
+                    jid: bare("bartholomew.featherstonehaugh@waddle.test"), nick: "Bartholomew Featherstonehaugh-Wright",
+                    role: .participant, affiliation: .member
+                ),
             ],
             nextCursor: nil
         ))
@@ -135,7 +181,7 @@ final class AdminSnapshotTests: XCTestCase {
             nextCursor: nil
         ))
         let sheet = AdminRoomSheet(subject: .existing(Self.lounge), rooms: sample.coordinator.adminRoomsList())
-        try await assertScreenSnapshot(of: sample.host(sheet), size: CGSize(width: Self.size.width, height: 900))
+        try await assertScreenSnapshot(of: sample.host(sheet), size: CGSize(width: Self.size.width, height: 1000))
     }
 
     /// A new room, with the spaces it can go in.

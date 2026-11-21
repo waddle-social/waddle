@@ -79,6 +79,14 @@ public struct AdminSpace: Hashable, Identifiable, Sendable {
             roomCount: roomCount, memberCount: max(0, memberCount - count)
         )
     }
+
+    /// The space after `count` members were added.
+    public func addingMembers(_ count: Int) -> AdminSpace {
+        AdminSpace(
+            service: service, node: node, name: name, description: description,
+            roomCount: roomCount, memberCount: memberCount + count
+        )
+    }
 }
 
 /// The name and description to give a space, as the server would take them.

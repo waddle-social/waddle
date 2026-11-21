@@ -29,21 +29,45 @@ struct AdminRoleRow<Role: Hashable>: View {
                 }
             }
             Spacer(minLength: Theme.Spacing.xs)
-            Menu(title(role)) {
-                ForEach(choices, id: \.self) { choice in
-                    Toggle(title(choice), isOn: Binding {
-                        role == choice
-                    } set: { _ in
-                        choose(choice)
-                    })
-                }
+            AdminRoleMenu(
+                role: role, choices: choices, title: title, removeTitle: removeTitle,
+                isChanging: isChanging, choose: choose, remove: remove
+            )
+            .accessibilityLabel(Text(note.map { "Role of \(address), \($0)" } ?? "Role of \(address)"))
+        }
+    }
+}
+
+/// A menu named after someone's role, to give them another or take it
+/// away.
+struct AdminRoleMenu<Role: Hashable>: View {
+    let role: Role
+    /// The roles that can be given, in the order shown.
+    let choices: [Role]
+    let title: (Role) -> String
+    /// "Remove role"; nil when they have none to take away.
+    let removeTitle: String?
+    let isChanging: Bool
+    let choose: (Role) -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        Menu(title(role)) {
+            ForEach(choices, id: \.self) { choice in
+                Toggle(title(choice), isOn: Binding {
+                    role == choice
+                } set: { _ in
+                    choose(choice)
+                })
+            }
+            if let removeTitle {
                 Divider()
                 Button(removeTitle, role: .destructive, action: remove)
             }
-            .fixedSize()
-            .disabled(isChanging)
-            .accessibilityLabel(Text(note.map { "Role of \(address), \($0)" } ?? "Role of \(address)"))
-            .accessibilityValue(Text(title(role)))
         }
+        .fixedSize()
+        .adminRowControl()
+        .disabled(isChanging)
+        .accessibilityValue(Text(title(role)))
     }
 }

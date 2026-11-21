@@ -34,10 +34,15 @@ final class AdminListNoticeTests: XCTestCase {
 /// What crosses the bridge for the admin console, and which of the
 /// server's answers mean "not an owner".
 final class AdminErrorTests: XCTestCase {
+    private func listError(_ error: Error) -> PortError? {
+        FFIXmppPort.adminError(error) as? PortError
+    }
+
     func testOnlyForbiddenMeansNotAnOwner() {
-        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "forbidden", text: nil)), .rejected)
-        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "internal-server-error", text: nil)), .failed)
-        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "bad-request", text: nil)), .failed)
+        XCTAssertEqual(listError(WaddleError.Stanza(condition: "forbidden", text: nil)), .rejected)
+        XCTAssertEqual(listError(WaddleError.Stanza(condition: "internal-server-error", text: nil)), .failed)
+        XCTAssertEqual(listError(WaddleError.Stanza(condition: "bad-request", text: nil)), .failed)
+        XCTAssertEqual(listError(WaddleError.Stanza(condition: "not-allowed", text: nil)), .failed)
     }
 
     /// The server sends an empty string for a description a space lacks.
@@ -83,9 +88,37 @@ final class AdminErrorTests: XCTestCase {
         XCTAssertEqual(AdminRoomSheet.PendingAction.removeRole(member).title, "Remove role?")
     }
 
+    /// A role can be given again from the console, so neither removal
+    /// says it cannot.
+    func testARemovalSaysWhatItEnds() {
+        let member = AdminRoomMember(jid: bare("jo@waddle.test"), affiliation: .member, reason: nil)
+        let occupant = AdminRoomOccupant(jid: bare("jo@waddle.test"), nick: "jo", role: .participant, affiliation: .member)
+        XCTAssertEqual(
+            AdminRoomSheet.PendingAction.removeRole(member).message(roomName: "Lounge"),
+            "jo@waddle.test will have no role in Lounge."
+        )
+        XCTAssertEqual(
+            AdminRoomSheet.PendingAction.removeMember(occupant).message(roomName: "Lounge"),
+            "Lounge is for members only, so jo also stops being a member and can't come back until they're made one again."
+        )
+    }
+
+    /// A role change keeps every refusal `rejected` but the two the
+    /// server explains.
+    func testARefusedRoleSaysWhyOnlyWhereTheServerDoes() {
+        func roleError(_ condition: String) -> Error {
+            FFIXmppPort.adminError(WaddleError.Stanza(condition: condition, text: nil), changingRole: true)
+        }
+        XCTAssertEqual(roleError("not-allowed") as? AdminRoleRefusal, .notAllowed)
+        XCTAssertEqual(roleError("conflict") as? AdminRoleRefusal, .lastOwner)
+        XCTAssertEqual(roleError("forbidden") as? PortError, .rejected)
+        XCTAssertEqual(roleError("item-not-found") as? PortError, .rejected)
+        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Timeout, changingRole: true) as? PortError, .timeout)
+    }
+
     func testOtherErrorsKeepTheirMeaning() {
-        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.NotConnected), .notConnected)
-        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Timeout), .timeout)
+        XCTAssertEqual(listError(WaddleError.NotConnected), .notConnected)
+        XCTAssertEqual(listError(WaddleError.Timeout), .timeout)
     }
 }
 
@@ -95,6 +128,21 @@ final class AdminSpaceCopyTests: XCTestCase {
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 1, members: 1), "1 room · 1 member")
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 3, members: 12), "3 rooms · 12 members")
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 0, members: 0), "0 rooms · 0 members")
+    }
+
+    func testARefusedRoleSaysEveryReasonTheServerHas() {
+        XCTAssertEqual(
+            AdminSpaceCopy.roleFailure(AdminRoleRefusal.notAllowed, address: "cy@elsewhere.test"),
+            "The server doesn't allow this. An owner or admin needs an account here or on a trusted server, and a space that belongs to another community is managed there."
+        )
+        XCTAssertEqual(
+            AdminSpaceCopy.roleFailure(PortError.rejected, address: "cy@elsewhere.test"),
+            "The server declined this request."
+        )
+        XCTAssertEqual(
+            AdminSpaceCopy.roleFailure(PortError.failed, address: "cy@elsewhere.test"),
+            "Couldn't change the role of cy@elsewhere.test. Try again."
+        )
     }
 
     func testTheDeleteWarningSaysRoomsGoToo() {
@@ -133,9 +181,98 @@ final class AdminRoomCopyTests: XCTestCase {
         )
     }
 
+    func testNoMatchesNamesTheTextAndTheSpace() {
+        let noMatches = AdminListCopy.rooms.noMatches
+        XCTAssertEqual(noMatches("lo", nil), "No room's name starts with “lo”.")
+        XCTAssertEqual(noMatches("lo", "Design"), "No room in Design has a name that starts with “lo”.")
+        XCTAssertEqual(
+            AdminListCopy.rooms.emptyInSpace?("Design"), "Design has no rooms yet. Make one to get people talking."
+        )
+    }
+
+    func testARefusedRoleSaysWhy() {
+        XCTAssertEqual(
+            AdminRoomCopy.roleFailure(AdminRoleRefusal.lastOwner, address: "ana@waddle.test"),
+            "ana@waddle.test is the room's last owner. Make someone else an owner first."
+        )
+        XCTAssertEqual(
+            AdminRoomCopy.roleFailure(AdminRoleRefusal.notAllowed, address: "cy@elsewhere.test"),
+            "The server doesn't allow this. An owner or admin needs an account here or on a trusted server, and a room that belongs to another community is managed there."
+        )
+        XCTAssertEqual(
+            AdminRoomCopy.roleFailure(PortError.timeout, address: "cy@elsewhere.test"),
+            "The server took too long to answer. Try again."
+        )
+    }
+
     func testRolesAreNamedWithoutProtocolWords() {
         XCTAssertEqual(AdminRoomCopy.title(RoomAffiliation.outcast), "Banned")
         XCTAssertEqual(AdminRoomCopy.title(RoomAffiliation.none), "No role")
         XCTAssertEqual(AdminRoomCopy.title(AdminRoomKind.other), "Other")
+    }
+}
+
+/// The space the console's rooms are narrowed to.
+@MainActor
+final class AdminConsoleTests: XCTestCase {
+    private let design = AdminSpace(
+        service: bare("spaces.waddle.test"), node: "design", name: "Design",
+        description: nil, roomCount: 1, memberCount: 2
+    )
+
+    /// The console's lists hold the session weakly.
+    private var sample: SampleSession?
+
+    private func console(spaces: [AdminSpace]) -> AdminConsole {
+        let sample = SampleSession()
+        self.sample = sample
+        sample.port.admin.spaces[.init()] = .success(AdminPage(rows: spaces, nextCursor: nil))
+        return AdminConsole(session: sample.coordinator)
+    }
+
+    /// Before the spaces load, the one chosen is still offered.
+    func testTheChosenSpaceIsOfferedWhileTheSpacesLoad() {
+        let console = console(spaces: [])
+        console.roomsSpace = design
+
+        XCTAssertEqual(console.spaceFilterChoices, [design])
+    }
+
+    func testAChosenSpaceThatIsGoneStopsNarrowingTheRooms() async {
+        let ops = AdminSpace(service: design.service, node: "ops", name: "Ops", description: nil, roomCount: 0, memberCount: 0)
+        let console = console(spaces: [ops])
+        console.roomsSpace = design
+
+        await console.refreshSpaceChoices()
+
+        XCTAssertNil(console.roomsSpace)
+        XCTAssertEqual(console.spaceFilterChoices, [ops])
+    }
+
+    /// Spaces that failed to load are asked for again when the rooms are
+    /// refreshed, so the filter comes back without leaving the rooms.
+    func testRefreshingTheRoomsAsksForTheSpacesAgain() async {
+        let console = console(spaces: [])
+        sample?.port.admin.spaces[.init()] = .failure(.timeout)
+        await console.refreshSpaceChoices()
+        XCTAssertEqual(console.spaceFilterChoices, [])
+
+        sample?.port.admin.spaces[.init()] = .success(AdminPage(rows: [design], nextCursor: nil))
+        await console.refresh(.rooms)
+
+        XCTAssertEqual(console.spaceFilterChoices, [design])
+    }
+
+    /// A space renamed since it was chosen is shown by its new name.
+    func testTheChosenSpaceFollowsItsRow() async {
+        let studio = AdminSpace(
+            service: design.service, node: "design", name: "Studio", description: nil, roomCount: 1, memberCount: 2
+        )
+        let console = console(spaces: [studio])
+        console.roomsSpace = design
+
+        await console.refreshSpaceChoices()
+
+        XCTAssertEqual(console.roomsSpace, studio)
     }
 }

@@ -92,7 +92,7 @@ extension FFIXmppPort {
     }
 
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember {
-        let result = try await mappingPortErrors {
+        let result = try await mappingAdminErrors(changingRole: true) {
             try await client.adminSpacesSetRole(
                 spaceJid: space.service.description, spaceNode: space.node,
                 memberJid: member.description, role: Self.role(role)
@@ -104,10 +104,11 @@ extension FFIXmppPort {
     // MARK: Rooms
 
     /// A room whose address does not parse is skipped, not fatal.
-    func adminRooms(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
+    func adminRooms(matching prefix: String?, in space: AdminSpace?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
         let page = try await mappingAdminErrors {
             try await client.adminChannelsList(args: WaddleAdminChannelsListArgs(
-                spaceJid: nil, spaceNode: nil, prefix: prefix, pageSize: Self.adminPageSize, afterCursor: cursor
+                spaceJid: space?.service.description, spaceNode: space?.node,
+                prefix: prefix, pageSize: Self.adminPageSize, afterCursor: cursor
             ))
         }
         let rooms = page.entries.compactMap { entry in
@@ -186,10 +187,10 @@ extension FFIXmppPort {
         return AdminPage(rows: occupants, nextCursor: page.nextCursor)
     }
 
-    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws {
+    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID, reason: String?) async throws {
         _ = try await mappingPortErrors {
             try await client.adminChannelsKick(
-                channelJid: room.description, occupantJid: occupant.description, reason: nil
+                channelJid: room.description, occupantJid: occupant.description, reason: reason
             )
         }
     }
@@ -213,14 +214,15 @@ extension FFIXmppPort {
     }
 
     func setAdminRoomAffiliation(
-        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember {
-        let result = try await mappingPortErrors {
+        let result = try await mappingAdminErrors(changingRole: true) {
             try await client.adminChannelsSetAffiliation(
                 channelJid: room.description, memberJid: member.description,
-                affiliation: FFIOutbound.affiliation(affiliation), reason: nil
+                affiliation: FFIOutbound.affiliation(affiliation), reason: reason
             )
         }
+        // No reason: the server does not keep the one sent (#2601).
         return AdminRoomMember(
             jid: member, affiliation: FFIInbound.roomAffiliation(result.affiliation), reason: nil
         )
@@ -275,19 +277,28 @@ extension FFIXmppPort {
         }
     }
 
-    /// `rejected` means "not an owner" to the console, so only the
-    /// server's `forbidden` becomes it; any other error it answers with is
-    /// a failure an owner can try again.
-    private func mappingAdminErrors<Value>(_ operation: () async throws -> Value) async throws -> Value {
+    private func mappingAdminErrors<Value>(
+        changingRole: Bool = false, _ operation: () async throws -> Value
+    ) async throws -> Value {
         do {
             return try await operation()
         } catch {
-            throw Self.adminError(error)
+            throw Self.adminError(error, changingRole: changingRole)
         }
     }
 
-    static func adminError(_ error: Error) -> PortError {
-        if case let WaddleError.Stanza(condition, _) = error, condition != "forbidden" { return .failed }
-        return FFIOutbound.portError(error)
+    /// What the console makes of an error the server answers with. A list
+    /// reads `rejected` as "not an owner", so only `forbidden` becomes it
+    /// there, and any other refusal is a failure an owner can try again.
+    /// A role change keeps a refusal `rejected`, except the two the server
+    /// explains: `not-allowed`, and `conflict` for a room's last owner.
+    static func adminError(_ error: Error, changingRole: Bool = false) -> Error {
+        guard case let WaddleError.Stanza(condition, _) = error else { return FFIOutbound.portError(error) }
+        switch condition {
+        case "forbidden": return PortError.rejected
+        case "not-allowed" where changingRole: return AdminRoleRefusal.notAllowed
+        case "conflict" where changingRole: return AdminRoleRefusal.lastOwner
+        default: return changingRole ? PortError.rejected : PortError.failed
+        }
     }
 }

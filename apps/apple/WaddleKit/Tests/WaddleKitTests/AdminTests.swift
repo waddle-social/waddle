@@ -193,7 +193,8 @@ struct AdminTests {
         #expect(!list.isLoadingMore)
     }
 
-    /// Typing on cancels the search in flight; that is not a failure.
+    /// Clearing the text cancels the search in flight; its failure is not
+    /// shown.
     @Test func aCancelledSearchChangesNothingShown() async {
         let (coordinator, port) = online()
         port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: nil))
@@ -204,6 +205,7 @@ struct AdminTests {
         let search = Task { await list.load(matching: "b") }
         await eventually { port.admin.usersFetches.count == 1 }
 
+        list.want("")
         search.cancel()
         port.admin.usersFetches.release()
         await search.value
@@ -229,6 +231,78 @@ struct AdminTests {
         port.admin.usersFetches.release()
         await cleared.value
         #expect(list.query == "")
+    }
+
+    /// The text cleared before a search answers: everyone stays shown, and
+    /// a refresh asks for everyone, not the text.
+    @Test func aRefreshAfterACancelledSearchAsksForWhatIsShown() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada, bo], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let search = Task { await list.load(matching: "b") }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        list.want("")
+        search.cancel()
+        port.admin.usersFetches.isHolding = false
+        port.admin.usersFetches.release()
+        await search.value
+        await list.reload()
+
+        #expect(port.admin.usersRequests.last == .init())
+        #expect(list.rows == [ada, bo])
+        #expect(list.query == "")
+    }
+
+    /// A search that overtakes the first page leaves no page to ask for
+    /// yet; loading every page stops instead of asking forever.
+    @Test(.timeLimit(.minutes(1)))
+    func loadingEveryPageStopsWhenAnotherSearchOvertakesIt() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "next"))
+        port.admin.users[.init(cursor: "next")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        port.admin.users[.init(prefix: "c")] = .success(AdminPage(rows: [cy], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let every = Task { await list.loadEveryPage() }
+        await eventually { port.admin.usersFetches.count == 1 }
+        let search = Task { await list.load(matching: "c") }
+        await eventually { port.admin.usersFetches.count == 2 }
+
+        port.admin.usersFetches.isHolding = false
+        port.admin.usersFetches.release()
+        await every.value
+        await search.value
+
+        #expect(list.rows == [cy])
+    }
+
+    /// Text typed back to what is shown before the other text answers: a
+    /// refresh in that window asks for the text shown, and the other
+    /// answer is not shown over it.
+    @Test func aRefreshBeforeACancelledSearchAnswersAsksForTheTextWanted() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init(prefix: "a")] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        port.admin.users[.init(prefix: "b")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load(matching: "a")
+        port.admin.usersFetches.isHolding = true
+        let search = Task { await list.load(matching: "b") }
+        await eventually { port.admin.usersFetches.count == 1 }
+        port.admin.usersFetches.isHolding = false
+
+        list.want("a")
+        search.cancel()
+        await list.reload()
+        port.admin.usersFetches.release()
+        await search.value
+
+        #expect(port.admin.usersRequests.last == .init(prefix: "a"))
+        #expect(list.rows == [ada])
+        #expect(list.query == "a")
     }
 
     @Test func refreshingDuringASearchAsksForTheTextBeingSearched() async {

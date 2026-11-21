@@ -5,10 +5,11 @@ import WaddleKit
 @MainActor
 final class FakeAdmin {
     /// A page asked for. Members are asked for by their space's `node`, in
-    /// `prefix`.
+    /// `prefix`; rooms narrowed to a space by its `node`, in `space`.
     struct PageRequest: Hashable {
         var prefix: String?
         var cursor: String?
+        var space: String?
     }
 
     enum SpaceWrite: Equatable {
@@ -22,14 +23,17 @@ final class FakeAdmin {
         case create(AdminRoomDraft)
         case update(BareJID, AdminRoomDraft)
         case delete(BareJID)
-        case remove(BareJID, BareJID)
-        case setAffiliation(BareJID, BareJID, RoomAffiliation)
+        case remove(BareJID, BareJID, reason: String? = nil)
+        case setAffiliation(BareJID, BareJID, RoomAffiliation, reason: String? = nil)
     }
 
     /// What each request answers; one not scripted answers an empty page.
     /// Who is in a room and its roles are asked for by the name part of
     /// its address, in `prefix`.
     var rooms: [PageRequest: Result<AdminPage<AdminRoom>, PortError>] = [:]
+    var roomsRequests: [PageRequest] = []
+    /// A held request answers with what was scripted when it began.
+    let roomsFetches = HeldCalls()
     var occupants: [PageRequest: Result<AdminPage<AdminRoomOccupant>, PortError>] = [:]
     var roomMembers: [PageRequest: Result<AdminPage<AdminRoomMember>, PortError>] = [:]
     var roomWrites: [RoomWrite] = []
@@ -54,6 +58,8 @@ final class FakeAdmin {
     var spaceWrites: [SpaceWrite] = []
     /// When set, every change is refused with it.
     var writeFailure: PortError?
+    /// When set, every role given in a space or a room is refused with it.
+    var roleRefusal: AdminRoleRefusal?
 
     fileprivate func write(_ write: SpaceWrite) throws {
         spaceWrites.append(write)
@@ -99,11 +105,16 @@ extension FakePort {
 
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember {
         try admin.write(.setRole(node: space.node, member: member, role))
+        if let refusal = admin.roleRefusal { throw refusal }
         return AdminSpaceMember(jid: member, role: role)
     }
 
-    func adminRooms(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
-        try admin.page(admin.rooms, prefix, cursor)
+    func adminRooms(matching prefix: String?, in space: AdminSpace?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
+        let request = FakeAdmin.PageRequest(prefix: prefix, cursor: cursor, space: space?.node)
+        admin.roomsRequests.append(request)
+        let answer = admin.rooms[request] ?? .success(AdminPage(rows: [], nextCursor: nil))
+        await admin.roomsFetches.wait()
+        return try answer.get()
     }
 
     func createAdminRoom(_ draft: AdminRoomDraft) async throws {
@@ -128,8 +139,8 @@ extension FakePort {
         try admin.page(admin.occupants, room.localpart, cursor)
     }
 
-    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws {
-        try admin.write(.remove(room, occupant))
+    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID, reason: String?) async throws {
+        try admin.write(.remove(room, occupant, reason: reason))
     }
 
     func adminRoomMembers(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomMember> {
@@ -137,9 +148,11 @@ extension FakePort {
     }
 
     func setAdminRoomAffiliation(
-        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember {
-        try admin.write(.setAffiliation(room, member, affiliation))
+        try admin.write(.setAffiliation(room, member, affiliation, reason: reason))
+        if let refusal = admin.roleRefusal { throw refusal }
+        // As the server: it keeps no reason for a role (#2601).
         return AdminRoomMember(jid: member, affiliation: affiliation, reason: nil)
     }
 }

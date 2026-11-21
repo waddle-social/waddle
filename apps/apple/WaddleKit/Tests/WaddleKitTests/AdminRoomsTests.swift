@@ -85,6 +85,148 @@ struct AdminRoomsTests {
         #expect(list.rows == [board])
     }
 
+    // MARK: Narrowed to a space
+
+    private let design = AdminSpace(
+        service: bare("spaces.waddle.test"), node: "design", name: "Design",
+        description: nil, roomCount: 1, memberCount: 2
+    )
+
+    @Test func theRoomsOfASpaceAreAskedForByTheSpace() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: "next"))
+        port.admin.rooms[.init(cursor: "next", space: "design")] = .success(AdminPage(rows: [board], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+
+        await list.load(in: design)
+        await list.loadMore()
+        await list.reload()
+
+        #expect(list.rows == [lounge])
+        #expect(list.space == design)
+        #expect(port.admin.roomsRequests == [
+            .init(space: "design"), .init(cursor: "next", space: "design"), .init(space: "design"),
+        ])
+    }
+
+    /// Choosing another space while one is on its way shows the one
+    /// chosen last.
+    @Test func aSlowerAnswerForTheSpaceBeforeIsDropped() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        port.admin.rooms[.init()] = .success(AdminPage(rows: [board], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+        port.admin.roomsFetches.isHolding = true
+        let first = Task { await list.load(in: design) }
+        await eventually { port.admin.roomsFetches.count == 1 }
+        port.admin.roomsFetches.isHolding = false
+
+        await list.load()
+        port.admin.roomsFetches.release()
+        await first.value
+
+        #expect(list.rows == [board])
+        #expect(list.space == nil)
+        #expect(!list.isLoading)
+    }
+
+    /// "All spaces" chosen again before a space answers: every room stays
+    /// shown, and a refresh asks for every room, not the space.
+    @Test func aRefreshAfterACancelledSpaceAsksForWhatIsShown() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init()] = .success(AdminPage(rows: [lounge, board], nextCursor: nil))
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+        await list.load()
+        port.admin.roomsFetches.isHolding = true
+        let narrowing = Task { await list.load(in: design) }
+        await eventually { port.admin.roomsFetches.count == 1 }
+
+        list.want("", in: nil)
+        narrowing.cancel()
+        port.admin.roomsFetches.isHolding = false
+        port.admin.roomsFetches.release()
+        await narrowing.value
+        await list.reload()
+
+        #expect(port.admin.roomsRequests.last == .init())
+        #expect(list.rows == [lounge, board])
+        #expect(list.space == nil)
+    }
+
+    /// Back to space A before B answers: a refresh in that window asks for
+    /// A, and B's rooms are not shown over A's.
+    @Test func aRefreshBeforeACancelledSpaceAnswersAsksForTheSpaceWanted() async {
+        let (coordinator, port) = online()
+        let ops = AdminSpace(service: design.service, node: "ops", name: "Ops", description: nil, roomCount: 1, memberCount: 0)
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        port.admin.rooms[.init(space: "ops")] = .success(AdminPage(rows: [board], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+        await list.load(in: design)
+        port.admin.roomsFetches.isHolding = true
+        let narrowing = Task { await list.load(in: ops) }
+        await eventually { port.admin.roomsFetches.count == 1 }
+        port.admin.roomsFetches.isHolding = false
+
+        list.want("", in: design)
+        narrowing.cancel()
+        await list.reload()
+        port.admin.roomsFetches.release()
+        await narrowing.value
+
+        #expect(port.admin.roomsRequests.last == .init(space: "design"))
+        #expect(list.rows == [lounge])
+        #expect(list.space == design)
+    }
+
+    /// Rooms of every space are not an answer for one space.
+    @Test func aSpaceThatFailsShowsNoRoomsFromBefore() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init()] = .success(AdminPage(rows: [lounge, board], nextCursor: nil))
+        port.admin.rooms[.init(space: "design")] = .failure(.timeout)
+        let list = coordinator.adminRoomsList()
+        await list.load()
+
+        await list.load(in: design)
+
+        #expect(list.rows.isEmpty)
+        #expect(!list.hasLoaded)
+        #expect(list.space == design)
+        #expect(list.failure == .timeout)
+    }
+
+    @Test func aSpaceAndTextAreAskedForTogether() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init(prefix: "l", space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+
+        await list.load(matching: "l", in: design)
+
+        #expect(list.rows == [lounge])
+        #expect(list.query == "l")
+    }
+
+    /// The spaces for a picker: every page, stopping at one that fails.
+    @Test func everyPageCanBeLoaded() async {
+        let (coordinator, port) = online()
+        let ops = AdminSpace(service: design.service, node: "ops", name: "Ops", description: nil, roomCount: 0, memberCount: 0)
+        port.admin.spaces[.init()] = .success(AdminPage(rows: [design], nextCursor: "next"))
+        port.admin.spaces[.init(cursor: "next")] = .success(AdminPage(rows: [ops], nextCursor: nil))
+        let list = coordinator.adminSpacesList()
+        #expect(!list.isComplete)
+
+        await list.loadEveryPage()
+
+        #expect(list.rows == [design, ops])
+        #expect(list.isComplete)
+
+        port.admin.spaces[.init(cursor: "next")] = .failure(.timeout)
+        await list.loadEveryPage()
+        #expect(list.rows == [design])
+        #expect(!list.isComplete)
+        #expect(list.moreFailure == .timeout)
+    }
+
     // MARK: Making, changing, deleting
 
     @Test func creatingARoomSendsItsDraftAndLooksAtTheDirectoryAgain() async throws {
@@ -206,5 +348,63 @@ struct AdminRoomsTests {
 
         #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .outcast)])
         #expect(changed == AdminRoomMember(jid: bo, affiliation: .outcast, reason: nil))
+    }
+
+    // MARK: Reasons
+
+    @Test func aRemovalSendsItsReason() async throws {
+        let (coordinator, port) = online()
+
+        try await coordinator.removeFromAdminRoom(bo, room: lounge, reason: " Flooding ")
+
+        #expect(port.admin.roomWrites == [.remove(lounge.jid, bo, reason: "Flooding")])
+    }
+
+    /// The reason is sent with a ban. The server keeps none for a role
+    /// (#2601), so the role shown after it has none either.
+    @Test func aBanSendsItsReason() async throws {
+        let (coordinator, port) = online()
+
+        let banned = try await coordinator.setAdminRoomAffiliation(.outcast, of: bo, in: lounge, reason: "Spam")
+
+        #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .outcast, reason: "Spam")])
+        #expect(banned == AdminRoomMember(jid: bo, affiliation: .outcast, reason: nil))
+    }
+
+    /// The server's reasons for refusing a role reach the console as they
+    /// are, so it can say them.
+    @Test func aRefusedRoleSaysWhy() async {
+        let (coordinator, port) = online()
+        port.admin.roleRefusal = .lastOwner
+
+        await #expect(throws: AdminRoleRefusal.lastOwner) {
+            try await coordinator.setAdminRoomAffiliation(.member, of: ada, in: lounge)
+        }
+    }
+
+    @Test func aBlankReasonIsNoReason() async throws {
+        let (coordinator, port) = online()
+
+        try await coordinator.removeFromAdminRoom(bo, room: lounge, reason: "  ")
+        let banned = try await coordinator.setAdminRoomAffiliation(.outcast, of: bo, in: lounge, reason: "\n")
+
+        #expect(port.admin.roomWrites == [
+            .remove(lounge.jid, bo, reason: nil), .setAffiliation(lounge.jid, bo, .outcast, reason: nil),
+        ])
+        #expect(banned.reason == nil)
+    }
+
+    /// Someone who had no role is listed first once given one.
+    @Test func someoneGivenARoleIsListedFirst() async throws {
+        let (coordinator, port) = online()
+        let owner = AdminRoomMember(jid: ada, affiliation: .owner, reason: nil)
+        port.admin.roomMembers[.init(prefix: "lounge")] = .success(AdminPage(rows: [owner], nextCursor: nil))
+        let list = coordinator.adminRoomMembersList(of: lounge)
+        await list.load()
+
+        list.add(try await coordinator.setAdminRoomAffiliation(.member, of: bo, in: lounge))
+
+        #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .member)])
+        #expect(list.rows == [AdminRoomMember(jid: bo, affiliation: .member, reason: nil), owner])
     }
 }

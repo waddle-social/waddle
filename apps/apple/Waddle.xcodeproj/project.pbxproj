@@ -90,6 +90,7 @@
 		23FFF61C63530EADF8DEBA86 /* PeopleList+Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4FAD78B88531EBF7368AC3A /* PeopleList+Session.swift */; };
 		245003CFC33DE220AA6DE188 /* FFIInbound+Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E693082B761CBC48B8E7AE /* FFIInbound+Notify.swift */; };
 		24530FC828EB809EBE5CE724 /* GroupCallDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F81E3CC3C092710A1D9AF8F1 /* GroupCallDockView.swift */; };
+		2465D67CE94262E3039F8915 /* AdminPersonPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */; };
 		24B2F26796B4062AE83C2E17 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CE875138305109C7CCC4E1 /* AppState.swift */; };
 		25AC23B910C8CEB3A969A269 /* FFIXmppPort+Stickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC2CFB3825C80C4758AB3018 /* FFIXmppPort+Stickers.swift */; };
 		25B080C55D7674C89CC0E9B9 /* SignInServerLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96F23CCB3265FE12326F400F /* SignInServerLabel.swift */; };
@@ -461,6 +462,7 @@
 		A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */; };
 		A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
 		A78240DBCD38E3C2631A7F6F /* RenameGroupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D02EE5D57B1FEEC55787AAE6 /* RenameGroupSheet.swift */; };
+		A79414F65F48C7CC84FAAF53 /* AdminPersonPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */; };
 		A90E6A70FCCB051F88A621B1 /* CallDockParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2126DCBE7C2DCC8744EA459B /* CallDockParts.swift */; };
 		A98D9A45A461088AB8FF4E15 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082EE4552E0588E35D76D98 /* SearchSheet.swift */; };
 		AA7275AC30C39DDF1E59095A /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
@@ -779,6 +781,7 @@
 		3BF52D49E9087D0B27F5A109 /* MessageSafetyScoresSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageSafetyScoresSheet.swift; sourceTree = "<group>"; };
 		3CB67A91AC8DCFCEC017F34E /* TimelineUnreadAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineUnreadAnchor.swift; sourceTree = "<group>"; };
 		3D8C603A3D63D07896B4E31A /* MessageAuthor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAuthor.swift; sourceTree = "<group>"; };
+		3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminPersonPicker.swift; sourceTree = "<group>"; };
 		3E59EB72051AA26FA675DD9D /* FFIInbound+Community.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+Community.swift"; sourceTree = "<group>"; };
 		3EDD2090A6B7D1DACB814ECC /* AttachmentUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentUploader.swift; sourceTree = "<group>"; };
 		3F58BCC39D30A86E52EFE92E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -1397,6 +1400,7 @@
 		57010325BE4CB572D63BE4DA /* Admin */ = {
 			isa = PBXGroup;
 			children = (
+				3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */,
 				CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */,
 				ACFC9BD024E32EA9E049D2A8 /* AdminRoomRow.swift */,
 				455C82774C67753D8BFC905B /* AdminRoomSheet.swift */,
@@ -2175,6 +2179,7 @@
 			files = (
 				1F366FF69DD8074B6316F8CA /* AccountSignOutButton.swift in Sources */,
 				95A048455B91E894F7E470A0 /* AddPeopleSheet.swift in Sources */,
+				2465D67CE94262E3039F8915 /* AdminPersonPicker.swift in Sources */,
 				E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */,
 				4DBCD4080C891BA4AD2A93DB /* AdminRoomRow.swift in Sources */,
 				A277D5F8D557882415EEED37 /* AdminRoomSheet.swift in Sources */,
@@ -2514,6 +2519,7 @@
 			files = (
 				2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */,
 				050ABC1E2E9DE9D7A16AB906 /* AddPeopleSheet.swift in Sources */,
+				A79414F65F48C7CC84FAAF53 /* AdminPersonPicker.swift in Sources */,
 				BDEDDFDCC2BC72E4DAFC1FAD /* AdminRoleRow.swift in Sources */,
 				D2475AFFB418A5C696E4E53D /* AdminRoomRow.swift in Sources */,
 				33A802453496543B15D66C36 /* AdminRoomSheet.swift in Sources */,

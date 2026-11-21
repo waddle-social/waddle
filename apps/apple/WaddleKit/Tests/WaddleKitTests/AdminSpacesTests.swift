@@ -388,4 +388,112 @@ struct AdminSpacesTests {
         #expect(port.admin.spaceWrites == [.setRole(node: "design", member: bo.jid, .admin)])
         #expect(changed == AdminSpaceMember(jid: bo.jid, role: .admin))
     }
+
+    // MARK: Adding a member
+
+    /// Someone who was not listed shows first; someone listed changes
+    /// where they are.
+    @Test func someoneAddedIsListedFirst() async {
+        let (coordinator, port) = online()
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        let list = coordinator.adminSpaceMembersList(of: design)
+        await list.load()
+
+        list.add(bo)
+        #expect(list.rows == [bo, ada])
+
+        let boAdmin = AdminSpaceMember(jid: bo.jid, role: .admin)
+        list.add(boAdmin)
+        #expect(list.rows == [boAdmin, ada])
+    }
+
+    /// A page asked for before someone was added does not know of them.
+    @Test func someoneAddedWhileAPageIsOnItsWayIsKept() async {
+        let (coordinator, port) = online()
+        let adaUser = AdminUser(jid: ada.jid, displayName: nil, isOwner: false)
+        let boUser = AdminUser(jid: bo.jid, displayName: nil, isOwner: false)
+        port.admin.users[.init()] = .success(AdminPage(rows: [adaUser], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        port.admin.usersFetches.isHolding = true
+        let refresh = Task { await list.load() }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        list.add(boUser)
+        port.admin.usersFetches.release()
+        await refresh.value
+
+        #expect(list.rows == [boUser, adaUser])
+    }
+
+    /// Who holds a role is what a fresh request answers, every page of
+    /// it: someone on a later page, or given a role since the list was
+    /// shown, is known before the picker offers anyone.
+    @Test func everyMemberIsWhatAFreshRequestAnswers() async {
+        let (coordinator, port) = online()
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        let list = coordinator.adminSpaceMembersList(of: design)
+        await list.load()
+        let boOwner = AdminSpaceMember(jid: bo.jid, role: .owner)
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: "next"))
+        port.admin.members[.init(prefix: "design", cursor: "next")] = .success(AdminPage(rows: [boOwner], nextCursor: nil))
+
+        let every = await list.loadEveryRow()
+
+        #expect(every == [ada, boOwner])
+    }
+
+    /// A request another search overtakes is not an answer.
+    @Test func everyMemberIsUnknownWhenAnotherRequestOvertakes() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [AdminUser(jid: ada.jid, displayName: nil, isOwner: false)], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        port.admin.usersFetches.isHolding = true
+        let every = Task { await list.loadEveryRow() }
+        await eventually { port.admin.usersFetches.count == 1 }
+        port.admin.usersFetches.isHolding = false
+
+        await list.load(matching: "b")
+        port.admin.usersFetches.release()
+
+        #expect(await every.value == nil)
+    }
+
+    /// The picker opened before the sheet's own first request answered,
+    /// then closed before its request answered: the members still load.
+    @Test func membersAskedForAgainByAPickerClosedEarlyStillLoad() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [AdminUser(jid: ada.jid, displayName: nil, isOwner: false)], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        port.admin.usersFetches.isHolding = true
+        let sheet = Task { await list.load() }
+        await eventually { port.admin.usersFetches.count == 1 }
+        let picker = Task { await list.loadEveryRow() }
+        await eventually { port.admin.usersFetches.count == 2 }
+
+        picker.cancel()
+        port.admin.usersFetches.isHolding = false
+        port.admin.usersFetches.release()
+        await sheet.value
+        #expect(await picker.value == nil)
+
+        #expect(list.hasLoaded)
+        #expect(list.rows.map(\.jid) == [ada.jid])
+        #expect(!list.isLoading)
+    }
+
+    @Test func addingMembersRaisesTheCount() {
+        #expect(design.addingMembers(1).memberCount == 13)
+        #expect(design.addingMembers(1).id == design.id)
+    }
+
+    /// The server gives owner and admin only to accounts of this
+    /// deployment and its trusted servers, and says `not-allowed`.
+    @Test func aRoleTheServerRefusesIsThrown() async {
+        let (coordinator, port) = online()
+        port.admin.writeFailure = .rejected
+
+        await #expect(throws: PortError.rejected) {
+            try await coordinator.setAdminSpaceRole(.owner, of: bare("cy@elsewhere.test"), in: design)
+        }
+    }
 }
