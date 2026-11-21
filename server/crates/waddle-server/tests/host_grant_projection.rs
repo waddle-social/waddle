@@ -1241,6 +1241,27 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         round_trip(&mut owner, get_configuration("space-owner-configuration")).await,
         "1",
     );
+    let cancel = Element::builder("x", DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "cancel")
+        .build();
+    let cancelled = round_trip(
+        &mut owner,
+        set(
+            "space-owner-cancel-configuration",
+            service.as_str(),
+            configuration(Some(cancel)),
+        ),
+    )
+    .await;
+    assert!(is_result(&cancelled), "{cancelled:?}");
+    assert_configuration(
+        round_trip(
+            &mut owner,
+            get_configuration("space-owner-config-unchanged"),
+        )
+        .await,
+        "1",
+    );
     let changed = round_trip(
         &mut owner,
         disable_payloads("space-owner-disable-event-payloads"),
