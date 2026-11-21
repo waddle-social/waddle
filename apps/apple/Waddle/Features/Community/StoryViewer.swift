@@ -15,8 +15,9 @@ extension View {
     }
 }
 
-/// One story at a time, on a dark ground: tap or arrow through the stories
-/// that were up when it opened. Showing a story marks it seen.
+/// One story at a time, on the dark media ground (Night's deep sea, whatever
+/// the appearance): tap or arrow through the stories that were up when it
+/// opened. Showing a story marks it seen.
 struct StoryViewer: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -25,6 +26,7 @@ struct StoryViewer: View {
     @State private var errorMessage: String?
     private let now: Date
     @FocusState private var isFocused: Bool
+    @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
 
     init(start: Story) {
         _stories = State(initialValue: [start])
@@ -50,7 +52,7 @@ struct StoryViewer: View {
     var body: some View {
         let story = stories[index]
         ZStack {
-            Color.black.ignoresSafeArea()
+            Theme.Colors.seaDeep.ignoresSafeArea()
             StoryMedia(story: story, picture: picture)
                 .id(story.id)
             pager
@@ -61,7 +63,7 @@ struct StoryViewer: View {
             }
         }
         .environment(\.colorScheme, .dark)
-        .environment(\.huddleGround, .black)
+        .environment(\.huddleGround, Theme.Colors.seaDeep)
         .focusable()
         .focusEffectDisabled()
         .focused($isFocused)
@@ -106,7 +108,7 @@ struct StoryViewer: View {
             HStack(spacing: Theme.Spacing.xs) {
                 ForEach(stories.indices, id: \.self) { position in
                     Capsule()
-                        .fill(Color.white.opacity(position <= index ? 0.95 : 0.3))
+                        .fill(Theme.Colors.fg.opacity(position <= index ? 1 : 0.3))
                         .frame(height: 3)
                 }
             }
@@ -118,21 +120,22 @@ struct StoryViewer: View {
                 }
                 Text(CommunityCopy.name(of: story.author))
                     .huddleText(Theme.Typography.author)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                 if let age = CommunityCopy.age(of: story.postedAt, at: now) {
                     Text(age)
                         .huddleText(Theme.Typography.caption)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
                 Spacer(minLength: 0)
                 Button {
                     dismiss()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .huddleTouchTarget()
+                        .font(.system(size: glyph, weight: .semibold))
+                        .foregroundStyle(Theme.Colors.fg)
+                        .frame(minWidth: Theme.Size.minHitTarget, minHeight: Theme.Size.minHitTarget)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(Text("Close"))
@@ -141,7 +144,7 @@ struct StoryViewer: View {
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.top, Theme.Spacing.m)
         .padding(.bottom, Theme.Spacing.xl)
-        .background(LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom))
+        .background(LinearGradient(colors: [Theme.Colors.scrim, .clear], startPoint: .top, endPoint: .bottom))
     }
 
     private func footer(_ story: Story) -> some View {
@@ -150,7 +153,7 @@ struct StoryViewer: View {
             if let body = story.body {
                 Text(body)
                     .huddleText(Theme.Typography.message)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.Colors.fg)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let errorMessage {
@@ -162,7 +165,7 @@ struct StoryViewer: View {
         }
         .padding(Theme.Spacing.l)
         .padding(.top, Theme.Spacing.xl)
-        .background(LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom))
+        .background(LinearGradient(colors: [.clear, Theme.Colors.scrim], startPoint: .top, endPoint: .bottom))
     }
 
     // MARK: Actions
@@ -216,7 +219,7 @@ private struct StoryMedia: View {
     private func failure(_ message: String, symbol: String) -> some View {
         Label(message, systemImage: symbol)
             .huddleText(Theme.Typography.body)
-            .foregroundStyle(.white.opacity(0.7))
+            .foregroundStyle(Theme.Colors.fgMuted)
     }
 
     var body: some View {
@@ -241,7 +244,7 @@ private struct StoryMedia: View {
                 case .failure:
                     failure("This story didn't load.", symbol: "photo.badge.exclamationmark")
                 default:
-                    ProgressView().tint(.white)
+                    ProgressView().tint(Theme.Colors.fg)
                 }
             }
             .accessibilityLabel(Text("Picture from \(CommunityCopy.name(of: story.author))"))
