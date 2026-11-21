@@ -296,7 +296,8 @@ public protocol AdminPort: AnyObject, Sendable {
     /// One page of the people in `room` now.
     func adminRoomOccupants(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomOccupant>
 
-    /// Takes `occupant` out of `room`; they can come back.
+    /// Takes `occupant` out of `room`. They can come back, unless the room
+    /// is for members only: there the server also ends their membership.
     func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws
 
     /// One page of the people with a lasting role in `room`.

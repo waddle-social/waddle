@@ -54,28 +54,18 @@ struct AdminRoomsTests {
         ) == nil)
     }
 
-    /// A room nobody can find and anybody can join is open to whoever
-    /// guesses its address, so a hidden room is for members only.
-    @Test func aHiddenRoomIsForMembersOnly() throws {
-        #expect(try draft(isListed: false, isMembersOnly: false).isMembersOnly)
-        #expect(try !draft(isListed: true, isMembersOnly: false).isMembersOnly)
+    /// The server has rooms that are hidden and open to anyone with the
+    /// address; a draft says what it is given and decides nothing.
+    @Test func aDraftKeepsTheAccessItIsGiven() throws {
+        #expect(try !draft(isListed: false, isMembersOnly: false).isMembersOnly)
         #expect(try draft(isListed: true, isMembersOnly: true).isMembersOnly)
-    }
-
-    @Test func aKindIsReadFromAndWrittenToTheWire() {
-        #expect(AdminRoomKind(wire: "text") == .text)
-        #expect(AdminRoomKind(wire: "announcement") == .announcement)
-        #expect(AdminRoomKind(wire: "forum") == .forum)
-        #expect(AdminRoomKind(wire: "group_dm") == .other("group_dm"))
-        #expect(AdminRoomKind.forum.wire == "forum")
-        #expect(AdminRoomKind.other("group_dm").wire == "group_dm")
     }
 
     /// The server makes these three; any other kind is its own business.
     @Test func onlyTheKindsTheServerMakesCanBeChosen() {
         #expect(AdminRoomKind.choices == [.text, .announcement, .forum])
         #expect(AdminRoomKind.text.canBeChosen)
-        #expect(!AdminRoomKind.other("group_dm").canBeChosen)
+        #expect(!AdminRoomKind.other.canBeChosen)
     }
 
     // MARK: The list
@@ -118,7 +108,7 @@ struct AdminRoomsTests {
         #expect(changed.name == "Salon")
         #expect(changed.kind == .forum)
         #expect(!changed.isListed)
-        #expect(changed.isMembersOnly)
+        #expect(!changed.isMembersOnly)
         #expect(changed.presentCount == 4)
         #expect(changed.memberCount == 9)
         #expect(port.topologyRequests == 1)
@@ -178,6 +168,14 @@ struct AdminRoomsTests {
         await list.loadMore()
 
         #expect(list.rows == [adaHere, boHere])
+    }
+
+    /// The same person from two devices is two rows.
+    @Test func someoneInARoomTwiceIsListedUnderEachName() {
+        let phone = AdminRoomOccupant(jid: ada, nick: "Ada", role: .participant, affiliation: .member)
+        let laptop = AdminRoomOccupant(jid: ada, nick: "Ada (laptop)", role: .participant, affiliation: .member)
+
+        #expect(phone.id != laptop.id)
     }
 
     @Test func removingSomeoneFromARoomAsksTheServer() async throws {

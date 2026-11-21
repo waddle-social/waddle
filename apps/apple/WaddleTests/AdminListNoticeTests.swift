@@ -55,6 +55,34 @@ final class AdminErrorTests: XCTestCase {
         XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.owner), WaddleSpaceRole.owner)
     }
 
+    /// The server names someone in a room by the device they are there
+    /// from; the console lists the person.
+    func testSomeoneInARoomIsNamedWithoutTheirDevice() {
+        XCTAssertEqual(FFIXmppPort.person("ana@waddle.test/phone"), bare("ana@waddle.test"))
+        XCTAssertEqual(FFIXmppPort.person("ana@waddle.test"), bare("ana@waddle.test"))
+        XCTAssertNil(FFIXmppPort.person("not an address"))
+    }
+
+    /// A kind the console does not make is shown and never sent.
+    func testRoomKindsCrossTheBridge() {
+        XCTAssertEqual(FFIXmppPort.roomKind("text"), .text)
+        XCTAssertEqual(FFIXmppPort.roomKind("announcement"), .announcement)
+        XCTAssertEqual(FFIXmppPort.roomKind("forum"), .forum)
+        XCTAssertEqual(FFIXmppPort.roomKind("stage"), .other)
+        XCTAssertEqual(FFIXmppPort.wire(.forum), "forum")
+        XCTAssertNil(FFIXmppPort.wire(.other))
+    }
+
+    func testAConfirmationSaysWhatCannotBePutBack() {
+        let member = AdminRoomMember(jid: bare("jo@waddle.test"), affiliation: .member, reason: nil)
+        XCTAssertEqual(
+            AdminRoomSheet.PendingAction.ban(member).message(roomName: "Lounge"),
+            "jo@waddle.test is taken out of Lounge and can't join it until the ban is changed."
+        )
+        XCTAssertEqual(AdminRoomSheet.PendingAction.ban(member).confirmTitle, "Ban")
+        XCTAssertEqual(AdminRoomSheet.PendingAction.removeRole(member).title, "Remove role?")
+    }
+
     func testOtherErrorsKeepTheirMeaning() {
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.NotConnected), .notConnected)
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Timeout), .timeout)
@@ -100,14 +128,14 @@ final class AdminRoomCopyTests: XCTestCase {
             ["Announcements", "Hidden", "Members only"]
         )
         XCTAssertEqual(
-            AdminRoomCopy.tags(for: room(kind: .other("group_dm"), isListed: true, isMembersOnly: true)),
-            ["Group chat", "Members only"]
+            AdminRoomCopy.tags(for: room(kind: .other, isListed: true, isMembersOnly: true)),
+            ["Other", "Members only"]
         )
     }
 
     func testRolesAreNamedWithoutProtocolWords() {
         XCTAssertEqual(AdminRoomCopy.title(RoomAffiliation.outcast), "Banned")
         XCTAssertEqual(AdminRoomCopy.title(RoomAffiliation.none), "No role")
-        XCTAssertEqual(AdminRoomCopy.title(AdminRoomKind.other("stage")), "Other")
+        XCTAssertEqual(AdminRoomCopy.title(AdminRoomKind.other), "Other")
     }
 }

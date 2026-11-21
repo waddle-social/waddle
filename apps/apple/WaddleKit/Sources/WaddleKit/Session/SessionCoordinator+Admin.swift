@@ -127,7 +127,8 @@ extension SessionCoordinator {
         return updated
     }
 
-    /// Takes someone out of a room; they can come back.
+    /// Takes someone out of a room. They can come back, unless the room is
+    /// for members only: there the server also ends their membership.
     public func removeFromAdminRoom(_ occupant: BareJID, room: AdminRoom) async throws {
         try await whileOnline { try await port.removeFromAdminRoom(occupant, room: room.jid) }
     }

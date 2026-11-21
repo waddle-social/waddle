@@ -20,9 +20,10 @@ struct AdminView: View {
     @State private var spaces: AdminList<AdminSpace>?
     @State private var query = ""
     @State private var rooms: AdminList<AdminRoom>?
-    @State private var sheet: AdminSpaceSheet.Subject?
+    @State private var spaceSheet: AdminSpaceSheet.Subject?
     @State private var roomSheet: AdminRoomSheet.Subject?
-    /// Lists not asked for since the connection last came back.
+    /// Lists that may be out of date: not asked for since the connection
+    /// last came back, or since the other sheet was last open.
     @State private var stale: Set<AdminSection> = []
 
     init(section: AdminSection = .users) {
@@ -65,7 +66,7 @@ struct AdminView: View {
             if section == .spaces {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        sheet = .new
+                        spaceSheet = .new
                     } label: {
                         Label("New space", systemImage: "plus")
                     }
@@ -94,13 +95,15 @@ struct AdminView: View {
                 .help("Refresh")
             }
         }
-        .sheet(item: $roomSheet) { subject in
+        // A space counts its rooms and takes them with it when deleted,
+        // so what is done in one sheet can change the other list.
+        .sheet(item: $roomSheet, onDismiss: { stale.insert(.spaces) }) { subject in
             if let rooms {
                 AdminRoomSheet(subject: subject, rooms: rooms)
                     .carryingCallDock()
             }
         }
-        .sheet(item: $sheet) { subject in
+        .sheet(item: $spaceSheet, onDismiss: { stale.insert(.rooms) }) { subject in
             if let spaces {
                 AdminSpaceSheet(subject: subject, spaces: spaces)
                     .carryingCallDock()
@@ -127,7 +130,7 @@ struct AdminView: View {
             }
         case .spaces:
             if let spaces {
-                AdminSpacesPanel(spaces: spaces) { sheet = .space($0) }
+                AdminSpacesPanel(spaces: spaces) { spaceSheet = .space($0) }
             } else {
                 Theme.Colors.bg
             }

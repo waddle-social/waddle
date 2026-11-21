@@ -119,29 +119,11 @@ public enum AdminRoomKind: Hashable, Sendable {
     case text
     case announcement
     case forum
-    /// A kind the console does not make, such as a group chat.
-    case other(String)
+    /// A kind the console does not make. It is shown, and left as it is.
+    case other
 
     /// The kinds a room can be made as or changed to.
     public static let choices: [AdminRoomKind] = [.text, .announcement, .forum]
-
-    public init(wire: String) {
-        switch wire {
-        case "text", "": self = .text
-        case "announcement": self = .announcement
-        case "forum": self = .forum
-        default: self = .other(wire)
-        }
-    }
-
-    public var wire: String {
-        switch self {
-        case .text: "text"
-        case .announcement: "announcement"
-        case .forum: "forum"
-        case let .other(wire): wire
-        }
-    }
 
     public var canBeChosen: Bool { Self.choices.contains(self) }
 }
@@ -156,7 +138,8 @@ public struct AdminRoom: Hashable, Identifiable, Sendable {
     public let isListed: Bool
     /// Only its members can join.
     public let isMembersOnly: Bool
-    /// How many people are in it now, and how many are members.
+    /// How many people are in it now, and how many hold a role in it
+    /// (owner, admin or member).
     public let presentCount: Int
     public let memberCount: Int
 
@@ -175,15 +158,6 @@ public struct AdminRoom: Hashable, Identifiable, Sendable {
         self.presentCount = presentCount
         self.memberCount = memberCount
     }
-
-    /// The room after `count` of the people in it were removed.
-    public func removingPresent(_ count: Int) -> AdminRoom {
-        AdminRoom(
-            jid: jid, name: name, description: description, kind: kind,
-            isListed: isListed, isMembersOnly: isMembersOnly,
-            presentCount: max(0, presentCount - count), memberCount: memberCount
-        )
-    }
 }
 
 /// What to make a room as, or change it to, as the server would take it.
@@ -197,8 +171,7 @@ public struct AdminRoomDraft: Hashable, Sendable {
     public let space: AdminSpace?
 
     /// Nil when the name, trimmed, is blank or too long (the limit is the
-    /// one for a space). A room that is not listed is for members only:
-    /// otherwise anyone who guessed its address could join.
+    /// one for a space).
     public init?(
         name: String, description: String, kind: AdminRoomKind,
         isListed: Bool, isMembersOnly: Bool, space: AdminSpace?
@@ -210,19 +183,20 @@ public struct AdminRoomDraft: Hashable, Sendable {
         self.description = description.isEmpty ? nil : description
         self.kind = kind
         self.isListed = isListed
-        self.isMembersOnly = isMembersOnly || !isListed
+        self.isMembersOnly = isMembersOnly
         self.space = space
     }
 }
 
-/// Someone in a room right now.
+/// Someone in a room right now, under the name they use there. One person
+/// can be in a room twice, from two devices, under two names.
 public struct AdminRoomOccupant: Hashable, Identifiable, Sendable {
     public let jid: BareJID
     public let nick: String
     public let role: RoomRole
     public let affiliation: RoomAffiliation
 
-    public var id: BareJID { jid }
+    public var id: String { nick }
 
     public init(jid: BareJID, nick: String, role: RoomRole, affiliation: RoomAffiliation) {
         self.jid = jid

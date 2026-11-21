@@ -42,7 +42,7 @@ struct AdminRoleRow<Role: Hashable>: View {
             }
             .fixedSize()
             .disabled(isChanging)
-            .accessibilityLabel(Text("Role of \(address)"))
+            .accessibilityLabel(Text(note.map { "Role of \(address), \($0)" } ?? "Role of \(address)"))
             .accessibilityValue(Text(title(role)))
         }
     }

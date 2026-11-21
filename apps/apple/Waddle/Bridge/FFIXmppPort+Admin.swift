@@ -116,11 +116,12 @@ extension FFIXmppPort {
                     jid: $0,
                     name: entry.name,
                     description: Self.nonEmpty(entry.topic),
-                    kind: AdminRoomKind(wire: entry.channelType),
+                    kind: Self.roomKind(entry.channelType),
                     isListed: entry.isPublic,
                     isMembersOnly: entry.membersOnly,
                     presentCount: Int(entry.occupantCount),
-                    memberCount: Int(entry.memberCount)
+                    // The server counts each role apart.
+                    memberCount: Int(entry.ownerCount + entry.adminCount + entry.memberCount)
                 )
             }
         }
@@ -130,7 +131,7 @@ extension FFIXmppPort {
     func createAdminRoom(_ draft: AdminRoomDraft) async throws {
         _ = try await mappingPortErrors {
             try await client.adminChannelsCreate(args: WaddleAdminChannelsCreateArgs(
-                name: draft.name, topic: draft.description, channelType: draft.kind.wire,
+                name: draft.name, topic: draft.description, channelType: Self.wire(draft.kind),
                 spaceJid: draft.space?.service.description, spaceNode: draft.space?.node,
                 isPublic: draft.isListed, membersOnly: draft.isMembersOnly
             ))
@@ -144,7 +145,7 @@ extension FFIXmppPort {
         let updated = try await mappingPortErrors {
             try await client.adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs(
                 channelJid: room.jid.description, name: draft.name, topic: draft.description,
-                channelType: draft.kind.canBeChosen ? draft.kind.wire : nil,
+                channelType: Self.wire(draft.kind),
                 isPublic: draft.isListed, membersOnly: draft.isMembersOnly
             ))
         }
@@ -152,7 +153,7 @@ extension FFIXmppPort {
             jid: room.jid,
             name: updated.name,
             description: Self.nonEmpty(updated.topic),
-            kind: AdminRoomKind(wire: updated.channelType),
+            kind: Self.roomKind(updated.channelType),
             isListed: updated.isPublic,
             isMembersOnly: updated.membersOnly,
             presentCount: room.presentCount,
@@ -166,7 +167,9 @@ extension FFIXmppPort {
         }
     }
 
-    /// Someone whose address does not parse is skipped, not fatal.
+    /// The server names each person by the address of the device they are
+    /// in the room from. Someone whose address does not parse is skipped,
+    /// not fatal.
     func adminRoomOccupants(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomOccupant> {
         let page = try await mappingAdminErrors {
             try await client.adminChannelsOccupants(args: WaddleAdminChannelsOccupantsArgs(
@@ -174,7 +177,7 @@ extension FFIXmppPort {
             ))
         }
         let occupants = page.entries.compactMap { entry in
-            FFIInbound.bareJID(entry.realJid).map {
+            Self.person(entry.realJid).map {
                 AdminRoomOccupant(
                     jid: $0, nick: entry.nick,
                     role: FFIInbound.roomRole(entry.role),
@@ -223,6 +226,31 @@ extension FFIXmppPort {
         return AdminRoomMember(
             jid: member, affiliation: FFIInbound.roomAffiliation(result.affiliation), reason: nil
         )
+    }
+
+    /// The person behind an address, with or without a device part.
+    static func person(_ address: String) -> BareJID? {
+        FFIInbound.jid(address)?.bare ?? FFIInbound.bareJID(address)
+    }
+
+    static func roomKind(_ wire: String) -> AdminRoomKind {
+        switch wire {
+        case "text", "": .text
+        case "announcement": .announcement
+        case "forum": .forum
+        default: .other
+        }
+    }
+
+    /// Nil for a kind the console does not make: the server refuses any
+    /// it does not know, and leaves the kind as it is when none is sent.
+    static func wire(_ kind: AdminRoomKind) -> String? {
+        switch kind {
+        case .text: "text"
+        case .announcement: "announcement"
+        case .forum: "forum"
+        case .other: nil
+        }
     }
 
     /// The server sends an empty string for a description a space lacks.

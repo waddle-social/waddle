@@ -16,7 +16,8 @@ struct AdminRoomsPanel: View {
 
 /// How the console words a room.
 enum AdminRoomCopy {
-    /// "4 here · 9 members".
+    /// "4 here · 9 members". Members are everyone with a role: owners
+    /// and admins too.
     static func counts(present: Int, members: Int) -> String {
         "\(present) here · \(members) \(members == 1 ? "member" : "members")"
     }
@@ -26,7 +27,6 @@ enum AdminRoomCopy {
         case .text: "Text"
         case .announcement: "Announcements"
         case .forum: "Forum"
-        case .other("group_dm"): "Group chat"
         case .other: "Other"
         }
     }
