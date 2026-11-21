@@ -76,7 +76,7 @@ struct AdminRoomSheet: View {
             } else if spaces == nil {
                 let spaces = session.adminSpacesList()
                 self.spaces = spaces
-                await Self.loadEvery(spaces)
+                await spaces.loadEveryPage()
             }
         }
         .confirmationDialog(
@@ -206,17 +206,9 @@ struct AdminRoomSheet: View {
         }
     }
 
-    /// Every space can be chosen, not only the first page. A page that
-    /// fails stops the loading; trying again starts over.
-    private static func loadEvery(_ spaces: AdminList<AdminSpace>) async {
-        await spaces.reload()
-        while spaces.hasMore, spaces.moreFailure == nil, !Task.isCancelled {
-            await spaces.loadMore()
-        }
-    }
-
-    /// The space a new room goes in. Create waits until the spaces have
-    /// loaded or failed, so a room is not made outside a space by accident.
+    /// The space a new room goes in, from every space, not only the first
+    /// page. Create waits until the spaces have loaded or failed, so a
+    /// room is not made outside a space by accident.
     @ViewBuilder
     private var spacePicker: some View {
         if let spaces, spacesAreSettled {
@@ -230,7 +222,7 @@ struct AdminRoomSheet: View {
             }
             if spaces.failure != nil || spaces.moreFailure != nil {
                 LabeledContent(spaces.rows.isEmpty ? "Spaces didn't load" : "Some spaces didn't load") {
-                    Button("Try again") { Task { await Self.loadEvery(spaces) } }
+                    Button("Try again") { Task { await spaces.loadEveryPage() } }
                 }
             }
         } else {
@@ -242,7 +234,7 @@ struct AdminRoomSheet: View {
     /// on its way.
     private var spacesAreSettled: Bool {
         guard let spaces, !spaces.isLoading, !spaces.isLoadingMore else { return false }
-        return spaces.failure != nil || spaces.moreFailure != nil || (spaces.hasLoaded && !spaces.hasMore)
+        return spaces.failure != nil || spaces.moreFailure != nil || spaces.isComplete
     }
 
     private var draft: AdminRoomDraft? {

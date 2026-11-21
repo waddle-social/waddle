@@ -136,6 +136,17 @@ final class AdminSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
     }
 
+    /// Rooms narrowed to one space, with the space chosen beside the title.
+    func testRoomsInSpace() async throws {
+        let sample = SampleSession()
+        sample.port.admin.spaces[.init()] = .success(AdminPage(rows: [Self.design], nextCursor: nil))
+        sample.port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [Self.lounge], nextCursor: nil))
+        let console = AdminConsole(session: sample.coordinator)
+        console.roomsSpace = Self.design
+        let view = NavigationStack { AdminView(section: .rooms, console: console) }
+        try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
+    }
+
     /// An open room: its settings, who is there, roles, and deleting it.
     func testRoom() async throws {
         let sample = SampleSession()

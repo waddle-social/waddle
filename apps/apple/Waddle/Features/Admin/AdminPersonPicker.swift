@@ -91,7 +91,7 @@ struct AdminPersonPicker<Role: Hashable>: View {
     }
 
     private func emptyText(_ users: AdminList<AdminUser>) -> String {
-        users.query.isEmpty ? "No users yet." : AdminListCopy.users.noMatches(users.query)
+        users.query.isEmpty ? "No users yet." : AdminListCopy.users.noMatches(users.query, nil)
     }
 
     /// As the console's users list: after a pause in typing, at once for

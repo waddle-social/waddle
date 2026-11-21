@@ -1,18 +1,21 @@
 import Foundation
 import Observation
 
-/// One list of the admin console: searched by the start of a name and
-/// loaded a page at a time.
+/// One list of the admin console: searched by the start of a name,
+/// narrowed to a space where the list allows it, and loaded a page at a
+/// time.
 @MainActor
 @Observable
 public final class AdminList<Row: Identifiable & Sendable> {
-    typealias Fetch = @MainActor (_ prefix: String?, _ cursor: String?) async throws -> AdminPage<Row>
+    typealias Fetch = @MainActor (_ prefix: String?, _ space: AdminSpace?, _ cursor: String?) async throws -> AdminPage<Row>
 
     public private(set) var rows: [Row] = []
     public private(set) var isLoading = false
     public private(set) var isLoadingMore = false
     /// The text the rows, or the lack of them, answer.
     public private(set) var query = ""
+    /// The space the rows, or the lack of them, answer; nil for all.
+    public private(set) var space: AdminSpace?
     /// The server has answered `query`.
     public private(set) var hasLoaded = false
     /// Why the last search or refresh failed; `rejected` when the account
@@ -21,10 +24,12 @@ public final class AdminList<Row: Identifiable & Sendable> {
     /// Why the last "load more" failed.
     public private(set) var moreFailure: PortError?
     public var hasMore: Bool { cursor != nil }
+    /// Every page of the last search is shown.
+    public var isComplete: Bool { hasLoaded && failure == nil && !hasMore }
 
     @ObservationIgnored private let fetch: Fetch
-    /// The text last asked for, answered or not.
-    @ObservationIgnored private var requested = ""
+    /// The text and space last asked for, answered or not.
+    @ObservationIgnored private var requested: (text: String, space: AdminSpace?) = ("", nil)
     @ObservationIgnored private var cursor: String?
     /// Counts searches; an answer to an earlier one is dropped.
     @ObservationIgnored private var serial = 0
@@ -35,19 +40,20 @@ public final class AdminList<Row: Identifiable & Sendable> {
         self.fetch = fetch
     }
 
-    /// Shows the first page of what starts with `text`; everything when it
-    /// is blank. A refresh that fails keeps the rows shown; a search for
-    /// other text that fails shows none, since they answered other text.
-    /// A search whose task was cancelled changes nothing.
-    public func load(matching text: String = "") async {
+    /// Shows the first page of what starts with `text`, in `space`;
+    /// everything when the text is blank and there is no space. A refresh
+    /// that fails keeps the rows shown; a search for other text or another
+    /// space that fails shows none, since they answered another search. A
+    /// search whose task was cancelled changes nothing.
+    public func load(matching text: String = "", in space: AdminSpace? = nil) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         serial += 1
         let search = serial
-        requested = text
+        requested = (text, space)
         isLoading = true
         isLoadingMore = false
         moreFailure = nil
-        let result = await Self.attempt { try await self.fetch(text.isEmpty ? nil : text, nil) }
+        let result = await Self.attempt { try await self.fetch(text.isEmpty ? nil : text, space, nil) }
         guard search == serial else { return }
         isLoading = false
         let changes = changesSinceAsking
@@ -60,7 +66,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
             hasLoaded = true
             failure = nil
         case let .failure(error):
-            if text != query {
+            if text != query || space?.id != self.space?.id {
                 rows = []
                 cursor = nil
                 hasLoaded = false
@@ -68,11 +74,22 @@ public final class AdminList<Row: Identifiable & Sendable> {
             failure = error
         }
         query = text
+        self.space = space
     }
 
-    /// Asks again for the text last searched for, answered yet or not.
+    /// Asks again for the text and space last searched for, answered yet
+    /// or not.
     public func reload() async {
-        await load(matching: requested)
+        await load(matching: requested.text, in: requested.space)
+    }
+
+    /// Asks again, then for every page after, for a picker that offers
+    /// them all. A page that fails stops it; asking again starts over.
+    public func loadEveryPage() async {
+        await reload()
+        while hasMore, moreFailure == nil, !Task.isCancelled {
+            await loadMore()
+        }
     }
 
     /// Adds the next page, if there is one and it is not on its way.
@@ -81,7 +98,9 @@ public final class AdminList<Row: Identifiable & Sendable> {
         let search = serial
         isLoadingMore = true
         moreFailure = nil
-        let result = await Self.attempt { try await self.fetch(self.query.isEmpty ? nil : self.query, cursor) }
+        let result = await Self.attempt {
+            try await self.fetch(self.query.isEmpty ? nil : self.query, self.space, cursor)
+        }
         guard search == serial else { return }
         isLoadingMore = false
         let changes = changesSinceAsking

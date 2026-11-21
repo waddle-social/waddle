@@ -5,10 +5,11 @@ import WaddleKit
 @MainActor
 final class FakeAdmin {
     /// A page asked for. Members are asked for by their space's `node`, in
-    /// `prefix`.
+    /// `prefix`; rooms narrowed to a space by its `node`, in `space`.
     struct PageRequest: Hashable {
         var prefix: String?
         var cursor: String?
+        var space: String?
     }
 
     enum SpaceWrite: Equatable {
@@ -30,6 +31,9 @@ final class FakeAdmin {
     /// Who is in a room and its roles are asked for by the name part of
     /// its address, in `prefix`.
     var rooms: [PageRequest: Result<AdminPage<AdminRoom>, PortError>] = [:]
+    var roomsRequests: [PageRequest] = []
+    /// A held request answers with what was scripted when it began.
+    let roomsFetches = HeldCalls()
     var occupants: [PageRequest: Result<AdminPage<AdminRoomOccupant>, PortError>] = [:]
     var roomMembers: [PageRequest: Result<AdminPage<AdminRoomMember>, PortError>] = [:]
     var roomWrites: [RoomWrite] = []
@@ -102,8 +106,12 @@ extension FakePort {
         return AdminSpaceMember(jid: member, role: role)
     }
 
-    func adminRooms(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
-        try admin.page(admin.rooms, prefix, cursor)
+    func adminRooms(matching prefix: String?, in space: AdminSpace?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
+        let request = FakeAdmin.PageRequest(prefix: prefix, cursor: cursor, space: space?.node)
+        admin.roomsRequests.append(request)
+        let answer = admin.rooms[request] ?? .success(AdminPage(rows: [], nextCursor: nil))
+        await admin.roomsFetches.wait()
+        return try answer.get()
     }
 
     func createAdminRoom(_ draft: AdminRoomDraft) async throws {

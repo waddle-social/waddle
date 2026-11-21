@@ -20,6 +20,11 @@ final class AdminListNoticeTests: XCTestCase {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: true, failure: nil, query: "ada"), .noMatches)
     }
 
+    /// Rooms narrowed to a space have none there, not none at all.
+    func testAListNarrowedToASpaceHasNoMatchesThere() {
+        XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: true, failure: nil, query: "", isInSpace: true), .noMatches)
+    }
+
     func testSomeoneWhoIsNotAnOwnerIsToldSo() {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: false, failure: .rejected, query: ""), .notAllowed)
     }
@@ -165,6 +170,13 @@ final class AdminRoomCopyTests: XCTestCase {
             AdminRoomCopy.tags(for: room(kind: .other, isListed: true, isMembersOnly: true)),
             ["Other", "Members only"]
         )
+    }
+
+    func testNoMatchesNamesTheTextAndTheSpace() {
+        let noMatches = AdminListCopy.rooms.noMatches
+        XCTAssertEqual(noMatches("lo", nil), "No room's name starts with “lo”.")
+        XCTAssertEqual(noMatches("", "Design"), "No rooms in Design yet.")
+        XCTAssertEqual(noMatches("lo", "Design"), "No room in Design has a name that starts with “lo”.")
     }
 
     func testRolesAreNamedWithoutProtocolWords() {

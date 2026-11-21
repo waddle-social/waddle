@@ -85,6 +85,99 @@ struct AdminRoomsTests {
         #expect(list.rows == [board])
     }
 
+    // MARK: Narrowed to a space
+
+    private let design = AdminSpace(
+        service: bare("spaces.waddle.test"), node: "design", name: "Design",
+        description: nil, roomCount: 1, memberCount: 2
+    )
+
+    @Test func theRoomsOfASpaceAreAskedForByTheSpace() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: "next"))
+        port.admin.rooms[.init(cursor: "next", space: "design")] = .success(AdminPage(rows: [board], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+
+        await list.load(in: design)
+        await list.loadMore()
+        await list.reload()
+
+        #expect(list.rows == [lounge])
+        #expect(list.space == design)
+        #expect(port.admin.roomsRequests == [
+            .init(space: "design"), .init(cursor: "next", space: "design"), .init(space: "design"),
+        ])
+    }
+
+    /// Choosing another space while one is on its way shows the one
+    /// chosen last.
+    @Test func aSlowerAnswerForTheSpaceBeforeIsDropped() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        port.admin.rooms[.init()] = .success(AdminPage(rows: [board], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+        port.admin.roomsFetches.isHolding = true
+        let first = Task { await list.load(in: design) }
+        await eventually { port.admin.roomsFetches.count == 1 }
+        port.admin.roomsFetches.isHolding = false
+
+        await list.load()
+        port.admin.roomsFetches.release()
+        await first.value
+
+        #expect(list.rows == [board])
+        #expect(list.space == nil)
+        #expect(!list.isLoading)
+    }
+
+    /// Rooms of every space are not an answer for one space.
+    @Test func aSpaceThatFailsShowsNoRoomsFromBefore() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init()] = .success(AdminPage(rows: [lounge, board], nextCursor: nil))
+        port.admin.rooms[.init(space: "design")] = .failure(.timeout)
+        let list = coordinator.adminRoomsList()
+        await list.load()
+
+        await list.load(in: design)
+
+        #expect(list.rows.isEmpty)
+        #expect(!list.hasLoaded)
+        #expect(list.space == design)
+        #expect(list.failure == .timeout)
+    }
+
+    @Test func aSpaceAndTextAreAskedForTogether() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init(prefix: "l", space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+
+        await list.load(matching: "l", in: design)
+
+        #expect(list.rows == [lounge])
+        #expect(list.query == "l")
+    }
+
+    /// The spaces for a picker: every page, stopping at one that fails.
+    @Test func everyPageCanBeLoaded() async {
+        let (coordinator, port) = online()
+        let ops = AdminSpace(service: design.service, node: "ops", name: "Ops", description: nil, roomCount: 0, memberCount: 0)
+        port.admin.spaces[.init()] = .success(AdminPage(rows: [design], nextCursor: "next"))
+        port.admin.spaces[.init(cursor: "next")] = .success(AdminPage(rows: [ops], nextCursor: nil))
+        let list = coordinator.adminSpacesList()
+        #expect(!list.isComplete)
+
+        await list.loadEveryPage()
+
+        #expect(list.rows == [design, ops])
+        #expect(list.isComplete)
+
+        port.admin.spaces[.init(cursor: "next")] = .failure(.timeout)
+        await list.loadEveryPage()
+        #expect(list.rows == [design])
+        #expect(!list.isComplete)
+        #expect(list.moreFailure == .timeout)
+    }
+
     // MARK: Making, changing, deleting
 
     @Test func creatingARoomSendsItsDraftAndLooksAtTheDirectoryAgain() async throws {

@@ -281,8 +281,9 @@ public protocol AdminPort: AnyObject, Sendable {
     /// Answers with the member and the role the server gave them.
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember
 
-    /// One page of every room, by name, as for `adminUsers`.
-    func adminRooms(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminRoom>
+    /// One page of every room, by name, as for `adminUsers`; only those of
+    /// `space` when there is one.
+    func adminRooms(matching prefix: String?, in space: AdminSpace?, after cursor: String?) async throws -> AdminPage<AdminRoom>
 
     func createAdminRoom(_ draft: AdminRoomDraft) async throws
 

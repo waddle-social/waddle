@@ -108,10 +108,11 @@ extension FFIXmppPort {
     // MARK: Rooms
 
     /// A room whose address does not parse is skipped, not fatal.
-    func adminRooms(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
+    func adminRooms(matching prefix: String?, in space: AdminSpace?, after cursor: String?) async throws -> AdminPage<AdminRoom> {
         let page = try await mappingAdminErrors {
             try await client.adminChannelsList(args: WaddleAdminChannelsListArgs(
-                spaceJid: nil, spaceNode: nil, prefix: prefix, pageSize: Self.adminPageSize, afterCursor: cursor
+                spaceJid: space?.service.description, spaceNode: space?.node,
+                prefix: prefix, pageSize: Self.adminPageSize, afterCursor: cursor
             ))
         }
         let rooms = page.entries.compactMap { entry in
