@@ -83,6 +83,21 @@ final class AdminErrorTests: XCTestCase {
         XCTAssertEqual(AdminRoomSheet.PendingAction.removeRole(member).title, "Remove role?")
     }
 
+    /// A role can be given again from the console, so neither removal
+    /// says it cannot.
+    func testARemovalSaysWhatItEnds() {
+        let member = AdminRoomMember(jid: bare("jo@waddle.test"), affiliation: .member, reason: nil)
+        let occupant = AdminRoomOccupant(jid: bare("jo@waddle.test"), nick: "jo", role: .participant, affiliation: .member)
+        XCTAssertEqual(
+            AdminRoomSheet.PendingAction.removeRole(member).message(roomName: "Lounge"),
+            "jo@waddle.test will have no role in Lounge."
+        )
+        XCTAssertEqual(
+            AdminRoomSheet.PendingAction.removeMember(occupant).message(roomName: "Lounge"),
+            "Lounge is for members only, so jo also stops being a member and can't come back until they're made one again."
+        )
+    }
+
     /// Only the server's `not-allowed` says a role was refused: owner and
     /// admin go only to accounts here and on trusted servers.
     func testOnlyNotAllowedMeansARoleWasRefused() {

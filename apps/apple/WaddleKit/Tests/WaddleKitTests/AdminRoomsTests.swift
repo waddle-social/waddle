@@ -207,4 +207,18 @@ struct AdminRoomsTests {
         #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .outcast)])
         #expect(changed == AdminRoomMember(jid: bo, affiliation: .outcast, reason: nil))
     }
+
+    /// Someone who had no role is listed first once given one.
+    @Test func someoneGivenARoleIsListedFirst() async throws {
+        let (coordinator, port) = online()
+        let owner = AdminRoomMember(jid: ada, affiliation: .owner, reason: nil)
+        port.admin.roomMembers[.init(prefix: "lounge")] = .success(AdminPage(rows: [owner], nextCursor: nil))
+        let list = coordinator.adminRoomMembersList(of: lounge)
+        await list.load()
+
+        list.add(try await coordinator.setAdminRoomAffiliation(.member, of: bo, in: lounge))
+
+        #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .member)])
+        #expect(list.rows == [AdminRoomMember(jid: bo, affiliation: .member, reason: nil), owner])
+    }
 }
