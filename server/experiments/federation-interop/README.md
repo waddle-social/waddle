@@ -86,12 +86,16 @@ To extend the outbound chord row through the built chat UI, set
 `firefox-chord-space.py` or a launcher for it. The native fixture supplies
 the Space service, node and child room as three arguments and stays alive
 while the probe runs. The probe reads `INTEROP_CHORD_BROWSER_CONFIG`, a
-private JSON fixture containing the built chat directory (`chat`), local
-Worker origin (`chat_origin`), Waddle HTTPS endpoint (`home`), disposable
-Colony origin and test session cookie (`issuer`, `issuer_cookie`), the
-matrix's `pki/test-ca.pem` (`ca`), and paths to `certutil` and `firefox`.
-Configure the fixture home with that issuer and chat origin. Two temporary
-Firefox profiles authenticate through Waddle's OIDC flow.
+private JSON fixture containing the local HTTP Worker origin (`chat_origin`),
+the Waddle HTTPS endpoint (`home`), the disposable local HTTP Colony origin
+(`issuer`), the test session cookie (`issuer_cookie`) and the PEM certificate
+contents from the matrix's `pki/test-ca.pem` (`ca_pem`). Use `127.0.0.1` or
+`localhost` with an explicit port for both HTTP origins and `home-a.test` or
+`home-b.test` for the Waddle endpoint. Build `chat` in the probe's checkout
+and put `node`, `certutil`, and `firefox` on the launcher's PATH. A wrapper can
+set PATH before executing the probe. Configure the fixture home with the
+fixture issuer and chat origin. Two temporary Firefox profiles authenticate
+through Waddle's OIDC flow.
 
 ## Environment
 

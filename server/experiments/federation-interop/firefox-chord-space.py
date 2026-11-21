@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Follow a real ejabberd Space and verify fresh-profile restoration in Firefox."""
 
-import http.client
+import base64
 import json
 import os
 import socket
@@ -19,16 +19,47 @@ def free_port():
         return reservation.getsockname()[1]
 
 
-def worker_ready(port: int) -> bool:
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+def stop_process(process):
+    if process.poll() is None:
+        process.terminate()
     try:
-        connection.request("GET", "/")
-        with connection.getresponse() as response:
-            return response.status == 200
-    except (OSError, http.client.HTTPException):
-        return False
-    finally:
-        connection.close()
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def wait_for_worker(worker, log, port: int):
+    expected = f"[wrangler:info] Ready on http://127.0.0.1:{port}".encode()
+    deadline = time.monotonic() + 20
+    offset = 0
+    pending = b""
+    while time.monotonic() < deadline:
+        if worker.poll() is not None:
+            raise RuntimeError("Waddle Worker exited")
+        chunk = os.pread(log.fileno(), 8192, offset)
+        offset += len(chunk)
+        *lines, pending = (pending + chunk).split(b"\n")
+        if expected in lines:
+            return
+        if len(pending) > 8192:
+            raise RuntimeError("unexpected Waddle Worker output")
+        if not chunk:
+            time.sleep(0.25)
+    raise RuntimeError("Waddle Worker did not report readiness")
+
+
+def fixture_ca_der(pem):
+    if len(pem) > 16384:
+        raise ValueError("fixture CA certificate is too large")
+    lines = pem.strip().splitlines()
+    if (
+        len(lines) < 3
+        or lines[0] != "-----BEGIN CERTIFICATE-----"
+        or lines[-1] != "-----END CERTIFICATE-----"
+    ):
+        raise ValueError("expected one fixture CA PEM certificate")
+    return base64.b64decode("".join(lines[1:-1]), validate=True)
 
 
 def fixture_origin(value, scheme, hosts, require_port=False):
@@ -52,15 +83,18 @@ def fixture_origin(value, scheme, hosts, require_port=False):
 
 
 def run_profile(config, service, node, room, restore):
-    chat = Path(config["chat"]).resolve()
+    chat = Path(__file__).resolve().parents[3] / "chat"
     home, home_domain, _ = fixture_origin(
         config["home"], "https", {"home-a.test", "home-b.test"}
     )
-    issuer = config["issuer"]
+    local_hosts = {"127.0.0.1", "localhost"}
+    issuer, issuer_host, issuer_port = fixture_origin(
+        config["issuer"], "http", local_hosts, require_port=True
+    )
     issuer_cookie = config["issuer_cookie"]
-    ca = config["ca"]
+    ca = fixture_ca_der(config["ca_pem"])
     origin, _, origin_port = fixture_origin(
-        config["chat_origin"], "http", {"127.0.0.1", "localhost"}, require_port=True
+        config["chat_origin"], "http", local_hosts, require_port=True
     )
     built_config = chat / "dist/server/wrangler.json"
     worker_config = json.loads(built_config.read_text())
@@ -69,6 +103,7 @@ def run_profile(config, service, node, room, restore):
     # Wrangler resolves build output and asset paths relative to its config.
     with (
         tempfile.TemporaryDirectory(prefix="waddle-firefox-") as profile,
+        tempfile.TemporaryFile() as worker_log,
         tempfile.NamedTemporaryFile(
             mode="w", dir=built_config.parent, prefix="interop-", suffix=".json"
         ) as local_config,
@@ -83,34 +118,28 @@ def run_profile(config, service, node, room, restore):
                 "--config",
                 local_config.name,
                 "--local",
+                "--show-interactive-dev-session=false",
             ],
             cwd=chat,
             env={**os.environ, "WRANGLER_SEND_METRICS": "false"},
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=worker_log,
+            stderr=subprocess.STDOUT,
         )
         try:
-            for _ in range(80):
-                if worker_ready(origin_port):
-                    break
-                if worker.poll() is not None:
-                    raise RuntimeError("Waddle Worker exited")
-                time.sleep(0.25)
-            else:
-                raise RuntimeError("Waddle Worker did not respond")
+            wait_for_worker(worker, worker_log, origin_port)
             port = free_port()
             Path(profile, "user.js").write_text(
                 f'user_pref("marionette.port", {port});\n'
                 f'user_pref("network.dns.localDomains", {json.dumps(home_domain)});\n'
                 'user_pref("network.trr.mode", 5);\n'
+                'user_pref("network.proxy.type", 0);\n'
             )
-            certutil = config["certutil"]
             subprocess.run(
-                [certutil, "-N", "--empty-password", "-d", f"sql:{profile}"], check=True
+                ["certutil", "-N", "--empty-password", "-d", f"sql:{profile}"], check=True
             )
             subprocess.run(
                 [
-                    certutil,
+                    "certutil",
                     "-A",
                     "-d",
                     f"sql:{profile}",
@@ -118,14 +147,13 @@ def run_profile(config, service, node, room, restore):
                     "Waddle fixture CA",
                     "-t",
                     "C,,",
-                    "-i",
-                    ca,
                 ],
+                input=ca,
                 check=True,
             )
             browser = subprocess.Popen(
                 [
-                    config["firefox"],
+                    "firefox",
                     "--headless",
                     "--no-remote",
                     "--profile",
@@ -136,7 +164,7 @@ def run_profile(config, service, node, room, restore):
                 stderr=subprocess.DEVNULL,
             )
             try:
-                for attempt in range(50):
+                for _ in range(50):
                     try:
                         connection = socket.create_connection(
                             ("127.0.0.1", port), timeout=5
@@ -166,8 +194,18 @@ def run_profile(config, service, node, room, restore):
                 assert receive()["applicationType"] == "gecko"
                 call(1, "WebDriver:NewSession", {"capabilities": {}})
                 call(2, "WebDriver:Navigate", {"url": issuer + "/sign-in"})
+                current = call(3, "WebDriver:GetCurrentURL", {})["value"]
+                location = urllib.parse.urlsplit(current)
+                if (
+                    location.scheme != "http"
+                    or location.hostname != issuer_host
+                    or (location.port or 80) != issuer_port
+                    or location.username is not None
+                    or location.password is not None
+                ):
+                    raise RuntimeError("disposable Colony sign-in left the fixture origin")
                 call(
-                    3,
+                    4,
                     "WebDriver:AddCookie",
                     {
                         "cookie": {
@@ -178,8 +216,8 @@ def run_profile(config, service, node, room, restore):
                         }
                     },
                 )
-                call(4, "WebDriver:Navigate", {"url": origin + "/rooms"})
-                command = 4
+                call(5, "WebDriver:Navigate", {"url": origin + "/rooms"})
+                command = 5
 
                 def execute(script, args=None):
                     nonlocal command
@@ -294,12 +332,10 @@ def run_profile(config, service, node, room, restore):
                         "PASS: Firefox followed the chord-created ejabberd Space and joined its listed room."
                     )
             finally:
-                browser.terminate()
-                browser.wait(timeout=15)
+                stop_process(browser)
 
         finally:
-            worker.terminate()
-            worker.wait(timeout=15)
+            stop_process(worker)
 
 
 if __name__ == "__main__":
