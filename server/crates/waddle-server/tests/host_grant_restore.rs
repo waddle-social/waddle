@@ -989,7 +989,7 @@ async fn configure_and_delete_space_preserves_room_scope() {
         .expect("read durable audience")
         .expect("the committed deletion");
     assert_eq!(audience.record, deleted);
-    assert_eq!(audience.local, [preference.clone()]);
+    assert_eq!(audience.local.as_slice(), std::slice::from_ref(&preference));
     let [remote] = audience.remote.as_slice() else {
         panic!("only the eligible remote preference is captured");
     };
@@ -2158,8 +2158,9 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         subscriptions
             .of_scope(&key, lifecycle)
             .await
-            .expect("live preferences"),
-        [local.clone()]
+            .expect("live preferences")
+            .as_slice(),
+        std::slice::from_ref(&local)
     );
 
     let publish = SpaceBookmarkChange {
@@ -2178,7 +2179,10 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .write_space_bookmark(&publish, &fixture.policy)
         .await
         .expect("publish");
-    assert_eq!(original.local_audience, [local.clone()]);
+    assert_eq!(
+        original.local_audience.as_slice(),
+        std::slice::from_ref(&local)
+    );
     let late = subscriptions
         .record(
             &key,
@@ -2221,7 +2225,10 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         loaded.item.as_ref().and_then(|item| item.id.as_deref()),
         Some(publish.room.as_str())
     );
-    assert_eq!(loaded.local_audience, [local.clone()]);
+    assert_eq!(
+        loaded.local_audience.as_slice(),
+        std::slice::from_ref(&local)
+    );
     sqlx::query(
         "UPDATE host_grant_space_bookmark_versions SET published_at =
          pg_catalog.statement_timestamp() - INTERVAL '31 seconds' WHERE operation_token = $1",
