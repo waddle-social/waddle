@@ -339,6 +339,45 @@ async fn assert_quiet_barrier(client: &mut WsXmppClient, id: &str, who: &str) {
     );
 }
 
+/// Wait for both the XEP-0199 barrier pong and every already-available sibling
+/// resource's RFC 6121 §4.2.2 initial presence (in either order, since initial
+/// probes run asynchronously after initial presence) while rejecting any other
+/// unexpected stanzas.
+async fn await_available_with_siblings(
+    client: &mut WsXmppClient,
+    id: &str,
+    expected_siblings: &[&FullJid],
+    who: &str,
+) {
+    send(client, ping(server_jid(), id)).await;
+    let mut saw_barrier = false;
+    let mut remaining: Vec<Jid> = expected_siblings
+        .iter()
+        .map(|jid| Jid::from((*jid).clone()))
+        .collect();
+    while !saw_barrier || !remaining.is_empty() {
+        let frame = next_stanza(client, id).await;
+        if is_result_for(&frame, id) {
+            assert!(!saw_barrier, "{who}: duplicate barrier {id}");
+            saw_barrier = true;
+            continue;
+        }
+        let matching_pos = match &frame {
+            Frame::Presence(presence) if presence.type_ == PresenceType::None => remaining
+                .iter()
+                .position(|expected| presence.from.as_ref() == Some(expected)),
+            _ => None,
+        };
+        if let Some(pos) = matching_pos {
+            remaining.swap_remove(pos);
+            continue;
+        }
+        panic!(
+            "{who} must receive only expected sibling presence before/around barrier {id}: {frame:?}"
+        );
+    }
+}
+
 /// Shows that `client`'s stream is held: nothing arrives for [`HOLD_WINDOW`].
 async fn assert_held(client: &mut WsXmppClient, who: &str) {
     match next_frame(client, HOLD_WINDOW).await {
@@ -556,7 +595,7 @@ async fn full_jid_chat_reaches_only_that_resource_and_an_unbound_resource_falls_
     assert_quiet_barrier(&mut web, "web-available", "web").await;
     let (mut phone, phone_jid) = connect(&server, BOB, "phone").await;
     send(&mut phone, available_with_priority(1)).await;
-    assert_quiet_barrier(&mut phone, "phone-available", "phone").await;
+    await_available_with_siblings(&mut phone, "phone-available", &[&web_jid], "phone").await;
     let (mut alice, alice_jid) = connect(&server, ALICE, "desk").await;
 
     send(&mut alice, chat(phone_jid.clone(), "dm-to-phone")).await;
@@ -615,7 +654,7 @@ async fn bare_jid_chat_selects_highest_non_negative_priority_and_stores_when_all
     assert_quiet_barrier(&mut web, "web-available", "web").await;
     let (mut phone, phone_jid) = connect(&server, BOB, "phone").await;
     send(&mut phone, available_with_priority(1)).await;
-    assert_quiet_barrier(&mut phone, "phone-available", "phone").await;
+    await_available_with_siblings(&mut phone, "phone-available", &[&web_jid], "phone").await;
     let (mut alice, alice_jid) = connect(&server, ALICE, "desk").await;
 
     send(&mut alice, chat(bob.clone(), "dm-highest")).await;
