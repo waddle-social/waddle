@@ -22,14 +22,11 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.IdleAge
 import social.waddle.android.client.idleAgeOf
-import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.presenceShowsIdle
 import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.feature.conversation.ConversationKind
@@ -61,23 +58,8 @@ fun DmScreen(
         factory = DmViewModel.factory(graph, peerJid),
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
-    val peerBare = remember(peerJid) { normalizedBareJid(peerJid) }
-    val peerFlow = remember(graph.sessionManager, peerBare) {
-        graph.sessionManager.presenceStore.contacts
-            .map { contacts -> contacts[peerBare] }
-            .distinctUntilChanged()
-    }
-    val directoryShowFlow = remember(graph.sessionManager, peerBare) {
-        graph.sessionManager.peopleDirectory
-            .map { dir -> dir.people.firstOrNull { it.bareJid == peerBare }?.show }
-            .distinctUntilChanged()
-    }
-    val peer by peerFlow.collectAsStateWithLifecycle(
-        initialValue = graph.sessionManager.presenceStore.contacts.value[peerBare],
-    )
-    val directoryShow by directoryShowFlow.collectAsStateWithLifecycle(
-        initialValue = graph.sessionManager.peopleDirectory.value.people.firstOrNull { it.bareJid == peerBare }?.show,
-    )
+    val peer by viewModel.peerPresence.collectAsStateWithLifecycle()
+    val directoryShow by viewModel.peerDirectoryShow.collectAsStateWithLifecycle()
     // Same lookup as the DM list: the People directory (rooms and contacts,
     // most-available), then contact presence. Seen nowhere this stream is
     // unknown, not "offline": no dot and no presence word.

@@ -1,5 +1,5 @@
 use super::regular::show_name;
-use super::subscription::{parse_subscription_state, recipient_blocks_sender, roster_storage};
+use super::subscription::{blocking_storage, parse_subscription_state, roster_storage};
 use super::{
     build_available_presence, build_subscription_presence, build_unavailable_presence, info, warn,
     BareJid, FullJid, Jid, Stanza, SubscriptionStateMachine, SubscriptionType, WebSocketState,
@@ -15,18 +15,68 @@ pub(super) async fn handle_presence_probe(
     suppress_unavailable: bool,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
-    if recipient_blocks_sender(state, &to, &from).await {
-        info!(requester = %from, target = %to, "Blocked presence probe");
+    let blocking = blocking_storage(state);
+    let target_blocklist = match blocking.load_blocklist(&to).await {
+        Ok(blocklist) => blocklist,
+        Err(error) => {
+            warn!(
+                error = %error,
+                requester = %from,
+                target = %to,
+                "Failed to load target blocklist for presence probe; failing closed"
+            );
+            return;
+        }
+    };
+    let from_jid = from_full
+        .clone()
+        .map(Jid::from)
+        .unwrap_or_else(|| Jid::from(from.clone()));
+    if target_blocklist.contains_jid(&from_jid) {
+        info!(requester = %from_jid, target = %to, "Blocked presence probe");
         return;
     }
-    if from != to && recipient_blocks_sender(state, &from, &to).await {
-        info!(requester = %from, target = %to, "Suppressed presence probe for contact blocked by requester");
-        return;
-    }
+    let requester_blocklist = if from != to {
+        match blocking.load_blocklist(&from).await {
+            Ok(blocklist) => {
+                let to_jid = to_full
+                    .clone()
+                    .map(Jid::from)
+                    .unwrap_or_else(|| Jid::from(to.clone()));
+                if blocklist.contains_jid(&to_jid) {
+                    info!(
+                        requester = %from,
+                        target = %to_jid,
+                        "Suppressed presence probe for contact blocked by requester"
+                    );
+                    return;
+                }
+                Some(blocklist)
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    requester = %from,
+                    target = %to,
+                    "Failed to load requester blocklist for presence probe; failing closed"
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
     if !presence_probe_authorized(state, &from, &to).await {
         info!(requester = %from, target = %to, "Unauthorized presence probe");
         if !suppress_unavailable {
-            send_unsubscribed_probe_response(state, &to, &from, ordered_relay_origin).await;
+            send_unsubscribed_probe_response(
+                state,
+                &to,
+                &from,
+                &target_blocklist,
+                ordered_relay_origin,
+            )
+            .await;
         }
         return;
     }
@@ -52,6 +102,13 @@ pub(super) async fn handle_presence_probe(
         available.retain(|(resource, _)| resource == to_full);
         detached_available.retain(|state| state.resource == *to_full);
     }
+    if let Some(requester_blocklist) = &requester_blocklist {
+        available.retain(|(resource, _)| {
+            !requester_blocklist.contains_jid(&Jid::from(resource.clone()))
+        });
+        detached_available
+            .retain(|state| !requester_blocklist.contains_jid(&Jid::from(state.resource.clone())));
+    }
     detached_available.retain(|state| {
         !available
             .iter()
@@ -61,6 +118,11 @@ pub(super) async fn handle_presence_probe(
         if suppress_unavailable {
             return;
         }
+        let requester_resources = if from_full.is_some() {
+            None
+        } else {
+            Some(unblocked_requester_resources(state, &from, &target_blocklist).await)
+        };
         let unavailable = Stanza::Presence(if let Some(to_full) = &to_full {
             let mut presence =
                 xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
@@ -81,7 +143,7 @@ pub(super) async fn handle_presence_probe(
             state,
             &from,
             from_full.as_ref(),
-            None,
+            requester_resources.as_deref(),
             unavailable,
             ordered_relay_origin,
         )
@@ -91,10 +153,7 @@ pub(super) async fn handle_presence_probe(
     let requester_resources = if from_full.is_some() {
         None
     } else {
-        Some(
-            crate::server::routes::websocket::handlers::account_reads::resources(state, &from)
-                .await,
-        )
+        Some(unblocked_requester_resources(state, &from, &target_blocklist).await)
     };
     for detached in detached_available {
         let mut probe_response = build_available_presence(
@@ -214,10 +273,23 @@ async fn deliver_probe_reply(
     }
 }
 
+async fn unblocked_requester_resources(
+    state: &WebSocketState,
+    requester: &BareJid,
+    target_blocklist: &waddle_xmpp::protocol::Blocklist,
+) -> Vec<FullJid> {
+    let mut resources =
+        crate::server::routes::websocket::handlers::account_reads::resources(state, requester)
+            .await;
+    resources.retain(|resource| !target_blocklist.contains_jid(&Jid::from(resource.clone())));
+    resources
+}
+
 async fn send_unsubscribed_probe_response(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,
+    target_blocklist: &waddle_xmpp::protocol::Blocklist,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     let stanza = Stanza::Presence(build_subscription_presence(
@@ -237,9 +309,7 @@ async fn send_unsubscribed_probe_response(
     {
         return;
     }
-    for resource in
-        crate::server::routes::websocket::handlers::account_reads::resources(state, to).await
-    {
+    for resource in unblocked_requester_resources(state, to, target_blocklist).await {
         let _ = state
             .deps
             .protocol

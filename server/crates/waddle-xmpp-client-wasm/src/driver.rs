@@ -739,7 +739,13 @@ impl WasmDriverTask {
         }
     }
 
+    fn prune_closed_pending_iqs(&mut self) {
+        self.pending_iqs
+            .retain(|_, responder| !responder.is_canceled());
+    }
+
     fn cancel_iq_command(&mut self, id: &waddle_xmpp_client::request::StanzaId) {
+        self.prune_closed_pending_iqs();
         cancel_raw_iq_state(&mut self.pending_iqs, &mut self.deferred_commands, id);
     }
 
@@ -767,6 +773,10 @@ impl WasmDriverTask {
         stanza: Element,
         responder: oneshot::Sender<DriverResult<Element>>,
     ) -> bool {
+        self.prune_closed_pending_iqs();
+        if responder.is_canceled() {
+            return true;
+        }
         let id = stanza
             .attr("id")
             .and_then(|id| waddle_xmpp_client::request::StanzaId::try_new(id).ok());
@@ -776,7 +786,9 @@ impl WasmDriverTask {
         {
             Ok(()) => match id {
                 Some(id) => {
-                    self.pending_iqs.insert(id, responder);
+                    if !responder.is_canceled() {
+                        self.pending_iqs.insert(id, responder);
+                    }
                     true
                 }
                 None => {

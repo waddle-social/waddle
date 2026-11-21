@@ -1,6 +1,8 @@
 import Foundation
 
 extension SessionCoordinator {
+    static let maxConcurrentAutoJoins = 4
+
     /// Loads the account's contact list. A lookup that fails keeps the
     /// list already held (an older list is nearer the truth than none)
     /// and is recorded, so a screen can say so and offer to try again.
@@ -47,7 +49,6 @@ extension SessionCoordinator {
         let roomsToJoin = (listed + onDemandRooms.sorted(by: { $0.description < $1.description })).filter { room in
             seen.insert(room).inserted && (directory.isRoom(room) || onDemandRooms.contains(room))
         }
-        let maxConcurrentJoins = 4
         await withTaskGroup(of: Void.self) { group in
             var pending = roomsToJoin[...]
             func addNext() {
@@ -56,7 +57,7 @@ extension SessionCoordinator {
                     await self.join(room)
                 }
             }
-            for _ in 0..<maxConcurrentJoins { addNext() }
+            for _ in 0..<Self.maxConcurrentAutoJoins { addNext() }
             while await group.next() != nil {
                 guard !Task.isCancelled else {
                     group.cancelAll()
