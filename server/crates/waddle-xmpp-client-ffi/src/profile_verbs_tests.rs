@@ -24,9 +24,12 @@ use waddle_xmpp_client::pep::{
 };
 use waddle_xmpp_client::xep::xep0292::{parse_vcard4_element, NS_VCARD4};
 
+use waddle_xmpp_client::error::{StanzaError, StanzaErrorType};
+use waddle_xmpp_client::ClientError;
+
 use crate::profile_verbs::{
-    activity_from_core, mint_request_id, mood_from_core, publish_avatar_iqs,
-    require_activity_general, require_activity_specific, require_mood_kind,
+    activity_from_core, mint_request_id, mood_from_core, own_activity_from_lookup,
+    publish_avatar_iqs, require_activity_general, require_activity_specific, require_mood_kind,
     require_pep_element_name, tune_from_core, tune_is_empty, tune_to_core, vcard4_from_core,
     vcard4_to_core, WaddleTune, WaddleVCard4, GENERAL_ACTIVITIES, MOOD_KINDS,
 };
@@ -764,6 +767,82 @@ mod validation {
                 .fetch_user_pep_profile("juliet@waddle.test".to_string())
                 .await
                 .unwrap_err(),
+            WaddleError::NotConnected
+        );
+    }
+
+    // ── XEP-0108: the account's own activity, looked up strictly ──────
+
+    fn activity_lookup_reply(payload: &str) -> Element {
+        format!(
+            "<iq xmlns='jabber:client' type='result' id='a1'>\
+               <pubsub xmlns='{NS_PUBSUB}'><items node='{NS_ACTIVITY}'>{payload}</items></pubsub>\
+             </iq>"
+        )
+        .parse()
+        .expect("reply parses")
+    }
+
+    fn stanza_error(condition: &str) -> ClientError {
+        ClientError::StanzaError(StanzaError {
+            error_type: StanzaErrorType::Cancel,
+            condition: condition.to_owned(),
+            text: None,
+            application_condition: None,
+        })
+    }
+
+    #[test]
+    fn own_activity_lookup_returns_the_published_activity() {
+        let reply = activity_lookup_reply(&format!(
+            "<item id='current'><activity xmlns='{NS_ACTIVITY}'>\
+               <talking><on_the_phone/></talking></activity></item>"
+        ));
+        let activity = own_activity_from_lookup(Ok(reply))
+            .expect("lookup succeeded")
+            .expect("activity present");
+        assert_eq!(activity.general, "talking");
+        assert_eq!(activity.specific.as_deref(), Some("on_the_phone"));
+    }
+
+    #[test]
+    fn own_activity_lookup_confirms_none_for_a_retracted_or_unpublished_node() {
+        // XEP-0108: an empty <activity/> is the retracted state.
+        let retracted = activity_lookup_reply(&format!(
+            "<item id='current'><activity xmlns='{NS_ACTIVITY}'/></item>"
+        ));
+        assert!(own_activity_from_lookup(Ok(retracted)).unwrap().is_none());
+        assert!(own_activity_from_lookup(Ok(activity_lookup_reply("")))
+            .unwrap()
+            .is_none());
+        assert!(
+            own_activity_from_lookup(Err(stanza_error("item-not-found")))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A caller that must not overwrite an in-call activity needs a
+    /// failed lookup to be an error, never "no activity".
+    #[test]
+    fn own_activity_lookup_that_fails_is_an_error() {
+        assert_eq!(
+            own_activity_from_lookup(Err(ClientError::IqTimeout {
+                timeout: std::time::Duration::from_secs(30),
+            }))
+            .unwrap_err(),
+            WaddleError::Timeout
+        );
+        assert!(matches!(
+            own_activity_from_lookup(Err(stanza_error("forbidden"))).unwrap_err(),
+            WaddleError::Stanza { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_own_activity_requires_connection() {
+        assert_eq!(
+            offline_client().fetch_own_activity().await.unwrap_err(),
             WaddleError::NotConnected
         );
     }

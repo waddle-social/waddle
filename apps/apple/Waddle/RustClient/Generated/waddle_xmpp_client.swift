@@ -1214,6 +1214,17 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func disableAvatar() async throws
 
     /**
+     * XEP-0108: the activity the account publishes now, from its own
+     * PEP node. `Ok(None)` only when there is confirmed to be none;
+     * unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+     * (not connected, timeout, any stanza error but `item-not-found`)
+     * is an error. The node is account-wide and another device may be
+     * using it to show a call, so a caller checks this before it
+     * publishes or retracts.
+     */
+    func fetchOwnActivity() async throws  -> WaddleActivity?
+
+    /**
      * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
      * `fetch_user_pep_profile` parity): each node is queried with a
      * XEP-0060 items request, and per-node failures (absent node,
@@ -3570,6 +3581,32 @@ open func disableAvatar()async throws   {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0108: the activity the account publishes now, from its own
+     * PEP node. `Ok(None)` only when there is confirmed to be none;
+     * unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+     * (not connected, timeout, any stanza error but `item-not-found`)
+     * is an error. The node is account-wide and another device may be
+     * using it to show a call, so a caller checks this before it
+     * publishes or retracts.
+     */
+open func fetchOwnActivity()async throws  -> WaddleActivity?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_activity(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleActivity.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -22050,6 +22087,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_activity() != 10876) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile() != 55127) {

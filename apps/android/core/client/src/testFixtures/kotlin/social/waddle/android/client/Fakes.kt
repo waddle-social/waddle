@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.client.ffi.WaddleActivity
 import social.waddle.client.ffi.WaddleAdhocAction
 import social.waddle.client.ffi.WaddleAdhocStatus
 import social.waddle.client.ffi.WaddleAdminChannelRef
@@ -1342,6 +1343,8 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         fetchPepProfileCalls += jid
         return pepProfile
     }
+
+    override suspend fun fetchOwnActivity(): WaddleActivity? = pepProfile.activity
 
     override suspend fun publishVcard4(vcard: WaddleVCard4) {
         profileVerbStall()
