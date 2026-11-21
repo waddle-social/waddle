@@ -294,6 +294,16 @@ impl HostGrantAuthority {
         Ok(receipt)
     }
 
+    /// Record an owner configuration change and schedule journal witnessing.
+    pub async fn configure_space(
+        &self,
+        command: &super::ConfigureSpace,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let receipt = self.store.configure_space(command, &self.issuance).await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
+    }
+
     /// Close a scope for good, as [`HostGrantStore::retire_scope`] does,
     /// and witness the retirement after the commit. Owner phase only.
     pub async fn retire_scope(

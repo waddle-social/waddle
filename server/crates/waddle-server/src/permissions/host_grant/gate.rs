@@ -48,6 +48,7 @@ use std::time::Duration;
 
 use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::pubsub::Affiliation;
+use waddle_xmpp::stream_management::persistence::SmReplayPayload;
 use waddle_xmpp::stream_management::{
     ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency,
 };
@@ -156,7 +157,15 @@ impl LocalSpaceReplyGrant {
         &self.replay
     }
 
-    pub(crate) async fn hold_subscription(&self) -> Option<crate::db::Transaction<'_>> {
+    pub(crate) fn bookmark_has_payload(&self, payload: &SmReplayPayload) -> bool {
+        self.replay.bookmark_event().is_some()
+            && bookmark_item_has_payload(&payload.as_ref().to_element())
+    }
+
+    pub(crate) async fn hold_subscription(
+        &self,
+        has_bookmark_payload: bool,
+    ) -> Option<crate::db::Transaction<'_>> {
         let preference = self.preference.as_ref()?;
         tokio::time::timeout(ROOM_READ_DEADLINE, async {
             if let Some(event) = self.replay.bookmark_event() {
@@ -170,7 +179,12 @@ impl LocalSpaceReplyGrant {
                 };
                 preference
                     .store
-                    .hold_delivery(&preference.key, &preference.subscription, &version)
+                    .hold_delivery(
+                        &preference.key,
+                        &preference.subscription,
+                        &version,
+                        has_bookmark_payload,
+                    )
                     .await
                     .ok()?
             } else {
@@ -250,6 +264,15 @@ fn is_local_space_disco_request(
         && request
             .from()
             .is_none_or(|from| from.as_str() == requester.as_str())
+}
+
+fn bookmark_item_has_payload(stanza: &minidom::Element) -> bool {
+    use waddle_xmpp::pubsub::NS_PUBSUB_EVENT;
+    stanza
+        .get_child("event", NS_PUBSUB_EVENT)
+        .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
+        .and_then(|items| items.get_child("item", NS_PUBSUB_EVENT))
+        .is_some_and(|item| item.children().next().is_some())
 }
 
 #[derive(Debug)]
@@ -352,7 +375,16 @@ impl ManagedSpaceGrant {
 
     /// Stage a remote effect. For an event, a self-unsubscribe must wait
     /// until the TLS session owns the bytes or staging has been refused.
-    pub(crate) async fn admit_remote<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
+    pub(crate) fn remote_bookmark_has_payload(&self, stanza: &minidom::Element) -> bool {
+        matches!(self.remote_effect, Some(RemoteSpaceEffect::Event { .. }))
+            && bookmark_item_has_payload(stanza)
+    }
+
+    pub(crate) async fn admit_remote<R>(
+        &self,
+        has_bookmark_payload: bool,
+        effect: impl FnOnce() -> R,
+    ) -> Option<R> {
         let Some(RemoteSpaceEffect::Event {
             key,
             recipient,
@@ -371,7 +403,7 @@ impl ManagedSpaceGrant {
                 recipient,
                 self.subscription_grant,
                 bookmark_version.as_ref()?,
-                chrono::Utc::now().timestamp_millis(),
+                has_bookmark_payload,
             ),
         )
         .await
@@ -1202,9 +1234,10 @@ impl HostGrantGate {
     /// Refresh a retained reply's lease only for its original scope decision.
     pub(crate) async fn refresh_local_space_reply(
         &self,
-        replay: &ProtectedSpaceReplyDescriptor,
+        payload: &SmReplayPayload,
         requester: &FullJid,
     ) -> Option<LocalSpaceReplyGrant> {
+        let replay = payload.protected_space_reply()?;
         if requester != replay.recipient() {
             return None;
         }
@@ -1254,7 +1287,9 @@ impl HostGrantGate {
             preference,
         };
         if replay.subscription_id().is_some() {
-            let hold = result.hold_subscription().await?;
+            let hold = result
+                .hold_subscription(result.bookmark_has_payload(payload))
+                .await?;
             let _ = hold.rollback().await;
         }
         Some(result)

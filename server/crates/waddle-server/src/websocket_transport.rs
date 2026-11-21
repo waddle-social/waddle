@@ -1308,6 +1308,7 @@ struct FrameAuthority {
     transport: Arc<TransportAuthority>,
     mode: FrameMode,
     space_reply: Option<SpaceReplyAuthority>,
+    has_bookmark_payload: bool,
 }
 
 impl WriteAuthority for FrameAuthority {
@@ -1319,7 +1320,10 @@ impl WriteAuthority for FrameAuthority {
         };
         grant.replay_identity().subscription_id()?;
         Some(Box::pin(async move {
-            let guard = grant.hold_subscription().await.ok_or(())?;
+            let guard = grant
+                .hold_subscription(self.has_bookmark_payload)
+                .await
+                .ok_or(())?;
             Ok(Box::new(guard) as Box<dyn Send + '_>)
         }))
     }
@@ -1436,6 +1440,7 @@ impl WebSocketOutboundFrame {
                 transport: Arc::clone(transport),
                 mode,
                 space_reply: None,
+                has_bookmark_payload: false,
             }),
         }
     }
@@ -1547,12 +1552,17 @@ where
         if self.authority.phase() != TransportPhase::Open || !permitted {
             return Err(OutputError::InvalidFrame);
         }
+        let has_bookmark_payload = match &grant {
+            SpaceReplyAuthority::Managed(grant) => grant.bookmark_has_payload(&payload),
+            SpaceReplyAuthority::Unmanaged(_) => false,
+        };
         Ok(WebSocketOutboundFrame {
             frame: Message::Text(payload.wire().to_owned().into()),
             authority: Arc::new(FrameAuthority {
                 transport: Arc::clone(&self.authority),
                 mode: FrameMode::Data,
                 space_reply: Some(grant),
+                has_bookmark_payload,
             }),
         })
     }

@@ -1307,6 +1307,140 @@ impl HostGrantStore {
         }))
     }
 
+    /// Update the notification policy of an exact bound Space.
+    pub async fn configure_space(
+        &self,
+        command: &super::ConfigureSpace,
+        policy: &IssuancePolicy,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        if policy.check(&command.initiator, RoomAffiliation::Member)? != IssuanceBasis::Local {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        let store = self.clone();
+        let command = command.clone();
+        let mode = commit_mode();
+        own(async move { store.configure_space_owned(&command, mode).await }).await
+    }
+
+    async fn configure_space_owned(
+        &self,
+        command: &super::ConfigureSpace,
+        mode: CommitMode,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let mut tx = self.begin_write().await?;
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+        let scope = load_scope(&mut tx, command.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+            .ok_or(HostGrantError::UnknownScope)?;
+        let fingerprint = command.fingerprint();
+        if let Some(recorded) = load_operation(&mut tx, command.operation).await? {
+            tx.rollback().await?;
+            return recorded.replay(&fingerprint);
+        }
+        let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        if current != command.expected_incarnation {
+            return Err(HostGrantError::IncarnationChanged);
+        }
+        refuse_unusable_scope(&scope, current)?;
+        if !scope_admits(&scope, current) {
+            return Err(HostGrantError::SpaceNotBindable);
+        }
+        if scope.generation != command.expected_generation {
+            return Err(HostGrantError::StaleGeneration {
+                current: scope.generation,
+            });
+        }
+        if scope.projection_pending() {
+            return Err(HostGrantError::Busy);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM host_grant_space_bindings b
+             JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id
+             JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
+             JOIN host_grant_space_affiliations s ON s.lifecycle_id = b.lifecycle_id
+             WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
+             AND b.service_jid = ? AND b.space_node = ? AND l.retired_at_ms IS NULL
+             AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)
+             AND p.persist_items = 1 AND p.notify_retract = 1
+             AND s.subject_jid = ? AND s.affiliation = 'owner'
+             AND s.effective_affiliation = 'owner' AND s.issuance_basis = 'local'
+             FOR NO KEY UPDATE OF p",
+                crate::db_params![
+                    command.lifecycle.to_storage(),
+                    current.to_storage(),
+                    command.key.service().as_str(),
+                    command.key.node(),
+                    waddle_xmpp::xep::xep0503::NS_SPACES,
+                    command.initiator.as_str(),
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)
+            .map_err(statement_failure)?;
+        if rows.next().await?.is_none() {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        drop(rows);
+        let Some(generation) = scope.generation.next() else {
+            return self
+                .exhaust(tx, &scope, command.operation, &fingerprint, mode)
+                .await;
+        };
+        tx.execute(
+            "SELECT pg_catalog.set_config('waddle.space_configuration_lifecycle', ?, true)",
+            crate::db_params![command.lifecycle.to_storage()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+        let updated = tx.execute(
+            "UPDATE pubsub_nodes SET deliver_payloads = ? WHERE owner_jid = ? AND node_name = ?",
+            crate::db_params![
+                i32::from(command.deliver_payloads),
+                command.key.service().as_str(),
+                command.key.node(),
+            ],
+        ).await.map_err(HostGrantError::from_database).map_err(statement_failure)?;
+        if updated != 1 {
+            return Err(corrupt("Space configuration"));
+        }
+        let now = Utc::now().timestamp_millis();
+        let record = OperationRecord {
+            operation: command.operation,
+            lifecycle: command.lifecycle,
+            generation,
+            kind: OperationKind::ConfigureSpace,
+            authority_incarnation: current,
+            projection_digest: current_digest(&mut tx, &scope).await?,
+        };
+        insert_operation(
+            &mut tx,
+            &record,
+            &fingerprint,
+            Some(command.initiator.as_str()),
+            now,
+        )
+        .await?;
+        advance_scope(
+            &mut tx,
+            &scope,
+            generation,
+            &command.operation.to_storage(),
+            now,
+        )
+        .await?;
+        commit(tx, mode).await?;
+        Ok(MutationReceipt::Recorded(record))
+    }
+
     /// Record an atomic membership change from an authenticated served owner.
     pub async fn set_space_affiliations(
         &self,
@@ -4064,6 +4198,7 @@ impl RecordedOperation {
             | OperationKind::SetAffiliation
             | OperationKind::BindSpace
             | OperationKind::SetSpaceAffiliations
+            | OperationKind::ConfigureSpace
             | OperationKind::Retire
             | OperationKind::Restore
             | OperationKind::Reconstruct

@@ -10,9 +10,10 @@ use waddle_xmpp::pubsub::{
 use xmpp_parsers::iq::Iq;
 
 use crate::permissions::host_grant::{
-    AdmissionState, AuthorityIncarnation, GrantGeneration, GrantOperationId, GrantSubject,
-    HostGrantAuthority, HostGrantError, Reconciliation, ScopeKey, ScopeLifecycleId,
-    SetSpaceAffiliations, FENCE_ACKNOWLEDGEMENT_DEADLINE,
+    AdmissionState, AuthorityIncarnation, ConfigureSpace, GrantGeneration, GrantOperationId,
+    GrantSubject, HostGrantAuthority, HostGrantError, HostGrantGate, OperationRecord,
+    Reconciliation, ScopeKey, ScopeLifecycleId, SetSpaceAffiliations,
+    FENCE_ACKNOWLEDGEMENT_DEADLINE,
 };
 
 use super::errors::{
@@ -105,6 +106,225 @@ pub(super) async fn read_space_owner_state(
         Ok(frame) => Some(frame),
         Err(_) => error(PubSubError::InternalServerError),
     }
+}
+
+pub(super) async fn configure_enrolled_space(
+    iq: &Iq,
+    state: &WebSocketState,
+    requester: Option<&FullJid>,
+    session: Option<&Session>,
+) -> Option<ResponseFrame> {
+    let Iq::Set { payload, to, .. } = iq else {
+        return None;
+    };
+    let service = state.deps.service_domains.spaces.as_str();
+    if !payload.is("pubsub", NS_PUBSUB_OWNER) || to.as_ref()?.as_str() != service {
+        return None;
+    }
+    let configure = payload.get_child("configure", NS_PUBSUB_OWNER)?;
+    let node = configure.attr("node")?;
+    let ordinary = |reply| Some(ResponseFrame::from(iq_to_xml(reply)));
+    let failure = |condition| ordinary(build_pubsub_error(iq, condition));
+    let gate = &state.deps.app_state.host_grants;
+    match gate.space_enrolled(node).await {
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(_) => return failure(PubSubError::InternalServerError),
+    }
+    let Some(requester) = requester else {
+        return failure(PubSubError::Forbidden);
+    };
+    let bare = requester.to_bare();
+    if session.is_none_or(|session| session.user_jid != bare.as_str())
+        || iq
+            .from()
+            .is_some_and(|from| from.as_str() != requester.as_str())
+    {
+        return failure(PubSubError::Forbidden);
+    }
+    let (Ok(service), Ok(initiator)) = (service.parse(), GrantSubject::new(bare)) else {
+        return failure(PubSubError::BadRequest);
+    };
+    let Ok(key) = ScopeKey::new(service, node) else {
+        return failure(PubSubError::BadRequest);
+    };
+    let Some(decision) = gate.space_read_local(&key, &initiator).await else {
+        return failure(PubSubError::Forbidden);
+    };
+    if decision.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true) {
+        return failure(PubSubError::Forbidden);
+    }
+    let (Some(store), Some(attachment)) = (gate.store(), gate.attachment()) else {
+        return failure(PubSubError::InternalServerError);
+    };
+    let Some(policy) = state
+        .deps
+        .service_domains
+        .host_grant_issuance_policy(attachment.principals())
+    else {
+        return failure(PubSubError::InternalServerError);
+    };
+    let binding = decision.subscription_grant();
+    let scope = match store.scope(binding.lifecycle).await {
+        Ok(Some(scope)) if scope.authority_incarnation == binding.incarnation => scope,
+        Ok(_) => return failure(PubSubError::NodeNotFound),
+        Err(error) => return ordinary(membership_mutation_error(iq, error)),
+    };
+    let current = match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(key.service(), node)
+        .await
+    {
+        Ok(Some(record)) => record.config,
+        Ok(None) => return failure(PubSubError::NodeNotFound),
+        Err(_) => return failure(PubSubError::InternalServerError),
+    };
+    let deliver_payloads = match configuration_payload_setting(payload, configure, &current) {
+        Some(PayloadSetting::Change(value)) => value,
+        Some(PayloadSetting::Cancel) => return ordinary(build_pubsub_success(iq)),
+        None => {
+            use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+            return ordinary(error(
+                iq,
+                StanzaError::new(
+                    ErrorType::Modify,
+                    DefinedCondition::NotAcceptable,
+                    "en",
+                    "The form contains an unsupported Space setting or an invalid value.",
+                ),
+            ));
+        }
+    };
+    let authority = HostGrantAuthority::new(
+        store.clone(),
+        state.deps.app_state.permission_actor.clone(),
+        policy,
+    );
+    let command = ConfigureSpace {
+        operation: GrantOperationId::generate(),
+        key,
+        lifecycle: binding.lifecycle,
+        expected_incarnation: binding.incarnation,
+        expected_generation: scope.generation,
+        initiator,
+        deliver_payloads,
+    };
+    let mut result = authority.configure_space(&command).await;
+    if matches!(result, Err(HostGrantError::CommitOutcomeUnknown)) {
+        result = authority.configure_space(&command).await;
+    }
+    let receipt = match result {
+        Ok(receipt) => receipt,
+        Err(error) => return ordinary(membership_mutation_error(iq, error)),
+    };
+    if settle_owner_mutation(gate, &authority, receipt.record()).await {
+        ordinary(build_pubsub_success(iq))
+    } else {
+        ordinary(error(
+            iq,
+            resource_constraint_iq_error(
+                "The configuration change was recorded and is awaiting confirmation.",
+            ),
+        ))
+    }
+}
+
+enum PayloadSetting {
+    Cancel,
+    Change(bool),
+}
+
+fn configuration_payload_setting(
+    payload: &Element,
+    configure: &Element,
+    current: &waddle_xmpp::pubsub::NodeConfig,
+) -> Option<PayloadSetting> {
+    const DATA_FORMS: &str = "jabber:x:data";
+    let form = configure.get_child("x", DATA_FORMS)?;
+    if !payload.attrs().is_empty()
+        || !payload.text().trim().is_empty()
+        || payload.children().count() != 1
+        || configure.attrs().len() != 1
+        || !configure.text().trim().is_empty()
+        || configure.children().count() != 1
+        || form.attrs().len() != 1
+        || !form.text().trim().is_empty()
+    {
+        return None;
+    }
+    if form.attr("type") == Some("cancel") && form.children().next().is_none() {
+        return Some(PayloadSetting::Cancel);
+    }
+    if form.attr("type") != Some("submit") || !(2..=10).contains(&form.children().count()) {
+        return None;
+    }
+    let mut form_type = false;
+    let mut deliver_payloads = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for field in form.children() {
+        let value = field.get_child("value", DATA_FORMS)?;
+        if !field.is("field", DATA_FORMS)
+            || field.children().count() != 1
+            || !field.text().trim().is_empty()
+            || !value.attrs().is_empty()
+            || value.children().next().is_some()
+        {
+            return None;
+        }
+        let field_type = field.attr("type");
+        if field.attrs().len() != 1 + usize::from(field_type.is_some()) {
+            return None;
+        }
+        let name = field.attr("var")?;
+        if !seen.insert(name) {
+            return None;
+        }
+        match (name, field_type, value.text().as_str()) {
+            (
+                "FORM_TYPE",
+                None | Some("hidden"),
+                "http://jabber.org/protocol/pubsub#node_config",
+            ) if !form_type => form_type = true,
+            ("pubsub#deliver_payloads", None | Some("boolean"), "1" | "true")
+                if deliver_payloads.is_none() =>
+            {
+                deliver_payloads = Some(true)
+            }
+            ("pubsub#deliver_payloads", None | Some("boolean"), "0" | "false")
+                if deliver_payloads.is_none() =>
+            {
+                deliver_payloads = Some(false)
+            }
+            ("pubsub#access_model", None, value) if value == current.access_model.to_string() => {}
+            ("pubsub#publish_model", None, value) if value == current.publish_model.to_string() => {
+            }
+            ("pubsub#type", None, value)
+                if current.node_type.is_some_and(|kind| kind.as_str() == value) => {}
+            ("pubsub#max_items", None, value)
+                if value.parse::<u32>().ok() == Some(current.max_items) => {}
+            ("pubsub#persist_items", None | Some("boolean"), value)
+                if setting_matches(value, current.persist_items) => {}
+            ("pubsub#notify_retract", None | Some("boolean"), value)
+                if setting_matches(value, current.notify_retract) => {}
+            ("pubsub#notify_delete", None | Some("boolean"), value)
+                if setting_matches(value, current.notify_delete) => {}
+            ("pubsub#send_last_published_item", None, value)
+                if value == current.send_last_published_item.to_string() => {}
+            _ => return None,
+        }
+    }
+    deliver_payloads
+        .filter(|_| form_type)
+        .map(PayloadSetting::Change)
+}
+
+fn setting_matches(value: &str, enabled: bool) -> bool {
+    matches!(
+        (value, enabled),
+        ("1" | "true", true) | ("0" | "false", false)
+    )
 }
 
 pub(super) async fn set_space_membership_reply(
@@ -309,9 +529,31 @@ async fn set_space_membership(
             service_unavailable_iq_error("The Space is unavailable."),
         )));
     }
+    if settle_owner_mutation(gate, &authority, record).await {
+        settled.generation = record.generation;
+        Ok(settled)
+    } else {
+        Err(Box::new(error(
+            iq,
+            resource_constraint_iq_error(
+                "The membership change was recorded and is awaiting confirmation; retry.",
+            ),
+        )))
+    }
+}
+
+async fn settle_owner_mutation(
+    gate: &HostGrantGate,
+    authority: &HostGrantAuthority,
+    record: &OperationRecord,
+) -> bool {
+    let Some(store) = gate.store() else {
+        return false;
+    };
     if let Some(fence) = gate.fence() {
         fence.wake();
     }
+    let lifecycle = record.lifecycle;
     let reconcile = async {
         if gate.attachment().is_none() {
             return false;
@@ -336,17 +578,7 @@ async fn set_space_membership(
         tokio::time::timeout(RECONCILE_DEADLINE, reconcile),
         acknowledged,
     );
-    if matches!(activated, Ok(true)) && acknowledged.is_ok_and(|reading| reading.acknowledged()) {
-        settled.generation = record.generation;
-        Ok(settled)
-    } else {
-        Err(Box::new(error(
-            iq,
-            resource_constraint_iq_error(
-                "The membership change was recorded and is awaiting confirmation; retry.",
-            ),
-        )))
-    }
+    matches!(activated, Ok(true)) && acknowledged.is_ok_and(|reading| reading.acknowledged())
 }
 
 fn membership_mutation_error(iq: &Iq, failure: HostGrantError) -> Iq {

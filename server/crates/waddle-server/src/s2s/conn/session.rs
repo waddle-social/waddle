@@ -415,6 +415,9 @@ impl Session {
             space_grant,
             written,
         } = transmission;
+        let has_bookmark_payload = space_grant
+            .as_ref()
+            .is_some_and(|grant| grant.remote_bookmark_has_payload(&stanza));
         let outputs = match self.stream.send_stanza(stanza) {
             Ok(outputs) => outputs,
             Err(error) => {
@@ -426,7 +429,10 @@ impl Session {
             let [Output::Transmit(bytes)] = outputs.as_slice() else {
                 return Err(S2sOutcome::Protocol);
             };
-            match grant.admit_remote(|| self.transport.stage_tls(bytes)).await {
+            match grant
+                .admit_remote(has_bookmark_payload, || self.transport.stage_tls(bytes))
+                .await
+            {
                 None => {
                     let _ = written.send(Err(Untransmitted::AuthorizationExpired));
                     return Ok(());

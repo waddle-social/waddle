@@ -470,6 +470,32 @@ impl SetSpaceAffiliations {
     }
 }
 
+/// A served owner's update of a bound Space's notification payload policy.
+#[derive(Clone, Debug)]
+pub struct ConfigureSpace {
+    pub operation: GrantOperationId,
+    pub key: ScopeKey,
+    pub lifecycle: ScopeLifecycleId,
+    pub expected_incarnation: AuthorityIncarnation,
+    pub expected_generation: GrantGeneration,
+    pub initiator: GrantSubject,
+    pub deliver_payloads: bool,
+}
+
+impl ConfigureSpace {
+    pub(super) fn fingerprint(&self) -> String {
+        let mut fingerprint = Fingerprint::new("waddle:host-grant:configure-space:v1");
+        fingerprint.text(self.key.service().as_str());
+        fingerprint.text(self.key.node());
+        fingerprint.text(&self.lifecycle.to_storage());
+        fingerprint.text(&self.expected_incarnation.to_storage());
+        fingerprint.number(self.expected_generation.value());
+        fingerprint.text(self.initiator.as_str());
+        fingerprint.number(i64::from(self.deliver_payloads));
+        fingerprint.finish()
+    }
+}
+
 /// Set one subject's affiliation in one managed room.
 #[derive(Clone, Debug)]
 pub struct SetAffiliation {
@@ -502,6 +528,7 @@ pub enum OperationKind {
     SetAffiliation,
     BindSpace,
     SetSpaceAffiliations,
+    ConfigureSpace,
     Retire,
     /// The scope had no working generation left for the command and was
     /// closed instead.
@@ -527,6 +554,7 @@ impl OperationKind {
             Self::SetAffiliation => "set_affiliation",
             Self::BindSpace => "bind_space",
             Self::SetSpaceAffiliations => "set_space_affiliations",
+            Self::ConfigureSpace => "configure_space",
             Self::Retire => "retire",
             Self::Exhaust => "exhaust",
             Self::Restore => "restore",
@@ -542,6 +570,7 @@ impl OperationKind {
             Self::SetAffiliation,
             Self::BindSpace,
             Self::SetSpaceAffiliations,
+            Self::ConfigureSpace,
             Self::Retire,
             Self::Exhaust,
             Self::Restore,

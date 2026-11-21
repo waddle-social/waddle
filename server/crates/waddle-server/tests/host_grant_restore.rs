@@ -683,6 +683,233 @@ fn reconstruction_lowers_only_and_records_subjects_only_the_projection_held() {
 }
 
 #[tokio::test]
+async fn configure_space_records_exact_policy_change_once() {
+    use waddle_server::db::local_space_subscriptions::LocalSpaceSubscriptions;
+    use waddle_server::db::s2s_spaces::SpaceSubscriptionGrant;
+    use waddle_server::permissions::host_grant::{
+        ConfigureSpace, SpaceBookmarkAction, SpaceBookmarkChange,
+    };
+
+    let Some(fixture) = GrantFixture::active("hg_configure_space").await else {
+        return;
+    };
+    let pool = owner_pool(&fixture).await;
+    let lifecycle = fixture.scope.lifecycle;
+    let key = ScopeKey::new(
+        "spaces.example.com".parse().expect("service JID"),
+        fixture.scope.space_node.as_str(),
+    )
+    .expect("Space address");
+    sqlx::query(
+        "INSERT INTO pubsub_nodes (owner_jid, node_name, access_model, publish_model,
+         node_type, max_items, persist_items, deliver_payloads, notify_retract, notify_delete,
+         send_last_published_item, created_at_ms)
+         VALUES ($1, $2, 'whitelist', 'publishers', 'urn:xmpp:spaces:0',
+         100, 1, 1, 1, 1, 'never', 42)",
+    )
+    .bind(key.service().as_str())
+    .bind(key.node())
+    .execute(&pool)
+    .await
+    .expect("seed the exact bound PubSub node");
+    let binding = fixture
+        .store
+        .bind_space(
+            &BindSpace {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: fixture.generation().await,
+                owner: subject(OWNER),
+                federated: true,
+            },
+            &served(),
+        )
+        .await
+        .expect("bind Space");
+    let legacy_write = sqlx::query(
+        "UPDATE pubsub_nodes SET deliver_payloads = 0 WHERE owner_jid = $1 AND node_name = $2",
+    )
+    .bind(key.service().as_str())
+    .bind(key.node())
+    .execute(&pool)
+    .await;
+    assert_eq!(
+        legacy_write
+            .expect_err("bound node rejects the generic configuration write")
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let command = ConfigureSpace {
+        operation: GrantOperationId::generate(),
+        key,
+        lifecycle,
+        expected_incarnation: binding.record().authority_incarnation,
+        expected_generation: binding.record().generation,
+        initiator: subject(OWNER),
+        deliver_payloads: false,
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .configure_space(&command, &fixture.policy)
+            .await,
+        Err(HostGrantError::Busy)
+    ));
+    fixture.activate_current(&fixture.scope).await;
+    let wrong_incarnation = ConfigureSpace {
+        expected_incarnation: AuthorityIncarnation::generate(),
+        ..command.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .configure_space(&wrong_incarnation, &fixture.policy)
+            .await,
+        Err(HostGrantError::IncarnationChanged)
+    ));
+    let unauthorized = ConfigureSpace {
+        initiator: subject(PEER),
+        ..command.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .configure_space(&unauthorized, &fixture.policy)
+            .await,
+        Err(HostGrantError::InitiatorNotAuthorized)
+    ));
+    let wrong_node = ConfigureSpace {
+        key: ScopeKey::new(command.key.service().clone(), "other").expect("other key"),
+        ..command.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .configure_space(&wrong_node, &fixture.policy)
+            .await,
+        Err(HostGrantError::InitiatorNotAuthorized)
+    ));
+    let subscriptions = LocalSpaceSubscriptions::new(fixture.ingress.db.clone());
+    let preference = subscriptions
+        .record(
+            &command.key,
+            &command.initiator,
+            &served(),
+            SpaceSubscriptionGrant {
+                lifecycle,
+                incarnation: command.expected_incarnation,
+                generation: binding.record().generation,
+            },
+        )
+        .await
+        .expect("record local owner preference")
+        .expect("owner may subscribe");
+    let bookmark = fixture
+        .store
+        .write_space_bookmark(
+            &SpaceBookmarkChange {
+                key: command.key.clone(),
+                lifecycle,
+                expected_incarnation: command.expected_incarnation,
+                expected_generation: command.expected_generation,
+                initiator: command.initiator.clone(),
+                room: fixture.scope.room.clone(),
+                action: SpaceBookmarkAction::Publish {
+                    payload: xmpp_parsers::minidom::Element::bare(
+                        "conference",
+                        "urn:xmpp:bookmarks:1",
+                    ),
+                },
+            },
+            &fixture.policy,
+        )
+        .await
+        .expect("commit bookmark before configuration change");
+    let version = &bookmark.versions[0];
+    subscriptions
+        .hold_delivery(&command.key, &preference, version, true)
+        .await
+        .expect("check event before policy change")
+        .expect("payload is initially allowed")
+        .rollback()
+        .await
+        .expect("release delivery lock");
+    let MutationReceipt::Recorded(record) = fixture
+        .store
+        .configure_space(&command, &fixture.policy)
+        .await
+        .expect("record policy")
+    else {
+        panic!("first configure records the operation");
+    };
+    assert_eq!(record.kind, OperationKind::ConfigureSpace);
+    assert_eq!(Some(record.generation), command.expected_generation.next());
+    assert_eq!(
+        fixture
+            .store
+            .configure_space(&command, &fixture.policy)
+            .await
+            .expect("retry"),
+        MutationReceipt::Replayed(record.clone())
+    );
+    let changed = ConfigureSpace {
+        deliver_payloads: true,
+        ..command.clone()
+    };
+    assert!(matches!(
+        fixture
+            .store
+            .configure_space(&changed, &fixture.policy)
+            .await,
+        Err(HostGrantError::OperationConflict)
+    ));
+    let stale = ConfigureSpace {
+        operation: GrantOperationId::generate(),
+        ..changed
+    };
+    assert!(matches!(
+        fixture.store.configure_space(&stale, &fixture.policy).await,
+        Err(HostGrantError::StaleGeneration { current }) if current == record.generation
+    ));
+    let config = sqlx::query_as::<_, (i32, i32, i32)>(
+        "SELECT deliver_payloads, persist_items, notify_retract FROM pubsub_nodes
+          WHERE owner_jid = $1 AND node_name = $2",
+    )
+    .bind(command.key.service().as_str())
+    .bind(command.key.node())
+    .fetch_one(&pool)
+    .await
+    .expect("read exact node configuration");
+    assert_eq!(config, (0, 1, 1));
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Activated
+    );
+    assert_eq!(
+        fixture.state(&fixture.scope).await.projected_generation,
+        Some(record.generation)
+    );
+    assert!(
+        subscriptions
+            .hold_delivery(&command.key, &preference, version, true)
+            .await
+            .expect("check event after policy change")
+            .is_none(),
+        "an already rendered payload cannot be staged after configuration disables it"
+    );
+    subscriptions
+        .hold_delivery(&command.key, &preference, version, false)
+        .await
+        .expect("check payload-free event after policy change")
+        .expect("the exact bookmark and subscription still allow a payload-free event")
+        .rollback()
+        .await
+        .expect("release delivery lock");
+}
+
+#[tokio::test]
 async fn a_declared_restore_invalidates_space_bindings_without_releasing_the_node() {
     let Some(fixture) = GrantFixture::active("hg_restore_space_binding").await else {
         return;
@@ -1325,7 +1552,7 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
          node_type, max_items, persist_items, deliver_payloads, notify_retract, notify_delete,
          send_last_published_item, created_at_ms)
          VALUES ($1, $2, 'whitelist', 'publishers', 'urn:xmpp:spaces:0',
-         100, 1, 1, 1, 1, 'never', 42)",
+         100, 1, 1, 0, 1, 'never', 42)",
     )
     .bind(service)
     .bind(node)
@@ -1590,7 +1817,7 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .expect("expired hint lookup")
         .is_none());
     let current = subscriptions
-        .hold_delivery(&key, &local, &original.versions[0])
+        .hold_delivery(&key, &local, &original.versions[0], false)
         .await
         .expect("verify delivery")
         .expect("exact preference and bookmark");
@@ -1621,7 +1848,7 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         LocalSpaceUnsubscribe::Removed,
     );
     assert!(subscriptions
-        .hold_delivery(&key, &local, &original.versions[0])
+        .hold_delivery(&key, &local, &original.versions[0], false)
         .await
         .expect("reject superseded bookmark")
         .is_none());
@@ -1646,7 +1873,7 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         "none tombstones are not listed"
     );
     assert!(subscriptions
-        .hold_delivery(&key, &local, &replacement.versions[0])
+        .hold_delivery(&key, &local, &replacement.versions[0], false)
         .await
         .expect("reject superseded affiliation")
         .is_none());
@@ -1737,14 +1964,6 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .await
         .expect("not subscribed")
         .is_none());
-    sqlx::query(
-        "UPDATE pubsub_nodes SET notify_retract = 0 WHERE owner_jid = $1 AND node_name = $2",
-    )
-    .bind(service)
-    .bind(node)
-    .execute(&pool)
-    .await
-    .expect("disable automatic retract notifications");
     let retraction = fixture
         .store
         .write_space_bookmark(

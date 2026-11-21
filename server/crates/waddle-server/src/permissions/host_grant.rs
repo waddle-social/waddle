@@ -132,13 +132,14 @@ pub use marker::{
 pub(crate) use model::guard_queue_key;
 pub use model::{
     AdmissionState, AuthorityIncarnation, BindSpace, BootstrapGrant, CandidateAdmission,
-    ClosedReason, EnrollScope, GrantGeneration, GrantOperationId, GrantRow, GrantSubject,
-    GrantSubjectError, LocalSpaceSubscription, ManagedRoom, MutationReceipt, OperationKind,
-    OperationOutcome, OperationRecord, ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey,
-    ScopeLifecycleId, ScopeState, SetAffiliation, SetSpaceAffiliations, SpaceAffiliationChange,
-    SpaceBookmarkAction, SpaceBookmarkChange, SpaceBookmarkNotification, SpaceBookmarkOutcome,
-    SpaceBookmarkVersion, SpaceBookmarkWrite, SpaceMembership, SpaceSubscriptionGrant,
-    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
+    ClosedReason, ConfigureSpace, EnrollScope, GrantGeneration, GrantOperationId, GrantRow,
+    GrantSubject, GrantSubjectError, LocalSpaceSubscription, ManagedRoom, MutationReceipt,
+    OperationKind, OperationOutcome, OperationRecord, ProjectionDigest, RetireScope,
+    RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState, SetAffiliation, SetSpaceAffiliations,
+    SpaceAffiliationChange, SpaceBookmarkAction, SpaceBookmarkChange, SpaceBookmarkNotification,
+    SpaceBookmarkOutcome, SpaceBookmarkVersion, SpaceBookmarkWrite, SpaceMembership,
+    SpaceSubscriptionGrant, HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use principal::{

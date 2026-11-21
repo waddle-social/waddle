@@ -100,6 +100,8 @@ impl FromStr for PublishModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PubSubNodeType {
+    /// An XEP-0503 Space.
+    Space,
     /// A node containing social-feed posts.
     PubsubSocialFeed,
     /// A node containing social-feed stories.
@@ -111,6 +113,7 @@ impl PubSubNodeType {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            PubSubNodeType::Space => "urn:xmpp:spaces:0",
             PubSubNodeType::PubsubSocialFeed => NS_SOCIAL_FEED,
             PubSubNodeType::PubsubSocialFeedStories => NS_STORIES,
         }
@@ -128,6 +131,7 @@ impl FromStr for PubSubNodeType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "urn:xmpp:spaces:0" => Ok(PubSubNodeType::Space),
             NS_SOCIAL_FEED => Ok(PubSubNodeType::PubsubSocialFeed),
             NS_STORIES => Ok(PubSubNodeType::PubsubSocialFeedStories),
             _ => Err(()),

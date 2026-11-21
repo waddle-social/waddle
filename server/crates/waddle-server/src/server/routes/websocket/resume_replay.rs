@@ -107,9 +107,8 @@ pub(super) async fn authorize_protected_payload(
     recipient: &jid::FullJid,
     grants: &HostGrantGate,
 ) -> Option<ResponseFrame> {
-    let identity = payload.protected_space_reply()?;
     let grant = grants
-        .refresh_local_space_reply(identity, recipient)
+        .refresh_local_space_reply(&payload, recipient)
         .await?;
     ResponseFrame::protected_space_frame(payload.wire().to_owned(), grant).ok()
 }

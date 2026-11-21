@@ -245,20 +245,22 @@ impl LocalSpaceSubscriptions {
         key: &ScopeKey,
         subscription: &LocalSpaceSubscription,
         version: &SpaceBookmarkVersion,
+        has_payload: bool,
     ) -> Result<Option<Transaction<'_>>, LocalSpaceSubscriptionError> {
         if version.lifecycle != subscription.grant.lifecycle
             || version.incarnation != subscription.grant.incarnation
         {
             return Ok(None);
         }
-        self.hold_exact(key, subscription, Some(version)).await
+        self.hold_exact(key, subscription, Some((version, has_payload)))
+            .await
     }
 
     async fn hold_exact(
         &self,
         key: &ScopeKey,
         subscription: &LocalSpaceSubscription,
-        version: Option<&SpaceBookmarkVersion>,
+        bookmark: Option<(&SpaceBookmarkVersion, bool)>,
     ) -> Result<Option<Transaction<'_>>, LocalSpaceSubscriptionError> {
         let Some(mut tx) = self.begin().await? else {
             return Ok(None);
@@ -267,12 +269,13 @@ impl LocalSpaceSubscriptions {
         if !hold_scope(&mut tx, grant.lifecycle).await? {
             return Ok(None);
         }
-        if let Some(version) = version {
+        if let Some((version, has_payload)) = bookmark {
             if !super::s2s_spaces::hold_bookmark_delivery_version(
                 &mut tx,
                 key.service(),
                 key.node(),
                 version,
+                has_payload,
             )
             .await?
             {

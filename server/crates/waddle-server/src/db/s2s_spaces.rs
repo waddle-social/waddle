@@ -454,21 +454,24 @@ async fn begin_for_subscription<'a>(
     Ok(Some(tx))
 }
 
-/// Hold the exact publication version while the caller stages a delivery.
+/// Hold the exact publication version and current node policy through staging.
 pub(super) async fn hold_bookmark_delivery_version(
     tx: &mut Transaction<'_>,
     service: &BareJid,
     node: &str,
     version: &crate::permissions::host_grant::SpaceBookmarkVersion,
+    has_payload: bool,
 ) -> Result<bool, super::DatabaseError> {
     let mut rows = tx
         .query(
             "SELECT 1 FROM host_grant_space_bookmark_versions v
              JOIN host_grant_space_bindings b ON b.lifecycle_id = v.lifecycle_id
+             JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
              WHERE b.service_jid = ? AND b.space_node = ?
              AND b.authority_incarnation = v.authority_incarnation
              AND v.lifecycle_id = ? AND v.room_jid = ? AND v.authority_incarnation = ?
-             AND v.operation_token = ? AND v.present = (?::bigint <> 0) FOR SHARE OF v",
+             AND v.operation_token = ? AND v.present = (?::bigint <> 0)
+             AND (?::bigint = 0 OR p.deliver_payloads = 1) FOR SHARE OF v, p",
             crate::db_params![
                 service.as_str(),
                 node,
@@ -477,6 +480,7 @@ pub(super) async fn hold_bookmark_delivery_version(
                 version.incarnation.to_storage(),
                 version.operation.to_storage(),
                 version.present,
+                has_payload,
             ],
         )
         .await?;
@@ -1173,7 +1177,7 @@ impl SpaceSubscriptions {
         account: &BareJid,
         grant: SpaceSubscriptionGrant,
         version: &crate::permissions::host_grant::SpaceBookmarkVersion,
-        now_ms: i64,
+        has_payload: bool,
     ) -> Result<Option<Transaction<'_>>, SpaceStoreError> {
         if self.db.driver() != DatabaseDriver::Postgres
             || version.lifecycle != grant.lifecycle
@@ -1188,7 +1192,7 @@ impl SpaceSubscriptions {
         )
         .await
         .map_err(storage)?;
-        let current = hold_bookmark_delivery_version(&mut tx, service, node, version)
+        let current = hold_bookmark_delivery_version(&mut tx, service, node, version, has_payload)
             .await
             .map_err(storage)?;
         if !current {
@@ -1203,7 +1207,7 @@ impl SpaceSubscriptions {
             crate::db_params![
                 service.as_str(), node, account.as_str(), grant.lifecycle.to_storage(),
                 grant.incarnation.to_storage(), grant.generation.value(),
-                now_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS)
+                chrono::Utc::now().timestamp_millis().saturating_sub(SUBSCRIPTION_LIFETIME_MS)
             ],
         ).await.map_err(storage)?;
         let present = rows.next().await.map_err(storage)?.is_some();
