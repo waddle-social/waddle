@@ -49,15 +49,14 @@ struct ConversationRowActions: ViewModifier {
     }
 
     private var muteButton: some View {
-        let current = session.directory.notifyMode(for: conversation)
-        let next = NotifyModeLabels.toggledMute(current, isRoom: conversation.isRoom)
+        let isMuted = session.directory.notifyMode(for: conversation) == .never
         return Button {
-            NotifyModeSetter.set(next, for: conversation, in: session)
+            NotifyModeSetter.toggleMute(for: conversation, in: session)
         } label: {
-            if next == .never {
-                Label("Mute", systemImage: "bell.slash")
-            } else {
+            if isMuted {
                 Label("Unmute", systemImage: "bell")
+            } else {
+                Label("Mute", systemImage: "bell.slash")
             }
         }
     }
@@ -98,6 +97,10 @@ struct NotifyModeMenu: View {
 enum NotifyModeSetter {
     static func set(_ mode: NotifyMode, for conversation: ConversationID, in session: SessionCoordinator) {
         Task { try? await session.setNotifyMode(mode, for: conversation) }
+    }
+
+    static func toggleMute(for conversation: ConversationID, in session: SessionCoordinator) {
+        Task { try? await session.toggleNotifyMute(for: conversation) }
     }
 }
 

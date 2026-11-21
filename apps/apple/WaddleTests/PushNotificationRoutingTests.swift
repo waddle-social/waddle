@@ -29,4 +29,12 @@ final class PushNotificationRoutingTests: XCTestCase {
         XCTAssertEqual(target.account, BareJID(parsing: "penguin@waddle.test"))
         XCTAssertEqual(target.conversation, .direct(BareJID(parsing: "puffin@waddle.test")!))
     }
+
+    func testReadClearingCoversALocalAlertAndAPush() {
+        let room = ConversationID.room(BareJID(parsing: "ice@rooms.waddle.test")!)
+        XCTAssertEqual(
+            NotificationController.threadIdentifiers(of: room),
+            ["room:ice@rooms.waddle.test", "ice@rooms.waddle.test"]
+        )
+    }
 }

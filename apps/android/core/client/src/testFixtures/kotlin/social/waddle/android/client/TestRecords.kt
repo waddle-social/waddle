@@ -49,6 +49,7 @@ fun testChannel(
     autojoin = autojoin,
     bookmarkName = bookmarkName,
     isGroupDm = isGroupDm,
+    membersOnly = null,
 )
 
 fun testMamPage(

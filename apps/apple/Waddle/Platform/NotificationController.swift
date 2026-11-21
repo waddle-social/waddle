@@ -141,7 +141,9 @@ final class NotificationController: NSObject {
         if #available(iOS 15.0, macOS 12.0, *) {
             content.interruptionLevel = alert.mentionsMe ? .timeSensitive : .active
         }
-        let request = UNNotificationRequest(identifier: "\(alert.conversation)#\(alert.messageID)", content: content, trigger: nil)
+        // The same identifier as the push for this message, so whichever
+        // arrives second replaces the first instead of adding a banner.
+        let request = UNNotificationRequest(identifier: alert.notificationID, content: content, trigger: nil)
         center.add(request)
     }
 
@@ -149,10 +151,16 @@ final class NotificationController: NSObject {
     func clear(_ conversation: ConversationID) {
         center.getDeliveredNotifications { notifications in
             let identifiers = notifications
-                .filter { $0.request.content.threadIdentifier == conversation.description }
+                .filter { Self.threadIdentifiers(of: conversation).contains($0.request.content.threadIdentifier) }
                 .map(\.request.identifier)
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
         }
+    }
+
+    /// The thread identifiers a conversation's notifications carry: a
+    /// local alert's, and the bare JID the server puts on a push.
+    nonisolated static func threadIdentifiers(of conversation: ConversationID) -> Set<String> {
+        [conversation.description, conversation.jid.description]
     }
 
     func clearAll() {

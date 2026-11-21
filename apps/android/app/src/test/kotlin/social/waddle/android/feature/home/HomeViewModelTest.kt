@@ -73,6 +73,7 @@ class HomeViewModelTest {
         autojoin = true,
         bookmarkName = null,
         isGroupDm = isGroupDm,
+        membersOnly = null,
     )
 
     private fun space(id: String, name: String) = WaddleSpace(

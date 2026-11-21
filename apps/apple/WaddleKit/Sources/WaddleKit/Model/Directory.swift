@@ -42,6 +42,8 @@ public struct Channel: Hashable, Sendable, Identifiable {
     public let spaceID: String?
     public let autojoin: Bool
     public let isGroupDM: Bool
+    /// Whether room discovery advertised members-only access, or nil if unknown.
+    public private(set) var membersOnly: Bool?
 
     public init(
         roomJID: BareJID,
@@ -51,7 +53,8 @@ public struct Channel: Hashable, Sendable, Identifiable {
         position: Int = 0,
         spaceID: String? = nil,
         autojoin: Bool = true,
-        isGroupDM: Bool = false
+        isGroupDM: Bool = false,
+        membersOnly: Bool? = nil
     ) {
         self.roomJID = roomJID
         self.name = name
@@ -61,6 +64,7 @@ public struct Channel: Hashable, Sendable, Identifiable {
         self.spaceID = spaceID
         self.autojoin = autojoin
         self.isGroupDM = isGroupDM
+        self.membersOnly = membersOnly
     }
 
     public var conversation: ConversationID { .room(roomJID) }
@@ -69,7 +73,13 @@ public struct Channel: Hashable, Sendable, Identifiable {
     public func with(name: String, summary: String?) -> Channel {
         Channel(
             roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
-            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM)
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly)
+    }
+
+    func withKnownMembersOnly(_ value: Bool?) -> Channel {
+        var copy = self
+        copy.membersOnly = value ?? membersOnly
+        return copy
     }
 }
 

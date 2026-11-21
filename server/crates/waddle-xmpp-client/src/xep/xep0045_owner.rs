@@ -29,6 +29,8 @@ pub const NS_MUC_ROOMCONFIG: &str = "http://jabber.org/protocol/muc#roomconfig";
 
 /// XEP-0045 discovery feature identifying a persistent room.
 pub const FEATURE_MUC_PERSISTENT: &str = "muc_persistent";
+/// XEP-0045 discovery feature identifying a members-only room.
+pub const FEATURE_MUC_MEMBERS_ONLY: &str = "muc_membersonly";
 /// Keep the room after its last occupant leaves.
 pub const FIELD_PERSISTENT_ROOM: &str = "muc#roomconfig_persistentroom";
 /// XEP-0004 §3.2 hidden form-type discriminator field.
