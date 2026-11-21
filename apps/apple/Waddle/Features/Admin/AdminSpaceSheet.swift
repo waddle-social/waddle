@@ -77,18 +77,20 @@ struct AdminSpaceSheet: View {
             Text("\(member.jid.description) loses their role in \(opened?.name ?? "this space").")
         }
         .sheet(isPresented: $isAdding) {
-            AdminPersonPicker(
-                title: "Add member",
-                confirmTitle: "Add",
-                roles: Self.roles,
-                role: .member,
-                roleTitle: AdminSpaceCopy.title,
-                held: Dictionary((members?.rows ?? []).map { ($0.jid, $0.role) }) { first, _ in first }
-            ) { user, role in
-                let held = members?.rows.first { $0.jid == user.jid }?.role
-                setRole(role, of: user.jid, from: held ?? .none)
+            if let members {
+                AdminPersonPicker(
+                    title: "Add member",
+                    confirmTitle: "Add",
+                    roles: Self.roles,
+                    role: .member,
+                    roleTitle: AdminSpaceCopy.title,
+                    holders: members,
+                    roleOf: \.role
+                ) { user, role in
+                    setRole(role, of: user.jid, from: .none)
+                }
+                .carryingCallDock()
             }
-            .carryingCallDock()
         }
     }
 
@@ -161,8 +163,8 @@ struct AdminSpaceSheet: View {
 
     /// Shows the role the server answers with: someone given no role is
     /// no longer a member, and someone not listed is added first.
-    private func setRole(_ role: AdminSpaceRole, of jid: BareJID, from held: AdminSpaceRole) {
-        guard let opened, let members, role != held, changing.insert(jid).inserted else { return }
+    private func setRole(_ role: AdminSpaceRole, of jid: BareJID, from old: AdminSpaceRole) {
+        guard let opened, let members, role != old, changing.insert(jid).inserted else { return }
         memberError = nil
         Task {
             do {
@@ -176,7 +178,7 @@ struct AdminSpaceSheet: View {
                     if !wasListed, let current { spaces.replace(current.addingMembers(1)) }
                 }
             } catch {
-                memberError = AdminSpaceCopy.roleFailure(error, role: role, address: jid.description)
+                memberError = AdminSpaceCopy.roleFailure(error, address: jid.description)
             }
             changing.remove(jid)
         }

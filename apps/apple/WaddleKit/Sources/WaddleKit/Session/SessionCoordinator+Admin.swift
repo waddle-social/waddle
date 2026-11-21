@@ -16,7 +16,7 @@ extension SessionCoordinator {
     /// Each request fails with `PortError`: `rejected` for an account that
     /// does not own the community, `notConnected` while offline.
     public func adminUsersList() -> AdminList<AdminUser> {
-        AdminList { [weak self] prefix, _, cursor in
+        AdminList { [weak self] prefix, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
                 try await self.port.adminUsers(matching: prefix, after: cursor)
@@ -26,7 +26,7 @@ extension SessionCoordinator {
 
     /// The spaces of this community, for the admin console.
     public func adminSpacesList() -> AdminList<AdminSpace> {
-        AdminList { [weak self] prefix, _, cursor in
+        AdminList { [weak self] prefix, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
                 try await self.port.adminSpaces(matching: prefix, after: cursor)
@@ -36,7 +36,7 @@ extension SessionCoordinator {
 
     /// Everyone in `space`, with their role. It is not searched.
     public func adminSpaceMembersList(of space: AdminSpace) -> AdminList<AdminSpaceMember> {
-        AdminList { [weak self] _, _, cursor in
+        AdminList { [weak self] _, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
                 try await self.port.adminSpaceMembers(of: space, after: cursor)
@@ -88,17 +88,17 @@ extension SessionCoordinator {
     /// Every room of this community, or of one space, for the admin
     /// console.
     public func adminRoomsList() -> AdminList<AdminRoom> {
-        AdminList { [weak self] prefix, space, cursor in
+        AdminList(narrowedBySpace: { [weak self] prefix, space, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
                 try await self.port.adminRooms(matching: prefix, in: space, after: cursor)
             }
-        }
+        })
     }
 
     /// The people in `room` now. It is not searched.
     public func adminRoomOccupantsList(of room: AdminRoom) -> AdminList<AdminRoomOccupant> {
-        AdminList { [weak self] _, _, cursor in
+        AdminList { [weak self] _, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
                 try await self.port.adminRoomOccupants(of: room.jid, after: cursor)
@@ -108,7 +108,7 @@ extension SessionCoordinator {
 
     /// The people with a lasting role in `room`. It is not searched.
     public func adminRoomMembersList(of room: AdminRoom) -> AdminList<AdminRoomMember> {
-        AdminList { [weak self] _, _, cursor in
+        AdminList { [weak self] _, cursor in
             guard let self else { throw PortError.notConnected }
             return try await self.whileOnline {
                 try await self.port.adminRoomMembers(of: room.jid, after: cursor)

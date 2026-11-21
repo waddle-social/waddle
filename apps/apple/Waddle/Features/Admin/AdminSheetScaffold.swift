@@ -214,6 +214,7 @@ struct AdminPeopleSection<Row: Identifiable & Sendable, RowView: View>: View {
                 Button(action: add) {
                     Label(addTitle, systemImage: "plus")
                 }
+                .adminRowControl()
                 .disabled(list == nil)
             }
         } header: {
@@ -246,6 +247,7 @@ struct AdminSheetList<Row: Identifiable & Sendable, RowView: View>: View {
                     Text(list.rows.isEmpty ? "Couldn't load the \(noun)." : "Couldn't refresh the \(noun).")
                     Spacer(minLength: Theme.Spacing.xs)
                     Button("Try again") { Task { await list.reload() } }
+                        .adminRowControl()
                         .disabled(list.isLoading)
                 }
             } else if list.rows.isEmpty {
@@ -260,6 +262,7 @@ struct AdminSheetList<Row: Identifiable & Sendable, RowView: View>: View {
                 Button(list.isLoadingMore ? "Loading…" : "Load more") {
                     Task { await list.loadMore() }
                 }
+                .adminRowControl()
                 .disabled(list.isLoadingMore)
             }
             if list.moreFailure != nil {
@@ -268,5 +271,20 @@ struct AdminSheetList<Row: Identifiable & Sendable, RowView: View>: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension View {
+    /// A button or menu inside a row of a sheet's list. iOS sends a tap
+    /// anywhere in a form's cell to every default-style button in it, and
+    /// these rows stack several people in one cell, so each control takes
+    /// only its own taps there. A Mac form has no such cell taps, and its
+    /// controls keep their look.
+    func adminRowControl() -> some View {
+        #if os(iOS)
+        buttonStyle(.borderless)
+        #else
+        self
+        #endif
     }
 }

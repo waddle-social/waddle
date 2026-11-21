@@ -66,6 +66,7 @@ struct AdminRoleMenu<Role: Hashable>: View {
             }
         }
         .fixedSize()
+        .adminRowControl()
         .disabled(isChanging)
         .accessibilityValue(Text(title(role)))
     }

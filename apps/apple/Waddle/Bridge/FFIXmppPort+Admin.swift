@@ -91,16 +91,12 @@ extension FFIXmppPort {
         return AdminPage(rows: members, nextCursor: page.nextCursor)
     }
 
-    /// `rejected` means the server refused this role to this person.
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember {
-        let result: WaddleAdminSpacesSetRoleResult
-        do {
-            result = try await client.adminSpacesSetRole(
+        let result = try await mappingAdminErrors(changingRole: true) {
+            try await client.adminSpacesSetRole(
                 spaceJid: space.service.description, spaceNode: space.node,
                 memberJid: member.description, role: Self.role(role)
             )
-        } catch {
-            throw Self.roleError(error)
         }
         return AdminSpaceMember(jid: member, role: Self.role(result.role))
     }
@@ -217,18 +213,18 @@ extension FFIXmppPort {
         return AdminPage(rows: members, nextCursor: page.nextCursor)
     }
 
-    /// The server's answer has no reason, so the role carries the one sent.
     func setAdminRoomAffiliation(
         _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember {
-        let result = try await mappingPortErrors {
+        let result = try await mappingAdminErrors(changingRole: true) {
             try await client.adminChannelsSetAffiliation(
                 channelJid: room.description, memberJid: member.description,
                 affiliation: FFIOutbound.affiliation(affiliation), reason: reason
             )
         }
+        // No reason: the server does not keep the one sent (#2601).
         return AdminRoomMember(
-            jid: member, affiliation: FFIInbound.roomAffiliation(result.affiliation), reason: reason
+            jid: member, affiliation: FFIInbound.roomAffiliation(result.affiliation), reason: nil
         )
     }
 
@@ -281,27 +277,28 @@ extension FFIXmppPort {
         }
     }
 
-    /// `rejected` means "not an owner" to the console, so only the
-    /// server's `forbidden` becomes it; any other error it answers with is
-    /// a failure an owner can try again.
-    private func mappingAdminErrors<Value>(_ operation: () async throws -> Value) async throws -> Value {
+    private func mappingAdminErrors<Value>(
+        changingRole: Bool = false, _ operation: () async throws -> Value
+    ) async throws -> Value {
         do {
             return try await operation()
         } catch {
-            throw Self.adminError(error)
+            throw Self.adminError(error, changingRole: changingRole)
         }
     }
 
-    /// The server answers `not-allowed` when it gives owner or admin only
-    /// to accounts of this deployment and its trusted servers; any other
-    /// error it answers with is a failure that can be tried again.
-    static func roleError(_ error: Error) -> PortError {
-        if case let WaddleError.Stanza(condition, _) = error, condition != "not-allowed" { return .failed }
-        return FFIOutbound.portError(error)
-    }
-
-    static func adminError(_ error: Error) -> PortError {
-        if case let WaddleError.Stanza(condition, _) = error, condition != "forbidden" { return .failed }
-        return FFIOutbound.portError(error)
+    /// What the console makes of an error the server answers with. A list
+    /// reads `rejected` as "not an owner", so only `forbidden` becomes it
+    /// there, and any other refusal is a failure an owner can try again.
+    /// A role change keeps a refusal `rejected`, except the two the server
+    /// explains: `not-allowed`, and `conflict` for a room's last owner.
+    static func adminError(_ error: Error, changingRole: Bool = false) -> Error {
+        guard case let WaddleError.Stanza(condition, _) = error else { return FFIOutbound.portError(error) }
+        switch condition {
+        case "forbidden": return PortError.rejected
+        case "not-allowed" where changingRole: return AdminRoleRefusal.notAllowed
+        case "conflict" where changingRole: return AdminRoleRefusal.lastOwner
+        default: return changingRole ? PortError.rejected : PortError.failed
+        }
     }
 }

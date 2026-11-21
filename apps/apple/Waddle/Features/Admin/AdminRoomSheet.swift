@@ -28,7 +28,7 @@ struct AdminRoomSheet: View {
     @State private var isGivingRole = false
     /// Who was picked to be given a role, and the role, until the picker
     /// has closed: a ban is asked about first.
-    @State private var picked: (member: AdminRoomMember, role: RoomAffiliation)?
+    @State private var roleToGive: (member: AdminRoomMember, role: RoomAffiliation)?
 
     init(subject: AdminSheetSubject<AdminRoom>, rooms: AdminList<AdminRoom>) {
         self.rooms = rooms
@@ -95,17 +95,20 @@ struct AdminRoomSheet: View {
             if pending != nil { reason = "" }
         }
         .sheet(isPresented: $isGivingRole, onDismiss: givePickedRole) {
-            AdminPersonPicker(
-                title: "Give a role",
-                confirmTitle: "Give",
-                roles: Self.roles,
-                role: .member,
-                roleTitle: AdminRoomCopy.title,
-                held: Dictionary((members?.rows ?? []).map { ($0.jid, $0.affiliation) }) { first, _ in first }
-            ) { user, role in
-                picked = (member(user.jid), role)
+            if let members {
+                AdminPersonPicker(
+                    title: "Give a role",
+                    confirmTitle: "Give",
+                    roles: Self.roles,
+                    role: .member,
+                    roleTitle: AdminRoomCopy.title,
+                    holders: members,
+                    roleOf: \.affiliation
+                ) { user, role in
+                    roleToGive = (member(user.jid), role)
+                }
+                .carryingCallDock()
             }
-            .carryingCallDock()
         }
     }
 
@@ -340,9 +343,9 @@ struct AdminRoomSheet: View {
     }
 
     private func givePickedRole() {
-        guard let picked else { return }
-        self.picked = nil
-        choose(picked.role, for: picked.member)
+        guard let roleToGive else { return }
+        self.roleToGive = nil
+        choose(roleToGive.role, for: roleToGive.member)
     }
 
     /// The server takes out one of the names they are there under, and
@@ -385,10 +388,7 @@ struct AdminRoomSheet: View {
                 }
                 await occupants?.reload()
             } catch {
-                peopleError = ActionErrorCopy.message(
-                    for: error,
-                    fallback: "Couldn't change the role of \(member.jid.description). Try again."
-                )
+                peopleError = AdminRoomCopy.roleFailure(error, address: member.jid.description)
             }
             changing.remove(member.jid)
         }
@@ -405,20 +405,38 @@ private struct AdminRoomOccupantRow: View {
     let removeRole: () -> Void
     let remove: () -> Void
 
+    /// Side by side while the name fits whole; the controls go under it
+    /// on a narrow screen or with large text.
     var body: some View {
-        HStack(spacing: Theme.Spacing.s) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                Text(occupant.nick)
-                    .lineLimit(1)
-                Text(occupant.jid.description)
-                    .huddleText(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.fgMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Theme.Spacing.s) {
+                name
+                Spacer(minLength: Theme.Spacing.xs)
+                controls
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text("\(occupant.nick), \(occupant.jid.description)"))
-            Spacer(minLength: Theme.Spacing.xs)
+            VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+                name
+                controls
+            }
+        }
+    }
+
+    private var name: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+            Text(occupant.nick)
+                .lineLimit(1)
+            Text(occupant.jid.description)
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("\(occupant.nick), \(occupant.jid.description)"))
+    }
+
+    private var controls: some View {
+        HStack(spacing: Theme.Spacing.s) {
             AdminRoleMenu(
                 role: occupant.affiliation,
                 choices: choices,
@@ -430,6 +448,7 @@ private struct AdminRoomOccupantRow: View {
             )
             .accessibilityLabel(Text("Role of \(occupant.nick)"))
             Button("Remove", action: remove)
+                .adminRowControl()
                 .disabled(isChanging)
                 .accessibilityLabel(Text("Remove \(occupant.nick) from the room"))
         }

@@ -17,11 +17,12 @@ enum AdminSpaceCopy {
             : "This deletes \(name) and the rooms that belong to it. This can't be undone."
     }
 
-    /// Why giving someone a role failed. The server refuses owner and
-    /// admin to accounts outside this community and its trusted servers.
-    static func roleFailure(_ error: Error, role: AdminSpaceRole, address: String) -> String {
-        if error as? PortError == .rejected, role == .owner || role == .admin {
-            return "\(address) can't be an owner or admin. Only people with an account here or on a trusted server can."
+    /// Why giving someone a role failed. The server says `not-allowed`
+    /// for owner or admin to an account outside this server and its
+    /// trusted ones, and for any role in a space of an enrolled community.
+    static func roleFailure(_ error: Error, address: String) -> String {
+        if error as? AdminRoleRefusal == .notAllowed {
+            return "The server doesn't allow this. Only people with an account here or on a trusted server can be an owner or admin, and a space that belongs to another community is managed there."
         }
         return ActionErrorCopy.message(for: error, fallback: "Couldn't change the role of \(address). Try again.")
     }

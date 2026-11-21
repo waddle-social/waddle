@@ -257,6 +257,18 @@ public protocol StickerPort: AnyObject, Sendable {
     func retractStickerPack(_ packID: String) async throws
 }
 
+/// Why the server refused to give someone a role in a space or a room,
+/// where it says so. Any other refusal is a `PortError`.
+public enum AdminRoleRefusal: Error, Equatable, Sendable {
+    /// `not-allowed`: owners and admins must have an account on this
+    /// server or a trusted one (and, in a room, not be there over a
+    /// connection that cannot carry the role), and a space or room of an
+    /// enrolled community is managed through that community.
+    case notAllowed
+    /// `conflict`: the room would be left without an owner.
+    case lastOwner
+}
+
 /// The admin console of the account's own server, for community owners.
 /// Anyone else is answered `PortError.rejected`.
 public protocol AdminPort: AnyObject, Sendable {
@@ -278,7 +290,8 @@ public protocol AdminPort: AnyObject, Sendable {
 
     func adminSpaceMembers(of space: AdminSpace, after cursor: String?) async throws -> AdminPage<AdminSpaceMember>
 
-    /// Answers with the member and the role the server gave them.
+    /// Answers with the member and the role the server gave them. A
+    /// refusal the server explains is an `AdminRoleRefusal`.
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember
 
     /// One page of every room, by name, as for `adminUsers`; only those of
@@ -305,8 +318,9 @@ public protocol AdminPort: AnyObject, Sendable {
     /// One page of the people with a lasting role in `room`.
     func adminRoomMembers(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomMember>
 
-    /// Answers with the person, the role the server gave them, and
-    /// `reason`, which is sent with it.
+    /// Answers with the person and the role the server gave them; `reason`
+    /// is sent with it. A refusal the server explains is an
+    /// `AdminRoleRefusal`.
     func setAdminRoomAffiliation(
         _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember

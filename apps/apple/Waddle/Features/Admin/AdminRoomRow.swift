@@ -28,6 +28,22 @@ enum AdminRoomCopy {
         return tags
     }
 
+    /// Why giving someone a role failed. The server says `not-allowed`
+    /// for owner or admin to an account outside this server and its
+    /// trusted ones or in the room over a stream that does not carry the
+    /// role, and for any role in a room of an enrolled community; and
+    /// `conflict` for the room's last owner.
+    static func roleFailure(_ error: Error, address: String) -> String {
+        switch error as? AdminRoleRefusal {
+        case .lastOwner:
+            "\(address) is the room's last owner. Make someone else an owner first."
+        case .notAllowed:
+            "The server doesn't allow this. Only people with an account here or on a trusted server can be an owner or admin, and not while they're in the room over a connection the server hasn't verified. A room that belongs to another community is managed there."
+        case nil:
+            ActionErrorCopy.message(for: error, fallback: "Couldn't change the role of \(address). Try again.")
+        }
+    }
+
     static func title(_ affiliation: RoomAffiliation) -> String {
         switch affiliation {
         case .owner: "Owner"

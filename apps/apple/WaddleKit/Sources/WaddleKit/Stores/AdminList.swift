@@ -26,6 +26,8 @@ public final class AdminList<Row: Identifiable & Sendable> {
     public var hasMore: Bool { cursor != nil }
     /// Every page of the last search is shown.
     public var isComplete: Bool { hasLoaded && failure == nil && !hasMore }
+    /// The rows once every page of them is in; nil before.
+    public var everyRow: [Row]? { isComplete ? rows : nil }
 
     @ObservationIgnored private let fetch: Fetch
     /// The text and space last asked for, answered or not.
@@ -36,8 +38,14 @@ public final class AdminList<Row: Identifiable & Sendable> {
     /// Rows changed here while a page was on its way.
     @ObservationIgnored private var changesSinceAsking: [Change] = []
 
-    init(fetch: @escaping Fetch) {
+    /// A list narrowed to a space when one is asked for: the rooms.
+    init(narrowedBySpace fetch: @escaping Fetch) {
         self.fetch = fetch
+    }
+
+    /// A list that is only searched.
+    convenience init(fetch: @escaping @MainActor (_ prefix: String?, _ cursor: String?) async throws -> AdminPage<Row>) {
+        self.init(narrowedBySpace: { prefix, _, cursor in try await fetch(prefix, cursor) })
     }
 
     /// Shows the first page of what starts with `text`, in `space`;
@@ -58,7 +66,11 @@ public final class AdminList<Row: Identifiable & Sendable> {
         isLoading = false
         let changes = changesSinceAsking
         changesSinceAsking = []
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            // A refresh asks for what is shown, not for what was dropped.
+            requested = (query, self.space)
+            return
+        }
         switch result {
         case let .success(page):
             rows = Self.applying(changes, to: page.rows)
@@ -84,11 +96,14 @@ public final class AdminList<Row: Identifiable & Sendable> {
     }
 
     /// Asks again, then for every page after, for a picker that offers
-    /// them all. A page that fails stops it; asking again starts over.
+    /// them all. A page that fails stops it, and so does another search
+    /// that holds the list; asking again starts over.
     public func loadEveryPage() async {
         await reload()
         while hasMore, moreFailure == nil, !Task.isCancelled {
+            let asked = cursor
             await loadMore()
+            guard cursor != asked else { return }
         }
     }
 

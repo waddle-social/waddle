@@ -82,7 +82,10 @@ public struct AdminSpace: Hashable, Identifiable, Sendable {
 
     /// The space after `count` members were added.
     public func addingMembers(_ count: Int) -> AdminSpace {
-        removingMembers(-count)
+        AdminSpace(
+            service: service, node: node, name: name, description: description,
+            roomCount: roomCount, memberCount: memberCount + count
+        )
     }
 }
 

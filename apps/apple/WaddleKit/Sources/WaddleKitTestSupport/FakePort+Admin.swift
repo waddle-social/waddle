@@ -58,6 +58,8 @@ final class FakeAdmin {
     var spaceWrites: [SpaceWrite] = []
     /// When set, every change is refused with it.
     var writeFailure: PortError?
+    /// When set, every role given in a space or a room is refused with it.
+    var roleRefusal: AdminRoleRefusal?
 
     fileprivate func write(_ write: SpaceWrite) throws {
         spaceWrites.append(write)
@@ -103,6 +105,7 @@ extension FakePort {
 
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember {
         try admin.write(.setRole(node: space.node, member: member, role))
+        if let refusal = admin.roleRefusal { throw refusal }
         return AdminSpaceMember(jid: member, role: role)
     }
 
@@ -148,6 +151,8 @@ extension FakePort {
         _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember {
         try admin.write(.setAffiliation(room, member, affiliation, reason: reason))
-        return AdminRoomMember(jid: member, affiliation: affiliation, reason: reason)
+        if let refusal = admin.roleRefusal { throw refusal }
+        // As the server: it keeps no reason for a role (#2601).
+        return AdminRoomMember(jid: member, affiliation: affiliation, reason: nil)
     }
 }

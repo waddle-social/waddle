@@ -231,6 +231,52 @@ struct AdminTests {
         #expect(list.query == "")
     }
 
+    /// The text cleared before a search answers: everyone stays shown, and
+    /// a refresh asks for everyone, not the text.
+    @Test func aRefreshAfterACancelledSearchAsksForWhatIsShown() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada, bo], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let search = Task { await list.load(matching: "b") }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        search.cancel()
+        port.admin.usersFetches.isHolding = false
+        port.admin.usersFetches.release()
+        await search.value
+        await list.reload()
+
+        #expect(port.admin.usersRequests.last == .init())
+        #expect(list.rows == [ada, bo])
+        #expect(list.query == "")
+    }
+
+    /// A search that overtakes the first page leaves no page to ask for
+    /// yet; loading every page stops instead of asking forever.
+    @Test(.timeLimit(.minutes(1)))
+    func loadingEveryPageStopsWhenAnotherSearchOvertakesIt() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "next"))
+        port.admin.users[.init(cursor: "next")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        port.admin.users[.init(prefix: "c")] = .success(AdminPage(rows: [cy], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let every = Task { await list.loadEveryPage() }
+        await eventually { port.admin.usersFetches.count == 1 }
+        let search = Task { await list.load(matching: "c") }
+        await eventually { port.admin.usersFetches.count == 2 }
+
+        port.admin.usersFetches.isHolding = false
+        port.admin.usersFetches.release()
+        await every.value
+        await search.value
+
+        #expect(list.rows == [cy])
+    }
+
     @Test func refreshingDuringASearchAsksForTheTextBeingSearched() async {
         let (coordinator, port) = online()
         port.admin.users[.init(prefix: "a")] = .success(AdminPage(rows: [ada], nextCursor: nil))

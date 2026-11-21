@@ -130,6 +130,29 @@ struct AdminRoomsTests {
         #expect(!list.isLoading)
     }
 
+    /// "All spaces" chosen again before a space answers: every room stays
+    /// shown, and a refresh asks for every room, not the space.
+    @Test func aRefreshAfterACancelledSpaceAsksForWhatIsShown() async {
+        let (coordinator, port) = online()
+        port.admin.rooms[.init()] = .success(AdminPage(rows: [lounge, board], nextCursor: nil))
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+        await list.load()
+        port.admin.roomsFetches.isHolding = true
+        let narrowing = Task { await list.load(in: design) }
+        await eventually { port.admin.roomsFetches.count == 1 }
+
+        narrowing.cancel()
+        port.admin.roomsFetches.isHolding = false
+        port.admin.roomsFetches.release()
+        await narrowing.value
+        await list.reload()
+
+        #expect(port.admin.roomsRequests.last == .init())
+        #expect(list.rows == [lounge, board])
+        #expect(list.space == nil)
+    }
+
     /// Rooms of every space are not an answer for one space.
     @Test func aSpaceThatFailsShowsNoRoomsFromBefore() async {
         let (coordinator, port) = online()
@@ -311,14 +334,26 @@ struct AdminRoomsTests {
         #expect(port.admin.roomWrites == [.remove(lounge.jid, bo, reason: "Flooding")])
     }
 
-    /// The role shown after a ban carries the reason given for it.
-    @Test func aBanCarriesItsReason() async throws {
+    /// The reason is sent with a ban. The server keeps none for a role
+    /// (#2601), so the role shown after it has none either.
+    @Test func aBanSendsItsReason() async throws {
         let (coordinator, port) = online()
 
         let banned = try await coordinator.setAdminRoomAffiliation(.outcast, of: bo, in: lounge, reason: "Spam")
 
         #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .outcast, reason: "Spam")])
-        #expect(banned == AdminRoomMember(jid: bo, affiliation: .outcast, reason: "Spam"))
+        #expect(banned == AdminRoomMember(jid: bo, affiliation: .outcast, reason: nil))
+    }
+
+    /// The server's reasons for refusing a role reach the console as they
+    /// are, so it can say them.
+    @Test func aRefusedRoleSaysWhy() async {
+        let (coordinator, port) = online()
+        port.admin.roleRefusal = .lastOwner
+
+        await #expect(throws: AdminRoleRefusal.lastOwner) {
+            try await coordinator.setAdminRoomAffiliation(.member, of: ada, in: lounge)
+        }
     }
 
     @Test func aBlankReasonIsNoReason() async throws {

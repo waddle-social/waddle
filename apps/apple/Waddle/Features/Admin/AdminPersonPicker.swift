@@ -1,10 +1,12 @@
 import SwiftUI
 import WaddleKit
 
-/// Picks someone with an account here, from the console's users list
-/// searched the same way, and a role to give them. It hands both back and
-/// closes; the sheet that opened it makes the change and says how it went.
-struct AdminPersonPicker<Role: Hashable>: View {
+/// Picks someone with an account here who holds no role yet, from the
+/// console's users list searched the same way, and a role to give them.
+/// Someone who holds one is shown with it but cannot be picked: their role
+/// is changed from their own row. It hands both back and closes; the sheet
+/// that opened it makes the change and says how it went.
+struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View where Holder.ID == BareJID {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
     let title: String
@@ -12,24 +14,27 @@ struct AdminPersonPicker<Role: Hashable>: View {
     /// The roles that can be given, in the order shown.
     let roles: [Role]
     let roleTitle: (Role) -> String
-    /// The roles the people already listed hold, shown beside them.
-    let held: [BareJID: Role]
+    /// Who holds a role already, every page of them, and which.
+    let holders: AdminList<Holder>
+    let roleOf: (Holder) -> Role
     let choose: (AdminUser, Role) -> Void
     @State private var role: Role
-    @State private var picked: BareJID?
+    @State private var pickedJID: BareJID?
     @State private var query = ""
     @State private var users: AdminList<AdminUser>?
 
     init(
         title: String, confirmTitle: String, roles: [Role], role: Role,
-        roleTitle: @escaping (Role) -> String, held: [BareJID: Role],
+        roleTitle: @escaping (Role) -> String,
+        holders: AdminList<Holder>, roleOf: @escaping (Holder) -> Role,
         choose: @escaping (AdminUser, Role) -> Void
     ) {
         self.title = title
         self.confirmTitle = confirmTitle
         self.roles = roles
         self.roleTitle = roleTitle
-        self.held = held
+        self.holders = holders
+        self.roleOf = roleOf
         self.choose = choose
         _role = State(initialValue: role)
     }
@@ -46,19 +51,11 @@ struct AdminPersonPicker<Role: Hashable>: View {
                     TextField("Search", text: $query, prompt: Text("Search users"))
                         .labelsHidden()
                         .autocorrectionDisabled()
-                    if let users {
-                        AdminSheetList(list: users, noun: "users", emptyText: emptyText(users)) { user in
-                            AdminPersonChoiceRow(
-                                user: user,
-                                role: held[user.jid].map(roleTitle),
-                                isPicked: user.jid == picked
-                            ) {
-                                picked = user.jid
-                            }
-                        }
-                    }
+                    people
                 } header: {
                     Text("Person")
+                } footer: {
+                    Text("People who already have a role are changed from their own row.")
                 }
             }
             .formStyle(.grouped)
@@ -79,36 +76,63 @@ struct AdminPersonPicker<Role: Hashable>: View {
                     .disabled(person == nil)
                 }
             }
-            .task(id: query) { await search() }
+            .task(id: query) {
+                let users = users ?? session.adminUsersList()
+                self.users = users
+                await users.search(query)
+            }
+            .task { await holders.loadEveryPage() }
         }
         .managementSheetFrame(minHeight: 480)
     }
 
-    /// The person picked, while the list shows them: someone a new search
-    /// hides is not added unseen.
+    /// The users, once it is known who holds a role.
+    @ViewBuilder
+    private var people: some View {
+        if let held, let users {
+            AdminSheetList(list: users, noun: "users", emptyText: emptyText(users)) { user in
+                AdminPersonChoiceRow(
+                    user: user,
+                    role: held[user.jid].map(roleTitle),
+                    isPicked: user.jid == pickedJID
+                ) {
+                    pickedJID = user.jid
+                }
+            }
+        } else if holders.failure != nil || holders.moreFailure != nil, !holders.isLoading, !holders.isLoadingMore {
+            HStack {
+                Text("Couldn't load who already has a role.")
+                Spacer(minLength: Theme.Spacing.xs)
+                Button("Try again") { Task { await holders.loadEveryPage() } }
+                    .adminRowControl()
+            }
+        } else {
+            Text("Loading…")
+                .foregroundStyle(Theme.Colors.fgMuted)
+        }
+    }
+
+    /// The role each holder has; nil until every page of them is in.
+    private var held: [BareJID: Role]? {
+        holders.everyRow.map { Dictionary($0.map { ($0.id, roleOf($0)) }) { first, _ in first } }
+    }
+
+    /// The person picked, while the list shows them and they hold no role:
+    /// someone a new search hides is not added unseen.
     private var person: AdminUser? {
-        users?.rows.first { $0.jid == picked }
+        guard let held, let user = users?.rows.first(where: { $0.jid == pickedJID }), held[user.jid] == nil else {
+            return nil
+        }
+        return user
     }
 
     private func emptyText(_ users: AdminList<AdminUser>) -> String {
         users.query.isEmpty ? "No users yet." : AdminListCopy.users.noMatches(users.query, nil)
     }
-
-    /// As the console's users list: after a pause in typing, at once for
-    /// an empty field.
-    private func search() async {
-        let users = users ?? session.adminUsersList()
-        self.users = users
-        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try? await Task.sleep(for: .milliseconds(250))
-        }
-        guard !Task.isCancelled else { return }
-        await users.load(matching: query)
-    }
 }
 
-/// Someone who can be picked: name and address, the role they hold if
-/// they hold one, and whether they are picked.
+/// Someone who can be picked: name and address, and whether they are
+/// picked. Someone who holds a role shows it and cannot be picked.
 private struct AdminPersonChoiceRow: View {
     let user: AdminUser
     let role: String?
@@ -131,16 +155,18 @@ private struct AdminPersonChoiceRow: View {
                 Spacer(minLength: Theme.Spacing.xs)
                 if let role {
                     HuddleTag(role)
+                } else {
+                    Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isPicked ? Theme.Colors.action : Theme.Colors.fgSoft)
+                        .imageScale(.large)
                 }
-                Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isPicked ? Theme.Colors.action : Theme.Colors.fgSoft)
-                    .imageScale(.large)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(role != nil)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text([user.name, user.jid.description, role].compactMap { $0 }.joined(separator: ", ")))
+        .accessibilityLabel(Text([user.name, user.jid.description, role.map { "already \($0)" }].compactMap { $0 }.joined(separator: ", ")))
         .accessibilityAddTraits(isPicked ? [.isButton, .isSelected] : [.isButton])
     }
 }

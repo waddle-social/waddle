@@ -52,6 +52,22 @@ final class AdminConsole {
     func markFresh(_ section: AdminSection) {
         stale.remove(section)
     }
+
+    /// The spaces the rooms can be narrowed to: every one loaded, and the
+    /// one chosen while it is not among them.
+    var spaceFilterChoices: [AdminSpace] {
+        let rows = spaceChoices.rows
+        guard let space = roomsSpace, !rows.contains(where: { $0.id == space.id }) else { return rows }
+        return [space] + rows
+    }
+
+    /// Asks for every space again. The space chosen follows its row, and
+    /// one no longer there stops narrowing the rooms.
+    func refreshSpaceChoices() async {
+        await spaceChoices.loadEveryPage()
+        guard let chosen = roomsSpace, let every = spaceChoices.everyRow else { return }
+        roomsSpace = every.first { $0.id == chosen.id }
+    }
 }
 
 /// The admin console, for community owners: everyone with an account on
@@ -122,6 +138,7 @@ struct AdminView: View {
             } accessory: {
                 AdminSpaceFilter(console: console)
             }
+            .task { await console.refreshSpaceChoices() }
         }
     }
 
@@ -158,7 +175,7 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
         AdminListPanel(list: list, copy: section.copy, accessory: accessory) { item in
             row(item) { subject = .existing(item) }
         }
-        .task(id: Search(query: query, space: space?.id, isOnline: session.connection == .online)) {
+        .task(id: Search(query: query, space: space, isOnline: session.connection == .online)) {
             await search()
         }
         .toolbar {
@@ -188,19 +205,14 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
         }
     }
 
-    /// Asks the list for the text typed, after a pause in typing; an empty
-    /// field or another space asks at once. A list that already answers
-    /// the text and space is left as it is, pages and all, when its
+    /// Asks the list for the text typed and the space chosen. A list that
+    /// already answers them is left as it is, pages and all, when its
     /// section is shown again, unless it may be out of date.
     private func search() async {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let answers = list.query == text && list.space?.id == space?.id
         if list.hasLoaded, list.failure == nil, answers, !console.stale.contains(section) { return }
-        if !text.isEmpty, list.space?.id == space?.id {
-            try? await Task.sleep(for: .milliseconds(250))
-        }
-        guard !Task.isCancelled else { return }
-        await list.load(matching: query, in: space)
+        await list.search(query, in: space)
         if !Task.isCancelled { console.markFresh(section) }
     }
 
@@ -208,8 +220,21 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
     /// space changes and when the connection comes back.
     private struct Search: Hashable {
         let query: String
-        let space: AdminSpace.ID?
+        let space: AdminSpace?
         let isOnline: Bool
+    }
+}
+
+extension AdminList {
+    /// Asks for what is typed, after a pause in typing; an empty field or
+    /// another space asks at once. Typing on cancels a search not yet
+    /// asked for.
+    func search(_ text: String, in space: AdminSpace? = nil) async {
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, self.space?.id == space?.id {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        guard !Task.isCancelled else { return }
+        await load(matching: text, in: space)
     }
 }
 
@@ -226,50 +251,23 @@ extension AdminSectionView where Accessory == EmptyView {
     }
 }
 
-/// Narrows the rooms to one space. The spaces are asked for again, every
-/// page, each time the rooms are shown; a space no longer there stops
-/// narrowing them.
+/// Narrows the rooms to one space. A community without spaces has
+/// nothing to narrow to.
 struct AdminSpaceFilter: View {
     @Bindable var console: AdminConsole
 
     var body: some View {
-        // Kept while hidden, so the spaces are still asked for.
-        VStack {
-            // A community without spaces has nothing to narrow to.
-            if !choices.isEmpty {
-                Picker("Space", selection: chosen) {
-                    Text("All spaces").tag(AdminSpace.ID?.none)
-                    ForEach(choices) { space in
-                        Text(space.name).tag(AdminSpace.ID?.some(space.id))
-                    }
+        if !console.spaceFilterChoices.isEmpty {
+            Picker("Space", selection: $console.roomsSpace) {
+                Text("All spaces").tag(AdminSpace?.none)
+                ForEach(console.spaceFilterChoices) { space in
+                    Text(space.name).tag(AdminSpace?.some(space))
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
-                .accessibilityLabel(Text("Space"))
             }
-        }
-        .task {
-            let spaces = console.spaceChoices
-            await spaces.loadEveryPage()
-            if spaces.isComplete, let space = console.roomsSpace, !spaces.rows.contains(where: { $0.id == space.id }) {
-                console.roomsSpace = nil
-            }
-        }
-    }
-
-    /// Every space loaded, and the one chosen while it is not among them.
-    private var choices: [AdminSpace] {
-        let rows = console.spaceChoices.rows
-        guard let space = console.roomsSpace, !rows.contains(where: { $0.id == space.id }) else { return rows }
-        return [space] + rows
-    }
-
-    private var chosen: Binding<AdminSpace.ID?> {
-        Binding {
-            console.roomsSpace?.id
-        } set: { id in
-            console.roomsSpace = choices.first { $0.id == id }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityLabel(Text("Space"))
         }
     }
 }
@@ -311,10 +309,9 @@ struct AdminListPanel<Row: Identifiable & Sendable, RowView: View, Accessory: Vi
                 isEmpty: list.rows.isEmpty,
                 hasLoaded: list.hasLoaded,
                 failure: list.failure,
-                query: list.query,
-                isInSpace: list.space != nil
+                query: list.query
             ) {
-                AdminNoticeView(notice: notice, query: list.query, space: list.space?.name, copy: copy)
+                AdminNoticeView(notice: notice, query: list.query, space: list.space, copy: copy)
             }
         }
     }
@@ -340,9 +337,8 @@ enum AdminListNotice: Equatable {
 
     /// Nil while there are rows to show. A list not loaded yet is loading,
     /// never empty: "no one" is only said once the server has said so,
-    /// and `query` is the text it answered, not the text being typed. A
-    /// list narrowed to a space has no matches there, not none at all.
-    init?(isEmpty: Bool, hasLoaded: Bool, failure: PortError?, query: String, isInSpace: Bool = false) {
+    /// and `query` is the text it answered, not the text being typed.
+    init?(isEmpty: Bool, hasLoaded: Bool, failure: PortError?, query: String) {
         guard isEmpty else { return nil }
         switch failure {
         case .rejected: self = .notAllowed
@@ -352,8 +348,7 @@ enum AdminListNotice: Equatable {
             if !hasLoaded {
                 self = .loading
             } else {
-                let isSearch = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                self = isSearch || isInSpace ? .noMatches : .empty
+                self = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .empty : .noMatches
             }
         }
     }
@@ -367,15 +362,17 @@ struct AdminListCopy {
     let loadingTitle: String
     let offlineMessage: String
     let failedTitle: String
-    /// Why nothing answers the text and, for rooms, the space.
+    /// Why nothing answers the text and, for rooms, the space it is in.
     let noMatches: (_ query: String, _ space: String?) -> String
     let emptyTitle: String
     let emptyMessage: String
     let searchPrompt: String
     /// The toolbar's "new" button; nil for a list nothing is added to.
     var newTitle: String?
-    /// The caption of a list narrowed to a space, by its name.
+    /// The caption of a list narrowed to a space, and what an empty one
+    /// says, by the space's name.
     var captionInSpace: ((String) -> String)?
+    var emptyInSpace: ((String) -> String)?
 
     static let users = AdminListCopy(
         title: "Users",
@@ -398,17 +395,15 @@ struct AdminListCopy {
         offlineMessage: "Rooms show up here when you're connected.",
         failedTitle: "Rooms didn't load",
         noMatches: { query, space in
-            switch (query.isEmpty, space) {
-            case let (true, space?): "No rooms in \(space) yet."
-            case let (false, space?): "No room in \(space) has a name that starts with “\(query)”."
-            case (_, nil): "No room's name starts with “\(query)”."
-            }
+            space.map { "No room in \($0) has a name that starts with “\(query)”." }
+                ?? "No room's name starts with “\(query)”."
         },
         emptyTitle: "No rooms yet",
         emptyMessage: "Make one to get people talking.",
         searchPrompt: "Search rooms",
         newTitle: "New room",
-        captionInSpace: { "The rooms in \($0)." }
+        captionInSpace: { "The rooms in \($0)." },
+        emptyInSpace: { "\($0) has no rooms yet. Make one to get people talking." }
     )
 
     static let spaces = AdminListCopy(
@@ -429,7 +424,7 @@ struct AdminListCopy {
 private struct AdminNoticeView: View {
     let notice: AdminListNotice
     let query: String
-    let space: String?
+    let space: AdminSpace?
     let copy: AdminListCopy
 
     var body: some View {
@@ -447,10 +442,15 @@ private struct AdminNoticeView: View {
         case .failed:
             EmptyStateView(title: copy.failedTitle, message: "Refresh to try again.", symbol: "exclamationmark.triangle")
         case .noMatches:
-            EmptyStateView(title: "No matches", message: copy.noMatches(query, space), symbol: "magnifyingglass")
+            EmptyStateView(title: "No matches", message: copy.noMatches(query, space?.name), symbol: "magnifyingglass")
         case .empty:
-            EmptyStateView(title: copy.emptyTitle, message: copy.emptyMessage, symbol: copy.symbol)
+            EmptyStateView(title: copy.emptyTitle, message: emptyMessage, symbol: copy.symbol)
         }
+    }
+
+    private var emptyMessage: String {
+        guard let space, let inSpace = copy.emptyInSpace else { return copy.emptyMessage }
+        return inSpace(space.name)
     }
 }
 

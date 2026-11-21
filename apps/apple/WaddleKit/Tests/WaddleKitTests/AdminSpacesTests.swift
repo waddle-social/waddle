@@ -425,6 +425,21 @@ struct AdminSpacesTests {
         #expect(list.rows == [boUser, adaUser])
     }
 
+    /// Who holds a role is known only once every page of members is in,
+    /// so the picker can leave out someone on a later page.
+    @Test func everyMemberIsKnownOnlyOnceEveryPageIsIn() async {
+        let (coordinator, port) = online()
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: "next"))
+        port.admin.members[.init(prefix: "design", cursor: "next")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        let list = coordinator.adminSpaceMembersList(of: design)
+
+        await list.load()
+        #expect(list.everyRow == nil)
+
+        await list.loadEveryPage()
+        #expect(list.everyRow == [ada, bo])
+    }
+
     @Test func addingMembersRaisesTheCount() {
         #expect(design.addingMembers(1).memberCount == 13)
         #expect(design.addingMembers(1).id == design.id)
