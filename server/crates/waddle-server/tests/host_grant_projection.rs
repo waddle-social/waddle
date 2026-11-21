@@ -1136,6 +1136,66 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
     )
     .await;
     assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
+    let configuration = |id| {
+        get(
+            id,
+            service.as_str(),
+            Element::builder("pubsub", NS_PUBSUB_OWNER)
+                .append(
+                    Element::builder("configure", NS_PUBSUB_OWNER)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                        .build(),
+                )
+                .build(),
+        )
+    };
+    let reply = round_trip(&mut owner, configuration("space-owner-configuration")).await;
+    let Iq::Result {
+        payload: Some(payload),
+        ..
+    } = reply
+    else {
+        panic!("Space owner configuration query returned {reply:?}");
+    };
+    assert!(payload.is("pubsub", NS_PUBSUB_OWNER), "{payload:?}");
+    let config = payload
+        .get_child("configure", NS_PUBSUB_OWNER)
+        .expect("node configuration");
+    assert_eq!(config.attr("node"), Some(node));
+    let form = config
+        .get_child("x", xmpp_parsers::ns::DATA_FORMS)
+        .expect("configuration data form");
+    assert_eq!(form.attr("type"), Some("form"));
+    let field = |name| {
+        form.children()
+            .find(|child| {
+                child.is("field", xmpp_parsers::ns::DATA_FORMS) && child.attr("var") == Some(name)
+            })
+            .expect("configuration field")
+    };
+    assert_eq!(field("FORM_TYPE").attr("type"), Some("hidden"));
+    for (name, expected) in [
+        ("FORM_TYPE", "http://jabber.org/protocol/pubsub#node_config"),
+        ("pubsub#access_model", "whitelist"),
+        ("pubsub#publish_model", "publishers"),
+        ("pubsub#persist_items", "1"),
+        ("pubsub#deliver_payloads", "1"),
+    ] {
+        assert_eq!(
+            field(name)
+                .get_child("value", xmpp_parsers::ns::DATA_FORMS)
+                .expect("configuration field value")
+                .text(),
+            expected,
+            "{name}",
+        );
+    }
+    let denied = round_trip(
+        &mut member,
+        configuration("space-member-configuration-denied"),
+    )
+    .await;
+    assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
     protected_space_contents::assert_canonical_space_children(
         &live,
         &authority,
