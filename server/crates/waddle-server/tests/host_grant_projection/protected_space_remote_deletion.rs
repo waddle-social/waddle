@@ -12,9 +12,7 @@ use waddle_ws_test_support::{
     iq::round_trip,
     stanza::{is_result, pubsub_owner_affiliations, pubsub_subscribe, set},
 };
-use waddle_xmpp::pubsub::{
-    NodeConfig, PubSubNodeType, NS_PUBSUB, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
-};
+use waddle_xmpp::pubsub::{NodeConfig, NS_PUBSUB, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER};
 use waddle_xmpp_core::pubsub::{stanzas::matches_pubsub_delete_event, PubSubNodeType};
 
 use super::{bare, served, subject, Live, PermissionActor, LIVE_SPICEDB, OWNER};
