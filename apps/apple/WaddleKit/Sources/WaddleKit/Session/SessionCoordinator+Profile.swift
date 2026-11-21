@@ -37,8 +37,57 @@ extension SessionCoordinator {
         status.mood = mood
     }
 
-    public func loadOwnMood() async {
-        status.mood = try? await port.fetchMood(of: account.jid)
+    /// XEP-0108 activity; nil retracts it.
+    public func setActivity(_ activity: UserActivity?) async throws {
+        if let activity {
+            try await port.publishActivity(activity)
+        } else {
+            try await port.retractActivity()
+        }
+        status.activity = activity
+    }
+
+    /// XEP-0118 tune; nil retracts it. A tune with nothing in it means
+    /// "stopped" on the wire (§3.2), so it is refused rather than published.
+    public func setTune(_ tune: UserTune?) async throws {
+        let tune = tune?.cleaned
+        if let tune {
+            guard !tune.isEmpty, tune.hasUsableLink else { throw PortError.invalidRequest }
+            try await port.publishTune(tune)
+        } else {
+            try await port.retractTune()
+        }
+        status.tune = tune
+    }
+
+    /// The mood, activity and tune the account shares now. A failed lookup
+    /// leaves what is shown.
+    public func loadOwnSharedStatus() async {
+        guard let shared = try? await port.fetchSharedStatus(of: account.jid) else { return }
+        status.mood = shared.mood
+        status.activity = shared.activity
+        status.tune = shared.tune
+    }
+
+    /// The account's own XEP-0292 details; empty when none are published.
+    @discardableResult
+    public func loadOwnDetails() async throws -> ProfileDetails {
+        let details = try await port.fetchProfileDetails(of: account.jid) ?? ProfileDetails()
+        status.details = details
+        return details
+    }
+
+    public func saveDetails(_ details: ProfileDetails) async throws {
+        let details = details.cleaned
+        guard details.hasUsableLink else { throw PortError.invalidRequest }
+        try await port.publishProfileDetails(details)
+        status.details = details
+    }
+
+    /// Someone's details, or nil when they have published none we can read.
+    public func details(of jid: BareJID) async -> ProfileDetails? {
+        guard let details = try? await port.fetchProfileDetails(of: jid), !details.hasNoText else { return nil }
+        return details
     }
 
     /// XEP-0363 slot for an attachment the platform layer then uploads.

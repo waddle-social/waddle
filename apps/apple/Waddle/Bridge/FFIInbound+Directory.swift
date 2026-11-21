@@ -105,8 +105,21 @@ extension FFIInbound {
         return .published(id: result.id, image: image)
     }
 
-    static func mood(_ mood: WaddleMood) -> UserMood {
-        UserMood(value: mood.kind, text: mood.text)
+    static func sharedStatus(_ profile: WaddlePepProfile) -> SharedStatus {
+        SharedStatus(
+            mood: profile.mood.map { UserMood(value: $0.kind, text: $0.text) },
+            activity: profile.activity.map { UserActivity(general: $0.general, specific: $0.specific, text: $0.text) },
+            tune: profile.tune.map {
+                UserTune(title: $0.title ?? "", artist: $0.artist ?? "", album: $0.source ?? "", link: $0.uri ?? "")
+            }
+        )
+    }
+
+    static func profileDetails(_ vcard: WaddleVCard4) -> ProfileDetails {
+        ProfileDetails(
+            fullName: vcard.fullName ?? "", nickname: vcard.nickname ?? "", pronouns: vcard.pronouns ?? "",
+            bio: vcard.note ?? "", link: vcard.url ?? "", photoURI: vcard.photoUri
+        )
     }
 
     static func presenceMode(_ preference: WaddleStatusPreference) -> PresenceMode {

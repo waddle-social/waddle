@@ -1,11 +1,13 @@
 import SwiftUI
 import WaddleKit
 
-/// DM details: the peer, their presence, notifications and search.
+/// DM details: the peer, their presence and details, notifications and
+/// search.
 struct DirectDetailsForm: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     let peer: BareJID
+    @State private var details: ProfileDetails?
 
     var body: some View {
         Form {
@@ -15,6 +17,9 @@ struct DirectDetailsForm: View {
                     name: session.directory.title(for: .direct(peer)),
                     presence: session.presence.contacts[peer]
                 )
+            }
+            if let details {
+                PeerDetailsSection(details: details)
             }
             NotificationModeSection(conversation: .direct(peer))
             Section {
@@ -26,6 +31,7 @@ struct DirectDetailsForm: View {
             }
         }
         .formStyle(.grouped)
+        .peerDetails(of: peer, session: session, into: $details)
     }
 }
 
@@ -111,13 +117,14 @@ struct PeerHeader: View {
 }
 
 /// A message author's profile, opened from their avatar or name in a
-/// timeline or thread: what `DirectPeerHeader` shows, plus "Message"
+/// timeline or thread: what `DirectPeerHeader` shows, their details, plus "Message"
 /// when a real bare JID other than our own is known.
 struct PeerProfileSheet: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.dismiss) private var dismiss
     let profile: PeerProfileRoute
+    @State private var details: ProfileDetails?
 
     var body: some View {
         let presence = PeerProfilePresence.resolve(profile, session: session)
@@ -131,6 +138,9 @@ struct PeerProfileSheet: View {
                         status: presence.status,
                         idleSince: presence.idleSince
                     )
+                }
+                if let details {
+                    PeerDetailsSection(details: details)
                 }
                 if let peer = messageablePeer {
                     Section {
@@ -146,6 +156,7 @@ struct PeerProfileSheet: View {
                 }
             }
             .formStyle(.grouped)
+            .peerDetails(of: profile.jid, session: session, into: $details)
             .navigationTitle(profile.name)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)

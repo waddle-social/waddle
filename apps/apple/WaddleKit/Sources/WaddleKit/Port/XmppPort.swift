@@ -135,9 +135,18 @@ public protocol ProfilePort: AnyObject, Sendable {
     /// Returns the XEP-0084 item id the avatar was published under.
     func publishAvatar(_ image: AvatarImage) async throws -> String
     func removeAvatar() async throws
-    func fetchMood(of jid: BareJID) async throws -> UserMood?
+    /// The mood, activity and tune `jid` shares; a part that is not shared
+    /// is nil.
+    func fetchSharedStatus(of jid: BareJID) async throws -> SharedStatus
     func publishMood(_ mood: UserMood) async throws
     func retractMood() async throws
+    func publishActivity(_ activity: UserActivity) async throws
+    func retractActivity() async throws
+    func publishTune(_ tune: UserTune) async throws
+    func retractTune() async throws
+    /// nil when `jid` has published no details.
+    func fetchProfileDetails(of jid: BareJID) async throws -> ProfileDetails?
+    func publishProfileDetails(_ details: ProfileDetails) async throws
     /// The account's stored presence mode; automatic when none is stored.
     func fetchPresenceMode() async throws -> PresenceMode
     /// Stores the mode for every device of the account to take up.

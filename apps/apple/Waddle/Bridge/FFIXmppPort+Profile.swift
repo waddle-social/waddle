@@ -28,9 +28,8 @@ extension FFIXmppPort {
         try await mappingPortErrors { try await client.disableAvatar() }
     }
 
-    func fetchMood(of jid: BareJID) async throws -> UserMood? {
-        let profile = try await mappingPortErrors { try await client.fetchUserPepProfile(jid: jid.description) }
-        return profile.mood.map(FFIInbound.mood)
+    func fetchSharedStatus(of jid: BareJID) async throws -> SharedStatus {
+        FFIInbound.sharedStatus(try await mappingPortErrors { try await client.fetchUserPepProfile(jid: jid.description) })
     }
 
     func publishMood(_ mood: UserMood) async throws {
@@ -39,6 +38,32 @@ extension FFIXmppPort {
 
     func retractMood() async throws {
         try await mappingPortErrors { try await client.retractMood() }
+    }
+
+    func publishActivity(_ activity: UserActivity) async throws {
+        try await mappingPortErrors {
+            try await client.publishActivity(general: activity.general, specific: activity.specific, text: activity.text)
+        }
+    }
+
+    func retractActivity() async throws {
+        try await mappingPortErrors { try await client.retractActivity() }
+    }
+
+    func publishTune(_ tune: UserTune) async throws {
+        try await mappingPortErrors { try await client.publishTune(tune: FFIOutbound.tune(tune)) }
+    }
+
+    func retractTune() async throws {
+        try await mappingPortErrors { try await client.retractTune() }
+    }
+
+    func fetchProfileDetails(of jid: BareJID) async throws -> ProfileDetails? {
+        try await mappingPortErrors { try await client.fetchVcard4(jid: jid.description) }.map(FFIInbound.profileDetails)
+    }
+
+    func publishProfileDetails(_ details: ProfileDetails) async throws {
+        try await mappingPortErrors { try await client.publishVcard4(vcard: FFIOutbound.vcard(details)) }
     }
 
     func fetchPresenceMode() async throws -> PresenceMode {

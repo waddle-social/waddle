@@ -744,6 +744,10 @@ public struct SessionStatus: Equatable, Sendable {
     public var availability: Availability = .available
     public var statusText: String?
     public var mood: UserMood?
+    public var activity: UserActivity?
+    public var tune: UserTune?
+    /// The account's own details, once loaded.
+    public var details: ProfileDetails?
 
     public init() {}
 }
