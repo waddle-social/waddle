@@ -1525,7 +1525,10 @@ impl LiveSocketState {
                             None
                         };
                         let frame = super::resume_replay::authorize_protected_payload(
-                            payload, recipient, gate,
+                            payload,
+                            recipient,
+                            gate,
+                            attempt.as_ref(),
                         )
                         .await;
                         let Some(frame) = frame else {
@@ -1544,10 +1547,6 @@ impl LiveSocketState {
                                 _ => false,
                             };
                             if !began {
-                                if let Some((_, completion)) = deletion {
-                                    let _ = completion
-                                        .send(SpaceDeletionSocketOutcome::RetryBeforeStage);
-                                }
                                 return ControlFlow::Continue(());
                             }
                         }

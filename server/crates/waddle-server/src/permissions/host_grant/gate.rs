@@ -146,6 +146,7 @@ enum LocalSpaceReplyAuthority {
 struct LocalDeletionDelivery {
     fence: FenceTicket,
     store: HostGrantStore,
+    attempt: Option<SpaceDeletionAttempt>,
 }
 
 impl std::fmt::Debug for LocalDeletionDelivery {
@@ -188,6 +189,30 @@ impl LocalSpaceReplyGrant {
             && bookmark_item_has_payload(&payload.as_ref().to_element())
     }
 
+    pub(crate) fn bind_deletion_attempt(&mut self, attempt: SpaceDeletionAttempt) -> bool {
+        let LocalSpaceReplyAuthority::Deleted(deletion) = &mut self.authority else {
+            return false;
+        };
+        if attempt.kind != SpaceDeletionDeliveryKind::Local
+            || attempt.subject.jid() != &self.replay.recipient().to_bare()
+            || HostGrantGate::local_space_deletion_event(
+                &attempt.key,
+                self.replay.recipient(),
+                &attempt.record,
+            )
+            .as_ref()
+                != Some(&self.replay)
+        {
+            return false;
+        }
+        deletion.attempt = Some(attempt);
+        true
+    }
+
+    pub(crate) fn requires_deletion_staging(&self) -> bool {
+        matches!(&self.authority, LocalSpaceReplyAuthority::Deleted(deletion) if deletion.attempt.is_some())
+    }
+
     pub(crate) fn needs_delivery_hold(&self) -> bool {
         self.preference.is_some() || matches!(&self.authority, LocalSpaceReplyAuthority::Deleted(_))
     }
@@ -198,6 +223,13 @@ impl LocalSpaceReplyGrant {
     ) -> Option<crate::db::Transaction<'_>> {
         tokio::time::timeout(ROOM_READ_DEADLINE, async {
             if let LocalSpaceReplyAuthority::Deleted(deletion) = &self.authority {
+                if let Some(attempt) = &deletion.attempt {
+                    return deletion
+                        .store
+                        .hold_space_deletion_staging(attempt)
+                        .await
+                        .ok()?;
+                }
                 let key = ScopeKey::new(self.replay.service().clone(), self.replay.node()).ok()?;
                 let subject = GrantSubject::new(self.replay.recipient().to_bare()).ok()?;
                 let operation = GrantOperationId::from_uuid(self.replay.deletion_operation()?);
@@ -1415,6 +1447,7 @@ impl HostGrantGate {
             authority: LocalSpaceReplyAuthority::Deleted(LocalDeletionDelivery {
                 fence: ticket,
                 store: store.clone(),
+                attempt: None,
             }),
             replay: replay.clone(),
             preference: None,

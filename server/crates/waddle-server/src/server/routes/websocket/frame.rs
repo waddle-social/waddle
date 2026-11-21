@@ -98,6 +98,15 @@ pub(crate) struct ProtectedSpaceFrame {
     pub(super) grant: SpaceReplyAuthority,
 }
 
+impl ProtectedSpaceFrame {
+    pub(super) fn initial_deletion(&self) -> Option<&LocalSpaceReplyGrant> {
+        match &self.grant {
+            SpaceReplyAuthority::Managed(grant) if grant.requires_deletion_staging() => Some(grant),
+            _ => None,
+        }
+    }
+}
+
 impl ResponseFrame {
     pub(super) fn protected_space_frame(
         xml: String,

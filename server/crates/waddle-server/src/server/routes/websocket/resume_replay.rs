@@ -99,17 +99,23 @@ async fn authorize_protected(
     grants: &HostGrantGate,
 ) -> Option<ResponseFrame> {
     let payload = SmReplayPayload::from_storage(stored).ok()?;
-    authorize_protected_payload(payload, recipient, grants).await
+    authorize_protected_payload(payload, recipient, grants, None).await
 }
 
 pub(super) async fn authorize_protected_payload(
     payload: SmReplayPayload,
     recipient: &jid::FullJid,
     grants: &HostGrantGate,
+    attempt: Option<&crate::permissions::host_grant::SpaceDeletionAttempt>,
 ) -> Option<ResponseFrame> {
-    let grant = grants
+    let mut grant = grants
         .refresh_local_space_reply(&payload, recipient)
         .await?;
+    if let Some(attempt) = attempt {
+        if !grant.bind_deletion_attempt(attempt.clone()) {
+            return None;
+        }
+    }
     ResponseFrame::protected_space_frame(payload.wire().to_owned(), grant).ok()
 }
 

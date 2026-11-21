@@ -493,6 +493,18 @@ where
             // A durable session takes custody of the frame before the
             // connection's queue or the transport may hold it.
             let provenance = frame.provenance();
+            let deletion_hold =
+                if let Some(grant) = protected.and_then(|reply| reply.initial_deletion()) {
+                    let Some(hold) = grant.hold_delivery(false).await else {
+                        continue;
+                    };
+                    if grant.admit(|| ()).is_none() {
+                        continue;
+                    }
+                    Some(hold)
+                } else {
+                    None
+                };
             let custody = conn
                 .durable_sm
                 .take_live_custody(
@@ -507,6 +519,7 @@ where
                     },
                 )
                 .await;
+            drop(deletion_hold);
             let committed_sequence = match custody {
                 LiveCustody::Unmanaged => None,
                 LiveCustody::Exposed { sequence } => {
@@ -1147,6 +1160,10 @@ where
         let ingress_receipts = frame.ingress_receipts().to_vec();
         let provenance = frame.provenance();
         let protected = frame.protected_space_reply();
+        if protected.is_some_and(|reply| reply.initial_deletion().is_some()) {
+            // An initial deletion can enter SM only through the custody hold.
+            continue;
+        }
         let frame_xml = protected.map_or_else(
             || frame.clone().into_serialized_xml(),
             |reply| reply.payload.wire().to_owned(),
