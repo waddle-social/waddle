@@ -36,6 +36,7 @@ pub enum ProtectedSpaceReplyKind {
     BookmarkEvent,
     OwnerAffiliations,
     OwnerAffiliationRefusals,
+    OwnerConfiguration,
 }
 
 /// Identity of the original access decision, without a replica lease.
@@ -316,6 +317,10 @@ impl ProtectedSpaceReplyDescriptor {
                 bytes.extend_from_slice(TYPED_HEADER);
                 bytes.push(6);
             }
+            ProtectedSpaceReplyKind::OwnerConfiguration => {
+                bytes.extend_from_slice(TYPED_HEADER);
+                bytes.push(7);
+            }
         }
         for field in fields {
             // The constructor limits every field below u32::MAX.
@@ -366,6 +371,7 @@ impl ProtectedSpaceReplyDescriptor {
                 Some((4, rest)) => (rest, ProtectedSpaceReplyKind::BookmarkEvent),
                 Some((5, rest)) => (rest, ProtectedSpaceReplyKind::OwnerAffiliations),
                 Some((6, rest)) => (rest, ProtectedSpaceReplyKind::OwnerAffiliationRefusals),
+                Some((7, rest)) => (rest, ProtectedSpaceReplyKind::OwnerConfiguration),
                 _ => return Err(ProtectedSpaceReplyCodecError),
             }
         };

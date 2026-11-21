@@ -945,22 +945,31 @@ impl HostGrantGate {
             && payload.attrs().is_empty()
             && payload.text().trim().is_empty()
             && payload.children().count() == 1
-            && payload.children().next().is_some_and(|affiliations| {
-                affiliations.is("affiliations", waddle_xmpp::pubsub::NS_PUBSUB_OWNER)
-                    && affiliations.attr("node") == Some(key.node())
-                    && affiliations.attrs().len() == 1
-                    && affiliations.children().next().is_none()
-                    && affiliations.text().trim().is_empty()
-            })
         {
-            ProtectedSpaceReplyKind::OwnerAffiliations
+            let operation = payload.children().next()?;
+            if operation.ns() != waddle_xmpp::pubsub::NS_PUBSUB_OWNER
+                || operation.attr("node") != Some(key.node())
+                || operation.attrs().len() != 1
+                || operation.children().next().is_some()
+                || !operation.text().trim().is_empty()
+            {
+                return None;
+            }
+            match operation.name() {
+                "affiliations" => ProtectedSpaceReplyKind::OwnerAffiliations,
+                "configure" => ProtectedSpaceReplyKind::OwnerConfiguration,
+                _ => return None,
+            }
         } else {
             return None;
         };
         let subject = GrantSubject::new(requester.to_bare()).ok()?;
         let grant = self.space_read_local(key, &subject).await?;
-        if kind == ProtectedSpaceReplyKind::OwnerAffiliations
-            && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
+        if matches!(
+            kind,
+            ProtectedSpaceReplyKind::OwnerAffiliations
+                | ProtectedSpaceReplyKind::OwnerConfiguration
+        ) && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
         {
             return None;
         }
@@ -1212,6 +1221,7 @@ impl HostGrantGate {
             replay.kind(),
             ProtectedSpaceReplyKind::OwnerAffiliations
                 | ProtectedSpaceReplyKind::OwnerAffiliationRefusals
+                | ProtectedSpaceReplyKind::OwnerConfiguration
         ) && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
         {
             return None;

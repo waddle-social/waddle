@@ -25,13 +25,15 @@ use crate::server::routes::websocket::frame::ResponseFrame;
 
 const RECONCILE_DEADLINE: Duration = Duration::from_secs(5);
 
-pub(super) async fn list_space_membership(
+pub(super) async fn read_space_owner_state(
     iq: &Iq,
     state: &WebSocketState,
     requester: Option<&jid::FullJid>,
     session: Option<&Session>,
 ) -> Option<ResponseFrame> {
-    use waddle_xmpp::pubsub::build_pubsub_affiliations_result;
+    use waddle_xmpp::pubsub::{
+        build_pubsub_affiliations_result, build_pubsub_configure_form_result,
+    };
 
     let Iq::Get { payload, to, .. } = iq else {
         return None;
@@ -40,9 +42,10 @@ pub(super) async fn list_space_membership(
     if !payload.is("pubsub", NS_PUBSUB_OWNER) || to.as_ref()?.as_str() != service {
         return None;
     }
-    let node = payload
-        .get_child("affiliations", NS_PUBSUB_OWNER)?
-        .attr("node")?;
+    let operation = payload.children().find(|child| {
+        child.ns() == NS_PUBSUB_OWNER && matches!(child.name(), "affiliations" | "configure")
+    })?;
+    let node = operation.attr("node")?;
     let error = |error| {
         Some(ResponseFrame::from(super::iq_to_xml(build_pubsub_error(
             iq, error,
@@ -67,13 +70,34 @@ pub(super) async fn list_space_membership(
     else {
         return error(PubSubError::BadRequest);
     };
-    let Some((grant, listing)) = gate
-        .local_space_affiliations_reply(&key, requester, iq)
-        .await
-    else {
-        return error(PubSubError::Forbidden);
+    let (grant, mut reply) = if operation.name() == "configure" {
+        let Some(grant) = gate.space_reply_local(&key, requester, iq).await else {
+            return error(PubSubError::Forbidden);
+        };
+        let config = match state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_node(key.service(), node)
+            .await
+        {
+            Ok(Some(record)) => record.config,
+            Ok(None) => return error(PubSubError::NodeNotFound),
+            Err(_) => return error(PubSubError::InternalServerError),
+        };
+        (grant, build_pubsub_configure_form_result(iq, node, &config))
+    } else {
+        let Some((grant, listing)) = gate
+            .local_space_affiliations_reply(&key, requester, iq)
+            .await
+        else {
+            return error(PubSubError::Forbidden);
+        };
+        (
+            grant,
+            build_pubsub_affiliations_result(iq, node, &listing.rows),
+        )
     };
-    let mut reply = build_pubsub_affiliations_result(iq, node, &listing.rows);
     if let Iq::Result { to, .. } = &mut reply {
         *to = Some(requester.clone().into());
     }

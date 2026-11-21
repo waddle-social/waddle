@@ -459,7 +459,7 @@ pub async fn handle_iq_with_conn_state(
             )
             .await
         } else {
-            super::pubsub_space_membership::list_space_membership(
+            super::pubsub_space_membership::read_space_owner_state(
                 &iq,
                 state,
                 phase.bound_jid(),
