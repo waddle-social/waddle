@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Follow a real ejabberd Space and verify fresh-profile restoration in Firefox."""
 
+import http.client
 import json
 import os
 import socket
@@ -9,7 +10,6 @@ import sys
 import tempfile
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 
@@ -19,9 +19,16 @@ def free_port():
         return reservation.getsockname()[1]
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+def worker_ready(port: int) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/")
+        with connection.getresponse() as response:
+            return response.status == 200
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 def fixture_origin(value, scheme, hosts, require_port=False):
@@ -45,7 +52,7 @@ def fixture_origin(value, scheme, hosts, require_port=False):
 
 
 def run_profile(config, service, node, room, restore):
-    chat = Path(config["chat"])
+    chat = Path(config["chat"]).resolve()
     home, home_domain, _ = fixture_origin(
         config["home"], "https", {"home-a.test", "home-b.test"}
     )
@@ -55,22 +62,26 @@ def run_profile(config, service, node, room, restore):
     origin, _, origin_port = fixture_origin(
         config["chat_origin"], "http", {"127.0.0.1", "localhost"}, require_port=True
     )
-    readiness = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    readiness_url = f"http://127.0.0.1:{origin_port}"
-    with tempfile.TemporaryDirectory(prefix="waddle-firefox-") as profile:
+    built_config = chat / "dist/server/wrangler.json"
+    worker_config = json.loads(built_config.read_text())
+    worker_config.setdefault("vars", {})["SERVER_BASE_URL"] = home
+    worker_config.setdefault("dev", {}).update(ip="127.0.0.1", port=origin_port)
+    # Wrangler resolves build output and asset paths relative to its config.
+    with (
+        tempfile.TemporaryDirectory(prefix="waddle-firefox-") as profile,
+        tempfile.NamedTemporaryFile(
+            mode="w", dir=built_config.parent, prefix="interop-", suffix=".json"
+        ) as local_config,
+    ):
+        json.dump(worker_config, local_config)
+        local_config.flush()
         worker = subprocess.Popen(
             [
                 "node",
                 "node_modules/.bin/wrangler",
                 "dev",
                 "--config",
-                "dist/server/wrangler.json",
-                "--ip",
-                "127.0.0.1",
-                "--port",
-                str(origin_port),
-                "--var",
-                f"SERVER_BASE_URL:{home}",
+                local_config.name,
                 "--local",
             ],
             cwd=chat,
@@ -80,14 +91,11 @@ def run_profile(config, service, node, room, restore):
         )
         try:
             for _ in range(80):
-                try:
-                    with readiness.open(readiness_url, timeout=1) as response:
-                        assert response.status == 200
+                if worker_ready(origin_port):
                     break
-                except OSError:
-                    if worker.poll() is not None:
-                        raise RuntimeError("Waddle Worker exited")
-                    time.sleep(0.25)
+                if worker.poll() is not None:
+                    raise RuntimeError("Waddle Worker exited")
+                time.sleep(0.25)
             else:
                 raise RuntimeError("Waddle Worker did not respond")
             port = free_port()

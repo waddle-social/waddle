@@ -266,7 +266,7 @@ impl Ejabberd {
     }
 
     async fn start_node(&mut self, node: u8) -> Result<()> {
-        std::fs::create_dir_all(self.logs.join(["ejabberd", &node.to_string()].concat()))?;
+        tokio::fs::create_dir_all(self.logs.join(["ejabberd", &node.to_string()].concat())).await?;
         let mut command = self.ctl(node);
         command.arg("foreground");
         self.starts += 1;
