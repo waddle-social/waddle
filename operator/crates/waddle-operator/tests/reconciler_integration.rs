@@ -19,10 +19,10 @@ use tokio::net::TcpListener;
 use tower::ServiceExt;
 use waddle_operator::external_crds::{discover_capabilities, DiscoveredCapabilities};
 use waddle_operator::health::{probe_router, HealthState};
-use waddle_operator::leader_election::{LeaderConfig, LeaderGuard};
+use waddle_operator::leader_election::{LeaderConfig, LeaderGuard, LeadershipFence};
 use waddle_operator::metrics::OperatorMetrics;
 use waddle_operator::resources::ANNOTATION_SESSION_KEY_FINGERPRINT;
-use waddle_operator::{reconcile_single, ControllerContext, OperatorPolicy};
+use waddle_operator::{reconcile_single, ControllerContext, OperatorError, OperatorPolicy};
 use waddle_operator_crd::{WaddleServer, WaddleServerPhase};
 
 #[derive(Default)]
@@ -367,6 +367,24 @@ async fn handle_k8s_request(
 
         let existing = g.resources.get(&path).cloned();
         let mut stored = payload;
+        if path.contains("/configmaps/") {
+            if let Some(prev) = &existing {
+                for field in ["data", "binaryData"] {
+                    if let Some(prev_entries) = prev.get(field).and_then(Value::as_object) {
+                        let stored_obj = stored.as_object_mut().and_then(|root| {
+                            root.entry(field.to_owned())
+                                .or_insert_with(|| json!({}))
+                                .as_object_mut()
+                        });
+                        if let Some(dst) = stored_obj {
+                            for (k, v) in prev_entries {
+                                dst.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if path.contains("/externalsecrets/") {
             if let Some(target) = stored
                 .get_mut("spec")
@@ -497,6 +515,7 @@ fn make_ctx(
         },
         metrics: Arc::new(OperatorMetrics::new()),
         recorder: Some(recorder),
+        leadership: LeadershipFence::always_active(),
     })
 }
 
@@ -1385,13 +1404,38 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
         }),
     );
 
-    // 3. Delete HTTP Service & mutate ConfigMap out-of-band -> drift_detected self-heals both!
+    // 3. Extra ConfigMap keys from other field managers must NOT trigger drift repairs,
+    // while deleted HTTP Service, tampered operator ConfigMap keys, and out-of-band
+    // Deployment field edits MUST self-heal.
     let http_svc_path = format!("/api/v1/namespaces/{ns}/services/{name}");
     let cm_path = format!("/api/v1/namespaces/{ns}/configmaps/{name}-config");
+    let mut cm_extra = cluster.get(&cm_path).expect("cm");
+    let orig_http_addr = cm_extra["data"]["WADDLE_HTTP_ADDR"]
+        .as_str()
+        .expect("WADDLE_HTTP_ADDR in ConfigMap")
+        .to_owned();
+    cm_extra["data"]["ADMIN_EXTRA_KEY"] = json!("kubectl-managed");
+    cluster.put(&cm_path, cm_extra);
+
+    cluster.clear_mutations();
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("extra ConfigMap key should stay Ready without rewrite");
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Ready,
+        "extra non-operator ConfigMap keys must not trigger Reconciling loops"
+    );
+    assert!(
+        cluster.mutations().is_empty(),
+        "extra non-operator ConfigMap keys must cause zero mutations, got: {:?}",
+        cluster.mutations()
+    );
+
     cluster.delete(&http_svc_path);
-    let mut cm = cluster.get(&cm_path).expect("cm");
-    cm["data"]["TAMPERED"] = json!("true");
-    cluster.put(&cm_path, cm);
+    let mut cm_tampered = cluster.get(&cm_path).expect("cm");
+    cm_tampered["data"]["WADDLE_HTTP_ADDR"] = json!("127.0.0.1:9999");
+    cluster.put(&cm_path, cm_tampered);
 
     reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
         .await
@@ -1408,9 +1452,15 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
         "deleted HTTP Service must be recreated on repair"
     );
     let repaired_cm = cluster.get(&cm_path).expect("repaired cm");
-    assert!(
-        repaired_cm["data"].get("TAMPERED").is_none(),
-        "tampered ConfigMap must be reconciled back to desired contents"
+    assert_eq!(
+        repaired_cm["data"]["WADDLE_HTTP_ADDR"].as_str(),
+        Some(orig_http_addr.as_str()),
+        "tampered operator ConfigMap key must be reconciled back to desired value"
+    );
+    assert_eq!(
+        repaired_cm["data"]["ADMIN_EXTRA_KEY"].as_str(),
+        Some("kubectl-managed"),
+        "SSA repair must preserve extra non-operator ConfigMap keys"
     );
     assert!(
         cluster.get(&unrelated_svc_path).is_some(),
@@ -1422,8 +1472,38 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
         .await
         .expect("return Ready");
 
-    // 4. Rotate Postgres Secret pg-app -> pod template secrets-checksum MUST change.
+    // 3b. Out-of-band Deployment field edits (e.g. terminationGracePeriodSeconds) must self-heal.
     let dep_path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}");
+    let mut tampered_dep = cluster.get(&dep_path).expect("dep");
+    let expected_grace = tampered_dep["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+        .as_i64()
+        .expect("expected terminationGracePeriodSeconds");
+    tampered_dep["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] = json!(999);
+    cluster.put(&dep_path, tampered_dep);
+
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("detect out-of-band Deployment edit -> Reconciling");
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Reconciling
+    );
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("repair Deployment terminationGracePeriodSeconds");
+    let repaired_dep = cluster.get(&dep_path).expect("repaired dep");
+    assert_eq!(
+        repaired_dep["spec"]["template"]["spec"]["terminationGracePeriodSeconds"].as_i64(),
+        Some(expected_grace),
+        "tampered Deployment terminationGracePeriodSeconds must be reconciled back to desired value"
+    );
+
+    mark_deployment_available(&cluster, ns, name);
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("return Ready after Deployment repair");
+
+    // 4. Rotate Postgres Secret pg-app -> pod template secrets-checksum MUST change.
     let prev_checksum = cluster.get(&dep_path).expect("dep")["spec"]["template"]["metadata"]
         ["annotations"]["waddle.social/secrets-checksum"]
         .as_str()
@@ -1465,6 +1545,11 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
         .await
         .expect("acquire lease")
         .expect("lease guard returned");
+    let fenced_handle = guard.fence();
+    assert!(
+        fenced_handle.is_valid(),
+        "LeadershipFence must be valid immediately after lease acquisition"
+    );
     let lost_rx = guard.take_lost_rx().expect("lost rx");
     cluster.set_stall_lease_puts(true);
 
@@ -1474,4 +1559,30 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
             "LeaderGuard must report lost leadership within deadline bound before 4s stall returns",
         )
         .expect("lost notification delivered");
+
+    assert!(
+        !fenced_handle.is_valid(),
+        "LeadershipFence must be revoked when LeaderGuard loses leadership"
+    );
+
+    let fenced_ctx = Arc::new(ControllerContext {
+        client: ctx.client.clone(),
+        policy: ctx.policy.clone(),
+        metrics: Arc::clone(&ctx.metrics),
+        recorder: ctx.recorder.clone(),
+        leadership: fenced_handle,
+    });
+    cluster.clear_mutations();
+    let lost_err = reconcile_single(Arc::new(cluster.get_waddle(ns, name)), fenced_ctx)
+        .await
+        .expect_err("reconcile_single with revoked LeadershipFence must abort");
+    assert!(
+        matches!(lost_err, OperatorError::LeadershipLost),
+        "expected LeadershipLost error, got: {lost_err:?}"
+    );
+    assert!(
+        cluster.mutations().is_empty(),
+        "revoked leader fence must perform zero Kubernetes writes, got: {:?}",
+        cluster.mutations()
+    );
 }

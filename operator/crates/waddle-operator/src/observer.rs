@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{Deployment, RollingUpdateDeployment};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, PersistentVolumeClaim, Secret, Service, ServiceAccount,
+    ConfigMap, Container, EnvVar, EnvVarSource, PersistentVolumeClaim, PodSecurityContext,
+    PodTemplateSpec, Probe, ResourceRequirements, Secret, SecurityContext, Service, ServiceAccount,
+    Volume, VolumeMount,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as KubeCondition;
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::{Client, ResourceExt};
@@ -1680,7 +1683,7 @@ async fn workload_has_drifted(
     else {
         return Ok(true);
     };
-    if resources::config_map_digest(&live_cm)? != cm_digest {
+    if config_map_drifted(&live_cm, &desired_cm) {
         return Ok(true);
     }
 
@@ -1783,6 +1786,24 @@ fn owned_by_uid<K: ResourceExt>(obj: &K, uid: &str) -> bool {
     obj.owner_references().iter().any(|owner| owner.uid == uid)
 }
 
+fn config_map_drifted(live: &ConfigMap, desired: &ConfigMap) -> bool {
+    !map_subset_matches(live.data.as_ref(), desired.data.as_ref())
+        || !map_subset_matches(live.binary_data.as_ref(), desired.binary_data.as_ref())
+}
+
+fn map_subset_matches<V: PartialEq>(
+    live: Option<&BTreeMap<String, V>>,
+    desired: Option<&BTreeMap<String, V>>,
+) -> bool {
+    let Some(d) = desired else {
+        return true;
+    };
+    let Some(l) = live else {
+        return d.is_empty();
+    };
+    d.iter().all(|(k, v)| l.get(k) == Some(v))
+}
+
 fn deployment_drifted(ws: &WaddleServer, live: &Deployment, desired: &Deployment) -> bool {
     let desired_hash = desired
         .metadata
@@ -1805,52 +1826,557 @@ fn deployment_drifted(ws: &WaddleServer, live: &Deployment, desired: &Deployment
         return true;
     }
 
-    let live_strategy_type = live_spec.strategy.as_ref().and_then(|s| s.type_.as_deref());
-    let desired_strategy_type = desired_spec
-        .strategy
-        .as_ref()
-        .and_then(|s| s.type_.as_deref());
-    if live_strategy_type != desired_strategy_type {
+    if deployment_strategy_drifted(live_spec.strategy.as_ref(), desired_spec.strategy.as_ref()) {
         return true;
     }
 
-    let (Some(live_tpl_spec), Some(desired_tpl_spec)) =
-        (&live_spec.template.spec, &desired_spec.template.spec)
-    else {
+    pod_template_drifted(&live_spec.template, &desired_spec.template)
+}
+
+fn deployment_strategy_drifted(
+    live: Option<&k8s_openapi::api::apps::v1::DeploymentStrategy>,
+    desired: Option<&k8s_openapi::api::apps::v1::DeploymentStrategy>,
+) -> bool {
+    let Some(ds) = desired else {
+        return false;
+    };
+    let Some(ls) = live else {
         return true;
     };
-    let live_img = live_tpl_spec
-        .containers
-        .first()
-        .and_then(|c| c.image.as_deref());
-    let desired_img = desired_tpl_spec
-        .containers
-        .first()
-        .and_then(|c| c.image.as_deref());
-    if live_img != desired_img {
+    if ds.type_.is_some() && ls.type_ != ds.type_ {
+        return true;
+    }
+    rolling_update_drifted(ls.rolling_update.as_ref(), ds.rolling_update.as_ref())
+}
+
+fn rolling_update_drifted(
+    live: Option<&RollingUpdateDeployment>,
+    desired: Option<&RollingUpdateDeployment>,
+) -> bool {
+    let Some(d_ru) = desired else {
+        return false;
+    };
+    let Some(l_ru) = live else {
+        return true;
+    };
+    (d_ru.max_surge.is_some() && l_ru.max_surge != d_ru.max_surge)
+        || (d_ru.max_unavailable.is_some() && l_ru.max_unavailable != d_ru.max_unavailable)
+}
+
+fn pod_template_drifted(live_tpl: &PodTemplateSpec, desired_tpl: &PodTemplateSpec) -> bool {
+    let live_meta = live_tpl.metadata.as_ref();
+    let desired_meta = desired_tpl.metadata.as_ref();
+    if !map_subset_matches(
+        live_meta.and_then(|m| m.labels.as_ref()),
+        desired_meta.and_then(|m| m.labels.as_ref()),
+    ) {
+        return true;
+    }
+    if !map_subset_matches(
+        live_meta.and_then(|m| m.annotations.as_ref()),
+        desired_meta.and_then(|m| m.annotations.as_ref()),
+    ) {
         return true;
     }
 
-    let live_ann = live_spec
-        .template
-        .metadata
-        .as_ref()
-        .and_then(|m| m.annotations.as_ref());
-    let desired_ann = desired_spec
-        .template
-        .metadata
-        .as_ref()
-        .and_then(|m| m.annotations.as_ref());
-    for key in [
-        "waddle.social/config-checksum",
-        "waddle.social/secrets-checksum",
-    ] {
-        if live_ann.and_then(|a| a.get(key)) != desired_ann.and_then(|a| a.get(key)) {
+    let (Some(l_ps), Some(d_ps)) = (&live_tpl.spec, &desired_tpl.spec) else {
+        return true;
+    };
+    if d_ps.service_account_name.is_some() && l_ps.service_account_name != d_ps.service_account_name
+    {
+        return true;
+    }
+    if d_ps.termination_grace_period_seconds.is_some()
+        && l_ps.termination_grace_period_seconds != d_ps.termination_grace_period_seconds
+    {
+        return true;
+    }
+    if pod_security_context_drifted(
+        l_ps.security_context.as_ref(),
+        d_ps.security_context.as_ref(),
+    ) {
+        return true;
+    }
+    if !map_subset_matches(l_ps.node_selector.as_ref(), d_ps.node_selector.as_ref()) {
+        return true;
+    }
+    if d_ps.affinity.is_some() && l_ps.affinity != d_ps.affinity {
+        return true;
+    }
+    if let Some(d_ips) = &d_ps.image_pull_secrets {
+        let l_ips = l_ps.image_pull_secrets.as_deref().unwrap_or(&[]);
+        if d_ips
+            .iter()
+            .any(|d_ref| !l_ips.iter().any(|l_ref| l_ref.name == d_ref.name))
+        {
+            return true;
+        }
+    }
+    if volumes_drifted(
+        l_ps.volumes.as_deref().unwrap_or(&[]),
+        d_ps.volumes.as_deref().unwrap_or(&[]),
+    ) {
+        return true;
+    }
+
+    d_ps.containers.iter().any(|d_c| {
+        let Some(l_c) = l_ps.containers.iter().find(|c| c.name == d_c.name) else {
+            return true;
+        };
+        container_drifted(l_c, d_c)
+    })
+}
+
+fn pod_security_context_drifted(
+    live: Option<&PodSecurityContext>,
+    desired: Option<&PodSecurityContext>,
+) -> bool {
+    let Some(d_psc) = desired else {
+        return false;
+    };
+    let Some(l_psc) = live else {
+        return true;
+    };
+    (d_psc.fs_group.is_some() && l_psc.fs_group != d_psc.fs_group)
+        || (d_psc.run_as_non_root.is_some() && l_psc.run_as_non_root != d_psc.run_as_non_root)
+        || (d_psc.run_as_user.is_some() && l_psc.run_as_user != d_psc.run_as_user)
+        || (d_psc.run_as_group.is_some() && l_psc.run_as_group != d_psc.run_as_group)
+}
+
+fn volumes_drifted(live: &[Volume], desired: &[Volume]) -> bool {
+    desired.iter().any(|d_vol| {
+        let Some(l_vol) = live.iter().find(|v| v.name == d_vol.name) else {
+            return true;
+        };
+        single_volume_drifted(l_vol, d_vol)
+    })
+}
+
+fn single_volume_drifted(l_vol: &Volume, d_vol: &Volume) -> bool {
+    if let Some(d_sec) = &d_vol.secret {
+        let Some(l_sec) = &l_vol.secret else {
+            return true;
+        };
+        if (d_sec.secret_name.is_some() && l_sec.secret_name != d_sec.secret_name)
+            || (d_sec.default_mode.is_some() && l_sec.default_mode != d_sec.default_mode)
+            || (d_sec.items.is_some() && l_sec.items != d_sec.items)
+        {
+            return true;
+        }
+    }
+    if let Some(d_cm) = &d_vol.config_map {
+        let Some(l_cm) = &l_vol.config_map else {
+            return true;
+        };
+        if l_cm.name != d_cm.name
+            || (d_cm.default_mode.is_some() && l_cm.default_mode != d_cm.default_mode)
+            || (d_cm.items.is_some() && l_cm.items != d_cm.items)
+        {
+            return true;
+        }
+    }
+    if let Some(d_pvc) = &d_vol.persistent_volume_claim {
+        let Some(l_pvc) = &l_vol.persistent_volume_claim else {
+            return true;
+        };
+        if l_pvc.claim_name != d_pvc.claim_name
+            || (d_pvc.read_only.is_some() && l_pvc.read_only != d_pvc.read_only)
+        {
+            return true;
+        }
+    }
+    d_vol.empty_dir.is_some() && l_vol.empty_dir.is_none()
+}
+
+fn container_drifted(live: &Container, desired: &Container) -> bool {
+    if live.image != desired.image
+        || (desired.image_pull_policy.is_some()
+            && live.image_pull_policy != desired.image_pull_policy)
+        || container_security_context_drifted(
+            live.security_context.as_ref(),
+            desired.security_context.as_ref(),
+        )
+        || pre_stop_drifted(live.lifecycle.as_ref(), desired.lifecycle.as_ref())
+        || ports_drifted(
+            live.ports.as_deref().unwrap_or(&[]),
+            desired.ports.as_deref().unwrap_or(&[]),
+        )
+        || env_from_drifted(
+            live.env_from.as_deref().unwrap_or(&[]),
+            desired.env_from.as_deref().unwrap_or(&[]),
+        )
+        || env_vars_drifted(
+            live.env.as_deref().unwrap_or(&[]),
+            desired.env.as_deref().unwrap_or(&[]),
+        )
+        || probe_drifted(
+            live.liveness_probe.as_ref(),
+            desired.liveness_probe.as_ref(),
+        )
+        || probe_drifted(
+            live.readiness_probe.as_ref(),
+            desired.readiness_probe.as_ref(),
+        )
+        || resources_drifted(live.resources.as_ref(), desired.resources.as_ref())
+        || volume_mounts_drifted(
+            live.volume_mounts.as_deref().unwrap_or(&[]),
+            desired.volume_mounts.as_deref().unwrap_or(&[]),
+        )
+    {
+        return true;
+    }
+
+    false
+}
+
+fn container_security_context_drifted(
+    live: Option<&SecurityContext>,
+    desired: Option<&SecurityContext>,
+) -> bool {
+    let Some(d_sc) = desired else {
+        return false;
+    };
+    let Some(l_sc) = live else {
+        return true;
+    };
+    if (d_sc.run_as_non_root.is_some() && l_sc.run_as_non_root != d_sc.run_as_non_root)
+        || (d_sc.run_as_user.is_some() && l_sc.run_as_user != d_sc.run_as_user)
+        || (d_sc.run_as_group.is_some() && l_sc.run_as_group != d_sc.run_as_group)
+        || (d_sc.allow_privilege_escalation.is_some()
+            && l_sc.allow_privilege_escalation != d_sc.allow_privilege_escalation)
+        || (d_sc.read_only_root_filesystem.is_some()
+            && l_sc.read_only_root_filesystem != d_sc.read_only_root_filesystem)
+    {
+        return true;
+    }
+
+    if let Some(d_drop) = d_sc.capabilities.as_ref().and_then(|c| c.drop.as_ref()) {
+        let Some(l_drop) = l_sc.capabilities.as_ref().and_then(|c| c.drop.as_ref()) else {
+            return true;
+        };
+        if d_drop.iter().any(|cap| !l_drop.contains(cap)) {
             return true;
         }
     }
 
     false
+}
+
+fn pre_stop_drifted(
+    live: Option<&k8s_openapi::api::core::v1::Lifecycle>,
+    desired: Option<&k8s_openapi::api::core::v1::Lifecycle>,
+) -> bool {
+    let Some(d_pre) = desired.and_then(|l| l.pre_stop.as_ref()) else {
+        return false;
+    };
+    let Some(l_pre) = live.and_then(|l| l.pre_stop.as_ref()) else {
+        return true;
+    };
+    (d_pre.sleep.is_some() && l_pre.sleep != d_pre.sleep)
+        || (d_pre.exec.is_some() && l_pre.exec != d_pre.exec)
+        || (d_pre.http_get.is_some() && l_pre.http_get != d_pre.http_get)
+}
+
+fn ports_drifted(
+    live: &[k8s_openapi::api::core::v1::ContainerPort],
+    desired: &[k8s_openapi::api::core::v1::ContainerPort],
+) -> bool {
+    desired.iter().any(|d_p| {
+        !live.iter().any(|l_p| {
+            l_p.name == d_p.name
+                && l_p.container_port == d_p.container_port
+                && (d_p.protocol.is_none() || l_p.protocol == d_p.protocol)
+        })
+    })
+}
+
+fn env_from_drifted(
+    live: &[k8s_openapi::api::core::v1::EnvFromSource],
+    desired: &[k8s_openapi::api::core::v1::EnvFromSource],
+) -> bool {
+    desired.iter().any(|d_ef| {
+        !live.iter().any(|l_ef| {
+            let prefix_ok =
+                l_ef.prefix.as_deref().unwrap_or("") == d_ef.prefix.as_deref().unwrap_or("");
+            let cm_ok = match (&l_ef.config_map_ref, &d_ef.config_map_ref) {
+                (_, None) => true,
+                (None, Some(_)) => false,
+                (Some(lr), Some(dr)) => {
+                    lr.name == dr.name && (dr.optional.is_none() || lr.optional == dr.optional)
+                }
+            };
+            let sec_ok = match (&l_ef.secret_ref, &d_ef.secret_ref) {
+                (_, None) => true,
+                (None, Some(_)) => false,
+                (Some(lr), Some(dr)) => {
+                    lr.name == dr.name && (dr.optional.is_none() || lr.optional == dr.optional)
+                }
+            };
+            prefix_ok
+                && cm_ok
+                && sec_ok
+                && (d_ef.config_map_ref.is_some() || l_ef.config_map_ref.is_none())
+                && (d_ef.secret_ref.is_some() || l_ef.secret_ref.is_none())
+        })
+    })
+}
+
+fn env_vars_drifted(live: &[EnvVar], desired: &[EnvVar]) -> bool {
+    desired.iter().any(|d_e| {
+        let Some(l_e) = live.iter().find(|e| e.name == d_e.name) else {
+            return true;
+        };
+        if d_e.value_from.is_none() {
+            l_e.value.as_deref().unwrap_or("") != d_e.value.as_deref().unwrap_or("")
+                || l_e.value_from.is_some()
+        } else {
+            l_e.value.is_some()
+                || env_value_from_drifted(l_e.value_from.as_ref(), d_e.value_from.as_ref())
+        }
+    })
+}
+
+fn env_value_from_drifted(live: Option<&EnvVarSource>, desired: Option<&EnvVarSource>) -> bool {
+    let Some(d_vf) = desired else {
+        return live.is_some();
+    };
+    let Some(l_vf) = live else {
+        return true;
+    };
+    let skr_ok = match (&l_vf.secret_key_ref, &d_vf.secret_key_ref) {
+        (None, None) => true,
+        (Some(lr), Some(dr)) => {
+            lr.name == dr.name
+                && lr.key == dr.key
+                && (dr.optional.is_none() || lr.optional == dr.optional)
+        }
+        _ => false,
+    };
+    let cmkr_ok = match (&l_vf.config_map_key_ref, &d_vf.config_map_key_ref) {
+        (None, None) => true,
+        (Some(lr), Some(dr)) => {
+            lr.name == dr.name
+                && lr.key == dr.key
+                && (dr.optional.is_none() || lr.optional == dr.optional)
+        }
+        _ => false,
+    };
+    let fr_ok = match (&l_vf.field_ref, &d_vf.field_ref) {
+        (None, None) => true,
+        (Some(lr), Some(dr)) => lr.field_path == dr.field_path,
+        _ => false,
+    };
+    let rfr_ok = match (&l_vf.resource_field_ref, &d_vf.resource_field_ref) {
+        (None, None) => true,
+        (Some(lr), Some(dr)) => {
+            lr.resource == dr.resource && lr.container_name == dr.container_name
+        }
+        _ => false,
+    };
+    !(skr_ok && cmkr_ok && fr_ok && rfr_ok)
+}
+
+fn probe_drifted(live: Option<&Probe>, desired: Option<&Probe>) -> bool {
+    let Some(d_p) = desired else {
+        return false;
+    };
+    let Some(l_p) = live else {
+        return true;
+    };
+    if (d_p.initial_delay_seconds.is_some()
+        && l_p.initial_delay_seconds != d_p.initial_delay_seconds)
+        || (d_p.period_seconds.is_some() && l_p.period_seconds != d_p.period_seconds)
+        || (d_p.timeout_seconds.is_some() && l_p.timeout_seconds != d_p.timeout_seconds)
+        || (d_p.success_threshold.is_some() && l_p.success_threshold != d_p.success_threshold)
+        || (d_p.failure_threshold.is_some() && l_p.failure_threshold != d_p.failure_threshold)
+    {
+        return true;
+    }
+    if let Some(d_http) = &d_p.http_get {
+        let Some(l_http) = &l_p.http_get else {
+            return true;
+        };
+        if l_http.path != d_http.path
+            || l_http.port != d_http.port
+            || (d_http.scheme.is_some() && l_http.scheme != d_http.scheme)
+        {
+            return true;
+        }
+    }
+    if let Some(d_tcp) = &d_p.tcp_socket {
+        let Some(l_tcp) = &l_p.tcp_socket else {
+            return true;
+        };
+        if l_tcp.port != d_tcp.port {
+            return true;
+        }
+    }
+    false
+}
+
+fn resources_drifted(
+    live: Option<&ResourceRequirements>,
+    desired: Option<&ResourceRequirements>,
+) -> bool {
+    let Some(d_res) = desired else {
+        return false;
+    };
+    let Some(l_res) = live else {
+        return true;
+    };
+    !resource_map_matches(l_res.requests.as_ref(), d_res.requests.as_ref())
+        || !resource_map_matches(l_res.limits.as_ref(), d_res.limits.as_ref())
+}
+
+fn resource_map_matches(
+    live: Option<&BTreeMap<String, Quantity>>,
+    desired: Option<&BTreeMap<String, Quantity>>,
+) -> bool {
+    let Some(d) = desired else {
+        return true;
+    };
+    let Some(l) = live else {
+        return d.is_empty();
+    };
+    d.iter()
+        .all(|(k, d_q)| l.get(k).is_some_and(|l_q| quantities_equal(l_q, d_q)))
+}
+
+fn quantities_equal(live: &Quantity, desired: &Quantity) -> bool {
+    if live.0 == desired.0 {
+        return true;
+    }
+    match (
+        parse_quantity_nano(&live.0),
+        parse_quantity_nano(&desired.0),
+    ) {
+        (Some(l), Some(d)) => l == d,
+        _ => false,
+    }
+}
+
+fn parse_quantity_nano(raw: &str) -> Option<i128> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (neg, unsigned) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, s)
+    };
+
+    let (num_part, binary_mul, suffix_exp10) = split_quantity_suffix(unsigned)?;
+    let (mantissa, sci_exp10) = match num_part.rsplit_once(['e', 'E']) {
+        Some((m, exp_str)) => (m, exp_str.parse::<i32>().ok()?),
+        None => (num_part, 0),
+    };
+    let (digits, frac_digits) = parse_decimal_digits(mantissa)?;
+
+    let total_exp10 = 9i32
+        .checked_sub(frac_digits)?
+        .checked_add(sci_exp10)?
+        .checked_add(suffix_exp10)?;
+    let scaled = digits.checked_mul(binary_mul)?;
+    let nano = if total_exp10 >= 0 {
+        let pow = 10i128.checked_pow(u32::try_from(total_exp10).ok()?)?;
+        scaled.checked_mul(pow)?
+    } else {
+        let div = 10i128.checked_pow(u32::try_from(-total_exp10).ok()?)?;
+        if scaled % div != 0 {
+            return None;
+        }
+        scaled / div
+    };
+    if neg {
+        nano.checked_neg()
+    } else {
+        Some(nano)
+    }
+}
+
+fn split_quantity_suffix(input: &str) -> Option<(&str, i128, i32)> {
+    const BINARY_SUFFIXES: [(&str, u32); 6] = [
+        ("Ki", 1),
+        ("Mi", 2),
+        ("Gi", 3),
+        ("Ti", 4),
+        ("Pi", 5),
+        ("Ei", 6),
+    ];
+    for (suffix, exp) in BINARY_SUFFIXES {
+        if let Some(num) = input.strip_suffix(suffix) {
+            return Some((num, 1_024i128.checked_pow(exp)?, 0));
+        }
+    }
+
+    const DECIMAL_SUFFIXES: [(&str, i32); 10] = [
+        ("n", -9),
+        ("u", -6),
+        ("m", -3),
+        ("k", 3),
+        ("M", 6),
+        ("G", 9),
+        ("T", 12),
+        ("P", 15),
+        ("E", 18),
+        ("", 0),
+    ];
+    for (suffix, exp10) in DECIMAL_SUFFIXES {
+        if let Some(num) = input.strip_suffix(suffix) {
+            return Some((num, 1, exp10));
+        }
+    }
+
+    None
+}
+
+fn parse_decimal_digits(mantissa: &str) -> Option<(i128, i32)> {
+    let (int_str, frac_str) = match mantissa.split_once('.') {
+        Some((i, f)) => {
+            if f.contains('.') {
+                return None;
+            }
+            (i, f)
+        }
+        None => (mantissa, ""),
+    };
+    if int_str.is_empty() && frac_str.is_empty() {
+        return None;
+    }
+
+    let trimmed_frac = frac_str.trim_end_matches('0');
+    let mut acc = 0i128;
+    for ch in int_str.bytes().chain(trimmed_frac.bytes()) {
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        acc = acc.checked_mul(10)?.checked_add(i128::from(ch - b'0'))?;
+    }
+    if trimmed_frac.len() < frac_str.len() {
+        for ch in frac_str[trimmed_frac.len()..].bytes() {
+            if ch != b'0' {
+                return None;
+            }
+        }
+    }
+    let frac_len = i32::try_from(trimmed_frac.len()).ok()?;
+    Some((acc, frac_len))
+}
+
+fn volume_mounts_drifted(live: &[VolumeMount], desired: &[VolumeMount]) -> bool {
+    desired.iter().any(|d_vm| {
+        let Some(l_vm) = live
+            .iter()
+            .find(|vm| vm.name == d_vm.name && vm.mount_path == d_vm.mount_path)
+        else {
+            return true;
+        };
+        (d_vm.read_only.is_some() && l_vm.read_only != d_vm.read_only)
+            || (d_vm.sub_path.is_some() && l_vm.sub_path != d_vm.sub_path)
+    })
 }
 
 fn service_drifted(live: &Service, desired: &Service) -> bool {
@@ -2147,4 +2673,39 @@ fn parse_existing_conditions(conditions: &[KubeCondition]) -> Vec<ConditionRecor
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+
+    use super::quantities_equal;
+
+    #[test]
+    fn quantities_equal_handles_kubernetes_canonical_equivalents() {
+        assert!(quantities_equal(
+            &Quantity("0.5".to_owned()),
+            &Quantity("500m".to_owned()),
+        ));
+        assert!(quantities_equal(
+            &Quantity("1000m".to_owned()),
+            &Quantity("1".to_owned()),
+        ));
+        assert!(quantities_equal(
+            &Quantity("1024Mi".to_owned()),
+            &Quantity("1Gi".to_owned()),
+        ));
+        assert!(quantities_equal(
+            &Quantity("1.5Gi".to_owned()),
+            &Quantity("1536Mi".to_owned()),
+        ));
+        assert!(!quantities_equal(
+            &Quantity("500m".to_owned()),
+            &Quantity("600m".to_owned()),
+        ));
+        assert!(!quantities_equal(
+            &Quantity("512Mi".to_owned()),
+            &Quantity("1Gi".to_owned()),
+        ));
+    }
 }

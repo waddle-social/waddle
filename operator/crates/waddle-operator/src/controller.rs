@@ -27,7 +27,7 @@ use crate::error::OperatorError;
 use crate::executor;
 use crate::external_crds;
 use crate::health::HealthState;
-use crate::leader_election::{LeaderConfig, LeaderGuard};
+use crate::leader_election::{LeaderConfig, LeaderGuard, LeadershipFence};
 use crate::metrics::OperatorMetrics;
 use crate::observer::{self, OperatorPolicy};
 use crate::resources;
@@ -46,17 +46,21 @@ pub struct ControllerContext {
     pub metrics: Arc<OperatorMetrics>,
     /// Optional Kubernetes event recorder.
     pub recorder: Option<Recorder>,
+    /// Monotonic lease fence checked prior to mutating cluster state.
+    pub leadership: LeadershipFence,
 }
 
 /// Reconciles a single `WaddleServer` resource through observation, pure FSM evaluation,
 /// imperative command execution, and diff-gated status persistence.
 ///
 /// # Errors
-/// Returns [`OperatorError`] if observation, workload execution, or status patching fails.
+/// Returns [`OperatorError`] if leadership is invalid or observation, workload execution, or
+/// status patching fails.
 pub async fn reconcile_single(
     ws: Arc<WaddleServer>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, OperatorError> {
+    ctx.leadership.ensure_valid()?;
     ctx.metrics.record_reconcile();
     let name = resources::workload_name(&ws)?;
     let ns = resources::workload_namespace(&ws)?;
@@ -75,11 +79,13 @@ pub async fn reconcile_single(
         &snapshot,
         &outcome.commands,
         ctx.recorder.as_ref(),
+        &ctx.leadership,
     )
     .await?;
 
     let status_patched =
-        executor::patch_status_if_changed(&ctx.client, &ws, &outcome, &snapshot).await?;
+        executor::patch_status_if_changed(&ctx.client, &ws, &outcome, &snapshot, &ctx.leadership)
+            .await?;
 
     if outcome.to_phase == Phase::Terminating {
         ctx.metrics.remove_resource(ns, name);
@@ -235,6 +241,10 @@ pub async fn run_controller(
         },
     );
 
+    let leadership = leader_guard
+        .as_ref()
+        .map_or_else(LeadershipFence::always_active, LeaderGuard::fence);
+
     let ctx = Arc::new(ControllerContext {
         client: client.clone(),
         policy: OperatorPolicy {
@@ -244,6 +254,7 @@ pub async fn run_controller(
         },
         metrics,
         recorder: Some(recorder),
+        leadership,
     });
 
     let leadership_lost = Arc::new(AtomicBool::new(false));
@@ -328,6 +339,14 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 
 fn error_policy(ws: Arc<WaddleServer>, err: &OperatorError, ctx: Arc<ControllerContext>) -> Action {
     ctx.metrics.record_error();
+    if matches!(err, OperatorError::LeadershipLost) {
+        tracing::warn!(
+            namespace = ws.metadata.namespace.as_deref().unwrap_or("<none>"),
+            name = ws.metadata.name.as_deref().unwrap_or("<none>"),
+            "leadership lost during reconciliation; halting retries"
+        );
+        return Action::await_change();
+    }
     tracing::warn!(
         namespace = ws.metadata.namespace.as_deref().unwrap_or("<none>"),
         name = ws.metadata.name.as_deref().unwrap_or("<none>"),

@@ -23,6 +23,7 @@ use waddle_operator_fsm::{
 use crate::bindings::ResolvedRuntimeBindings;
 use crate::error::OperatorError;
 use crate::external_crds;
+use crate::leader_election::LeadershipFence;
 use crate::observer::WorldSnapshot;
 use crate::resources;
 
@@ -33,23 +34,33 @@ const MAX_EVENT_NOTE_BYTES: usize = 1000;
 /// Executes declarative state machine commands against the Kubernetes API.
 ///
 /// # Errors
-/// Returns [`OperatorError`] if any required Kubernetes create, replace, or SSA operation fails.
+/// Returns [`OperatorError`] if leadership was lost or any required Kubernetes create, replace,
+/// or SSA operation fails.
 pub async fn apply_commands(
     client: &Client,
     ws: &WaddleServer,
     snapshot: &WorldSnapshot,
     commands: &[ReconcileCommand],
     recorder: Option<&Recorder>,
+    leadership: &LeadershipFence,
 ) -> Result<(), OperatorError> {
     let ns = resources::workload_namespace(ws)?;
 
     for command in commands {
+        leadership.ensure_valid()?;
         match command {
             ReconcileCommand::EnsureYoloSecret => {
-                ensure_yolo_secret(client, ns, ws).await?;
+                ensure_yolo_secret(client, ns, ws, leadership).await?;
             }
             ReconcileCommand::ApplyManagedExternalSecret => {
-                apply_managed_external_secret(client, ns, ws, snapshot.bindings.as_ref()).await?;
+                apply_managed_external_secret(
+                    client,
+                    ns,
+                    ws,
+                    snapshot.bindings.as_ref(),
+                    leadership,
+                )
+                .await?;
             }
             ReconcileCommand::ApplyWorkload => {
                 let validated = snapshot.validated.as_ref().ok_or_else(|| {
@@ -62,7 +73,7 @@ pub async fn apply_commands(
                         "ApplyWorkload requested without ResolvedRuntimeBindings".to_owned(),
                     )
                 })?;
-                apply_workload(client, ns, ws, validated, bindings).await?;
+                apply_workload(client, ns, ws, validated, bindings, leadership).await?;
             }
             ReconcileCommand::EmitEvent(notice) => {
                 if let Some(rec) = recorder {
@@ -97,12 +108,14 @@ pub async fn apply_commands(
 /// Returns `true` if a `patch_status` API call was issued, `false` when already converged.
 ///
 /// # Errors
-/// Returns [`OperatorError`] on invalid condition timestamps or Kubernetes API failure.
+/// Returns [`OperatorError`] if leadership was lost, condition timestamps are invalid, or the
+/// Kubernetes API fails.
 pub async fn patch_status_if_changed(
     client: &Client,
     ws: &WaddleServer,
     outcome: &TransitionOutcome,
     snapshot: &WorldSnapshot,
+    leadership: &LeadershipFence,
 ) -> Result<bool, OperatorError> {
     let name = resources::workload_name(ws)?;
     let ns = resources::workload_namespace(ws)?;
@@ -111,6 +124,8 @@ pub async fn patch_status_if_changed(
     if ws.status.as_ref() == Some(&desired_status) {
         return Ok(false);
     }
+
+    leadership.ensure_valid()?;
 
     let api: Api<WaddleServer> = Api::namespaced(client.clone(), ns);
     let payload = json!({
@@ -133,6 +148,7 @@ async fn ensure_yolo_secret(
     client: &Client,
     ns: &str,
     ws: &WaddleServer,
+    leadership: &LeadershipFence,
 ) -> Result<(), OperatorError> {
     let api: Api<Secret> = Api::namespaced(client.clone(), ns);
     let name = resources::yolo_secret_name(ws)?;
@@ -145,6 +161,7 @@ async fn ensure_yolo_secret(
             source,
         })? {
         None => {
+            leadership.ensure_valid()?;
             let fresh = resources::build_yolo_secret(ws)?;
             match api.create(&PostParams::default(), &fresh).await {
                 Ok(_) => Ok(()),
@@ -155,6 +172,7 @@ async fn ensure_yolo_secret(
                             source,
                         })?;
                     if resources::fill_missing_yolo_keys(ws, &mut existing)? {
+                        leadership.ensure_valid()?;
                         api.replace(&name, &PostParams::default(), &existing)
                             .await
                             .map_err(|source| OperatorError::Kube {
@@ -172,6 +190,7 @@ async fn ensure_yolo_secret(
         }
         Some(mut existing) => {
             if resources::fill_missing_yolo_keys(ws, &mut existing)? {
+                leadership.ensure_valid()?;
                 api.replace(&name, &PostParams::default(), &existing)
                     .await
                     .map_err(|source| OperatorError::Kube {
@@ -189,6 +208,7 @@ async fn apply_managed_external_secret(
     ns: &str,
     ws: &WaddleServer,
     bindings: Option<&ResolvedRuntimeBindings>,
+    leadership: &LeadershipFence,
 ) -> Result<(), OperatorError> {
     let version = match bindings.and_then(|b| b.eso_api_version) {
         Some(v) => v,
@@ -202,6 +222,7 @@ async fn apply_managed_external_secret(
         }
     };
 
+    leadership.ensure_valid()?;
     let desired = resources::build_managed_external_secret(ws, version)?;
     let es_name = resources::managed_external_secret_name(ws)?;
     let ar = external_crds::api_resource_eso(version);
@@ -222,6 +243,7 @@ async fn apply_workload(
     ws: &WaddleServer,
     validated: &waddle_operator_crd::ValidatedSpec,
     bindings: &ResolvedRuntimeBindings,
+    leadership: &LeadershipFence,
 ) -> Result<(), OperatorError> {
     let name = resources::workload_name(ws)?;
 
@@ -230,6 +252,7 @@ async fn apply_workload(
         &Api::<ServiceAccount>::namespaced(client.clone(), ns),
         name,
         &sa,
+        leadership,
     )
     .await?;
 
@@ -239,52 +262,55 @@ async fn apply_workload(
         &Api::<ConfigMap>::namespaced(client.clone(), ns),
         &cm_name,
         &cm,
+        leadership,
     )
     .await?;
     let cm_digest = resources::config_map_digest(&cm)?;
 
     let svc_api: Api<Service> = Api::namespaced(client.clone(), ns);
     let http_svc = resources::build_http_service(ws)?;
-    ssa_apply(&svc_api, name, &http_svc).await?;
+    ssa_apply(&svc_api, name, &http_svc, leadership).await?;
 
     if let Some(pvc) = resources::build_pvc(ws)? {
         let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
         let pvc_name = resources::pvc_name(ws)?;
-        ensure_pvc_created(&pvc_api, &pvc_name, &pvc).await?;
+        ensure_pvc_created(&pvc_api, &pvc_name, &pvc, leadership).await?;
     }
 
     let owner = resources::owner_reference(ws)?;
 
     let headless_name = resources::headless_service_name(ws)?;
     match resources::build_headless_service(ws)? {
-        Some(svc) => ssa_apply(&svc_api, &headless_name, &svc).await?,
-        None => delete_if_owned(&svc_api, &headless_name, &owner.uid).await?,
+        Some(svc) => ssa_apply(&svc_api, &headless_name, &svc, leadership).await?,
+        None => delete_if_owned(&svc_api, &headless_name, &owner.uid, leadership).await?,
     }
 
     let s2s_name = resources::s2s_service_name(ws)?;
     match resources::build_s2s_service(ws)? {
-        Some(svc) => ssa_apply(&svc_api, &s2s_name, &svc).await?,
-        None => delete_if_owned(&svc_api, &s2s_name, &owner.uid).await?,
+        Some(svc) => ssa_apply(&svc_api, &s2s_name, &svc, leadership).await?,
+        None => delete_if_owned(&svc_api, &s2s_name, &owner.uid, leadership).await?,
     }
 
     let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(client.clone(), ns);
     match resources::build_pdb(ws)? {
-        Some(pdb) => ssa_apply(&pdb_api, name, &pdb).await?,
-        None => delete_if_owned(&pdb_api, name, &owner.uid).await?,
+        Some(pdb) => ssa_apply(&pdb_api, name, &pdb, leadership).await?,
+        None => delete_if_owned(&pdb_api, name, &owner.uid, leadership).await?,
     }
 
     let np_api: Api<NetworkPolicy> = Api::namespaced(client.clone(), ns);
     let np_name = resources::network_policy_name(ws)?;
     match resources::build_network_policy(ws)? {
-        Some(np) => ssa_apply(&np_api, &np_name, &np).await?,
-        None => delete_if_owned(&np_api, &np_name, &owner.uid).await?,
+        Some(np) => ssa_apply(&np_api, &np_name, &np, leadership).await?,
+        None => delete_if_owned(&np_api, &np_name, &owner.uid, leadership).await?,
     }
 
+    leadership.ensure_valid()?;
     let deployment = resources::build_deployment(ws, validated, bindings, &cm_digest)?;
     ssa_apply(
         &Api::<Deployment>::namespaced(client.clone(), ns),
         name,
         &deployment,
+        leadership,
     )
     .await?;
 
@@ -295,6 +321,7 @@ async fn ensure_pvc_created(
     api: &Api<PersistentVolumeClaim>,
     name: &str,
     pvc: &PersistentVolumeClaim,
+    leadership: &LeadershipFence,
 ) -> Result<(), OperatorError> {
     if api
         .get_opt(name)
@@ -308,6 +335,7 @@ async fn ensure_pvc_created(
         return Ok(());
     }
 
+    leadership.ensure_valid()?;
     match api.create(&PostParams::default(), pvc).await {
         Ok(_) => Ok(()),
         Err(kube::Error::Api(status)) if status.code == 409 => Ok(()),
@@ -318,11 +346,17 @@ async fn ensure_pvc_created(
     }
 }
 
-async fn ssa_apply<K>(api: &Api<K>, name: &str, obj: &K) -> Result<(), OperatorError>
+async fn ssa_apply<K>(
+    api: &Api<K>,
+    name: &str,
+    obj: &K,
+    leadership: &LeadershipFence,
+) -> Result<(), OperatorError>
 where
     K: Resource + Serialize + Clone + Debug + serde::de::DeserializeOwned,
     K::DynamicType: Default,
 {
+    leadership.ensure_valid()?;
     let params = PatchParams::apply(FIELD_MANAGER_WORKLOAD).force();
     api.patch(name, &params, &Patch::Apply(obj))
         .await
@@ -333,7 +367,12 @@ where
     Ok(())
 }
 
-async fn delete_if_owned<K>(api: &Api<K>, name: &str, owner_uid: &str) -> Result<(), OperatorError>
+async fn delete_if_owned<K>(
+    api: &Api<K>,
+    name: &str,
+    owner_uid: &str,
+    leadership: &LeadershipFence,
+) -> Result<(), OperatorError>
 where
     K: Resource + ResourceExt + Clone + Debug + serde::de::DeserializeOwned,
     K::DynamicType: Default,
@@ -357,6 +396,7 @@ where
         return Ok(());
     }
 
+    leadership.ensure_valid()?;
     let params = DeleteParams {
         preconditions: existing.uid().map(|uid| Preconditions {
             uid: Some(uid),

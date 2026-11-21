@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
@@ -45,13 +47,110 @@ impl LeaderConfig {
     }
 }
 
+/// Monotonic write fence preventing stale leaders from issuing Kubernetes writes after lease expiry.
+#[derive(Debug, Clone)]
+pub struct LeadershipFence {
+    inner: Arc<LeadershipFenceInner>,
+}
+
+#[derive(Debug)]
+struct LeadershipFenceInner {
+    always_active: bool,
+    active: AtomicBool,
+    origin: tokio::time::Instant,
+    safe_deadline_ms: AtomicU64,
+}
+
+impl LeadershipFence {
+    /// Creates an unrestricted fence for single-replica or test setups without leader election.
+    #[must_use]
+    pub fn always_active() -> Self {
+        Self {
+            inner: Arc::new(LeadershipFenceInner {
+                always_active: true,
+                active: AtomicBool::new(true),
+                origin: tokio::time::Instant::now(),
+                safe_deadline_ms: AtomicU64::new(u64::MAX),
+            }),
+        }
+    }
+
+    fn new_bounded(
+        origin: tokio::time::Instant,
+        attempt_start: tokio::time::Instant,
+        lease_duration: Duration,
+        safety_margin: Duration,
+    ) -> Self {
+        let fence = Self {
+            inner: Arc::new(LeadershipFenceInner {
+                always_active: false,
+                active: AtomicBool::new(true),
+                origin,
+                safe_deadline_ms: AtomicU64::new(0),
+            }),
+        };
+        fence.renew_from(attempt_start, lease_duration, safety_margin);
+        fence
+    }
+
+    fn renew_from(
+        &self,
+        attempt_start: tokio::time::Instant,
+        lease_duration: Duration,
+        safety_margin: Duration,
+    ) {
+        let safe_until = attempt_start + lease_duration.saturating_sub(safety_margin);
+        let offset_ms = safe_until
+            .saturating_duration_since(self.inner.origin)
+            .as_millis();
+        let clamped_ms = u64::try_from(offset_ms).unwrap_or(u64::MAX);
+        self.inner
+            .safe_deadline_ms
+            .store(clamped_ms, Ordering::Release);
+    }
+
+    fn revoke(&self) {
+        self.inner.active.store(false, Ordering::Release);
+        self.inner.safe_deadline_ms.store(0, Ordering::Release);
+    }
+
+    /// Returns `true` while leadership is active and within the monotonic lease safety deadline.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        if self.inner.always_active {
+            return true;
+        }
+        if !self.inner.active.load(Ordering::Acquire) {
+            return false;
+        }
+        let elapsed_ms = tokio::time::Instant::now()
+            .saturating_duration_since(self.inner.origin)
+            .as_millis();
+        let safe_ms = self.inner.safe_deadline_ms.load(Ordering::Acquire);
+        elapsed_ms < u128::from(safe_ms)
+    }
+
+    /// Ensures leadership is still valid before performing a cluster mutation.
+    ///
+    /// # Errors
+    /// Returns [`OperatorError::LeadershipLost`] when the lease has expired or been revoked.
+    pub fn ensure_valid(&self) -> Result<(), OperatorError> {
+        if self.is_valid() {
+            Ok(())
+        } else {
+            Err(OperatorError::LeadershipLost)
+        }
+    }
+}
+
 /// Active leadership lease guard that renews in the background until shutdown or loss.
 pub struct LeaderGuard {
     config: LeaderConfig,
     api: Api<Lease>,
+    fence: LeadershipFence,
     stop_tx: watch::Sender<bool>,
     lost_rx: Option<oneshot::Receiver<()>>,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LeaderGuard {
@@ -67,13 +166,19 @@ impl LeaderGuard {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<Option<Self>, OperatorError> {
         let api: Api<Lease> = Api::namespaced(client.clone(), &config.namespace);
+        let lease_duration =
+            Duration::from_secs(u64::try_from(config.lease_duration_secs.max(1)).unwrap_or(15));
+        let safety_margin = Duration::from_secs(2).min(lease_duration / 3);
 
+        let acquire_start;
         loop {
             if *shutdown.borrow() {
                 return Ok(None);
             }
 
+            let attempt_start = tokio::time::Instant::now();
             if try_acquire_once(&api, &config).await? {
+                acquire_start = attempt_start;
                 tracing::info!(
                     namespace = %config.namespace,
                     lease = %config.lease_name,
@@ -95,15 +200,18 @@ impl LeaderGuard {
 
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let (lost_tx, lost_rx) = oneshot::channel();
+        let fence = LeadershipFence::new_bounded(
+            acquire_start,
+            acquire_start,
+            lease_duration,
+            safety_margin,
+        );
+        let renew_fence = fence.clone();
         let renew_api = api.clone();
         let renew_cfg = config.clone();
 
         let task = tokio::spawn(async move {
-            let lease_duration = Duration::from_secs(
-                u64::try_from(renew_cfg.lease_duration_secs.max(1)).unwrap_or(15),
-            );
-            let safety_margin = Duration::from_secs(2).min(lease_duration / 3);
-            let mut lease_deadline = tokio::time::Instant::now() + lease_duration;
+            let mut lease_deadline = acquire_start + lease_duration;
             let mut interval = tokio::time::interval(renew_cfg.renew_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let _first_tick = interval.tick().await;
@@ -116,6 +224,7 @@ impl LeaderGuard {
                             .saturating_duration_since(attempt_start)
                             .saturating_sub(safety_margin);
                         if remaining.is_zero() {
+                            renew_fence.revoke();
                             tracing::error!(holder = %renew_cfg.holder_id, "leader election lease renewal budget exhausted before response");
                             let _ = lost_tx.send(());
                             break;
@@ -124,18 +233,22 @@ impl LeaderGuard {
                         match tokio::time::timeout(remaining, renew_once(&renew_api, &renew_cfg)).await {
                             Ok(Ok(true)) => {
                                 lease_deadline = attempt_start + lease_duration;
+                                renew_fence.renew_from(attempt_start, lease_duration, safety_margin);
                             }
                             Ok(Ok(false)) => {
+                                renew_fence.revoke();
                                 tracing::error!(holder = %renew_cfg.holder_id, "leader election lease lost to another holder");
                                 let _ = lost_tx.send(());
                                 break;
                             }
                             Ok(Err(err)) => {
+                                renew_fence.revoke();
                                 tracing::error!(error = %err, holder = %renew_cfg.holder_id, "failed to renew leader election lease");
                                 let _ = lost_tx.send(());
                                 break;
                             }
                             Err(_) => {
+                                renew_fence.revoke();
                                 tracing::error!(holder = %renew_cfg.holder_id, "leader election lease renewal exceeded safety deadline");
                                 let _ = lost_tx.send(());
                                 break;
@@ -154,10 +267,17 @@ impl LeaderGuard {
         Ok(Some(Self {
             config,
             api,
+            fence,
             stop_tx,
             lost_rx: Some(lost_rx),
-            task,
+            task: Some(task),
         }))
+    }
+
+    /// Returns a cloneable handle to the synchronous leadership write fence.
+    #[must_use]
+    pub fn fence(&self) -> LeadershipFence {
+        self.fence.clone()
     }
 
     /// Takes the oneshot notification channel that resolves if the lease is lost.
@@ -166,10 +286,23 @@ impl LeaderGuard {
     }
 
     /// Stops background renewal and attempts best-effort release of the Lease.
-    pub async fn release(self) {
+    pub async fn release(mut self) {
+        self.fence.revoke();
         let _ = self.stop_tx.send(true);
-        let _ = self.task.await;
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
         release_now(&self.api, &self.config).await;
+    }
+}
+
+impl Drop for LeaderGuard {
+    fn drop(&mut self) {
+        self.fence.revoke();
+        let _ = self.stop_tx.send(true);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
