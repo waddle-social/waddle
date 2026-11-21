@@ -47,12 +47,12 @@ struct OwnProfileTests {
     @Test func anActivitySavedWhileTheProfileLoadsIsNotReplacedByTheOlderOne() async throws {
         let (coordinator, port) = session()
         port.sharedStatus = .success(SharedStatus(mood: UserMood(value: "happy", text: nil)))
-        port.holdsSharedStatusFetches = true
+        port.sharedStatusFetches.isHolding = true
         let load = Task { await coordinator.loadOwnSharedStatus() }
-        await eventually { port.heldSharedStatusFetches == 1 }
+        await eventually { port.sharedStatusFetches.count == 1 }
 
         try await coordinator.setActivity(coding)
-        port.releaseSharedStatusFetches()
+        port.sharedStatusFetches.release()
         await load.value
 
         #expect(coordinator.status.activity == coding)
@@ -196,6 +196,23 @@ struct OwnProfileTests {
         await #expect(throws: PortError.rejected) { try await coordinator.loadOwnDetails() }
 
         #expect(coordinator.status.details == nil)
+    }
+
+    /// The profile and its editor each look the details up. A slow answer
+    /// to the first must not undo what the editor saved in between.
+    @Test func detailsSavedWhileALookupRunsAreNotReplacedByTheOlderOnes() async throws {
+        let (coordinator, port) = session()
+        port.ownProfileDetails = .success(ProfileDetails(fullName: "Ada"))
+        port.ownProfileDetailsFetches.isHolding = true
+        let load = Task { try await coordinator.loadOwnDetails() }
+        await eventually { port.ownProfileDetailsFetches.count == 1 }
+
+        let saved = ProfileDetails(fullName: "Ada Lovelace")
+        try await coordinator.saveDetails(saved)
+        port.ownProfileDetailsFetches.release()
+
+        #expect(try await load.value == saved)
+        #expect(coordinator.status.details == saved)
     }
 
     @Test func savedDetailsAreTrimmedAndShown() async throws {

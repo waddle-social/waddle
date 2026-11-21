@@ -1,12 +1,13 @@
 import Foundation
 
-/// How many times each shared part has been set from this device. A
-/// lookup that began before an edit holds an older value for that part,
+/// How many times each part of the profile has been set from this device.
+/// A lookup that began before an edit holds an older value for that part,
 /// and must not put it back.
-struct SharedStatusEdits: Equatable {
+struct ProfileEdits: Equatable {
     var mood = 0
     var activity = 0
     var tune = 0
+    var details = 0
 }
 
 extension SessionCoordinator {
@@ -44,7 +45,7 @@ extension SessionCoordinator {
             try await port.retractMood()
         }
         status.mood = mood
-        sharedStatusEdits.mood += 1
+        profileEdits.mood += 1
     }
 
     /// XEP-0108 activity; nil retracts it.
@@ -65,15 +66,15 @@ extension SessionCoordinator {
             try await port.retractActivity()
         }
         status.activity = activity
-        sharedStatusEdits.activity += 1
+        profileEdits.activity += 1
     }
 
     /// Looks up the activity the account publishes now. A failed lookup
     /// leaves what is shown, and so does one overtaken by an edit here.
     public func refreshOwnActivity() async {
-        let before = sharedStatusEdits
+        let before = profileEdits
         guard let published = try? await port.fetchOwnActivity() as UserActivity??,
-              sharedStatusEdits.activity == before.activity
+              profileEdits.activity == before.activity
         else { return }
         status.activity = published
     }
@@ -89,26 +90,30 @@ extension SessionCoordinator {
             try await port.retractTune()
         }
         status.tune = tune
-        sharedStatusEdits.tune += 1
+        profileEdits.tune += 1
     }
 
     /// The mood, activity and tune the account shares now. A failed lookup
     /// leaves what is shown. The editors stay usable while this runs, so a
     /// part set here in the meantime keeps its new value.
     public func loadOwnSharedStatus() async {
-        let before = sharedStatusEdits
+        let before = profileEdits
         guard let shared = try? await port.fetchSharedStatus(of: account.jid) else { return }
-        if sharedStatusEdits.mood == before.mood { status.mood = shared.mood }
-        if sharedStatusEdits.activity == before.activity { status.activity = shared.activity }
-        if sharedStatusEdits.tune == before.tune { status.tune = shared.tune }
+        if profileEdits.mood == before.mood { status.mood = shared.mood }
+        if profileEdits.activity == before.activity { status.activity = shared.activity }
+        if profileEdits.tune == before.tune { status.tune = shared.tune }
     }
 
     /// The account's own XEP-0292 details; empty only when it is confirmed
     /// that none are published. A lookup that fails throws: saving replaces
     /// every field, so details that could not be read must not be edited.
+    /// Details saved here while the lookup ran are newer than its answer,
+    /// and are what is kept and returned.
     @discardableResult
     public func loadOwnDetails() async throws -> ProfileDetails {
+        let before = profileEdits
         let details = try await port.fetchOwnProfileDetails() ?? ProfileDetails()
+        if let saved = status.details, profileEdits.details != before.details { return saved }
         status.details = details
         return details
     }
@@ -118,6 +123,7 @@ extension SessionCoordinator {
         guard details.hasUsableLink else { throw PortError.invalidRequest }
         try await port.publishProfileDetails(details)
         status.details = details
+        profileEdits.details += 1
     }
 
     /// Someone's details, or nil when they have published none we can read.

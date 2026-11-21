@@ -118,9 +118,8 @@ final class FakePort: XmppPort {
     var publishedTunes: [UserTune?] = []
     var sharedStatusPublishResult: Result<Void, PortError> = .success(())
     /// A held lookup answers with what was set when it began.
-    var holdsSharedStatusFetches = false
-    private var heldSharedStatusContinuations: [CheckedContinuation<Void, Never>] = []
-    var heldSharedStatusFetches: Int { heldSharedStatusContinuations.count }
+    let sharedStatusFetches = HeldCalls()
+    let ownProfileDetailsFetches = HeldCalls()
     /// What a strict lookup of the account's own details answers.
     var ownProfileDetails: Result<ProfileDetails?, PortError> = .success(nil)
     /// Other people's details.
@@ -379,17 +378,14 @@ final class FakePort: XmppPort {
     func removeAvatar() async throws {}
     func fetchSharedStatus(of _: BareJID) async throws -> SharedStatus {
         let answer = sharedStatus
-        if holdsSharedStatusFetches {
-            await withCheckedContinuation { heldSharedStatusContinuations.append($0) }
-        }
+        await sharedStatusFetches.wait()
         return try answer.get()
     }
-    func releaseSharedStatusFetches() {
-        let held = heldSharedStatusContinuations
-        heldSharedStatusContinuations = []
-        held.forEach { $0.resume() }
+    func fetchOwnProfileDetails() async throws -> ProfileDetails? {
+        let answer = ownProfileDetails
+        await ownProfileDetailsFetches.wait()
+        return try answer.get()
     }
-    func fetchOwnProfileDetails() async throws -> ProfileDetails? { try ownProfileDetails.get() }
     func fetchOwnActivity() async throws -> UserActivity? { try ownActivity.get() }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
@@ -488,5 +484,25 @@ final class FakePort: XmppPort {
     ) async throws -> ExtensionCommandResult {
         submissions.append(ExtensionSubmission(command: command, sessionID: sessionID, values: values, action: action, room: room))
         return try submitResult.get()
+    }
+}
+
+/// Lets a test keep calls waiting, as a slow server would, until it
+/// releases them.
+@MainActor
+final class HeldCalls {
+    var isHolding = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    var count: Int { waiting.count }
+
+    func wait() async {
+        guard isHolding else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func release() {
+        let held = waiting
+        waiting = []
+        held.forEach { $0.resume() }
     }
 }

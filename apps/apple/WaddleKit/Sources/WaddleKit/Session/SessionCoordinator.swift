@@ -150,7 +150,7 @@ public final class SessionCoordinator {
     @ObservationIgnored var idleClock = IdleClock()
     /// What the current stream was last told; nil on a fresh stream.
     @ObservationIgnored var sentPresence: SentPresence?
-    @ObservationIgnored var sharedStatusEdits = SharedStatusEdits()
+    @ObservationIgnored var profileEdits = ProfileEdits()
 
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
