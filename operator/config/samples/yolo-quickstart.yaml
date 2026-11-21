@@ -1,0 +1,32 @@
+# Quickstart sample for development/staging clusters ONLY.
+# Requires running waddle-operator with `--enable-yolo-mode=true`.
+# Single-node only: clustering and replicas > 1 are forbidden in Yolo mode.
+apiVersion: waddle.social/v1alpha1
+kind: WaddleServer
+metadata:
+  name: waddle-quickstart
+  namespace: waddle-dev
+spec:
+  replicas: 1
+  mode: HomeServer
+  baseUrl: https://waddle.local
+  xmpp:
+    domain: waddle.local
+    publicWebsocketUrl: wss://waddle.local/xmpp-websocket
+  postgres:
+    mode: CloudNativePg
+    cnpg:
+      clusterName: waddle-pg
+  spicedb:
+    mode: SpiceDbOperator
+    operator:
+      clusterName: spicedb
+  secrets:
+    mode: Yolo
+    yolo:
+      enrollLineage: true
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
