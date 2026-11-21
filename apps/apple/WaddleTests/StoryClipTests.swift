@@ -34,4 +34,33 @@ final class StoryClipTests: ClipTestCase {
             XCTFail("A clip over the cap was prepared")
         } catch StoryClip.Failure.tooLarge {}
     }
+
+    /// A conversion stopped at the cap would be a shorter clip that fits;
+    /// it is refused as too large, never posted cut short.
+    func testAConversionCutShortByTheCapIsRefusedAsTooLarge() async throws {
+        let whole = try await StoryClip.prepare(
+            try await clip(codec: .hevc, width: 320, height: 240), maxBytes: StoryComposer.storyLimit
+        )
+        let source = try await clip(codec: .hevc, width: 320, height: 240)
+
+        do {
+            _ = try await StoryClip.prepare(source, maxBytes: whole.payload.data.count / 2)
+            XCTFail("A clip over the cap was prepared")
+        } catch StoryClip.Failure.tooLarge {}
+    }
+
+    func testACancelledPreparationThrowsAndRemovesTheClip() async throws {
+        let source = try await clip(codec: .hevc, width: 320, height: 240)
+        let preparing = Task { () async throws -> StoryClip.Prepared in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await StoryClip.prepare(source, maxBytes: StoryComposer.storyLimit)
+        }
+
+        do {
+            _ = try await preparing.value
+            XCTFail("A cancelled clip was prepared")
+        } catch is CancellationError {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+    }
 }
+

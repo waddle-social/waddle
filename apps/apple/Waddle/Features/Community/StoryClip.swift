@@ -36,10 +36,13 @@ enum StoryClip {
         video == kCMVideoCodecType_H264 && audio.allSatisfy { $0 == kAudioFormatMPEG4AAC } ? .copy : .convert
     }
 
-    /// Prepares the clip at `source` and removes that file. `maxBytes`
-    /// caps the file that would be uploaded.
+    /// Prepares the clip at `source` and removes that file, also when the
+    /// task is cancelled (which stops the export and throws
+    /// `CancellationError`). `maxBytes` caps the file that would be
+    /// uploaded.
     static func prepare(_ source: URL, maxBytes: Int) async throws -> Prepared {
         defer { try? FileManager.default.removeItem(at: source) }
+        try Task.checkCancellation()
         let asset = AVURLAsset(url: source)
         guard let video = try? await codecs(of: .video, in: asset).first,
               let audio = try? await codecs(of: .audio, in: asset)
@@ -63,9 +66,26 @@ enum StoryClip {
         export.outputFileType = .mp4
         export.metadataItemFilter = .forSharing()
         export.shouldOptimizeForNetworkUse = true
-        await export.export()
+        if encoding == .convert {
+            // A conversion that cannot fit stops at the cap instead of
+            // writing on; the shorter clip it leaves is refused below.
+            export.fileLengthLimit = Int64(maxBytes)
+        }
+        nonisolated(unsafe) let session = export
+        await withTaskCancellationHandler {
+            await session.export()
+        } onCancel: {
+            session.cancelExport()
+        }
+        try Task.checkCancellation()
+        // Measured on disk, so a file far over the cap is never read. An
+        // export that ended at the cap is too large, whatever its status.
+        let size = (try? output.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard size <= maxBytes else { throw Failure.tooLarge }
         guard export.status == .completed else { throw failure }
-
+        if encoding == .convert, try await isCutShort(output, comparedWith: asset) {
+            throw Failure.tooLarge
+        }
         let data = try Data(contentsOf: output)
         guard data.count <= maxBytes else { throw Failure.tooLarge }
         let frames = AVAssetImageGenerator(asset: AVURLAsset(url: output))
@@ -76,6 +96,15 @@ enum StoryClip {
             payload: AttachmentPayload(data: data, filename: "story.mp4", mediaType: "video/mp4", width: nil, height: nil),
             poster: poster
         )
+    }
+
+    /// Whether the export stopped before the end of the clip: what
+    /// `fileLengthLimit` does when the clip does not fit.
+    private static func isCutShort(_ output: URL, comparedWith source: AVURLAsset) async throws -> Bool {
+        let whole = try await source.load(.duration).seconds
+        let written = try await AVURLAsset(url: output).load(.duration).seconds
+        // A frame's worth of difference is rounding, not a cut.
+        return written < whole - max(0.1, whole * 0.02)
     }
 
     private static func codecs(of type: AVMediaType, in asset: AVURLAsset) async throws -> [FourCharCode] {
