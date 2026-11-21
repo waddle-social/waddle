@@ -455,11 +455,16 @@ struct CommunityTests {
         #expect(FeedPostDraft(body: "hi", link: "  ")?.link == nil)
         #expect(FeedPostDraft(body: "hi", link: "  ") != nil)
         #expect(FeedPostDraft(body: "hi", link: "http://rink.example")?.link == URL(string: "http://rink.example"))
-        #expect(FeedPostDraft(body: "hi", link: "ftp://rink.example/ice") == nil)
-        #expect(FeedPostDraft(body: "hi", link: "javascript:alert(1)") == nil)
-        #expect(FeedPostDraft(body: "hi", link: "the rink") == nil)
-        #expect(FeedPostDraft.isWebLink("rink.example"))
-        #expect(!FeedPostDraft.isWebLink("the rink"))
+        #expect(FeedPostDraft.link(from: " ") == .none)
+        #expect(FeedPostDraft.link(from: "rink.example/ice") == .web(URL(string: "https://rink.example/ice")!))
+        for refused in [
+            "ftp://rink.example/ice", "javascript:alert(1)", "the rink",
+            "mailto:a@b.c", "me@example.com", "https://me:secret@rink.example",
+            "localhost:8080", "https://rink", "https://rink.example." + String(repeating: "a", count: 2048),
+        ] {
+            #expect(FeedPostDraft.link(from: refused) == .invalid, "\(refused)")
+            #expect(FeedPostDraft(body: "hi", link: refused) == nil, "\(refused)")
+        }
     }
 
     @Test func myNewStoryIsShownAndAlreadySeen() async throws {

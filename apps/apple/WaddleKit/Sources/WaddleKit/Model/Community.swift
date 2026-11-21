@@ -44,27 +44,46 @@ public struct FeedPost: Hashable, Sendable, Identifiable {
 
 /// A feed post being written, with an optional link.
 public struct FeedPostDraft: Hashable, Sendable {
+    /// What was typed for a post's link.
+    public enum LinkInput: Hashable, Sendable {
+        /// Nothing, or only spaces.
+        case none
+        case web(URL)
+        case invalid
+    }
+
+    /// Longer addresses are refused, as browsers and servers commonly do.
+    public static let linkLimit = 2048
+
     public let body: String
     public let link: URL?
 
     /// Trims the text; nil when nothing is left to post, or when `link`
-    /// is filled in but is not a web address. A blank link is no link.
+    /// is filled in but is not a web address.
     public init?(body: String, link: String = "") {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return nil }
         self.body = body
-        if link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            self.link = nil
-        } else {
-            guard let url = ComposerInsertion.linkURL(from: link) else { return nil }
-            self.link = url
+        switch Self.link(from: link) {
+        case .none: self.link = nil
+        case let .web(url): self.link = url
+        case .invalid: return nil
         }
     }
 
-    /// Whether `text` is an http(s) address; `https://` is assumed when
-    /// no scheme is typed.
-    public static func isWebLink(_ text: String) -> Bool {
-        ComposerInsertion.linkURL(from: text) != nil
+    /// An http(s) address with a dotted host and no user or password,
+    /// `https://` assumed when no scheme is typed. Stricter than a link in
+    /// a message: a post is read by the whole community, so
+    /// `me@example.com` must not become `https://me@example.com`.
+    public static func link(from text: String) -> LinkInput {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return .none }
+        guard text.count <= linkLimit,
+              let url = ComposerInsertion.linkURL(from: text),
+              url.user == nil, url.password == nil,
+              let host = url.host(), host.contains("."), !host.hasPrefix("."), !host.hasSuffix(".")
+        else { return .invalid }
+        return .web(url)
     }
 }
 

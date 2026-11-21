@@ -10,7 +10,6 @@ struct FeedComposerCard: View {
     @State private var isPosting = false
     @State private var errorMessage: String?
     @FocusState private var focus: Field?
-    @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
 
     private enum Field {
         case text
@@ -59,25 +58,16 @@ struct FeedComposerCard: View {
     }
 
     private var linkToggle: some View {
-        Button {
+        HuddleIconButton(hasLink ? "Remove the link" : "Add a link", symbol: "link") {
             hasLink.toggle()
             if hasLink {
                 focus = .link
             } else {
                 link = ""
             }
-        } label: {
-            Image(systemName: "link")
-                .font(.system(size: glyph, weight: .semibold))
-                .foregroundStyle(hasLink ? Theme.Colors.actionText : Theme.Colors.fgMuted)
-                .frame(minWidth: WaddleTokens.ControlHeight.md, minHeight: WaddleTokens.ControlHeight.md)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .huddleTouchTarget()
+        .foregroundStyle(hasLink ? Theme.Colors.actionText : Theme.Colors.fgMuted)
         .disabled(isPosting)
-        .accessibilityLabel(Text(hasLink ? "Remove the link" : "Add a link"))
-        .help(hasLink ? "Remove the link" : "Add a link")
     }
 
     /// Lined up with the text above it.
@@ -108,7 +98,7 @@ struct FeedComposerCard: View {
     }
 
     private var linkIsInvalid: Bool {
-        !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !FeedPostDraft.isWebLink(link)
+        FeedPostDraft.link(from: link) == .invalid
     }
 
     private var draft: FeedPostDraft? {

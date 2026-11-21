@@ -194,6 +194,46 @@ private struct HuddleChipBody: View {
     }
 }
 
+// MARK: - Icon button
+
+/// A bare glyph that acts (close, mute, add a link): sized with Dynamic
+/// Type, 36pt for a pointer and the 44pt target on touch. It takes the
+/// foreground style around it.
+struct HuddleIconButton: View {
+    let label: String
+    let symbol: String
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
+
+    init(_ label: String, symbol: String, action: @escaping () -> Void) {
+        self.label = label
+        self.symbol = symbol
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: glyph, weight: .semibold))
+                .frame(minWidth: Self.side, minHeight: Self.side)
+                .contentShape(Rectangle())
+                .opacity(isEnabled ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
+        .help(label)
+    }
+
+    private static var side: CGFloat {
+        #if os(iOS)
+        Theme.Size.minHitTarget
+        #else
+        WaddleTokens.ControlHeight.md
+        #endif
+    }
+}
+
 // MARK: - Tag
 
 /// A small outlined label for a role or state (web `tag`).
