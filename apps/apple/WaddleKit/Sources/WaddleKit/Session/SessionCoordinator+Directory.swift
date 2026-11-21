@@ -33,10 +33,13 @@ extension SessionCoordinator {
             directoryRefreshesInFlight -= 1
             if directoryRefreshesInFlight == 0 { directoryMutations.removeAll() }
         }
+        let epoch = connectionEpoch
         let result = await port.discoverTopology()
         // A superseded ready pipeline (the stream dropped and reconnected
         // meanwhile) must not overwrite the directory with its answer.
-        guard !Task.isCancelled else { return }
+        // Neither must a look asked for elsewhere, whose task a reconnect
+        // does not cancel.
+        guard !Task.isCancelled, epoch == connectionEpoch else { return }
         if case let .success(topology) = result {
             directory.apply(topology)
             // A room that outlived its space is listed again.

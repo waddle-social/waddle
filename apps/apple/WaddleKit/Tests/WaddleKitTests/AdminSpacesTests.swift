@@ -308,6 +308,25 @@ struct AdminSpacesTests {
         #expect(port.joined == [sketch])
     }
 
+    /// A reconnect does not cancel the task a space was changed from.
+    @Test func aDirectoryAskedForBeforeAReconnectIsNotShownOverTheNewOne() async throws {
+        let (coordinator, port) = online()
+        let draft = try #require(AdminSpaceDraft(name: "Studio", description: ""))
+        port.topology = Topology(spaces: [], channels: [Channel(roomJID: sketch, name: "sketch")])
+        port.holdsTopology = true
+        let creating = Task { try await coordinator.createAdminSpace(draft) }
+        await eventually { port.topologyRequests == 1 }
+
+        coordinator.connectionEpoch += 1
+        coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: lounge, name: "lounge")]))
+        port.releaseTopology()
+        try await creating.value
+
+        #expect(coordinator.directory.isRoom(lounge))
+        #expect(!coordinator.directory.isRoom(sketch))
+        #expect(port.joined.isEmpty)
+    }
+
     @Test func aRefusedChangeAsksForNoDirectory() async throws {
         let (coordinator, port) = online()
         port.admin.writeFailure = .rejected
