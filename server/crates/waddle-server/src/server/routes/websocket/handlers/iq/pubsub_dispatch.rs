@@ -639,7 +639,7 @@ pub(super) async fn handle_pubsub_iq(
 /// request kind this build does not classify, which is refused.
 fn enrolled_scope_guarded_node(request: &PubSubRequest) -> Result<Option<&str>, ()> {
     Ok(match request {
-        PubSubRequest::Unsubscribe { .. } | PubSubRequest::Unsupported { .. } => None,
+        PubSubRequest::Unsupported { .. } => None,
         PubSubRequest::Publish { node, .. }
         | PubSubRequest::Retract { node, .. }
         | PubSubRequest::Items { node, .. }
@@ -647,6 +647,7 @@ fn enrolled_scope_guarded_node(request: &PubSubRequest) -> Result<Option<&str>, 
         | PubSubRequest::ConfigureNode { node }
         | PubSubRequest::DeleteNode { node }
         | PubSubRequest::Subscribe { node, .. }
+        | PubSubRequest::Unsubscribe { node, .. }
         | PubSubRequest::PurgeNode { node }
         | PubSubRequest::ConfigureNodeSet { node, .. }
         | PubSubRequest::AffiliationsGet { node }
@@ -859,6 +860,25 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             error = %error,
             "Failed to reconcile PEP node config on publish; \
              publish will proceed against the divergent config"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsubscribe_uses_the_enrolled_space_guard() {
+        let request = PubSubRequest::Unsubscribe {
+            node: "engineering".to_owned(),
+            jid: "alice@example.test".parse().expect("fixture JID"),
+            subid: Some("subscription-id".to_owned()),
+        };
+
+        assert_eq!(
+            enrolled_scope_guarded_node(&request),
+            Ok(Some("engineering"))
         );
     }
 }
