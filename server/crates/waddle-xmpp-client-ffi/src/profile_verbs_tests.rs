@@ -773,14 +773,28 @@ mod validation {
 
     // ── XEP-0108: the account's own activity, looked up strictly ──────
 
-    fn activity_lookup_reply(payload: &str) -> Element {
-        format!(
-            "<iq xmlns='jabber:client' type='result' id='a1'>\
-               <pubsub xmlns='{NS_PUBSUB}'><items node='{NS_ACTIVITY}'>{payload}</items></pubsub>\
-             </iq>"
-        )
-        .parse()
-        .expect("reply parses")
+    /// An XEP-0060 items result for the activity node, holding `payload`
+    /// as its one item, or no item at all.
+    fn activity_lookup_reply(payload: Option<Element>) -> Element {
+        let items = Element::builder("items", NS_PUBSUB).attr("node", NS_ACTIVITY);
+        let items = match payload {
+            Some(payload) => items.append(
+                Element::builder("item", NS_PUBSUB)
+                    .attr("id", "current")
+                    .append(payload)
+                    .build(),
+            ),
+            None => items,
+        };
+        Element::builder("iq", "jabber:client")
+            .attr("type", "result")
+            .attr("id", "a1")
+            .append(
+                Element::builder("pubsub", NS_PUBSUB)
+                    .append(items.build())
+                    .build(),
+            )
+            .build()
     }
 
     fn stanza_error(condition: &str) -> ClientError {
@@ -794,9 +808,14 @@ mod validation {
 
     #[test]
     fn own_activity_lookup_returns_the_published_activity() {
-        let reply = activity_lookup_reply(&format!(
-            "<item id='current'><activity xmlns='{NS_ACTIVITY}'>\
-               <talking><on_the_phone/></talking></activity></item>"
+        let reply = activity_lookup_reply(Some(
+            Element::builder("activity", NS_ACTIVITY)
+                .append(
+                    Element::builder("talking", NS_ACTIVITY)
+                        .append(Element::builder("on_the_phone", NS_ACTIVITY).build())
+                        .build(),
+                )
+                .build(),
         ));
         let activity = own_activity_from_lookup(Ok(reply))
             .expect("lookup succeeded")
@@ -808,11 +827,10 @@ mod validation {
     #[test]
     fn own_activity_lookup_confirms_none_for_a_retracted_or_unpublished_node() {
         // XEP-0108: an empty <activity/> is the retracted state.
-        let retracted = activity_lookup_reply(&format!(
-            "<item id='current'><activity xmlns='{NS_ACTIVITY}'/></item>"
-        ));
+        let retracted =
+            activity_lookup_reply(Some(Element::builder("activity", NS_ACTIVITY).build()));
         assert!(own_activity_from_lookup(Ok(retracted)).unwrap().is_none());
-        assert!(own_activity_from_lookup(Ok(activity_lookup_reply("")))
+        assert!(own_activity_from_lookup(Ok(activity_lookup_reply(None)))
             .unwrap()
             .is_none());
         assert!(
