@@ -87,6 +87,7 @@ def run_profile(config, service, node, room, restore):
     home, home_domain, _ = fixture_origin(
         config["home"], "https", {"home-a.test", "home-b.test"}
     )
+    firefox_local_host = "home-a.test" if home_domain == "home-a.test" else "home-b.test"
     local_hosts = {"127.0.0.1", "localhost"}
     issuer, issuer_host, issuer_port = fixture_origin(
         config["issuer"], "http", local_hosts, require_port=True
@@ -130,7 +131,7 @@ def run_profile(config, service, node, room, restore):
             port = free_port()
             Path(profile, "user.js").write_text(
                 f'user_pref("marionette.port", {port});\n'
-                f'user_pref("network.dns.localDomains", {json.dumps(home_domain)});\n'
+                f'user_pref("network.dns.localDomains", "{firefox_local_host}");\n'
                 'user_pref("network.trr.mode", 5);\n'
                 'user_pref("network.proxy.type", 0);\n'
             )
