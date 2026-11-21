@@ -80,13 +80,69 @@ final class AdminSnapshotTests: XCTestCase {
             ],
             nextCursor: "after-mika"
         ))
-        let sheet = AdminSpaceSheet(subject: .space(Self.design), spaces: sample.coordinator.adminSpacesList())
+        let sheet = AdminSpaceSheet(subject: .existing(Self.design), spaces: sample.coordinator.adminSpacesList())
         try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
     }
 
     func testNewSpace() async throws {
         let sample = SampleSession()
         let sheet = AdminSpaceSheet(subject: .new, spaces: sample.coordinator.adminSpacesList())
+        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
+    }
+
+    private static let lounge = AdminRoom(
+        jid: bare("lounge@rooms.waddle.test"), name: "Lounge", description: "Small talk and coffee",
+        kind: .text, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 4, memberCount: 9
+    )
+
+    /// A plain room, a hidden announcements room and a forum.
+    func testRooms() async throws {
+        let sample = SampleSession()
+        sample.port.admin.rooms[.init()] = .success(AdminPage(
+            rows: [
+                Self.lounge,
+                AdminRoom(
+                    jid: bare("board@rooms.waddle.test"), name: "Board", description: nil,
+                    kind: .announcement, access: AdminRoomAccess(isListed: false, isMembersOnly: true), presentCount: 0, memberCount: 1
+                ),
+                AdminRoom(
+                    jid: bare("ideas@rooms.waddle.test"), name: "Ideas", description: "Pitch something",
+                    kind: .forum, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 2, memberCount: 31
+                ),
+            ],
+            nextCursor: nil
+        ))
+        let view = NavigationStack { AdminView(section: .rooms) }
+        try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
+    }
+
+    /// An open room: its settings, who is there, roles, and deleting it.
+    func testRoom() async throws {
+        let sample = SampleSession()
+        sample.port.admin.occupants[.init(prefix: "lounge")] = .success(AdminPage(
+            rows: [
+                AdminRoomOccupant(jid: SampleSession.ana.jid, nick: "Ana Lindqvist", role: .moderator, affiliation: .owner),
+                AdminRoomOccupant(jid: SampleSession.mika, nick: "mika", role: .participant, affiliation: .none),
+            ],
+            nextCursor: nil
+        ))
+        sample.port.admin.roomMembers[.init(prefix: "lounge")] = .success(AdminPage(
+            rows: [
+                AdminRoomMember(jid: SampleSession.ana.jid, affiliation: .owner, reason: nil),
+                AdminRoomMember(jid: SampleSession.jo, affiliation: .member, reason: nil),
+                AdminRoomMember(jid: SampleSession.theo, affiliation: .outcast, reason: "Spam"),
+            ],
+            nextCursor: nil
+        ))
+        let sheet = AdminRoomSheet(subject: .existing(Self.lounge), rooms: sample.coordinator.adminRoomsList())
+        try await assertScreenSnapshot(of: sample.host(sheet), size: CGSize(width: Self.size.width, height: 900))
+    }
+
+    /// A new room, with the spaces it can go in.
+    func testNewRoom() async throws {
+        let sample = SampleSession()
+        sample.port.admin.spaces[.init()] = .success(AdminPage(rows: [Self.design], nextCursor: nil))
+        let sheet = AdminRoomSheet(subject: .new, rooms: sample.coordinator.adminRoomsList())
         try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
     }
 

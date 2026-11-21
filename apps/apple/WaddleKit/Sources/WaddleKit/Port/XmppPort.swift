@@ -280,6 +280,33 @@ public protocol AdminPort: AnyObject, Sendable {
 
     /// Answers with the member and the role the server gave them.
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember
+
+    /// One page of every room, by name, as for `adminUsers`.
+    func adminRooms(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminRoom>
+
+    func createAdminRoom(_ draft: AdminRoomDraft) async throws
+
+    /// Answers with the room as the server now holds it. A draft without
+    /// a description leaves the one it has; a kind that cannot be chosen
+    /// is left as it is.
+    func updateAdminRoom(_ room: AdminRoom, to draft: AdminRoomDraft) async throws -> AdminRoom
+
+    func deleteAdminRoom(_ room: BareJID) async throws
+
+    /// One page of the people in `room` now.
+    func adminRoomOccupants(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomOccupant>
+
+    /// Takes `occupant` out of `room`. They can come back, unless the room
+    /// is for members only: there the server also ends their membership.
+    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws
+
+    /// One page of the people with a lasting role in `room`.
+    func adminRoomMembers(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomMember>
+
+    /// Answers with the person and the role the server gave them.
+    func setAdminRoomAffiliation(
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID
+    ) async throws -> AdminRoomMember
 }
 
 /// The full surface the session coordinator drives.

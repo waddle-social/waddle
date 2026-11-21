@@ -1,19 +1,6 @@
 import SwiftUI
 import WaddleKit
 
-/// The spaces found, a page at a time, or why there are none to show.
-/// Choosing one opens it.
-struct AdminSpacesPanel: View {
-    let spaces: AdminList<AdminSpace>
-    let open: (AdminSpace) -> Void
-
-    var body: some View {
-        AdminListPanel(list: spaces, copy: .spaces) { space in
-            AdminSpaceRow(space: space) { open(space) }
-        }
-    }
-}
-
 /// How the console words a space.
 enum AdminSpaceCopy {
     /// "3 rooms · 12 members".
@@ -41,7 +28,7 @@ enum AdminSpaceCopy {
 }
 
 /// Name, description and how much is in the space.
-private struct AdminSpaceRow: View {
+struct AdminSpaceRow: View {
     let space: AdminSpace
     let action: () -> Void
 

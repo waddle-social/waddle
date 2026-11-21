@@ -82,4 +82,62 @@ extension SessionCoordinator {
     ) async throws -> AdminSpaceMember {
         try await whileOnline { try await port.setAdminSpaceRole(role, of: member, in: space) }
     }
+
+    // MARK: Rooms
+
+    /// Every room of this community, for the admin console.
+    public func adminRoomsList() -> AdminList<AdminRoom> {
+        AdminList { [weak self] prefix, cursor in
+            guard let self else { throw PortError.notConnected }
+            return try await self.whileOnline {
+                try await self.port.adminRooms(matching: prefix, after: cursor)
+            }
+        }
+    }
+
+    /// The people in `room` now. It is not searched.
+    public func adminRoomOccupantsList(of room: AdminRoom) -> AdminList<AdminRoomOccupant> {
+        AdminList { [weak self] _, cursor in
+            guard let self else { throw PortError.notConnected }
+            return try await self.whileOnline {
+                try await self.port.adminRoomOccupants(of: room.jid, after: cursor)
+            }
+        }
+    }
+
+    /// The people with a lasting role in `room`. It is not searched.
+    public func adminRoomMembersList(of room: AdminRoom) -> AdminList<AdminRoomMember> {
+        AdminList { [weak self] _, cursor in
+            guard let self else { throw PortError.notConnected }
+            return try await self.whileOnline {
+                try await self.port.adminRoomMembers(of: room.jid, after: cursor)
+            }
+        }
+    }
+
+    public func createAdminRoom(_ draft: AdminRoomDraft) async throws {
+        try await whileOnline { try await port.createAdminRoom(draft) }
+        await refreshDirectory(joiningOnlyNewRooms: true)
+    }
+
+    /// Answers with the room as the server now holds it.
+    public func updateAdminRoom(_ room: AdminRoom, to draft: AdminRoomDraft) async throws -> AdminRoom {
+        let updated = try await whileOnline { try await port.updateAdminRoom(room, to: draft) }
+        await refreshDirectory(joiningOnlyNewRooms: true)
+        return updated
+    }
+
+    /// Takes someone out of a room. They can come back, unless the room is
+    /// for members only: there the server also ends their membership.
+    public func removeFromAdminRoom(_ occupant: BareJID, room: AdminRoom) async throws {
+        try await whileOnline { try await port.removeFromAdminRoom(occupant, room: room.jid) }
+    }
+
+    /// Answers with the person and the role the server gave them.
+    @discardableResult
+    public func setAdminRoomAffiliation(
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: AdminRoom
+    ) async throws -> AdminRoomMember {
+        try await whileOnline { try await port.setAdminRoomAffiliation(affiliation, of: member, in: room.jid) }
+    }
 }
