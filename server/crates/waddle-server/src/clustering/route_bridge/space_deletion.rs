@@ -53,6 +53,23 @@ impl OrderedRelayDeliveryBridge {
     ) -> RelaySpaceDeletionReply {
         use RelaySpaceDeletionReply::{NoObservation, RetryBeforeStage};
 
+        let Ok(_permit) = self.space_deletion_capacity.try_acquire() else {
+            return RetryBeforeStage;
+        };
+        tokio::time::timeout(
+            self.reserved_delivery_effect_timeout(),
+            self.deliver_space_deletion_locally(target),
+        )
+        .await
+        .unwrap_or(NoObservation)
+    }
+
+    async fn deliver_space_deletion_locally(
+        &self,
+        target: LocalSpaceDeletionTarget,
+    ) -> RelaySpaceDeletionReply {
+        use RelaySpaceDeletionReply::{NoObservation, RetryBeforeStage};
+
         let Some(services) = self.services.get() else {
             return RetryBeforeStage;
         };
@@ -79,9 +96,6 @@ impl OrderedRelayDeliveryBridge {
             return RetryBeforeStage;
         }
         let Some(state) = services.web_socket_state.upgrade() else {
-            return RetryBeforeStage;
-        };
-        let Ok(_permit) = self.space_deletion_capacity.try_acquire() else {
             return RetryBeforeStage;
         };
         offer_on_socket(&state, target, Some((&services.node_identity, &stamp)))

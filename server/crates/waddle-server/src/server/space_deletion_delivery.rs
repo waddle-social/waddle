@@ -114,7 +114,9 @@ async fn settle_attempt(
     route: &DeliveryRoute,
     attempt: SpaceDeletionAttempt,
 ) {
-    let Some(outcome) = route.offer(grants, &attempt).await else {
+    let Ok(Some(outcome)) =
+        tokio::time::timeout(COMPLETION_DEADLINE, route.offer(grants, &attempt)).await
+    else {
         // The persisted phase settles when an unobserved attempt expires.
         return;
     };

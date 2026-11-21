@@ -111,12 +111,12 @@ pub(crate) async fn offer_on_socket(
         return retry;
     };
     let operation = GrantOperationId::from_uuid(target.operation);
-    let Ok(Some(attempt)) = store
+    // Another handoff may already own staging. An absent leased token says
+    // nothing about the outcome of this attempt.
+    let attempt = store
         .load_local_space_deletion_attempt(&key, operation, &subject, target.token)
         .await
-    else {
-        return retry;
-    };
+        .ok()??;
     let selection = state
         .deps
         .app_state
