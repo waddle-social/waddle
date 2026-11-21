@@ -86,6 +86,7 @@ export function useXmppRosterContacts(
   const contacts = ref<RosterContact[]>([]);
   const isLoadingContacts = ref(false);
   let rosterVersion: string | null = null;
+  let hasFullRosterSnapshot = false;
   let loadGeneration = 0;
   let inFlightLoad: { client: BrowserXmppClient; generation: number; promise: Promise<void> } | null = null;
 
@@ -93,10 +94,12 @@ export function useXmppRosterContacts(
     const cached = readCachedRoster(account);
     if (!cached) {
       rosterVersion = null;
+      hasFullRosterSnapshot = false;
       contacts.value = [];
       return;
     }
     rosterVersion = cached.ver;
+    hasFullRosterSnapshot = true;
     contacts.value = seedPresence(cached.contacts);
   }
 
@@ -118,6 +121,7 @@ export function useXmppRosterContacts(
     if (!client) {
       contacts.value = [];
       rosterVersion = null;
+      hasFullRosterSnapshot = false;
       return;
     }
     if (inFlightLoad && inFlightLoad.client === client && inFlightLoad.generation === loadGeneration) {
@@ -126,15 +130,16 @@ export function useXmppRosterContacts(
 
     const generation = loadGeneration;
     const account = accountBareJid?.value ?? null;
+    const requestVer = hasFullRosterSnapshot ? rosterVersion : null;
     isLoadingContacts.value = true;
     const runLoad = async () => {
       try {
         const result = typeof client.listRosterContactsVersioned === "function"
-          ? await client.listRosterContactsVersioned(rosterVersion)
+          ? await client.listRosterContactsVersioned(requestVer)
           : { unchanged: false, ver: null, contacts: await client.listRosterContacts() };
         if (generation !== loadGeneration || xmppClient.value !== client) return;
 
-        if (result.unchanged) {
+        if (result.unchanged && hasFullRosterSnapshot) {
           if (result.ver !== null) rosterVersion = result.ver;
           const live = $livePresence.get();
           let changed = false;
@@ -156,6 +161,7 @@ export function useXmppRosterContacts(
           }
         }
         rosterVersion = result.ver;
+        hasFullRosterSnapshot = true;
         contacts.value = seedPresence(result.contacts, existingShowByJid);
         writeCachedRoster(account, rosterVersion, contacts.value);
       } catch {
@@ -179,11 +185,13 @@ export function useXmppRosterContacts(
   }
 
   function applyRosterPush(push: RosterPushEvent) {
-    if (push.ver !== undefined && push.ver !== null) {
+    if (hasFullRosterSnapshot && push.ver !== undefined && push.ver !== null) {
       rosterVersion = push.ver;
     }
     if (push.items.length === 0) {
-      writeCachedRoster(accountBareJid?.value ?? null, rosterVersion, contacts.value);
+      if (hasFullRosterSnapshot) {
+        writeCachedRoster(accountBareJid?.value ?? null, rosterVersion, contacts.value);
+      }
       return;
     }
     const live = $livePresence.get();
@@ -204,7 +212,9 @@ export function useXmppRosterContacts(
       else next.push(merged);
     }
     contacts.value = next;
-    writeCachedRoster(accountBareJid?.value ?? null, rosterVersion, contacts.value);
+    if (hasFullRosterSnapshot) {
+      writeCachedRoster(accountBareJid?.value ?? null, rosterVersion, contacts.value);
+    }
   }
 
   function updatePresence(jid: string, show: RosterContact["presenceShow"]) {
@@ -222,6 +232,7 @@ export function useXmppRosterContacts(
     loadGeneration += 1;
     inFlightLoad = null;
     rosterVersion = null;
+    hasFullRosterSnapshot = false;
     contacts.value = [];
     isLoadingContacts.value = false;
     if (opts?.clearPersistedCache) {

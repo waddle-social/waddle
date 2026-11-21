@@ -213,7 +213,7 @@ impl DiscoveryExt for ClientHandle {
 
     async fn discover_upload_service(&self, server_domain: &str) -> ClientResult<Option<String>> {
         let items = self.discover_items(server_domain, None).await?;
-        let probed: Vec<(String, bool)> = stream::iter(items)
+        let mut probes = std::pin::pin!(stream::iter(items)
             .map(|item| async move {
                 let is_upload = self
                     .discover_info(&item.jid, None)
@@ -221,12 +221,13 @@ impl DiscoveryExt for ClientHandle {
                     .is_ok_and(|info| info.has_feature(UPLOAD_NS));
                 (item.jid, is_upload)
             })
-            .buffered(DISCO_CONCURRENCY)
-            .collect()
-            .await;
-        Ok(probed
-            .into_iter()
-            .find_map(|(jid, is_upload)| is_upload.then_some(jid)))
+            .buffered(DISCO_CONCURRENCY));
+        while let Some((jid, is_upload)) = probes.next().await {
+            if is_upload {
+                return Ok(Some(jid));
+            }
+        }
+        Ok(None)
     }
 
     async fn request_upload_slot(

@@ -248,16 +248,24 @@ async fn discover_extension_service(handle: &ClientHandle, domain: &str) -> Stri
             (index, matched)
         });
     }
-    let mut matches = vec![false; candidates.len()];
+    let mut outcomes: Vec<Option<bool>> = vec![None; candidates.len()];
+    let mut next_priority = 0usize;
     while let Some(joined) = join_set.join_next().await {
         if let Ok((index, matched)) = joined {
-            if let Some(slot) = matches.get_mut(index) {
-                *slot = matched;
+            if let Some(slot) = outcomes.get_mut(index) {
+                *slot = Some(matched);
+            }
+            while let Some(Some(is_match)) = outcomes.get(next_priority) {
+                if *is_match {
+                    join_set.abort_all();
+                    return candidates[next_priority].clone();
+                }
+                next_priority += 1;
             }
         }
     }
-    for (candidate, matched) in candidates.into_iter().zip(matches) {
-        if matched {
+    for (candidate, matched) in candidates.into_iter().zip(outcomes) {
+        if matched == Some(true) {
             return candidate;
         }
     }

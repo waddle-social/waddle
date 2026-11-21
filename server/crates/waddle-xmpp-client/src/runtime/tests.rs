@@ -992,14 +992,30 @@ fn app_stanza_silently_drops_forged_roster_pushes() {
         "alice@example.com/other",
         "alice@example.com/macbook",
     ] {
-        let xml = format!(
-            "<iq xmlns='jabber:client' type='set' id='rp-forged' from='{forged_from}' to='alice@example.com/macbook'>\
-                <query xmlns='jabber:iq:roster' ver='v99'>\
-                    <item jid='mallory@example.com' subscription='both'/>\
-                </query>\
-            </iq>"
-        );
-        let stanza: Element = xml.parse().unwrap();
+        let item = Element::builder("item", "jabber:iq:roster")
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                "mallory@example.com",
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("subscription").to_owned(),
+                "both",
+            )
+            .build();
+        let query = Element::builder("query", "jabber:iq:roster")
+            .attr(minidom::rxml::xml_ncname!("ver").to_owned(), "v99")
+            .append(item)
+            .build();
+        let stanza = Element::builder("iq", crate::NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "rp-forged")
+            .attr(minidom::rxml::xml_ncname!("from").to_owned(), forged_from)
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "alice@example.com/macbook",
+            )
+            .append(query)
+            .build();
         let events = runtime.handle_app_stanza(&stanza);
         assert!(
             events.is_empty(),

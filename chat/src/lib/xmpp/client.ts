@@ -3320,11 +3320,15 @@ export class BrowserXmppClient {
   }> {
     const xmpp = await this.requireConnectedXmpp();
     if (typeof xmpp.list_roster_contacts_versioned === "function") {
-      const result = await xmpp.list_roster_contacts_versioned(ver ?? null);
+      const result = await xmpp.list_roster_contacts_versioned(ver ?? null) as {
+        unchanged?: boolean;
+        ver?: string | null;
+        contacts?: WasmRosterContact[];
+      } | null;
       return {
         unchanged: Boolean(result?.unchanged),
         ver: result?.ver ?? null,
-        contacts: (result?.contacts ?? []).map((item) => this.mapWasmRosterContact(item)),
+        contacts: (result?.contacts ?? []).map((item: WasmRosterContact) => this.mapWasmRosterContact(item)),
       };
     }
     const contacts = await this.listRosterContacts();

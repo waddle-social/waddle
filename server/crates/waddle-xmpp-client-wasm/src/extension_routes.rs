@@ -30,7 +30,7 @@ pub(crate) async fn discover_extension_command_service(
     }
 
     let candidates = extension_command_service_candidates(domain, &discovered_items);
-    let probed: Vec<(String, bool)> = stream::iter(candidates)
+    let mut probes = std::pin::pin!(stream::iter(candidates)
         .map(|candidate| {
             let inner = inner.clone();
             async move {
@@ -44,11 +44,9 @@ pub(crate) async fn discover_extension_command_service(
                 (candidate, matched)
             }
         })
-        .buffered(EXTENSION_DISCO_CONCURRENCY)
-        .collect()
-        .await;
+        .buffered(EXTENSION_DISCO_CONCURRENCY));
 
-    for (candidate, matched) in probed {
+    while let Some((candidate, matched)) = probes.next().await {
         if matched {
             return candidate;
         }

@@ -162,6 +162,44 @@ describe("useXmppRosterContacts XEP-0237 cache and roster pushes", () => {
       scope.stop();
     }
   });
+
+  test("does not stamp rosterVersion or persist a partial cache on pushes before initial full load", async () => {
+    const listRosterContactsVersioned = mock(async (_ver?: string | null) => ({
+      unchanged: false,
+      ver: "v10",
+      contacts: [
+        { jid: "bob@example.com", name: "Bob", username: "Bob", subscription: "both" as const, groups: [] },
+        { jid: "carol@example.com", name: "Carol", username: "Carol", subscription: "to" as const, groups: [] },
+      ],
+    }));
+
+    const clientRef = ref({
+      listRosterContactsVersioned,
+    } as unknown as BrowserXmppClient);
+    const accountRef = ref<string | null>("alice@example.com");
+
+    const scope = effectScope();
+    const roster = scope.run(() => useXmppRosterContacts(clientRef, accountRef))!;
+    try {
+      // A push arrives before any full roster snapshot has been loaded.
+      roster.applyRosterPush({
+        ver: "v9",
+        items: [
+          { jid: "carol@example.com", name: "Carol", username: "Carol", subscription: "to", groups: [] },
+        ],
+      });
+      expect(roster.contacts.value.map((c) => c.jid)).toEqual(["carol@example.com"]);
+      expect(storageEnv.store.has("waddle.roster.v1:alice@example.com")).toBe(false);
+
+      // Subsequent load MUST send ver=null (not "v9") to fetch the complete roster.
+      await roster.loadRosterContacts();
+      expect(listRosterContactsVersioned).toHaveBeenCalledWith(null);
+      expect(roster.contacts.value.map((c) => c.jid)).toEqual(["bob@example.com", "carol@example.com"]);
+      expect(JSON.parse(storageEnv.store.get("waddle.roster.v1:alice@example.com")!).ver).toBe("v10");
+    } finally {
+      scope.stop();
+    }
+  });
 });
 
 describe("BrowserXmppClient fetchInbox in-flight deduplication", () => {

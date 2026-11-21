@@ -526,7 +526,8 @@ async fn run_initial_presence_probes(
 
     // RFC 6121 §4.2.2: deliver current presence of the user's other available
     // resources to the newly available resource.
-    deliver_local_contact_presence_to_owner(deps, &sender_bare, sender_jid, owner, true).await;
+    deliver_local_contact_presence_to_owner(deps, &sender_bare, sender_jid, owner, true, None)
+        .await;
 
     let storage = deps.app_state.db_pool.roster_storage();
     let contacts = match storage.get_presence_subscription_jids(&sender_bare).await {
@@ -577,9 +578,11 @@ async fn run_initial_presence_probes(
         return;
     }
 
-    let sender_bare_jid = Jid::from(sender_bare.clone());
+    // XEP-0191 §3.3: pass the connecting full JID so exact full-JID blocks
+    // (as well as bare-JID and domain blocks) on the contact's blocklist match.
+    let sender_full_jid = Jid::from(sender_jid.clone());
     let blocked_by_contacts = match blocking
-        .filter_blocking_recipients(&candidates, &sender_bare_jid)
+        .filter_blocking_recipients(&candidates, &sender_full_jid)
         .await
     {
         Ok(blocked) => blocked,
@@ -601,6 +604,7 @@ async fn run_initial_presence_probes(
         return;
     }
 
+    let sender_blocklist_ref = &sender_blocklist;
     futures::stream::iter(targets)
         .for_each_concurrent(PRESENCE_FANOUT_CONCURRENCY, |contact| async move {
             if deps
@@ -625,7 +629,15 @@ async fn run_initial_presence_probes(
             {
                 return;
             }
-            deliver_local_contact_presence_to_owner(deps, &contact, sender_jid, owner, false).await;
+            deliver_local_contact_presence_to_owner(
+                deps,
+                &contact,
+                sender_jid,
+                owner,
+                false,
+                Some(sender_blocklist_ref),
+            )
+            .await;
         })
         .await;
 }
@@ -636,6 +648,7 @@ async fn deliver_local_contact_presence_to_owner(
     recipient_full: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     exclude_recipient: bool,
+    recipient_blocklist: Option<&waddle_xmpp::protocol::Blocklist>,
 ) {
     let available =
         crate::server::routes::websocket::handlers::account_reads::available_resources_with_presence_for_app_state(
@@ -660,6 +673,9 @@ async fn deliver_local_contact_presence_to_owner(
     };
     detached_available.retain(|detached| {
         !(exclude_recipient && detached.resource == *recipient_full)
+            && !recipient_blocklist.is_some_and(|blocklist| {
+                blocklist.contains_jid(&Jid::from(detached.resource.clone()))
+            })
             && !available
                 .iter()
                 .any(|(live_resource, _)| *live_resource == detached.resource)
@@ -685,6 +701,11 @@ async fn deliver_local_contact_presence_to_owner(
 
     for (resource, presence_state) in available {
         if exclude_recipient && resource == *recipient_full {
+            continue;
+        }
+        if recipient_blocklist
+            .is_some_and(|blocklist| blocklist.contains_jid(&Jid::from(resource.clone())))
+        {
             continue;
         }
         let mut presence = build_available_presence(
@@ -758,9 +779,9 @@ async fn broadcast_presence_to_subscribers(
 
     let mut targets = remote_candidates;
     if !local_candidates.is_empty() {
-        let sender_bare_jid = Jid::from(sender_bare);
+        let sender_full_jid = Jid::from(sender_jid.clone());
         let blocked_by_subscribers = match blocking
-            .filter_blocking_recipients(&local_candidates, &sender_bare_jid)
+            .filter_blocking_recipients(&local_candidates, &sender_full_jid)
             .await
         {
             Ok(blocked) => blocked,
@@ -783,6 +804,7 @@ async fn broadcast_presence_to_subscribers(
         return;
     }
 
+    let sender_blocklist_ref = &sender_blocklist;
     futures::stream::iter(targets)
         .for_each_concurrent(PRESENCE_FANOUT_CONCURRENCY, |subscriber_bare| async move {
             // RFC 6121 §4.4.2: relay the user's own stanza (readdressed), never a
@@ -820,6 +842,10 @@ async fn broadcast_presence_to_subscribers(
                 .collect();
             let mut excluded_resources = Vec::with_capacity(live_resources.len());
             for resource in live_resources {
+                if sender_blocklist_ref.contains_jid(&Jid::from(resource.clone())) {
+                    excluded_resources.push(resource);
+                    continue;
+                }
                 match state
                     .deps
                     .protocol

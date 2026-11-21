@@ -109,6 +109,9 @@ mod imp {
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,
         pub unread: RefCell<HashMap<String, u32>>,
+        /// Conversation keys whose unread count was modified by live events
+        /// since the current connection's bootstrap started.
+        pub live_unread_keys: RefCell<HashSet<String>>,
         /// One timeline per conversation, by bare JID.
         pub timelines: RefCell<HashMap<String, Timeline>>,
         /// Original messages retained as context when opening an implicit-root thread.

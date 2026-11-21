@@ -10,6 +10,7 @@ import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleException
 import social.waddle.client.ffi.WaddleMucAffiliation
+import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleRoomMemberEntry
@@ -35,6 +36,34 @@ internal class RoomAdminVerbs(
         data object Failed : TierOutcome
     }
 
+    private suspend fun fetchRoomBotsSafely(
+        lease: ActiveSession.OwnerLease,
+        roomJid: String,
+    ): List<WaddleRoomBot>? = try {
+        activeSession.fetchIfCurrent(lease) { it.listRoomBots(roomJid) }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        null
+    }
+
+    private suspend fun fetchMemberTier(
+        lease: ActiveSession.OwnerLease,
+        roomJid: String,
+        tier: WaddleMucAffiliation,
+    ): TierOutcome = try {
+        when (val result = activeSession.invokeIfCurrent(lease) { it.listRoomMembers(roomJid, tier) }) {
+            ActiveSession.LeaseInvocation.Stale,
+            ActiveSession.LeaseInvocation.NotConnected,
+            -> TierOutcome.Disconnected
+            is ActiveSession.LeaseInvocation.Completed -> TierOutcome.Entries(result.value)
+        }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        TierOutcome.Failed
+    }
+
     /**
      * Refresh a room's member list with the web `listRoomMembers`
      * fan-out: one `muc#admin` query per affiliation tier, tolerating
@@ -47,30 +76,9 @@ internal class RoomAdminVerbs(
         val lease = activeSession.captureOwnerLease() ?: return
         if (!activeSession.applyIfCurrent(lease) { stores.roomMembersStore.markLoading(roomJid) }) return
         val (outcomes, bots) = coroutineScope {
-            val botsDeferred = async {
-                try {
-                    activeSession.fetchIfCurrent(lease) { it.listRoomBots(roomJid) }
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (_: Throwable) {
-                    null
-                }
-            }
+            val botsDeferred = async { fetchRoomBotsSafely(lease, roomJid) }
             val tierDeferreds = MEMBER_LIST_TIERS.map { tier ->
-                async {
-                    try {
-                        when (val result = activeSession.invokeIfCurrent(lease) { it.listRoomMembers(roomJid, tier) }) {
-                            ActiveSession.LeaseInvocation.Stale,
-                            ActiveSession.LeaseInvocation.NotConnected,
-                            -> TierOutcome.Disconnected
-                            is ActiveSession.LeaseInvocation.Completed -> TierOutcome.Entries(result.value)
-                        }
-                    } catch (cancellation: CancellationException) {
-                        throw cancellation
-                    } catch (_: Throwable) {
-                        TierOutcome.Failed
-                    }
-                }
+                async { fetchMemberTier(lease, roomJid, tier) }
             }
             Pair(tierDeferreds.awaitAll(), botsDeferred.await())
         }

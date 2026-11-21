@@ -49,26 +49,20 @@ extension SessionCoordinator {
         }
         let maxConcurrentJoins = 4
         await withTaskGroup(of: Void.self) { group in
-            var nextIndex = 0
-            while nextIndex < min(maxConcurrentJoins, roomsToJoin.count) {
-                let room = roomsToJoin[nextIndex]
-                nextIndex += 1
-                group.addTask { @MainActor in
+            var pending = roomsToJoin[...]
+            func addNext() {
+                guard let room = pending.popFirst() else { return }
+                group.addTask {
                     await self.join(room)
                 }
             }
+            for _ in 0..<maxConcurrentJoins { addNext() }
             while await group.next() != nil {
                 guard !Task.isCancelled else {
                     group.cancelAll()
                     break
                 }
-                if nextIndex < roomsToJoin.count {
-                    let room = roomsToJoin[nextIndex]
-                    nextIndex += 1
-                    group.addTask { @MainActor in
-                        await self.join(room)
-                    }
-                }
+                addNext()
             }
         }
     }

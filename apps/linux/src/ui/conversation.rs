@@ -208,6 +208,7 @@ impl WaddleWindow {
         imp.thread_roots.replace(Default::default());
         imp.thread_updates.replace(Default::default());
         imp.unread.replace(Default::default());
+        imp.live_unread_keys.borrow_mut().clear();
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
         imp.images.replace(Default::default());
@@ -263,6 +264,7 @@ impl WaddleWindow {
                 imp.connect_epoch.set(connect_epoch);
                 imp.connected.set(true);
                 imp.reconnect_attempt.set(0);
+                imp.live_unread_keys.borrow_mut().clear();
                 self.spawn_on_connected(generation, connect_epoch);
             }
             SessionEvent::Disconnected => {
@@ -392,11 +394,17 @@ impl WaddleWindow {
             return;
         };
         if self.is_reading(&conversation) {
+            imp.live_unread_keys
+                .borrow_mut()
+                .insert(conversation.clone());
             self.queue_read(&conversation);
             return;
         }
         // Unread even when open, if the user is not looking: coming back
         // then marks it read on the server too.
+        imp.live_unread_keys
+            .borrow_mut()
+            .insert(conversation.clone());
         *imp.unread
             .borrow_mut()
             .entry(conversation.clone())
@@ -443,7 +451,7 @@ impl WaddleWindow {
             }
             imp.conversations.replace(conversations);
             for entry in &inbox {
-                window.update_inbox(entry);
+                window.apply_inbox_entry(entry, true);
             }
             window.render_conversations();
             window.refresh_composer();
@@ -580,6 +588,7 @@ impl WaddleWindow {
             .remove(&jid)
             .is_some_and(|count| count > 0);
         if had_unread {
+            imp.live_unread_keys.borrow_mut().insert(jid.clone());
             self.queue_read(&jid);
             self.render_conversations();
         }
