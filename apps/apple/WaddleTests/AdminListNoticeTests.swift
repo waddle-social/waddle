@@ -249,6 +249,20 @@ final class AdminConsoleTests: XCTestCase {
         XCTAssertEqual(console.spaceFilterChoices, [ops])
     }
 
+    /// Spaces that failed to load are asked for again when the rooms are
+    /// refreshed, so the filter comes back without leaving the rooms.
+    func testRefreshingTheRoomsAsksForTheSpacesAgain() async {
+        let console = console(spaces: [])
+        sample?.port.admin.spaces[.init()] = .failure(.timeout)
+        await console.refreshSpaceChoices()
+        XCTAssertEqual(console.spaceFilterChoices, [])
+
+        sample?.port.admin.spaces[.init()] = .success(AdminPage(rows: [design], nextCursor: nil))
+        await console.refresh(.rooms)
+
+        XCTAssertEqual(console.spaceFilterChoices, [design])
+    }
+
     /// A space renamed since it was chosen is shown by its new name.
     func testTheChosenSpaceFollowsItsRow() async {
         let studio = AdminSpace(

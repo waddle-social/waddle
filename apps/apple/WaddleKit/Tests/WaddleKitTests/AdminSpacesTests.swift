@@ -425,19 +425,60 @@ struct AdminSpacesTests {
         #expect(list.rows == [boUser, adaUser])
     }
 
-    /// Who holds a role is known only once every page of members is in,
-    /// so the picker can leave out someone on a later page.
-    @Test func everyMemberIsKnownOnlyOnceEveryPageIsIn() async {
+    /// Who holds a role is what a fresh request answers, every page of
+    /// it: someone on a later page, or given a role since the list was
+    /// shown, is known before the picker offers anyone.
+    @Test func everyMemberIsWhatAFreshRequestAnswers() async {
         let (coordinator, port) = online()
-        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: "next"))
-        port.admin.members[.init(prefix: "design", cursor: "next")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: nil))
         let list = coordinator.adminSpaceMembersList(of: design)
-
         await list.load()
-        #expect(list.everyRow == nil)
+        let boOwner = AdminSpaceMember(jid: bo.jid, role: .owner)
+        port.admin.members[.init(prefix: "design")] = .success(AdminPage(rows: [ada], nextCursor: "next"))
+        port.admin.members[.init(prefix: "design", cursor: "next")] = .success(AdminPage(rows: [boOwner], nextCursor: nil))
 
-        await list.loadEveryPage()
-        #expect(list.everyRow == [ada, bo])
+        let every = await list.loadEveryRow()
+
+        #expect(every == [ada, boOwner])
+    }
+
+    /// A request another search overtakes is not an answer.
+    @Test func everyMemberIsUnknownWhenAnotherRequestOvertakes() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [AdminUser(jid: ada.jid, displayName: nil, isOwner: false)], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        port.admin.usersFetches.isHolding = true
+        let every = Task { await list.loadEveryRow() }
+        await eventually { port.admin.usersFetches.count == 1 }
+        port.admin.usersFetches.isHolding = false
+
+        await list.load(matching: "b")
+        port.admin.usersFetches.release()
+
+        #expect(await every.value == nil)
+    }
+
+    /// The picker opened before the sheet's own first request answered,
+    /// then closed before its request answered: the members still load.
+    @Test func membersAskedForAgainByAPickerClosedEarlyStillLoad() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [AdminUser(jid: ada.jid, displayName: nil, isOwner: false)], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        port.admin.usersFetches.isHolding = true
+        let sheet = Task { await list.load() }
+        await eventually { port.admin.usersFetches.count == 1 }
+        let picker = Task { await list.loadEveryRow() }
+        await eventually { port.admin.usersFetches.count == 2 }
+
+        picker.cancel()
+        port.admin.usersFetches.isHolding = false
+        port.admin.usersFetches.release()
+        await sheet.value
+        #expect(await picker.value == nil)
+
+        #expect(list.hasLoaded)
+        #expect(list.rows.map(\.jid) == [ada.jid])
+        #expect(!list.isLoading)
     }
 
     @Test func addingMembersRaisesTheCount() {

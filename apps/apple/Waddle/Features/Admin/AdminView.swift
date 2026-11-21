@@ -64,9 +64,22 @@ final class AdminConsole {
     /// Asks for every space again. The space chosen follows its row, and
     /// one no longer there stops narrowing the rooms.
     func refreshSpaceChoices() async {
-        await spaceChoices.loadEveryPage()
-        guard let chosen = roomsSpace, let every = spaceChoices.everyRow else { return }
+        let every = await spaceChoices.loadEveryRow()
+        guard let chosen = roomsSpace, let every else { return }
         roomsSpace = every.first { $0.id == chosen.id }
+    }
+
+    /// What Refresh asks for again: the section's list and, for the rooms,
+    /// the spaces they can be narrowed to, which may have failed before.
+    func refresh(_ section: AdminSection) async {
+        switch section {
+        case .users: await users.reload()
+        case .spaces: await spaces.reload()
+        case .rooms:
+            async let roomsReloaded: Void = rooms.reload()
+            async let choicesReloaded: Void = refreshSpaceChoices()
+            _ = await (roomsReloaded, choicesReloaded)
+        }
     }
 }
 
@@ -138,7 +151,8 @@ struct AdminView: View {
             } accessory: {
                 AdminSpaceFilter(console: console)
             }
-            .task { await console.refreshSpaceChoices() }
+            // On showing the rooms and on coming back online.
+            .task(id: session.connection == .online) { await console.refreshSpaceChoices() }
         }
     }
 
@@ -172,7 +186,7 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
     @State private var subject: AdminSheetSubject<Row>?
 
     var body: some View {
-        AdminListPanel(list: list, copy: section.copy, accessory: accessory) { item in
+        AdminListPanel(list: list, copy: section.copy, refresh: { await console.refresh(section) }, accessory: accessory) { item in
             row(item) { subject = .existing(item) }
         }
         .task(id: Search(query: query, space: space, isOnline: session.connection == .online)) {
@@ -191,7 +205,7 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    Task { await list.reload() }
+                    Task { await console.refresh(section) }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -209,6 +223,8 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
     /// already answers them is left as it is, pages and all, when its
     /// section is shown again, unless it may be out of date.
     private func search() async {
+        // Wanted at once, so a refresh before an answer asks for it.
+        list.want(query, in: space)
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let answers = list.query == text && list.space?.id == space?.id
         if list.hasLoaded, list.failure == nil, answers, !console.stale.contains(section) { return }
@@ -230,6 +246,7 @@ extension AdminList {
     /// another space asks at once. Typing on cancels a search not yet
     /// asked for.
     func search(_ text: String, in space: AdminSpace? = nil) async {
+        want(text, in: space)
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, self.space?.id == space?.id {
             try? await Task.sleep(for: .milliseconds(250))
         }
@@ -277,6 +294,8 @@ struct AdminSpaceFilter: View {
 struct AdminListPanel<Row: Identifiable & Sendable, RowView: View, Accessory: View>: View {
     let list: AdminList<Row>
     let copy: AdminListCopy
+    /// Pull to refresh: the list, and what goes with it.
+    let refresh: () async -> Void
     @ViewBuilder let accessory: () -> Accessory
     @ViewBuilder let row: (Row) -> RowView
 
@@ -303,7 +322,7 @@ struct AdminListPanel<Row: Identifiable & Sendable, RowView: View, Accessory: Vi
             .frame(maxWidth: Self.readableWidth)
             .frame(maxWidth: .infinity)
         }
-        .refreshable { await list.reload() }
+        .refreshable { await refresh() }
         .overlay {
             if let notice = AdminListNotice(
                 isEmpty: list.rows.isEmpty,

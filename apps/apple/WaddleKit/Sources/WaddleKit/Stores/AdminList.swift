@@ -26,11 +26,10 @@ public final class AdminList<Row: Identifiable & Sendable> {
     public var hasMore: Bool { cursor != nil }
     /// Every page of the last search is shown.
     public var isComplete: Bool { hasLoaded && failure == nil && !hasMore }
-    /// The rows once every page of them is in; nil before.
-    public var everyRow: [Row]? { isComplete ? rows : nil }
 
     @ObservationIgnored private let fetch: Fetch
-    /// The text and space last asked for, answered or not.
+    /// The text and space wanted: last asked for or said to be wanted,
+    /// answered or not. A refresh asks for it.
     @ObservationIgnored private var requested: (text: String, space: AdminSpace?) = ("", nil)
     @ObservationIgnored private var cursor: String?
     /// Counts searches; an answer to an earlier one is dropped.
@@ -51,8 +50,10 @@ public final class AdminList<Row: Identifiable & Sendable> {
     /// Shows the first page of what starts with `text`, in `space`;
     /// everything when the text is blank and there is no space. A refresh
     /// that fails keeps the rows shown; a search for other text or another
-    /// space that fails shows none, since they answered another search. A
-    /// search whose task was cancelled changes nothing.
+    /// space that fails shows none, since they answered another search. An
+    /// answer to a search no longer wanted changes nothing; one still
+    /// wanted is shown even if its task was cancelled, since no other
+    /// search will ask for it.
     public func load(matching text: String = "", in space: AdminSpace? = nil) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         serial += 1
@@ -66,11 +67,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
         isLoading = false
         let changes = changesSinceAsking
         changesSinceAsking = []
-        guard !Task.isCancelled else {
-            // A refresh asks for what is shown, not for what was dropped.
-            requested = (query, self.space)
-            return
-        }
+        guard text == requested.text, space?.id == requested.space?.id else { return }
         switch result {
         case let .success(page):
             rows = Self.applying(changes, to: page.rows)
@@ -93,6 +90,25 @@ public final class AdminList<Row: Identifiable & Sendable> {
     /// or not.
     public func reload() async {
         await load(matching: requested.text, in: requested.space)
+    }
+
+    /// Says what the list should answer from now on, before or without
+    /// asking: a refresh asks for it, and an answer to anything else still
+    /// on its way is not shown. A search that already answers it need not
+    /// ask again.
+    public func want(_ text: String, in space: AdminSpace? = nil) {
+        requested = (text.trimmingCharacters(in: .whitespacesAndNewlines), space)
+    }
+
+    /// Asks again for every page and answers with every row once this
+    /// request and all its pages are in: what holds now, not what was
+    /// shown before. Nil when one failed, the task was cancelled or
+    /// another search overtook it.
+    public func loadEveryRow() async -> [Row]? {
+        let asked = serial + 1
+        await loadEveryPage()
+        guard serial == asked, !Task.isCancelled, isComplete else { return nil }
+        return rows
     }
 
     /// Asks again, then for every page after, for a picker that offers

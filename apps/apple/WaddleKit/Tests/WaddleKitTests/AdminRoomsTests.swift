@@ -142,6 +142,7 @@ struct AdminRoomsTests {
         let narrowing = Task { await list.load(in: design) }
         await eventually { port.admin.roomsFetches.count == 1 }
 
+        list.want("", in: nil)
         narrowing.cancel()
         port.admin.roomsFetches.isHolding = false
         port.admin.roomsFetches.release()
@@ -151,6 +152,31 @@ struct AdminRoomsTests {
         #expect(port.admin.roomsRequests.last == .init())
         #expect(list.rows == [lounge, board])
         #expect(list.space == nil)
+    }
+
+    /// Back to space A before B answers: a refresh in that window asks for
+    /// A, and B's rooms are not shown over A's.
+    @Test func aRefreshBeforeACancelledSpaceAnswersAsksForTheSpaceWanted() async {
+        let (coordinator, port) = online()
+        let ops = AdminSpace(service: design.service, node: "ops", name: "Ops", description: nil, roomCount: 1, memberCount: 0)
+        port.admin.rooms[.init(space: "design")] = .success(AdminPage(rows: [lounge], nextCursor: nil))
+        port.admin.rooms[.init(space: "ops")] = .success(AdminPage(rows: [board], nextCursor: nil))
+        let list = coordinator.adminRoomsList()
+        await list.load(in: design)
+        port.admin.roomsFetches.isHolding = true
+        let narrowing = Task { await list.load(in: ops) }
+        await eventually { port.admin.roomsFetches.count == 1 }
+        port.admin.roomsFetches.isHolding = false
+
+        list.want("", in: design)
+        narrowing.cancel()
+        await list.reload()
+        port.admin.roomsFetches.release()
+        await narrowing.value
+
+        #expect(port.admin.roomsRequests.last == .init(space: "design"))
+        #expect(list.rows == [lounge])
+        #expect(list.space == design)
     }
 
     /// Rooms of every space are not an answer for one space.

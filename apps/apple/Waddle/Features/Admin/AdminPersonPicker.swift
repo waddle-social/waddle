@@ -22,6 +22,10 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
     @State private var pickedJID: BareJID?
     @State private var query = ""
     @State private var users: AdminList<AdminUser>?
+    /// The role each holder has, from this picker's own request for every
+    /// page of them; nil until it is in.
+    @State private var held: [BareJID: Role]?
+    @State private var heldFailed = false
 
     init(
         title: String, confirmTitle: String, roles: [Role], role: Role,
@@ -81,7 +85,7 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
                 self.users = users
                 await users.search(query)
             }
-            .task { await holders.loadEveryPage() }
+            .task { await loadHeld() }
         }
         .managementSheetFrame(minHeight: 480)
     }
@@ -99,11 +103,11 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
                     pickedJID = user.jid
                 }
             }
-        } else if holders.failure != nil || holders.moreFailure != nil, !holders.isLoading, !holders.isLoadingMore {
+        } else if heldFailed {
             HStack {
                 Text("Couldn't load who already has a role.")
                 Spacer(minLength: Theme.Spacing.xs)
-                Button("Try again") { Task { await holders.loadEveryPage() } }
+                Button("Try again") { Task { await loadHeld() } }
                     .adminRowControl()
             }
         } else {
@@ -112,9 +116,16 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
         }
     }
 
-    /// The role each holder has; nil until every page of them is in.
-    private var held: [BareJID: Role]? {
-        holders.everyRow.map { Dictionary($0.map { ($0.id, roleOf($0)) }) { first, _ in first } }
+    /// Asks for who holds a role now, not who did when the sheet loaded:
+    /// no one is offered until every page of the answer is in.
+    private func loadHeld() async {
+        heldFailed = false
+        held = nil
+        guard let every = await holders.loadEveryRow() else {
+            if !Task.isCancelled { heldFailed = true }
+            return
+        }
+        held = Dictionary(every.map { ($0.id, roleOf($0)) }) { first, _ in first }
     }
 
     /// The person picked, while the list shows them and they hold no role:
