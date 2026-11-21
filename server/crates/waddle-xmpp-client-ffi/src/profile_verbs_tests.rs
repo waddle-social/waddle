@@ -776,19 +776,20 @@ mod validation {
     /// An XEP-0060 items result for the activity node, holding `payload`
     /// as its one item, or no item at all.
     fn activity_lookup_reply(payload: Option<Element>) -> Element {
-        let items = Element::builder("items", NS_PUBSUB).attr("node", NS_ACTIVITY);
+        let items = Element::builder("items", NS_PUBSUB)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), NS_ACTIVITY);
         let items = match payload {
             Some(payload) => items.append(
                 Element::builder("item", NS_PUBSUB)
-                    .attr("id", "current")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
                     .append(payload)
                     .build(),
             ),
             None => items,
         };
         Element::builder("iq", "jabber:client")
-            .attr("type", "result")
-            .attr("id", "a1")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "a1")
             .append(
                 Element::builder("pubsub", NS_PUBSUB)
                     .append(items.build())
