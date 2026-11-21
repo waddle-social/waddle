@@ -150,6 +150,7 @@ public final class SessionCoordinator {
     @ObservationIgnored var idleClock = IdleClock()
     /// What the current stream was last told; nil on a fresh stream.
     @ObservationIgnored var sentPresence: SentPresence?
+    @ObservationIgnored var profileEdits = ProfileEdits()
 
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
@@ -744,6 +745,10 @@ public struct SessionStatus: Equatable, Sendable {
     public var availability: Availability = .available
     public var statusText: String?
     public var mood: UserMood?
+    public var activity: UserActivity?
+    public var tune: UserTune?
+    /// The account's own details, once loaded.
+    public var details: ProfileDetails?
 
     public init() {}
 }

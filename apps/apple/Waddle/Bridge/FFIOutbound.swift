@@ -14,6 +14,22 @@ enum FFIOutbound {
         }
     }
 
+    /// An empty field is left off the wire.
+    static func tune(_ tune: UserTune) -> WaddleTune {
+        WaddleTune(
+            artist: tune.artist.nilIfEmpty, title: tune.title.nilIfEmpty, source: tune.album.nilIfEmpty,
+            track: nil, uri: tune.link.nilIfEmpty, lengthSeconds: nil, rating: nil
+        )
+    }
+
+    static func vcard(_ details: ProfileDetails) -> WaddleVCard4 {
+        WaddleVCard4(
+            fullName: details.fullName.nilIfEmpty, nickname: details.nickname.nilIfEmpty,
+            pronouns: details.pronouns.nilIfEmpty, note: details.bio.nilIfEmpty,
+            url: details.link.nilIfEmpty, photoUri: details.photoURI
+        )
+    }
+
     /// `stanzaID` is stamped as the stanza `@id` and XEP-0359
     /// `<origin-id/>`; for a send it must be the client id the local
     /// echo is keyed by.
@@ -126,4 +142,8 @@ enum FFIOutbound {
             sources: source.sources.map(\.absoluteString)
         )
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

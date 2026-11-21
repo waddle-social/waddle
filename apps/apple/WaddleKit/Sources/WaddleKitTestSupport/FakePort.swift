@@ -110,6 +110,22 @@ final class FakePort: XmppPort {
     var avatarLookups: [BareJID] = []
     var publishedAvatarID = "own1"
     var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
+    var sharedStatus: Result<SharedStatus, PortError> = .success(SharedStatus())
+    /// What a strict lookup of the account's own activity answers.
+    var ownActivity: Result<UserActivity?, PortError> = .success(nil)
+    /// Every activity and tune offered for publishing; nil is a retraction.
+    var publishedActivities: [UserActivity?] = []
+    var publishedTunes: [UserTune?] = []
+    var sharedStatusPublishResult: Result<Void, PortError> = .success(())
+    /// A held lookup answers with what was set when it began.
+    let sharedStatusFetches = HeldCalls()
+    let ownProfileDetailsFetches = HeldCalls()
+    /// What a strict lookup of the account's own details answers.
+    var ownProfileDetails: Result<ProfileDetails?, PortError> = .success(nil)
+    /// Other people's details.
+    var profileDetails: [BareJID: ProfileDetails] = [:]
+    var publishedProfileDetails: [ProfileDetails] = []
+    var profileDetailsPublishResult: Result<Void, PortError> = .success(())
 
     init() {
         var captured: AsyncStream<XmppEvent>.Continuation!
@@ -360,9 +376,40 @@ final class FakePort: XmppPort {
         publishedAvatarID
     }
     func removeAvatar() async throws {}
-    func fetchMood(of jid: BareJID) async throws -> UserMood? { nil }
+    func fetchSharedStatus(of _: BareJID) async throws -> SharedStatus {
+        let answer = sharedStatus
+        await sharedStatusFetches.wait()
+        return try answer.get()
+    }
+    func fetchOwnProfileDetails() async throws -> ProfileDetails? {
+        let answer = ownProfileDetails
+        await ownProfileDetailsFetches.wait()
+        return try answer.get()
+    }
+    func fetchOwnActivity() async throws -> UserActivity? { try ownActivity.get() }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
+    func publishActivity(_ activity: UserActivity) async throws {
+        publishedActivities.append(activity)
+        try sharedStatusPublishResult.get()
+    }
+    func retractActivity() async throws {
+        publishedActivities.append(nil)
+        try sharedStatusPublishResult.get()
+    }
+    func publishTune(_ tune: UserTune) async throws {
+        publishedTunes.append(tune)
+        try sharedStatusPublishResult.get()
+    }
+    func retractTune() async throws {
+        publishedTunes.append(nil)
+        try sharedStatusPublishResult.get()
+    }
+    func fetchProfileDetails(of jid: BareJID) async throws -> ProfileDetails? { profileDetails[jid] }
+    func publishProfileDetails(_ details: ProfileDetails) async throws {
+        publishedProfileDetails.append(details)
+        try profileDetailsPublishResult.get()
+    }
     func fetchPresenceMode() async throws -> PresenceMode { try storedPresenceMode.get() }
     func publishPresenceMode(_ mode: PresenceMode) async throws {
         publishedPresenceModes.append(mode)
@@ -437,5 +484,25 @@ final class FakePort: XmppPort {
     ) async throws -> ExtensionCommandResult {
         submissions.append(ExtensionSubmission(command: command, sessionID: sessionID, values: values, action: action, room: room))
         return try submitResult.get()
+    }
+}
+
+/// Lets a test keep calls waiting, as a slow server would, until it
+/// releases them.
+@MainActor
+final class HeldCalls {
+    var isHolding = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    var count: Int { waiting.count }
+
+    func wait() async {
+        guard isHolding else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func release() {
+        let held = waiting
+        waiting = []
+        held.forEach { $0.resume() }
     }
 }
