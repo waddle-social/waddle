@@ -16,11 +16,11 @@ struct AdminSpacesTests {
     }
 
     private let design = AdminSpace(
-        address: "spaces.waddle.test", node: "design", name: "Design",
+        service: bare("spaces.waddle.test"), node: "design", name: "Design",
         description: "Pixels and critique", roomCount: 3, memberCount: 12
     )
     private let ops = AdminSpace(
-        address: "spaces.waddle.test", node: "ops", name: "Ops",
+        service: bare("spaces.waddle.test"), node: "ops", name: "Ops",
         description: nil, roomCount: 1, memberCount: 1
     )
     private let ada = AdminSpaceMember(jid: bare("ada@waddle.test"), role: .owner)
@@ -48,6 +48,21 @@ struct AdminSpacesTests {
         #expect(AdminSpaceDraft(name: String(repeating: "a", count: 81), description: "") == nil)
     }
 
+    /// The server counts Unicode scalars; a family emoji is seven of them.
+    @Test func aNameIsMeasuredTheWayTheServerMeasuresIt() {
+        let family = "👨‍👩‍👧‍👦"
+        #expect(AdminSpaceDraft(name: String(repeating: family, count: 11), description: "") != nil)
+        #expect(AdminSpaceDraft(name: String(repeating: family, count: 12), description: "") == nil)
+        #expect(AdminSpaceDraft.isNameTooLong(String(repeating: family, count: 12)))
+        #expect(!AdminSpaceDraft.isNameTooLong(String(repeating: "a", count: 80) + " "))
+    }
+
+    @Test func removingMembersLowersTheCountButNotBelowNone() {
+        #expect(design.removingMembers(2).memberCount == 10)
+        #expect(ops.removingMembers(3).memberCount == 0)
+        #expect(design.removingMembers(2).id == design.id)
+    }
+
     // MARK: The list
 
     @Test func theSpacesListLoadsAndSearches() async {
@@ -71,7 +86,7 @@ struct AdminSpacesTests {
         let list = coordinator.adminSpacesList()
         await list.load()
         let renamed = AdminSpace(
-            address: design.address, node: design.node, name: "Studio",
+            service: design.service, node: design.node, name: "Studio",
             description: design.description, roomCount: 3, memberCount: 12
         )
 

@@ -40,10 +40,12 @@ struct AdminView: View {
             switch section {
             case .users:
                 let list = users ?? session.adminUsersList()
-                await search(list, isFirstLoad: users == nil) { users = list }
+                users = list
+                await search(list)
             case .spaces:
                 let list = spaces ?? session.adminSpacesList()
-                await search(list, isFirstLoad: spaces == nil) { spaces = list }
+                spaces = list
+                await search(list)
             }
         }
         .toolbar {
@@ -119,11 +121,13 @@ struct AdminView: View {
         }
     }
 
-    /// Shows `list` and asks it for the text typed, after a pause in
-    /// typing; a list shown for the first time asks at once.
-    private func search<Row>(_ list: AdminList<Row>, isFirstLoad: Bool, show: () -> Void) async {
-        show()
-        if !isFirstLoad {
+    /// Asks `list` for the text typed, after a pause in typing; an empty
+    /// field asks at once. A list that already answers the text is left
+    /// as it is, pages and all, when its section is shown again.
+    private func search<Row>(_ list: AdminList<Row>) async {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if list.hasLoaded, list.failure == nil, list.query == text { return }
+        if !text.isEmpty {
             try? await Task.sleep(for: .milliseconds(250))
         }
         guard !Task.isCancelled else { return }
@@ -354,7 +358,7 @@ private struct AdminUserRow: View {
 }
 
 /// Asks for the next page; says so when the last try failed.
-struct AdminLoadMore: View {
+private struct AdminLoadMore: View {
     let isLoading: Bool
     let failed: Bool
     let action: () -> Void

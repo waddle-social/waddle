@@ -31,12 +31,28 @@ final class AdminListNoticeTests: XCTestCase {
     }
 }
 
-/// Which of the server's answers mean "not an owner".
+/// What crosses the bridge for the admin console, and which of the
+/// server's answers mean "not an owner".
 final class AdminErrorTests: XCTestCase {
     func testOnlyForbiddenMeansNotAnOwner() {
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "forbidden", text: nil)), .rejected)
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "internal-server-error", text: nil)), .failed)
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "bad-request", text: nil)), .failed)
+    }
+
+    /// The server sends an empty string for a description a space lacks.
+    func testAnEmptyDescriptionIsNoDescription() {
+        XCTAssertNil(FFIXmppPort.nonEmpty(""))
+        XCTAssertNil(FFIXmppPort.nonEmpty(nil))
+        XCTAssertEqual(FFIXmppPort.nonEmpty("Pixels"), "Pixels")
+    }
+
+    func testRolesCrossTheBridgeUnchanged() {
+        for role in AdminSpaceRole.allCases {
+            XCTAssertEqual(FFIXmppPort.role(FFIXmppPort.role(role)), role)
+        }
+        XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.none), WaddleSpaceRole.none)
+        XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.owner), WaddleSpaceRole.owner)
     }
 
     func testOtherErrorsKeepTheirMeaning() {
@@ -53,24 +69,11 @@ final class AdminSpaceCopyTests: XCTestCase {
         XCTAssertEqual(AdminSpaceCopy.counts(rooms: 0, members: 0), "0 rooms · 0 members")
     }
 
-    func testTheDeleteWarningNamesTheRoomsThatGoToo() {
+    func testTheDeleteWarningSaysRoomsGoToo() {
         XCTAssertEqual(AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 0), "This deletes Ops. This can't be undone.")
-        XCTAssertEqual(AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 1), "This deletes Ops and its room. This can't be undone.")
-        XCTAssertEqual(AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 3), "This deletes Ops and its 3 rooms. This can't be undone.")
-    }
-
-    /// The server sends an empty string for a description a space lacks.
-    func testAnEmptyDescriptionIsNoDescription() {
-        XCTAssertNil(FFIXmppPort.text(""))
-        XCTAssertNil(FFIXmppPort.text(nil))
-        XCTAssertEqual(FFIXmppPort.text("Pixels"), "Pixels")
-    }
-
-    func testRolesCrossTheBridgeUnchanged() {
-        for role in AdminSpaceRole.allCases {
-            XCTAssertEqual(FFIXmppPort.role(FFIXmppPort.role(role)), role)
-        }
-        XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.none), WaddleSpaceRole.none)
-        XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.owner), WaddleSpaceRole.owner)
+        XCTAssertEqual(
+            AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 3),
+            "This deletes Ops and the rooms that belong to it. This can't be undone."
+        )
     }
 }

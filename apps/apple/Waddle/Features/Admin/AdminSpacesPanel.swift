@@ -21,13 +21,13 @@ enum AdminSpaceCopy {
         "\(rooms) \(rooms == 1 ? "room" : "rooms") · \(members) \(members == 1 ? "member" : "members")"
     }
 
-    /// What deleting a space takes with it.
+    /// What deleting a space takes with it. The server deletes the rooms
+    /// that belong to the space and only unlinks the others it lists, so
+    /// no number is promised.
     static func deleteWarning(name: String, rooms: Int) -> String {
-        switch rooms {
-        case 0: "This deletes \(name). This can't be undone."
-        case 1: "This deletes \(name) and its room. This can't be undone."
-        default: "This deletes \(name) and its \(rooms) rooms. This can't be undone."
-        }
+        rooms == 0
+            ? "This deletes \(name). This can't be undone."
+            : "This deletes \(name) and the rooms that belong to it. This can't be undone."
     }
 
     static func title(_ role: AdminSpaceRole) -> String {
@@ -70,7 +70,8 @@ private struct AdminSpaceRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(space.name), \(counts)"))
+        .accessibilityLabel(Text([space.name, space.description, counts].compactMap { $0 }.joined(separator: ", ")))
+        .accessibilityAddTraits(.isButton)
         .accessibilityHint(Text("Opens the space"))
     }
 

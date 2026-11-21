@@ -21,11 +21,13 @@ struct AdminSpaceSheet: View {
     @Environment(\.dismiss) private var dismiss
     /// The list the sheet was opened from, kept in step with what is done.
     private let spaces: AdminList<AdminSpace>
+    /// The space as it was when opened; `current` follows the list.
     private let space: AdminSpace?
     @State private var name: String
     @State private var description: String
     @State private var isBusy = false
     @State private var errorMessage: String?
+    @State private var deleteError: String?
     @State private var members: AdminList<AdminSpaceMember>?
     /// Members whose role is on its way to the server.
     @State private var changing: Set<BareJID> = []
@@ -61,7 +63,7 @@ struct AdminSpaceSheet: View {
             #endif
             .toolbar { toolbar }
         }
-        .interactiveDismissDisabled(isBusy)
+        .interactiveDismissDisabled(isWaiting)
         .task {
             guard let space, members == nil else { return }
             let members = session.adminSpaceMembersList(of: space)
@@ -104,7 +106,7 @@ struct AdminSpaceSheet: View {
         } header: {
             Text("Name")
         } footer: {
-            if name.count > AdminSpaceDraft.maxNameLength {
+            if AdminSpaceDraft.isNameTooLong(name) {
                 Text("A name can be up to \(AdminSpaceDraft.maxNameLength) characters.")
                     .foregroundStyle(Theme.Colors.dangerText)
             }
@@ -131,13 +133,13 @@ struct AdminSpaceSheet: View {
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button(space == nil ? "Cancel" : "Close") { dismiss() }
-                .disabled(isBusy)
+                .disabled(isWaiting)
         }
         ToolbarItem(placement: .confirmationAction) {
             if isBusy {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel(Text("Saving"))
+                    .accessibilityLabel(Text("Working"))
             } else {
                 Button(space == nil ? "Create" : "Save", action: save)
                     .disabled(!canSave)
@@ -149,22 +151,33 @@ struct AdminSpaceSheet: View {
         AdminSpaceDraft(name: name, description: description)
     }
 
+    /// The space as the list now holds it: a save or a removal here
+    /// changes its row.
+    private var current: AdminSpace? {
+        guard let space else { return nil }
+        return spaces.rows.first { $0.id == space.id } ?? space
+    }
+
+    /// Something is on its way to the server, so the sheet stays to show
+    /// how it went.
+    private var isWaiting: Bool { isBusy || !changing.isEmpty }
+
     /// A space that is open has something to save once it differs from
     /// what the server holds. A cleared description is not a difference:
     /// the server would keep the old one.
     private var canSave: Bool {
         guard let draft else { return false }
-        guard let space else { return true }
+        guard let space = current else { return true }
         return draft.name != space.name || (draft.description != nil && draft.description != space.description)
     }
 
     private func save() {
-        guard let draft, canSave, !isBusy else { return }
+        guard let draft, canSave, !isWaiting else { return }
         isBusy = true
         errorMessage = nil
         Task {
             do {
-                if let space {
+                if let space = current {
                     spaces.replace(try await session.updateAdminSpace(space, to: draft))
                 } else {
                     try await session.createAdminSpace(draft)
@@ -183,14 +196,14 @@ struct AdminSpaceSheet: View {
     @ViewBuilder
     private var membersSection: some View {
         Section {
+            if let memberError {
+                ManagementErrorLabel(message: memberError)
+            }
             if let members {
                 membersRows(members)
             } else {
                 Text("Loading members…")
                     .foregroundStyle(Theme.Colors.fgMuted)
-            }
-            if let memberError {
-                ManagementErrorLabel(message: memberError)
             }
         } header: {
             Text("Members")
@@ -199,15 +212,14 @@ struct AdminSpaceSheet: View {
 
     @ViewBuilder
     private func membersRows(_ members: AdminList<AdminSpaceMember>) -> some View {
-        if members.rows.isEmpty {
-            if members.failure != nil {
-                LabeledContent("Members didn't load.") {
-                    Button("Try again") { Task { await members.reload() } }
-                }
-            } else {
-                Text(members.hasLoaded ? "No members yet." : "Loading members…")
-                    .foregroundStyle(Theme.Colors.fgMuted)
+        if members.failure != nil {
+            LabeledContent(members.rows.isEmpty ? "Members didn't load." : "Couldn't refresh the members.") {
+                Button("Try again") { Task { await members.reload() } }
+                    .disabled(members.isLoading)
             }
+        } else if members.rows.isEmpty {
+            Text(members.hasLoaded ? "No members yet." : "Loading members…")
+                .foregroundStyle(Theme.Colors.fgMuted)
         }
         ForEach(members.rows) { member in
             AdminSpaceMemberRow(member: member, isChanging: changing.contains(member.jid)) { role in
@@ -249,6 +261,7 @@ struct AdminSpaceSheet: View {
                 let changed = try await session.setAdminSpaceRole(role, of: member.jid, in: space)
                 if changed.role == .none {
                     members.remove(changed.id)
+                    if let current { spaces.replace(current.removingMembers(1)) }
                 } else {
                     members.replace(changed)
                 }
@@ -268,22 +281,26 @@ struct AdminSpaceSheet: View {
         Section {
             Button("Delete space", role: .destructive) { confirmsDelete = true }
                 .foregroundStyle(Theme.Colors.dangerText)
+                .disabled(!changing.isEmpty)
+            if let deleteError {
+                ManagementErrorLabel(message: deleteError)
+            }
         } footer: {
             Text(AdminSpaceCopy.deleteWarning(name: space.name, rooms: space.roomCount))
         }
     }
 
     private func delete(_ space: AdminSpace) {
-        guard !isBusy else { return }
+        guard !isWaiting else { return }
         isBusy = true
-        errorMessage = nil
+        deleteError = nil
         Task {
             do {
                 try await session.deleteAdminSpace(space)
                 spaces.remove(space.id)
                 dismiss()
             } catch {
-                errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't delete the space. Try again.")
+                deleteError = ActionErrorCopy.message(for: error, fallback: "Couldn't delete the space. Try again.")
             }
             isBusy = false
         }

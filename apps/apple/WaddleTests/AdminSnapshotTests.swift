@@ -42,7 +42,7 @@ final class AdminSnapshotTests: XCTestCase {
     }
 
     private static let design = AdminSpace(
-        address: "spaces.waddle.test", node: "design", name: "Design",
+        service: bare("spaces.waddle.test"), node: "design", name: "Design",
         description: "Pixels, type and critique", roomCount: 3, memberCount: 12
     )
 
@@ -53,7 +53,7 @@ final class AdminSnapshotTests: XCTestCase {
             rows: [
                 Self.design,
                 AdminSpace(
-                    address: "spaces.waddle.test", node: "ops", name: "Ops",
+                    service: bare("spaces.waddle.test"), node: "ops", name: "Ops",
                     description: nil, roomCount: 1, memberCount: 1
                 ),
             ],

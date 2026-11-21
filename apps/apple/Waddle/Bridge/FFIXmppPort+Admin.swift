@@ -25,21 +25,27 @@ extension FFIXmppPort {
                 prefix: prefix, pageSize: Self.adminPageSize, afterCursor: cursor
             ))
         }
-        let spaces = page.entries.map { entry in
-            AdminSpace(
-                address: entry.spaceJid,
-                node: entry.spaceNode,
-                name: entry.name,
-                description: Self.text(entry.description),
-                roomCount: Int(entry.channelCount),
-                memberCount: Int(entry.memberCount)
-            )
+        // A space whose service does not parse is skipped, not fatal.
+        let spaces = page.entries.compactMap { entry in
+            FFIInbound.bareJID(entry.spaceJid).map {
+                AdminSpace(
+                    service: $0,
+                    node: entry.spaceNode,
+                    name: entry.name,
+                    description: Self.nonEmpty(entry.description),
+                    roomCount: Int(entry.channelCount),
+                    memberCount: Int(entry.memberCount)
+                )
+            }
         }
         return AdminPage(rows: spaces, nextCursor: page.nextCursor)
     }
 
+    // A change the server refuses is `rejected` whatever its reason: only
+    // the lists read `rejected` as "not an owner".
+
     func createAdminSpace(_ draft: AdminSpaceDraft) async throws {
-        _ = try await mappingAdminErrors {
+        _ = try await mappingPortErrors {
             try await client.adminSpacesCreate(args: WaddleAdminSpacesCreateArgs(
                 name: draft.name, description: draft.description, iconUrl: nil
             ))
@@ -49,25 +55,25 @@ extension FFIXmppPort {
     /// The server leaves what is not sent as it is, so the icon stays. Its
     /// answer has no counts; they are the ones `space` had.
     func updateAdminSpace(_ space: AdminSpace, to draft: AdminSpaceDraft) async throws -> AdminSpace {
-        let updated = try await mappingAdminErrors {
+        let updated = try await mappingPortErrors {
             try await client.adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs(
-                spaceJid: space.address, spaceNode: space.node,
+                spaceJid: space.service.description, spaceNode: space.node,
                 name: draft.name, description: draft.description, iconUrl: nil
             ))
         }
         return AdminSpace(
-            address: updated.spaceJid,
-            node: updated.spaceNode,
+            service: space.service,
+            node: space.node,
             name: updated.name,
-            description: Self.text(updated.description),
+            description: Self.nonEmpty(updated.description),
             roomCount: space.roomCount,
             memberCount: space.memberCount
         )
     }
 
     func deleteAdminSpace(_ space: AdminSpace) async throws {
-        try await mappingAdminErrors {
-            try await client.adminSpacesDelete(spaceJid: space.address, spaceNode: space.node)
+        try await mappingPortErrors {
+            try await client.adminSpacesDelete(spaceJid: space.service.description, spaceNode: space.node)
         }
     }
 
@@ -75,7 +81,7 @@ extension FFIXmppPort {
     func adminSpaceMembers(of space: AdminSpace, after cursor: String?) async throws -> AdminPage<AdminSpaceMember> {
         let page = try await mappingAdminErrors {
             try await client.adminSpacesMembers(args: WaddleAdminSpacesMembersArgs(
-                spaceJid: space.address, spaceNode: space.node,
+                spaceJid: space.service.description, spaceNode: space.node,
                 pageSize: Self.adminPageSize, afterCursor: cursor
             ))
         }
@@ -86,9 +92,9 @@ extension FFIXmppPort {
     }
 
     func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember {
-        let result = try await mappingAdminErrors {
+        let result = try await mappingPortErrors {
             try await client.adminSpacesSetRole(
-                spaceJid: space.address, spaceNode: space.node,
+                spaceJid: space.service.description, spaceNode: space.node,
                 memberJid: member.description, role: Self.role(role)
             )
         }
@@ -96,7 +102,7 @@ extension FFIXmppPort {
     }
 
     /// The server sends an empty string for a description a space lacks.
-    static func text(_ value: String?) -> String? {
+    static func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }
         return value
     }

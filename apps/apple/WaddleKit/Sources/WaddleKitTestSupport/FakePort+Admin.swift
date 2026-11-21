@@ -58,7 +58,7 @@ extension FakePort {
     func updateAdminSpace(_ space: AdminSpace, to draft: AdminSpaceDraft) async throws -> AdminSpace {
         try admin.write(.update(node: space.node, draft))
         return AdminSpace(
-            address: space.address, node: space.node, name: draft.name,
+            service: space.service, node: space.node, name: draft.name,
             description: draft.description ?? space.description,
             roomCount: space.roomCount, memberCount: space.memberCount
         )
