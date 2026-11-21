@@ -159,10 +159,8 @@ impl ConnectionRegistry {
         use crate::stream_management::ProtectedSpaceReplyKind;
 
         if !payload.protected_space_reply().is_some_and(|descriptor| {
-            matches!(
-                descriptor.kind(),
-                ProtectedSpaceReplyKind::BookmarkEvent | ProtectedSpaceReplyKind::DeleteEvent
-            ) && descriptor.recipient() == jid
+            descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent
+                && descriptor.recipient() == jid
         }) {
             return ProtectedSpaceEventEnqueue::InvalidPayload;
         }
@@ -173,7 +171,46 @@ impl ConnectionRegistry {
         else {
             return ProtectedSpaceEventEnqueue::Unavailable;
         };
-        entry.endpoint.try_send_protected_space(payload)
+        entry
+            .endpoint
+            .try_send_protected_space(super::endpoint::ProtectedSpaceOutbound::Bookmark(payload))
+    }
+
+    /// Offer a durable deletion attempt to the exact binding for its full JID.
+    pub fn try_send_space_deletion_if_owner(
+        &self,
+        jid: &jid::FullJid,
+        owner: LocalConnectionBindingId,
+        payload: crate::stream_management::persistence::SmReplayPayload,
+        attempt_token: uuid::Uuid,
+    ) -> Result<
+        tokio::sync::oneshot::Receiver<super::SpaceDeletionSocketOutcome>,
+        super::ProtectedSpaceEventEnqueue,
+    > {
+        use super::endpoint::{ProtectedSpaceOutbound, SocketSpaceDeletion};
+        use super::ProtectedSpaceEventEnqueue;
+
+        if !payload.protected_space_reply().is_some_and(|descriptor| {
+            descriptor.deletion_operation().is_some() && descriptor.recipient() == jid
+        }) {
+            return Err(ProtectedSpaceEventEnqueue::InvalidPayload);
+        }
+        let entry = self
+            .connections
+            .get(jid)
+            .filter(|entry| entry.is_locally_hosted() && entry.binding_id() == owner)
+            .ok_or(ProtectedSpaceEventEnqueue::Unavailable)?;
+        let (completion, result) = tokio::sync::oneshot::channel();
+        match entry
+            .endpoint
+            .try_send_protected_space(ProtectedSpaceOutbound::Deletion(SocketSpaceDeletion {
+                payload,
+                attempt_token,
+                completion,
+            })) {
+            ProtectedSpaceEventEnqueue::Enqueued => Ok(result),
+            rejected => Err(rejected),
+        }
     }
 
     /// Wait for pending-delivery capacity before marking the row offered.

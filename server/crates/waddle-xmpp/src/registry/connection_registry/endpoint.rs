@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 struct OutboundQueue {
     sender: QueueSender,
     receiver_identity: Option<Arc<()>>,
-    protected_space: Option<mpsc::Sender<SmReplayPayload>>,
+    protected_space: Option<mpsc::Sender<ProtectedSpaceOutbound>>,
 }
 
 #[derive(Debug)]
@@ -78,6 +78,38 @@ pub struct SocketOutboundEndpoint {
 pub enum SocketOutboundFrame {
     Ordinary(Box<OutboundStanza>),
     ProtectedSpace(Box<SmReplayPayload>),
+    SpaceDeletion(Box<SocketSpaceDeletion>),
+}
+
+/// The exact deletion attempt and its socket completion channel.
+#[derive(Debug)]
+pub struct SocketSpaceDeletion {
+    pub payload: SmReplayPayload,
+    pub attempt_token: uuid::Uuid,
+    pub completion: tokio::sync::oneshot::Sender<SpaceDeletionSocketOutcome>,
+}
+
+/// Evidence from the owning socket after the deletion attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceDeletionSocketOutcome {
+    RetryBeforeStage,
+    Custody,
+    Ambiguous,
+}
+
+#[derive(Debug)]
+pub(super) enum ProtectedSpaceOutbound {
+    Bookmark(SmReplayPayload),
+    Deletion(SocketSpaceDeletion),
+}
+
+impl From<ProtectedSpaceOutbound> for SocketOutboundFrame {
+    fn from(outbound: ProtectedSpaceOutbound) -> Self {
+        match outbound {
+            ProtectedSpaceOutbound::Bookmark(payload) => Self::ProtectedSpace(Box::new(payload)),
+            ProtectedSpaceOutbound::Deletion(deletion) => Self::SpaceDeletion(Box::new(deletion)),
+        }
+    }
 }
 
 /// Outcome of offering a protected bookmark event to an exact local socket.
@@ -95,7 +127,7 @@ pub enum ProtectedSpaceEventEnqueue {
 /// prove that an exact sealed endpoint has no accepted queued frames.
 pub struct SocketOutboundReceiver {
     receiver: mpsc::Receiver<OutboundStanza>,
-    protected_space: mpsc::Receiver<SmReplayPayload>,
+    protected_space: mpsc::Receiver<ProtectedSpaceOutbound>,
     identity: Arc<()>,
 }
 
@@ -110,10 +142,10 @@ impl SocketOutboundReceiver {
         tokio::select! {
             ordinary = self.receiver.recv() => match ordinary {
                 Some(frame) => Some(SocketOutboundFrame::Ordinary(Box::new(frame))),
-                None => self.protected_space.recv().await.map(|frame| SocketOutboundFrame::ProtectedSpace(Box::new(frame))),
+                None => self.protected_space.recv().await.map(SocketOutboundFrame::from),
             },
             protected = self.protected_space.recv() => match protected {
-                Some(frame) => Some(SocketOutboundFrame::ProtectedSpace(Box::new(frame))),
+                Some(frame) => Some(SocketOutboundFrame::from(frame)),
                 None => self.receiver.recv().await.map(|frame| SocketOutboundFrame::Ordinary(Box::new(frame))),
             },
         }
@@ -258,7 +290,7 @@ impl BindingOutboundEndpoint {
 
     pub(super) fn try_send_protected_space(
         &self,
-        payload: SmReplayPayload,
+        payload: ProtectedSpaceOutbound,
     ) -> ProtectedSpaceEventEnqueue {
         let Ok(admitted) = self.admit() else {
             return ProtectedSpaceEventEnqueue::Unavailable;
