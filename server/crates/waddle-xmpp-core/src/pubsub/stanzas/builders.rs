@@ -56,6 +56,21 @@ pub fn build_pubsub_retract_event(from: &Jid, to: &Jid, node: &str, item_id: &st
     message
 }
 
+/// Build an XEP-0060 node deletion notification without a redirect.
+#[must_use]
+pub fn build_pubsub_delete_event(from: &Jid, to: &Jid, node: &str) -> Message {
+    let deleted = Element::builder("delete", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .build();
+    let event = Element::builder("event", NS_PUBSUB_EVENT)
+        .append(deleted)
+        .build();
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
+    message.from = Some(from.clone());
+    message.payloads.push(event);
+    message
+}
+
 /// Build a PubSub items result IQ.
 #[must_use]
 pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubItem]) -> Iq {
