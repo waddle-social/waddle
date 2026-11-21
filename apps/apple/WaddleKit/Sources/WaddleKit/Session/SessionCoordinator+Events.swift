@@ -15,6 +15,8 @@ extension SessionCoordinator {
         let (list, canManage) = await (fetched, isOwner)
         guard events.isCurrent(refresh) else { return }
         if let list { events.publish(events: list, refresh: refresh) }
+        // The same question the admin console's entry asks once connected.
+        if canManage { isCommunityOwner = true }
         events.finish(failed: list == nil, canManage: canManage, at: now)
     }
 

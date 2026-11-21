@@ -64,11 +64,18 @@ enum SplitSection: Hashable {
     case events
     /// Everyone the account knows by address.
     case people
+    /// The admin console, for community owners.
+    case admin
 }
 
 /// A screen pushed inside the phone's Feed tab.
 enum FeedRoute: Hashable {
     case events
+}
+
+/// A screen pushed inside the phone's You tab.
+enum YouRoute: Hashable {
+    case admin
 }
 
 /// Panels shown beside the conversation on iPad and Mac.
@@ -124,6 +131,19 @@ final class NavigationModel {
     var inboxPath: [Route] = []
     /// The phone has no Events tab: Events opens from the Feed.
     var feedPath: [FeedRoute] = []
+    /// The phone has no Admin tab: owners open the console from You. Kept
+    /// in step with the split view, as People is on the Home stack.
+    var youPath: [YouRoute] = [] {
+        didSet {
+            let showsAdmin = youPath.last == .admin
+            if showsAdmin, splitSection != .admin || selection != nil {
+                selection = nil
+                splitSection = .admin
+            } else if !showsAdmin, splitSection == .admin, selection == nil, oldValue.last == .admin {
+                splitSection = homePath.last == .people ? .people : .home
+            }
+        }
+    }
 
     /// Quick switcher (⌘K) visibility.
     var isQuickSwitcherPresented = false
@@ -145,7 +165,7 @@ final class NavigationModel {
     }
 
     /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed,
-    /// Events or People.
+    /// Events, People or the admin console.
     func show(_ section: SplitSection) {
         selection = nil
         inspector = nil
@@ -168,6 +188,9 @@ final class NavigationModel {
         case .people:
             tab = .home
             homePath = [.people]
+        case .admin:
+            tab = .you
+            youPath = [.admin]
         }
     }
 

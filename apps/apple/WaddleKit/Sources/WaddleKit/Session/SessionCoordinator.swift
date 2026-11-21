@@ -38,6 +38,9 @@ public final class SessionCoordinator {
     public internal(set) var contacts: [Contact]?
     /// Where the last lookup of the contact list stands.
     public internal(set) var contactsLoad = ContactsLoad.idle
+    /// The account owns this community, so it may open the admin console.
+    /// False until the server has said so.
+    public internal(set) var isCommunityOwner = false
     public let history: HistoryStore
     @ObservationIgnored let inbox: InboxStore
     @ObservationIgnored let readCursors: ReadCursorStore
@@ -252,6 +255,7 @@ public final class SessionCoordinator {
         resetPresenceMode()
         contacts = nil
         contactsLoad = .idle
+        isCommunityOwner = false
         await stopCalls()
         await port.disconnect()
         eventTask?.cancel()
@@ -571,6 +575,8 @@ public final class SessionCoordinator {
         // so a stream that drops right after binding keeps backing off.
         guard !Task.isCancelled else { return }
         reconnectAttempt = 0
+        await refreshCommunityOwnership()
+        guard !Task.isCancelled else { return }
         // Last: discovery is several round-trips and nothing above needs it.
         await refreshExtensionCommands()
     }

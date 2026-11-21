@@ -2,7 +2,8 @@ import SwiftUI
 import WaddleKit
 
 /// The signed-in user's profile: avatar, details, status, what they share
-/// (mood, activity, tune), settings and sign out.
+/// (mood, activity, tune), settings and sign out. In the "You" tab a
+/// community owner also finds the admin console here.
 ///
 /// iPhone shows it as the "You" tab; iPad and Mac present it as a sheet.
 struct ProfileView: View {
@@ -11,7 +12,8 @@ struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isPresented) private var isPresented
 
-    init() {}
+    /// The stack this sits in can push the admin console (the "You" tab).
+    var opensAdmin = false
 
     var body: some View {
         Form {
@@ -26,6 +28,11 @@ struct ProfileView: View {
             ProfileSharingSection()
             Section {
                 ProfileSettingsLink()
+                if opensAdmin, session.isCommunityOwner {
+                    NavigationLink(value: YouRoute.admin) {
+                        Label("Admin", systemImage: "shield")
+                    }
+                }
             }
             Section {
                 AccountSignOutButton()
