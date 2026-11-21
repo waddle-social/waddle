@@ -711,6 +711,7 @@ async fn post_participant_joined_webhook(
     let body = serde_json::to_vec(&json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_joined",
+        "createdAt": chrono::Utc::now().timestamp().to_string(),
         "room": { "name": room },
         "participant": {
             "identity": identity,
@@ -722,6 +723,7 @@ async fn post_participant_joined_webhook(
     let response = reqwest::Client::new()
         .post(format!("{}/api/v1/livekit/webhook", server.http_base_url()))
         .header("Authorization", livekit_webhook_auth(&body))
+        .header("Content-Type", "application/webhook+json")
         .body(body)
         .send()
         .await
@@ -742,6 +744,7 @@ async fn post_participant_left_webhook(
     let body = serde_json::to_vec(&json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_left",
+        "createdAt": chrono::Utc::now().timestamp().to_string(),
         "room": { "name": room },
         "participant": {
             "identity": identity,
@@ -753,6 +756,7 @@ async fn post_participant_left_webhook(
     let response = reqwest::Client::new()
         .post(format!("{}/api/v1/livekit/webhook", server.http_base_url()))
         .header("Authorization", livekit_webhook_auth(&body))
+        .header("Content-Type", "application/webhook+json")
         .body(body)
         .send()
         .await

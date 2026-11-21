@@ -1,0 +1,19 @@
+{
+  "event": "room_finished",
+  "room": {
+    "sid": "RM_protojson",
+    "name": "general@muc.test",
+    "emptyTimeout": 300,
+    "creationTime": "1782907100",
+    "enabledCodecs": [
+      {
+        "mime": "audio/opus"
+      },
+      {
+        "mime": "video/VP8"
+      }
+    ]
+  },
+  "id": "EV_fixture_room_finished",
+  "createdAt": "1782907200"
+}

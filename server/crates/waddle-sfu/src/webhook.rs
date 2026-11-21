@@ -221,7 +221,11 @@ pub struct ParticipantEnvelope {
     /// backward compatibility; when present it orders redelivered
     /// events so a stale re-executed join cannot roll a participant
     /// sid backward (#1612 review round 12).
-    #[serde(default, rename = "createdAt")]
+    #[serde(
+        default,
+        rename = "createdAt",
+        deserialize_with = "deserialize_optional_protojson_i64"
+    )]
     pub created_at: Option<i64>,
     pub room: RoomInfo,
     pub participant: ParticipantInfo,
@@ -233,9 +237,34 @@ pub struct ParticipantEnvelope {
 pub struct RoomEnvelope {
     pub id: Option<String>,
     /// See [`ParticipantEnvelope::created_at`].
-    #[serde(default, rename = "createdAt")]
+    #[serde(
+        default,
+        rename = "createdAt",
+        deserialize_with = "deserialize_optional_protojson_i64"
+    )]
     pub created_at: Option<i64>,
     pub room: RoomInfo,
+}
+
+// Protobuf int64 fields are serialized as decimal strings by LiveKit's
+// ProtoJSON encoder. Keep accepting numeric values from older fixtures and
+// callers while retaining integer precision and rejecting malformed evidence.
+fn deserialize_optional_protojson_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireI64 {
+        Number(i64),
+        String(String),
+    }
+
+    match Option::<WireI64>::deserialize(deserializer)? {
+        Some(WireI64::Number(value)) => Ok(Some(value)),
+        Some(WireI64::String(value)) => value.parse().map(Some).map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
 }
 
 /// LiveKit `Room` projection. Only the fields Waddle actually needs
@@ -302,6 +331,99 @@ mod tests {
             "iat": chrono::Utc::now().timestamp(),
         });
         sign_claims(secret, &claims)
+    }
+
+    #[test]
+    fn verifies_protojson_created_at_on_all_typed_webhooks() {
+        let secret = fixture_secret();
+        for body in [
+            include_bytes!("../tests/fixtures/livekit-webhooks/participant_joined.json").as_slice(),
+            include_bytes!("../tests/fixtures/livekit-webhooks/participant_left.json").as_slice(),
+            include_bytes!(
+                "../tests/fixtures/livekit-webhooks/participant_connection_aborted.json"
+            )
+            .as_slice(),
+            include_bytes!("../tests/fixtures/livekit-webhooks/room_finished.json").as_slice(),
+        ] {
+            let auth = sign_for_body(&secret, body);
+            let event = verify_webhook_signature(&secret, Some(&auth), body)
+                .expect("upstream ProtoJSON event verifies and decodes");
+            let (created_at, room) = match event {
+                LiveKitWebhookEvent::ParticipantJoined(envelope)
+                | LiveKitWebhookEvent::ParticipantLeft(envelope)
+                | LiveKitWebhookEvent::ParticipantConnectionAborted(envelope) => {
+                    assert_eq!(envelope.participant.identity, "alice@waddle.test/desktop");
+                    (envelope.created_at, envelope.room)
+                }
+                LiveKitWebhookEvent::RoomFinished(envelope) => (envelope.created_at, envelope.room),
+                LiveKitWebhookEvent::Other => panic!("fixture must exercise a typed event"),
+            };
+            assert_eq!(created_at, Some(1_782_907_200));
+            assert_eq!(room.name, "general@muc.test");
+            assert_eq!(
+                room.sid,
+                Some(RoomSid::try_new("RM_protojson").expect("fixture room SID"))
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_projection_preserves_integer_precision_and_optional_fields() {
+        let secret = fixture_secret();
+        for (timestamp, expected) in [
+            (None, None),
+            (Some(json!(null)), None),
+            (Some(json!(1782907200)), Some(1_782_907_200)),
+            (Some(json!("1782907200")), Some(1_782_907_200)),
+            (Some(json!("9007199254740993")), Some(9_007_199_254_740_993)),
+        ] {
+            for kind in ["participant_left", "room_finished"] {
+                let mut payload = json!({
+                    "event": kind,
+                    "room": { "name": "general@muc.test" },
+                    "participant": { "identity": "alice@waddle.test/desktop" },
+                });
+                if let Some(timestamp) = &timestamp {
+                    payload["createdAt"] = timestamp.clone();
+                }
+                let body = serde_json::to_vec(&payload).expect("timestamp fixture");
+                let auth = sign_for_body(&secret, &body);
+                let event = verify_webhook_signature(&secret, Some(&auth), &body)
+                    .expect("supported timestamp representation");
+                let created_at = match event {
+                    LiveKitWebhookEvent::ParticipantLeft(envelope) => envelope.created_at,
+                    LiveKitWebhookEvent::RoomFinished(envelope) => envelope.created_at,
+                    other => panic!("unexpected event {other:?}"),
+                };
+                assert_eq!(created_at, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_or_overflowed_created_at_in_signed_webhooks() {
+        let secret = fixture_secret();
+        for timestamp in [
+            json!(""),
+            json!("not-a-timestamp"),
+            json!("9223372036854775808"),
+            json!(9223372036854775808_u64),
+            json!(1.5),
+            json!(true),
+            json!([]),
+            json!({}),
+        ] {
+            let body = serde_json::to_vec(&json!({
+                "event": "room_finished",
+                "createdAt": timestamp,
+                "room": { "name": "general@muc.test" },
+            }))
+            .expect("invalid timestamp fixture");
+            let auth = sign_for_body(&secret, &body);
+            let error = verify_webhook_signature(&secret, Some(&auth), &body)
+                .expect_err("malformed timestamp must not erase ordering evidence");
+            assert!(matches!(error, WebhookVerifyError::BodyJson(_)));
+        }
     }
 
     #[test]
