@@ -12,6 +12,7 @@ use waddle_xmpp_core::pubsub::build_pubsub_delete_event;
 use xmpp_parsers::message::Id;
 
 use super::{transport_xml::stanza_to_xml, WebSocketState};
+use crate::account_coordinator::AccountCoordinatorConfig;
 use crate::permissions::host_grant::{
     GrantOperationId, GrantSubject, HostGrantError, HostGrantGate, HostGrantStore, ScopeKey,
     SpaceDeletionAttempt, SpaceDeletionAttemptOutcome, SpaceDeletionBinding,
@@ -72,8 +73,9 @@ pub(crate) async fn deliver(
             return Ok(());
         }
     }
+    let max_resource_bindings = AccountCoordinatorConfig::default().max_resources.get();
     let bindings = store
-        .claim_local_space_deletion_bindings(attempt, 32)
+        .claim_local_space_deletion_bindings(attempt, max_resource_bindings)
         .await?;
     stream::iter(bindings)
         .for_each_concurrent(8, |binding| async move {

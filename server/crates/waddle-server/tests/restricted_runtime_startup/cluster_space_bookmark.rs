@@ -474,6 +474,27 @@ async fn exercise(exercise: Exercise) {
         })
         .await
         .expect("socket receipt settles the exact deletion job");
+        let binding_states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT resource_jid, state FROM host_grant_space_deletion_bindings
+              WHERE lifecycle_id = $1 AND subject_jid = 'alice@localhost'
+              ORDER BY resource_jid",
+        )
+        .bind(lifecycle.to_storage())
+        .fetch_all(&readback)
+        .await
+        .expect("read exact socket custody");
+        let mut expected_bindings = vec![
+            (expected_recipient.clone(), "custody".to_owned()),
+            (
+                second_resource
+                    .full_jid
+                    .clone()
+                    .expect("bound second resource"),
+                "custody".to_owned(),
+            ),
+        ];
+        expected_bindings.sort_unstable();
+        assert_eq!(binding_states, expected_bindings);
         readback.close().await;
         assert!(
             negative_resource
