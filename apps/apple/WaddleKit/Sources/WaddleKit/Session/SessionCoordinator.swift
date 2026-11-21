@@ -538,7 +538,7 @@ public final class SessionCoordinator {
 
     /// The ready pipeline: presence, directory, joins, read state, queue.
     private func sessionReady() async {
-        await sendOwnPresence()
+        await refreshOwnPresence()
         guard !Task.isCancelled else { return }
         await syncPresenceModeOnConnect()
         guard !Task.isCancelled else { return }
@@ -738,7 +738,7 @@ public final class SessionCoordinator {
 public struct SessionStatus: Equatable, Sendable {
     public var connection: ConnectionStatus = .signedOut
     /// How the account's presence is decided; the same on every device.
-    public var mode: PresenceMode = .automatic
+    public var presenceMode: PresenceMode = .automatic
     /// What this device shows: the picked status, or what its idle time
     /// says while the mode is automatic.
     public var availability: Availability = .available

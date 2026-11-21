@@ -43,7 +43,7 @@ public enum XmppEvent: Sendable {
     /// nil when the avatar was disabled.
     case avatarChanged(jid: BareJID, id: String?)
     /// Another device of this account picked a status or reset to
-    /// automatic (ADR-010).
+    /// automatic (ADR-010). The server does not send a device its own pick.
     case presenceModeChanged(PresenceMode)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)

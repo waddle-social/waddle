@@ -37,12 +37,12 @@ struct ProfileStatusSection: View {
     /// The dot on Automatic: what this device's idle time says, which is
     /// what is shown only while the mode is automatic.
     private var automaticShows: Availability {
-        session.status.mode == .automatic ? session.status.availability : .available
+        session.status.presenceMode == .automatic ? session.status.availability : .available
     }
 
     private var choiceBinding: Binding<ProfileStatusChoice> {
         Binding(
-            get: { ProfileStatusChoice(session.status.mode) },
+            get: { ProfileStatusChoice(session.status.presenceMode) },
             set: { choice in
                 Task { await session.setPresenceMode(choice.mode) }
             }

@@ -32,7 +32,7 @@ final class ProfileStatusSnapshotTests: XCTestCase {
         testName: String = #function, line: UInt = #line
     ) async throws {
         let sample = SampleSession()
-        sample.coordinator.status.mode = mode
+        sample.coordinator.status.presenceMode = mode
         sample.coordinator.status.availability = shown
         let view = Form { ProfileStatusSection() }
             .formStyle(.grouped)

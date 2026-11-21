@@ -47,7 +47,7 @@ struct PresenceModeTests {
     @Test func aDeviceWithNothingStoredIsAutomaticAndPublishesNothing() async {
         let (coordinator, port, _) = await connected()
 
-        #expect(coordinator.status.mode == .automatic)
+        #expect(coordinator.status.presenceMode == .automatic)
         #expect(port.presenceSends == [sent(.available)])
         #expect(port.publishedPresenceModes.isEmpty)
         await coordinator.stop()
@@ -58,7 +58,7 @@ struct PresenceModeTests {
     @Test func aNewDeviceTakesTheStatusPickedOnAnotherDevice() async {
         let (coordinator, port, _) = await connected(stored: .manual(.doNotDisturb))
 
-        #expect(coordinator.status.mode == .manual(.doNotDisturb))
+        #expect(coordinator.status.presenceMode == .manual(.doNotDisturb))
         #expect(coordinator.status.availability == .doNotDisturb)
         #expect(port.presenceSends.last == sent(.doNotDisturb))
         #expect(port.publishedPresenceModes.isEmpty)
@@ -70,7 +70,7 @@ struct PresenceModeTests {
         port.storedPresenceMode = .failure(.timeout)
         await connect(coordinator, port)
 
-        #expect(coordinator.status.mode == .automatic)
+        #expect(coordinator.status.presenceMode == .automatic)
         #expect(port.presenceSends == [sent(.available)])
         #expect(port.publishedPresenceModes.isEmpty)
         await coordinator.stop()
@@ -83,7 +83,7 @@ struct PresenceModeTests {
 
         await coordinator.setPresenceMode(.manual(.away))
 
-        #expect(coordinator.status.mode == .manual(.away))
+        #expect(coordinator.status.presenceMode == .manual(.away))
         #expect(coordinator.status.availability == .away)
         #expect(port.presenceSends.last == sent(.away))
         #expect(port.publishedPresenceModes == [.manual(.away)])
@@ -122,7 +122,7 @@ struct PresenceModeTests {
         #expect(port.publishedPresenceModes.isEmpty)
         await connect(coordinator, port)
 
-        #expect(coordinator.status.mode == .manual(.doNotDisturb))
+        #expect(coordinator.status.presenceMode == .manual(.doNotDisturb))
         #expect(port.publishedPresenceModes == [.manual(.doNotDisturb)])
         #expect(port.presenceSends.last == sent(.doNotDisturb))
         await coordinator.stop()
@@ -132,14 +132,14 @@ struct PresenceModeTests {
         let (coordinator, port, _) = await connected()
         port.presenceModePublishResult = .failure(.timeout)
         await coordinator.setPresenceMode(.manual(.away))
-        #expect(coordinator.status.mode == .manual(.away))
+        #expect(coordinator.status.presenceMode == .manual(.away))
 
         port.presenceModePublishResult = .success(())
         port.emit(.disconnected)
         await eventually { !coordinator.isSendReady }
         await connect(coordinator, port, again: true)
 
-        #expect(coordinator.status.mode == .manual(.away))
+        #expect(coordinator.status.presenceMode == .manual(.away))
         #expect(port.publishedPresenceModes == [.manual(.away), .manual(.away)])
         await coordinator.stop()
     }
@@ -158,7 +158,7 @@ struct PresenceModeTests {
         await first
 
         #expect(port.publishedPresenceModes == [.manual(.away), .manual(.doNotDisturb)])
-        #expect(coordinator.status.mode == .manual(.doNotDisturb))
+        #expect(coordinator.status.presenceMode == .manual(.doNotDisturb))
         await coordinator.stop()
     }
 
@@ -170,14 +170,13 @@ struct PresenceModeTests {
         port.emit(.presenceModeChanged(.manual(.doNotDisturb)))
         await eventually { port.presenceSends.last == sent(.doNotDisturb) }
 
-        #expect(coordinator.status.mode == .manual(.doNotDisturb))
+        #expect(coordinator.status.presenceMode == .manual(.doNotDisturb))
         #expect(port.presenceSends.last == sent(.doNotDisturb))
         #expect(port.publishedPresenceModes.isEmpty)
         await coordinator.stop()
     }
 
-    /// The server tells the picking device of its own pick too.
-    @Test func hearingItsOwnPickBackChangesNothing() async {
+    @Test func hearingOfTheStatusAlreadyHeldChangesNothing() async {
         let (coordinator, port, _) = await connected()
         await coordinator.setPresenceMode(.manual(.away))
         let sends = port.presenceSends.count
@@ -190,23 +189,44 @@ struct PresenceModeTests {
         await coordinator.stop()
     }
 
-    /// Heard back while a second pick waits its turn, the first must not
-    /// replace the second.
-    @Test func hearingAPickBackWhileItIsBeingStoredDoesNotDropTheNextPick() async {
+    /// The server hears the other device first and this one after, so
+    /// this device's pick is the one the account ends up with.
+    @Test func aPickFromAnotherDeviceHeardWhileStoringOursLosesToOurs() async {
         let (coordinator, port, _) = await connected()
         port.holdsPresenceModePublishes = true
 
-        async let first: Void = coordinator.setPresenceMode(.manual(.away))
+        async let ours: Void = coordinator.setPresenceMode(.manual(.away))
         await eventually { port.heldPresenceModePublishes == 1 }
-        await coordinator.setPresenceMode(.manual(.doNotDisturb))
-        coordinator.handle(.presenceModeChanged(.manual(.away)))
+        coordinator.handle(.presenceModeChanged(.manual(.doNotDisturb)))
         port.holdsPresenceModePublishes = false
         port.releasePresenceModePublishes()
-        await first
+        await ours
 
-        #expect(coordinator.status.mode == .manual(.doNotDisturb))
-        #expect(port.publishedPresenceModes == [.manual(.away), .manual(.doNotDisturb)])
+        #expect(coordinator.status.presenceMode == .manual(.away))
+        #expect(port.presenceSends.last == sent(.away))
+        // Held by the server already: asking for it again stores nothing.
+        await coordinator.setPresenceMode(.manual(.away))
+        #expect(port.publishedPresenceModes == [.manual(.away)])
+        await coordinator.stop()
+    }
+
+    /// The server did not take this device's pick, so the account holds
+    /// what the other device picked.
+    @Test func aPickFromAnotherDeviceStandsWhenOursIsNotTaken() async {
+        let (coordinator, port, _) = await connected()
+        port.holdsPresenceModePublishes = true
+        port.presenceModePublishResult = .failure(.rejected)
+
+        async let ours: Void = coordinator.setPresenceMode(.manual(.away))
+        await eventually { port.heldPresenceModePublishes == 1 }
+        coordinator.handle(.presenceModeChanged(.manual(.doNotDisturb)))
+        port.holdsPresenceModePublishes = false
+        port.releasePresenceModePublishes()
+        await ours
+
+        #expect(coordinator.status.presenceMode == .manual(.doNotDisturb))
         #expect(port.presenceSends.last == sent(.doNotDisturb))
+        #expect(port.publishedPresenceModes == [.manual(.away)])
         await coordinator.stop()
     }
 
@@ -216,7 +236,7 @@ struct PresenceModeTests {
 
         coordinator.handle(.presenceModeChanged(.manual(.doNotDisturb)))
 
-        #expect(coordinator.status.mode == .automatic)
+        #expect(coordinator.status.presenceMode == .automatic)
         #expect(port.publishedPresenceModes.isEmpty)
     }
 
@@ -278,6 +298,34 @@ struct PresenceModeTests {
         clock.advance(minutes: 12)
 
         await coordinator.send(Draft(text: "still here"), in: bobConversation)
+        await coordinator.refreshOwnPresence()
+
+        #expect(port.presenceSends == [sent(.available)])
+        await coordinator.stop()
+    }
+
+    /// What a Mac says of its last input wobbles by a hair from one
+    /// reading to the next.
+    @Test func aLastInputReportedAHairLaterIsTheSameInput() async {
+        let (coordinator, port, clock) = await connected()
+        let lastInput = clock.now
+        clock.advance(minutes: 12)
+        await coordinator.refreshOwnPresence()
+
+        coordinator.noteActivity(at: lastInput.addingTimeInterval(0.004))
+        await coordinator.refreshOwnPresence()
+        coordinator.noteActivity(at: lastInput.addingTimeInterval(0.9))
+        await coordinator.refreshOwnPresence()
+
+        #expect(port.presenceSends == [sent(.available), sent(.away, idleSince: lastInput)])
+        await coordinator.stop()
+    }
+
+    @Test func typingCountsAsInput() async {
+        let (coordinator, port, clock) = await connected()
+        clock.advance(minutes: 12)
+
+        coordinator.userTyped(in: bobConversation)
         await coordinator.refreshOwnPresence()
 
         #expect(port.presenceSends == [sent(.available)])

@@ -18,6 +18,8 @@ final class UserInputMonitor {
     private static let interval: TimeInterval = 30
     /// Input in this app prompts a refresh at once, at most this often.
     private static let promptInterval: TimeInterval = 5
+    /// The timer may run this late, to share a wake-up with other timers.
+    private static let tolerance: TimeInterval = 5
 
     /// The user was active at this instant.
     var onInput: ((Date) -> Void)?
@@ -37,7 +39,7 @@ final class UserInputMonitor {
         let timer = Timer(timeInterval: Self.interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
-        timer.tolerance = 5
+        timer.tolerance = Self.tolerance
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         #if os(macOS)

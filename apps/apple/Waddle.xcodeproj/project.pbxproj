@@ -90,6 +90,7 @@
 		25B080C55D7674C89CC0E9B9 /* SignInServerLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96F23CCB3265FE12326F400F /* SignInServerLabel.swift */; };
 		261AD770CFC4AA7ABFFF740E /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47CB426A26582C047EB9477 /* ConversationComposer.swift */; };
 		263401E52D3F6C3199008C13 /* NewChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C3E2364E067CC95BB2F1DA /* NewChannelSheet.swift */; };
+		263FFCEBE003C7E2C4E3844D /* ProfileStatusChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80DAE2D489CD12DD7FE02B23 /* ProfileStatusChoice.swift */; };
 		271EE65F526E62C618FF2ED5 /* WaddleXmppClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */; };
 		28ECAA02B2CC8F749EE5D43B /* ConversationLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B7A4AB14D9CCBB80E6E1D64 /* ConversationLink.swift */; };
 		29D3F70D6FAB491E1365BB1A /* ComposerFormattingBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9767D04DC6F058B0ECC1485 /* ComposerFormattingBar.swift */; };
@@ -250,6 +251,7 @@
 		6677C38210F890FFCD989E0D /* ComposerCommandCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF3F0EF8F7344EF314C694C /* ComposerCommandCenter.swift */; };
 		66E38053AACC4ABA2CC45EB4 /* Fixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F693E2124F7171597B578129 /* Fixtures.swift */; };
 		674E3FE61343AE620C34BA8E /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C0B6BD5F8A7D842A008370 /* RootView.swift */; };
+		675C3CD3358BDA8C6A27331B /* ProfileStatusChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80DAE2D489CD12DD7FE02B23 /* ProfileStatusChoice.swift */; };
 		678350FE32A744881E116A1D /* SignInProviderPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04AD95367192E794D6F0B2C6 /* SignInProviderPanel.swift */; };
 		6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
 		67AB5DB94D297BCE5C8EEC7A /* ComposerTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBE71705540136F76B531A9B /* ComposerTextField.swift */; };
@@ -779,6 +781,7 @@
 		7F8A75B22608D596E64D64C1 /* SpacePickerMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacePickerMenu.swift; sourceTree = "<group>"; };
 		7FDDC6F055B97ED2BE7C8BCE /* EventsAgenda.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsAgenda.swift; sourceTree = "<group>"; };
 		801525ECEF92405EF6A54E00 /* DirectMessagesList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectMessagesList.swift; sourceTree = "<group>"; };
+		80DAE2D489CD12DD7FE02B23 /* ProfileStatusChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStatusChoice.swift; sourceTree = "<group>"; };
 		85176CCA7895C14E3FAF17FE /* ManagementSheetParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagementSheetParts.swift; sourceTree = "<group>"; };
 		86482589F0CF5CF8E3CB9431 /* StickerSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickerSnapshotTests.swift; sourceTree = "<group>"; };
 		864B273BE4F9A184AE17B490 /* NavigationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationModel.swift; sourceTree = "<group>"; };
@@ -1554,6 +1557,7 @@
 				A857EFDE807DD88C1AEA1EF1 /* ProfileMoodCatalog.swift */,
 				A2F0CFB8B8A9EF99839CFEE4 /* ProfileMoodEditor.swift */,
 				C38245774FABA6681771A714 /* ProfileMoodRow.swift */,
+				80DAE2D489CD12DD7FE02B23 /* ProfileStatusChoice.swift */,
 				A699C3988283081BA15B97DD /* ProfileStatusSection.swift */,
 				BA6039ABBCA4C43BE7CFCF32 /* ProfileView.swift */,
 			);
@@ -2212,6 +2216,7 @@
 				CEE7D811A19B454D75C2682F /* ProfileMoodCatalog.swift in Sources */,
 				3DA6E62AAD3B1DB7DAAB6C7C /* ProfileMoodEditor.swift in Sources */,
 				2CD83D8B1FDD716A09CA2DB3 /* ProfileMoodRow.swift in Sources */,
+				675C3CD3358BDA8C6A27331B /* ProfileStatusChoice.swift in Sources */,
 				C01877A2E48B0C4A03892717 /* ProfileStatusSection.swift in Sources */,
 				C130A4F16967752B6E065AE6 /* ProfileView.swift in Sources */,
 				43B2A0D672F1BA1CBE9DEF02 /* PushTokenRegistrar.swift in Sources */,
@@ -2518,6 +2523,7 @@
 				D56262205062FBDB1F827792 /* ProfileMoodCatalog.swift in Sources */,
 				710FDC51F6C376DAFE4EDCB3 /* ProfileMoodEditor.swift in Sources */,
 				2EBC2382FD6373E8E5FE589E /* ProfileMoodRow.swift in Sources */,
+				263FFCEBE003C7E2C4E3844D /* ProfileStatusChoice.swift in Sources */,
 				62E5A7287B1A5271E6643A5A /* ProfileStatusSection.swift in Sources */,
 				ED1E74B2407A48AE9AA1BCC6 /* ProfileView.swift in Sources */,
 				60A4229B240517F8F30E8ED6 /* PushTokenRegistrar.swift in Sources */,

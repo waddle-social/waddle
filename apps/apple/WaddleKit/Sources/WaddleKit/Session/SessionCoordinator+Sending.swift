@@ -436,6 +436,7 @@ extension SessionCoordinator {
     /// Call on every composer edit. Sends `composing` once, then `paused`
     /// after a quiet period.
     public func userTyped(in conversation: ConversationID) {
+        noteActivity()
         guard connection == .online else { return }
         if sentChatStates[conversation] != .composing {
             sentChatStates[conversation] = .composing
