@@ -2,21 +2,6 @@ import Foundation
 import UserNotifications
 import WaddleKit
 
-@MainActor
-protocol MessageNotificationCenter {
-    func addMessage(_ request: UNNotificationRequest)
-    func deliveredRequests() async -> [UNNotificationRequest]
-    func removeDeliveredNotifications(withIdentifiers identifiers: [String])
-}
-
-extension UNUserNotificationCenter: MessageNotificationCenter {
-    func addMessage(_ request: UNNotificationRequest) { add(request) }
-
-    func deliveredRequests() async -> [UNNotificationRequest] {
-        await deliveredNotifications().map(\.request)
-    }
-}
-
 /// Local notifications for incoming messages, with inline reply and
 /// mark-read actions, grouped per conversation; and for a call that rings
 /// while Waddle is not in front, with Accept and Decline.
@@ -40,8 +25,7 @@ final class NotificationController: NSObject {
     var hasLivePushSession: (@MainActor (PushRegistrationStore.Owner) -> Bool)?
     var onPushAction: (@MainActor (PushRegistrationStore.Owner, AppState.NotificationAction) async -> Void)?
 
-    private lazy var center = UNUserNotificationCenter.current()
-    private let messageCenter: any MessageNotificationCenter
+    private let center = UNUserNotificationCenter.current()
     private var hasRequestedAuthorization = false
 
     private enum Identifier {
@@ -59,9 +43,8 @@ final class NotificationController: NSObject {
         static let pushRoutingKey = "waddle"
     }
 
-    override convenience init() {
-        let center = UNUserNotificationCenter.current()
-        self.init(messageCenter: center)
+    override init() {
+        super.init()
         center.delegate = self
         // Foreground: the app must be running with a live session to send;
         // a background wake could be suspended with the reply still queued.
@@ -81,11 +64,6 @@ final class NotificationController: NSObject {
             UNNotificationCategory(identifier: Identifier.category, actions: [reply, markRead], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: Identifier.callCategory, actions: [accept, decline], intentIdentifiers: [], options: []),
         ])
-    }
-
-    init(messageCenter: any MessageNotificationCenter) {
-        self.messageCenter = messageCenter
-        super.init()
     }
 
     /// Posts the ring for a call on a Mac, which plays its own ring. An
@@ -163,18 +141,26 @@ final class NotificationController: NSObject {
         if #available(iOS 15.0, macOS 12.0, *) {
             content.interruptionLevel = alert.mentionsMe ? .timeSensitive : .active
         }
+        // The same identifier as the push for this message, so whichever
+        // arrives second replaces the first instead of adding a banner.
         let request = UNNotificationRequest(identifier: alert.notificationID, content: content, trigger: nil)
-        messageCenter.addMessage(request)
+        center.add(request)
     }
 
     /// Removes delivered notifications for a conversation the user read.
     func clear(_ conversation: ConversationID) {
-        Task {
-            let identifiers = await messageCenter.deliveredRequests()
-                .filter { $0.content.threadIdentifier == conversation.description }
-                .map(\.identifier)
-            messageCenter.removeDeliveredNotifications(withIdentifiers: identifiers)
+        center.getDeliveredNotifications { notifications in
+            let identifiers = notifications
+                .filter { Self.threadIdentifiers(of: conversation).contains($0.request.content.threadIdentifier) }
+                .map(\.request.identifier)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
         }
+    }
+
+    /// The thread identifiers a conversation's notifications carry: a
+    /// local alert's, and the bare JID the server puts on a push.
+    nonisolated static func threadIdentifiers(of conversation: ConversationID) -> Set<String> {
+        [conversation.description, conversation.jid.description]
     }
 
     func clearAll() {

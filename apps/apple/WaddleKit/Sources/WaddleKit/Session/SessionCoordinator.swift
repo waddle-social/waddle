@@ -9,11 +9,10 @@ public struct IncomingAlert: Hashable, Sendable {
     public let body: String
     /// The timeline row id.
     public let messageID: String
-    fileprivate let pushCollapseID: String?
+    /// The notification request's identifier: the id the server's push for
+    /// this message collapses on, so the two replace each other.
+    public let notificationID: String
     public let mentionsMe: Bool
-
-    /// Matches the APNs request for this message when an archive id is present.
-    public var notificationID: String { pushCollapseID ?? "\(conversation)#\(messageID)" }
 }
 
 /// Owns one signed-in session: drives the `XmppPort`, routes its events
@@ -712,7 +711,9 @@ public final class SessionCoordinator {
         case .never: shouldAlert = false
         }
         guard shouldAlert else { return }
-        // Pushes use the room's archive id, or the recipient's for a DM.
+        // A push is named after the id the room's archive gave the message,
+        // or the recipient's own archive for a 1:1 message (never the
+        // server's domain, which `directArchiveAuthorities` also accepts).
         let archive = conversation.isRoom ? conversation.jid : account.jid
         onAlert?(IncomingAlert(
             conversation: conversation,
@@ -720,7 +721,7 @@ public final class SessionCoordinator {
             senderName: item.authorName,
             body: preview(of: item) ?? "",
             messageID: item.id,
-            pushCollapseID: item.identity.stanzaID(assignedBy: archive),
+            notificationID: item.identity.stanzaID(assignedBy: archive) ?? "\(conversation)#\(item.id)",
             mentionsMe: mentionsMe
         ))
     }
