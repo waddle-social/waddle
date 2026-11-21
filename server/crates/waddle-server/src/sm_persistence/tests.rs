@@ -435,9 +435,8 @@ async fn round_trip_unacked_preserves_typed_stanza() {
 
 #[tokio::test]
 async fn protected_space_reply_keeps_its_authority_in_both_storage_readers() {
-    use waddle_xmpp::stream_management::{
-        persistence::SmReplayPayload, ProtectedSpaceReplyDescriptor,
-    };
+    use waddle_xmpp::stream_management::persistence::SmReplayPayload;
+    use waddle_xmpp::stream_management::ProtectedSpaceReplyDescriptor;
 
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     let session = fixture_session("protected-space");

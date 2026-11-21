@@ -1,25 +1,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use tokio_util::sync::CancellationToken;
 use waddle_server::permissions::host_grant::{BindSpace, GrantOperationId, Reconciliation};
 use waddle_server::s2s::route::RouterLimits;
 use waddle_server::test_support::{
     host_spaces_for_remote_principals, spawn_remote_space_deletion_worker,
 };
-use waddle_ws_test_support::{
-    iq::round_trip,
-    stanza::{is_result, pubsub_owner_affiliations, pubsub_subscribe, set},
-};
+use waddle_ws_test_support::iq::round_trip;
+use waddle_ws_test_support::stanza::{is_result, pubsub_owner_affiliations, pubsub_subscribe, set};
 use waddle_xmpp::pubsub::{NodeConfig, NS_PUBSUB, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER};
 use waddle_xmpp_core::pubsub::PubSubNodeType;
 
 use super::{bare, served, subject, Live, PermissionActor, LIVE_SPICEDB, OWNER};
-use crate::{
-    host_grant_revocation_support::Replica,
-    s2s_inbound_muc_support::{error_condition, jid, Hosted, Wiring, QUIET},
-};
+use crate::host_grant_revocation_support::Replica;
+use crate::s2s_inbound_muc_support::{error_condition, jid, Hosted, Wiring, QUIET};
 
 const SERVICE: &str = "spaces.example.com";
 const GUEST: &str = "guest@home-b.test";

@@ -8,9 +8,8 @@
 //! obligation settled nothing and left its canonical row non-terminal. One
 //! builder removes the class of defect rather than the instance.
 
-use waddle_xmpp::stream_management::{
-    persistence::SmReplayPayload, stamp_replay_delay, ReplayStanza, StreamManagementState,
-};
+use waddle_xmpp::stream_management::persistence::SmReplayPayload;
+use waddle_xmpp::stream_management::{stamp_replay_delay, ReplayStanza, StreamManagementState};
 
 use super::frame::ResponseFrame;
 use crate::permissions::host_grant::HostGrantGate;

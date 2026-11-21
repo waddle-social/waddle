@@ -39,7 +39,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::Engine;
 use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;

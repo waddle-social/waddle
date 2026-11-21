@@ -1,19 +1,18 @@
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
-use minidom::{rxml::xml_ncname, Element};
-use waddle_ws_test_support::{
-    iq::{receive_iq, round_trip, send_stanza},
-    stanza::{is_error, is_result, pubsub_subscribe, result_payload, set},
-    WsXmppClient,
-};
-use waddle_xmpp::{pubsub::NS_PUBSUB, stream_management::SM_NS};
-use xmpp_parsers::{iq::Iq, stanza_error::DefinedCondition};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
+use waddle_ws_test_support::iq::{receive_iq, round_trip, send_stanza};
+use waddle_ws_test_support::stanza::{is_error, is_result, pubsub_subscribe, result_payload, set};
+use waddle_ws_test_support::WsXmppClient;
+use waddle_xmpp::pubsub::NS_PUBSUB;
+use waddle_xmpp::stream_management::SM_NS;
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
-use super::{
-    host_grant_revocation_support::{authenticate_unbound, Replica},
-    CAROL, OWNER, PEER,
-};
+use super::host_grant_revocation_support::{authenticate_unbound, Replica};
+use super::{CAROL, OWNER, PEER};
 
 const STATE_DETACHED: i64 = 2;
 const NS_PUBSUB_ERRORS: &str = "http://jabber.org/protocol/pubsub#errors";

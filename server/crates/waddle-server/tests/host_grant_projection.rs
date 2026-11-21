@@ -874,13 +874,12 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
     use protected_space_subscriptions::{receive_sm, wait_for_detach};
     use s2s_inbound_muc_support::Wiring;
     use waddle_server::permissions::host_grant::{BindSpace, FenceAcknowledgement, ScopeKey};
-    use waddle_ws_test_support::{
-        iq::{receive_iq, round_trip, send_stanza},
-        stanza::{get, is_error, is_result, set},
-    };
+    use waddle_ws_test_support::iq::{receive_iq, round_trip, send_stanza};
+    use waddle_ws_test_support::stanza::{get, is_error, is_result, set};
     use waddle_xmpp::pubsub::{Affiliation, NodeConfig, NS_PUBSUB_OWNER};
     use waddle_xmpp::stream_management::SM_NS;
-    use xmpp_parsers::{iq::Iq, minidom::Element};
+    use xmpp_parsers::iq::Iq;
+    use xmpp_parsers::minidom::Element;
 
     const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
     let _serial = LIVE_SPICEDB.lock().await;
@@ -1447,7 +1446,9 @@ async fn live_spicedb_graph_only_admin_cannot_moderate_a_managed_room_over_s2s()
         remote_join, remote_set, statuses, Hosted, Wiring, ARRIVES, HOME_B, QUIET,
     };
     use waddle_server::s2s::route::RouterLimits;
-    use waddle_xmpp::{muc::room_actor::GetSnapshot, muc::room_registry_actor::GetRoom, Role};
+    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room_registry_actor::GetRoom;
+    use waddle_xmpp::Role;
 
     const GUEST: &str = "guest@home-b.test";
     const GUEST_PHONE: &str = "guest@home-b.test/phone";

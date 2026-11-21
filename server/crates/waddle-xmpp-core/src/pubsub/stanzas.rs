@@ -35,6 +35,7 @@ pub use implementation::NS_PUBSUB_EVENT;
 pub use implementation::NS_PUBSUB_OWNER;
 
 /// Match a server-generated deletion notice before handing protected bytes to a transport.
+#[must_use]
 pub fn matches_pubsub_delete_event(
     element: &minidom::Element,
     from: &str,

@@ -11,7 +11,8 @@ use waddle_xmpp::Stanza;
 use waddle_xmpp_core::pubsub::build_pubsub_delete_event;
 use xmpp_parsers::message::Id;
 
-use super::{transport_xml::stanza_to_xml, WebSocketState};
+use super::transport_xml::stanza_to_xml;
+use super::WebSocketState;
 use crate::account_coordinator::AccountCoordinatorConfig;
 use crate::permissions::host_grant::{
     GrantOperationId, GrantSubject, HostGrantError, HostGrantGate, HostGrantStore, ScopeKey,

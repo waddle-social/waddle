@@ -1,18 +1,18 @@
 use std::time::Duration;
 
 use jid::BareJid;
-use minidom::{rxml::xml_ncname, Element};
-use waddle_server::{
-    db::Database,
-    permissions::host_grant::{FenceAcknowledgement, HostGrantStore, ScopeLifecycleId},
+use minidom::rxml::xml_ncname;
+use minidom::Element;
+use waddle_server::db::Database;
+use waddle_server::permissions::host_grant::{
+    FenceAcknowledgement, HostGrantStore, ScopeLifecycleId,
 };
-use waddle_ws_test_support::{
-    iq::{receive_iq, round_trip, send_stanza},
-    stanza::{get, is_error, is_result, pubsub_owner_affiliations, set},
-    TestServer, WsXmppClient,
-};
+use waddle_ws_test_support::iq::{receive_iq, round_trip, send_stanza};
+use waddle_ws_test_support::stanza::{get, is_error, is_result, pubsub_owner_affiliations, set};
+use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::stream_management::SM_NS;
-use xmpp_parsers::{ns, stanza_error::DefinedCondition};
+use xmpp_parsers::ns;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 use super::super::{owner_database, DOMAIN};
 

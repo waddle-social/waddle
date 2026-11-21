@@ -54,9 +54,9 @@ async fn exercise(exercise: Exercise) {
         EnsureAuthzCodecIncarnation, EnsureSchema, PermissionActor, RecordAuthzSchemaVersion,
     };
     use waddle_server::pubsub::DatabasePubSubStorage;
-    use waddle_ws_test_support::{
-        iq::round_trip,
-        stanza::{is_result, pubsub_publish, pubsub_subscribe, result_payload, set},
+    use waddle_ws_test_support::iq::round_trip;
+    use waddle_ws_test_support::stanza::{
+        is_result, pubsub_publish, pubsub_subscribe, result_payload, set,
     };
     use waddle_xmpp::identity::CanonicalDomain;
     use waddle_xmpp::pubsub::{NodeConfig, PubSubStorage, NS_PUBSUB, NS_PUBSUB_EVENT};

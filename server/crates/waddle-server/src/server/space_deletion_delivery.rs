@@ -7,7 +7,8 @@ use futures::{stream, StreamExt};
 use jid::Jid;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use waddle_xmpp::{stream_management::space_deletion_notice_id, Stanza};
+use waddle_xmpp::stream_management::space_deletion_notice_id;
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::pubsub::build_pubsub_delete_event;
 use xmpp_parsers::message::Id;
 

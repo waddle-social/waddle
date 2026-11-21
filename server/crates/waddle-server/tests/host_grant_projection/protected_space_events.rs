@@ -1,17 +1,19 @@
 use std::time::Duration;
 
 use jid::BareJid;
-use minidom::{rxml::xml_ncname, Element};
-use waddle_ws_test_support::{
-    iq::{round_trip, send_iq},
-    stanza::{is_result, pubsub_publish, pubsub_retract, pubsub_subscribe, result_payload, set},
-    WsXmppClient,
+use minidom::rxml::xml_ncname;
+use minidom::Element;
+use waddle_ws_test_support::iq::{round_trip, send_iq};
+use waddle_ws_test_support::stanza::{
+    is_result, pubsub_publish, pubsub_retract, pubsub_subscribe, result_payload, set,
 };
+use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::pubsub::{NS_PUBSUB, NS_PUBSUB_EVENT};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
 use xmpp_parsers::iq::Iq;
 
-use super::{host_grant_revocation_support::Replica, PEER};
+use super::host_grant_revocation_support::Replica;
+use super::PEER;
 
 const ARRIVES: Duration = Duration::from_secs(5);
 const QUIET: Duration = Duration::from_millis(600);

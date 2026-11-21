@@ -141,7 +141,7 @@ pub(crate) struct LocalSpaceReplyGrant {
 #[derive(Debug)]
 enum LocalSpaceReplyAuthority {
     Active(ManagedSpaceGrant),
-    Deleted(LocalDeletionDelivery),
+    Deleted(Box<LocalDeletionDelivery>),
 }
 
 struct LocalDeletionDelivery {
@@ -1446,11 +1446,11 @@ impl HostGrantGate {
         }
         let ticket = fence.ticket(registration, record.lifecycle, saved.current_generation);
         ticket.is_current().then(|| LocalSpaceReplyGrant {
-            authority: LocalSpaceReplyAuthority::Deleted(LocalDeletionDelivery {
+            authority: LocalSpaceReplyAuthority::Deleted(Box::new(LocalDeletionDelivery {
                 fence: ticket,
                 store: store.clone(),
                 attempt: None,
-            }),
+            })),
             replay: replay.clone(),
             preference: None,
         })

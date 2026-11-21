@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use jid::{BareJid, Jid};
-use tokio::sync::{mpsc::OwnedPermit, oneshot};
+use tokio::sync::mpsc::OwnedPermit;
+use tokio::sync::oneshot;
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};

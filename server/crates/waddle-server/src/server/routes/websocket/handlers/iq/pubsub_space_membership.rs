@@ -123,16 +123,17 @@ async fn enrolled_space_owner(
     requester: Option<&FullJid>,
     session: Option<&Session>,
     node: &str,
-) -> Result<Option<EnrolledSpaceOwner>, Iq> {
+) -> Result<Option<EnrolledSpaceOwner>, Box<Iq>> {
+    let failure = |condition| Box::new(build_pubsub_error(iq, condition));
     let service = state.deps.service_domains.spaces.as_str();
     let gate = &state.deps.app_state.host_grants;
     match gate.space_enrolled(node).await {
         Ok(false) => return Ok(None),
         Ok(true) => {}
-        Err(_) => return Err(build_pubsub_error(iq, PubSubError::InternalServerError)),
+        Err(_) => return Err(failure(PubSubError::InternalServerError)),
     }
     let Some(requester) = requester else {
-        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+        return Err(failure(PubSubError::Forbidden));
     };
     let bare = requester.to_bare();
     if session.is_none_or(|session| session.user_jid != bare.as_str())
@@ -140,35 +141,35 @@ async fn enrolled_space_owner(
             .from()
             .is_some_and(|from| from.as_str() != requester.as_str())
     {
-        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+        return Err(failure(PubSubError::Forbidden));
     }
     let (Ok(service), Ok(initiator)) = (service.parse(), GrantSubject::new(bare)) else {
-        return Err(build_pubsub_error(iq, PubSubError::BadRequest));
+        return Err(failure(PubSubError::BadRequest));
     };
     let Ok(key) = ScopeKey::new(service, node) else {
-        return Err(build_pubsub_error(iq, PubSubError::BadRequest));
+        return Err(failure(PubSubError::BadRequest));
     };
     let Some(decision) = gate.space_read_local(&key, &initiator).await else {
-        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+        return Err(failure(PubSubError::Forbidden));
     };
     if decision.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true) {
-        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+        return Err(failure(PubSubError::Forbidden));
     }
     let (Some(store), Some(attachment)) = (gate.store(), gate.attachment()) else {
-        return Err(build_pubsub_error(iq, PubSubError::InternalServerError));
+        return Err(failure(PubSubError::InternalServerError));
     };
     let Some(policy) = state
         .deps
         .service_domains
         .host_grant_issuance_policy(attachment.principals())
     else {
-        return Err(build_pubsub_error(iq, PubSubError::InternalServerError));
+        return Err(failure(PubSubError::InternalServerError));
     };
     let binding = decision.subscription_grant();
     let scope = match store.scope(binding.lifecycle).await {
         Ok(Some(scope)) if scope.authority_incarnation == binding.incarnation => scope,
-        Ok(_) => return Err(build_pubsub_error(iq, PubSubError::NodeNotFound)),
-        Err(error) => return Err(membership_mutation_error(iq, error)),
+        Ok(_) => return Err(failure(PubSubError::NodeNotFound)),
+        Err(error) => return Err(Box::new(membership_mutation_error(iq, error))),
     };
     Ok(Some(EnrolledSpaceOwner {
         key,
@@ -204,7 +205,7 @@ pub(super) async fn configure_enrolled_space(
     let owner = match enrolled_space_owner(iq, state, requester, session, node).await {
         Ok(Some(owner)) => owner,
         Ok(None) => return None,
-        Err(error) => return ordinary(error),
+        Err(error) => return ordinary(*error),
     };
     let current = match state
         .deps
@@ -288,7 +289,7 @@ pub(super) async fn delete_enrolled_space(
     let owner = match enrolled_space_owner(iq, state, requester, session, node).await {
         Ok(Some(owner)) => owner,
         Ok(None) => return None,
-        Err(error) => return ordinary(error),
+        Err(error) => return ordinary(*error),
     };
     if !payload.attrs().is_empty()
         || payload.children().count() != 1

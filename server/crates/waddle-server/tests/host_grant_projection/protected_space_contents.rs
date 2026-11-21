@@ -1,24 +1,25 @@
 use std::time::Duration;
 
 use jid::BareJid;
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use waddle_server::permissions::host_grant::{
     FenceAcknowledgement, GrantOperationId, HostGrantAuthority, Reconciliation, RoomAffiliation,
     SetAffiliation,
 };
-use waddle_ws_test_support::{
-    iq::round_trip,
-    stanza::{
-        get, is_error, is_result, pubsub_items, pubsub_publish, pubsub_retract, result_payload, set,
-    },
-    WsXmppClient,
+use waddle_ws_test_support::iq::round_trip;
+use waddle_ws_test_support::stanza::{
+    get, is_error, is_result, pubsub_items, pubsub_publish, pubsub_retract, result_payload, set,
 };
+use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::pubsub::{PubSubItem, NS_PUBSUB};
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, Bookmark};
-use xmpp_parsers::{iq::Iq, stanza_error::DefinedCondition};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
+use super::host_grant_revocation_support::Replica;
 use super::host_grant_support::EnrolledScope;
-use super::{bare, host_grant_revocation_support::Replica, subject, Live, OWNER, PEER};
+use super::{bare, subject, Live, OWNER, PEER};
 
 const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
