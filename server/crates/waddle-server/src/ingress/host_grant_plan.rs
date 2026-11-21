@@ -592,6 +592,7 @@ fn reduce_delivery(
         ExternalDeliveryEffect::SfuRevokeToken { .. }
         | ExternalDeliveryEffect::RelayCarbons { .. }
         | ExternalDeliveryEffect::Carbons { .. }
+        | ExternalDeliveryEffect::NotificationCandidate { .. }
         | ExternalDeliveryEffect::QueueOfflineDelivery { .. } => Err(Unclassified),
     }
 }

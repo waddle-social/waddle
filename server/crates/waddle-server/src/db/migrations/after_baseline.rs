@@ -512,19 +512,6 @@ CREATE UNIQUE INDEX idx_notification_candidates_missed_call
 #[cfg(test)]
 mod tests {
     use super::super::BASELINE_VERSION;
-    use super::all;
-
-    #[test]
-    fn later_migrations_follow_the_baseline_in_order() {
-        let versions: Vec<i64> = all().iter().map(|migration| migration.version).collect();
-        assert!(versions.iter().all(|version| *version > BASELINE_VERSION));
-        assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::BASELINE_VERSION;
     use super::{
         all, ACCOUNT_SESSION_ENDINGS_VERSION, CHANNEL_FEDERATED_VERSION,
         HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,

@@ -273,6 +273,9 @@ fn recipient_effect(effect: &Effect, recipient: &BareJid, sender: &BareJid) -> b
                 ..
             } => owner == recipient && resource.to_bare() == *recipient,
             ExternalDeliveryEffect::QueueOfflineDelivery { row, .. } => row.recipient == *recipient,
+            ExternalDeliveryEffect::NotificationCandidate { candidate } => {
+                candidate.recipient_bare_jid() == recipient
+            }
             ExternalDeliveryEffect::HostOwnedCopy { .. }
             | ExternalDeliveryEffect::UndeliverableBounce { .. }
             | ExternalDeliveryEffect::SfuRevokeToken { .. } => false,
