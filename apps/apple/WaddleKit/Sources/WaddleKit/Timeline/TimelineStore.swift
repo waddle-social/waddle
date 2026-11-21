@@ -183,7 +183,7 @@ public final class TimelineStore {
             let existing = list[index]
             recordWireDate(item.timestamp, in: conversation)
             var updated = superseding(existing, with: item, isLocalEcho: isLocalEcho)
-            if existing.roomArchiveUID == nil, let uid = roomArchiveUID(of: item) {
+            if existing.roomArchiveUID == nil, let uid = item.roomArchiveUID {
                 // Keep the first UID even when this copy changes no rendered
                 // fields, or a later live payload replaces its archive source.
                 var learned = updated ?? existing
@@ -213,7 +213,7 @@ public final class TimelineStore {
             mutations: MutationState(tombstone: tombstone),
             isLocalEcho: isLocalEcho,
             isArchived: item.message.source != .live,
-            roomArchiveUID: roomArchiveUID(of: item)
+            roomArchiveUID: item.roomArchiveUID
         )
         entry = drainParked(into: entry, conversation: conversation)
         list.append(entry)
@@ -404,11 +404,11 @@ public final class TimelineStore {
         }
         // The room assigns this identity independently of occupant nick or
         // sender-chosen aliases. Resolve it before considering those aliases.
-        if let roomID = incoming.roomStanzaID,
-           let index = list.firstIndex(where: { $0.item.roomStanzaID == roomID }) {
+        let items = list.lazy.map(\.item)
+        if let index = incoming.roomStanzaMatch(in: items) {
             return index
         }
-        if let uid = roomArchiveUID(of: incoming) {
+        if let uid = incoming.roomArchiveUID {
             let matches = list.indices.filter { list[$0].roomArchiveUID == uid }
             if !matches.isEmpty {
                 guard matches.count == 1 else { return nil }
@@ -419,27 +419,7 @@ public final class TimelineStore {
                 return index
             }
         }
-        guard let author = incoming.message.authorRealJID else { return nil }
-        let authoredIDs = Set([incoming.identity.originID, incoming.identity.messageID].compactMap { $0 })
-        let matches = list.indices.filter { index in
-            let existing = list[index].item
-            // Distinct authoritative ids always identify distinct messages.
-            if incoming.roomStanzaID != nil, existing.roomStanzaID != nil { return false }
-            guard existing.message.authorRealJID == author else { return false }
-            let existingIDs = Set([existing.identity.originID, existing.identity.messageID].compactMap { $0 })
-            return !existingIDs.isDisjoint(with: authoredIDs)
-        }
-        // Reused aliases can claim several rows even for a verified author.
-        return matches.count == 1 ? matches[0] : nil
-    }
-
-    /// MAM UIDs belong to this room archive, never to sender-chosen wire
-    /// aliases. `Entry.archiveID` separately follows the paging payload.
-    private func roomArchiveUID(of item: TimelineItem) -> String? {
-        guard item.conversation.isRoom,
-              case let .archive(uid) = item.message.source,
-              !uid.isEmpty else { return nil }
-        return uid
+        return incoming.roomAuthoredMatch(in: items)
     }
 
     private func drainParked(into entry: Entry, conversation: ConversationID) -> Entry {

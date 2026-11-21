@@ -131,6 +131,50 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         conversation.isRoom ? identity.stanzaID(assignedBy: conversation.jid) : nil
     }
 
+    /// The id the room's archive gave this row (XEP-0313), when the row
+    /// came from that archive. Room-assigned, never a sender-chosen alias.
+    var roomArchiveUID: String? {
+        guard conversation.isRoom, case let .archive(uid) = message.source, !uid.isEmpty else { return nil }
+        return uid
+    }
+
+    /// The row in `items` with the same room-assigned stanza id.
+    func roomStanzaMatch<Items: Collection>(in items: Items) -> Items.Index? where Items.Element == TimelineItem {
+        guard let roomID = roomStanzaID else { return nil }
+        return items.firstIndex { $0.conversation == conversation && $0.roomStanzaID == roomID }
+    }
+
+    /// The single row in `items` from the same room archive entry, unless
+    /// the two carry different room-assigned stanza ids.
+    func roomArchiveMatch(in items: [TimelineItem]) -> Int? {
+        guard let uid = roomArchiveUID else { return nil }
+        let matches = items.indices.filter {
+            items[$0].conversation == conversation && items[$0].roomArchiveUID == uid
+        }
+        guard matches.count == 1 else { return nil }
+        if let roomID = roomStanzaID, let other = items[matches[0]].roomStanzaID, roomID != other { return nil }
+        return matches[0]
+    }
+
+    /// An authored alias can identify a reply only for a verified author
+    /// and only when it selects exactly one candidate.
+    func roomAuthoredMatch<Items: Collection>(in items: Items) -> Items.Index? where Items.Element == TimelineItem {
+        guard conversation.isRoom, let author = authorJID else { return nil }
+        let roomID = roomStanzaID
+        let authoredIDs = Set([identity.originID, identity.messageID].compactMap { $0 })
+        guard !authoredIDs.isEmpty else { return nil }
+
+        let matches = items.indices.filter { index in
+            let existing = items[index]
+            guard existing.conversation == conversation, existing.authorJID == author else { return false }
+            // Authoritative room IDs take precedence over sender aliases.
+            if roomID != nil, existing.roomStanzaID != nil { return false }
+            let existingIDs = [existing.identity.originID, existing.identity.messageID].compactMap { $0 }
+            return !authoredIDs.isDisjoint(with: existingIDs)
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     /// Ids another entity may use to point at this row. In a room only the
     /// room-assigned stanza id: every other id is sender-controlled and
     /// could collide with, and so hijack or block, another occupant's row.
