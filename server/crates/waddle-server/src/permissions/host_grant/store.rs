@@ -1006,7 +1006,7 @@ impl HostGrantStore {
                 }
                 Some(wire)
             }
-            super::SpaceBookmarkAction::Retract => None,
+            super::SpaceBookmarkAction::Retract { .. } => None,
         };
         let store = self.clone();
         let change = change.clone();
@@ -1060,7 +1060,7 @@ impl HostGrantStore {
         let node = change.key.node();
         let mut rows = tx
             .query(
-                "SELECT p.max_items, p.persist_items
+                "SELECT p.max_items, p.persist_items, p.deliver_payloads, p.notify_retract
              FROM host_grant_space_bindings b
              JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id
              JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
@@ -1093,6 +1093,12 @@ impl HostGrantStore {
             .ok_or(HostGrantError::InitiatorNotAuthorized)?;
         let max_items = u32::try_from(row.get::<i64>(0)?).map_err(|_| corrupt("Space item cap"))?;
         let persist_items: i32 = row.get(1)?;
+        let deliver_payloads = row.get::<i32>(2)? == 1;
+        let notify_retract = row.get::<i32>(3)? == 1
+            || matches!(
+                change.action,
+                super::SpaceBookmarkAction::Retract { notify: true }
+            );
         drop(rows);
         if persist_items != 1 {
             return Err(HostGrantError::SpaceNotBindable);
@@ -1157,47 +1163,148 @@ impl HostGrantStore {
             }
             SpaceBookmarkOutcome::Retracted { removed: false } => Vec::new(),
         };
+        let publication_order = if versions.is_empty() {
+            None
+        } else {
+            let mut rows = tx
+                .query(
+                    "SELECT pg_catalog.nextval('local_space_notification_order')",
+                    (),
+                )
+                .await?;
+            Some(
+                rows.next()
+                    .await?
+                    .ok_or(corrupt("local Space notification order"))?
+                    .get::<i64>(0)?,
+            )
+        };
         for version in &versions {
             tx.execute(
                 "INSERT INTO host_grant_space_bookmark_versions
-                 (lifecycle_id, room_jid, authority_incarnation, operation_token, present)
-                 VALUES (?, ?, ?, ?, (?::bigint <> 0))
+                 (lifecycle_id, room_jid, authority_incarnation, operation_token, present,
+                  publication_order, published_at, deliver_payloads, notify_retract)
+                 VALUES (?, ?, ?, ?, (?::bigint <> 0), ?, pg_catalog.statement_timestamp(), (?::bigint <> 0), (?::bigint <> 0))
                  ON CONFLICT (lifecycle_id, room_jid) DO UPDATE SET
                  authority_incarnation = EXCLUDED.authority_incarnation,
-                 operation_token = EXCLUDED.operation_token, present = EXCLUDED.present",
+                 operation_token = EXCLUDED.operation_token, present = EXCLUDED.present,
+                 publication_order = EXCLUDED.publication_order,
+                 published_at = EXCLUDED.published_at,
+                 deliver_payloads = EXCLUDED.deliver_payloads,
+                 notify_retract = EXCLUDED.notify_retract",
                 crate::db_params![
                     lifecycle.as_str(),
                     version.room.as_str(),
                     incarnation.to_storage(),
                     operation.to_storage(),
                     version.present,
+                    publication_order,
+                    deliver_payloads,
+                    notify_retract,
                 ],
             )
             .await
             .map_err(HostGrantError::from_database)?;
         }
-        let local_audience = if versions.is_empty() {
-            Vec::new()
-        } else {
-            use crate::db::local_space_subscriptions::{
-                read_local_space_audience, LocalSpaceSubscriptionError,
-            };
-            read_local_space_audience(&mut tx, &change.key, change.lifecycle)
-                .await
-                .map_err(|error| match error {
-                    LocalSpaceSubscriptionError::Database(error) => {
-                        HostGrantError::from_database(error)
-                    }
-                    LocalSpaceSubscriptionError::BoundsUnproven => HostGrantError::BoundsUnproven,
-                    LocalSpaceSubscriptionError::InvalidRow => corrupt("local Space preference"),
-                })?
+        let local_audience = match publication_order {
+            Some(order) => {
+                notification_audience(&mut tx, &change.key, change.lifecycle, order).await?
+            }
+            None => Vec::new(),
         };
         commit(tx, mode).await?;
         Ok(SpaceBookmarkWrite {
             outcome,
             versions,
             local_audience,
+            deliver_payloads,
+            notify_retract,
         })
+    }
+
+    /// Rebuild the notification for an exact current bookmark version
+    /// from PostgreSQL. The relay supplies only its qualified address and
+    /// operation token, without content or recipient authority.
+    pub async fn load_space_bookmark_notification(
+        &self,
+        service: &BareJid,
+        node: &str,
+        room: &BareJid,
+        operation: GrantOperationId,
+    ) -> Result<Option<super::SpaceBookmarkNotification>, HostGrantError> {
+        let key = super::ScopeKey::new(service.clone(), node)?;
+        ManagedRoom::new(room.clone())?;
+        let mut tx = self.begin_interactive_read().await?;
+        let mut rows = tx
+            .query(
+                "SELECT v.lifecycle_id, v.authority_incarnation, v.present, v.publication_order,
+                        (v.deliver_payloads AND p.deliver_payloads = 1), v.notify_retract, i.payload_xml
+                   FROM host_grant_space_bookmark_versions v
+                   JOIN host_grant_space_bindings b ON b.lifecycle_id = v.lifecycle_id
+                   JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id
+                   JOIN host_grant_scopes s ON s.lifecycle_id = b.lifecycle_id
+                   JOIN host_grant_authority a ON a.singleton AND a.incarnation = s.authority_incarnation
+                   JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
+                   LEFT JOIN pubsub_items i ON i.owner_jid = b.service_jid AND i.node_name = b.space_node
+                       AND i.item_id = v.room_jid
+                  WHERE b.service_jid = ? AND b.space_node = ? AND v.room_jid = ? AND v.operation_token = ?
+                    AND l.retired_at_ms IS NULL AND b.authority_incarnation = a.incarnation
+                    AND v.authority_incarnation = a.incarnation AND s.admission_state = 'active'
+                    AND s.policy_version = ? AND p.access_model = b.access_model
+                    AND (p.node_type IS NULL OR p.node_type = ?) AND v.publication_order IS NOT NULL
+                    AND v.published_at BETWEEN pg_catalog.statement_timestamp() - INTERVAL '30 seconds'
+                                           AND pg_catalog.statement_timestamp()
+                    AND (v.present = (i.item_id IS NOT NULL))",
+                crate::db_params![
+                    service.as_str(), node, room.as_str(), operation.to_storage(),
+                    HOST_GRANT_POLICY_VERSION, waddle_xmpp::xep::xep0503::NS_SPACES,
+                ],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            drop(rows);
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
+            .ok_or(corrupt("notification Space lifecycle"))?;
+        let incarnation = AuthorityIncarnation::from_storage(&row.get::<String>(1)?)
+            .ok_or(corrupt("notification Space incarnation"))?;
+        let present: bool = row.get(2)?;
+        let order: i64 = row.get(3)?;
+        let deliver_payloads: bool = row.get(4)?;
+        let notify_retract: bool = row.get(5)?;
+        let item = if present {
+            let payload: minidom::Element = row
+                .get::<Option<String>>(6)?
+                .ok_or(corrupt("notification bookmark payload"))?
+                .parse()
+                .map_err(|_| corrupt("notification bookmark payload"))?;
+            waddle_xmpp::xep::xep0402::parse_bookmark(room.as_str(), &payload)
+                .map_err(|_| corrupt("notification bookmark payload"))?;
+            Some(waddle_xmpp::pubsub::PubSubItem::new(
+                Some(room.to_string()),
+                Some(payload),
+            ))
+        } else {
+            None
+        };
+        drop(rows);
+        let local_audience = notification_audience(&mut tx, &key, lifecycle, order).await?;
+        tx.rollback().await?;
+        Ok(Some(super::SpaceBookmarkNotification {
+            version: super::SpaceBookmarkVersion {
+                lifecycle,
+                incarnation,
+                room: room.clone(),
+                operation,
+                present,
+            },
+            item,
+            deliver_payloads,
+            notify_retract,
+            local_audience,
+        }))
     }
 
     /// Record an atomic membership change from an authenticated served owner.
@@ -3451,6 +3558,24 @@ async fn own<T: Send + 'static>(
     tokio::spawn(work)
         .await
         .map_err(|_| HostGrantError::CommitOutcomeUnknown)?
+}
+
+async fn notification_audience(
+    tx: &mut Transaction<'_>,
+    key: &super::ScopeKey,
+    lifecycle: ScopeLifecycleId,
+    order: i64,
+) -> Result<Vec<super::LocalSpaceSubscription>, HostGrantError> {
+    use crate::db::local_space_subscriptions::{
+        read_local_space_audience, LocalSpaceSubscriptionError,
+    };
+    read_local_space_audience(tx, key, lifecycle, Some(order))
+        .await
+        .map_err(|error| match error {
+            LocalSpaceSubscriptionError::Database(error) => HostGrantError::from_database(error),
+            LocalSpaceSubscriptionError::BoundsUnproven => HostGrantError::BoundsUnproven,
+            LocalSpaceSubscriptionError::InvalidRow => corrupt("local Space preference"),
+        })
 }
 
 /// End a mutation's transaction. A commit that is not acknowledged is

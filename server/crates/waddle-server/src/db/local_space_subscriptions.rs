@@ -125,14 +125,19 @@ impl LocalSpaceSubscriptions {
         let mut saved = tx
             .query(
                 "INSERT INTO local_space_subscriptions
-                   (lifecycle_id, subject_jid, authority_incarnation, grant_generation, subid)
-                 VALUES (?, ?, ?, ?, ?)
+                   (lifecycle_id, subject_jid, authority_incarnation, grant_generation, subid, birth_order)
+                 VALUES (?, ?, ?, ?, ?, pg_catalog.nextval('local_space_notification_order'))
                  ON CONFLICT (lifecycle_id, subject_jid) DO UPDATE SET
                     authority_incarnation = EXCLUDED.authority_incarnation,
                     grant_generation = EXCLUDED.grant_generation,
                     subid = CASE WHEN local_space_subscriptions.authority_incarnation = EXCLUDED.authority_incarnation
                                AND local_space_subscriptions.grant_generation = EXCLUDED.grant_generation
-                            THEN local_space_subscriptions.subid ELSE EXCLUDED.subid END
+                               AND local_space_subscriptions.birth_order IS NOT NULL
+                            THEN local_space_subscriptions.subid ELSE EXCLUDED.subid END,
+                    birth_order = CASE WHEN local_space_subscriptions.authority_incarnation = EXCLUDED.authority_incarnation
+                               AND local_space_subscriptions.grant_generation = EXCLUDED.grant_generation
+                            THEN COALESCE(local_space_subscriptions.birth_order, EXCLUDED.birth_order)
+                            ELSE EXCLUDED.birth_order END
                  RETURNING subid",
                 crate::db_params![
                     lifecycle, account.as_str(), incarnation, grant.generation.value(),
@@ -219,7 +224,7 @@ impl LocalSpaceSubscriptions {
         let Some(mut tx) = self.begin().await? else {
             return Ok(Vec::new());
         };
-        let subscriptions = read_local_space_audience(&mut tx, key, lifecycle).await?;
+        let subscriptions = read_local_space_audience(&mut tx, key, lifecycle, None).await?;
         tx.rollback().await?;
         Ok(subscriptions)
     }
@@ -326,12 +331,14 @@ pub(crate) async fn read_local_space_audience(
     tx: &mut Transaction<'_>,
     key: &ScopeKey,
     lifecycle: ScopeLifecycleId,
+    publication_order: Option<i64>,
 ) -> Result<Vec<LocalSpaceSubscription>, LocalSpaceSubscriptionError> {
     let mut rows = tx
         .query(
             &format!(
                 "SELECT g.subject_jid, b.authority_incarnation, g.changed_generation, sub.subid
                    {CURRENT_GRANT} {LIVE_PREFERENCE} WHERE {ACTIVE_SPACE}
+                 AND (?::bigint IS NULL OR sub.birth_order < ?::bigint)
                  ORDER BY g.subject_jid LIMIT ?"
             ),
             crate::db_params![
@@ -340,6 +347,8 @@ pub(crate) async fn read_local_space_audience(
                 key.node(),
                 HOST_GRANT_POLICY_VERSION,
                 waddle_xmpp::xep::xep0503::NS_SPACES,
+                publication_order,
+                publication_order,
                 i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS).expect("bounded local preferences"),
             ],
         )

@@ -1255,7 +1255,7 @@ async fn a_space_bookmark_write_checks_both_grants_and_commits_item_eviction_ato
     assert_ne!(latest.operation, new.operation);
     assert_eq!(latest.room, new.room);
 
-    change.action = SpaceBookmarkAction::Retract;
+    change.action = SpaceBookmarkAction::Retract { notify: false };
     let retracted = fixture
         .store
         .write_space_bookmark(&change, policy)
@@ -1443,6 +1443,51 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         !original.local_audience.contains(&late),
         "a subscriber cannot join an already committed publication's audience"
     );
+    assert_eq!(
+        subscriptions
+            .record(&key, &subject(PEER), &served(), era)
+            .await
+            .expect("renew the prior subscription after publication"),
+        Some(local.clone()),
+    );
+    let original_hint = &original.versions[0];
+    let loaded = fixture
+        .store
+        .load_space_bookmark_notification(
+            key.service(),
+            key.node(),
+            &publish.room,
+            original_hint.operation,
+        )
+        .await
+        .expect("canonical notification lookup")
+        .expect("current marker");
+    assert_eq!(loaded.version, *original_hint);
+    assert!(loaded.deliver_payloads);
+    assert_eq!(
+        loaded.item.as_ref().and_then(|item| item.id.as_deref()),
+        Some(publish.room.as_str())
+    );
+    assert_eq!(loaded.local_audience, [local.clone()]);
+    sqlx::query(
+        "UPDATE host_grant_space_bookmark_versions SET published_at =
+         pg_catalog.statement_timestamp() - INTERVAL '31 seconds' WHERE operation_token = $1",
+    )
+    .bind(original_hint.operation.to_storage())
+    .execute(&pool)
+    .await
+    .expect("age notification by the database clock");
+    assert!(fixture
+        .store
+        .load_space_bookmark_notification(
+            key.service(),
+            key.node(),
+            &publish.room,
+            original_hint.operation,
+        )
+        .await
+        .expect("expired hint lookup")
+        .is_none());
     let current = subscriptions
         .hold_delivery(&key, &local, &original.versions[0])
         .await
@@ -1455,6 +1500,18 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .await
         .expect("republish");
     assert_eq!(replacement.local_audience, [local.clone(), late.clone()]);
+    let reloaded = fixture
+        .store
+        .load_space_bookmark_notification(
+            key.service(),
+            key.node(),
+            &publish.room,
+            replacement.versions[0].operation,
+        )
+        .await
+        .expect("new version lookup")
+        .expect("latest marker");
+    assert_eq!(reloaded.local_audience, replacement.local_audience);
     assert_eq!(
         subscriptions
             .remove_own(&key, &subject(OWNER), &served(), Some(&late.subid))
@@ -1514,6 +1571,21 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .await
         .expect("fresh preference")
         .expect("regranted member");
+    let post_regrant = fixture
+        .store
+        .load_space_bookmark_notification(
+            key.service(),
+            key.node(),
+            &publish.room,
+            replacement.versions[0].operation,
+        )
+        .await
+        .expect("current notification lookup")
+        .expect("bookmark version remains current");
+    assert!(
+        post_regrant.local_audience.is_empty(),
+        "the new grant era did not see the old publication"
+    );
     assert_ne!(renewed.subid, local.subid);
     assert_eq!(
         subscriptions
@@ -1553,6 +1625,40 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .await
         .expect("not subscribed")
         .is_none());
+    sqlx::query(
+        "UPDATE pubsub_nodes SET notify_retract = 0 WHERE owner_jid = $1 AND node_name = $2",
+    )
+    .bind(service)
+    .bind(node)
+    .execute(&pool)
+    .await
+    .expect("disable automatic retract notifications");
+    let retraction = fixture
+        .store
+        .write_space_bookmark(
+            &SpaceBookmarkChange {
+                expected_generation: fixture.generation().await,
+                action: SpaceBookmarkAction::Retract { notify: true },
+                ..publish
+            },
+            &fixture.policy,
+        )
+        .await
+        .expect("request explicit retraction notification");
+    let loaded_retraction = fixture
+        .store
+        .load_space_bookmark_notification(
+            key.service(),
+            key.node(),
+            &fixture.scope.room,
+            retraction.versions[0].operation,
+        )
+        .await
+        .expect("retraction lookup")
+        .expect("current tombstone");
+    assert!(!loaded_retraction.version.present);
+    assert!(loaded_retraction.item.is_none());
+    assert!(loaded_retraction.notify_retract);
     let remote_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM s2s_space_subscriptions")
         .fetch_one(&pool)
         .await
@@ -2608,6 +2714,7 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_bookmark_versions TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
+        format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
@@ -2883,6 +2990,7 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_bookmark_versions TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
+        format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),

@@ -1416,6 +1416,7 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_affiliations TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_bookmark_versions TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
+        format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
@@ -1618,6 +1619,7 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         // A lease or an acknowledgement of the revocation fence is never
         // deleted either: an expired lease is a row that no longer counts.
         "DELETE FROM host_grant_space_bookmark_versions".to_owned(),
+        "SELECT pg_catalog.setval('local_space_notification_order', 1)".to_owned(),
         "DELETE FROM host_grant_fence_replicas".to_owned(),
         "DELETE FROM host_grant_fence_acks".to_owned(),
         "TRUNCATE host_grant_fence_replicas".to_owned(),
@@ -1628,6 +1630,25 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             "{statement}"
         );
     }
+
+    sqlx::query(&format!(
+        "GRANT UPDATE ON SEQUENCE local_space_notification_order TO {role}"
+    ))
+    .execute(&admin)
+    .await
+    .expect("excess sequence grant");
+    assert!(matches!(
+        runtime.verify_runtime_privileges().await,
+        Err(HostGrantError::UnsafeRuntimePrivileges {
+            component: "local_space_notification_order"
+        })
+    ));
+    sqlx::query(&format!(
+        "REVOKE UPDATE ON SEQUENCE local_space_notification_order FROM {role}"
+    ))
+    .execute(&admin)
+    .await
+    .expect("restore sequence profile");
 
     // A privilege beyond the profile is found, whoever granted it.
     sqlx::query(&format!("GRANT DELETE ON host_grants TO {role}"))

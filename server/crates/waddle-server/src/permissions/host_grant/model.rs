@@ -354,7 +354,7 @@ impl BindSpace {
 #[derive(Clone, Debug)]
 pub enum SpaceBookmarkAction {
     Publish { payload: minidom::Element },
-    Retract,
+    Retract { notify: bool },
 }
 
 /// A local owner changes the bookmark of a room already enrolled under the Space.
@@ -408,6 +408,18 @@ pub struct SpaceBookmarkWrite {
     pub outcome: SpaceBookmarkOutcome,
     pub versions: Vec<SpaceBookmarkVersion>,
     /// Exact live local preferences at the publication transaction's lock.
+    pub local_audience: Vec<LocalSpaceSubscription>,
+    pub deliver_payloads: bool,
+    pub notify_retract: bool,
+}
+
+/// Canonical content and eligible local preferences for one event hint.
+#[derive(Clone, Debug)]
+pub struct SpaceBookmarkNotification {
+    pub version: SpaceBookmarkVersion,
+    pub item: Option<waddle_xmpp::pubsub::PubSubItem>,
+    pub deliver_payloads: bool,
+    pub notify_retract: bool,
     pub local_audience: Vec<LocalSpaceSubscription>,
 }
 

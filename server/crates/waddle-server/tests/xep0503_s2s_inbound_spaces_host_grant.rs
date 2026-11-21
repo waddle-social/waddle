@@ -708,7 +708,7 @@ async fn protected_space_disco_requires_a_canonical_remote_grant() {
         .all(|stanza| stanza.attr("id") != Some("superseded-space-event")));
 
     let mut retract = change.clone();
-    retract.action = SpaceBookmarkAction::Retract;
+    retract.action = SpaceBookmarkAction::Retract { notify: false };
     let retracted = fixture
         .store
         .write_space_bookmark(&retract, &fixture.policy)

@@ -263,7 +263,11 @@ pub(crate) async fn verify_host_grants(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    verify(tx, schema, HOST_GRANT_RELATIONS, false).await
+    if let Some(relation) = verify(tx, schema, HOST_GRANT_RELATIONS, false).await? {
+        return Ok(Some(relation));
+    }
+    Ok((!local_space_sequence_is_safe(tx, schema).await?)
+        .then_some("local_space_notification_order"))
 }
 
 /// The host-grant relations carry no trigger and no rule.
@@ -521,6 +525,33 @@ async fn relation_privileges_match(
             schema,
             relation.name
         ],
+    ).await?;
+    match rows.next().await? {
+        Some(row) => row.get(0),
+        None => Ok(false),
+    }
+}
+
+async fn local_space_sequence_is_safe(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<bool, DatabaseError> {
+    let mut rows = tx.query(
+        "SELECT c.relkind = 'S' AND c.relowner <> r.oid
+         AND NOT pg_catalog.pg_has_role(r.oid, c.relowner, 'SET')
+         AND s.seqtypid = 'pg_catalog.int8'::pg_catalog.regtype
+         AND s.seqstart = 1 AND s.seqmin = 1 AND s.seqmax = 9223372036854775807
+         AND s.seqincrement = 1 AND s.seqcache = 1 AND NOT s.seqcycle
+         AND pg_catalog.has_sequence_privilege(r.oid, c.oid, 'USAGE')
+         AND NOT pg_catalog.has_sequence_privilege(r.oid, c.oid, 'SELECT,UPDATE')
+         AND NOT pg_catalog.has_sequence_privilege(r.oid, c.oid,
+           'USAGE WITH GRANT OPTION,SELECT WITH GRANT OPTION,UPDATE WITH GRANT OPTION')
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('S', c.relowner))) a WHERE a.grantee = 0)
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_roles r ON r.rolname = current_user
+         JOIN pg_catalog.pg_sequence s ON s.seqrelid = c.oid
+         WHERE n.nspname = ? AND c.relname = 'local_space_notification_order'",
+        crate::db_params![schema],
     ).await?;
     match rows.next().await? {
         Some(row) => row.get(0),
