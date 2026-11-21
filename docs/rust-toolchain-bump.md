@@ -16,7 +16,7 @@ Android targets). Every build path reads that file:
 
 ## Procedure
 
-1. Edit `channel` in `server/rust-toolchain.toml` to the new stable version.
+1. Edit `channel` in `server/rust-toolchain.toml` (and keep `operator/rust-toolchain.toml` aligned if bumping both workspaces together) to the new stable version.
 2. Update the flake inputs so `rust-overlay` knows the new release:
 
    ```sh
