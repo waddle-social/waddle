@@ -2,8 +2,9 @@ use super::{corrupt, decode_operation, read_space_deletion_header, HostGrantStor
 use crate::db::Transaction;
 use crate::ingress_substrate::set_local_transaction_timeouts;
 use crate::permissions::host_grant::{
-    GrantSubject, HostGrantError, ScopeKey, SpaceDeletionAttempt, SpaceDeletionAttemptOutcome,
-    SpaceDeletionDeliveryKind, HOST_GRANT_POLICY_VERSION, SPACE_BOOKMARK_RESTORE_LOCK,
+    GrantOperationId, GrantSubject, HostGrantError, ScopeKey, SpaceDeletionAttempt,
+    SpaceDeletionAttemptOutcome, SpaceDeletionDeliveryKind, HOST_GRANT_POLICY_VERSION,
+    SPACE_BOOKMARK_RESTORE_LOCK,
 };
 
 const MAX_ATTEMPTS: i32 = 16;
@@ -88,6 +89,44 @@ impl HostGrantStore {
         drop(rows);
         tx.commit().await?;
         Ok(attempts)
+    }
+
+    /// Recover the exact live local lease at its destination socket node.
+    pub async fn load_local_space_deletion_attempt(
+        &self,
+        key: &ScopeKey,
+        operation: GrantOperationId,
+        subject: &GrantSubject,
+        token: uuid::Uuid,
+    ) -> Result<Option<SpaceDeletionAttempt>, HostGrantError> {
+        let mut tx = self.begin_interactive_read().await?;
+        let Some((record, _, _)) =
+            read_space_deletion_header(&mut tx, key, operation, false).await?
+        else {
+            return Ok(None);
+        };
+        let mut rows = tx.query(
+            "SELECT attempts, lease_until_ms FROM host_grant_space_deletion_jobs
+              WHERE lifecycle_id = ? AND subject_jid = ? AND delivery_kind = 'local'
+                AND attempt_token = ?::uuid AND state = 'leased'
+                AND lease_until_ms > (EXTRACT(EPOCH FROM pg_catalog.statement_timestamp()) * 1000)::bigint",
+            crate::db_params![record.lifecycle.to_storage(), subject.as_str(), token.to_string()],
+        ).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let attempt = SpaceDeletionAttempt {
+            key: key.clone(),
+            record,
+            subject: subject.clone(),
+            kind: SpaceDeletionDeliveryKind::Local,
+            token,
+            attempt: row.get(0)?,
+            lease_until_ms: row.get(1)?,
+        };
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some(attempt))
     }
 
     /// Record that this attempt may reach transport before any staging starts.

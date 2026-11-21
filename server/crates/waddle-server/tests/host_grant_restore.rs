@@ -1076,6 +1076,22 @@ async fn configure_and_delete_space_preserves_room_scope() {
         };
         assert_eq!(&attempt.subject, expected);
         assert_eq!(attempt.record, deleted);
+        let exact = fixture
+            .store
+            .load_local_space_deletion_attempt(
+                &deletion.key,
+                deletion.operation,
+                expected,
+                attempt.token,
+            )
+            .await
+            .expect("look up the exact local lease");
+        assert_eq!(exact.is_some(), kind == Kind::Local);
+        if let Some(exact) = exact {
+            assert_eq!(exact.token, attempt.token);
+            assert_eq!(exact.attempt, attempt.attempt);
+        }
+
         assert!(fixture
             .store
             .claim_space_deletion_jobs(kind, 2)
