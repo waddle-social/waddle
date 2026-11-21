@@ -32,6 +32,7 @@ extension SessionCoordinator {
         preview: String,
         in conversation: ConversationID
     ) async -> String? {
+        noteActivity()
         var options = composed.options
         // A sticker's text is its pack's description, not something the
         // sender typed, so nothing in it is taken as a mention.
@@ -435,6 +436,7 @@ extension SessionCoordinator {
     /// Call on every composer edit. Sends `composing` once, then `paused`
     /// after a quiet period.
     public func userTyped(in conversation: ConversationID) {
+        noteActivity()
         guard connection == .online else { return }
         if sentChatStates[conversation] != .composing {
             sentChatStates[conversation] = .composing

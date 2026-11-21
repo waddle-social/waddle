@@ -1432,6 +1432,10 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun fetchStatusPreference(): WaddleStatusPreference = presence.fetchPreference()
 
+    override suspend fun publishStatusPreference(preference: WaddleStatusPreference) {
+        presence.storedPreference = preference
+    }
+
     /** Recorded (conversation, targetId, emojis) reaction sends. */
     val reactionCalls = CopyOnWriteArrayList<Triple<String, String, List<String>>>()
 

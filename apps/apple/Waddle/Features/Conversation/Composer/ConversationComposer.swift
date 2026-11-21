@@ -315,11 +315,11 @@ struct ConversationComposer: View {
         case let .searchGIFs(query):
             model.clearText()
             gifSearch = ComposerGifSearch(query: query)
-        case let .setAvailability(availability):
+        case let .setPresenceMode(mode):
             model.clearText()
             let commands = self.commands
             let session = self.session
-            Task { await commands.setAvailability(availability, session: session) }
+            Task { await commands.setPresenceMode(mode, session: session) }
         case let .runExtension(command, invocation):
             model.clearText()
             let commands = self.commands

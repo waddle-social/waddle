@@ -48,6 +48,7 @@ final class AppState {
     @ObservationIgnored var setVoIPPushEnabled: (@MainActor (Bool) -> Void)?
 
     let notifications = NotificationController()
+    @ObservationIgnored private let userInput = UserInputMonitor()
     @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
     #if os(iOS)
     @ObservationIgnored private lazy var systemCalls = makeSystemCalls()
@@ -70,6 +71,14 @@ final class AppState {
         let server = ServerSettings.current
         self.server = server
         self.client = AuthClient(baseURL: server)
+        userInput.onInput = { [weak self] instant in
+            self?.session?.coordinator.noteActivity(at: instant)
+        }
+        userInput.onRefresh = { [weak self] in
+            guard let coordinator = self?.session?.coordinator else { return }
+            Task { await coordinator.refreshOwnPresence() }
+        }
+        userInput.start()
         notifications.onAuthorizationResult = { [weak self] isGranted in
             self?.notificationPermissionGranted = isGranted
         }
@@ -467,7 +476,10 @@ final class AppState {
 
     func sceneActivityChanged(isActive: Bool) {
         notifications.isAppActive = isActive
-        if isActive { notifications.refreshAuthorizationStatus() }
+        if isActive {
+            notifications.refreshAuthorizationStatus()
+            userInput.appBecameActive()
+        }
         guard let coordinator = session?.coordinator else { return }
         if isActive {
             coordinator.resume()

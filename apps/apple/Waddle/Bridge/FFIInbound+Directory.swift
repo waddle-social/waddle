@@ -108,4 +108,14 @@ extension FFIInbound {
     static func mood(_ mood: WaddleMood) -> UserMood {
         UserMood(value: mood.kind, text: mood.text)
     }
+
+    static func presenceMode(_ preference: WaddleStatusPreference) -> PresenceMode {
+        switch preference {
+        case .automatic: .automatic
+        case .manual(.available): .manual(.available)
+        case .manual(.chat): .manual(.chat)
+        case .manual(.away): .manual(.away)
+        case .manual(.dnd): .manual(.doNotDisturb)
+        }
+    }
 }

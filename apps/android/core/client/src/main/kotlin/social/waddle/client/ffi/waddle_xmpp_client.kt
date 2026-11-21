@@ -909,6 +909,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_status_preference(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
@@ -1195,6 +1197,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_feed(`pt
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_feed_post(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`post`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_status_preference(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_status_preference(`ptr`: Long,`preference`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
 ): Long
@@ -1706,6 +1710,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference() != 15536) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_status_preference() != 46235) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {
@@ -3138,6 +3145,13 @@ public interface WaddleClientInterface {
      * the caller keep what it knew.
      */
     suspend fun `fetchStatusPreference`(): WaddleStatusPreference
+
+    /**
+     * Store `preference` as the account's presence mode, for every
+     * device of the account to adopt. A reset is stored as `Automatic`,
+     * never removed. `Ok` means the server accepted it.
+     */
+    suspend fun `publishStatusPreference`(`preference`: WaddleStatusPreference)
 
     /**
      * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
@@ -6348,6 +6362,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeWaddleStatusPreference.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Store `preference` as the account's presence mode, for every
+     * device of the account to adopt. A reset is stored as `Automatic`,
+     * never removed. `Ok` means the server accepted it.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishStatusPreference`(`preference`: WaddleStatusPreference) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_status_preference(
+                uniffiHandle,
+                FfiConverterTypeWaddleStatusPreference.lower(`preference`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
