@@ -78,6 +78,7 @@ import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleRoomMemberEntry
+import social.waddle.client.ffi.WaddleRosterContact
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
@@ -1345,6 +1346,12 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     }
 
     override suspend fun fetchOwnActivity(): WaddleActivity? = pepProfile.activity
+
+    /** Canned roster served by [fetchRosterContacts]. */
+    @Volatile
+    var rosterContacts: List<WaddleRosterContact> = emptyList()
+
+    override suspend fun fetchRosterContacts(): List<WaddleRosterContact> = rosterContacts
 
     override suspend fun fetchOwnVcard4(): WaddleVCard4? {
         fetchVcard4Failure?.let { throw it }
