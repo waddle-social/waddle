@@ -51,9 +51,7 @@ struct ConversationRowActions: ViewModifier {
     private var muteButton: some View {
         let isMuted = session.directory.notifyMode(for: conversation) == .never
         return Button {
-            let session = self.session
-            let conversation = self.conversation
-            Task { try? await session.toggleNotifyMute(for: conversation) }
+            NotifyModeSetter.toggleMute(for: conversation, in: session)
         } label: {
             if isMuted {
                 Label("Unmute", systemImage: "bell")
@@ -99,6 +97,10 @@ struct NotifyModeMenu: View {
 enum NotifyModeSetter {
     static func set(_ mode: NotifyMode, for conversation: ConversationID, in session: SessionCoordinator) {
         Task { try? await session.setNotifyMode(mode, for: conversation) }
+    }
+
+    static func toggleMute(for conversation: ConversationID, in session: SessionCoordinator) {
+        Task { try? await session.toggleNotifyMute(for: conversation) }
     }
 }
 

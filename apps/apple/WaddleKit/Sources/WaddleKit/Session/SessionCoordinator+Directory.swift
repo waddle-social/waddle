@@ -46,7 +46,10 @@ extension SessionCoordinator {
             roomsOfDeletedSpaces.subtract(topology.channels.map(\.roomJID))
             for mutation in directoryMutations.dropFirst(mutationStart) {
                 switch mutation {
-                case .upsert(let channel): directory.upsert(channel)
+                case .upsert(let channel):
+                    // Queued local edits may carry an older discovery flag.
+                    let membersOnly = directory.channel(for: channel.roomJID)?.membersOnly
+                    directory.upsert(channel.withKnownMembersOnly(membersOnly))
                 case .remove(let room): directory.remove(room)
                 }
             }

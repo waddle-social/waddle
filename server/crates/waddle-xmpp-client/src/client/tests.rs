@@ -18,7 +18,6 @@ use url::Url;
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::command::XmppCommand;
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
-use crate::discovery::{DiscoveredChannel, DiscoveryExt, SpaceNode};
 use crate::error::ClientError;
 use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent};
 use crate::state::StreamId;
@@ -239,68 +238,6 @@ async fn driver_cancels_unreplayable_iq_after_fresh_stream_fallback() {
 }
 
 // ── send_iq round-trip through mock ───────────────────────────────────────
-
-async fn discover_test_space_channels(room_info: Element) -> Vec<DiscoveredChannel> {
-    let (commands, mut requests) = mpsc::channel(1);
-    let (events, _) = broadcast::channel(1);
-    let state = watch::Sender::new(SessionSnapshot::new());
-    let handle = ClientHandle::from_parts(commands, events, state);
-    let space_items = r#"<iq xmlns='jabber:client' type='result'>
-        <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-            <items node='general'>
-                <item id='chat@muc.example.com'>
-                    <conference xmlns='urn:xmpp:bookmarks:1'/>
-                </item>
-            </items>
-        </pubsub>
-    </iq>"#
-        .parse()
-        .expect("valid space items");
-
-    let driver = tokio::spawn(async move {
-        for response in [space_items, room_info] {
-            let Some(XmppCommand::SendIq { responder, .. }) = requests.recv().await else {
-                panic!("expected a discovery IQ");
-            };
-            responder.send(Ok(response)).expect("waiting for response");
-        }
-    });
-    let channels = handle
-        .discover_space_channels(
-            &"spaces.example.com".parse().expect("space service JID"),
-            &SpaceNode::try_new("general").expect("space node"),
-        )
-        .await
-        .expect("discovered space channels");
-    driver.await.expect("mock driver completed");
-    channels
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn discovers_members_only_space_channel() {
-    let room_info = r#"<iq xmlns='jabber:client' type='result'>
-        <query xmlns='http://jabber.org/protocol/disco#info'>
-            <feature var='muc_membersonly'/>
-        </query>
-    </iq>"#
-        .parse()
-        .expect("valid room info");
-    let channels = discover_test_space_channels(room_info).await;
-    assert_eq!(channels[0].members_only, Some(true));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn discovers_space_channel_without_members_only_feature() {
-    let room_info = r#"<iq xmlns='jabber:client' type='result'>
-        <query xmlns='http://jabber.org/protocol/disco#info'>
-            <feature var='muc_hidden'/>
-        </query>
-    </iq>"#
-        .parse()
-        .expect("valid room info");
-    let channels = discover_test_space_channels(room_info).await;
-    assert_eq!(channels[0].members_only, Some(false));
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn send_iq_resolves_via_mock_driver() {

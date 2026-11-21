@@ -5,10 +5,12 @@ import Testing
 @MainActor
 @Suite("Room management refreshes")
 struct RoomManagementRefreshTests {
-    private func connected(group: Bool = false, autojoin: Bool = true) async -> (SessionCoordinator, FakePort) {
+    private func connected(
+        group: Bool = false, autojoin: Bool = true, membersOnly: Bool? = nil
+    ) async -> (SessionCoordinator, FakePort) {
         let port = FakePort()
         port.topology = Topology(spaces: [], channels: [
-            Channel(roomJID: room, name: "Old name", autojoin: autojoin, isGroupDM: group),
+            Channel(roomJID: room, name: "Old name", autojoin: autojoin, isGroupDM: group, membersOnly: membersOnly),
         ])
         let coordinator = SessionCoordinator(account: me, port: port)
         coordinator.start()
@@ -104,6 +106,28 @@ struct RoomManagementRefreshTests {
         #expect(Set(port.joined) == Set(inFlight))
         #expect(!port.joined.contains(room))
         #expect(coordinator.directory.channel(for: room) == nil)
+        await coordinator.stop()
+    }
+
+    @Test(arguments: [false, nil] as [Bool?])
+    func aRenameDuringRefreshKeepsTheDiscoveredMembersOnlyDefault(membersOnly: Bool?) async throws {
+        let (coordinator, port) = await connected(membersOnly: membersOnly)
+        port.topology = Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "Old name", membersOnly: true),
+        ])
+        port.holdsTopology = true
+        port.emit(.disconnected)
+        port.emit(.connected)
+        await eventually { port.heldTopology.count == 1 }
+        try #require(port.heldTopology.count == 1)
+
+        try await coordinator.updateRoom(room, with: RoomSettingsPatch(name: "Renamed"))
+        port.holdsTopology = false
+        port.releaseTopology()
+        await coordinator.readyTask?.value
+
+        #expect(coordinator.directory.title(for: roomConversation) == "Renamed")
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
         await coordinator.stop()
     }
 

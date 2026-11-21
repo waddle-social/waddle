@@ -6,7 +6,6 @@ use std::collections::HashSet;
 
 use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
-use crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY;
 
 use super::iq::{
     build_disco_info_iq, build_disco_items_iq, build_pubsub_items_iq, build_upload_slot_iq,
@@ -21,9 +20,7 @@ use super::types::{
     DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, RoomBot, SpaceNode,
     UploadSlot,
 };
-use super::{
-    STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_GROUP_DM_FEATURE_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
-};
+use super::{STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
 
 const DISCO_CONCURRENCY: usize = 8;
 
@@ -320,8 +317,7 @@ impl DiscoveryExt for ClientHandle {
                         )
                         .filter(|description| !description.trim().is_empty())
                         .map(str::to_string);
-                    channel.is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
-                    channel.members_only = Some(info.has_feature(FEATURE_MUC_MEMBERS_ONLY));
+                    (channel.is_group_dm, channel.members_only) = info.room_flags();
                 }
                 channel
             })
@@ -470,8 +466,7 @@ impl DiscoveryExt for ClientHandle {
                                 )
                                 .filter(|description| !description.trim().is_empty())
                                 .map(str::to_string);
-                            is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
-                            members_only = Some(info.has_feature(FEATURE_MUC_MEMBERS_ONLY));
+                            (is_group_dm, members_only) = info.room_flags();
                         }
                         let name = room
                             .name

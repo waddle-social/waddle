@@ -988,7 +988,7 @@ mod bookmark_merge {
         }
     }
 
-    fn stanza_error() -> ClientError {
+    pub(super) fn stanza_error() -> ClientError {
         ClientError::StanzaError(StanzaError {
             error_type: StanzaErrorType::Cancel,
             condition: "item-not-found".to_string(),
@@ -997,7 +997,7 @@ mod bookmark_merge {
         })
     }
 
-    fn bookmark(jid: &str, name: Option<&str>, autojoin: bool) -> BookmarkItem {
+    pub(super) fn bookmark(jid: &str, name: Option<&str>, autojoin: bool) -> BookmarkItem {
         BookmarkItem {
             jid: jid.parse().expect("bookmark jid"),
             name: name.map(str::to_string),
@@ -1029,9 +1029,9 @@ mod bookmark_merge {
         SpaceNode::try_new(STANDALONE_SPACE_ID).expect("standalone id")
     }
 
-    fn bookmarks_response(items: Vec<BookmarkItem>) -> Element {
+    pub(super) fn bookmarks_response(node: &str, items: Vec<BookmarkItem>) -> Element {
         let mut items_builder = Element::builder("items", PUBSUB_NS)
-            .attr(minidom::rxml::xml_ncname!("node").to_owned(), BOOKMARKS_NS);
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
         for item in items {
             items_builder = items_builder.append(
                 Element::builder("item", PUBSUB_NS)
@@ -1053,7 +1053,7 @@ mod bookmark_merge {
             .build()
     }
 
-    fn disco_info_response(features: &[&str]) -> Element {
+    pub(super) fn disco_info_response(features: &[&str]) -> Element {
         let mut query = Element::builder("query", DISCO_INFO_NS);
         for feature in features {
             query = query.append(
@@ -1115,11 +1115,10 @@ mod bookmark_merge {
 
     #[test]
     fn fetch_parses_own_pep_bookmark_items() {
-        let driver = MockDriver::new(vec![Ok(bookmarks_response(vec![bookmark(
-            "chat@muc.waddle.test",
-            Some("Chat"),
-            true,
-        )]))]);
+        let driver = MockDriver::new(vec![Ok(bookmarks_response(
+            BOOKMARKS_NS,
+            vec![bookmark("chat@muc.waddle.test", Some("Chat"), true)],
+        ))]);
         let items = block_on(fetch_user_bookmarks(&driver));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].jid.to_string(), "chat@muc.waddle.test");
@@ -1265,5 +1264,127 @@ mod bookmark_merge {
         stamp_bookmark(&mut channel, &bookmark("chat@muc.waddle.test", None, true));
         assert!(channel.autojoin);
         assert!(channel.bookmark_name.is_none());
+    }
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+mod room_discovery {
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    use crate::client::ClientHandle;
+    use crate::command::XmppCommand;
+    use crate::error::ClientResult;
+    use crate::state::SessionSnapshot;
+
+    use super::super::DiscoveryExt;
+    use super::bookmark_merge::{bookmark, bookmarks_response, disco_info_response, stanza_error};
+    use super::{DiscoveredChannel, Element, SpaceNode, BOOKMARKS_NS, MUC_NS};
+
+    fn mock_client(
+        mut reply: impl FnMut(&Element) -> ClientResult<Element> + Send + 'static,
+    ) -> (ClientHandle, tokio::task::JoinHandle<()>) {
+        let (commands, mut requests) = mpsc::channel(1);
+        let (events, _) = broadcast::channel(1);
+        let state = watch::Sender::new(SessionSnapshot::new());
+        let handle = ClientHandle::from_parts(commands, events, state);
+        let driver = tokio::spawn(async move {
+            while let Some(command) = requests.recv().await {
+                let XmppCommand::SendIq { stanza, responder } = command else {
+                    panic!("expected a discovery IQ");
+                };
+                responder
+                    .send(reply(&stanza))
+                    .expect("waiting for response");
+            }
+        });
+        (handle, driver)
+    }
+
+    async fn discover_test_space_channels(
+        room_info: ClientResult<Element>,
+    ) -> Vec<DiscoveredChannel> {
+        let space_items = bookmarks_response(
+            "general",
+            vec![bookmark("chat@muc.example.com", None, false)],
+        );
+        let mut replies = [Ok(space_items), room_info].into_iter();
+        let (handle, driver) = mock_client(move |_| replies.next().expect("mock response queued"));
+        let channels = handle
+            .discover_space_channels(
+                &"spaces.example.com".parse().expect("space service JID"),
+                &SpaceNode::try_new("general").expect("space node"),
+            )
+            .await
+            .expect("discovered space channels");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+        channels
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovers_members_only_space_channel() {
+        let channels =
+            discover_test_space_channels(Ok(disco_info_response(&["muc_membersonly"]))).await;
+        assert_eq!(channels[0].members_only, Some(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovers_space_channel_without_members_only_feature() {
+        let channels = discover_test_space_channels(Ok(disco_info_response(&["muc_hidden"]))).await;
+        assert_eq!(channels[0].members_only, Some(false));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn space_channel_privacy_is_unknown_when_disco_info_fails() {
+        let channels = discover_test_space_channels(Err(stanza_error())).await;
+        assert_eq!(channels[0].members_only, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_discovers_privacy_of_muc_catalog_and_bookmark_only_rooms() {
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                Some("muc.example.com") => r#"<iq xmlns='jabber:client' type='result'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='listed@muc.example.com'/>
+                        <item jid='unknown@muc.example.com'/>
+                    </query>
+                </iq>"#,
+                None => {
+                    return Ok(bookmarks_response(
+                        BOOKMARKS_NS,
+                        vec![bookmark("bookmarked@muc.example.com", None, false)],
+                    ));
+                }
+                Some("listed@muc.example.com" | "bookmarked@muc.example.com") => {
+                    return Ok(disco_info_response(&[MUC_NS, "muc_membersonly"]));
+                }
+                Some("unknown@muc.example.com") => return Err(stanza_error()),
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+        let rooms: Vec<_> = topology
+            .channels
+            .iter()
+            .map(|room| (room.room_jid.as_str(), room.members_only))
+            .collect();
+        assert_eq!(
+            rooms,
+            [
+                ("listed@muc.example.com", Some(true)),
+                ("unknown@muc.example.com", None),
+                ("bookmarked@muc.example.com", Some(true)),
+            ]
+        );
     }
 }

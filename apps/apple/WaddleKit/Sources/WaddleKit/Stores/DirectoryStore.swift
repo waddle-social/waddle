@@ -80,7 +80,13 @@ public final class DirectoryStore {
 
     public func apply(_ topology: Topology) {
         spaces = topology.spaces
-        let sorted = topology.channels.sorted(by: Self.listOrder)
+        let previous = Dictionary(
+            (channels + groupDMs).map { ($0.roomJID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let sorted = topology.channels.map { channel in
+            channel.withKnownMembersOnly(channel.membersOnly ?? previous[channel.roomJID]?.membersOnly)
+        }.sorted(by: Self.listOrder)
         channels = sorted.filter { !$0.isGroupDM }
         groupDMs = sorted.filter(\.isGroupDM)
         roomJIDs = Set(topology.channels.map(\.roomJID))
@@ -133,7 +139,7 @@ public final class DirectoryStore {
         notifyModes[conversation] = mode
     }
 
-    /// The mode as the account stores it; `nil` is the kind's default.
+    /// The mode as the account stores it. A nil mode uses the conversation's default.
     public func setStoredNotifyMode(_ mode: NotifyMode?, for conversation: ConversationID) {
         notifyModes[conversation] = mode
     }
