@@ -40,6 +40,18 @@ final class ProfileSharingSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 620))
     }
 
+    func testTuneEditorBeforeAnythingIsTyped() async throws {
+        let view = NavigationStack { ProfileTuneEditor(current: nil) }
+        try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 420))
+    }
+
+    func testACallOnAnotherDeviceOwnsTheActivity() async throws {
+        let sample = SampleSession()
+        sample.coordinator.status.activity = UserActivity(general: "talking", specific: "on_video_phone")
+        let view = NavigationStack { Form { ProfileSharingSection() }.formStyle(.grouped) }
+        try await assertScreenSnapshot(of: sample.host(view), size: CGSize(width: Self.width, height: 320))
+    }
+
     func testSomeoneElsesDetails() async throws {
         let details = ProfileDetails(
             fullName: "Ada Lovelace", nickname: "ada", pronouns: "she/her",

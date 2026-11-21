@@ -14,6 +14,12 @@ public struct UserActivity: Hashable, Sendable {
         self.specific = specific
         self.text = text
     }
+
+    /// The activity a device publishes by itself for as long as it is in a
+    /// call (ADR-010). It belongs to that call, not to the person.
+    public var showsACall: Bool {
+        general == "talking" && (specific == "on_the_phone" || specific == "on_video_phone")
+    }
 }
 
 /// XEP-0118 tune. An empty field is one that is not shared.
@@ -41,9 +47,7 @@ public struct UserTune: Hashable, Sendable {
 
     /// No link, or a full address in any scheme: a tune may point into a
     /// music app.
-    public var hasUsableLink: Bool {
-        link.trimmed.isEmpty || URL(string: link.trimmed)?.scheme != nil
-    }
+    public var hasUsableLink: Bool { link.trimmed.isEmptyOrFullAddress }
 }
 
 /// What an account shares about the moment over PEP.
@@ -101,10 +105,9 @@ public struct ProfileDetails: Hashable, Sendable {
         return text == ProfileDetails()
     }
 
-    /// No link, or one that opens in a browser.
-    public var hasUsableLink: Bool {
-        cleaned.link.isEmpty || webLink != nil
-    }
+    /// No link, or a full address. Another app may have stored one that
+    /// is not a web link, and that must not stand in the way of a save.
+    public var hasUsableLink: Bool { cleaned.link.isEmptyOrFullAddress }
 
     /// The link when it is safe to open: `http` or `https` with a host.
     /// Details come from other people, so nothing else is ever opened.
@@ -118,4 +121,8 @@ public struct ProfileDetails: Hashable, Sendable {
 
 private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var isEmptyOrFullAddress: Bool {
+        isEmpty || (!contains(where: \.isWhitespace) && URL(string: self)?.scheme != nil)
+    }
 }

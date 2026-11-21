@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// One save at a time for a profile editor: busy while it runs, then
-/// either done or holding the reason it failed.
+/// either done or holding a message to show.
 @MainActor
 @Observable
 final class ProfileSave {
@@ -19,13 +19,13 @@ final class ProfileSave {
                 done()
             } catch {
                 isSaving = false
-                errorMessage = error.localizedDescription
+                errorMessage = "That could not be saved. Try again."
             }
         }
     }
 }
 
-/// Why the last save failed, when it did.
+/// Says that the last save failed, when it did.
 struct ProfileSaveError: View {
     let save: ProfileSave
 

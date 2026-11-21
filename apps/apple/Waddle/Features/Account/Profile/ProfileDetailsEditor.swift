@@ -37,7 +37,9 @@ struct ProfileDetailsEditor: View {
         .toolbar {
             ProfileSaveButton(save: save, isDisabled: !canSave, action: publish)
         }
-        .task { await load() }
+        // Not again when the screen comes back: that would replace what
+        // has been typed.
+        .task { if details == nil { await load() } }
     }
 
     private var canSave: Bool {
@@ -81,7 +83,7 @@ private struct ProfileDetailsFields: View {
         } footer: {
             Text(details.hasUsableLink
                 ? "People see these details when they open your profile."
-                : "Use a web link, like https://example.org")
+                : "Use a full link, like https://example.org")
         }
     }
 }

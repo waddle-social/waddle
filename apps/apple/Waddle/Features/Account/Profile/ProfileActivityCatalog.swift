@@ -67,9 +67,12 @@ enum ProfileActivityCatalog {
         return (extra + offered).map(choice)
     }
 
-    /// The specific activities defined under `general`.
-    static func specifics(of general: String?) -> [String] {
-        general.flatMap(entry)?.specifics ?? []
+    /// The specific activities defined under `general`, and `current`'s
+    /// own when it is one the list lacks (another app may publish others).
+    static func specifics(of general: String?, including current: UserActivity?) -> [String] {
+        let defined = general.flatMap(entry)?.specifics ?? []
+        guard let kept = current?.specific, current?.general == general, !defined.contains(kept) else { return defined }
+        return [kept] + defined
     }
 
     static func emoji(for general: String) -> String {
@@ -91,15 +94,10 @@ enum ProfileActivityCatalog {
     }
 
     /// The activity to publish, or nil when `general` is not one the XEP
-    /// defines. A specific activity from another general is dropped, and a
-    /// blank note is left out.
+    /// defines. A blank note is left out.
     static func activity(general: String, specific: String?, note: String) -> UserActivity? {
-        guard let entry = entry(for: general) else { return nil }
+        guard entry(for: general) != nil else { return nil }
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        return UserActivity(
-            general: general,
-            specific: specific.flatMap { entry.specifics.contains($0) ? $0 : nil },
-            text: trimmed.isEmpty ? nil : trimmed
-        )
+        return UserActivity(general: general, specific: specific, text: trimmed.isEmpty ? nil : trimmed)
     }
 }

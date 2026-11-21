@@ -38,7 +38,16 @@ extension SessionCoordinator {
     }
 
     /// XEP-0108 activity; nil retracts it.
+    ///
+    /// The account has one activity, and a device in a call uses it to show
+    /// the call (ADR-010). What is published is looked up first, and while
+    /// it shows a call it is left alone: writing over it would end the "in
+    /// a call" mark for everyone.
     public func setActivity(_ activity: UserActivity?) async throws {
+        if let published = try? await port.fetchSharedStatus(of: account.jid).activity, published.showsACall {
+            status.activity = published
+            throw PortError.rejected
+        }
         if let activity {
             try await port.publishActivity(activity)
         } else {

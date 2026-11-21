@@ -249,6 +249,7 @@
 		64571B910A1B5EDCAF96F1DB /* NavigationRowChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E389D8FF37A6F61A5761275 /* NavigationRowChrome.swift */; };
 		645DE17F5C5CDC420FCE3059 /* ConversationToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424F4321DD2A384763B772FD /* ConversationToolbar.swift */; };
 		64AACA177CE03F1E7A29A020 /* EventsBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2866C6388D15ECCB5298DB01 /* EventsBridgeTests.swift */; };
+		655FFA3D66E4FE74CCC0CFB5 /* ProfileLinkField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 929AAE533B849B08D33B3654 /* ProfileLinkField.swift */; };
 		660444B62F45D645F2BBCCC4 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A082EE4552E0588E35D76D98 /* SearchSheet.swift */; };
 		66497F2BBD161FEAF3309C55 /* FFIInbound+SafetyScores.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE36378C327949710DA48E9 /* FFIInbound+SafetyScores.swift */; };
 		665D572F4F368852A707DA59 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66FCE4A2E446F8397C801AC /* SignInView.swift */; };
@@ -384,6 +385,7 @@
 		95C278879BAE43004DA127F6 /* SplitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23892C2B3A078BA52981F443 /* SplitShell.swift */; };
 		95CE93BC36F8321BEBCF160F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
 		95EC73D8F6C6FFABDDDA88F2 /* FeedComposerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2C9E2456F42C82B9D56503E /* FeedComposerCard.swift */; };
+		974B626DF7ECA01CDC8741B8 /* ProfileLinkField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 929AAE533B849B08D33B3654 /* ProfileLinkField.swift */; };
 		9752FBAA9CDE1B0C074CEA74 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CE875138305109C7CCC4E1 /* AppState.swift */; };
 		977FF2B76F048955C852435F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BC57272670658BD2403BA4E3 /* Localizable.strings */; };
 		97B64D066C7758AB6293B144 /* NavigationSectionHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0DC7EF989C84CD50FE8B750 /* NavigationSectionHeader.swift */; };
@@ -819,6 +821,7 @@
 		92341C99BBB49D538EC5376C /* MemberPermissions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberPermissions.swift; sourceTree = "<group>"; };
 		9255223F1551E4C3235D6786 /* StickerMessageContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickerMessageContentTests.swift; sourceTree = "<group>"; };
 		9295908F61E540E4185F41C3 /* FFIInbound.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIInbound.swift; sourceTree = "<group>"; };
+		929AAE533B849B08D33B3654 /* ProfileLinkField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileLinkField.swift; sourceTree = "<group>"; };
 		931B91F62774BEC1541CC962 /* CallDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDock.swift; sourceTree = "<group>"; };
 		93EB94A6DDD9F6A80D3D74C7 /* NotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationController.swift; sourceTree = "<group>"; };
 		9472731557D616B2F74FF441 /* MessageReplySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageReplySummary.swift; sourceTree = "<group>"; };
@@ -1584,6 +1587,7 @@
 				EC7F3ACCEB44086F86D3BCC1 /* ProfileChoiceGrid.swift */,
 				CBFABF1B99B5F09791FA868E /* ProfileDetailsEditor.swift */,
 				5A859364D0F895078570C5D3 /* ProfileHeader.swift */,
+				929AAE533B849B08D33B3654 /* ProfileLinkField.swift */,
 				A857EFDE807DD88C1AEA1EF1 /* ProfileMoodCatalog.swift */,
 				A2F0CFB8B8A9EF99839CFEE4 /* ProfileMoodEditor.swift */,
 				1CD60D4DBA74E88E6838393F /* ProfileSave.swift */,
@@ -2250,6 +2254,7 @@
 				466C45970409995333771C4D /* ProfileChoiceGrid.swift in Sources */,
 				C1B58C09DC366CBF3F3B2BFD /* ProfileDetailsEditor.swift in Sources */,
 				CFB9C73CB8E6482259A077CA /* ProfileHeader.swift in Sources */,
+				655FFA3D66E4FE74CCC0CFB5 /* ProfileLinkField.swift in Sources */,
 				CEE7D811A19B454D75C2682F /* ProfileMoodCatalog.swift in Sources */,
 				3DA6E62AAD3B1DB7DAAB6C7C /* ProfileMoodEditor.swift in Sources */,
 				6A2589E77495574F6FDA41BD /* ProfileSave.swift in Sources */,
@@ -2565,6 +2570,7 @@
 				AB0C49EC6382DA6AA927ED3E /* ProfileChoiceGrid.swift in Sources */,
 				6768B323C68E76787B0CFDAE /* ProfileDetailsEditor.swift in Sources */,
 				F119FB09C57B373CAF809F60 /* ProfileHeader.swift in Sources */,
+				974B626DF7ECA01CDC8741B8 /* ProfileLinkField.swift in Sources */,
 				D56262205062FBDB1F827792 /* ProfileMoodCatalog.swift in Sources */,
 				710FDC51F6C376DAFE4EDCB3 /* ProfileMoodEditor.swift in Sources */,
 				9AA1924C80BB3D3F5650C194 /* ProfileSave.swift in Sources */,

@@ -19,15 +19,24 @@ struct ProfileSharingSection: View {
                     detail: session.status.mood.map(\.text) ?? "Let people know how you're feeling."
                 )
             }
-            NavigationLink {
-                ProfileActivityEditor(current: session.status.activity)
-            } label: {
+            if session.status.activity?.showsACall == true {
+                // The call owns the activity until it ends (ADR-010).
                 ProfileSharingLabel(
-                    emoji: session.status.activity.map { ProfileActivityCatalog.emoji(for: $0.general) },
-                    symbol: "figure.walk",
-                    title: session.status.activity.map(ProfileActivityCatalog.summary) ?? "Set an activity",
-                    detail: session.status.activity.map(\.text) ?? "Say what you're doing."
+                    emoji: "📞", symbol: "phone",
+                    title: "In a call",
+                    detail: "Shown while you're in a call on another device."
                 )
+            } else {
+                NavigationLink {
+                    ProfileActivityEditor(current: session.status.activity)
+                } label: {
+                    ProfileSharingLabel(
+                        emoji: session.status.activity.map { ProfileActivityCatalog.emoji(for: $0.general) },
+                        symbol: "figure.walk",
+                        title: session.status.activity.map(ProfileActivityCatalog.summary) ?? "Set an activity",
+                        detail: session.status.activity.map(\.text) ?? "Say what you're doing."
+                    )
+                }
             }
             NavigationLink {
                 ProfileTuneEditor(current: session.status.tune)

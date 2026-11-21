@@ -70,6 +70,30 @@ struct OwnProfileTests {
         #expect(coordinator.status.activity == nil)
     }
 
+    /// ADR-010: a device in a call shows it through the account's one
+    /// activity. Another device must not write over that, or clear it.
+    @Test func anActivityIsNotWrittenOverACallOnAnotherDevice() async {
+        let (coordinator, port) = session()
+        let call = UserActivity(general: "talking", specific: "on_the_phone")
+        port.sharedStatus = .success(SharedStatus(activity: call))
+
+        await #expect(throws: PortError.rejected) { try await coordinator.setActivity(coding) }
+        await #expect(throws: PortError.rejected) { try await coordinator.setActivity(nil) }
+
+        #expect(port.publishedActivities.isEmpty)
+        #expect(coordinator.status.activity == call)
+    }
+
+    /// Talking to someone in the room is an ordinary activity, not a call.
+    @Test func anActivityThatIsNotACallCanBeReplaced() async throws {
+        let (coordinator, port) = session()
+        port.sharedStatus = .success(SharedStatus(activity: UserActivity(general: "talking", specific: "in_real_life")))
+
+        try await coordinator.setActivity(coding)
+
+        #expect(port.publishedActivities == [coding])
+    }
+
     @Test func aTuneIsPublishedWithoutStraySpaces() async throws {
         let (coordinator, port) = session()
 
@@ -147,7 +171,7 @@ struct OwnProfileTests {
         let (coordinator, port) = session()
 
         await #expect(throws: PortError.invalidRequest) {
-            try await coordinator.saveDetails(ProfileDetails(link: "mailto:ada@example.org"))
+            try await coordinator.saveDetails(ProfileDetails(link: "not a link"))
         }
 
         #expect(port.publishedProfileDetails.isEmpty)
@@ -188,11 +212,19 @@ struct ProfileLinkTests {
         #expect(ProfileDetails(link: "ada.example/about").cleaned.link == "https://ada.example/about")
     }
 
-    @Test func onlyWebLinksAreAllowedInDetails() {
+    @Test func aLinkInDetailsMustBeAnAddress() {
         #expect(ProfileDetails(link: "https://ada.example").hasUsableLink)
         #expect(ProfileDetails(link: "").hasUsableLink)
-        #expect(!ProfileDetails(link: "javascript:alert(1)").hasUsableLink)
         #expect(!ProfileDetails(link: "not a link").hasUsableLink)
+    }
+
+    /// A link another app stored, such as a mail address, is kept as it is
+    /// and does not block saving the other fields.
+    @Test func aLinkThatIsNotAWebLinkCanStillBeSaved() {
+        let details = ProfileDetails(link: "mailto:ada@example.org")
+        #expect(details.hasUsableLink)
+        #expect(details.cleaned.link == "mailto:ada@example.org")
+        #expect(details.webLink == nil)
     }
 
     @Test func aWebLinkIsOnlyOfferedForOpeningWhenItIsHTTP() {

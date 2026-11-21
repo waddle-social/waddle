@@ -59,7 +59,7 @@ struct ProfileActivityEditor: View {
     }
 
     private var specifics: [String] {
-        ProfileActivityCatalog.specifics(of: general)
+        ProfileActivityCatalog.specifics(of: general, including: current)
     }
 
     private var pendingActivity: UserActivity? {
