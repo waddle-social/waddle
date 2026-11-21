@@ -135,6 +135,12 @@ extension SessionCoordinator {
         return details
     }
 
+    /// What someone shares about the moment, or nil when it could not be
+    /// looked up. See `SharedStatus.shown(isOnline:)` for what to show.
+    public func sharedStatus(of jid: BareJID) async -> SharedStatus? {
+        try? await port.fetchSharedStatus(of: jid)
+    }
+
     /// XEP-0363 slot for an attachment the platform layer then uploads.
     public func uploadSlot(filename: String, size: Int, mediaType: String) async -> UploadSlot? {
         guard connection == .online else { return nil }

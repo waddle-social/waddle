@@ -85,8 +85,9 @@ enum ProfileTuneSummary {
 }
 
 /// An emoji when something is shared, else a neutral symbol; then a title
-/// and an optional second line.
-private struct ProfileSharingLabel: View {
+/// and an optional second line. Also draws what someone else shares
+/// (`PeerSharingSection`).
+struct ProfileSharingLabel: View {
     let emoji: String?
     let symbol: String
     let title: String

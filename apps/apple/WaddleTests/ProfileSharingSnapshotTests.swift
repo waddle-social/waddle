@@ -4,7 +4,8 @@ import XCTest
 @testable import WaddleKit
 
 /// Night and Daylight goldens for what the profile shares (mood, activity,
-/// tune), the activity editor, and someone else's details. Forms only draw
+/// tune), the activity editor, and what someone else shares and their
+/// details. Forms only draw
 /// in a real window, so these are screen snapshots (see
 /// `assertScreenSnapshot`).
 ///
@@ -59,5 +60,21 @@ final class ProfileSharingSnapshotTests: XCTestCase {
         )
         let view = Form { PeerDetailsSection(details: details) }.formStyle(.grouped)
         try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 320))
+    }
+
+    func testWhatSomeoneElseShares() async throws {
+        let shared = SharedStatus(
+            mood: UserMood(value: "happy", text: "Shipped it"),
+            activity: coding,
+            tune: UserTune(title: "Heroes", artist: "David Bowie", album: "\"Heroes\"")
+        )
+        let view = Form { PeerSharingSection(status: shared, isOnline: true) }.formStyle(.grouped)
+        try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 320))
+    }
+
+    func testSomeoneElseInACall() async throws {
+        let shared = SharedStatus(activity: UserActivity(general: "talking", specific: "on_video_phone"))
+        let view = Form { PeerSharingSection(status: shared, isOnline: true) }.formStyle(.grouped)
+        try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 160))
     }
 }
