@@ -27,6 +27,16 @@ impl AccountAuthoritySelection {
         }
     }
 
+    /// Select one connected headline destination, or verify the exact resource
+    /// chosen before a relay hop, from a single authoritative account view.
+    pub(crate) async fn headline_binding(
+        &self,
+        account: &BareJid,
+        selected: Option<&FullJid>,
+    ) -> Result<Option<(FullJid, BindingRef)>, AccountCoordinatorError> {
+        select_headline_binding(&self.coordinator_view(account).await?, selected)
+    }
+
     /// Availability, priority and carbons of every active resource, in the
     /// shape recipient selection freezes.
     pub(crate) async fn routing_resources(
@@ -149,9 +159,94 @@ impl AccountAuthoritySelection {
     }
 }
 
+fn select_headline_binding(
+    view: &AccountView,
+    selected: Option<&FullJid>,
+) -> Result<Option<(FullJid, BindingRef)>, AccountCoordinatorError> {
+    let candidate = view
+        .routing
+        .iter()
+        .filter(|resource| {
+            resource.available
+                && resource.priority >= 0
+                && selected.is_none_or(|jid| &resource.jid == jid)
+        })
+        .max_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| right.jid.cmp(&left.jid))
+        });
+    let Some(resource) = candidate else {
+        return Ok(None);
+    };
+    let binding = view
+        .binding(&resource.jid)
+        .ok_or(AccountCoordinatorError::Diverged)?;
+    Ok(Some((resource.jid.clone(), binding.clone())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headline_selects_only_an_available_exact_binding() {
+        use waddle_xmpp::ownership::account_coordinator::AccountResourceRouting;
+        use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
+
+        let resource = |name, available, priority| AccountResourceRouting {
+            jid: format!("alice@example.com/{name}")
+                .parse()
+                .expect("resource"),
+            available,
+            priority,
+            carbons_enabled: false,
+        };
+        let phone = resource("phone", true, 0);
+        let desktop = resource("desktop", true, 5);
+        let away = resource("away", false, 127);
+        let negative = resource("negative", true, -1);
+        let binding =
+            || BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let phone_binding = binding();
+        let desktop_binding = binding();
+        let mut view = AccountView {
+            routing: vec![
+                phone.clone(),
+                desktop.clone(),
+                away.clone(),
+                negative.clone(),
+            ],
+            bindings: vec![
+                (phone.jid.clone(), phone_binding.clone()),
+                (desktop.jid.clone(), desktop_binding.clone()),
+                (away.jid.clone(), binding()),
+                (negative.jid.clone(), binding()),
+            ],
+            ..AccountView::default()
+        };
+
+        assert_eq!(
+            select_headline_binding(&view, None).expect("authoritative selection"),
+            Some((desktop.jid.clone(), desktop_binding))
+        );
+        assert_eq!(
+            select_headline_binding(&view, Some(&phone.jid)).expect("exact selection"),
+            Some((phone.jid, phone_binding))
+        );
+        assert!(select_headline_binding(&view, Some(&negative.jid))
+            .expect("negative priority")
+            .is_none());
+        view.bindings.retain(|(jid, _)| jid != &desktop.jid);
+        assert!(matches!(
+            select_headline_binding(&view, None),
+            Err(AccountCoordinatorError::Diverged)
+        ));
+        view.routing = vec![away, negative];
+        assert!(select_headline_binding(&view, None)
+            .expect("no available resource")
+            .is_none());
+    }
 
     /// An application that never ran startup's selection has no account
     /// authority: every read fails instead of answering from another
@@ -163,6 +258,10 @@ mod tests {
         let resource: FullJid = "alice@example.com/phone".parse().expect("full jid");
         assert!(matches!(
             selection.resources(&account).await,
+            Err(AccountCoordinatorError::Unselected)
+        ));
+        assert!(matches!(
+            selection.headline_binding(&account, None).await,
             Err(AccountCoordinatorError::Unselected)
         ));
         assert!(matches!(

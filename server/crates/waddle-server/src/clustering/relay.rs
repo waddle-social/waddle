@@ -162,6 +162,7 @@ pub use implementation::RelayTrustProfile;
 pub use implementation::RelayUnregisterRemoteUserResource;
 pub use implementation::RelayUpdateRemoteUserResource;
 pub use implementation::{RelaySpaceBookmarkPublication, RelaySpaceBookmarkPublicationReply};
+pub(crate) use implementation::{RelaySpaceDeletion, RelaySpaceDeletionReply};
 
 #[cfg(test)]
 use implementation::REREGISTER_INTERVAL;

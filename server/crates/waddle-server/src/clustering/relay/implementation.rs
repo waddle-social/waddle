@@ -110,6 +110,7 @@ pub(in crate::clustering::relay) enum RelayDispatchKind {
     MucAdminQuery,
     RemoteRoomRequest,
     SpaceBookmarkPublication,
+    SpaceDeletion,
     EventPlanningAccess,
 }
 
@@ -136,6 +137,7 @@ impl RelayDispatchKind {
             Self::MucAdminQuery => "muc_admin_query",
             Self::RemoteRoomRequest => "remote_room_request",
             Self::SpaceBookmarkPublication => "space_bookmark_publication",
+            Self::SpaceDeletion => "space_deletion",
             Self::EventPlanningAccess => "event_planning_access",
         }
     }
@@ -1455,6 +1457,65 @@ impl Message<RelaySpaceBookmarkPublication> for RelayActor {
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
             bridge.space_bookmark_publication_local(msg).await
+        })
+    }
+}
+
+/// Request to deliver an exact deletion attempt to one current socket binding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelaySpaceDeletion {
+    pub(crate) target:
+        crate::server::routes::websocket::local_space_deletion::LocalSpaceDeletionTarget,
+    #[serde(default)]
+    pub(crate) trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelaySpaceDeletionReply {
+    RetryBeforeStage,
+    Custody,
+    Ambiguous,
+    NoObservation,
+}
+
+impl RelaySpaceDeletionReply {
+    pub(crate) fn into_socket_outcome(
+        self,
+    ) -> Option<waddle_xmpp::registry::SpaceDeletionSocketOutcome> {
+        use waddle_xmpp::registry::SpaceDeletionSocketOutcome;
+        Some(match self {
+            Self::RetryBeforeStage => SpaceDeletionSocketOutcome::RetryBeforeStage,
+            Self::Custody => SpaceDeletionSocketOutcome::Custody,
+            Self::Ambiguous => SpaceDeletionSocketOutcome::Ambiguous,
+            Self::NoObservation => return None,
+        })
+    }
+}
+
+impl From<waddle_xmpp::registry::SpaceDeletionSocketOutcome> for RelaySpaceDeletionReply {
+    fn from(outcome: waddle_xmpp::registry::SpaceDeletionSocketOutcome) -> Self {
+        use waddle_xmpp::registry::SpaceDeletionSocketOutcome;
+        match outcome {
+            SpaceDeletionSocketOutcome::RetryBeforeStage => Self::RetryBeforeStage,
+            SpaceDeletionSocketOutcome::Custody => Self::Custody,
+            SpaceDeletionSocketOutcome::Ambiguous => Self::Ambiguous,
+        }
+    }
+}
+
+#[kameo::remote_message("waddle.clustering.relay.space_deletion.v1")]
+impl Message<RelaySpaceDeletion> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelaySpaceDeletionReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelaySpaceDeletion,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::SpaceDeletion, &msg.trace);
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.space_deletion_local(msg.target).await
         })
     }
 }
@@ -2938,6 +2999,31 @@ impl RelayHandle {
                 failure: RelaySendFailure::ReplyTimeout,
                 effect: RelaySendEffect::MaybeCommitted,
                 message: "Space bookmark publication hint deadline elapsed".to_owned(),
+            })),
+        }
+    }
+
+    pub(crate) async fn space_deletion(
+        &mut self,
+        mut request: RelaySpaceDeletion,
+    ) -> Result<RelaySpaceDeletionReply, RelayAskError> {
+        request.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = tokio::time::timeout(Duration::from_secs(15), async {
+                let target = self.resolve().await?;
+                target
+                    .ask(&request)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(Duration::from_secs(12))
+                    .await
+                    .map_err(send_error)
+            }) => result.unwrap_or_else(|_| Err(RelayAskError::Send {
+                failure: RelaySendFailure::ReplyTimeout,
+                effect: RelaySendEffect::MaybeCommitted,
+                message: "Space deletion handoff deadline elapsed".to_owned(),
             })),
         }
     }

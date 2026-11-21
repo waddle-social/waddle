@@ -195,10 +195,17 @@ impl ConnectionRegistry {
         }) {
             return Err(ProtectedSpaceEventEnqueue::InvalidPayload);
         }
+        // Presence updates take a shared entry guard, so use the exclusive
+        // guard to check both presence fields and enqueue against one value.
         let entry = self
             .connections
-            .get(jid)
-            .filter(|entry| entry.is_locally_hosted() && entry.binding_id() == owner)
+            .get_mut(jid)
+            .filter(|entry| {
+                entry.is_locally_hosted()
+                    && entry.binding_id() == owner
+                    && entry.is_presence_available()
+                    && entry.presence_priority() >= 0
+            })
             .ok_or(ProtectedSpaceEventEnqueue::Unavailable)?;
         let (completion, result) = tokio::sync::oneshot::channel();
         match entry
