@@ -19,15 +19,44 @@ def free_port():
         return reservation.getsockname()[1]
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def fixture_origin(value, scheme, hosts, require_port=False):
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme != scheme
+        or parsed.hostname not in hosts
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid federation browser fixture origin")
+    port = parsed.port
+    if port == 0 or (require_port and port is None):
+        raise ValueError("invalid federation browser fixture port")
+    host = parsed.hostname
+    origin = f"{scheme}://{host}" if port is None else f"{scheme}://{host}:{port}"
+    return origin, host, port
+
+
 def run_profile(config, service, node, room, restore):
     chat = Path(config["chat"])
-    home = config["home"]
-    home_domain = urllib.parse.urlparse(home).hostname
+    home, home_domain, _ = fixture_origin(
+        config["home"], "https", {"home-a.test", "home-b.test"}
+    )
     issuer = config["issuer"]
     issuer_cookie = config["issuer_cookie"]
     ca = config["ca"]
-    origin = config["chat_origin"]
-    origin_port = urllib.parse.urlparse(origin).port
+    origin, _, origin_port = fixture_origin(
+        config["chat_origin"], "http", {"127.0.0.1", "localhost"}, require_port=True
+    )
+    readiness = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    readiness_url = f"http://127.0.0.1:{origin_port}"
     with tempfile.TemporaryDirectory(prefix="waddle-firefox-") as profile:
         worker = subprocess.Popen(
             [
@@ -50,9 +79,9 @@ def run_profile(config, service, node, room, restore):
             stderr=subprocess.DEVNULL,
         )
         try:
-            for attempt in range(80):
+            for _ in range(80):
                 try:
-                    with urllib.request.urlopen(origin, timeout=1) as response:
+                    with readiness.open(readiness_url, timeout=1) as response:
                         assert response.status == 200
                     break
                 except OSError:

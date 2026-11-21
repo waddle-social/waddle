@@ -36,12 +36,15 @@ impl Postgres {
         owner_fixture: bool,
     ) -> Result<Self> {
         let cluster = root.join(label);
-        std::fs::create_dir_all(&cluster)?;
+        tokio::fs::create_dir_all(&cluster).await?;
         let data = cluster.join("data");
         let owner_socket = owner_fixture.then(|| cluster.join("owner-socket"));
         if let Some(socket) = &owner_socket {
-            std::fs::create_dir(socket)?;
-            std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o700))?;
+            tokio::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(socket)
+                .await?;
+            tokio::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o700)).await?;
         }
         let password = uuid::Uuid::new_v4().simple().to_string();
         let password_file = cluster.join("initdb-password");
@@ -64,7 +67,7 @@ impl Postgres {
             .arg("--pwfile")
             .arg(&password_file);
         let result = process::run("initdb", initdb, Duration::from_secs(120)).await;
-        std::fs::remove_file(&password_file)?;
+        tokio::fs::remove_file(&password_file).await?;
         result?;
         let mut postgres = Self {
             label: label.to_owned(),

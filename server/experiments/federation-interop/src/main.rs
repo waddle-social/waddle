@@ -150,7 +150,7 @@ async fn run_all(harness: &mut Harness, log: &mut EvidenceLog, filter: &Filter, 
 async fn remove_work_dir(root: &Path) {
     let mut last = None;
     for _ in 0..10 {
-        match std::fs::remove_dir_all(root) {
+        match tokio::fs::remove_dir_all(root).await {
             Ok(()) => return,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
             Err(error) => last = Some(error),

@@ -212,16 +212,17 @@ impl Prosody {
 
     /// Write the configuration, register the accounts and start.
     pub async fn start(&mut self, variant: &Variant) -> Result<()> {
-        std::fs::create_dir_all(self.root.join("data"))?;
+        tokio::fs::create_dir_all(self.root.join("data")).await?;
         if variant.certificate_less_outbound.is_some() {
             let modules = self.root.join("fixture-modules");
-            std::fs::create_dir_all(&modules)?;
-            std::fs::write(
+            tokio::fs::create_dir_all(&modules).await?;
+            tokio::fs::write(
                 modules.join("mod_fixture_no_client_certificate.lua"),
                 include_str!("mod_fixture_no_client_certificate.lua"),
-            )?;
+            )
+            .await?;
         }
-        std::fs::write(&self.config, self.render(variant))?;
+        tokio::fs::write(&self.config, self.render(variant)).await?;
         for host in [PROSODY, PROSODY_INSECURE] {
             for (account, password) in &self.passwords {
                 self.set_account(host, account, Some(password)).await?;

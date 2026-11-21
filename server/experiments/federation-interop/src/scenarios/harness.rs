@@ -131,7 +131,7 @@ impl Harness {
         enrolled_space_fixture: bool,
     ) -> Result<Self> {
         let logs = root.join("logs");
-        std::fs::create_dir_all(&logs)?;
+        tokio::fs::create_dir_all(&logs).await?;
         let pki = Arc::new(Pki::generate(&root.join("pki"))?);
         let mut leaves = BTreeMap::new();
         for domain in leaf_domains() {
@@ -302,7 +302,7 @@ impl Harness {
                 })
                 .collect();
             let upload_dir = root.join([home.label(), "-uploads"].concat());
-            std::fs::create_dir_all(&upload_dir)?;
+            tokio::fs::create_dir_all(&upload_dir).await?;
             let spec = Spec {
                 home,
                 binary: bins.waddle.clone(),
