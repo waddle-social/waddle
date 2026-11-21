@@ -1486,7 +1486,7 @@ async fn verify_table_connection(
          AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND c.reloftype = 0 \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class = c.oid) \
-         AND (c.relname = 'pubsub_items' OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)) \
+         AND (c.relname IN ('pubsub_nodes', 'pubsub_items') OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint fk \
            LEFT JOIN pg_catalog.pg_class child ON child.oid = fk.conrelid \
            WHERE fk.contype = 'f' AND fk.confrelid = c.oid AND NOT \
