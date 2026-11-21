@@ -97,6 +97,16 @@ pub enum ClientEvent {
         /// Identifier used for stanza correlation.
         stanza_id: StanzaId,
     },
+    /// Verified RFC 6121 §2.1.6 roster push (`<iq type='set'><query xmlns='jabber:iq:roster'/></iq>`).
+    ///
+    /// Only emitted when the inbound IQ has no `from` attribute or `from` matches the
+    /// account's own bare JID. Forged pushes are dropped before reaching this event.
+    RosterPush {
+        /// Optional XEP-0237 roster version token carried on `<query ver='...'/>`.
+        version: Option<String>,
+        /// Roster items added, updated, or marked `subscription="remove"`.
+        items: Vec<waddle_xmpp_core::roster::RosterItem>,
+    },
     /// Post-bootstrap stanza that no built-in handler claimed.
     UnhandledStanza(Element),
 }

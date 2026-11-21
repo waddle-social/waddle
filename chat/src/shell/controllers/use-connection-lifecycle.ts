@@ -146,6 +146,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
   }
 
   function runSessionBootstrap(client: BrowserXmppClient, lifecycle: "fresh" | "resumed") {
+    void rosterContacts.loadRosterContacts();
     hydrateInboxWithRetry(() => dmConversations.hydrateFromInbox());
     hydrateInboxWithRetry(() => channelUnread.hydrateFromInbox());
     void socialFeed.refresh();
@@ -235,6 +236,9 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       dmConversations.onInboxPush(entry);
       channelUnread.onInboxPush(entry);
     });
+    if (typeof rosterContacts.applyRosterPush === "function") {
+      client.setRosterPushHandler?.(rosterContacts.applyRosterPush);
+    }
     // #1180: the fresh lifecycle event's coverage made the composables
     // skip their MAM reload; a covered-but-failed catch-up hands the
     // reload back to them here, after the failed attempt.
@@ -305,7 +309,11 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     const requestId = routeSync.beginRouteRequest();
     isApplyingRoute.value = true;
     try {
-      await refreshExtensionRoutes();
+      if (match.id === "channelExtension") {
+        await refreshExtensionRoutes();
+      } else {
+        void refreshExtensionRoutes();
+      }
       if (routeSync.isCurrentRouteRequest(requestId)) {
         await routeSync.applyRouteTarget(match, requestId);
       }
@@ -389,8 +397,10 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
         if (channelRouteTargetMissing(match)) {
           pendingChannelRouteMatch = match;
           preserveCurrentUrl = true;
-        } else {
+        } else if (match.id === "channelExtension") {
           await refreshExtensionRoutes();
+        } else {
+          void refreshExtensionRoutes();
         }
       }
       if (!preserveCurrentUrl && routeSync.isCurrentRouteRequest(requestId)) {
@@ -406,12 +416,9 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       }
     }
 
-    // #754: inbox/feed/stories/events/notify-settings hydrates are NOT
-    // fired here — the fresh session-lifecycle event of the first XMPP
-    // connection runs them exactly once via runSessionBootstrap (the
-    // client is registered in the store before it lazily connects, so
-    // that event cannot be missed).
-    void rosterContacts.loadRosterContacts();
+    // #754: roster/inbox/feed/stories/events/notify-settings hydrates
+    // fire from `runSessionBootstrap` on the session-lifecycle event
+    // instead of waiting for structure discovery here.
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {
@@ -428,7 +435,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     dmMessaging.disconnect();
     waddles.clearData();
     channelUnread.clearAll();
-    rosterContacts.clearRosterContacts();
+    rosterContacts.clearRosterContacts({ clearPersistedCache: true });
     extensionRoutes.value = [];
     selectedChannelRoomJids.value = {};
     activeExtensionRouteKey.value = null;

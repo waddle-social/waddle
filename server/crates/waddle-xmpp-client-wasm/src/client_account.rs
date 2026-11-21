@@ -20,10 +20,11 @@ use super::{
     WaddleClientInner, WaddleDmBookmarkItem, WaddleFetchInboxOptions, WaddleFetchThreadsOptions,
     WaddleInboxMarkRead, WaddleMoodOpts, WaddleMoodResult, WaddlePepProfile,
     WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomMember, WaddleRosterContact,
-    WaddleServerVersion, WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
-    WaddleThreadCallAnchor, WaddleThreadCallEnded, WaddleThreadEntry, WaddleThreadSort,
-    WaddleThreadStatusFilter, WaddleThreadsPage, WaddleTuneOpts, WaddleTuneResult, WaddleVCard4,
-    WaddleVapidAdvertisement, NS_CLIENT, NS_MUC_ADMIN, NS_ROSTER, NS_VERSION,
+    WaddleRosterVersionedResult, WaddleServerVersion, WaddleSetDmNotificationModeOutcome,
+    WaddleSetRoomNotificationModeOutcome, WaddleThreadCallAnchor, WaddleThreadCallEnded,
+    WaddleThreadEntry, WaddleThreadSort, WaddleThreadStatusFilter, WaddleThreadsPage,
+    WaddleTuneOpts, WaddleTuneResult, WaddleVCard4, WaddleVapidAdvertisement, NS_CLIENT,
+    NS_MUC_ADMIN, NS_ROSTER, NS_VERSION,
 };
 use crate::state::InboxPage;
 
@@ -659,6 +660,44 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to the account's roster contacts using XEP-0237 roster versioning.
+    ///
+    /// Pass `ver` from a previously cached roster fetch (or `None` / `""` to opt in
+    /// without a cached version). When the server replies with an empty IQ result
+    /// (`unchanged: true`), callers should keep their cached contacts and version.
+    pub fn list_roster_contacts_versioned(&self, ver: Option<String>) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let requested_ver = ver.as_deref().unwrap_or("");
+            let result =
+                send_iq_command(inner, build_roster_get_iq(None, Some(requested_ver))).await?;
+            if result.get_child("query", NS_ROSTER).is_none() {
+                return to_js_value(&WaddleRosterVersionedResult {
+                    unchanged: true,
+                    ver,
+                    contacts: Vec::new(),
+                });
+            }
+            let roster = parse_roster_result(&result)
+                .ok_or_else(|| js_error("could not parse roster result"))?;
+            let contacts = roster
+                .items
+                .into_iter()
+                .map(|item| WaddleRosterContact {
+                    jid: item.jid.to_string(),
+                    name: item.name,
+                    subscription: Some(item.subscription.to_string()),
+                    groups: item.groups,
+                })
+                .collect::<Vec<_>>();
+            to_js_value(&WaddleRosterVersionedResult {
+                unchanged: false,
+                ver: roster.ver,
+                contacts,
+            })
+        })
+    }
+
     /// Publish a `WaddleMoodOpts` object to the account's mood PEP node; rejects invalid
     /// input or a failed publish.
     pub fn publish_mood(&self, mood_json: JsValue) -> Promise {
@@ -807,57 +846,59 @@ impl WaddleClient {
     pub fn fetch_user_pep_profile(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let mood = send_iq_command(
+            let mood_fut = send_iq_command(
                 inner.clone(),
                 build_pep_items_iq(
                     &uuid::Uuid::new_v4().to_string(),
                     &jid,
                     waddle_xmpp_client::pep::NS_MOOD,
                 ),
-            )
-            .await
-            .ok()
-            .and_then(|result| parse_pep_mood(&result))
-            .map(|mood| WaddleMoodResult {
-                kind: mood.mood,
-                text: mood.text,
-            });
-            let activity = send_iq_command(
+            );
+            let activity_fut = send_iq_command(
                 inner.clone(),
                 build_pep_items_iq(
                     &uuid::Uuid::new_v4().to_string(),
                     &jid,
                     waddle_xmpp_client::pep::NS_ACTIVITY,
                 ),
-            )
-            .await
-            .ok()
-            .and_then(|result| parse_pep_activity(&result))
-            .map(|activity| WaddleActivityResult {
-                general: activity.activity,
-                specific: activity.specific,
-                text: activity.text,
-            });
-            let tune = send_iq_command(
+            );
+            let tune_fut = send_iq_command(
                 inner,
                 build_pep_items_iq(
                     &uuid::Uuid::new_v4().to_string(),
                     &jid,
                     waddle_xmpp_client::pep::NS_TUNE,
                 ),
-            )
-            .await
-            .ok()
-            .and_then(|result| parse_pep_tune(&result))
-            .map(|tune| WaddleTuneResult {
-                artist: tune.artist,
-                title: tune.title,
-                source: tune.source,
-                length: tune.length,
-                rating: tune.rating,
-                track: tune.track,
-                uri: tune.uri,
-            });
+            );
+            let (mood_res, activity_res, tune_res) =
+                futures::join!(mood_fut, activity_fut, tune_fut);
+            let mood = mood_res
+                .ok()
+                .and_then(|result| parse_pep_mood(&result))
+                .map(|mood| WaddleMoodResult {
+                    kind: mood.mood,
+                    text: mood.text,
+                });
+            let activity = activity_res
+                .ok()
+                .and_then(|result| parse_pep_activity(&result))
+                .map(|activity| WaddleActivityResult {
+                    general: activity.activity,
+                    specific: activity.specific,
+                    text: activity.text,
+                });
+            let tune = tune_res
+                .ok()
+                .and_then(|result| parse_pep_tune(&result))
+                .map(|tune| WaddleTuneResult {
+                    artist: tune.artist,
+                    title: tune.title,
+                    source: tune.source,
+                    length: tune.length,
+                    rating: tune.rating,
+                    track: tune.track,
+                    uri: tune.uri,
+                });
             let profile = WaddlePepProfile {
                 mood,
                 activity,

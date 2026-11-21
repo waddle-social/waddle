@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -97,21 +99,27 @@ class MembersViewModel(
     /** Refused/failed member actions, for the screen's snackbar. */
     val actionFailures: SharedFlow<RoomAdminResult> = _actionFailures
 
+    private val normalizedRoomJid = normalizedBareJid(roomJid)
+
     val uiState: StateFlow<MembersUiState> = combine(
-        sessionManager.roomMembersStore.rooms,
-        sessionManager.presenceStore.occupants,
+        sessionManager.roomMembersStore.rooms
+            .map { rooms -> rooms[roomJid] ?: RoomMembersState() }
+            .distinctUntilChanged(),
+        sessionManager.presenceStore.occupants
+            .map { occupants -> occupants[roomJid].orEmpty() }
+            .distinctUntilChanged(),
         search,
-        sessionManager.callStore.mucCallPresence.participants,
+        sessionManager.callStore.mucCallPresence.participants
+            .map { huddles -> huddles[normalizedRoomJid].orEmpty() }
+            .distinctUntilChanged(),
         sessionManager.peopleDirectory,
-    ) { rooms, occupants, searchState, huddles, directory ->
-        val members = rooms[roomJid] ?: RoomMembersState()
-        val roomOccupants = occupants[roomJid].orEmpty()
+    ) { members, roomOccupants, searchState, huddleNicks, directory ->
         MembersUiState(
             status = members.status,
             rows = memberRowsOf(
                 members = members,
                 occupants = roomOccupants,
-                huddleNicks = huddles[normalizedBareJid(roomJid)].orEmpty(),
+                huddleNicks = huddleNicks,
                 knownShows = directory.people.associate { it.bareJid to it.show },
             ),
             bots = botRowsOf(members.bots),

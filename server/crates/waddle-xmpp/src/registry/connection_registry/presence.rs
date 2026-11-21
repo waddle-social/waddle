@@ -37,21 +37,37 @@ impl ConnectionRegistry {
         available: bool,
         priority: i8,
     ) -> bool {
-        let Some(entry) = self.connections.get(jid) else {
-            return false;
-        };
+        self.update_presence_if_owner_transition(jid, owner, available, priority)
+            .is_some()
+    }
+
+    /// Owner-gated presence availability write returning `Some(was_available)`
+    /// on success, or `None` when the registry slot is absent or superseded.
+    ///
+    /// Uses an atomic swap on `presence_available` under the entry guard so
+    /// callers can distinguish the initial transition from unavailable to
+    /// available (RFC 6121 §4.3.1) from subsequent presence updates or a
+    /// XEP-0198 resumed session whose availability was already restored.
+    pub fn update_presence_if_owner_transition(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+        available: bool,
+        priority: i8,
+    ) -> Option<bool> {
+        let entry = self.connections.get(jid)?;
         if entry.value().binding_id() != *owner {
-            return false;
+            return None;
         }
-        entry
+        let was_available = entry
             .value()
             .presence_available
-            .store(available, Ordering::Relaxed);
+            .swap(available, Ordering::AcqRel);
         entry
             .value()
             .presence_priority
             .store(priority, Ordering::Relaxed);
-        true
+        Some(was_available)
     }
 
     /// Owner-gated [`Self::update_presence_state`]: writes the JID-keyed

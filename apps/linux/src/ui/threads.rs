@@ -10,6 +10,14 @@ use crate::threads::Thread;
 
 impl WaddleWindow {
     pub(super) fn update_inbox(&self, entry: &waddle_xmpp_client_ffi::WaddleInboxEntry) {
+        self.apply_inbox_entry(entry, false);
+    }
+
+    pub(super) fn apply_inbox_entry(
+        &self,
+        entry: &waddle_xmpp_client_ffi::WaddleInboxEntry,
+        from_snapshot: bool,
+    ) {
         if entry.kind == "direct" {
             self.ensure_direct(&entry.partner);
         }
@@ -35,10 +43,19 @@ impl WaddleWindow {
             None => base,
         };
         let key = destination.key();
-        self.imp()
-            .unread
-            .borrow_mut()
-            .insert(key.clone(), entry.unread);
+        let imp = self.imp();
+        if from_snapshot {
+            if imp.live_unread_keys.borrow().contains(&key) {
+                return;
+            }
+            imp.unread.borrow_mut().insert(key.clone(), entry.unread);
+            if self.is_reading(&key) {
+                self.read_current();
+            }
+            return;
+        }
+        imp.live_unread_keys.borrow_mut().insert(key.clone());
+        imp.unread.borrow_mut().insert(key.clone(), entry.unread);
         self.render_conversations();
         if self.is_reading(&key) {
             self.read_current();

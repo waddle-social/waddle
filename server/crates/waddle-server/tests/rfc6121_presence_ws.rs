@@ -106,6 +106,20 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
     bob.send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("bob is available for presence broadcasts");
+    // RFC 6121 §4.3.1: Bob's initial available presence triggers a server-side
+    // probe for subscribed contacts, delivering Alice's current presence to Bob.
+    let alice_initial = bob
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains("from='alice@localhost/")
+                && !frame.contains("type='unavailable'")
+        })
+        .await
+        .expect("bob receives alice initial presence from §4.3.1 probe");
+    assert!(
+        alice_initial.contains("from='alice@localhost/"),
+        "expected alice full-JID initial presence: {alice_initial}"
+    );
     await_frames_handled(bob, "bob-available-handled").await;
 }
 
@@ -795,4 +809,192 @@ async fn websocket_probe_returns_xep0319_idle_for_live_and_detached_resource() {
     );
 
     let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn websocket_initial_presence_probes_subscribed_contacts_and_siblings() {
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut alice_a = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-a",
+    )
+    .await
+    .expect("alice-a");
+    let mut bob_1 =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &bob_password, "bob-1")
+            .await
+            .expect("bob-1");
+
+    establish_subscription_to_alice(&mut alice_a, &mut bob_1).await;
+
+    // Alice announces rich presence on alice-a and connects a second resource alice-b.
+    alice_a
+        .send(r#"<presence xmlns="jabber:client"><show>away</show><status>on desk</status></presence>"#)
+        .await
+        .expect("alice-a rich presence");
+    bob_1
+        .recv_matching(|frame| frame.contains("on desk"))
+        .await
+        .expect("bob-1 sees alice-a away");
+
+    let mut alice_b = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-b",
+    )
+    .await
+    .expect("alice-b");
+    alice_b
+        .send(r#"<presence xmlns="jabber:client"><show>chat</show><status>mobile</status></presence>"#)
+        .await
+        .expect("alice-b initial presence");
+
+    // RFC 6121 §4.2.2: alice-b's initial available presence receives sibling alice-a's presence.
+    let sibling_on_b = alice_b
+        .recv_matching(|frame| frame.contains("from='alice@localhost/alice-a'"))
+        .await
+        .expect("alice-b receives sibling alice-a presence");
+    assert!(
+        sibling_on_b.contains("on desk"),
+        "expected alice-a rich presence on sibling alice-b: {sibling_on_b}"
+    );
+    bob_1
+        .recv_matching(|frame| frame.contains("from='alice@localhost/alice-b'"))
+        .await
+        .expect("bob-1 sees alice-b broadcast");
+
+    // Now Bob connects a second resource bob-2 and sends initial <presence/>.
+    // RFC 6121 §4.3.1: bob-2 MUST receive both alice-a and alice-b plus sibling bob-1,
+    // and alice's probe responses MUST NOT be duplicated to bob-1.
+    let mut bob_2 =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &bob_password, "bob-2")
+            .await
+            .expect("bob-2");
+    bob_2
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob-2 initial presence");
+
+    let mut saw_alice_a = false;
+    let mut saw_alice_b = false;
+    let mut saw_bob_1 = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !(saw_alice_a && saw_alice_b && saw_bob_1) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for initial probe responses on bob-2: alice_a={saw_alice_a} alice_b={saw_alice_b} bob_1={saw_bob_1}"
+        );
+        let frame = bob_2.recv_timeout(remaining).await.expect("frame on bob-2");
+        if frame.contains("from='alice@localhost/alice-a'") && frame.contains("on desk") {
+            saw_alice_a = true;
+        } else if frame.contains("from='alice@localhost/alice-b'") && frame.contains("mobile") {
+            saw_alice_b = true;
+        } else if frame.contains("from='bob@localhost/bob-1'") {
+            saw_bob_1 = true;
+        }
+    }
+
+    // Sibling bob-1 must NOT receive alice's probe responses addressed to bob-2.
+    assert_no_frame_matching(
+        &mut bob_1,
+        Duration::from_millis(250),
+        |frame| frame.contains("from='alice@localhost/"),
+        "bob-1 must not receive probe responses triggered by bob-2",
+    )
+    .await;
+
+    // A subsequent show update on bob-2 is NOT an initial availability transition,
+    // so it must NOT re-probe alice's resources.
+    bob_2
+        .send(r#"<presence xmlns="jabber:client"><show>dnd</show></presence>"#)
+        .await
+        .expect("bob-2 show update");
+    await_frames_handled(&mut bob_2, "bob-2-dnd-handled").await;
+    assert_no_frame_matching(
+        &mut bob_2,
+        Duration::from_millis(250),
+        |frame| frame.contains("from='alice@localhost/"),
+        "subsequent presence update must not re-probe contacts",
+    )
+    .await;
+
+    let _ = bob_2.close().await;
+    let _ = bob_1.close().await;
+    let _ = alice_b.close().await;
+    let _ = alice_a.close().await;
+}
+
+#[tokio::test]
+async fn websocket_initial_presence_probe_respects_xep0191_blocklist() {
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-main",
+    )
+    .await
+    .expect("alice");
+    let mut bob_1 =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &bob_password, "bob-1")
+            .await
+            .expect("bob-1");
+
+    establish_subscription_to_alice(&mut alice, &mut bob_1).await;
+
+    // Alice blocks Bob via XEP-0191.
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="set" id="block-bob-1"><block xmlns="urn:xmpp:blocking"><item jid="bob@localhost"/></block></iq>"#)
+        .await
+        .expect("alice blocks bob");
+    let block_res = alice
+        .recv_matching(|frame| frame.contains("id='block-bob-1'"))
+        .await
+        .expect("block result");
+    assert!(
+        block_res.contains("type='result'"),
+        "expected block iq result: {block_res}"
+    );
+
+    // Bob connects a fresh resource and sends initial <presence/>; Alice's presence
+    // must NOT be leaked by the §4.3.1 initial probe.
+    let mut bob_2 =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &bob_password, "bob-2")
+            .await
+            .expect("bob-2");
+    bob_2
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob-2 initial presence");
+    await_frames_handled(&mut bob_2, "bob-2-blocked-handled").await;
+    assert_no_frame_matching(
+        &mut bob_2,
+        Duration::from_millis(300),
+        |frame| frame.contains("from='alice@localhost/"),
+        "initial presence probe must not leak presence of a user who blocked the sender",
+    )
+    .await;
+
+    let _ = bob_2.close().await;
+    let _ = bob_1.close().await;
+    let _ = alice.close().await;
 }

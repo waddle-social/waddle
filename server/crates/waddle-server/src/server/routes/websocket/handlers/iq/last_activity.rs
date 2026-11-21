@@ -1,8 +1,7 @@
 use super::{
     build_iq_error_xml_typed, build_last_activity_response, chrono, forbidden_iq_error,
     internal_server_error_iq_error, iq_to_xml, local_account_exists, not_authorized_iq_error,
-    service_unavailable_iq_error, warn, DatabaseBlockingStorage, FullJid, GetDatabase, Jid,
-    WebSocketState,
+    service_unavailable_iq_error, warn, FullJid, Jid, WebSocketState,
 };
 
 pub(super) async fn handle_last_activity_iq(
@@ -51,27 +50,7 @@ pub(super) async fn handle_last_activity_iq(
     if target.node().is_some() && target.resource().is_none() && target.domain().as_str() == domain
     {
         let target_bare = target.to_bare();
-        let global_db = match state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .clone()
-            .ask(GetDatabase)
-            .await
-        {
-            Ok(db) => db,
-            Err(error) => {
-                warn!(error = %error, "Failed to access database for last-activity block check");
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            }
-        };
-        let blocking_storage = DatabaseBlockingStorage::new(global_db);
+        let blocking_storage = state.deps.app_state.db_pool.blocking_storage();
         match blocking_storage
             .is_blocked_jid(&target_bare, &Jid::from(sender_jid.clone()))
             .await

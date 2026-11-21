@@ -1,7 +1,7 @@
 use super::{
     build_roster_push, build_roster_result, build_roster_result_empty, build_subscription_presence,
-    build_xmpp_error_response, chrono, global_database, iq_to_xml, local_account_jid_exists,
-    mark_span_error, parse_roster_get, parse_roster_set, warn, AskType, BareJid, BroadcastOutcome,
+    build_xmpp_error_response, chrono, iq_to_xml, local_account_jid_exists, mark_span_error,
+    parse_roster_get, parse_roster_set, warn, AskType, BareJid, BroadcastOutcome,
     DatabaseRosterStorage, FullJid, RosterItem, RosterItemRow, RosterRowChange,
     RosterRowMutationKind, RosterSetResult, RosterStorageError, RosterVersion, Stanza,
     Subscription, SubscriptionStateMachine, SubscriptionType, WebSocketState, XmppError,

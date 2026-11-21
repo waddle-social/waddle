@@ -191,17 +191,20 @@ pub(crate) async fn try_handle_muc_presence_update(
         return None;
     }
 
-    let actor = get_room_actor(state, room_jid).await?;
     let muji = extract_muji(incoming);
     // XEP-0045 join/rejoin presence carries `<x xmlns='.../muc'/>`.
     // On stream resume the client may replay that autojoin while the
     // room actor still has the full JID as an occupant. Treating that
     // as a Muji clear would suppress the join replay that refreshes
     // active-call state; XEP-0272 leave markers are plain available
-    // presence without this MUC join payload.
+    // presence without this MUC join payload. Check this BEFORE asking
+    // the room registry for the room actor so every normal join avoids
+    // an unnecessary registry round-trip.
     if muji.is_none() && is_muc_join_presence(incoming) {
         return None;
     }
+
+    let actor = get_room_actor(state, room_jid).await?;
 
     // XEP-0045 §7.6 (#1252): resolve the sender's authoritative nick
     // BEFORE any state mutation. An in-room presence addressed to

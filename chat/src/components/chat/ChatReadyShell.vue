@@ -277,7 +277,9 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   spaces: waddles.sortedSpaces.value,
   channels: waddles.sortedChannels.value,
   contacts: rosterContacts.contacts.value,
-  isLoading: waddles.isLoadingStructure.value || rosterContacts.isLoadingContacts.value,
+  isLoading:
+    waddles.isLoadingStructure.value
+    || (rosterContacts.isLoadingContacts.value && rosterContacts.contacts.value.length === 0),
   channelUnreadMap: computedChannelUnreadMap.value,
   mentionedRoomJids: messaging.mentionedChannelCounts.value,
   activeChannelJids: messaging.activeChannels.value,

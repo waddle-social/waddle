@@ -276,6 +276,12 @@ const DURABLE: Profile = Profile {
             definition: "USING btree (full_jid)",
         },
         Index {
+            table: "sm_durable_sessions",
+            name: "idx_sm_durable_sessions_bare_state",
+            unique: false,
+            definition: "USING btree (bare_jid, state)",
+        },
+        Index {
             table: "sm_durable_operations",
             name: "idx_sm_durable_operations_session",
             unique: false,

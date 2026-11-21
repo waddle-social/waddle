@@ -32,6 +32,14 @@ use super::messages::{
 };
 use crate::account_bindings::AccountBindingStore;
 
+struct ActorsTable {
+    actors: HashMap<BareJid, ActorRef<AccountCoordinatorActor>>,
+    /// Monotonic epoch bumped whenever `adopt_account` invalidates an entry,
+    /// preventing a stale pre-adoption claim lookup from inserting an outdated
+    /// coordinator after adoption begins.
+    adopt_epoch: u64,
+}
+
 /// The account coordinators of this node.
 ///
 /// A coordinator is created for an account the first time the account is
@@ -51,7 +59,7 @@ pub struct AccountCoordinators {
     liveness: Arc<dyn ConnectionLiveness>,
     config: AccountCoordinatorConfig,
     mirror_holds: Arc<MirrorClaimHolds>,
-    actors: Mutex<HashMap<BareJid, ActorRef<AccountCoordinatorActor>>>,
+    actors: Mutex<ActorsTable>,
 }
 
 /// Send one message to an account's coordinator. A coordinator that
@@ -107,7 +115,10 @@ impl AccountCoordinators {
             liveness,
             config,
             mirror_holds: Arc::default(),
-            actors: Mutex::new(HashMap::new()),
+            actors: Mutex::new(ActorsTable {
+                actors: HashMap::new(),
+                adopt_epoch: 0,
+            }),
         }
     }
 
@@ -137,37 +148,50 @@ impl AccountCoordinators {
         account: &BareJid,
         need: ClaimNeed,
     ) -> Result<ActorRef<AccountCoordinatorActor>, AccountCoordinatorError> {
-        let mut actors = self.actors.lock().await;
-        if let Some(actor) = actors.get(account).filter(|actor| actor.is_alive()) {
-            return Ok(actor.clone());
+        loop {
+            let observed_epoch = {
+                let table = self.actors.lock().await;
+                if let Some(actor) = table.actors.get(account).filter(|actor| actor.is_alive()) {
+                    return Ok(actor.clone());
+                }
+                table.adopt_epoch
+            };
+            let claim_identity = match need {
+                ClaimNeed::Existing => self.claims.current_claim(account).await?,
+                ClaimNeed::Taken => self.claims.acquire_claim(account).await?,
+            };
+            let mut table = self.actors.lock().await;
+            if let Some(actor) = table.actors.get(account).filter(|actor| actor.is_alive()) {
+                return Ok(actor.clone());
+            }
+            if table.adopt_epoch != observed_epoch {
+                continue;
+            }
+            let actor = AccountCoordinatorActor::spawn_with_mailbox(
+                AccountCoordinatorActor::new(
+                    claim_identity,
+                    Arc::clone(&self.store),
+                    Arc::clone(&self.claims),
+                    Arc::clone(&self.liveness),
+                    self.config,
+                ),
+                mailbox::bounded(self.config.mailbox_capacity),
+            );
+            table.actors.insert(account.clone(), actor.clone());
+            return Ok(actor);
         }
-        let claim_identity = match need {
-            ClaimNeed::Existing => self.claims.current_claim(account).await?,
-            ClaimNeed::Taken => self.claims.acquire_claim(account).await?,
-        };
-        let actor = AccountCoordinatorActor::spawn_with_mailbox(
-            AccountCoordinatorActor::new(
-                claim_identity,
-                Arc::clone(&self.store),
-                Arc::clone(&self.claims),
-                Arc::clone(&self.liveness),
-                self.config,
-            ),
-            mailbox::bounded(self.config.mailbox_capacity),
-        );
-        actors.insert(account.clone(), actor.clone());
-        Ok(actor)
     }
 
     /// Drop the directory's entry for a coordinator that stopped, unless a
     /// newer coordinator already took its place.
     async fn forget(&self, account: &BareJid, stopped: &ActorRef<AccountCoordinatorActor>) {
-        let mut actors = self.actors.lock().await;
-        if actors
+        let mut table = self.actors.lock().await;
+        if table
+            .actors
             .get(account)
             .is_some_and(|actor| actor.id() == stopped.id())
         {
-            actors.remove(account);
+            table.actors.remove(account);
         }
     }
 
@@ -310,8 +334,12 @@ impl AccountCoordinators {
         &self,
         account: &BareJid,
     ) -> Result<AdoptionReport, AccountCoordinatorError> {
-        if let Some(previous) = self.actors.lock().await.remove(account) {
-            previous.kill();
+        {
+            let mut table = self.actors.lock().await;
+            table.adopt_epoch = table.adopt_epoch.wrapping_add(1);
+            if let Some(previous) = table.actors.remove(account) {
+                previous.kill();
+            }
         }
         ask!(self, account, ClaimNeed::Existing, Adopt)
     }
@@ -323,6 +351,7 @@ impl AccountCoordinators {
             .actors
             .lock()
             .await
+            .actors
             .iter()
             .map(|(account, actor)| (account.clone(), actor.clone()))
             .collect();
@@ -348,7 +377,7 @@ impl AccountCoordinators {
 
     /// How many coordinators this node currently runs.
     pub async fn loaded_accounts(&self) -> usize {
-        self.actors.lock().await.len()
+        self.actors.lock().await.actors.len()
     }
 }
 

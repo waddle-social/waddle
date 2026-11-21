@@ -1,10 +1,9 @@
 use super::roster::roster_storage_for_state;
 use super::{
-    bad_request_iq_error, build_iq_error_xml_typed, chrono, global_database,
-    internal_server_error_iq_error, iq_to_xml, mark_span_error, not_authorized_iq_error,
-    send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
-    service_unavailable_iq_error, warn, BareJid, DatabaseBlockingStorage, FullJid, HashSet,
-    IqConnState, Jid, Stanza, WebSocketState,
+    bad_request_iq_error, build_iq_error_xml_typed, chrono, internal_server_error_iq_error,
+    iq_to_xml, mark_span_error, not_authorized_iq_error, send_current_presence_from_user_to_jid,
+    send_unavailable_presence_from_user_to_jid, service_unavailable_iq_error, warn, BareJid,
+    FullJid, HashSet, IqConnState, Jid, Stanza, WebSocketState,
 };
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceStateUpdate;
@@ -26,20 +25,7 @@ pub(super) async fn handle_blocking_iq(
         )];
     };
     let user_bare = sender_jid.to_bare();
-    let db = match global_database(state).await {
-        Ok(db) => db,
-        Err(error) => {
-            mark_span_error("failed to access database for blocking IQ");
-            warn!(error = %error, "Failed to access database for blocking IQ");
-            return vec![build_iq_error_xml_typed(
-                iq.id(),
-                response_from,
-                response_to,
-                internal_server_error_iq_error("Internal server error."),
-            )];
-        }
-    };
-    let storage = DatabaseBlockingStorage::new(db);
+    let storage = state.deps.app_state.db_pool.blocking_storage();
     let request = match waddle_xmpp::xep::xep0191::parse_blocking_request(iq) {
         Ok(request) => request,
         Err(error) => {

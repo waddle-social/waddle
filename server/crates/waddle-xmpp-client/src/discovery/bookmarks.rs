@@ -54,7 +54,7 @@ pub(super) async fn merge_bookmarks_into_channels<D: CommandDriver>(
     bookmarks: Vec<BookmarkItem>,
     standalone_space_id: &SpaceNode,
 ) -> usize {
-    let mut appended = 0usize;
+    let mut bookmark_only: Vec<BookmarkItem> = Vec::new();
     for bookmark in bookmarks {
         if let Some(channel) = channels
             .iter_mut()
@@ -63,9 +63,25 @@ pub(super) async fn merge_bookmarks_into_channels<D: CommandDriver>(
             stamp_bookmark(channel, &bookmark);
             continue;
         }
-        let info = match discover_room_info(driver, &bookmark.jid).await {
-            Some(info) => info,
-            None => continue,
+        if let Some(existing) = bookmark_only
+            .iter_mut()
+            .find(|existing| existing.jid == bookmark.jid)
+        {
+            *existing = bookmark;
+        } else {
+            bookmark_only.push(bookmark);
+        }
+    }
+
+    if bookmark_only.is_empty() {
+        return 0;
+    }
+
+    let hydrated = hydrate_bookmark_only_rooms(driver, bookmark_only).await;
+    let mut appended = 0usize;
+    for (bookmark, info) in hydrated {
+        let Some(info) = info else {
+            continue;
         };
         if let Some(channel) =
             bookmark_only_channel(&bookmark, &info, standalone_space_id, channels.len() as i32)
@@ -75,6 +91,38 @@ pub(super) async fn merge_bookmarks_into_channels<D: CommandDriver>(
         }
     }
     appended
+}
+
+#[cfg(any(feature = "native", feature = "wasm"))]
+async fn hydrate_bookmark_only_rooms<D: CommandDriver>(
+    driver: &D,
+    bookmarks: Vec<BookmarkItem>,
+) -> Vec<(BookmarkItem, Option<super::types::DiscoInfoResult>)> {
+    use futures::stream::{self, StreamExt};
+
+    const BOOKMARK_DISCO_CONCURRENCY: usize = 8;
+
+    stream::iter(bookmarks)
+        .map(|bookmark| async move {
+            let info = discover_room_info(driver, &bookmark.jid).await;
+            (bookmark, info)
+        })
+        .buffered(BOOKMARK_DISCO_CONCURRENCY)
+        .collect()
+        .await
+}
+
+#[cfg(not(any(feature = "native", feature = "wasm")))]
+async fn hydrate_bookmark_only_rooms<D: CommandDriver>(
+    driver: &D,
+    bookmarks: Vec<BookmarkItem>,
+) -> Vec<(BookmarkItem, Option<super::types::DiscoInfoResult>)> {
+    let mut hydrated = Vec::with_capacity(bookmarks.len());
+    for bookmark in bookmarks {
+        let info = discover_room_info(driver, &bookmark.jid).await;
+        hydrated.push((bookmark, info));
+    }
+    hydrated
 }
 
 /// Stamp a bookmark's autojoin/name onto a catalog channel.

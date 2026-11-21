@@ -337,3 +337,44 @@ async fn xep0237_startup_prune_of_non_account_contacts_invalidates_the_version()
 
     let _ = alice.close().await;
 }
+
+#[tokio::test]
+async fn xep0237_matching_ver_fast_path_still_marks_resource_roster_interested() {
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&accounts(&alice_password));
+
+    let mut r1 = connect_named(&server, "alice", &alice_password, "r1").await;
+    let _ = roster_set_add(&mut r1, "xep237-fast-seed", "bob@localhost", "Bob").await;
+    let initial = roster_get(&mut r1, "xep237-fast-initial", None).await;
+    let current_ver = roster_version(&initial);
+
+    // Connect a second resource r2 that presents the current ver immediately;
+    // the server must take the empty-result fast path AND still mark r2 as
+    // roster-interested so subsequent mutations push to r2.
+    let mut r2 = connect_named(&server, "alice", &alice_password, "r2").await;
+    let unchanged = roster_get(&mut r2, "xep237-fast-unchanged", Some(&current_ver)).await;
+    assert!(
+        unchanged.contains("type='result'")
+            && !unchanged.contains("jabber:iq:roster")
+            && !unchanged.contains("<item"),
+        "expected empty unchanged roster result for r2: {unchanged}"
+    );
+
+    let _ = roster_set_add(&mut r1, "xep237-fast-add-carol", "carol@localhost", "Carol").await;
+    let r2_push = r2
+        .recv_matching(|frame| frame.contains("type='set'") && frame.contains("jabber:iq:roster"))
+        .await
+        .expect("r2 must receive roster push after unchanged ver sync");
+    assert!(
+        r2_push.contains("carol@localhost"),
+        "expected carol in roster push to r2: {r2_push}"
+    );
+    assert_ne!(
+        roster_version(&r2_push),
+        current_ver,
+        "roster push must carry the incremented version"
+    );
+
+    let _ = r1.close().await;
+    let _ = r2.close().await;
+}

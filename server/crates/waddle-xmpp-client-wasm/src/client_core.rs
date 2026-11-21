@@ -31,6 +31,7 @@ impl WaddleClient {
                 on_mds_displayed: None,
                 on_avatar_changed: None,
                 on_pubsub_event: None,
+                on_roster_push: None,
                 on_call: None,
                 on_stream_management: None,
                 resume_state: None,
@@ -38,15 +39,27 @@ impl WaddleClient {
         }
     }
 
+    fn current_resume_state(&self) -> Option<waddle_xmpp_client::SmResumeState> {
+        let borrowed = self.inner.borrow();
+        if let Some(driver_core) = borrowed.driver_core.as_ref() {
+            if let Ok(core) = driver_core.try_borrow() {
+                return if core.explicit_disconnect {
+                    None
+                } else {
+                    core.runtime.resume_state()
+                };
+            }
+        }
+        borrowed.resume_state.clone()
+    }
+
     /// Return a persistence-ready resume snapshot, or `null` when unavailable or not serializable.
     /// The camelCase object includes counters, resumption eligibility, the server's
     /// optional maximum interval, and timestamped unhandled outbound entries.
     /// Persist snapshots promptly, especially after the synchronous pagehide handoff.
     pub fn resume_state(&self) -> JsValue {
-        match self.inner.borrow().resume_state.as_ref() {
-            Some(state) => {
-                to_js_value(&JsResumeState::from(state.clone())).unwrap_or(JsValue::NULL)
-            }
+        match self.current_resume_state() {
+            Some(state) => to_js_value(&JsResumeState::from(state)).unwrap_or(JsValue::NULL),
             None => JsValue::NULL,
         }
     }
@@ -54,10 +67,7 @@ impl WaddleClient {
     /// Clone the current resume snapshot into an opaque handle, or return no handle when
     /// unavailable.
     pub fn resume_state_handle(&self) -> Option<WaddleResumeState> {
-        self.inner
-            .borrow()
-            .resume_state
-            .clone()
+        self.current_resume_state()
             .map(|inner| WaddleResumeState { inner })
     }
 
@@ -126,6 +136,13 @@ impl WaddleClient {
     /// value.
     pub fn set_on_pubsub_event(&mut self, cb: Function) {
         self.inner.borrow_mut().on_pubsub_event = Some(cb);
+    }
+
+    /// RFC 6121 §2.1.6 verified roster push handler. Invoked with a
+    /// `WaddleRosterPush`-shaped JS value carrying the optional new `ver`
+    /// token and updated/removed `WaddleRosterContact` items.
+    pub fn set_on_roster_push(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_roster_push = Some(cb);
     }
 
     /// Register a callback for inbound XMPP-native call events

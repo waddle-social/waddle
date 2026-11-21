@@ -1,5 +1,5 @@
 use super::regular::show_name;
-use super::subscription::{parse_subscription_state, recipient_blocks_sender, roster_storage};
+use super::subscription::{blocking_storage, parse_subscription_state, roster_storage};
 use super::{
     build_available_presence, build_subscription_presence, build_unavailable_presence, info, warn,
     BareJid, FullJid, Jid, Stanza, SubscriptionStateMachine, SubscriptionType, WebSocketState,
@@ -9,22 +9,82 @@ use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 pub(super) async fn handle_presence_probe(
     state: &WebSocketState,
     from: BareJid,
+    from_full: Option<FullJid>,
     to: BareJid,
     to_full: Option<FullJid>,
+    suppress_unavailable: bool,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
-    if recipient_blocks_sender(state, &to, &from).await {
-        info!(requester = %from, target = %to, "Blocked presence probe");
+    let blocking = blocking_storage(state);
+    let target_blocklist = match blocking.load_blocklist(&to).await {
+        Ok(blocklist) => blocklist,
+        Err(error) => {
+            warn!(
+                error = %error,
+                requester = %from,
+                target = %to,
+                "Failed to load target blocklist for presence probe; failing closed"
+            );
+            return;
+        }
+    };
+    let from_jid = from_full
+        .clone()
+        .map(Jid::from)
+        .unwrap_or_else(|| Jid::from(from.clone()));
+    if target_blocklist.contains_jid(&from_jid) {
+        info!(requester = %from_jid, target = %to, "Blocked presence probe");
         return;
     }
+    let requester_blocklist = if from != to {
+        match blocking.load_blocklist(&from).await {
+            Ok(blocklist) => {
+                let to_jid = to_full
+                    .clone()
+                    .map(Jid::from)
+                    .unwrap_or_else(|| Jid::from(to.clone()));
+                if blocklist.contains_jid(&to_jid) {
+                    info!(
+                        requester = %from,
+                        target = %to_jid,
+                        "Suppressed presence probe for contact blocked by requester"
+                    );
+                    return;
+                }
+                Some(blocklist)
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    requester = %from,
+                    target = %to,
+                    "Failed to load requester blocklist for presence probe; failing closed"
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
     if !presence_probe_authorized(state, &from, &to).await {
         info!(requester = %from, target = %to, "Unauthorized presence probe");
-        send_unsubscribed_probe_response(state, &to, &from, ordered_relay_origin).await;
+        if !suppress_unavailable {
+            send_unsubscribed_probe_response(
+                state,
+                &to,
+                &from,
+                &target_blocklist,
+                ordered_relay_origin,
+            )
+            .await;
+        }
         return;
     }
     let mut available =
-        crate::server::routes::websocket::handlers::account_reads::available_resources(state, &to)
-            .await;
+        crate::server::routes::websocket::handlers::account_reads::available_resources_with_presence(
+            state, &to,
+        )
+        .await;
     let mut detached_available = match state
         .deps
         .protocol
@@ -42,45 +102,59 @@ pub(super) async fn handle_presence_probe(
         available.retain(|(resource, _)| resource == to_full);
         detached_available.retain(|state| state.resource == *to_full);
     }
+    if let Some(requester_blocklist) = &requester_blocklist {
+        available.retain(|(resource, _)| {
+            !requester_blocklist.contains_jid(&Jid::from(resource.clone()))
+        });
+        detached_available
+            .retain(|state| !requester_blocklist.contains_jid(&Jid::from(state.resource.clone())));
+    }
     detached_available.retain(|state| {
         !available
             .iter()
             .any(|(live_resource, _)| *live_resource == state.resource)
     });
     if available.is_empty() && detached_available.is_empty() {
+        if suppress_unavailable {
+            return;
+        }
+        let requester_resources = if from_full.is_some() {
+            None
+        } else {
+            Some(unblocked_requester_resources(state, &from, &target_blocklist).await)
+        };
         let unavailable = Stanza::Presence(if let Some(to_full) = &to_full {
             let mut presence =
                 xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
             presence.from = Some(Jid::from(to_full.clone()));
-            presence.to = Some(Jid::from(from.clone()));
+            presence.to = Some(match &from_full {
+                Some(full) => Jid::from(full.clone()),
+                None => Jid::from(from.clone()),
+            });
             presence
         } else {
-            build_unavailable_presence(&to, &from)
+            let mut presence = build_unavailable_presence(&to, &from);
+            if let Some(full) = &from_full {
+                presence.to = Some(Jid::from(full.clone()));
+            }
+            presence
         });
-        if super::subscription::try_route_presence_to_bare_remote(
+        deliver_probe_reply(
             state,
             &from,
-            &unavailable,
+            from_full.as_ref(),
+            requester_resources.as_deref(),
+            unavailable,
             ordered_relay_origin,
         )
-        .await
-        {
-            return;
-        }
-        for resource in
-            crate::server::routes::websocket::handlers::account_reads::resources(state, &from).await
-        {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(&resource, unavailable.clone())
-                .await;
-        }
+        .await;
         return;
     }
-    let requester_resources =
-        crate::server::routes::websocket::handlers::account_reads::resources(state, &from).await;
+    let requester_resources = if from_full.is_some() {
+        None
+    } else {
+        Some(unblocked_requester_resources(state, &from, &target_blocklist).await)
+    };
     for detached in detached_available {
         let mut probe_response = build_available_presence(
             &detached.resource,
@@ -89,36 +163,24 @@ pub(super) async fn handle_presence_probe(
             detached.status.as_deref(),
             detached.priority,
         );
+        if let Some(full) = &from_full {
+            probe_response.to = Some(Jid::from(full.clone()));
+        }
         // Relay the detached resource's own stored extension payloads
         // (XEP-0115 caps, XEP-0319 idle, anything else) verbatim, exactly
         // like the live branch below (issue #1103).
         probe_response.payloads.extend(detached.payloads);
-        let presence = Stanza::Presence(probe_response);
-        if super::subscription::try_route_presence_to_bare_remote(
+        deliver_probe_reply(
             state,
             &from,
-            &presence,
+            from_full.as_ref(),
+            requester_resources.as_deref(),
+            Stanza::Presence(probe_response),
             ordered_relay_origin,
         )
-        .await
-        {
-            continue;
-        }
-        for requester_resource in &requester_resources {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(requester_resource, presence.clone())
-                .await;
-        }
+        .await;
     }
-    for (resource, _priority) in available {
-        let presence_state =
-            crate::server::routes::websocket::handlers::account_reads::presence_state(
-                state, &resource,
-            )
-            .await;
+    for (resource, presence_state) in available {
         let mut probe_response = build_available_presence(
             &resource,
             &from,
@@ -133,6 +195,9 @@ pub(super) async fn handle_presence_probe(
                 .map(|state| state.priority)
                 .unwrap_or(0),
         );
+        if let Some(full) = &from_full {
+            probe_response.to = Some(Jid::from(full.clone()));
+        }
         // Relay the resource's own stored extension payloads (XEP-0115 caps,
         // XEP-0319 idle, anything else) verbatim — never server-rebuilt ones
         // (issue #1101).
@@ -141,32 +206,90 @@ pub(super) async fn handle_presence_probe(
                 .payloads
                 .extend(stored.payloads.iter().cloned());
         }
-        let presence = Stanza::Presence(probe_response);
-        if super::subscription::try_route_presence_to_bare_remote(
+        deliver_probe_reply(
             state,
             &from,
+            from_full.as_ref(),
+            requester_resources.as_deref(),
+            Stanza::Presence(probe_response),
+            ordered_relay_origin,
+        )
+        .await;
+    }
+}
+
+async fn deliver_probe_reply(
+    state: &WebSocketState,
+    from: &BareJid,
+    from_full: Option<&FullJid>,
+    requester_resources: Option<&[FullJid]>,
+    presence: Stanza,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
+) {
+    if let Some(target_full) = from_full {
+        if super::subscription::try_route_presence_to_full_remote(
+            state,
+            target_full,
             &presence,
             ordered_relay_origin,
         )
         .await
         {
-            continue;
+            return;
         }
-        for requester_resource in &requester_resources {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(requester_resource, presence.clone())
-                .await;
-        }
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(target_full, presence);
+        return;
     }
+    if super::subscription::try_route_presence_to_bare_remote(
+        state,
+        from,
+        &presence,
+        ordered_relay_origin,
+    )
+    .await
+    {
+        return;
+    }
+    let resources;
+    let targets = match requester_resources {
+        Some(slice) => slice,
+        None => {
+            resources =
+                crate::server::routes::websocket::handlers::account_reads::resources(state, from)
+                    .await;
+            &resources
+        }
+    };
+    for requester_resource in targets {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_to(requester_resource, presence.clone());
+    }
+}
+
+async fn unblocked_requester_resources(
+    state: &WebSocketState,
+    requester: &BareJid,
+    target_blocklist: &waddle_xmpp::protocol::Blocklist,
+) -> Vec<FullJid> {
+    let mut resources =
+        crate::server::routes::websocket::handlers::account_reads::resources(state, requester)
+            .await;
+    resources.retain(|resource| !target_blocklist.contains_jid(&Jid::from(resource.clone())));
+    resources
 }
 
 async fn send_unsubscribed_probe_response(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,
+    target_blocklist: &waddle_xmpp::protocol::Blocklist,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     let stanza = Stanza::Presence(build_subscription_presence(
@@ -186,9 +309,7 @@ async fn send_unsubscribed_probe_response(
     {
         return;
     }
-    for resource in
-        crate::server::routes::websocket::handlers::account_reads::resources(state, to).await
-    {
+    for resource in unblocked_requester_resources(state, to, target_blocklist).await {
         let _ = state
             .deps
             .protocol

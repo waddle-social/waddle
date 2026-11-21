@@ -72,14 +72,20 @@ pub(super) async fn handle_spaces_items(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
-    backfill_missing_space_bookmarks(state, &spaces_jid, node, item_ids).await;
-    match state
-        .deps
-        .protocol
-        .pubsub_storage
-        .get_items(&spaces_jid, node, max_items, item_ids)
-        .await
-    {
+    let preloaded =
+        backfill_missing_space_bookmarks(state, &spaces_jid, node, max_items, item_ids).await;
+    let stored_items = match preloaded {
+        Some(items) => Ok(items),
+        None => {
+            state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_items(&spaces_jid, node, max_items, item_ids)
+                .await
+        }
+    };
+    match stored_items {
         Ok(stored_items) => {
             let items: Vec<_> = stored_items
                 .iter()
@@ -98,8 +104,9 @@ async fn backfill_missing_space_bookmarks(
     state: &WebSocketState,
     spaces_jid: &BareJid,
     node: &str,
+    max_items: Option<u32>,
     item_ids: &[String],
-) {
+) -> Option<Vec<waddle_xmpp::pubsub::StoredItem>> {
     let space_node = SpaceNode::from(node);
     let links = match state
         .deps
@@ -111,33 +118,32 @@ async fn backfill_missing_space_bookmarks(
         Ok(links) => links,
         Err(error) => {
             warn!(node, error = %error, "Failed to list channel-space links for Spaces bookmark backfill");
-            return;
+            return None;
         }
     };
     if links.is_empty() {
-        return;
+        return None;
     }
 
-    let existing_ids = match state
+    let existing_items = match state
         .deps
         .protocol
         .pubsub_storage
         .get_items(spaces_jid, node, None, &[])
         .await
     {
-        Ok(items) => items
-            .into_iter()
-            .map(|item| item.id)
-            .collect::<HashSet<_>>(),
+        Ok(items) => items,
         Err(error) => {
             warn!(node, error = %error, "Failed to inspect Spaces items before bookmark backfill");
-            return;
+            return None;
         }
     };
+    let existing_ids: HashSet<&str> = existing_items.iter().map(|item| item.id.as_str()).collect();
+    let mut mutated = false;
 
     for channel_jid in links {
         let item_id = channel_jid.to_string();
-        if existing_ids.contains(&item_id)
+        if existing_ids.contains(item_id.as_str())
             || (!item_ids.is_empty() && !item_ids.iter().any(|id| id == &item_id))
         {
             continue;
@@ -224,7 +230,10 @@ async fn backfill_missing_space_bookmarks(
             .publish_item(spaces_jid, node, &item, None, false)
             .await
         {
-            Ok(result) => result,
+            Ok(result) => {
+                mutated = true;
+                result
+            }
             Err(error) => {
                 warn!(channel = %channel_jid, node, error = %error, "Failed to backfill Spaces bookmark item");
                 continue;
@@ -240,6 +249,8 @@ async fn backfill_missing_space_bookmarks(
             warn!(channel = %channel_jid, node, error = %error, "Backfilled Spaces bookmark but failed to repair channel parent tuple; retracted backfill item");
         }
     }
+    drop(existing_ids);
+    (!mutated && max_items.is_none() && item_ids.is_empty()).then_some(existing_items)
 }
 
 async fn channel_type_for_space_bookmark(
