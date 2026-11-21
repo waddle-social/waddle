@@ -23,4 +23,46 @@ extension SessionCoordinator {
             }
         }
     }
+
+    /// The spaces of this community, for the admin console.
+    public func adminSpacesList() -> AdminList<AdminSpace> {
+        AdminList { [weak self] prefix, cursor in
+            guard let self else { throw PortError.notConnected }
+            return try await self.whileOnline {
+                try await self.port.adminSpaces(matching: prefix, after: cursor)
+            }
+        }
+    }
+
+    /// Everyone in `space`, with their role. It is not searched.
+    public func adminSpaceMembersList(of space: AdminSpace) -> AdminList<AdminSpaceMember> {
+        AdminList { [weak self] _, cursor in
+            guard let self else { throw PortError.notConnected }
+            return try await self.whileOnline {
+                try await self.port.adminSpaceMembers(of: space, after: cursor)
+            }
+        }
+    }
+
+    public func createAdminSpace(_ draft: AdminSpaceDraft) async throws {
+        try await whileOnline { try await port.createAdminSpace(draft) }
+    }
+
+    /// Answers with the space as the server now holds it.
+    public func updateAdminSpace(_ space: AdminSpace, to draft: AdminSpaceDraft) async throws -> AdminSpace {
+        try await whileOnline { try await port.updateAdminSpace(space, to: draft) }
+    }
+
+    /// Deletes the space and every room in it.
+    public func deleteAdminSpace(_ space: AdminSpace) async throws {
+        try await whileOnline { try await port.deleteAdminSpace(space) }
+    }
+
+    /// Answers with the member and the role the server gave them.
+    @discardableResult
+    public func setAdminSpaceRole(
+        _ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace
+    ) async throws -> AdminSpaceMember {
+        try await whileOnline { try await port.setAdminSpaceRole(role, of: member, in: space) }
+    }
 }

@@ -263,6 +263,23 @@ public protocol AdminPort: AnyObject, Sendable {
     /// One page of everyone with an account, by name. `prefix` keeps those
     /// whose name starts with it; `cursor` is a page's `nextCursor`.
     func adminUsers(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminUser>
+
+    /// One page of the spaces, by name, as for `adminUsers`.
+    func adminSpaces(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminSpace>
+
+    func createAdminSpace(_ draft: AdminSpaceDraft) async throws
+
+    /// Answers with the space as the server now holds it. A draft without
+    /// a description leaves the one it has.
+    func updateAdminSpace(_ space: AdminSpace, to draft: AdminSpaceDraft) async throws -> AdminSpace
+
+    /// Deletes the space and every room in it.
+    func deleteAdminSpace(_ space: AdminSpace) async throws
+
+    func adminSpaceMembers(of space: AdminSpace, after cursor: String?) async throws -> AdminPage<AdminSpaceMember>
+
+    /// Answers with the member and the role the server gave them.
+    func setAdminSpaceRole(_ role: AdminSpaceRole, of member: BareJID, in space: AdminSpace) async throws -> AdminSpaceMember
 }
 
 /// The full surface the session coordinator drives.

@@ -92,6 +92,17 @@ public final class AdminList<Row: Identifiable & Sendable> {
         }
     }
 
+    /// Shows a row as the server now holds it, where it was.
+    public func replace(_ row: Row) {
+        guard let index = rows.firstIndex(where: { $0.id == row.id }) else { return }
+        rows[index] = row
+    }
+
+    /// Takes out a row the server no longer has.
+    public func remove(_ id: Row.ID) {
+        rows.removeAll { $0.id == id }
+    }
+
     private static func attempt(_ fetch: () async throws -> AdminPage<Row>) async -> Result<AdminPage<Row>, PortError> {
         do {
             return .success(try await fetch())

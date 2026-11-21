@@ -142,9 +142,11 @@
 		38017566CDB55F105E0004AC /* ProfileAvatarEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E7D2EFE74CE0E7AA324637B /* ProfileAvatarEncoder.swift */; };
 		388A0B3BBF6C487B3D34ECDB /* RemoteImageDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD90267CD2CEC512024017D9 /* RemoteImageDataView.swift */; };
 		38AE4281C3EEF348D3AEA4B2 /* FFIOutbound+Values.swift in Sources */ = {isa = PBXBuildFile; fileRef = 883F76BB4172D356990947A1 /* FFIOutbound+Values.swift */; };
+		3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */; };
 		3969C52801321874826F0EA8 /* RoomManagementSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC9686E713C0F3912EE63F29 /* RoomManagementSnapshotTests.swift */; };
 		39A334574173EF578C4E2D45 /* Surfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = A681AA1E99DFA6786DF6F7BF /* Surfaces.swift */; };
 		39C387955122514D97C6723B /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BC57272670658BD2403BA4E3 /* Localizable.strings */; };
+		3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */; };
 		3BED28B913CADEB301B04E80 /* SettingsPreferenceSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2FCD21C5931F86CC13AF643 /* SettingsPreferenceSections.swift */; };
 		3BF90258E14DB45EFDF789E3 /* ManagementSheetParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85176CCA7895C14E3FAF17FE /* ManagementSheetParts.swift */; };
 		3CFF53C6E468C3E7D895AF40 /* MessageSafetyScoresButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB3CC66C2E14BDDAD64BBC5 /* MessageSafetyScoresButton.swift */; };
@@ -362,6 +364,7 @@
 		89595B61161D4DF7D2CCD997 /* QuickSwitcherResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0EC3BBBD56E38C392A73A0 /* QuickSwitcherResults.swift */; };
 		898A6AE30F6BDEE06534B821 /* RoomDetailsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */; };
 		89B11E70D2B4FEE87EAD1E64 /* RecipientInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45389C112F24924C4ADC88C3 /* RecipientInput.swift */; };
+		89EA73B177B879F10E234AF1 /* AdminSpacesPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6AFF17E8FC8EA2F9D17F520 /* AdminSpacesPanel.swift */; };
 		89F7DC5EE24626C9FC914750 /* SplitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23892C2B3A078BA52981F443 /* SplitShell.swift */; };
 		8A79AD8FC309A56A1CCD2B76 /* ScreenSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56272EFA683B51640DA6142 /* ScreenSnapshot.swift */; };
 		8AC1D9BC64BFCCD6AED35DC8 /* FFIXmppPort+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */; };
@@ -646,6 +649,7 @@
 		F83733C7A34A67BF10556C40 /* PushNotificationRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39A5A759619EA0A17AE98EEE /* PushNotificationRoutingTests.swift */; };
 		F8C86ADAF4EEFA743BFF2FFC /* ProfileSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 212084C0987439901E238C8C /* ProfileSharingSection.swift */; };
 		F9AA9EAB1CD94201BA23FF9E /* FFIInbound+MessageParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F3FAA96C326A287596EF89C /* FFIInbound+MessageParts.swift */; };
+		F9D7172E6F902D398A70E8F5 /* AdminSpacesPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6AFF17E8FC8EA2F9D17F520 /* AdminSpacesPanel.swift */; };
 		F9F76261551A058EAF6FC23B /* MessageActionDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88CA08725E4A0901005E896 /* MessageActionDialogs.swift */; };
 		FA26FF441D93E02BBD7F5418 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE82E554569A1E4A76B2E0FA /* PeopleView.swift */; };
 		FA79F94C66C9D98E063881D1 /* WaddleKit in Frameworks */ = {isa = PBXBuildFile; productRef = 32D767ED41763E739625FA09 /* WaddleKit */; };
@@ -891,7 +895,9 @@
 		B2D65F17C5B0112B7B7FF405 /* NewMessageSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheet.swift; sourceTree = "<group>"; };
 		B3C54D5AD6E8BCD5E9D0FE01 /* FeedPostCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedPostCard.swift; sourceTree = "<group>"; };
 		B63D13CA78302D5917C8EAD8 /* ComposerAttachmentIntake.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAttachmentIntake.swift; sourceTree = "<group>"; };
+		B6AFF17E8FC8EA2F9D17F520 /* AdminSpacesPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSpacesPanel.swift; sourceTree = "<group>"; };
 		B77EF83062F6AD53EB3E0377 /* AnimatedImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedImageView.swift; sourceTree = "<group>"; };
+		B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSpaceSheet.swift; sourceTree = "<group>"; };
 		B85879D67EF49761A46A414D /* MessageAccessibilityText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAccessibilityText.swift; sourceTree = "<group>"; };
 		B8CBB5DA6584DB641E831C1A /* WaddleKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = WaddleKit; path = WaddleKit; sourceTree = SOURCE_ROOT; };
 		B8EFDBE554A7520A804F94EF /* waddle_xmpp_clientFFI.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = waddle_xmpp_clientFFI.h; sourceTree = "<group>"; };
@@ -1352,6 +1358,8 @@
 		57010325BE4CB572D63BE4DA /* Admin */ = {
 			isa = PBXGroup;
 			children = (
+				B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */,
+				B6AFF17E8FC8EA2F9D17F520 /* AdminSpacesPanel.swift */,
 				05A4701A3A1BB24DC5BDC9BF /* AdminView.swift */,
 			);
 			path = Admin;
@@ -2123,6 +2131,8 @@
 			files = (
 				1F366FF69DD8074B6316F8CA /* AccountSignOutButton.swift in Sources */,
 				95A048455B91E894F7E470A0 /* AddPeopleSheet.swift in Sources */,
+				3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */,
+				F9D7172E6F902D398A70E8F5 /* AdminSpacesPanel.swift in Sources */,
 				802554785F689417C3ED30DC /* AdminView.swift in Sources */,
 				5FF74D9CAA9E5256B21392AA /* AnimatedImageDecoder.swift in Sources */,
 				34584E0FB63C7B23B895B6B9 /* AnimatedImageRepresentable.swift in Sources */,
@@ -2449,6 +2459,8 @@
 			files = (
 				2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */,
 				050ABC1E2E9DE9D7A16AB906 /* AddPeopleSheet.swift in Sources */,
+				3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */,
+				89EA73B177B879F10E234AF1 /* AdminSpacesPanel.swift in Sources */,
 				353717E9E3E485089D172673 /* AdminView.swift in Sources */,
 				AEAC3248473A2F45ED84CB7D /* AnimatedImageDecoder.swift in Sources */,
 				D39E3DCCA5E5950B512ABFF8 /* AnimatedImageRepresentable.swift in Sources */,

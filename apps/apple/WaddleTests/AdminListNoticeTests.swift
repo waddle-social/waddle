@@ -44,3 +44,33 @@ final class AdminErrorTests: XCTestCase {
         XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Timeout), .timeout)
     }
 }
+
+/// How the console words a space.
+final class AdminSpaceCopyTests: XCTestCase {
+    func testCountsSayOneOrMany() {
+        XCTAssertEqual(AdminSpaceCopy.counts(rooms: 1, members: 1), "1 room · 1 member")
+        XCTAssertEqual(AdminSpaceCopy.counts(rooms: 3, members: 12), "3 rooms · 12 members")
+        XCTAssertEqual(AdminSpaceCopy.counts(rooms: 0, members: 0), "0 rooms · 0 members")
+    }
+
+    func testTheDeleteWarningNamesTheRoomsThatGoToo() {
+        XCTAssertEqual(AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 0), "This deletes Ops. This can't be undone.")
+        XCTAssertEqual(AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 1), "This deletes Ops and its room. This can't be undone.")
+        XCTAssertEqual(AdminSpaceCopy.deleteWarning(name: "Ops", rooms: 3), "This deletes Ops and its 3 rooms. This can't be undone.")
+    }
+
+    /// The server sends an empty string for a description a space lacks.
+    func testAnEmptyDescriptionIsNoDescription() {
+        XCTAssertNil(FFIXmppPort.text(""))
+        XCTAssertNil(FFIXmppPort.text(nil))
+        XCTAssertEqual(FFIXmppPort.text("Pixels"), "Pixels")
+    }
+
+    func testRolesCrossTheBridgeUnchanged() {
+        for role in AdminSpaceRole.allCases {
+            XCTAssertEqual(FFIXmppPort.role(FFIXmppPort.role(role)), role)
+        }
+        XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.none), WaddleSpaceRole.none)
+        XCTAssertEqual(FFIXmppPort.role(AdminSpaceRole.owner), WaddleSpaceRole.owner)
+    }
+}
