@@ -23,6 +23,8 @@ public final class AdminList<Row: Identifiable & Sendable> {
     public var hasMore: Bool { cursor != nil }
 
     @ObservationIgnored private let fetch: Fetch
+    /// The text last asked for, answered or not.
+    @ObservationIgnored private var requested = ""
     @ObservationIgnored private var cursor: String?
     /// Counts searches; an answer to an earlier one is dropped.
     @ObservationIgnored private var serial = 0
@@ -39,6 +41,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         serial += 1
         let search = serial
+        requested = text
         isLoading = true
         isLoadingMore = false
         moreFailure = nil
@@ -63,9 +66,9 @@ public final class AdminList<Row: Identifiable & Sendable> {
         query = text
     }
 
-    /// Asks again for the text last searched for.
+    /// Asks again for the text last searched for, answered yet or not.
     public func reload() async {
-        await load(matching: query)
+        await load(matching: requested)
     }
 
     /// Adds the next page, if there is one and it is not on its way.

@@ -231,6 +231,25 @@ struct AdminTests {
         #expect(list.query == "")
     }
 
+    @Test func refreshingDuringASearchAsksForTheTextBeingSearched() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init(prefix: "a")] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        port.admin.users[.init(prefix: "b")] = .success(AdminPage(rows: [bo], nextCursor: nil))
+        let list = coordinator.adminUsersList()
+        await list.load(matching: "a")
+        port.admin.usersFetches.isHolding = true
+        let search = Task { await list.load(matching: "b") }
+        await eventually { port.admin.usersFetches.count == 1 }
+        port.admin.usersFetches.isHolding = false
+
+        await list.reload()
+        port.admin.usersFetches.release()
+        await search.value
+
+        #expect(list.rows == [bo])
+        #expect(list.query == "b")
+    }
+
     @Test func someoneWhoIsNotAnOwnerIsRefused() async {
         let (coordinator, port) = online()
         port.admin.users[.init()] = .failure(.rejected)
