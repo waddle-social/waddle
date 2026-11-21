@@ -907,6 +907,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_roster_contacts(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_feed_post(
@@ -1199,6 +1201,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_users(`
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affiliation(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`patch`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_roster_contacts(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_feed(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`maxItems`: RustBuffer.ByValue,
 ): Long
@@ -1715,6 +1719,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_roster_contacts() != 38928) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed() != 30404) {
@@ -3156,6 +3163,14 @@ public interface WaddleClientInterface {
      * unedited settings round-trip verbatim.
      */
     suspend fun `submitRoomConfig`(`roomJid`: kotlin.String, `patch`: WaddleRoomConfigPatch)
+
+    /**
+     * RFC 6121 §2.1.3: fetch the account's roster (wasm
+     * `list_roster_contacts` parity). An account with no contacts
+     * answers an empty list; a lookup that fails or cannot be read is
+     * an error.
+     */
+    suspend fun `fetchRosterContacts`(): List<WaddleRosterContact>
 
     /**
      * XEP-0472: fetch the newest entries of the community feed on
@@ -6374,6 +6389,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         // lift function
         { Unit },
 
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * RFC 6121 §2.1.3: fetch the account's roster (wasm
+     * `list_roster_contacts` parity). An account with no contacts
+     * answers an empty list; a lookup that fails or cannot be read is
+     * an error.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchRosterContacts`() : List<WaddleRosterContact> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_roster_contacts(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleRosterContact.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
@@ -12664,6 +12706,48 @@ public object FfiConverterTypeWaddleRoomMemberEntry: FfiConverterRustBuffer<Wadd
             FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
             FfiConverterOptionalString.write(value.`nick`, buf)
             FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+/**
+ * One contact on the account's roster: its bare JID and the name the
+ * account saved for it, when it saved one.
+ */
+data class WaddleRosterContact (
+    var `jid`: kotlin.String
+    ,
+    var `name`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRosterContact: FfiConverterRustBuffer<WaddleRosterContact> {
+    override fun read(buf: ByteBuffer): WaddleRosterContact {
+        return WaddleRosterContact(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRosterContact) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterOptionalString.allocationSize(value.`name`)
+    )
+
+    override fun write(value: WaddleRosterContact, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
     }
 }
 
@@ -20374,6 +20458,34 @@ public object FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRustBuf
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleRoomMemberEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleRosterContact: FfiConverterRustBuffer<List<WaddleRosterContact>> {
+    override fun read(buf: ByteBuffer): List<WaddleRosterContact> {
+        val len = buf.getInt()
+        return List<WaddleRosterContact>(len) {
+            FfiConverterTypeWaddleRosterContact.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleRosterContact>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleRosterContact.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleRosterContact>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleRosterContact.write(it, buf)
         }
     }
 }

@@ -30,6 +30,7 @@ mod ping;
 mod profile_verbs;
 mod push;
 mod room_admin;
+mod roster;
 mod safety_scores;
 mod send_outcome;
 mod social_feed;
@@ -67,6 +68,8 @@ mod profile_verbs_tests;
 mod push_tests;
 #[cfg(test)]
 mod room_admin_tests;
+#[cfg(test)]
+mod roster_tests;
 #[cfg(test)]
 mod safety_scores_tests;
 #[cfg(test)]
@@ -119,6 +122,7 @@ pub use room_admin::{
     WaddlePinPermission, WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry,
     WaddleUserSearchEntry,
 };
+pub use roster::WaddleRosterContact;
 pub use social_feed::{WaddleFeedEntry, WaddleFeedPost, WaddleFeedSource};
 pub use status_preference::{WaddleManualStatus, WaddleStatusPreference};
 pub use stories::{

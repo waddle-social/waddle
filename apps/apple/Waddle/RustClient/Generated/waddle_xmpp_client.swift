@@ -1423,6 +1423,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) async throws
 
     /**
+     * RFC 6121 §2.1.3: fetch the account's roster (wasm
+     * `list_roster_contacts` parity). An account with no contacts
+     * answers an empty list; a lookup that fails or cannot be read is
+     * an error.
+     */
+    func fetchRosterContacts() async throws  -> [WaddleRosterContact]
+
+    /**
      * XEP-0472: fetch the newest entries of the community feed on
      * `community_jid` (the `community.<domain>` service), newest
      * first. `max_items: None` leaves the page size to the server.
@@ -4194,6 +4202,29 @@ open func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch)async t
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * RFC 6121 §2.1.3: fetch the account's roster (wasm
+     * `list_roster_contacts` parity). An account with no contacts
+     * answers an empty list; a lookup that fails or cannot be read is
+     * an error.
+     */
+open func fetchRosterContacts()async throws  -> [WaddleRosterContact]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_roster_contacts(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleRosterContact.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -12147,6 +12178,64 @@ public func FfiConverterTypeWaddleRoomMemberEntry_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeWaddleRoomMemberEntry_lower(_ value: WaddleRoomMemberEntry) -> RustBuffer {
     return FfiConverterTypeWaddleRoomMemberEntry.lower(value)
+}
+
+
+/**
+ * One contact on the account's roster: its bare JID and the name the
+ * account saved for it, when it saved one.
+ */
+public struct WaddleRosterContact: Equatable, Hashable {
+    public var jid: String
+    public var name: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jid: String, name: String?) {
+        self.jid = jid
+        self.name = name
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRosterContact: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRosterContact: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRosterContact {
+        return
+            try WaddleRosterContact(
+                jid: FfiConverterString.read(from: &buf),
+                name: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRosterContact, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRosterContact_lift(_ buf: RustBuffer) throws -> WaddleRosterContact {
+    return try FfiConverterTypeWaddleRosterContact.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRosterContact_lower(_ value: WaddleRosterContact) -> RustBuffer {
+    return FfiConverterTypeWaddleRosterContact.lower(value)
 }
 
 
@@ -21306,6 +21395,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleRosterContact: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleRosterContact]
+
+    public static func write(_ value: [WaddleRosterContact], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleRosterContact.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleRosterContact] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleRosterContact]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleRosterContact.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleSafetyScore: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleSafetyScore]
 
@@ -22198,6 +22312,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_roster_contacts() != 38928) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed() != 30404) {
