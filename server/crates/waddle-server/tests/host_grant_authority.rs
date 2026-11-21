@@ -1419,6 +1419,7 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(

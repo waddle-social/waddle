@@ -767,7 +767,7 @@ async fn count_in(
 
 /// A row read back as the subscription it records. A row whose evidence
 /// cannot be read is an error, never evidence the row does not hold.
-fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
+pub(crate) fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
     let account: String = row.get(0).map_err(storage)?;
     let strength: String = row.get(1).map_err(storage)?;
     let trust_profile: Option<String> = row.get(2).map_err(storage)?;

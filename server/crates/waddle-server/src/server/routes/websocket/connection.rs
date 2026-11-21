@@ -1490,7 +1490,8 @@ impl LiveSocketState {
                             return ControlFlow::Continue(());
                         };
                         if !payload.protected_space_reply().is_some_and(|descriptor| {
-                            descriptor.bookmark_event().is_some()
+                            (descriptor.bookmark_event().is_some()
+                                || descriptor.deletion_operation().is_some())
                                 && descriptor.service().as_str()
                                     == state.deps.service_domains.spaces.as_str()
                         }) {

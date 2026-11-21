@@ -57,7 +57,9 @@ use xmpp_parsers::iq::Iq;
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
 use super::issuance::IssuanceBasis;
-use super::model::{GrantOperationId, GrantSubject, ScopeKey, SpaceBookmarkVersion};
+use super::model::{
+    GrantOperationId, GrantSubject, OperationRecord, ScopeKey, SpaceBookmarkVersion,
+};
 use super::policy::HostGrantAction;
 use super::principal::{
     named_evidence, NoSeats, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, SeatEvidence,
@@ -126,12 +128,18 @@ pub struct ManagedSpaceGrant {
     subscription_grant: SpaceSubscriptionGrant,
 }
 
-/// An exact local disco response and its current Space read authority.
+/// An exact protected reply and its current delivery authority.
 #[derive(Debug)]
 pub(crate) struct LocalSpaceReplyGrant {
-    grant: ManagedSpaceGrant,
+    authority: LocalSpaceReplyAuthority,
     replay: ProtectedSpaceReplyDescriptor,
     preference: Option<LocalReplyPreference>,
+}
+
+#[derive(Debug)]
+enum LocalSpaceReplyAuthority {
+    Active(ManagedSpaceGrant),
+    Deleted(FenceTicket),
 }
 
 struct LocalReplyPreference {
@@ -150,7 +158,10 @@ impl std::fmt::Debug for LocalReplyPreference {
 
 impl LocalSpaceReplyGrant {
     pub(crate) fn admit<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
-        self.grant.admit(|_| effect())
+        match &self.authority {
+            LocalSpaceReplyAuthority::Active(grant) => grant.admit(|_| effect()),
+            LocalSpaceReplyAuthority::Deleted(fence) => fence.admit(effect),
+        }
     }
 
     pub(crate) fn replay_identity(&self) -> &ProtectedSpaceReplyDescriptor {
@@ -205,8 +216,11 @@ impl LocalSpaceReplyGrant {
     ) -> Option<Self> {
         let (dependencies, decisions): (Vec<_>, Vec<_>) = rooms.into_iter().unzip();
         self.replay = self.replay.with_room_dependencies(dependencies).ok()?;
+        let LocalSpaceReplyAuthority::Active(grant) = &mut self.authority else {
+            return None;
+        };
         for decision in decisions {
-            self.grant.require_room(decision);
+            grant.require_room(decision);
         }
         Some(self)
     }
@@ -1017,7 +1031,7 @@ impl HostGrantGate {
         .ok()?
         .with_kind(kind);
         Some(LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay,
             preference: None,
         })
@@ -1088,7 +1102,7 @@ impl HostGrantGate {
         .ok()?
         .with_kind(ProtectedSpaceReplyKind::OwnerAffiliationRefusals);
         Some(LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay,
             preference: None,
         })
@@ -1134,7 +1148,7 @@ impl HostGrantGate {
             subscription,
         };
         Some(LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay,
             preference: Some(preference),
         })
@@ -1231,6 +1245,69 @@ impl HostGrantGate {
         guard.permits_reply(reply, requester).then_some(guard)
     }
 
+    pub(crate) fn local_space_deletion_event(
+        key: &ScopeKey,
+        recipient: &FullJid,
+        record: &OperationRecord,
+    ) -> Option<ProtectedSpaceReplyDescriptor> {
+        Some(
+            ProtectedSpaceReplyDescriptor::new(
+                key.service().clone(),
+                key.node().to_owned(),
+                recipient.clone(),
+                record.operation.as_uuid().simple().to_string(),
+                record.lifecycle.as_uuid(),
+                record.authority_incarnation.as_uuid(),
+                record.generation.value(),
+            )
+            .ok()?
+            .with_kind(ProtectedSpaceReplyKind::DeleteEvent),
+        )
+    }
+
+    async fn refresh_local_space_deletion(
+        &self,
+        replay: &ProtectedSpaceReplyDescriptor,
+        key: &ScopeKey,
+        subject: &GrantSubject,
+    ) -> Option<LocalSpaceReplyGrant> {
+        let operation = GrantOperationId::from_uuid(replay.deletion_operation()?);
+        let attachment = self.attachment()?;
+        if attachment.binding().incarnation.as_uuid() != replay.incarnation()
+            || !matches!(
+                attachment
+                    .principals()
+                    .witness(subject.jid(), &PrincipalEvidence::NoStream),
+                PrincipalWitness::Served
+            )
+        {
+            return None;
+        }
+        let fence = self.fence.as_ref()?;
+        let registration = fence.begin_decision().await?;
+        let saved = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            self.store
+                .as_ref()?
+                .load_local_space_deletion_recipient(key, operation, subject),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        let record = saved.record;
+        if Self::local_space_deletion_event(key, replay.recipient(), &record).as_ref()
+            != Some(replay)
+        {
+            return None;
+        }
+        let ticket = fence.ticket(registration, record.lifecycle, saved.current_generation);
+        ticket.is_current().then(|| LocalSpaceReplyGrant {
+            authority: LocalSpaceReplyAuthority::Deleted(ticket),
+            replay: replay.clone(),
+            preference: None,
+        })
+    }
+
     /// Refresh a retained reply's lease only for its original scope decision.
     pub(crate) async fn refresh_local_space_reply(
         &self,
@@ -1243,6 +1320,11 @@ impl HostGrantGate {
         }
         let subject = GrantSubject::new(requester.to_bare()).ok()?;
         let key = ScopeKey::new(replay.service().clone(), replay.node()).ok()?;
+        if replay.kind() == ProtectedSpaceReplyKind::DeleteEvent {
+            return self
+                .refresh_local_space_deletion(replay, &key, &subject)
+                .await;
+        }
         let mut grant = self.space_read_local(&key, &subject).await?;
         if grant.fence.lifecycle().as_uuid() != replay.lifecycle()
             || grant.subscription_grant.incarnation.as_uuid() != replay.incarnation()
@@ -1282,7 +1364,7 @@ impl HostGrantGate {
             None
         };
         let result = LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay: replay.clone(),
             preference,
         };

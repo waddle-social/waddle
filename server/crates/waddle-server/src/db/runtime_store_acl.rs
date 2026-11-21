@@ -176,6 +176,12 @@ const HOST_GRANT_RELATIONS: &[Relation] = &[
         delete: true,
     },
     Relation {
+        name: "host_grant_space_deletion_audience",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
         name: "host_grant_space_deletions",
         insert: true,
         update: false,

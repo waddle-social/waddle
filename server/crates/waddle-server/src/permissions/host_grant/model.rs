@@ -520,6 +520,24 @@ impl DeleteSpace {
     }
 }
 
+/// The exact audiences and event age for a committed Space deletion.
+#[derive(Clone, Debug)]
+pub struct SpaceDeletionAudience {
+    pub record: OperationRecord,
+    pub recorded_at_ms: i64,
+    pub local: Vec<LocalSpaceSubscription>,
+    pub remote: Vec<crate::db::s2s_spaces::SpaceSubscription>,
+}
+
+/// Exact local subscriber and current fence generation for a deletion.
+#[derive(Clone, Debug)]
+pub struct LocalSpaceDeletionRecipient {
+    pub record: OperationRecord,
+    pub recorded_at_ms: i64,
+    pub preference: LocalSpaceSubscription,
+    pub current_generation: GrantGeneration,
+}
+
 /// Set one subject's affiliation in one managed room.
 #[derive(Clone, Debug)]
 pub struct SetAffiliation {

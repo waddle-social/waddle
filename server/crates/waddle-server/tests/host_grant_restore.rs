@@ -109,7 +109,7 @@ const SERVICE_UNAVAILABLE: (ErrorType, DefinedCondition) =
 
 /// Every relation of the canonical host-grant store: what a restore of the
 /// database brings back.
-const AUTHORITY_RELATIONS: [&str; 10] = [
+const AUTHORITY_RELATIONS: [&str; 12] = [
     "host_grant_authority",
     "host_grant_scope_lifecycles",
     "host_grant_scopes",
@@ -121,6 +121,7 @@ const AUTHORITY_RELATIONS: [&str; 10] = [
     "host_grant_space_affiliations",
     "host_grant_space_operation_changes",
     "host_grant_space_deletions",
+    "host_grant_space_deletion_audience",
 ];
 
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which
@@ -909,12 +910,53 @@ async fn configure_and_delete_space_preserves_room_scope() {
         .await
         .expect("release delivery lock");
 
+    let remote_account = subject("alice@peer.test");
+    let member = fixture
+        .store
+        .set_space_affiliations(
+            &SetSpaceAffiliations {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: record.generation,
+                initiator: subject(OWNER),
+                changes: vec![SpaceAffiliationChange {
+                    subject: remote_account.clone(),
+                    affiliation: SpaceMembership::Member,
+                }],
+            },
+            &fixture.policy,
+        )
+        .await
+        .expect("record the remote member");
+    fixture.activate_current(&fixture.scope).await;
+    let remote_snapshot = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO s2s_space_subscriptions
+         (service_jid, node_name, subscriber_jid, account_jid, subscriber_domain,
+          node_created_at_ms, strength, trust_profile, snapshot_generation, subscribed_at_ms,
+          grant_lifecycle_id, grant_authority_incarnation, grant_generation)
+         VALUES ($1, $2, $3, $3, 'peer.test', 42, 'pkix', 'private_ca', $4, $5, $6, $7, $8),
+                ($1, $2, 'other@peer.test', 'other@peer.test', 'peer.test', 42,
+                 'pkix', 'private_ca', $4, $5, $6, $7, $8)",
+    )
+    .bind(command.key.service().as_str())
+    .bind(command.key.node())
+    .bind(remote_account.as_str())
+    .bind(remote_snapshot.to_string())
+    .bind(chrono::Utc::now().timestamp_millis())
+    .bind(lifecycle.to_storage())
+    .bind(command.expected_incarnation.to_storage())
+    .bind(member.record().generation.value())
+    .execute(&pool)
+    .await
+    .expect("seed exact and unrelated remote subscriptions");
+
     let deletion = DeleteSpace {
         operation: GrantOperationId::generate(),
         key: command.key.clone(),
         lifecycle,
         expected_incarnation: command.expected_incarnation,
-        expected_generation: record.generation,
+        expected_generation: member.record().generation,
         initiator: subject(OWNER),
     };
     let MutationReceipt::Recorded(deleted) = fixture
@@ -937,6 +979,57 @@ async fn configure_and_delete_space_preserves_room_scope() {
     assert_eq!(
         fixture.activate_current(&fixture.scope).await,
         Activation::Activated
+    );
+    let audience = fixture
+        .store
+        .load_space_deletion_audience(&deletion.key, deletion.operation)
+        .await
+        .expect("read durable audience")
+        .expect("the committed deletion");
+    assert_eq!(audience.record, deleted);
+    assert_eq!(audience.local, [preference.clone()]);
+    let [remote] = audience.remote.as_slice() else {
+        panic!("only the eligible remote preference is captured");
+    };
+    assert_eq!(&remote.account, remote_account.jid());
+    assert_eq!(remote.snapshot, remote_snapshot);
+    assert_eq!(
+        remote.grant,
+        Some(SpaceSubscriptionGrant {
+            lifecycle,
+            incarnation: command.expected_incarnation,
+            generation: member.record().generation,
+        })
+    );
+    let local = fixture
+        .store
+        .load_local_space_deletion_recipient(&deletion.key, deletion.operation, &deletion.initiator)
+        .await
+        .expect("read exact local recipient")
+        .expect("the owner preference");
+    assert_eq!(local.preference, preference);
+    assert_eq!(local.current_generation, deleted.generation);
+    assert!(fixture
+        .store
+        .load_local_space_deletion_recipient(&deletion.key, deletion.operation, &subject(PEER))
+        .await
+        .expect("check unrelated subject")
+        .is_none());
+    sqlx::query("DELETE FROM s2s_space_subscriptions WHERE service_jid = $1 AND node_name = $2")
+        .bind(deletion.key.service().as_str())
+        .bind(deletion.key.node())
+        .execute(&pool)
+        .await
+        .expect("remove the mutable source preferences");
+    assert_eq!(
+        fixture
+            .store
+            .load_space_deletion_audience(&deletion.key, deletion.operation)
+            .await
+            .expect("recover after cleanup")
+            .expect("the same deletion")
+            .remote,
+        audience.remote
     );
     let scope = fixture.state(&fixture.scope).await;
     assert_eq!(scope.admission, AdmissionState::Active);
@@ -3099,6 +3192,7 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
         format!(
@@ -3376,6 +3470,7 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(

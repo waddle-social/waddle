@@ -147,7 +147,7 @@ impl ConnectionEntry {
 }
 
 impl ConnectionRegistry {
-    /// Offer a validated bookmark event to the currently published local socket
+    /// Offer a validated Space event to the currently published local socket
     /// for this exact binding. Enqueue is best effort and grants no wire authority.
     pub fn try_send_protected_space_event_if_owner(
         &self,
@@ -159,8 +159,10 @@ impl ConnectionRegistry {
         use crate::stream_management::ProtectedSpaceReplyKind;
 
         if !payload.protected_space_reply().is_some_and(|descriptor| {
-            descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent
-                && descriptor.recipient() == jid
+            matches!(
+                descriptor.kind(),
+                ProtectedSpaceReplyKind::BookmarkEvent | ProtectedSpaceReplyKind::DeleteEvent
+            ) && descriptor.recipient() == jid
         }) {
             return ProtectedSpaceEventEnqueue::InvalidPayload;
         }
