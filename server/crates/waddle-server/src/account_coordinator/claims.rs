@@ -265,8 +265,12 @@ impl AccountClaimSource for ClaimStoreClaimSource {
 /// What is known about the connection a stored binding names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingLiveness {
-    /// The connection's node holds a fresh lease.
+    /// The connection's node holds an active (non-draining, non-expired) lease.
     Live,
+    /// The connection's node is draining: it is leaving and refusing new
+    /// claims while finishing live socket teardown. Its binding is not adopted
+    /// as live on takeover, nor detached or retired until the lease expires.
+    Draining,
     /// The connection's node lost its lease, or its process ended. The
     /// connection is gone and the binding can be retired without it.
     Expired,
@@ -322,29 +326,34 @@ impl ConnectionLiveness for LocalNodeLiveness {
     }
 }
 
-/// Reads whether another node's lease is unexpired.
+/// Reads the lifecycle state of a node incarnation's lease.
 #[async_trait]
 pub trait NodeLeaseRead: Send + Sync + 'static {
-    /// `Some(true)` when the lease of this exact node incarnation is
-    /// unexpired, `Some(false)` when it is expired or gone, and `None`
-    /// when the read did not answer.
-    async fn unexpired(&self, node: &NodeIdentity) -> Option<bool>;
+    /// The lease state of this exact node incarnation, or `None` when the read
+    /// did not answer.
+    async fn lease_state(
+        &self,
+        node: &NodeIdentity,
+    ) -> Option<waddle_xmpp::ownership::NodeLeaseState>;
 }
 
-/// Liveness on a clustered node, from the node leases. A connection under
-/// this node's current lease is live. A connection another node hosts is
-/// live while that node incarnation's lease is unexpired and expired once
-/// the lease is expired or gone. A lease read that does not answer, and a
-/// connection of a standalone process, are unknown.
+/// Liveness on a clustered node, from the node leases.
+///
+/// Every clustered binding — including bindings hosted by this node — is
+/// checked against the authoritative lease row for its exact
+/// `(node_id, node_epoch)` incarnation. Consulting the lease store directly
+/// avoids treating a superseded pre-rotation incarnation as live after a
+/// self-fence and keeps `Draining` symmetric across local and remote
+/// coordinators. A lease read that does not answer, and a connection of a
+/// standalone process, are unknown.
 #[derive(Clone)]
 pub struct ClusterLeaseLiveness {
-    lease: NodeLeaseIdentity,
     node_leases: Arc<dyn NodeLeaseRead>,
 }
 
 impl ClusterLeaseLiveness {
-    pub fn new(lease: NodeLeaseIdentity, node_leases: Arc<dyn NodeLeaseRead>) -> Self {
-        Self { lease, node_leases }
+    pub fn new(node_leases: Arc<dyn NodeLeaseRead>) -> Self {
+        Self { node_leases }
     }
 }
 
@@ -355,16 +364,13 @@ impl ConnectionLiveness for ClusterLeaseLiveness {
         binding: &BindingRef,
         _session: Option<SmSessionKey>,
     ) -> BindingLiveness {
-        let lease = binding.connection_ref().node_lease();
-        if lease == &self.lease {
-            return BindingLiveness::Live;
-        }
-        let Some(host) = lease.clustered_node() else {
+        let Some(host) = binding.connection_ref().node_lease().clustered_node() else {
             return BindingLiveness::Unknown;
         };
-        match self.node_leases.unexpired(&host).await {
-            Some(true) => BindingLiveness::Live,
-            Some(false) => BindingLiveness::Expired,
+        match self.node_leases.lease_state(&host).await {
+            Some(waddle_xmpp::ownership::NodeLeaseState::Active) => BindingLiveness::Live,
+            Some(waddle_xmpp::ownership::NodeLeaseState::Draining) => BindingLiveness::Draining,
+            Some(waddle_xmpp::ownership::NodeLeaseState::Expired) => BindingLiveness::Expired,
             None => BindingLiveness::Unknown,
         }
     }

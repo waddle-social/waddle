@@ -254,7 +254,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     cause,
                     selector,
                     attempt,
-                    notified,
+                    mut notified,
                     removal,
                 } => {
                     // A reconnected JID does NOT short-circuit the retry:
@@ -393,6 +393,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .await
                     {
                         Ok(LeaveDisposition::Left(outcome)) => {
+                            let mut fanout_completed = true;
                             match cause {
                                 OccupancyLeaveCause::Disconnect => {
                                     // Idempotent SFU teardown: the live task
@@ -433,7 +434,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                             );
                                         }
                                     }
-                                    broadcast_muc_leave_to_remaining_resumable(
+                                    let leave_fanout = broadcast_muc_leave_to_remaining_resumable(
                                         state,
                                         &room,
                                         &jid,
@@ -450,20 +451,32 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         }),
                                     )
                                     .await;
-                                    if removal.is_announced() {
-                                        broadcast_muc_muji_clear_to_remaining_resumable(
-                                            state,
-                                            &room,
-                                            &jid,
-                                            &outcome,
-                                            Some(LeaveFanOutProgress {
-                                                skip: &notified,
-                                                record: None,
-                                            }),
-                                        )
-                                        .await;
+                                    notified.extend(leave_fanout.newly_notified);
+                                    if !leave_fanout.completed {
+                                        fanout_completed = false;
                                     }
-                                    let _ = maybe_evict_empty_room(state, &room, &outcome).await;
+                                    if removal.is_announced() {
+                                        let muji_fanout =
+                                            broadcast_muc_muji_clear_to_remaining_resumable(
+                                                state,
+                                                &room,
+                                                &jid,
+                                                &outcome,
+                                                Some(LeaveFanOutProgress {
+                                                    skip: &notified,
+                                                    record: None,
+                                                }),
+                                            )
+                                            .await;
+                                        notified.extend(muji_fanout.newly_notified);
+                                        if !muji_fanout.completed {
+                                            fanout_completed = false;
+                                        }
+                                    }
+                                    if fanout_completed {
+                                        let _ =
+                                            maybe_evict_empty_room(state, &room, &outcome).await;
+                                    }
                                 }
                                 OccupancyLeaveCause::Administrative => {
                                     broadcast_group_dm_leave(
@@ -484,16 +497,19 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     // after enqueue: the leaver got a wait-class
                                     // bounce, so deliver its §7.14 self-echo now
                                     // and fan out to the remaining occupants.
-                                    routes::websocket::echo_muc_self_unavailable(
-                                        state,
-                                        &room,
-                                        &jid,
-                                        &outcome.leaving_room_jid,
-                                        outcome.affiliation,
-                                        removal,
-                                    )
-                                    .await;
-                                    broadcast_muc_leave_to_remaining_resumable(
+                                    if !notified.contains(&jid) {
+                                        routes::websocket::echo_muc_self_unavailable(
+                                            state,
+                                            &room,
+                                            &jid,
+                                            &outcome.leaving_room_jid,
+                                            outcome.affiliation,
+                                            removal,
+                                        )
+                                        .await;
+                                        notified.insert(jid.clone());
+                                    }
+                                    let leave_fanout = broadcast_muc_leave_to_remaining_resumable(
                                         state,
                                         &room,
                                         &jid,
@@ -510,18 +526,27 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         }),
                                     )
                                     .await;
+                                    notified.extend(leave_fanout.newly_notified);
+                                    if !leave_fanout.completed {
+                                        fanout_completed = false;
+                                    }
                                     if removal.is_announced() {
-                                        broadcast_muc_muji_clear_to_remaining_resumable(
-                                            state,
-                                            &room,
-                                            &jid,
-                                            &outcome,
-                                            Some(LeaveFanOutProgress {
-                                                skip: &notified,
-                                                record: None,
-                                            }),
-                                        )
-                                        .await;
+                                        let muji_fanout =
+                                            broadcast_muc_muji_clear_to_remaining_resumable(
+                                                state,
+                                                &room,
+                                                &jid,
+                                                &outcome,
+                                                Some(LeaveFanOutProgress {
+                                                    skip: &notified,
+                                                    record: None,
+                                                }),
+                                            )
+                                            .await;
+                                        notified.extend(muji_fanout.newly_notified);
+                                        if !muji_fanout.completed {
+                                            fanout_completed = false;
+                                        }
                                     }
                                     match (outcome.provenance, selector) {
                                         // A replayed receipt answers an owed earlier
@@ -552,8 +577,34 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                             );
                                         }
                                     }
-                                    let _ = maybe_evict_empty_room(state, &room, &outcome).await;
+                                    if fanout_completed {
+                                        let _ =
+                                            maybe_evict_empty_room(state, &room, &outcome).await;
+                                    }
                                 }
+                            }
+                            if !fanout_completed {
+                                state
+                                    .deps
+                                    .protocol
+                                    .pending_local_muc_departures
+                                    .requeue_with_backoff(PendingLocalDeparture {
+                                        item: LocalDepartureItem::RoomDeparture {
+                                            room,
+                                            jid,
+                                            cause,
+                                            selector,
+                                            attempt,
+                                            notified,
+                                            removal,
+                                        },
+                                        attempts: pending.attempts,
+                                        not_before: pending.not_before,
+                                    });
+                                crate::metrics::record_local_departure_retry(
+                                    LocalDepartureRetryOutcome::Requeued,
+                                );
+                                break;
                             }
                             // Effects ran: only now is the receipt no longer owed.
                             routes::websocket::ack_departure_receipt(
@@ -995,6 +1046,19 @@ pub(in crate::server::session_janitors) const REAPER_ASK_TIMEOUT: Duration = Dur
 #[cfg(feature = "clustering")]
 pub(in crate::server::session_janitors) const STALE_NODE_WATCHDOG_CANDIDATE_LIMIT: usize = 64;
 
+/// How often the stale-node expiry watchdog scans for nodes whose heartbeats
+/// have lapsed past `lease_ttl`, independent of the longer 120 s orphan-reaper
+/// sweep. Keeping this short ensures a dead draining pod transitions to
+/// committed `expired = true` promptly after `lease_ttl` and wakes the
+/// account-coordinator expired-binding sweep.
+#[cfg(feature = "clustering")]
+pub(in crate::server::session_janitors) const STALE_NODE_WATCHDOG_INTERVAL: Duration =
+    Duration::from_secs(10);
+
+/// Hard bound on one standalone stale-node watchdog pass.
+#[cfg(feature = "clustering")]
+const STALE_NODE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Per-sweep bound for proactive `RoomActor` orphan reconciliation. Room
 /// claims are cheap rows but adoption can hydrate durable state, so the
 /// janitor deliberately amortizes a large node loss across sweeps.
@@ -1283,11 +1347,45 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             // — no need to sweep before the node-lease loop has even
             // registered this node.
             ticker.tick().await;
+            let watchdog_interval = interval
+                .min(STALE_NODE_WATCHDOG_INTERVAL)
+                .max(Duration::from_millis(10));
+            let mut watchdog_ticker = tokio::time::interval(watchdog_interval);
+            watchdog_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            watchdog_ticker.tick().await;
             loop {
-                tokio::select! {
+                enum Wake {
+                    FullSweep,
+                    Watchdog,
+                }
+                let wake = tokio::select! {
+                    biased;
                     _ = stop.cancelled() => break,
                     _ = supervisor.workers.fatal_fence.cancelled() => break,
-                    _ = ticker.tick() => {}
+                    _ = ticker.tick() => Wake::FullSweep,
+                    _ = watchdog_ticker.tick() => Wake::Watchdog,
+                };
+                if matches!(wake, Wake::Watchdog) {
+                    let Some(state) = weak_state.upgrade() else {
+                        break;
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => break,
+                        _ = supervisor.workers.fatal_fence.cancelled() => break,
+                        res = tokio::time::timeout(
+                            STALE_NODE_WATCHDOG_TIMEOUT,
+                            run_standalone_stale_node_watchdog_pass(&state),
+                        ) => {
+                            if res.is_err() {
+                                warn!(
+                                    timeout = ?STALE_NODE_WATCHDOG_TIMEOUT,
+                                    "stale-node watchdog pass timed out; retrying next tick"
+                                );
+                            }
+                        }
+                    }
+                    continue;
                 }
                 if !supervisor.is_healthy() {
                     error!("orphan reaper worker exited; restarting workers with retained work");
@@ -2704,6 +2802,111 @@ pub(in crate::server::session_janitors) async fn reconcile_registered_room_or_se
 }
 
 #[cfg(feature = "clustering")]
+enum StaleNodeWatchdogOutcome {
+    Completed,
+    Failed,
+    SelfStale,
+}
+
+#[cfg(feature = "clustering")]
+async fn expire_heartbeat_stale_nodes(
+    state: &Arc<WebSocketState>,
+    node_lease: &dyn crate::clustering::claims::NodeLeaseStore,
+    me: &waddle_xmpp::ownership::NodeIdentity,
+    lease_ttl: Duration,
+) -> StaleNodeWatchdogOutcome {
+    match node_lease
+        .list_heartbeat_stale_nodes(lease_ttl, STALE_NODE_WATCHDOG_CANDIDATE_LIMIT)
+        .await
+    {
+        Ok(stale_nodes) => {
+            let candidate_count = stale_nodes.len();
+            let mut expired_nodes = 0usize;
+            let mut renewed_nodes = 0usize;
+            let mut failed_nodes = 0usize;
+            for stale_node in stale_nodes {
+                if stale_node == *me {
+                    debug!(
+                        node_id = %me.node_id,
+                        node_epoch = %me.node_epoch,
+                        "orphan reaper: stale-node watchdog found this node's own heartbeat stale; aborting sweep"
+                    );
+                    return StaleNodeWatchdogOutcome::SelfStale;
+                }
+                match node_lease.expire(&stale_node, lease_ttl).await {
+                    Ok(true) => expired_nodes += 1,
+                    Ok(false) => renewed_nodes += 1,
+                    Err(error) => {
+                        failed_nodes += 1;
+                        warn!(
+                            node_id = %stale_node.node_id,
+                            node_epoch = %stale_node.node_epoch,
+                            %error,
+                            "orphan reaper: stale-node watchdog expire failed; retrying next sweep"
+                        );
+                    }
+                }
+            }
+            if expired_nodes > 0 {
+                info!(
+                    expired_nodes,
+                    candidate_count,
+                    limit = STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
+                    "orphan reaper: stale-node watchdog committed expired nodes"
+                );
+                state
+                    .deps
+                    .app_state
+                    .account_authority()
+                    .wake_expired_binding_sweep();
+            }
+            if renewed_nodes > 0 {
+                debug!(
+                    renewed_nodes,
+                    candidate_count,
+                    "orphan reaper: stale-node watchdog candidates renewed before expire"
+                );
+            }
+            if failed_nodes > 0 {
+                warn!(
+                    failed_nodes,
+                    candidate_count,
+                    "orphan reaper: stale-node watchdog failed to expire some candidates"
+                );
+                return StaleNodeWatchdogOutcome::Failed;
+            }
+            StaleNodeWatchdogOutcome::Completed
+        }
+        Err(error) => {
+            warn!(%error, "orphan reaper: stale-node watchdog candidate scan failed");
+            StaleNodeWatchdogOutcome::Failed
+        }
+    }
+}
+
+/// Lightweight periodic watchdog pass that commits `expired = true` for
+/// heartbeat-stale nodes and wakes the account-coordinator expired-binding
+/// sweep without running full SM/Room claim reclamation.
+#[cfg(feature = "clustering")]
+async fn run_standalone_stale_node_watchdog_pass(state: &Arc<WebSocketState>) {
+    let clustering = &state.deps.app_state.clustering_claims;
+    let Some((_, identity_handle)) = clustering.claim_pair() else {
+        return;
+    };
+    let Some(node_lease) = clustering.node_lease.clone() else {
+        return;
+    };
+    let Some(lease_ttl) = clustering.lease_ttl else {
+        return;
+    };
+    let me = identity_handle.current();
+    if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "watchdog").await {
+        return;
+    }
+    let _ = expire_heartbeat_stale_nodes(state, node_lease.as_ref(), &me, lease_ttl).await;
+}
+
+#[cfg(feature = "clustering")]
 pub(in crate::server::session_janitors) async fn run_orphan_reaper_sweep_with_workers(
     state: &Arc<WebSocketState>,
     workers: &OrphanReaperWorkers,
@@ -2750,66 +2953,10 @@ pub(in crate::server::session_janitors) async fn run_orphan_reaper_sweep_with_wo
             }
         }
 
-        match node_lease
-            .list_heartbeat_stale_nodes(lease_ttl, STALE_NODE_WATCHDOG_CANDIDATE_LIMIT)
-            .await
-        {
-            Ok(stale_nodes) => {
-                let candidate_count = stale_nodes.len();
-                let mut expired_nodes = 0usize;
-                let mut renewed_nodes = 0usize;
-                let mut failed_nodes = 0usize;
-                for stale_node in stale_nodes {
-                    if stale_node == me {
-                        debug!(
-                            node_id = %me.node_id,
-                            node_epoch = %me.node_epoch,
-                            "orphan reaper: stale-node watchdog found this node's own heartbeat stale; aborting sweep"
-                        );
-                        return false;
-                    }
-                    match node_lease.expire(&stale_node, lease_ttl).await {
-                        Ok(true) => expired_nodes += 1,
-                        Ok(false) => renewed_nodes += 1,
-                        Err(error) => {
-                            failed_nodes += 1;
-                            warn!(
-                                node_id = %stale_node.node_id,
-                                node_epoch = %stale_node.node_epoch,
-                                %error,
-                                "orphan reaper: stale-node watchdog expire failed; retrying next sweep"
-                            );
-                        }
-                    }
-                }
-                if expired_nodes > 0 {
-                    info!(
-                        expired_nodes,
-                        candidate_count,
-                        limit = STALE_NODE_WATCHDOG_CANDIDATE_LIMIT,
-                        "orphan reaper: stale-node watchdog committed expired nodes"
-                    );
-                }
-                if renewed_nodes > 0 {
-                    debug!(
-                        renewed_nodes,
-                        candidate_count,
-                        "orphan reaper: stale-node watchdog candidates renewed before expire"
-                    );
-                }
-                if failed_nodes > 0 {
-                    sweep_failed = true;
-                    warn!(
-                        failed_nodes,
-                        candidate_count,
-                        "orphan reaper: stale-node watchdog failed to expire some candidates"
-                    );
-                }
-            }
-            Err(error) => {
-                sweep_failed = true;
-                warn!(%error, "orphan reaper: stale-node watchdog candidate scan failed");
-            }
+        match expire_heartbeat_stale_nodes(state, node_lease.as_ref(), &me, lease_ttl).await {
+            StaleNodeWatchdogOutcome::Completed => {}
+            StaleNodeWatchdogOutcome::Failed => sweep_failed = true,
+            StaleNodeWatchdogOutcome::SelfStale => return false,
         }
 
         if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "post-watchdog")

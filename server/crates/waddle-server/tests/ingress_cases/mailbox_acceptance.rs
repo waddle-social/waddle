@@ -790,3 +790,481 @@ async fn successor_owner_adopts_the_lane_of_a_room_it_now_owns() {
     );
     fixture.close().await;
 }
+
+/// Session-scoped room requests (`RoomJoin`, `RoomPresence`, `RoomLeave`,
+/// `RoomIq`) settle as `Rejected` when their retry budget is exhausted instead
+/// of dead-lettering their lane. The lane cursor advances so subsequent queued
+/// entries are immediately claimable, and `ingress_room_requests` is settled so
+/// `count_unsettled_decisions` stays zero.
+#[tokio::test]
+async fn retry_exhausted_room_requests_settle_rejected_and_unblock_the_lane() {
+    use std::time::Duration;
+    use waddle_server::ingress::mailbox_worker::{
+        MailboxAttemptRecord, MailboxLaneHead, MAILBOX_ATTEMPT_LIMIT,
+    };
+    use waddle_server::ingress::room_request::{RoomRequestCommit, RoomRequestSubmission};
+    use waddle_server::ingress_uow::RoomRequestRepository;
+    use waddle_xmpp::ingress::mailbox::{RoomRequestKey, RoomRequestKind};
+    use waddle_xmpp::Stanza;
+    use waddle_xmpp_core::OccupancySessionGeneration;
+
+    let Some((fixture, room_fence)) = mailbox_fixture("room_req_exhaust").await else {
+        return;
+    };
+    let owner = room_fence.owner.clone();
+    let authority = mailbox_authority(&fixture, &owner).await;
+    let occupant: jid::FullJid = "alice@example.com/web".parse().expect("occupant");
+    let generation = OccupancySessionGeneration::mint();
+
+    let presence_stanza = |kind: RoomRequestKind| -> Stanza {
+        match kind {
+            RoomRequestKind::Join | RoomRequestKind::Presence => {
+                let mut p =
+                    xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+                p.to = Some(room().with_resource_str("alice").expect("nick").into());
+                Stanza::Presence(p)
+            }
+            RoomRequestKind::Leave => {
+                let mut p = xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::Unavailable,
+                );
+                p.to = Some(room().with_resource_str("alice").expect("nick").into());
+                Stanza::Presence(p)
+            }
+            RoomRequestKind::Iq => Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Get {
+                from: Some(occupant.clone().into()),
+                to: Some(room().into()),
+                id: "room-iq-exhaust".to_owned(),
+                payload: minidom::Element::builder("query", "jabber:iq:version").build(),
+            })),
+        }
+    };
+
+    // Queue two entries on the same MUC-stanza lane: RoomJoin followed by
+    // RoomPresence. Exhausting retries on the head must auto-settle it and
+    // unblock the queued second entry on the same lane.
+    let RoomRequestCommit::Committed(join_pending) = authority
+        .commit_room_request(RoomRequestSubmission {
+            key: RoomRequestKey::mint(),
+            kind: RoomRequestKind::Join,
+            room: room(),
+            occupant: occupant.clone(),
+            generation,
+            principal: fixture.principal.clone(),
+            stanza: presence_stanza(RoomRequestKind::Join),
+        })
+        .await
+        .expect("commit join")
+    else {
+        panic!("join request must be carried");
+    };
+    let RoomRequestCommit::Committed(presence_pending) = authority
+        .commit_room_request(RoomRequestSubmission {
+            key: RoomRequestKey::mint(),
+            kind: RoomRequestKind::Presence,
+            room: room(),
+            occupant: occupant.clone(),
+            generation,
+            principal: fixture.principal.clone(),
+            stanza: presence_stanza(RoomRequestKind::Presence),
+        })
+        .await
+        .expect("commit presence")
+    else {
+        panic!("presence request must be carried");
+    };
+    assert_eq!(join_pending.lane, presence_pending.lane);
+
+    for attempt in 1..MAILBOX_ATTEMPT_LIMIT {
+        assert_eq!(
+            authority
+                .record_room_acceptance_failure(join_pending.lane, join_pending.operation, &owner)
+                .await
+                .expect("record deferred attempt"),
+            MailboxAttemptRecord::Deferred { attempts: attempt }
+        );
+    }
+    assert_eq!(
+        authority
+            .record_room_acceptance_failure(join_pending.lane, join_pending.operation, &owner)
+            .await
+            .expect("record exhausting attempt"),
+        MailboxAttemptRecord::ExhaustedSettled
+    );
+
+    // Verify mailbox entry and parent request are settled cleanly with no dead
+    // letter and no unsettled decision left behind.
+    let mut tx = fixture.uow.begin().await.expect("inspect join state");
+    let entry = MailboxRepository::lookup(&mut tx, join_pending.operation)
+        .await
+        .expect("lookup join entry")
+        .expect("join entry exists");
+    assert_eq!(
+        entry.disposition,
+        MailboxEntryDisposition::Consumed(MailboxOwnerDecision::Rejected)
+    );
+    assert_eq!(entry.dead_letter, None);
+    assert_eq!(entry.attempts, MAILBOX_ATTEMPT_LIMIT);
+    let stored = RoomRequestRepository::read(&mut tx, join_pending.key)
+        .await
+        .expect("read join request")
+        .expect("join request exists");
+    assert_eq!(stored.decision, Some(MailboxOwnerDecision::Rejected));
+    assert!(stored.settled, "exhausted room request must be settled");
+    assert_eq!(
+        RoomRequestRepository::count_unsettled_decisions(&mut tx, Duration::ZERO)
+            .await
+            .expect("count unsettled"),
+        0
+    );
+    drop(tx);
+
+    // The queued second entry on the same lane is now immediately claimable!
+    let MailboxLaneHead::ReadyRequest(next) = authority
+        .claim_room_acceptance(join_pending.lane, &owner)
+        .await
+        .expect("claim next entry on unblocked lane")
+    else {
+        panic!("the second queued room request must be claimable after head exhaustion");
+    };
+    assert_eq!(next.operation, presence_pending.operation);
+
+    // Exhaust Presence, Leave, and Iq as well to prove all four kinds settle.
+    for (lane, operation, key) in {
+        let mut items = vec![(
+            presence_pending.lane,
+            presence_pending.operation,
+            presence_pending.key,
+        )];
+        for kind in [RoomRequestKind::Leave, RoomRequestKind::Iq] {
+            let RoomRequestCommit::Committed(pending) = authority
+                .commit_room_request(RoomRequestSubmission {
+                    key: RoomRequestKey::mint(),
+                    kind,
+                    room: room(),
+                    occupant: occupant.clone(),
+                    generation,
+                    principal: fixture.principal.clone(),
+                    stanza: presence_stanza(kind),
+                })
+                .await
+                .expect("commit request")
+            else {
+                panic!("{kind:?} request must be carried");
+            };
+            items.push((pending.lane, pending.operation, pending.key));
+        }
+        items
+    } {
+        for _ in 1..MAILBOX_ATTEMPT_LIMIT {
+            authority
+                .record_room_acceptance_failure(lane, operation, &owner)
+                .await
+                .expect("defer");
+        }
+        assert_eq!(
+            authority
+                .record_room_acceptance_failure(lane, operation, &owner)
+                .await
+                .expect("exhaust"),
+            MailboxAttemptRecord::ExhaustedSettled
+        );
+        let mut tx = fixture.uow.begin().await.expect("inspect settled request");
+        let entry = MailboxRepository::lookup(&mut tx, operation)
+            .await
+            .expect("lookup")
+            .expect("entry");
+        assert_eq!(
+            entry.disposition,
+            MailboxEntryDisposition::Consumed(MailboxOwnerDecision::Rejected)
+        );
+        assert_eq!(entry.dead_letter, None);
+        let stored = RoomRequestRepository::read(&mut tx, key)
+            .await
+            .expect("read")
+            .expect("stored");
+        assert_eq!(stored.decision, Some(MailboxOwnerDecision::Rejected));
+        assert!(stored.settled);
+        drop(tx);
+    }
+
+    let mut tx = fixture.uow.begin().await.expect("check final state");
+    assert!(
+        MailboxRepository::list_dead_letters(&mut tx, 16)
+            .await
+            .expect("list dead letters")
+            .is_empty(),
+        "no session-scoped room request should be dead-lettered"
+    );
+    assert_eq!(
+        RoomRequestRepository::count_unsettled_decisions(&mut tx, Duration::ZERO)
+            .await
+            .expect("count unsettled"),
+        0
+    );
+    drop(tx);
+    fixture.close().await;
+}
+
+/// A deposed room owner that hits the retry limit after the room claim has
+/// moved to another node must NOT reject-settle the entry; it returns
+/// `Settled` and leaves the entry pending so the new owner can adopt the lane
+/// and process it cleanly.
+#[tokio::test]
+async fn deposed_room_owner_does_not_settle_exhausted_room_request() {
+    use waddle_server::ingress::mailbox_worker::{
+        MailboxAttemptRecord, MailboxLaneHead, MAILBOX_ATTEMPT_LIMIT,
+    };
+    use waddle_server::ingress::room_request::{RoomRequestCommit, RoomRequestSubmission};
+    use waddle_server::ingress_uow::RoomRequestRepository;
+    use waddle_xmpp::ingress::mailbox::{RoomRequestKey, RoomRequestKind};
+    use waddle_xmpp::ownership::NodeIdentity;
+    use waddle_xmpp::Stanza;
+    use waddle_xmpp_core::OccupancySessionGeneration;
+
+    let Some((fixture, room_fence)) = mailbox_fixture("room_req_deposed").await else {
+        return;
+    };
+    let old_owner = room_fence.owner.clone();
+    let new_owner = NodeIdentity::new("new-room-owner", "new-incarnation");
+    let old_authority = mailbox_authority(&fixture, &old_owner).await;
+    let new_authority = mailbox_authority(&fixture, &new_owner).await;
+    let occupant: jid::FullJid = "bob@example.com/web".parse().expect("occupant");
+
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence.to = Some(room().with_resource_str("bob").expect("nick").into());
+    let RoomRequestCommit::Committed(pending) = old_authority
+        .commit_room_request(RoomRequestSubmission {
+            key: RoomRequestKey::mint(),
+            kind: RoomRequestKind::Presence,
+            room: room(),
+            occupant,
+            generation: OccupancySessionGeneration::mint(),
+            principal: fixture.principal.clone(),
+            stanza: Stanza::Presence(presence),
+        })
+        .await
+        .expect("commit presence")
+    else {
+        panic!("request must be carried");
+    };
+
+    // Bring attempts to MAILBOX_ATTEMPT_LIMIT - 1 with zero retry delay so
+    // the successor can immediately claim the entry once it adopts the lane.
+    {
+        let mut tx = fixture.uow.begin().await.expect("bump attempts");
+        let locked = MailboxRepository::claim_backlogged_lane(&mut tx, pending.lane, &old_owner)
+            .await
+            .expect("lock lane")
+            .expect("lane belongs to old owner");
+        for attempt in 1..MAILBOX_ATTEMPT_LIMIT {
+            assert_eq!(
+                MailboxRepository::record_attempt(
+                    &mut tx,
+                    &locked,
+                    pending.operation,
+                    std::time::Duration::ZERO,
+                )
+                .await
+                .expect("record attempt"),
+                attempt
+            );
+        }
+        tx.commit().await.expect("commit attempts");
+    }
+
+    // Move the room claim to the successor before the old owner's final attempt.
+    fixture
+        .execute(
+            "UPDATE clustering_claims SET node_id = ?, node_epoch = ?, claim_epoch = ? \
+             WHERE entity = ?",
+            waddle_server::db_params![
+                new_owner.node_id.clone(),
+                new_owner.node_epoch.clone(),
+                room_fence.epoch.0 + 10,
+                format!("room_actor:{}", room())
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        old_authority
+            .record_room_acceptance_failure(pending.lane, pending.operation, &old_owner)
+            .await
+            .expect("deposed owner attempt"),
+        MailboxAttemptRecord::ClaimNotHeld,
+        "deposed owner must report ClaimNotHeld without settling the request"
+    );
+    assert!(
+        matches!(
+            old_authority
+                .claim_room_acceptance(pending.lane, &old_owner)
+                .await
+                .expect("deposed owner re-claim"),
+            MailboxLaneHead::Idle
+        ),
+        "deposed owner's retry must be deferred so work_lane does not hot-spin"
+    );
+
+    let mut tx = fixture.uow.begin().await.expect("inspect pending");
+    let entry = MailboxRepository::lookup(&mut tx, pending.operation)
+        .await
+        .expect("lookup")
+        .expect("entry");
+    assert_eq!(entry.disposition, MailboxEntryDisposition::Pending);
+    assert_eq!(entry.dead_letter, None);
+    assert_eq!(entry.attempts, MAILBOX_ATTEMPT_LIMIT - 1);
+    let stored = RoomRequestRepository::read(&mut tx, pending.key)
+        .await
+        .expect("read")
+        .expect("stored");
+    assert_eq!(stored.decision, None);
+    assert!(!stored.settled);
+    drop(tx);
+
+    // The successor adopts the lane (which clears the deposed owner's backoff)
+    // and can immediately work the pending request.
+    let adoption = new_authority
+        .adopt_transferred_lanes(&new_owner, None, |_| async { true })
+        .await
+        .expect("successor adopts lane");
+    assert_eq!(adoption.adopted, 1);
+    assert_eq!(
+        new_authority
+            .scan_mailbox_backlog(&new_owner, None)
+            .await
+            .expect("successor backlog scan"),
+        vec![pending.lane]
+    );
+    assert!(matches!(
+        new_authority
+            .claim_room_acceptance(pending.lane, &new_owner)
+            .await
+            .expect("successor claims request"),
+        MailboxLaneHead::ReadyRequest(claimed) if claimed.operation == pending.operation
+    ));
+    fixture.close().await;
+}
+
+/// Online operator dead-letter inspection and repair (`waddle-server
+/// mailbox-dead-letters`) lists pending dead letters targeting any node
+/// incarnation (including stopped ones), repairs `RetriesExhausted` entries
+/// without matching `target_owner`, and refuses `CanonicalEvidenceInvalid`
+/// unless `force_invalid_evidence` is explicitly passed.
+#[tokio::test]
+async fn operator_dead_letter_list_and_repair_works_for_stopped_owner_and_guards_invalid_evidence()
+{
+    use waddle_server::ingress::mailbox_worker::{
+        list_mailbox_dead_letters, operator_repair_mailbox_dead_letter, MailboxAttemptRecord,
+        OperatorMailboxRepairOutcome, MAILBOX_ATTEMPT_LIMIT,
+    };
+    use waddle_server::ingress_uow::MailboxDeadLetterReason;
+
+    let Some((fixture, room_fence)) = mailbox_fixture("op_dead_letter_cli").await else {
+        return;
+    };
+    let owner = room_fence.owner.clone();
+    let authority = mailbox_authority(&fixture, &owner).await;
+
+    let origin = origin_groupchat(&fixture, "op-dead-letter-1", "dead-lettered message");
+    let committed = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit");
+    let key = committed.message_key.expect("canonical message");
+    let lane = committed
+        .remote_acceptance
+        .as_ref()
+        .expect("pending acceptance")
+        .lane;
+    let operation = MailboxOperationKey::RoomAcceptance(key);
+
+    for _ in 0..MAILBOX_ATTEMPT_LIMIT {
+        authority
+            .record_room_acceptance_failure(lane, operation, &owner)
+            .await
+            .expect("record failure");
+    }
+
+    let listed = list_mailbox_dead_letters(&fixture.uow, 10)
+        .await
+        .expect("list dead letters");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].lane, lane);
+    assert_eq!(listed[0].operation, operation);
+    assert_eq!(listed[0].target_owner, owner);
+    assert_eq!(listed[0].reason, MailboxDeadLetterReason::RetriesExhausted);
+
+    assert_eq!(
+        operator_repair_mailbox_dead_letter(&fixture.uow, lane, operation, false)
+            .await
+            .expect("operator repair"),
+        OperatorMailboxRepairOutcome::Repaired {
+            previous_reason: MailboxDeadLetterReason::RetriesExhausted,
+        }
+    );
+    assert!(list_mailbox_dead_letters(&fixture.uow, 10)
+        .await
+        .expect("list after repair")
+        .is_empty());
+    assert_eq!(
+        operator_repair_mailbox_dead_letter(&fixture.uow, lane, operation, false)
+            .await
+            .expect("repeat repair"),
+        OperatorMailboxRepairOutcome::NotDeadLettered
+    );
+
+    // Park the same entry as `CanonicalEvidenceInvalid` and verify the safety
+    // guard refuses repair unless `force_invalid_evidence` is true.
+    let mut tx = fixture.uow.begin().await.expect("park invalid evidence");
+    let locked = MailboxRepository::lock_lane_for_operator(&mut tx, lane)
+        .await
+        .expect("lock lane")
+        .expect("lane exists");
+    MailboxRepository::dead_letter(
+        &mut tx,
+        &locked,
+        operation,
+        MailboxDeadLetterReason::CanonicalEvidenceInvalid,
+    )
+    .await
+    .expect("dead-letter invalid evidence");
+    tx.commit().await.expect("commit invalid evidence");
+
+    assert_eq!(
+        operator_repair_mailbox_dead_letter(&fixture.uow, lane, operation, false)
+            .await
+            .expect("refused without force"),
+        OperatorMailboxRepairOutcome::RefusedCanonicalEvidenceInvalid
+    );
+    assert_eq!(
+        list_mailbox_dead_letters(&fixture.uow, 10)
+            .await
+            .expect("still listed")
+            .len(),
+        1
+    );
+    assert_eq!(
+        operator_repair_mailbox_dead_letter(&fixture.uow, lane, operation, true)
+            .await
+            .expect("repaired with force"),
+        OperatorMailboxRepairOutcome::Repaired {
+            previous_reason: MailboxDeadLetterReason::CanonicalEvidenceInvalid,
+        }
+    );
+    assert!(list_mailbox_dead_letters(&fixture.uow, 10)
+        .await
+        .expect("cleared after forced repair")
+        .is_empty());
+
+    // Confirm RoomAcceptance still dead-letters on retry exhaustion (unlike
+    // session-scoped room requests).
+    let mut last = MailboxAttemptRecord::Settled;
+    for _ in 0..MAILBOX_ATTEMPT_LIMIT {
+        last = authority
+            .record_room_acceptance_failure(lane, operation, &owner)
+            .await
+            .expect("re-exhaust");
+    }
+    assert_eq!(last, MailboxAttemptRecord::DeadLettered);
+    fixture.close().await;
+}

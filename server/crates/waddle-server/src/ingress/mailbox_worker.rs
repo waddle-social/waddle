@@ -74,6 +74,13 @@ pub enum MailboxAttemptRecord {
     Deferred { attempts: u32 },
     /// The retry budget is spent; the entry was parked for an operator.
     DeadLettered,
+    /// A session-scoped room request exhausted retries and was settled as
+    /// rejected to release its lane.
+    ExhaustedSettled,
+    /// This node does not hold the authoritative room claim needed to settle a
+    /// retry-exhausted request; the entry stays pending (with its next attempt
+    /// deferred) so the current or future room owner can adopt and work it.
+    ClaimNotHeld,
     /// The entry was decided or the lane changed hands meanwhile.
     Settled,
 }
@@ -291,9 +298,15 @@ impl IngressAuthority {
         }
     }
 
-    /// Count a failed attempt at `operation` and defer the next one, or park
-    /// the entry for an operator once [`MAILBOX_ATTEMPT_LIMIT`] is reached.
-    /// The lane's cursor never moves here.
+    /// Count a failed attempt at `operation` and defer the next one, or once
+    /// [`MAILBOX_ATTEMPT_LIMIT`] is reached:
+    /// - for a session-scoped room request (`RoomJoin`, `RoomPresence`,
+    ///   `RoomLeave`, `RoomIq`), verify this node still holds the room claim
+    ///   and atomically reject, consume, and settle the request in canonical
+    ///   lock order (`epoch -> claim -> lane -> request -> entry`) so the lane
+    ///   cursor advances instead of parking forever;
+    /// - for a durable room acceptance or direct request, park the entry for
+    ///   an operator without moving the lane's cursor.
     pub async fn record_room_acceptance_failure(
         &self,
         lane: MailboxLaneId,
@@ -304,6 +317,26 @@ impl IngressAuthority {
             .uow
             .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
             .await?;
+        #[cfg(feature = "clustering")]
+        if let Some((kind, request_key)) = operation.request() {
+            let Some(peek) = MailboxRepository::lookup(&mut tx, operation).await? else {
+                return Ok(MailboxAttemptRecord::Settled);
+            };
+            if peek.disposition != MailboxEntryDisposition::Pending || peek.dead_letter.is_some() {
+                return Ok(MailboxAttemptRecord::Settled);
+            }
+            if peek.lane == lane && peek.attempts.saturating_add(1) >= MAILBOX_ATTEMPT_LIMIT {
+                return Self::settle_exhausted_room_request(
+                    tx,
+                    lane,
+                    operation,
+                    kind,
+                    request_key,
+                    target,
+                )
+                .await;
+            }
+        }
         let Some(locked) = MailboxRepository::claim_backlogged_lane(&mut tx, lane, target).await?
         else {
             return Ok(MailboxAttemptRecord::Settled);
@@ -313,6 +346,29 @@ impl IngressAuthority {
         };
         if entry.disposition != MailboxEntryDisposition::Pending || entry.dead_letter.is_some() {
             return Ok(MailboxAttemptRecord::Settled);
+        }
+        #[cfg(feature = "clustering")]
+        if let Some((kind, request_key)) = operation.request() {
+            if entry.attempts.saturating_add(1) >= MAILBOX_ATTEMPT_LIMIT {
+                // Another worker bumped `attempts` to the limit between our
+                // unlocked peek and `claim_backlogged_lane`. Drop `tx` to
+                // release the lane lock before re-entering in canonical
+                // `claim -> lane -> request -> entry` order.
+                drop(tx);
+                let fresh_tx = self
+                    .uow
+                    .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+                    .await?;
+                return Self::settle_exhausted_room_request(
+                    fresh_tx,
+                    lane,
+                    operation,
+                    kind,
+                    request_key,
+                    target,
+                )
+                .await;
+            }
         }
         let attempts = MailboxRepository::record_attempt(
             &mut tx,
@@ -335,6 +391,186 @@ impl IngressAuthority {
         };
         tx.commit().await?;
         Ok(record)
+    }
+
+    /// Settle a retry-exhausted session-scoped room request inside `tx` in
+    /// exact canonical lock order:
+    /// `ingress_protocol_epoch (held by tx) -> clustering_claims (FOR SHARE)
+    /// -> ingress_mailbox_lanes (FOR UPDATE) -> ingress_room_requests (FOR UPDATE)
+    /// -> ingress_mailbox_entries (FOR UPDATE)`.
+    #[cfg(feature = "clustering")]
+    async fn settle_exhausted_room_request(
+        mut tx: crate::ingress_uow::IngressUowTransaction<'_>,
+        lane: MailboxLaneId,
+        operation: MailboxOperationKey,
+        kind: waddle_xmpp::ingress::mailbox::RoomRequestKind,
+        request_key: waddle_xmpp::ingress::mailbox::RoomRequestKey,
+        target: &NodeIdentity,
+    ) -> Result<MailboxAttemptRecord, IngressUowError> {
+        use crate::ingress_uow::{
+            ClaimRepository, MailboxError, MailboxTargetFence, RoomRequestError,
+            RoomRequestRepository,
+        };
+        // Unlocked read of the parent request to discover the room JID before
+        // taking any row locks. Missing or malformed parent rows park as
+        // `CanonicalEvidenceInvalid` so corrupt state is never silently dropped.
+        let room = match RoomRequestRepository::read(&mut tx, request_key).await {
+            Ok(Some(request)) if request.kind == kind => request.room,
+            Ok(_) | Err(IngressUowError::RoomRequest(RoomRequestError::InvalidStored)) => {
+                let Some(locked) =
+                    MailboxRepository::claim_backlogged_lane(&mut tx, lane, target).await?
+                else {
+                    return Ok(MailboxAttemptRecord::Settled);
+                };
+                MailboxRepository::dead_letter(
+                    &mut tx,
+                    &locked,
+                    operation,
+                    MailboxDeadLetterReason::CanonicalEvidenceInvalid,
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(MailboxAttemptRecord::DeadLettered);
+            }
+            Err(error) => return Err(error),
+        };
+        // 1. Assert room claim first (canonical lock order). If the room claim
+        //    is gone or moved elsewhere, do not settle the request — defer our
+        //    retry without consuming an attempt and report `ClaimNotHeld` so
+        //    `work_lane` stops immediately without spinning or emitting
+        //    `Decided`, while the current or next room owner can adopt the
+        //    lane (which clears `next_attempt_at`) and work it cleanly.
+        let Some((claim_owner, claim_epoch)) = ClaimRepository::room_claim(&mut tx, &room).await?
+        else {
+            return Self::defer_exhausted_without_claim(tx, lane, operation, target).await;
+        };
+        if claim_owner != *target {
+            return Self::defer_exhausted_without_claim(tx, lane, operation, target).await;
+        }
+        match ClaimRepository::assert_room_claim(&mut tx, &room, target, claim_epoch).await {
+            Ok(_) => {}
+            Err(IngressUowError::ClaimFenceMissing | IngressUowError::RoomGenerationStale) => {
+                return Self::defer_exhausted_without_claim(tx, lane, operation, target).await;
+            }
+            Err(error) => return Err(error),
+        }
+        // 2. Lock the lane as its target.
+        let mut locked = match MailboxRepository::lock_lane_for_target(
+            &mut tx,
+            lane,
+            &MailboxTargetFence {
+                target_epoch: claim_epoch,
+                target_owner: claim_owner,
+            },
+        )
+        .await
+        {
+            Ok(locked) => locked,
+            Err(IngressUowError::Mailbox(MailboxError::LaneMissing)) => {
+                return Ok(MailboxAttemptRecord::Settled);
+            }
+            Err(IngressUowError::Mailbox(MailboxError::StaleFence(_))) => {
+                return Ok(MailboxAttemptRecord::ClaimNotHeld);
+            }
+            Err(error) => return Err(error),
+        };
+        if locked.pending() == 0 {
+            return Ok(MailboxAttemptRecord::Settled);
+        }
+        // 3. Lock the room request row.
+        let Some(stored) = RoomRequestRepository::lock(&mut tx, request_key).await? else {
+            MailboxRepository::dead_letter(
+                &mut tx,
+                &locked,
+                operation,
+                MailboxDeadLetterReason::CanonicalEvidenceInvalid,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(MailboxAttemptRecord::DeadLettered);
+        };
+        // Re-verify the mailbox entry under the held locks.
+        let Some(entry) = MailboxRepository::lookup(&mut tx, operation).await? else {
+            return Ok(MailboxAttemptRecord::Settled);
+        };
+        if entry.lane != locked.id()
+            || entry.disposition != MailboxEntryDisposition::Pending
+            || entry.dead_letter.is_some()
+        {
+            return Ok(MailboxAttemptRecord::Settled);
+        }
+        if locked.cursor().advance_to(entry.sequence).is_err() {
+            return Ok(MailboxAttemptRecord::Settled);
+        }
+        if entry.attempts.saturating_add(1) < MAILBOX_ATTEMPT_LIMIT {
+            let attempts = MailboxRepository::record_attempt(
+                &mut tx,
+                &locked,
+                operation,
+                mailbox_retry_delay(entry.attempts.saturating_add(1)),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(MailboxAttemptRecord::Deferred { attempts });
+        }
+        // Defensive guard: if the request already carries a latched decision,
+        // only advance the mailbox entry without consuming/settling responses
+        // the origin may still need to read.
+        if let Some(recorded) = stored.decision {
+            MailboxRepository::decide(&mut tx, &mut locked, operation, recorded).await?;
+            tx.commit().await?;
+            return Ok(MailboxAttemptRecord::Settled);
+        }
+        // 4. Record the final attempt, latch Rejected, advance the lane cursor,
+        //    consume the entry, and settle the request so collection cleans it
+        //    up and `room_request_unconsumed_decisions` does not stay nonzero.
+        MailboxRepository::record_attempt(&mut tx, &locked, operation, Duration::ZERO).await?;
+        RoomRequestRepository::latch_decision(&mut tx, request_key, MailboxOwnerDecision::Rejected)
+            .await?;
+        MailboxRepository::decide(
+            &mut tx,
+            &mut locked,
+            operation,
+            MailboxOwnerDecision::Rejected,
+        )
+        .await?;
+        MailboxRepository::consume(&mut tx, &locked, operation).await?;
+        RoomRequestRepository::settle(&mut tx, request_key).await?;
+        tx.commit().await?;
+        tracing::warn!(
+            room = %room,
+            ?kind,
+            lane = %lane.as_uuid(),
+            attempts = MAILBOX_ATTEMPT_LIMIT,
+            "room request exhausted retries; settled as rejected to unblock mailbox lane"
+        );
+        Ok(MailboxAttemptRecord::ExhaustedSettled)
+    }
+
+    /// Defer the next attempt of an entry whose room claim is absent, held by
+    /// another node, or stale — without incrementing `attempt_count` or
+    /// settling the entry — so a deposed or unclaimed node does not hot-spin
+    /// `work_lane` or poll every second while waiting for claim adoption.
+    #[cfg(feature = "clustering")]
+    async fn defer_exhausted_without_claim(
+        mut tx: crate::ingress_uow::IngressUowTransaction<'_>,
+        lane: MailboxLaneId,
+        operation: MailboxOperationKey,
+        target: &NodeIdentity,
+    ) -> Result<MailboxAttemptRecord, IngressUowError> {
+        if let Some(locked) =
+            MailboxRepository::claim_backlogged_lane(&mut tx, lane, target).await?
+        {
+            MailboxRepository::defer_attempt(
+                &mut tx,
+                &locked,
+                operation,
+                mailbox_retry_delay(MAILBOX_ATTEMPT_LIMIT),
+            )
+            .await?;
+            tx.commit().await?;
+        }
+        Ok(MailboxAttemptRecord::ClaimNotHeld)
     }
 
     /// Adopt backlogged lanes whose work this node now owns: lanes of a
@@ -603,6 +839,70 @@ impl IngressAuthority {
         tx.commit().await?;
         Ok(true)
     }
+}
+
+/// Result of an operator-initiated repair attempt on one dead-lettered mailbox
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorMailboxRepairOutcome {
+    /// Entry was returned to pending work with a fresh retry budget.
+    Repaired {
+        previous_reason: MailboxDeadLetterReason,
+    },
+    /// No lane exists with the requested ID.
+    LaneMissing,
+    /// The entry does not exist on that lane or is no longer dead-lettered.
+    NotDeadLettered,
+    /// Entry was parked because its canonical parent evidence is missing or
+    /// malformed; requeueing without `--force` is refused.
+    RefusedCanonicalEvidenceInvalid,
+}
+
+/// List pending dead-lettered mailbox entries, oldest first, at most `limit`.
+pub async fn list_mailbox_dead_letters(
+    uow: &crate::ingress_uow::IngressUnitOfWork,
+    limit: u32,
+) -> Result<Vec<crate::ingress_uow::DeadLetteredMailboxEntry>, IngressUowError> {
+    let mut tx = uow
+        .begin_read_with_timeouts(Duration::from_secs(2), Duration::from_secs(5))
+        .await?;
+    let entries = MailboxRepository::list_dead_letters(&mut tx, limit).await?;
+    tx.commit().await?;
+    Ok(entries)
+}
+
+/// Operator repair of one dead-lettered mailbox entry without requiring the
+/// caller to match the lane's recorded `target_owner` (which may name a
+/// stopped node incarnation awaiting claim adoption).
+pub async fn operator_repair_mailbox_dead_letter(
+    uow: &crate::ingress_uow::IngressUnitOfWork,
+    lane: MailboxLaneId,
+    operation: MailboxOperationKey,
+    force_invalid_evidence: bool,
+) -> Result<OperatorMailboxRepairOutcome, IngressUowError> {
+    let mut tx = uow
+        .begin_with_timeouts(Duration::from_secs(2), Duration::from_secs(5))
+        .await?;
+    let Some(locked) = MailboxRepository::lock_lane_for_operator(&mut tx, lane).await? else {
+        return Ok(OperatorMailboxRepairOutcome::LaneMissing);
+    };
+    let Some(entry) = MailboxRepository::lookup(&mut tx, operation).await? else {
+        return Ok(OperatorMailboxRepairOutcome::NotDeadLettered);
+    };
+    if entry.lane != locked.id() || entry.disposition != MailboxEntryDisposition::Pending {
+        return Ok(OperatorMailboxRepairOutcome::NotDeadLettered);
+    }
+    let Some(reason) = entry.dead_letter else {
+        return Ok(OperatorMailboxRepairOutcome::NotDeadLettered);
+    };
+    if reason == MailboxDeadLetterReason::CanonicalEvidenceInvalid && !force_invalid_evidence {
+        return Ok(OperatorMailboxRepairOutcome::RefusedCanonicalEvidenceInvalid);
+    }
+    MailboxRepository::repair_dead_letter(&mut tx, &locked, operation).await?;
+    tx.commit().await?;
+    Ok(OperatorMailboxRepairOutcome::Repaired {
+        previous_reason: reason,
+    })
 }
 
 #[cfg(test)]

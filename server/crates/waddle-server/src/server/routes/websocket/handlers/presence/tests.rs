@@ -250,3 +250,157 @@ async fn muc_presence_fanout_counts_exhausted_full_channel_drop() {
     );
     drop(rx);
 }
+
+#[tokio::test]
+async fn fan_out_room_presences_preserves_per_recipient_order_and_marks_completed() {
+    let state = create_test_websocket_state().await;
+    let room: BareJid = "room@muc.example.com".parse().unwrap();
+    let alice: FullJid = "alice@example.com/web".parse().unwrap();
+    let bob: FullJid = "bob@example.com/web".parse().unwrap();
+
+    let (tx_a, mut rx_a) = mpsc::channel::<OutboundStanza>(4);
+    let _owner_a = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), tx_a);
+    let (tx_b, mut rx_b) = mpsc::channel::<OutboundStanza>(4);
+    let _owner_b = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob.clone(), tx_b);
+
+    let make_presence = |to: &FullJid, status: &str| {
+        let mut presence =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+        presence.to = Some(jid::Jid::from(to.clone()));
+        presence.statuses.insert(
+            xmpp_parsers::message::Lang(String::new()),
+            status.to_owned(),
+        );
+        waddle_xmpp::Stanza::Presence(presence)
+    };
+
+    let batches = vec![
+        (
+            alice.clone(),
+            vec![
+                make_presence(&alice, "clear"),
+                make_presence(&alice, "preparing"),
+                make_presence(&alice, "active"),
+            ],
+        ),
+        (bob.clone(), vec![make_presence(&bob, "single")]),
+    ];
+
+    let mut completed = Vec::new();
+    assert!(
+        super::muc::fan_out_room_presences(state.as_ref(), &room, batches, |recipient| {
+            completed.push(recipient.clone());
+        })
+        .await,
+        "local room presence fan-out must complete within timeout"
+    );
+
+    assert_eq!(completed, vec![alice.clone(), bob.clone()]);
+
+    let mut alice_statuses = Vec::new();
+    while let Ok(delivered) = rx_a.try_recv() {
+        let waddle_xmpp::Stanza::Presence(p) = delivered.stanza else {
+            panic!("expected presence");
+        };
+        alice_statuses.push(p.statuses.get("").cloned().unwrap_or_default());
+    }
+    assert_eq!(
+        alice_statuses,
+        vec!["clear", "preparing", "active"],
+        "multi-entry room presence batch must preserve strict per-recipient ordering"
+    );
+
+    let bob_delivered = rx_b.try_recv().expect("bob received presence");
+    assert!(matches!(
+        bob_delivered.stanza,
+        waddle_xmpp::Stanza::Presence(_)
+    ));
+    assert!(rx_b.try_recv().is_err());
+}
+
+#[cfg(feature = "clustering")]
+#[test]
+fn rejected_empty_room_request_resolution_synthesizes_refusal_error() {
+    use crate::ingress::room_request::RoomRequestResolution;
+    use waddle_xmpp::ingress::mailbox::MailboxOwnerDecision;
+
+    let room: BareJid = "room@muc.example.com".parse().unwrap();
+    let occupant: FullJid = "alice@example.com/web".parse().unwrap();
+
+    // Presence request rejected without frozen responses (e.g., retry-exhausted
+    // auto-settled entry) must produce a wait/service-unavailable presence error
+    // so `presence_request_refused` returns true.
+    let mut join = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    join.to = Some(jid::Jid::from(
+        room.with_resource_str("alice").expect("room nick"),
+    ));
+    let join_stanza = waddle_xmpp::Stanza::Presence(join);
+
+    let rejected_replies = super::room_request::finalize_room_request_resolution(
+        &join_stanza,
+        &room,
+        &occupant,
+        Ok(RoomRequestResolution {
+            decision: MailboxOwnerDecision::Rejected,
+            responses: Vec::new(),
+        }),
+    );
+    assert!(
+        super::room_request::presence_request_refused(&rejected_replies),
+        "empty Rejected room presence resolution must synthesize an error presence"
+    );
+
+    // Accepted with empty responses must stay empty (not treated as refused).
+    let accepted_replies = super::room_request::finalize_room_request_resolution(
+        &join_stanza,
+        &room,
+        &occupant,
+        Ok(RoomRequestResolution {
+            decision: MailboxOwnerDecision::Accepted,
+            responses: Vec::new(),
+        }),
+    );
+    assert!(accepted_replies.is_empty());
+    assert!(!super::room_request::presence_request_refused(
+        &accepted_replies
+    ));
+
+    // IQ request rejected without frozen responses must synthesize an IQ error
+    // matching the original IQ id.
+    let iq = waddle_xmpp::Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Get {
+        from: Some(occupant.clone().into()),
+        to: Some(room.clone().into()),
+        id: "iq-exhausted-1".to_owned(),
+        payload: Element::builder("query", "jabber:iq:version").build(),
+    }));
+    let iq_replies = super::room_request::finalize_room_request_resolution(
+        &iq,
+        &room,
+        &occupant,
+        Ok(RoomRequestResolution {
+            decision: MailboxOwnerDecision::Rejected,
+            responses: Vec::new(),
+        }),
+    );
+    assert_eq!(iq_replies.len(), 1);
+    assert!(matches!(
+        &iq_replies[0],
+        waddle_xmpp::Stanza::Iq(reply)
+            if matches!(
+                reply.as_ref(),
+                xmpp_parsers::iq::Iq::Error { id, error, .. }
+                    if id == "iq-exhausted-1"
+                        && error.type_ == xmpp_parsers::stanza_error::ErrorType::Wait
+                        && error.defined_condition
+                            == xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+            )
+    ));
+}

@@ -216,6 +216,23 @@ impl NodeIdentity {
     }
 }
 
+/// Lifecycle state of a clustered node incarnation's lease row in
+/// `clustering_nodes`.
+///
+/// - [`Self::Active`]: the exact `(node_id, node_epoch)` row exists and is
+///   neither `draining` nor `expired`.
+/// - [`Self::Draining`]: the row exists and is not `expired`, but `draining`
+///   is set — the node is leaving and refusing new claims while draining its
+///   live sockets.
+/// - [`Self::Expired`]: the row is committed `expired = true` or absent for
+///   that `(node_id, node_epoch)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeLeaseState {
+    Active,
+    Draining,
+    Expired,
+}
+
 /// A live, shared view of this process's current [`NodeIdentity`].
 ///
 /// Node identity is not fixed for the life of a process: ADR-0017 Phase 3

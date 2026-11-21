@@ -182,7 +182,7 @@ carries a domain, an address or a stream id. None is zero-registered.
 | `ingress.gc.reclaimed.orphan.proofs` | counter | `{proof}` | — | `ingress_gc_reclaimed_orphan_proofs_total` | Orphan stream-management append proofs reclaimed by ingress retention GC runs (lower bound: progress lost to external cancellation is not counted). |
 | `ingress.gc.reclaimed_messages` | counter | `{message}` | — | `ingress_gc_reclaimed_messages_total` | Ingress messages reclaimed by ingress retention GC runs (lower bound: progress lost to external cancellation is not counted). |
 | `ingress.gc.runs` | counter | `{run}` | `outcome` | `ingress_gc_runs_total` | Ingress retention GC runs by closed outcome. |
-| `ingress.mailbox.deliveries` | counter | `{event}` | `outcome` | `ingress_mailbox_deliveries_total` | Mailbox poller attempts at a lane head, by how they ended. |
+| `ingress.mailbox.deliveries` | counter | `{event}` | `outcome` | `ingress_mailbox_deliveries_total` | Mailbox poller attempts at a lane head, by how they ended (`decided`, `retried`, `dead_lettered`, `exhausted_rejected`). |
 | `ingress.mailbox.hints` | counter | `{event}` | `outcome` | `ingress_mailbox_hints_total` | Mailbox wake-up hints sent to a peer, by whether it acknowledged. |
 | `ingress.mailbox.room_acceptances` | counter | `{event}` | `outcome` | `ingress_mailbox_room_acceptances_total` | Origin waits for a remote room owner's decision, by how they ended. |
 | `ingress.mailbox.room_requests.unconsumed_decisions` | gauge | `{request}` | — | `ingress_mailbox_room_requests_unconsumed_decisions` | Decided room requests no origin has consumed after the consumption grace. |

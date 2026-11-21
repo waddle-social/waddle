@@ -417,7 +417,10 @@ pub(crate) async fn try_handle_muc_presence_update(
     // authoritative table — so a malicious client cannot inject
     // bogus `<x xmlns='muc#user'>` items.
     let mut responses = Vec::new();
+    let mut fanout_batches: Vec<(FullJid, Vec<Stanza>)> =
+        Vec::with_capacity(outcome.update.recipients.len());
     for recipient in &outcome.update.recipients {
+        let mut recipient_stanzas = Vec::new();
         for entry in &reflected_entries {
             // XEP-0045 §7.1: sessions sharing the owner bare JID
             // receive status-110 for that occupant presence. Muji
@@ -473,12 +476,14 @@ pub(crate) async fn try_handle_muc_presence_update(
             if recipient == sender_jid {
                 responses.push(stanza_to_xml(&Stanza::Presence(presence)));
             } else {
-                let stanza = Stanza::Presence(presence);
-                super::muc::route_room_presence_to_occupant(state, room_jid, recipient, stanza)
-                    .await;
+                recipient_stanzas.push(Stanza::Presence(presence));
             }
         }
+        if !recipient_stanzas.is_empty() {
+            fanout_batches.push((recipient.clone(), recipient_stanzas));
+        }
     }
+    let _ = super::muc::fan_out_room_presences(state, room_jid, fanout_batches, |_| {}).await;
 
     if clears_muji_presence {
         // The durable completion retry is persisted INSIDE

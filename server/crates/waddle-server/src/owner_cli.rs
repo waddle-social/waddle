@@ -31,6 +31,7 @@ mod emit_handoff;
 mod error;
 mod host_grant;
 mod install_attestor;
+mod mailbox_dead_letters;
 mod output;
 mod owner_phase;
 
@@ -83,6 +84,7 @@ pub fn run_from_args() -> i32 {
             Command::EmitHandoff(args) => emit_handoff::run(args).await,
             Command::HostGrant(args) => host_grant::run(args).await,
             Command::Account(args) => account::run(args).await,
+            Command::MailboxDeadLetters(args) => mailbox_dead_letters::run(args).await,
         }
     });
     match outcome {

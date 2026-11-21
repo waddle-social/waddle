@@ -28,8 +28,9 @@ mod host_grant_admission;
 pub(crate) use host_grant_admission::HostGrantAdmissionRepository;
 mod mailbox;
 pub use mailbox::{
-    LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal, MailboxDeadLetterReason,
-    MailboxError, MailboxLaneId, MailboxRepository, MailboxTargetFence, StoredMailboxEntry,
+    DeadLetteredMailboxEntry, LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal,
+    MailboxDeadLetterReason, MailboxError, MailboxLaneId, MailboxRepository, MailboxTargetFence,
+    StoredMailboxEntry,
 };
 #[cfg(feature = "clustering")]
 mod direct_requests;

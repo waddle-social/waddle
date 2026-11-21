@@ -1271,8 +1271,12 @@ where
         // A binding this socket still holds at the account coordinator (a
         // resume that failed after it was recorded) is retired before the
         // next one is minted, so the new bind does not wait on it.
+        let had_prior_binding = conn.account_binding.is_some() || conn.binding_ref.is_some();
         super::account_binding::retire_current(state, conn).await;
         conn.retire_binding_ref();
+        if had_prior_binding {
+            conn.occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        }
         match conn.bindings.prepare_next() {
             Ok(prepared) => prepared.attempt.binding_ref,
             Err(refusal) => {
