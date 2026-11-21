@@ -7,17 +7,35 @@ use super::{
     attach_clustered_pool, keypair_pool, owner_database, provision_clustered, Prepared, DOMAIN,
 };
 
+#[path = "cluster_space_resume.rs"]
+mod cluster_space_resume;
 #[path = "../cluster_support/mod.rs"]
 #[allow(dead_code)]
 mod cluster_support;
 #[path = "../host_grant_support/live_spicedb.rs"]
 mod live_spicedb;
 
+#[derive(Clone, Copy)]
+enum Exercise {
+    BookmarkEvent,
+    Resume,
+}
+
 /// Two real, attested cluster processes share a protected Space, but the
 /// publisher and subscriber each authenticate to a different WebSocket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires disposable PostgreSQL and SpiceDB"]
 async fn live_spicedb_cluster_delivers_protected_space_bookmark_over_websocket() {
+    exercise(Exercise::BookmarkEvent).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires disposable PostgreSQL and SpiceDB"]
+async fn live_spicedb_cluster_resumes_protected_space_reply_over_websocket() {
+    exercise(Exercise::Resume).await;
+}
+
+async fn exercise(exercise: Exercise) {
     use kameo::actor::Spawn;
     use waddle_server::config::SpiceDbConfig;
     use waddle_server::permissions::host_grant::{
@@ -177,6 +195,9 @@ async fn live_spicedb_cluster_delivers_protected_space_bookmark_over_websocket()
             ("WADDLE_SPICEDB_PRESHARED_KEY", key.clone()),
             ("WADDLE_SPICEDB_INSECURE", "true".to_owned()),
         ]);
+        if matches!(exercise, Exercise::Resume) {
+            env.push(("WADDLE_XMPP_DURABLE_SM", "durable".to_owned()));
+        }
         env
     };
     let spawn = |env: Vec<(&'static str, String)>| {
@@ -245,6 +266,23 @@ async fn live_spicedb_cluster_delivers_protected_space_bookmark_over_websocket()
     )
     .await;
     assert!(is_result(&granted), "canonical membership: {granted:?}");
+    if matches!(exercise, Exercise::Resume) {
+        cluster_space_resume::assert_protected_resume(
+            &prepared.owner_url,
+            [&a, &b],
+            &mut owner,
+            subscriber,
+            &service,
+            node,
+            lifecycle,
+        )
+        .await;
+        owner.close().await.expect("close owner");
+        drop((a, b));
+        prepared.cleanup().await;
+        return;
+    }
+
     let subscribed = round_trip(
         &mut subscriber,
         set(
