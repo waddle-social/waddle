@@ -99,6 +99,11 @@ impl LeaderGuard {
         let renew_cfg = config.clone();
 
         let task = tokio::spawn(async move {
+            let lease_duration = Duration::from_secs(
+                u64::try_from(renew_cfg.lease_duration_secs.max(1)).unwrap_or(15),
+            );
+            let safety_margin = Duration::from_secs(2).min(lease_duration / 3);
+            let mut lease_deadline = tokio::time::Instant::now() + lease_duration;
             let mut interval = tokio::time::interval(renew_cfg.renew_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let _first_tick = interval.tick().await;
@@ -106,15 +111,32 @@ impl LeaderGuard {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        match renew_once(&renew_api, &renew_cfg).await {
-                            Ok(true) => {}
-                            Ok(false) => {
+                        let attempt_start = tokio::time::Instant::now();
+                        let remaining = lease_deadline
+                            .saturating_duration_since(attempt_start)
+                            .saturating_sub(safety_margin);
+                        if remaining.is_zero() {
+                            tracing::error!(holder = %renew_cfg.holder_id, "leader election lease renewal budget exhausted before response");
+                            let _ = lost_tx.send(());
+                            break;
+                        }
+
+                        match tokio::time::timeout(remaining, renew_once(&renew_api, &renew_cfg)).await {
+                            Ok(Ok(true)) => {
+                                lease_deadline = attempt_start + lease_duration;
+                            }
+                            Ok(Ok(false)) => {
                                 tracing::error!(holder = %renew_cfg.holder_id, "leader election lease lost to another holder");
                                 let _ = lost_tx.send(());
                                 break;
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 tracing::error!(error = %err, holder = %renew_cfg.holder_id, "failed to renew leader election lease");
+                                let _ = lost_tx.send(());
+                                break;
+                            }
+                            Err(_) => {
+                                tracing::error!(holder = %renew_cfg.holder_id, "leader election lease renewal exceeded safety deadline");
                                 let _ = lost_tx.send(());
                                 break;
                             }

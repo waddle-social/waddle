@@ -167,6 +167,10 @@ fn deployment_and_companion_manifests_match_waddle_server_contracts() {
         cm_data.get("WADDLE_S3_BUCKET").map(String::as_str),
         Some("waddle-uploads")
     );
+    assert_eq!(
+        cm_data.get("WADDLE_HTTP_ADDR").map(String::as_str),
+        Some("0.0.0.0:3000")
+    );
     let cm_digest = config_map_digest(&cm).expect("digest");
 
     let dep = build_deployment(&ws, &validated, &bindings, &cm_digest).expect("deployment");
@@ -301,6 +305,36 @@ fn deployment_and_companion_manifests_match_waddle_server_contracts() {
 
     let mut service_edited_ws = ws.clone();
     service_edited_ws.spec.service.http_port = 8081;
+    let custom_port_cm = build_config_map(&service_edited_ws, &bindings).expect("custom port cm");
+    assert_eq!(
+        custom_port_cm
+            .data
+            .as_ref()
+            .and_then(|d| d.get("WADDLE_HTTP_ADDR"))
+            .map(String::as_str),
+        Some("0.0.0.0:8081")
+    );
+
+    let mut rolling_ws = ws.clone();
+    rolling_ws.spec.update_strategy = waddle_operator_crd::UpdateStrategyKind::RollingUpdate;
+    let rolling_val = validate_spec(&rolling_ws.spec).expect("rolling spec valid with RWX+S3");
+    let rolling_dep = build_deployment(&rolling_ws, &rolling_val, &bindings, &cm_digest)
+        .expect("rolling deployment");
+    let rolling_cfg = rolling_dep
+        .spec
+        .as_ref()
+        .and_then(|s| s.strategy.as_ref())
+        .and_then(|s| s.rolling_update.as_ref())
+        .expect("rollingUpdate strategy parameters must be populated");
+    assert_eq!(
+        rolling_cfg.max_surge,
+        Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(1))
+    );
+    assert_eq!(
+        rolling_cfg.max_unavailable,
+        Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(0))
+    );
+
     let service_changed_hash =
         build_deployment(&service_edited_ws, &validated, &bindings, &cm_digest)
             .expect("hash 2")

@@ -144,6 +144,7 @@ pub async fn run_controller(
     let waddle_api = scoped_api::<WaddleServer>(&client, ns);
     let mut controller = Controller::new(waddle_api, watcher::Config::default());
     let store = controller.store();
+    let ready_store = store.clone();
 
     let managed_secret_selector = format!(
         "{}={}",
@@ -273,7 +274,19 @@ pub async fn run_controller(
         }
     });
 
-    health.set_ready(true);
+    let (ready_cancel_tx, ready_cancel_rx) = oneshot::channel::<()>();
+    let ready_health = Arc::clone(&health);
+    let ready_task = tokio::spawn(async move {
+        tokio::select! {
+            sync_res = ready_store.wait_until_ready() => {
+                if sync_res.is_ok() {
+                    ready_health.set_ready(true);
+                    tracing::info!("primary WaddleServer reflector synced; marking operator ready");
+                }
+            }
+            _ = ready_cancel_rx => {}
+        }
+    });
 
     controller
         .graceful_shutdown_on(async move {
@@ -287,6 +300,8 @@ pub async fn run_controller(
         })
         .await;
 
+    let _ = ready_cancel_tx.send(());
+    let _ = ready_task.await;
     health.set_ready(false);
 
     let lost = leadership_lost.load(Ordering::Acquire);

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy};
+use k8s_openapi::api::apps::v1::{
+    Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment,
+};
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, ConfigMapEnvSource, ConfigMapKeySelector, ConfigMapVolumeSource,
     Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource,
@@ -148,17 +150,23 @@ pub fn build_deployment(
         ..Affinity::default()
     });
 
-    let strategy_type = match spec.update_strategy {
-        UpdateStrategyKind::Recreate => "Recreate",
-        UpdateStrategyKind::RollingUpdate => "RollingUpdate",
+    let strategy = match spec.update_strategy {
+        UpdateStrategyKind::Recreate => DeploymentStrategy {
+            type_: Some("Recreate".to_owned()),
+            ..DeploymentStrategy::default()
+        },
+        UpdateStrategyKind::RollingUpdate => DeploymentStrategy {
+            type_: Some("RollingUpdate".to_owned()),
+            rolling_update: Some(RollingUpdateDeployment {
+                max_surge: Some(IntOrString::Int(1)),
+                max_unavailable: Some(IntOrString::Int(0)),
+            }),
+        },
     };
 
     let deploy_spec = DeploymentSpec {
         replicas: spec.replicas,
-        strategy: Some(DeploymentStrategy {
-            type_: Some(strategy_type.to_owned()),
-            ..DeploymentStrategy::default()
-        }),
+        strategy: Some(strategy),
         selector: LabelSelector {
             match_labels: Some(selector),
             ..LabelSelector::default()

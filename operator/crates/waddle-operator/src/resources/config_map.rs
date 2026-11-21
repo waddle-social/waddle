@@ -123,6 +123,10 @@ pub fn build_config_map(
         "WADDLE_SERVER_OWNER_LOCALPARTS".to_owned(),
         spec.server_owner_localparts.join(","),
     );
+    data.insert(
+        "WADDLE_HTTP_ADDR".to_owned(),
+        format!("0.0.0.0:{}", spec.service.http_port),
+    );
     data.insert("RUST_LOG".to_owned(), spec.rust_log.clone());
     if let Some(cors) = &spec.cors_origins {
         if !cors.trim().is_empty() {

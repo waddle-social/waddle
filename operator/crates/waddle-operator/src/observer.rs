@@ -2,11 +2,15 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, PersistentVolumeClaim, Secret, Service, ServiceAccount,
+};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as KubeCondition;
 use kube::api::{Api, DynamicObject, ListParams};
-use kube::Client;
+use kube::{Client, ResourceExt};
 use waddle_operator_crd::{
     ContentDigest, EsoApiVersion, PostgresSourceMode, ResourceName, RestrictedRuntimeSpec,
     SecretProviderMode, SecretStoreKind, SpiceDbSourceMode, UpdateStrategyKind, ValidatedSpec,
@@ -128,12 +132,12 @@ pub async fn observe_world(
         }
     };
 
-    let (postgres_health, postgres_binding) =
+    let (postgres_health, postgres_binding, pg_digest) =
         observe_postgres(client, ns, ws, policy.capabilities.has_cnpg).await?;
 
     let spicedb_key_in_runtime_secret = spicedb_expects_key_in_runtime_secret(ws);
 
-    let secret_obs = observe_secrets(
+    let mut secret_obs = observe_secrets(
         client,
         ws,
         ns,
@@ -143,7 +147,7 @@ pub async fn observe_world(
     )
     .await?;
 
-    let (spicedb_health, spicedb_binding) = observe_spicedb(
+    let (spicedb_health, spicedb_binding, sp_digest) = observe_spicedb(
         client,
         ws,
         ns,
@@ -151,6 +155,15 @@ pub async fn observe_world(
         &secret_obs.target_secret_name,
     )
     .await?;
+
+    let mut digest_parts = secret_obs.component_digests;
+    if let Some(digest) = pg_digest {
+        digest_parts.insert("postgres".to_owned(), digest);
+    }
+    if let Some(digest) = sp_digest {
+        digest_parts.insert("spicedb".to_owned(), digest);
+    }
+    secret_obs.observation.checksum = yolo::combine_digests(&digest_parts);
 
     let bindings = if let (Some(pg), Some(spicedb)) = (postgres_binding, spicedb_binding) {
         Some(ResolvedRuntimeBindings {
@@ -216,7 +229,14 @@ async fn observe_postgres(
     ns: &str,
     ws: &WaddleServer,
     known_has_cnpg: bool,
-) -> Result<(DependencyHealth, Option<PostgresBinding>), OperatorError> {
+) -> Result<
+    (
+        DependencyHealth,
+        Option<PostgresBinding>,
+        Option<ContentDigest>,
+    ),
+    OperatorError,
+> {
     let pg = &ws.spec.postgres;
     let restricted = pg.restricted_runtime.as_ref().filter(|r| r.enabled);
 
@@ -229,6 +249,7 @@ async fn observe_postgres(
                         detail: "postgres.mode is CloudNativePg without spec.postgres.cnpg"
                             .to_owned(),
                     },
+                    None,
                     None,
                 ));
             };
@@ -247,6 +268,7 @@ async fn observe_postgres(
                                 api_group: "postgresql.cnpg.io".to_owned(),
                             },
                             None,
+                            None,
                         ));
                     }
                     return Ok((
@@ -257,6 +279,7 @@ async fn observe_postgres(
                                 cnpg.cluster_name
                             ),
                         },
+                        None,
                         None,
                     ));
                 }
@@ -276,18 +299,20 @@ async fn observe_postgres(
                 cnpg.require_healthy,
             );
             if !health.is_ready() {
-                return Ok((health, None));
+                return Ok((health, None, None));
             }
 
             if let Some(rr) = restricted {
-                if let Some(blocker) = observe_restricted_runtime(client, ns, rr).await? {
-                    return Ok((blocker, None));
+                let (blocker, rr_digest) = observe_restricted_runtime(client, ns, rr).await?;
+                if let Some(b) = blocker {
+                    return Ok((b, None, None));
                 }
                 return Ok((
                     health,
                     Some(PostgresBinding::RestrictedRuntime {
                         spec: Box::new(rr.clone()),
                     }),
+                    rr_digest,
                 ));
             }
 
@@ -303,6 +328,7 @@ async fn observe_postgres(
                             "Resolved CNPG credential Secret name '{secret_name}' is not a valid Kubernetes resource name"
                         ),
                     },
+                    None,
                     None,
                 ));
             }
@@ -320,10 +346,16 @@ async fn observe_postgres(
                         detail: format!("PostgreSQL credential Secret {secret_name} not found"),
                     },
                     None,
+                    None,
                 ));
             };
 
             let data = secret.data.unwrap_or_default();
+            let raw = to_raw_byte_map(Some(&data));
+            let pg_digest = yolo::compute_consumed_secret_digest(
+                &raw,
+                &[&cnpg.uri_key, &cnpg.username_key, &cnpg.password_key],
+            );
             if has_nonempty_key(&data, &cnpg.uri_key) {
                 return Ok((
                     health,
@@ -331,6 +363,7 @@ async fn observe_postgres(
                         secret_name,
                         uri_key: cnpg.uri_key.clone(),
                     }),
+                    pg_digest,
                 ));
             }
             if has_nonempty_key(&data, &cnpg.username_key)
@@ -346,6 +379,7 @@ async fn observe_postgres(
                         port: 5432,
                         database: cluster_view.resolved_database_name().to_owned(),
                     }),
+                    pg_digest,
                 ));
             }
 
@@ -358,6 +392,7 @@ async fn observe_postgres(
                     ),
                 },
                 None,
+                None,
             ))
         }
         PostgresSourceMode::External => {
@@ -369,6 +404,7 @@ async fn observe_postgres(
                             .to_owned(),
                     },
                     None,
+                    None,
                 ));
             };
 
@@ -376,13 +412,14 @@ async fn observe_postgres(
                 if let Some(blocker) =
                     check_service_endpoints(client, ns, svc_name, "Postgres").await?
                 {
-                    return Ok((blocker, None));
+                    return Ok((blocker, None, None));
                 }
             }
 
             if let Some(rr) = restricted {
-                if let Some(blocker) = observe_restricted_runtime(client, ns, rr).await? {
-                    return Ok((blocker, None));
+                let (blocker, rr_digest) = observe_restricted_runtime(client, ns, rr).await?;
+                if let Some(b) = blocker {
+                    return Ok((b, None, None));
                 }
                 return Ok((
                     DependencyHealth::Ready {
@@ -394,6 +431,7 @@ async fn observe_postgres(
                     Some(PostgresBinding::RestrictedRuntime {
                         spec: Box::new(rr.clone()),
                     }),
+                    rr_digest,
                 ));
             }
 
@@ -414,6 +452,7 @@ async fn observe_postgres(
                         ),
                     },
                     None,
+                    None,
                 ));
             };
 
@@ -428,9 +467,14 @@ async fn observe_postgres(
                         ),
                     },
                     None,
+                    None,
                 ));
             }
 
+            let pg_digest = yolo::compute_consumed_secret_digest(
+                &to_raw_byte_map(Some(&data)),
+                &[&ext.uri_key],
+            );
             let hint = ext.service_name.as_ref().map_or_else(
                 || format!("secret/{}", ext.secret_name),
                 |svc| format!("svc/{svc}"),
@@ -443,6 +487,7 @@ async fn observe_postgres(
                     secret_name: ext.secret_name.clone(),
                     uri_key: ext.uri_key.clone(),
                 }),
+                pg_digest,
             ))
         }
     }
@@ -452,7 +497,7 @@ async fn observe_restricted_runtime(
     client: &Client,
     ns: &str,
     rr: &RestrictedRuntimeSpec,
-) -> Result<Option<DependencyHealth>, OperatorError> {
+) -> Result<(Option<DependencyHealth>, Option<ContentDigest>), OperatorError> {
     let secrets = Api::<Secret>::namespaced(client.clone(), ns);
     let Some(ca_secret) = secrets
         .get_opt(&rr.ca_secret_name)
@@ -462,22 +507,29 @@ async fn observe_restricted_runtime(
             source,
         })?
     else {
-        return Ok(Some(DependencyHealth::Missing {
-            reason: "PostgresCaSecretMissing".to_owned(),
-            detail: format!(
-                "Restricted runtime CA Secret {} not found",
-                rr.ca_secret_name
-            ),
-        }));
+        return Ok((
+            Some(DependencyHealth::Missing {
+                reason: "PostgresCaSecretMissing".to_owned(),
+                detail: format!(
+                    "Restricted runtime CA Secret {} not found",
+                    rr.ca_secret_name
+                ),
+            }),
+            None,
+        ));
     };
-    if !has_nonempty_key(&ca_secret.data.unwrap_or_default(), &rr.ca_secret_key) {
-        return Ok(Some(DependencyHealth::NotReady {
-            reason: "PostgresCaKeyMissing".to_owned(),
-            detail: format!(
-                "CA Secret {} lacks non-empty key '{}'",
-                rr.ca_secret_name, rr.ca_secret_key
-            ),
-        }));
+    let ca_data = ca_secret.data.unwrap_or_default();
+    if !has_nonempty_key(&ca_data, &rr.ca_secret_key) {
+        return Ok((
+            Some(DependencyHealth::NotReady {
+                reason: "PostgresCaKeyMissing".to_owned(),
+                detail: format!(
+                    "CA Secret {} lacks non-empty key '{}'",
+                    rr.ca_secret_name, rr.ca_secret_key
+                ),
+            }),
+            None,
+        ));
     }
 
     let Some(cred_secret) = secrets
@@ -488,25 +540,29 @@ async fn observe_restricted_runtime(
             source,
         })?
     else {
-        return Ok(Some(DependencyHealth::Missing {
-            reason: "PostgresRuntimeCredentialMissing".to_owned(),
-            detail: format!(
-                "Restricted runtime credential Secret {} not found",
-                rr.runtime_credential_secret
-            ),
-        }));
+        return Ok((
+            Some(DependencyHealth::Missing {
+                reason: "PostgresRuntimeCredentialMissing".to_owned(),
+                detail: format!(
+                    "Restricted runtime credential Secret {} not found",
+                    rr.runtime_credential_secret
+                ),
+            }),
+            None,
+        ));
     };
-    if !has_nonempty_key(
-        &cred_secret.data.unwrap_or_default(),
-        &rr.runtime_credential_key,
-    ) {
-        return Ok(Some(DependencyHealth::NotReady {
-            reason: "PostgresRuntimeCredentialKeyMissing".to_owned(),
-            detail: format!(
-                "Credential Secret {} lacks non-empty key '{}'",
-                rr.runtime_credential_secret, rr.runtime_credential_key
-            ),
-        }));
+    let cred_data = cred_secret.data.unwrap_or_default();
+    if !has_nonempty_key(&cred_data, &rr.runtime_credential_key) {
+        return Ok((
+            Some(DependencyHealth::NotReady {
+                reason: "PostgresRuntimeCredentialKeyMissing".to_owned(),
+                detail: format!(
+                    "Credential Secret {} lacks non-empty key '{}'",
+                    rr.runtime_credential_secret, rr.runtime_credential_key
+                ),
+            }),
+            None,
+        ));
     }
 
     let Some(handoff_cm) = Api::<ConfigMap>::namespaced(client.clone(), ns)
@@ -517,30 +573,53 @@ async fn observe_restricted_runtime(
             source,
         })?
     else {
-        return Ok(Some(DependencyHealth::Missing {
-            reason: "PostgresHandoffMissing".to_owned(),
-            detail: format!(
-                "Restricted runtime handoff ConfigMap {} not found",
-                rr.handoff_config_map_name
-            ),
-        }));
+        return Ok((
+            Some(DependencyHealth::Missing {
+                reason: "PostgresHandoffMissing".to_owned(),
+                detail: format!(
+                    "Restricted runtime handoff ConfigMap {} not found",
+                    rr.handoff_config_map_name
+                ),
+            }),
+            None,
+        ));
     };
-    let has_handoff = handoff_cm
+    let handoff_val = handoff_cm
         .data
         .as_ref()
         .and_then(|d| d.get("handoff.json"))
-        .is_some_and(|v| !v.trim().is_empty());
-    if !has_handoff {
-        return Ok(Some(DependencyHealth::NotReady {
-            reason: "PostgresHandoffKeyMissing".to_owned(),
-            detail: format!(
-                "Handoff ConfigMap {} lacks non-empty 'handoff.json'",
-                rr.handoff_config_map_name
-            ),
-        }));
+        .filter(|v| !v.trim().is_empty());
+    let Some(handoff_json) = handoff_val else {
+        return Ok((
+            Some(DependencyHealth::NotReady {
+                reason: "PostgresHandoffKeyMissing".to_owned(),
+                detail: format!(
+                    "Handoff ConfigMap {} lacks non-empty 'handoff.json'",
+                    rr.handoff_config_map_name
+                ),
+            }),
+            None,
+        ));
+    };
+
+    let mut parts = BTreeMap::new();
+    if let Some(d) = ca_data
+        .get(&rr.ca_secret_key)
+        .and_then(|v| yolo::compute_single_key_digest(&v.0))
+    {
+        parts.insert("ca".to_owned(), d);
+    }
+    if let Some(d) = cred_data
+        .get(&rr.runtime_credential_key)
+        .and_then(|v| yolo::compute_single_key_digest(&v.0))
+    {
+        parts.insert("cred".to_owned(), d);
+    }
+    if let Some(d) = yolo::compute_single_key_digest(handoff_json.as_bytes()) {
+        parts.insert("handoff".to_owned(), d);
     }
 
-    Ok(None)
+    Ok((None, yolo::combine_digests(&parts)))
 }
 
 async fn observe_spicedb(
@@ -549,7 +628,14 @@ async fn observe_spicedb(
     ns: &str,
     known_has_spicedb: bool,
     runtime_secret_name: &str,
-) -> Result<(DependencyHealth, Option<SpiceDbBinding>), OperatorError> {
+) -> Result<
+    (
+        DependencyHealth,
+        Option<SpiceDbBinding>,
+        Option<ContentDigest>,
+    ),
+    OperatorError,
+> {
     let sp = &ws.spec.spicedb;
     match sp.mode {
         SpiceDbSourceMode::SpiceDbOperator => {
@@ -560,6 +646,7 @@ async fn observe_spicedb(
                         detail: "spicedb.mode is SpiceDbOperator without spec.spicedb.operator"
                             .to_owned(),
                     },
+                    None,
                     None,
                 ));
             };
@@ -578,6 +665,7 @@ async fn observe_spicedb(
                                 api_group: "authzed.com".to_owned(),
                             },
                             None,
+                            None,
                         ));
                     }
                     return Ok((
@@ -589,6 +677,7 @@ async fn observe_spicedb(
                             ),
                         },
                         None,
+                        None,
                     ));
                 }
                 Err(source) => {
@@ -599,8 +688,12 @@ async fn observe_spicedb(
                 }
             };
 
-            let view: SpiceDbClusterView = serde_json::from_value(cluster_obj.data)
+            let mut view: SpiceDbClusterView = serde_json::from_value(cluster_obj.data)
                 .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
+            // DynamicObject stores object metadata in `cluster_obj.metadata` rather than `data`.
+            if view.metadata.generation.is_none() {
+                view.metadata.generation = cluster_obj.metadata.generation;
+            }
 
             let svc_name = op.service_name.as_deref().unwrap_or(&op.cluster_name);
             let ready_endpoints = count_ready_endpoints(client, ns, svc_name).await?;
@@ -615,19 +708,19 @@ async fn observe_spicedb(
                 op.require_ready,
             );
             if !health.is_ready() {
-                return Ok((health, None));
+                return Ok((health, None, None));
             }
 
-            let (pk_secret_name, pk_secret_key) = if let Some(explicit) =
+            let (pk_secret_name, pk_secret_key, sp_digest) = if let Some(explicit) =
                 &op.preshared_key_secret_ref
             {
-                if let Some(blocker) =
+                let (blocker, digest) =
                     verify_secret_key_present(client, ns, &explicit.name, &explicit.key, "SpiceDB")
-                        .await?
-                {
-                    return Ok((blocker, None));
+                        .await?;
+                if let Some(b) = blocker {
+                    return Ok((b, None, None));
                 }
-                (explicit.name.clone(), explicit.key.clone())
+                (explicit.name.clone(), explicit.key.clone(), digest)
             } else if ws.spec.secrets.mode == SecretProviderMode::Yolo {
                 let Some(cluster_secret) = view
                     .spec
@@ -645,6 +738,7 @@ async fn observe_spicedb(
                                 ),
                             },
                             None,
+                            None,
                         ));
                 };
                 if !is_safe_resource_name(cluster_secret) {
@@ -656,24 +750,30 @@ async fn observe_spicedb(
                             ),
                         },
                         None,
+                        None,
                     ));
                 }
-                if let Some(blocker) = verify_secret_key_present(
+                let (blocker, digest) = verify_secret_key_present(
                     client,
                     ns,
                     cluster_secret,
                     "preshared_key",
                     "SpiceDB",
                 )
-                .await?
-                {
-                    return Ok((blocker, None));
+                .await?;
+                if let Some(b) = blocker {
+                    return Ok((b, None, None));
                 }
-                (cluster_secret.to_owned(), "preshared_key".to_owned())
+                (
+                    cluster_secret.to_owned(),
+                    "preshared_key".to_owned(),
+                    digest,
+                )
             } else {
                 (
                     runtime_secret_name.to_owned(),
                     KEY_SPICEDB_PRESHARED_KEY.to_owned(),
+                    None,
                 )
             };
 
@@ -685,6 +785,7 @@ async fn observe_spicedb(
                     preshared_key_secret_name: pk_secret_name,
                     preshared_key_secret_key: pk_secret_key,
                 }),
+                sp_digest,
             ))
         }
         SpiceDbSourceMode::External => {
@@ -695,6 +796,7 @@ async fn observe_spicedb(
                         detail: "spicedb.mode is External without spec.spicedb.external".to_owned(),
                     },
                     None,
+                    None,
                 ));
             };
 
@@ -702,24 +804,25 @@ async fn observe_spicedb(
                 if let Some(blocker) =
                     check_service_endpoints(client, ns, svc_name, "SpiceDB").await?
                 {
-                    return Ok((blocker, None));
+                    return Ok((blocker, None, None));
                 }
             }
 
-            let (pk_secret_name, pk_secret_key) = if let Some(explicit) =
+            let (pk_secret_name, pk_secret_key, sp_digest) = if let Some(explicit) =
                 &ext.preshared_key_secret_ref
             {
-                if let Some(blocker) =
+                let (blocker, digest) =
                     verify_secret_key_present(client, ns, &explicit.name, &explicit.key, "SpiceDB")
-                        .await?
-                {
-                    return Ok((blocker, None));
+                        .await?;
+                if let Some(b) = blocker {
+                    return Ok((b, None, None));
                 }
-                (explicit.name.clone(), explicit.key.clone())
+                (explicit.name.clone(), explicit.key.clone(), digest)
             } else {
                 (
                     runtime_secret_name.to_owned(),
                     KEY_SPICEDB_PRESHARED_KEY.to_owned(),
+                    None,
                 )
             };
 
@@ -733,6 +836,7 @@ async fn observe_spicedb(
                     preshared_key_secret_name: pk_secret_name,
                     preshared_key_secret_key: pk_secret_key,
                 }),
+                sp_digest,
             ))
         }
     }
@@ -741,6 +845,7 @@ async fn observe_spicedb(
 struct SecretObservationBundle {
     observation: SecretsObservation,
     target_secret_name: String,
+    component_digests: BTreeMap<String, ContentDigest>,
     session_key_fingerprint: Option<ContentDigest>,
     occupant_id_fingerprint: Option<ContentDigest>,
     eso_api_version: Option<DiscoveredEsoVersion>,
@@ -755,7 +860,7 @@ async fn observe_secrets(
     live_deployment: Option<&Deployment>,
     spicedb_key_in_runtime_secret: bool,
 ) -> Result<SecretObservationBundle, OperatorError> {
-    match ws.spec.secrets.mode {
+    let mut bundle = match ws.spec.secrets.mode {
         SecretProviderMode::Yolo => {
             observe_yolo_secrets(
                 client,
@@ -765,7 +870,7 @@ async fn observe_secrets(
                 live_deployment,
                 spicedb_key_in_runtime_secret,
             )
-            .await
+            .await?
         }
         SecretProviderMode::ExternalSecrets => {
             observe_eso_secrets(
@@ -776,9 +881,18 @@ async fn observe_secrets(
                 live_deployment,
                 spicedb_key_in_runtime_secret,
             )
-            .await
+            .await?
         }
+    };
+
+    if let Some(runtime_digest) = bundle.observation.checksum.take() {
+        bundle
+            .component_digests
+            .insert("runtime".to_owned(), runtime_digest);
     }
+    collect_companion_secret_digests(client, ns, ws, &mut bundle.component_digests).await?;
+    bundle.observation.checksum = yolo::combine_digests(&bundle.component_digests);
+    Ok(bundle)
 }
 
 async fn observe_yolo_secrets(
@@ -883,6 +997,7 @@ async fn observe_yolo_secrets(
             sensitive_key_rotated,
         },
         target_secret_name,
+        component_digests: BTreeMap::new(),
         session_key_fingerprint: session_fp,
         occupant_id_fingerprint: occupant_fp,
         eso_api_version: None,
@@ -918,6 +1033,7 @@ async fn observe_eso_secrets(
                 sensitive_key_rotated: None,
             },
             target_secret_name: fallback_target,
+            component_digests: BTreeMap::new(),
             session_key_fingerprint: None,
             occupant_id_fingerprint: None,
             eso_api_version: None,
@@ -1174,6 +1290,7 @@ async fn observe_eso_secrets(
             sensitive_key_rotated,
         },
         target_secret_name,
+        component_digests: BTreeMap::new(),
         session_key_fingerprint: session_fp,
         occupant_id_fingerprint: occupant_fp,
         eso_api_version: eso_version,
@@ -1194,30 +1311,7 @@ async fn observe_workload(
     };
 
     let drift_detected = if let (Some(val), Some(b)) = (validated, bindings) {
-        let desired_cm = resources::build_config_map(ws, b)?;
-        let cm_digest = resources::config_map_digest(&desired_cm)?;
-        let desired_dep = resources::build_deployment(ws, val, b, &cm_digest)?;
-        let desired_hash = desired_dep
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get(ANNOTATION_SPEC_HASH));
-        let live_hash = dep
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get(ANNOTATION_SPEC_HASH));
-
-        let cm_missing = Api::<ConfigMap>::namespaced(client.clone(), ns)
-            .get_opt(&resources::config_map_name(ws)?)
-            .await
-            .map_err(|source| OperatorError::Kube {
-                context: "get ConfigMap for drift detection",
-                source,
-            })?
-            .is_none();
-
-        cm_missing || desired_hash != live_hash
+        workload_has_drifted(client, ns, ws, val, b, dep).await?
     } else {
         false
     };
@@ -1408,7 +1502,7 @@ async fn verify_secret_key_present(
     secret_name: &str,
     key: &str,
     label: &str,
-) -> Result<Option<DependencyHealth>, OperatorError> {
+) -> Result<(Option<DependencyHealth>, Option<ContentDigest>), OperatorError> {
     let sec = Api::<Secret>::namespaced(client.clone(), ns)
         .get_opt(secret_name)
         .await
@@ -1417,18 +1511,398 @@ async fn verify_secret_key_present(
             source,
         })?;
     let Some(secret) = sec else {
-        return Ok(Some(DependencyHealth::NotReady {
-            reason: format!("{label}SecretMissing"),
-            detail: format!("{label} Secret {secret_name} not found in namespace {ns}"),
-        }));
+        return Ok((
+            Some(DependencyHealth::NotReady {
+                reason: format!("{label}SecretMissing"),
+                detail: format!("{label} Secret {secret_name} not found in namespace {ns}"),
+            }),
+            None,
+        ));
     };
-    if !has_nonempty_key(&secret.data.unwrap_or_default(), key) {
-        return Ok(Some(DependencyHealth::NotReady {
-            reason: format!("{label}SecretKeyMissing"),
-            detail: format!("{label} Secret {secret_name} lacks non-empty key '{key}'"),
-        }));
+    let data = secret.data.unwrap_or_default();
+    if !has_nonempty_key(&data, key) {
+        return Ok((
+            Some(DependencyHealth::NotReady {
+                reason: format!("{label}SecretKeyMissing"),
+                detail: format!("{label} Secret {secret_name} lacks non-empty key '{key}'"),
+            }),
+            None,
+        ));
     }
-    Ok(None)
+    let digest = data
+        .get(key)
+        .and_then(|val| yolo::compute_single_key_digest(&val.0));
+    Ok((None, digest))
+}
+
+async fn collect_companion_secret_digests(
+    client: &Client,
+    ns: &str,
+    ws: &WaddleServer,
+    parts: &mut BTreeMap<String, ContentDigest>,
+) -> Result<(), OperatorError> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+
+    if ws.spec.xmpp.enabled {
+        if let Some(tls_secret) = ws
+            .spec
+            .xmpp
+            .tls_secret_name
+            .as_deref()
+            .filter(|name| is_safe_resource_name(name))
+        {
+            if let Some(sec) =
+                secrets
+                    .get_opt(tls_secret)
+                    .await
+                    .map_err(|source| OperatorError::Kube {
+                        context: "get XMPP TLS Secret for checksum",
+                        source,
+                    })?
+            {
+                let raw = to_raw_byte_map(sec.data.as_ref());
+                if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &["tls.crt", "tls.key"])
+                {
+                    parts.insert("xmpp_tls".to_owned(), d);
+                }
+            }
+        }
+    }
+
+    if let Some(eso) = &ws.spec.secrets.external_secrets {
+        if let Some(apns) = &eso.apns_secret_ref {
+            if is_safe_resource_name(&apns.secret_name) {
+                if let Some(sec) = secrets.get_opt(&apns.secret_name).await.map_err(|source| {
+                    OperatorError::Kube {
+                        context: "get APNs Secret for checksum",
+                        source,
+                    }
+                })? {
+                    let raw = to_raw_byte_map(sec.data.as_ref());
+                    if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &[&apns.secret_key])
+                    {
+                        parts.insert("apns".to_owned(), d);
+                    }
+                }
+            }
+        }
+
+        if ws.spec.clustering.enabled {
+            if let Some(pool_name) = eso
+                .clustering_keypool_secret_name
+                .as_deref()
+                .filter(|name| is_safe_resource_name(name))
+            {
+                if let Some(sec) =
+                    secrets
+                        .get_opt(pool_name)
+                        .await
+                        .map_err(|source| OperatorError::Kube {
+                            context: "get keypool Secret for checksum",
+                            source,
+                        })?
+                {
+                    let raw = to_raw_byte_map(sec.data.as_ref());
+                    if let Some(d) = yolo::compute_consumed_secret_digest(
+                        &raw,
+                        &["WADDLE_CLUSTERING_KEYPAIR_POOL"],
+                    ) {
+                        parts.insert("keypool".to_owned(), d);
+                    }
+                }
+            }
+        }
+    }
+
+    for extra_name in collect_extra_secret_refs(ws) {
+        if !is_safe_resource_name(&extra_name) {
+            continue;
+        }
+        if let Some(sec) =
+            secrets
+                .get_opt(&extra_name)
+                .await
+                .map_err(|source| OperatorError::Kube {
+                    context: "get extra envFrom Secret for checksum",
+                    source,
+                })?
+        {
+            let raw = to_raw_byte_map(sec.data.as_ref());
+            let key_refs: Vec<&str> = raw.keys().map(String::as_str).collect();
+            if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &key_refs) {
+                parts.insert(format!("extra:{extra_name}"), d);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn workload_has_drifted(
+    client: &Client,
+    ns: &str,
+    ws: &WaddleServer,
+    validated: &ValidatedSpec,
+    bindings: &ResolvedRuntimeBindings,
+    live_dep: &Deployment,
+) -> Result<bool, OperatorError> {
+    let name = resources::workload_name(ws)?;
+    let owner = resources::owner_reference(ws)?;
+
+    let desired_cm = resources::build_config_map(ws, bindings)?;
+    let cm_digest = resources::config_map_digest(&desired_cm)?;
+    let desired_dep = resources::build_deployment(ws, validated, bindings, &cm_digest)?;
+
+    if deployment_drifted(ws, live_dep, &desired_dep) {
+        return Ok(true);
+    }
+
+    let sa_exists = Api::<ServiceAccount>::namespaced(client.clone(), ns)
+        .get_opt(name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get ServiceAccount for drift detection",
+            source,
+        })?
+        .is_some();
+    if !sa_exists {
+        return Ok(true);
+    }
+
+    let cm_name = resources::config_map_name(ws)?;
+    let Some(live_cm) = Api::<ConfigMap>::namespaced(client.clone(), ns)
+        .get_opt(&cm_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get ConfigMap for drift detection",
+            source,
+        })?
+    else {
+        return Ok(true);
+    };
+    if resources::config_map_digest(&live_cm)? != cm_digest {
+        return Ok(true);
+    }
+
+    let svc_api: Api<Service> = Api::namespaced(client.clone(), ns);
+    let desired_http_svc = resources::build_http_service(ws)?;
+    let Some(live_http_svc) =
+        svc_api
+            .get_opt(name)
+            .await
+            .map_err(|source| OperatorError::Kube {
+                context: "get HTTP Service for drift detection",
+                source,
+            })?
+    else {
+        return Ok(true);
+    };
+    if service_drifted(&live_http_svc, &desired_http_svc) {
+        return Ok(true);
+    }
+
+    if resources::build_pvc(ws)?.is_some() {
+        let pvc_name = resources::pvc_name(ws)?;
+        let pvc_exists = Api::<PersistentVolumeClaim>::namespaced(client.clone(), ns)
+            .get_opt(&pvc_name)
+            .await
+            .map_err(|source| OperatorError::Kube {
+                context: "get PersistentVolumeClaim for drift detection",
+                source,
+            })?
+            .is_some();
+        if !pvc_exists {
+            return Ok(true);
+        }
+    }
+
+    let headless_name = resources::headless_service_name(ws)?;
+    let live_headless =
+        svc_api
+            .get_opt(&headless_name)
+            .await
+            .map_err(|source| OperatorError::Kube {
+                context: "get headless Service for drift detection",
+                source,
+            })?;
+    match (resources::build_headless_service(ws)?, live_headless) {
+        (Some(_), None) => return Ok(true),
+        (Some(desired), Some(live)) if service_drifted(&live, &desired) => return Ok(true),
+        (None, Some(live)) if owned_by_uid(&live, &owner.uid) => return Ok(true),
+        _ => {}
+    }
+
+    let s2s_name = resources::s2s_service_name(ws)?;
+    let live_s2s = svc_api
+        .get_opt(&s2s_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get S2S Service for drift detection",
+            source,
+        })?;
+    match (resources::build_s2s_service(ws)?, live_s2s) {
+        (Some(_), None) => return Ok(true),
+        (Some(desired), Some(live)) if service_drifted(&live, &desired) => return Ok(true),
+        (None, Some(live)) if owned_by_uid(&live, &owner.uid) => return Ok(true),
+        _ => {}
+    }
+
+    let live_pdb = Api::<PodDisruptionBudget>::namespaced(client.clone(), ns)
+        .get_opt(name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get PodDisruptionBudget for drift detection",
+            source,
+        })?;
+    match (resources::build_pdb(ws)?, live_pdb) {
+        (Some(_), None) => return Ok(true),
+        (Some(desired), Some(live)) if pdb_drifted(&live, &desired) => return Ok(true),
+        (None, Some(live)) if owned_by_uid(&live, &owner.uid) => return Ok(true),
+        _ => {}
+    }
+
+    let np_name = resources::network_policy_name(ws)?;
+    let live_np = Api::<NetworkPolicy>::namespaced(client.clone(), ns)
+        .get_opt(&np_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get NetworkPolicy for drift detection",
+            source,
+        })?;
+    match (resources::build_network_policy(ws)?, live_np) {
+        (Some(_), None) => return Ok(true),
+        (Some(desired), Some(live)) if network_policy_drifted(&live, &desired) => return Ok(true),
+        (None, Some(live)) if owned_by_uid(&live, &owner.uid) => return Ok(true),
+        _ => {}
+    }
+
+    Ok(false)
+}
+
+fn owned_by_uid<K: ResourceExt>(obj: &K, uid: &str) -> bool {
+    obj.owner_references().iter().any(|owner| owner.uid == uid)
+}
+
+fn deployment_drifted(ws: &WaddleServer, live: &Deployment, desired: &Deployment) -> bool {
+    let desired_hash = desired
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ANNOTATION_SPEC_HASH));
+    let live_hash = live
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ANNOTATION_SPEC_HASH));
+    if desired_hash != live_hash {
+        return true;
+    }
+
+    let (Some(live_spec), Some(desired_spec)) = (&live.spec, &desired.spec) else {
+        return true;
+    };
+    if ws.spec.replicas.is_some() && live_spec.replicas != desired_spec.replicas {
+        return true;
+    }
+
+    let live_strategy_type = live_spec.strategy.as_ref().and_then(|s| s.type_.as_deref());
+    let desired_strategy_type = desired_spec
+        .strategy
+        .as_ref()
+        .and_then(|s| s.type_.as_deref());
+    if live_strategy_type != desired_strategy_type {
+        return true;
+    }
+
+    let (Some(live_tpl_spec), Some(desired_tpl_spec)) =
+        (&live_spec.template.spec, &desired_spec.template.spec)
+    else {
+        return true;
+    };
+    let live_img = live_tpl_spec
+        .containers
+        .first()
+        .and_then(|c| c.image.as_deref());
+    let desired_img = desired_tpl_spec
+        .containers
+        .first()
+        .and_then(|c| c.image.as_deref());
+    if live_img != desired_img {
+        return true;
+    }
+
+    let live_ann = live_spec
+        .template
+        .metadata
+        .as_ref()
+        .and_then(|m| m.annotations.as_ref());
+    let desired_ann = desired_spec
+        .template
+        .metadata
+        .as_ref()
+        .and_then(|m| m.annotations.as_ref());
+    for key in [
+        "waddle.social/config-checksum",
+        "waddle.social/secrets-checksum",
+    ] {
+        if live_ann.and_then(|a| a.get(key)) != desired_ann.and_then(|a| a.get(key)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn service_drifted(live: &Service, desired: &Service) -> bool {
+    let (Some(live_spec), Some(desired_spec)) = (&live.spec, &desired.spec) else {
+        return true;
+    };
+    if live_spec.type_ != desired_spec.type_ || live_spec.selector != desired_spec.selector {
+        return true;
+    }
+    if desired_spec.cluster_ip.as_deref() == Some("None")
+        && live_spec.cluster_ip != desired_spec.cluster_ip
+    {
+        return true;
+    }
+    if desired_spec.publish_not_ready_addresses.is_some()
+        && live_spec.publish_not_ready_addresses != desired_spec.publish_not_ready_addresses
+    {
+        return true;
+    }
+    if desired_spec.external_ips.is_some() && live_spec.external_ips != desired_spec.external_ips {
+        return true;
+    }
+
+    let live_ports = live_spec.ports.as_deref().unwrap_or(&[]);
+    let desired_ports = desired_spec.ports.as_deref().unwrap_or(&[]);
+    if live_ports.len() != desired_ports.len() {
+        return true;
+    }
+    live_ports.iter().zip(desired_ports.iter()).any(|(lp, dp)| {
+        lp.name != dp.name
+            || lp.port != dp.port
+            || lp.target_port != dp.target_port
+            || lp.protocol != dp.protocol
+            || (dp.node_port.is_some() && lp.node_port != dp.node_port)
+    })
+}
+
+fn pdb_drifted(live: &PodDisruptionBudget, desired: &PodDisruptionBudget) -> bool {
+    let (Some(live_spec), Some(desired_spec)) = (&live.spec, &desired.spec) else {
+        return true;
+    };
+    live_spec.max_unavailable != desired_spec.max_unavailable
+        || live_spec.selector != desired_spec.selector
+}
+
+fn network_policy_drifted(live: &NetworkPolicy, desired: &NetworkPolicy) -> bool {
+    let (Some(live_spec), Some(desired_spec)) = (&live.spec, &desired.spec) else {
+        return true;
+    };
+    live_spec.pod_selector != desired_spec.pod_selector
+        || live_spec.policy_types != desired_spec.policy_types
+        || live_spec.ingress != desired_spec.ingress
 }
 
 async fn has_group_version_live(client: &Client, group: &str, version: &str) -> bool {

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
@@ -18,6 +19,7 @@ use tokio::net::TcpListener;
 use tower::ServiceExt;
 use waddle_operator::external_crds::{discover_capabilities, DiscoveredCapabilities};
 use waddle_operator::health::{probe_router, HealthState};
+use waddle_operator::leader_election::{LeaderConfig, LeaderGuard};
 use waddle_operator::metrics::OperatorMetrics;
 use waddle_operator::resources::ANNOTATION_SESSION_KEY_FINGERPRINT;
 use waddle_operator::{reconcile_single, ControllerContext, OperatorPolicy};
@@ -28,6 +30,7 @@ struct MockClusterInner {
     cnpg_installed: bool,
     spicedb_installed: bool,
     eso_installed: bool,
+    stall_lease_puts: bool,
     resources: BTreeMap<String, Value>,
     gets: Vec<String>,
     mutations: Vec<(String, String)>,
@@ -113,6 +116,14 @@ impl MockCluster {
         self.inner.lock().expect("lock").gets.clear();
     }
 
+    fn set_stall_lease_puts(&self, stall: bool) {
+        self.inner.lock().expect("lock").stall_lease_puts = stall;
+    }
+
+    fn delete(&self, path: &str) {
+        self.inner.lock().expect("lock").resources.remove(path);
+    }
+
     fn events(&self) -> Vec<Value> {
         self.inner.lock().expect("lock").events.clone()
     }
@@ -137,6 +148,14 @@ async fn handle_k8s_request(
 ) -> Response {
     let path = uri.path().to_owned();
     let query = uri.query().unwrap_or("");
+    let should_stall_lease = {
+        let g = state.lock().expect("lock");
+        g.stall_lease_puts && method == Method::PUT && path.contains("/leases/")
+    };
+    if should_stall_lease {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    }
+
     let mut g = state.lock().expect("lock");
 
     // Discovery routes
@@ -1291,4 +1310,168 @@ async fn invalid_spec_skips_dependency_gets_and_stale_deadline_stays_reconciling
         WaddleServerPhase::Reconciling,
         "stale gen-1 ProgressDeadlineExceeded while observedGeneration=1 < generation=2 must stay Reconciling"
     );
+}
+
+#[tokio::test]
+async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease_deadline() {
+    let cluster = MockCluster::start().await;
+    let ns = "hardening";
+    let name = "chat";
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // 1. Stale SpiceDBCluster metadata.generation (2) > observedGeneration (1) blocks Pending.
+    cluster.put(
+        &format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{name}"),
+        yolo_waddle_json(ns, name),
+    );
+    seed_healthy_cnpg_and_spicedb(&cluster, ns);
+    let sp_path = format!("/apis/authzed.com/v1alpha1/namespaces/{ns}/spicedbclusters/spicedb");
+    let mut sp = cluster.get(&sp_path).expect("spicedb exists");
+    sp["metadata"]["generation"] = json!(2);
+    sp["status"]["observedGeneration"] = json!(1);
+    cluster.put(&sp_path, sp);
+
+    let ctx = make_ctx(
+        &cluster,
+        true,
+        discover_capabilities(&cluster.client()).await,
+    );
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("reconcile with stale SpiceDBCluster generation");
+    let st_stale = cluster.get_waddle(ns, name).status.expect("st");
+    assert_eq!(st_stale.phase, WaddleServerPhase::Pending);
+    assert_eq!(st_stale.dependencies.spicedb.reason, "GenerationPending");
+
+    // Advance SpiceDBCluster observedGeneration to 2 -> reach Ready.
+    let mut sp2 = cluster.get(&sp_path).expect("spicedb exists");
+    sp2["status"]["observedGeneration"] = json!(2);
+    cluster.put(&sp_path, sp2);
+
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("provision yolo secret");
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("create workload");
+    mark_deployment_available(&cluster, ns, name);
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("converge Ready");
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Ready
+    );
+
+    // 2. Pre-existing Service/chat-headless owned by ANOTHER WaddleServer MUST NOT be deleted.
+    let unrelated_svc_path = format!("/api/v1/namespaces/{ns}/services/{name}-headless");
+    cluster.put(
+        &unrelated_svc_path,
+        json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": format!("{name}-headless"),
+                "namespace": ns,
+                "uid": "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+                "ownerReferences": [{
+                    "apiVersion": "waddle.social/v1alpha1",
+                    "kind": "WaddleServer",
+                    "name": "chat-headless",
+                    "uid": "other-owner-uid",
+                    "controller": true
+                }]
+            }
+        }),
+    );
+
+    // 3. Delete HTTP Service & mutate ConfigMap out-of-band -> drift_detected self-heals both!
+    let http_svc_path = format!("/api/v1/namespaces/{ns}/services/{name}");
+    let cm_path = format!("/api/v1/namespaces/{ns}/configmaps/{name}-config");
+    cluster.delete(&http_svc_path);
+    let mut cm = cluster.get(&cm_path).expect("cm");
+    cm["data"]["TAMPERED"] = json!("true");
+    cluster.put(&cm_path, cm);
+
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("detect Service deletion and ConfigMap tamper -> Reconciling");
+    assert_eq!(
+        cluster.get_waddle(ns, name).status.expect("st").phase,
+        WaddleServerPhase::Reconciling
+    );
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("self-heal workload and restore Service & ConfigMap");
+    assert!(
+        cluster.get(&http_svc_path).is_some(),
+        "deleted HTTP Service must be recreated on repair"
+    );
+    let repaired_cm = cluster.get(&cm_path).expect("repaired cm");
+    assert!(
+        repaired_cm["data"].get("TAMPERED").is_none(),
+        "tampered ConfigMap must be reconciled back to desired contents"
+    );
+    assert!(
+        cluster.get(&unrelated_svc_path).is_some(),
+        "non-owned Service/chat-headless MUST NOT be deleted"
+    );
+
+    mark_deployment_available(&cluster, ns, name);
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("return Ready");
+
+    // 4. Rotate Postgres Secret pg-app -> pod template secrets-checksum MUST change.
+    let dep_path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}");
+    let prev_checksum = cluster.get(&dep_path).expect("dep")["spec"]["template"]["metadata"]
+        ["annotations"]["waddle.social/secrets-checksum"]
+        .as_str()
+        .expect("prev checksum")
+        .to_owned();
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/pg-app"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "pg-app", "namespace": ns },
+            "data": { "uri": b64.encode("postgres://u:NEW_PASS@pg-rw:5432/waddle") }
+        }),
+    );
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("detect PG secret rotation -> Reconciling");
+    reconcile_single(Arc::new(cluster.get_waddle(ns, name)), Arc::clone(&ctx))
+        .await
+        .expect("apply new secrets-checksum");
+    let new_checksum = cluster.get(&dep_path).expect("dep")["spec"]["template"]["metadata"]
+        ["annotations"]["waddle.social/secrets-checksum"]
+        .as_str()
+        .expect("new checksum")
+        .to_owned();
+    assert_ne!(
+        prev_checksum, new_checksum,
+        "Postgres secret rotation MUST update waddle.social/secrets-checksum on Deployment"
+    );
+
+    // 5. Stalled Lease renewal server must trigger LeaderGuard leadership loss before TTL expiry.
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut cfg = LeaderConfig::new(ns.to_owned(), "op-leader".to_owned(), "pod-a".to_owned());
+    cfg.lease_duration_secs = 2;
+    cfg.renew_interval = Duration::from_millis(100);
+    cfg.retry_interval = Duration::from_millis(50);
+
+    let mut guard = LeaderGuard::acquire(&cluster.client(), cfg, shutdown_rx)
+        .await
+        .expect("acquire lease")
+        .expect("lease guard returned");
+    let lost_rx = guard.take_lost_rx().expect("lost rx");
+    cluster.set_stall_lease_puts(true);
+
+    tokio::time::timeout(Duration::from_secs(3), lost_rx)
+        .await
+        .expect(
+            "LeaderGuard must report lost leadership within deadline bound before 4s stall returns",
+        )
+        .expect("lost notification delivered");
 }

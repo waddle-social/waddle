@@ -8,9 +8,9 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition as KubeCondition, Time};
-use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams, PostParams, Preconditions};
 use kube::runtime::events::{Event, EventType, Recorder};
-use kube::{Client, Resource};
+use kube::{Client, Resource, ResourceExt};
 use serde::Serialize;
 use serde_json::json;
 use waddle_operator_crd::{
@@ -253,29 +253,31 @@ async fn apply_workload(
         ensure_pvc_created(&pvc_api, &pvc_name, &pvc).await?;
     }
 
+    let owner = resources::owner_reference(ws)?;
+
     let headless_name = resources::headless_service_name(ws)?;
     match resources::build_headless_service(ws)? {
         Some(svc) => ssa_apply(&svc_api, &headless_name, &svc).await?,
-        None => delete_if_exists(&svc_api, &headless_name).await?,
+        None => delete_if_owned(&svc_api, &headless_name, &owner.uid).await?,
     }
 
     let s2s_name = resources::s2s_service_name(ws)?;
     match resources::build_s2s_service(ws)? {
         Some(svc) => ssa_apply(&svc_api, &s2s_name, &svc).await?,
-        None => delete_if_exists(&svc_api, &s2s_name).await?,
+        None => delete_if_owned(&svc_api, &s2s_name, &owner.uid).await?,
     }
 
     let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(client.clone(), ns);
     match resources::build_pdb(ws)? {
         Some(pdb) => ssa_apply(&pdb_api, name, &pdb).await?,
-        None => delete_if_exists(&pdb_api, name).await?,
+        None => delete_if_owned(&pdb_api, name, &owner.uid).await?,
     }
 
     let np_api: Api<NetworkPolicy> = Api::namespaced(client.clone(), ns);
     let np_name = resources::network_policy_name(ws)?;
     match resources::build_network_policy(ws)? {
         Some(np) => ssa_apply(&np_api, &np_name, &np).await?,
-        None => delete_if_exists(&np_api, &np_name).await?,
+        None => delete_if_owned(&np_api, &np_name, &owner.uid).await?,
     }
 
     let deployment = resources::build_deployment(ws, validated, bindings, &cm_digest)?;
@@ -331,12 +333,39 @@ where
     Ok(())
 }
 
-async fn delete_if_exists<K>(api: &Api<K>, name: &str) -> Result<(), OperatorError>
+async fn delete_if_owned<K>(api: &Api<K>, name: &str, owner_uid: &str) -> Result<(), OperatorError>
 where
-    K: Resource + Clone + Debug + serde::de::DeserializeOwned,
+    K: Resource + ResourceExt + Clone + Debug + serde::de::DeserializeOwned,
     K::DynamicType: Default,
 {
-    match api.delete(name, &DeleteParams::default()).await {
+    let Some(existing) = api
+        .get_opt(name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "inspect optional resource ownership before delete",
+            source,
+        })?
+    else {
+        return Ok(());
+    };
+
+    let owned_by_ws = existing
+        .owner_references()
+        .iter()
+        .any(|owner| owner.uid == owner_uid);
+    if !owned_by_ws {
+        return Ok(());
+    }
+
+    let params = DeleteParams {
+        preconditions: existing.uid().map(|uid| Preconditions {
+            uid: Some(uid),
+            resource_version: None,
+        }),
+        ..DeleteParams::default()
+    };
+
+    match api.delete(name, &params).await {
         Ok(_) => Ok(()),
         Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(source) => Err(OperatorError::Kube {

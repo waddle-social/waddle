@@ -209,6 +209,30 @@ pub fn compute_single_key_digest(bytes: &[u8]) -> Option<ContentDigest> {
     ContentDigest::try_new(&hex_digest).ok()
 }
 
+/// Computes a deterministic composite digest across named component secret digests.
+///
+/// Returns `None` if `parts` is empty. Never handles raw secret bytes directly.
+#[must_use]
+pub fn combine_digests(parts: &BTreeMap<String, ContentDigest>) -> Option<ContentDigest> {
+    use sha2::Digest;
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"waddle-composite-secret-v1:");
+    for (name, digest) in parts {
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name.as_bytes());
+        let val = digest.as_str();
+        hasher.update((val.len() as u64).to_be_bytes());
+        hasher.update(val.as_bytes());
+    }
+    let hex_digest = hex::encode(hasher.finalize());
+    ContentDigest::try_new(&hex_digest).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
