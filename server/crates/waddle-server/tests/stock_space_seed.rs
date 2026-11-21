@@ -7,9 +7,12 @@ mod support;
 
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
+use std::time::Duration;
 
 use kameo::actor::Spawn;
-use waddle_server::config::SpiceDbConfig;
+use waddle_server::config::{LineageConfig, SpiceDbConfig};
+use waddle_server::db::bootstrap::RuntimePoolLimits;
+use waddle_server::db::runtime_startup::RuntimeStartupIdentity;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::permissions::host_grant::{
     BindSpace, BootstrapGrant, EnrollScope, GrantOperationId, GrantSubject, HostGrantAuthority,
@@ -106,9 +109,31 @@ async fn provision_enrolled_space_for_stock_peer() {
     )
     .await
     .expect("owner database");
-    let pubsub = DatabasePubSubStorage::initialize_shared_owner(owner_database.clone())
+    let startup = RuntimeStartupIdentity::from_json(
+        &prepared.handoff,
+        &LineageConfig {
+            deployment_uuid: Some(prepared.lineage.deployment_uuid),
+            action: None,
+        },
+        support::RELEASE_GIT_SHA,
+    )
+    .expect("stock fixture runtime handoff");
+    let limits = RuntimePoolLimits {
+        main_connections: 2,
+        ingress_connections: 1,
+        acquire_timeout: Duration::from_secs(10),
+    };
+    let preflight = startup
+        .preflight(&prepared.runtime_url, limits)
         .await
-        .expect("owner PubSub store");
+        .expect("stock fixture restricted preflight");
+    let runtime = startup
+        .attach_serving(preflight, &prepared.runtime_url, limits, None)
+        .await
+        .expect("stock fixture attested pool");
+    let pubsub = DatabasePubSubStorage::attach_existing(runtime.global().clone())
+        .await
+        .expect("attested PubSub store");
     pubsub
         .get_or_create_node(&service, &node)
         .await

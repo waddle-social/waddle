@@ -96,6 +96,9 @@ async fn receive_deletion(h: &Harness, node: &str) -> Result<Outcome> {
     let mut reader = h
         .login_peer(Peer::Ejabberd, "alice", &support::id("space-subscriber"))
         .await?;
+    reader
+        .send(&stanza::presence(ns::CLIENT, None, None))
+        .await?;
     let granted = ask(
         &mut owner,
         stanza::pubsub_affiliations_set(
