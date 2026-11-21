@@ -813,7 +813,7 @@ const c = {
     </div>
 
     <!-- Media from another server, named until the user asks to load it -->
-    <div v-if="withheldMedia.length > 0" :class="c.withheld" @click.stop>
+    <div v-if="withheldMedia.length > 0" :class="c.withheld">
       <span :class="c.fileMeta">
         Images and files from {{ remoteMediaHost }} aren't loaded until you choose to.
       </span>
