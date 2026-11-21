@@ -38,6 +38,18 @@ public struct AdminPage<Row: Sendable>: Sendable {
 
 extension AdminPage: Equatable where Row: Equatable {}
 
+/// What the server takes as the name of a space or a room.
+public enum AdminName {
+    /// One to this many characters, counted as the server counts them:
+    /// one for each Unicode scalar, so some emoji count several.
+    public static let maxLength = 80
+
+    /// Whether `name`, trimmed, is longer than the server takes.
+    public static func isTooLong(_ name: String) -> Bool {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count > maxLength
+    }
+}
+
 /// A space, as the admin console lists it.
 public struct AdminSpace: Hashable, Identifiable, Sendable {
     /// The service that holds the space, and its name there. The server
@@ -71,22 +83,13 @@ public struct AdminSpace: Hashable, Identifiable, Sendable {
 
 /// The name and description to give a space, as the server would take them.
 public struct AdminSpaceDraft: Hashable, Sendable {
-    /// The server takes one to this many characters, counted as it counts
-    /// them: one for each Unicode scalar, so some emoji count several.
-    public static let maxNameLength = 80
-
-    /// Whether `name`, trimmed, is longer than the server takes.
-    public static func isNameTooLong(_ name: String) -> Bool {
-        name.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count > maxNameLength
-    }
-
     public let name: String
     public let description: String?
 
     /// Nil when the name, trimmed, is blank or too long.
     public init?(name: String, description: String) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, !Self.isNameTooLong(name) else { return nil }
+        guard !name.isEmpty, !AdminName.isTooLong(name) else { return nil }
         let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
         self.name = name
         self.description = description.isEmpty ? nil : description
@@ -128,16 +131,29 @@ public enum AdminRoomKind: Hashable, Sendable {
     public var canBeChosen: Bool { Self.choices.contains(self) }
 }
 
+/// Who can get into a room.
+public struct AdminRoomAccess: Hashable, Sendable {
+    /// People can find it when they browse rooms.
+    public var isListed: Bool
+    /// Only its members can join.
+    public var isMembersOnly: Bool
+
+    /// Anyone can find it and join it.
+    public static let open = AdminRoomAccess(isListed: true, isMembersOnly: false)
+
+    public init(isListed: Bool, isMembersOnly: Bool) {
+        self.isListed = isListed
+        self.isMembersOnly = isMembersOnly
+    }
+}
+
 /// A room, as the admin console lists it.
 public struct AdminRoom: Hashable, Identifiable, Sendable {
     public let jid: BareJID
     public let name: String
     public let description: String?
     public let kind: AdminRoomKind
-    /// People can find it when they browse rooms.
-    public let isListed: Bool
-    /// Only its members can join.
-    public let isMembersOnly: Bool
+    public let access: AdminRoomAccess
     /// How many people are in it now, and how many hold a role in it
     /// (owner, admin or member).
     public let presentCount: Int
@@ -147,14 +163,13 @@ public struct AdminRoom: Hashable, Identifiable, Sendable {
 
     public init(
         jid: BareJID, name: String, description: String?, kind: AdminRoomKind,
-        isListed: Bool, isMembersOnly: Bool, presentCount: Int, memberCount: Int
+        access: AdminRoomAccess, presentCount: Int, memberCount: Int
     ) {
         self.jid = jid
         self.name = name
         self.description = description
         self.kind = kind
-        self.isListed = isListed
-        self.isMembersOnly = isMembersOnly
+        self.access = access
         self.presentCount = presentCount
         self.memberCount = memberCount
     }
@@ -165,25 +180,21 @@ public struct AdminRoomDraft: Hashable, Sendable {
     public let name: String
     public let description: String?
     public let kind: AdminRoomKind
-    public let isListed: Bool
-    public let isMembersOnly: Bool
+    public let access: AdminRoomAccess
     /// The space to make the room in. Not used when changing a room.
     public let space: AdminSpace?
 
-    /// Nil when the name, trimmed, is blank or too long (the limit is the
-    /// one for a space).
+    /// Nil when the name, trimmed, is blank or too long.
     public init?(
-        name: String, description: String, kind: AdminRoomKind,
-        isListed: Bool, isMembersOnly: Bool, space: AdminSpace?
+        name: String, description: String, kind: AdminRoomKind, access: AdminRoomAccess, space: AdminSpace?
     ) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, !AdminSpaceDraft.isNameTooLong(name) else { return nil }
+        guard !name.isEmpty, !AdminName.isTooLong(name) else { return nil }
         let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
         self.name = name
         self.description = description.isEmpty ? nil : description
         self.kind = kind
-        self.isListed = isListed
-        self.isMembersOnly = isMembersOnly
+        self.access = access
         self.space = space
     }
 }

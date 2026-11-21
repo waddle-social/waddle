@@ -80,7 +80,7 @@ final class AdminSnapshotTests: XCTestCase {
             ],
             nextCursor: "after-mika"
         ))
-        let sheet = AdminSpaceSheet(subject: .space(Self.design), spaces: sample.coordinator.adminSpacesList())
+        let sheet = AdminSpaceSheet(subject: .existing(Self.design), spaces: sample.coordinator.adminSpacesList())
         try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
     }
 
@@ -92,7 +92,7 @@ final class AdminSnapshotTests: XCTestCase {
 
     private static let lounge = AdminRoom(
         jid: bare("lounge@rooms.waddle.test"), name: "Lounge", description: "Small talk and coffee",
-        kind: .text, isListed: true, isMembersOnly: false, presentCount: 4, memberCount: 9
+        kind: .text, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 4, memberCount: 9
     )
 
     /// A plain room, a hidden announcements room and a forum.
@@ -103,11 +103,11 @@ final class AdminSnapshotTests: XCTestCase {
                 Self.lounge,
                 AdminRoom(
                     jid: bare("board@rooms.waddle.test"), name: "Board", description: nil,
-                    kind: .announcement, isListed: false, isMembersOnly: true, presentCount: 0, memberCount: 1
+                    kind: .announcement, access: AdminRoomAccess(isListed: false, isMembersOnly: true), presentCount: 0, memberCount: 1
                 ),
                 AdminRoom(
                     jid: bare("ideas@rooms.waddle.test"), name: "Ideas", description: "Pitch something",
-                    kind: .forum, isListed: true, isMembersOnly: false, presentCount: 2, memberCount: 31
+                    kind: .forum, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 2, memberCount: 31
                 ),
             ],
             nextCursor: nil
@@ -134,7 +134,7 @@ final class AdminSnapshotTests: XCTestCase {
             ],
             nextCursor: nil
         ))
-        let sheet = AdminRoomSheet(subject: .room(Self.lounge), rooms: sample.coordinator.adminRoomsList())
+        let sheet = AdminRoomSheet(subject: .existing(Self.lounge), rooms: sample.coordinator.adminRoomsList())
         try await assertScreenSnapshot(of: sample.host(sheet), size: CGSize(width: Self.size.width, height: 900))
     }
 

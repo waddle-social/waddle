@@ -2,29 +2,63 @@ import SwiftUI
 import WaddleKit
 
 /// The lists of the admin console.
-enum AdminSection: Hashable {
+enum AdminSection: Hashable, CaseIterable {
     case users
     case spaces
     case rooms
+
+    var copy: AdminListCopy {
+        switch self {
+        case .users: .users
+        case .spaces: .spaces
+        case .rooms: .rooms
+        }
+    }
+}
+
+/// The lists behind the console, kept while it is open so a section shown
+/// again still has the pages it loaded.
+@MainActor
+@Observable
+final class AdminConsole {
+    let users: AdminList<AdminUser>
+    let spaces: AdminList<AdminSpace>
+    let rooms: AdminList<AdminRoom>
+    /// Lists that may be out of date: not asked for since the connection
+    /// last came back, or since a sheet of another list was last open.
+    private(set) var stale: Set<AdminSection> = []
+
+    init(session: SessionCoordinator) {
+        users = session.adminUsersList()
+        spaces = session.adminSpacesList()
+        rooms = session.adminRoomsList()
+    }
+
+    func markAllStale() {
+        stale = Set(AdminSection.allCases)
+    }
+
+    /// A space counts its rooms and takes them with it when deleted, so
+    /// what is done in one list's sheet can change the others.
+    func markOthersStale(than section: AdminSection) {
+        stale.formUnion(AdminSection.allCases.filter { $0 != section })
+    }
+
+    func markFresh(_ section: AdminSection) {
+        stale.remove(section)
+    }
 }
 
 /// The admin console, for community owners: everyone with an account on
-/// this server, and its spaces. The server checks every request, so
-/// someone who is not an owner sees "Admin access only" here.
+/// this server, its spaces and its rooms. The server checks every
+/// request, so someone who is not an owner sees "Admin access only" here.
 ///
 /// iPad and Mac show it from the sidebar; iPhone pushes it from You.
 struct AdminView: View {
     @Environment(SessionCoordinator.self) private var session
     @State private var section: AdminSection
-    @State private var users: AdminList<AdminUser>?
-    @State private var spaces: AdminList<AdminSpace>?
+    @State private var console: AdminConsole?
     @State private var query = ""
-    @State private var rooms: AdminList<AdminRoom>?
-    @State private var spaceSheet: AdminSpaceSheet.Subject?
-    @State private var roomSheet: AdminRoomSheet.Subject?
-    /// Lists that may be out of date: not asked for since the connection
-    /// last came back, or since the other sheet was last open.
-    @State private var stale: Set<AdminSection> = []
 
     init(section: AdminSection = .users) {
         _section = State(initialValue: section)
@@ -32,118 +66,55 @@ struct AdminView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HuddleSegmentedControl(selection: shownSection, segments: [
-                .init(value: .users, title: "Users"),
-                .init(value: .spaces, title: "Spaces"),
-                .init(value: .rooms, title: "Rooms"),
-            ])
+            HuddleSegmentedControl(
+                selection: shownSection,
+                segments: AdminSection.allCases.map { .init(value: $0, title: $0.copy.title) }
+            )
             .padding(.vertical, Theme.Spacing.s)
-            panel
+            if let console {
+                sectionView(console)
+            } else {
+                Theme.Colors.bg
+            }
         }
         .background(Theme.Colors.bg)
         .navigationTitle("Admin")
-        .searchable(text: $query, prompt: searchPrompt)
-        .task(id: Search(section: section, query: query, isOnline: session.connection == .online)) {
-            switch section {
-            case .users:
-                let list = users ?? session.adminUsersList()
-                users = list
-                await search(list, in: .users)
-            case .spaces:
-                let list = spaces ?? session.adminSpacesList()
-                spaces = list
-                await search(list, in: .spaces)
-            case .rooms:
-                let list = rooms ?? session.adminRoomsList()
-                rooms = list
-                await search(list, in: .rooms)
-            }
+        .searchable(text: $query, prompt: section.copy.searchPrompt)
+        .task {
+            if console == nil { console = AdminConsole(session: session) }
         }
         .onChange(of: session.connection == .online) { _, isOnline in
-            if isOnline { stale = [.users, .spaces, .rooms] }
-        }
-        .toolbar {
-            if section == .spaces {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        spaceSheet = .new
-                    } label: {
-                        Label("New space", systemImage: "plus")
-                    }
-                    .disabled(spaces == nil)
-                    .help("New space")
-                }
-            }
-            if section == .rooms {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        roomSheet = .new
-                    } label: {
-                        Label("New room", systemImage: "plus")
-                    }
-                    .disabled(rooms == nil)
-                    .help("New room")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task { await reload() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(isLoading)
-                .help("Refresh")
-            }
-        }
-        // A space counts its rooms and takes them with it when deleted,
-        // so what is done in one sheet can change the other list.
-        .sheet(item: $roomSheet, onDismiss: { stale.insert(.spaces) }) { subject in
-            if let rooms {
-                AdminRoomSheet(subject: subject, rooms: rooms)
-                    .carryingCallDock()
-            }
-        }
-        .sheet(item: $spaceSheet, onDismiss: { stale.insert(.rooms) }) { subject in
-            if let spaces {
-                AdminSpaceSheet(subject: subject, spaces: spaces)
-                    .carryingCallDock()
-            }
+            if isOnline { console?.markAllStale() }
         }
     }
 
-    private var searchPrompt: String {
-        switch section {
-        case .users: "Search users"
-        case .spaces: "Search spaces"
-        case .rooms: "Search rooms"
-        }
-    }
-
+    /// The one place that knows what each section lists, how a row of it
+    /// looks and what opens from it.
     @ViewBuilder
-    private var panel: some View {
+    private func sectionView(_ console: AdminConsole) -> some View {
         switch section {
         case .users:
-            if let users {
-                AdminUsersPanel(users: users)
-            } else {
-                Theme.Colors.bg
+            AdminSectionView(section: .users, list: console.users, console: console, query: query) { user, _ in
+                AdminUserRow(user: user)
+            } sheet: { _ in
+                EmptyView()
             }
         case .spaces:
-            if let spaces {
-                AdminSpacesPanel(spaces: spaces) { spaceSheet = .space($0) }
-            } else {
-                Theme.Colors.bg
+            AdminSectionView(section: .spaces, list: console.spaces, console: console, query: query) { space, open in
+                AdminSpaceRow(space: space, action: open)
+            } sheet: { subject in
+                AdminSpaceSheet(subject: subject, spaces: console.spaces)
             }
         case .rooms:
-            if let rooms {
-                AdminRoomsPanel(rooms: rooms) { roomSheet = .room($0) }
-            } else {
-                Theme.Colors.bg
+            AdminSectionView(section: .rooms, list: console.rooms, console: console, query: query) { room, open in
+                AdminRoomRow(room: room, action: open)
+            } sheet: { subject in
+                AdminRoomSheet(subject: subject, rooms: console.rooms)
             }
         }
     }
 
-    /// Text typed for one list is not a search of the other.
+    /// Text typed for one list is not a search of another.
     private var shownSection: Binding<AdminSection> {
         Binding {
             section
@@ -153,55 +124,75 @@ struct AdminView: View {
             section = $0
         }
     }
+}
 
-    private var isLoading: Bool {
-        switch section {
-        case .users: users?.isLoading ?? true
-        case .spaces: spaces?.isLoading ?? true
-        case .rooms: rooms?.isLoading ?? true
+/// One section of the console: its list, searched by the text typed, with
+/// the toolbar's refresh and "new" buttons and the sheet a row opens.
+struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View>: View {
+    @Environment(SessionCoordinator.self) private var session
+    let section: AdminSection
+    let list: AdminList<Row>
+    let console: AdminConsole
+    let query: String
+    /// A row, and what choosing it does.
+    @ViewBuilder let row: (Row, _ open: @escaping () -> Void) -> RowView
+    @ViewBuilder let sheet: (AdminSheetSubject<Row>) -> Sheet
+    @State private var subject: AdminSheetSubject<Row>?
+
+    var body: some View {
+        AdminListPanel(list: list, copy: section.copy) { item in
+            row(item) { subject = .existing(item) }
+        }
+        .task(id: Search(query: query, isOnline: session.connection == .online)) {
+            await search()
+        }
+        .toolbar {
+            if let newTitle = section.copy.newTitle {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        subject = .new
+                    } label: {
+                        Label(newTitle, systemImage: "plus")
+                    }
+                    .help(newTitle)
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await list.reload() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(list.isLoading)
+                .help("Refresh")
+            }
+        }
+        .sheet(item: $subject, onDismiss: { console.markOthersStale(than: section) }) { subject in
+            sheet(subject)
+                .carryingCallDock()
         }
     }
 
-    private func reload() async {
-        switch section {
-        case .users: await users?.reload()
-        case .spaces: await spaces?.reload()
-        case .rooms: await rooms?.reload()
-        }
-    }
-
-    /// Asks `list` for the text typed, after a pause in typing; an empty
+    /// Asks the list for the text typed, after a pause in typing; an empty
     /// field asks at once. A list that already answers the text is left
     /// as it is, pages and all, when its section is shown again, unless
-    /// the connection came back since it was asked.
-    private func search<Row>(_ list: AdminList<Row>, in section: AdminSection) async {
+    /// it may be out of date.
+    private func search() async {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if list.hasLoaded, list.failure == nil, list.query == text, !stale.contains(section) { return }
+        if list.hasLoaded, list.failure == nil, list.query == text, !console.stale.contains(section) { return }
         if !text.isEmpty {
             try? await Task.sleep(for: .milliseconds(250))
         }
         guard !Task.isCancelled else { return }
         await list.load(matching: query)
-        if !Task.isCancelled { stale.remove(section) }
+        if !Task.isCancelled { console.markFresh(section) }
     }
 
-    /// What the list on screen answers: asked again when the list or the
-    /// text changes and when the connection comes back.
+    /// What the list on screen answers: asked again when the text changes
+    /// and when the connection comes back.
     private struct Search: Hashable {
-        let section: AdminSection
         let query: String
         let isOnline: Bool
-    }
-}
-
-/// The users found, a page at a time, or why there are none to show.
-struct AdminUsersPanel: View {
-    let users: AdminList<AdminUser>
-
-    var body: some View {
-        AdminListPanel(list: users, copy: .users) { user in
-            AdminUserRow(user: user)
-        }
     }
 }
 
@@ -286,6 +277,9 @@ struct AdminListCopy {
     let noMatches: (_ query: String) -> String
     let emptyTitle: String
     let emptyMessage: String
+    let searchPrompt: String
+    /// The toolbar's "new" button; nil for a list nothing is added to.
+    var newTitle: String?
 
     static let users = AdminListCopy(
         title: "Users",
@@ -296,7 +290,8 @@ struct AdminListCopy {
         failedTitle: "Users didn't load",
         noMatches: { "No one's name or address starts with “\($0)”." },
         emptyTitle: "No users yet",
-        emptyMessage: "People show up here once they have an account."
+        emptyMessage: "People show up here once they have an account.",
+        searchPrompt: "Search users"
     )
 
     static let rooms = AdminListCopy(
@@ -308,7 +303,9 @@ struct AdminListCopy {
         failedTitle: "Rooms didn't load",
         noMatches: { "No room's name starts with “\($0)”." },
         emptyTitle: "No rooms yet",
-        emptyMessage: "Make one to get people talking."
+        emptyMessage: "Make one to get people talking.",
+        searchPrompt: "Search rooms",
+        newTitle: "New room"
     )
 
     static let spaces = AdminListCopy(
@@ -320,7 +317,9 @@ struct AdminListCopy {
         failedTitle: "Spaces didn't load",
         noMatches: { "No space's name starts with “\($0)”." },
         emptyTitle: "No spaces yet",
-        emptyMessage: "Make one to group rooms together."
+        emptyMessage: "Make one to group rooms together.",
+        searchPrompt: "Search spaces",
+        newTitle: "New space"
     )
 }
 
@@ -386,7 +385,7 @@ private struct AdminNoticeLine: View {
 
 /// Avatar, name and address, with a tag on community owners. Opens their
 /// profile.
-private struct AdminUserRow: View {
+struct AdminUserRow: View {
     @Environment(NavigationModel.self) private var navigation
     let user: AdminUser
 

@@ -115,7 +115,7 @@ extension FakePort {
         return AdminRoom(
             jid: room.jid, name: draft.name, description: draft.description ?? room.description,
             kind: draft.kind.canBeChosen ? draft.kind : room.kind,
-            isListed: draft.isListed, isMembersOnly: draft.isMembersOnly,
+            access: draft.access,
             presentCount: room.presentCount, memberCount: room.memberCount
         )
     }

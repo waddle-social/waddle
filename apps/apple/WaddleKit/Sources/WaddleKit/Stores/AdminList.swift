@@ -98,6 +98,12 @@ public final class AdminList<Row: Identifiable & Sendable> {
         }
     }
 
+    /// `row` as the list now holds it; `row` itself when it is not listed.
+    /// What is open beside the list follows the changes made to its row.
+    public func current(_ row: Row) -> Row {
+        rows.first { $0.id == row.id } ?? row
+    }
+
     /// Shows a row as the server now holds it, where it was.
     public func replace(_ row: Row) {
         noteChange(.replace(row))

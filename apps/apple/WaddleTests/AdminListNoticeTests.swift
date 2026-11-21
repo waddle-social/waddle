@@ -111,7 +111,7 @@ final class AdminRoomCopyTests: XCTestCase {
     private func room(kind: AdminRoomKind, isListed: Bool, isMembersOnly: Bool) -> AdminRoom {
         AdminRoom(
             jid: bare("lounge@rooms.waddle.test"), name: "Lounge", description: nil, kind: kind,
-            isListed: isListed, isMembersOnly: isMembersOnly, presentCount: 0, memberCount: 0
+            access: AdminRoomAccess(isListed: isListed, isMembersOnly: isMembersOnly), presentCount: 0, memberCount: 0
         )
     }
 

@@ -53,8 +53,8 @@ struct AdminSpacesTests {
         let family = "👨‍👩‍👧‍👦"
         #expect(AdminSpaceDraft(name: String(repeating: family, count: 11), description: "") != nil)
         #expect(AdminSpaceDraft(name: String(repeating: family, count: 12), description: "") == nil)
-        #expect(AdminSpaceDraft.isNameTooLong(String(repeating: family, count: 12)))
-        #expect(!AdminSpaceDraft.isNameTooLong(String(repeating: "a", count: 80) + " "))
+        #expect(AdminName.isTooLong(String(repeating: family, count: 12)))
+        #expect(!AdminName.isTooLong(String(repeating: "a", count: 80) + " "))
     }
 
     @Test func removingMembersLowersTheCountButNotBelowNone() {
@@ -90,9 +90,15 @@ struct AdminSpacesTests {
             description: design.description, roomCount: 3, memberCount: 12
         )
 
+        #expect(list.current(design) == design)
         list.replace(renamed)
 
         #expect(list.rows == [renamed, ops])
+        #expect(list.current(design) == renamed)
+        let unlisted = AdminSpace(
+            service: design.service, node: "gone", name: "Gone", description: nil, roomCount: 0, memberCount: 0
+        )
+        #expect(list.current(unlisted) == unlisted)
     }
 
     @Test func aRowTheServerDeletedIsTakenOut() async {

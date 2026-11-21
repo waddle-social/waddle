@@ -117,8 +117,7 @@ extension FFIXmppPort {
                     name: entry.name,
                     description: Self.nonEmpty(entry.topic),
                     kind: Self.roomKind(entry.channelType),
-                    isListed: entry.isPublic,
-                    isMembersOnly: entry.membersOnly,
+                    access: AdminRoomAccess(isListed: entry.isPublic, isMembersOnly: entry.membersOnly),
                     presentCount: Int(entry.occupantCount),
                     // The server counts each role apart.
                     memberCount: Int(entry.ownerCount + entry.adminCount + entry.memberCount)
@@ -133,7 +132,7 @@ extension FFIXmppPort {
             try await client.adminChannelsCreate(args: WaddleAdminChannelsCreateArgs(
                 name: draft.name, topic: draft.description, channelType: Self.wire(draft.kind),
                 spaceJid: draft.space?.service.description, spaceNode: draft.space?.node,
-                isPublic: draft.isListed, membersOnly: draft.isMembersOnly
+                isPublic: draft.access.isListed, membersOnly: draft.access.isMembersOnly
             ))
         }
     }
@@ -146,7 +145,7 @@ extension FFIXmppPort {
             try await client.adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs(
                 channelJid: room.jid.description, name: draft.name, topic: draft.description,
                 channelType: Self.wire(draft.kind),
-                isPublic: draft.isListed, membersOnly: draft.isMembersOnly
+                isPublic: draft.access.isListed, membersOnly: draft.access.isMembersOnly
             ))
         }
         return AdminRoom(
@@ -154,8 +153,7 @@ extension FFIXmppPort {
             name: updated.name,
             description: Self.nonEmpty(updated.topic),
             kind: Self.roomKind(updated.channelType),
-            isListed: updated.isPublic,
-            isMembersOnly: updated.membersOnly,
+            access: AdminRoomAccess(isListed: updated.isPublic, isMembersOnly: updated.membersOnly),
             presentCount: room.presentCount,
             memberCount: room.memberCount
         )

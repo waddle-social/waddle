@@ -1,19 +1,6 @@
 import SwiftUI
 import WaddleKit
 
-/// The rooms found, a page at a time, or why there are none to show.
-/// Choosing one opens it.
-struct AdminRoomsPanel: View {
-    let rooms: AdminList<AdminRoom>
-    let open: (AdminRoom) -> Void
-
-    var body: some View {
-        AdminListPanel(list: rooms, copy: .rooms) { room in
-            AdminRoomRow(room: room) { open(room) }
-        }
-    }
-}
-
 /// How the console words a room.
 enum AdminRoomCopy {
     /// "4 here · 9 members". Members are everyone with a role: owners
@@ -36,8 +23,8 @@ enum AdminRoomCopy {
     static func tags(for room: AdminRoom) -> [String] {
         var tags: [String] = []
         if room.kind != .text { tags.append(title(room.kind)) }
-        if !room.isListed { tags.append("Hidden") }
-        if room.isMembersOnly { tags.append("Members only") }
+        if !room.access.isListed { tags.append("Hidden") }
+        if room.access.isMembersOnly { tags.append("Members only") }
         return tags
     }
 
@@ -53,7 +40,7 @@ enum AdminRoomCopy {
 }
 
 /// Name, what kind of room it is, and how many people it has.
-private struct AdminRoomRow: View {
+struct AdminRoomRow: View {
     let room: AdminRoom
     let action: () -> Void
 

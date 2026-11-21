@@ -17,11 +17,11 @@ struct AdminRoomsTests {
 
     private let lounge = AdminRoom(
         jid: bare("lounge@muc.waddle.test"), name: "Lounge", description: "Small talk",
-        kind: .text, isListed: true, isMembersOnly: false, presentCount: 4, memberCount: 9
+        kind: .text, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 4, memberCount: 9
     )
     private let board = AdminRoom(
         jid: bare("board@muc.waddle.test"), name: "Board", description: nil,
-        kind: .announcement, isListed: false, isMembersOnly: true, presentCount: 0, memberCount: 3
+        kind: .announcement, access: AdminRoomAccess(isListed: false, isMembersOnly: true), presentCount: 0, memberCount: 3
     )
     private let ada = bare("ada@waddle.test")
     private let bo = bare("bo@waddle.test")
@@ -32,7 +32,7 @@ struct AdminRoomsTests {
     ) throws -> AdminRoomDraft {
         try #require(AdminRoomDraft(
             name: name, description: description, kind: kind,
-            isListed: isListed, isMembersOnly: isMembersOnly, space: space
+            access: AdminRoomAccess(isListed: isListed, isMembersOnly: isMembersOnly), space: space
         ))
     }
 
@@ -47,18 +47,18 @@ struct AdminRoomsTests {
     }
 
     @Test func aRoomNeedsANameTheServerWouldTake() {
-        #expect(AdminRoomDraft(name: " ", description: "", kind: .text, isListed: true, isMembersOnly: false, space: nil) == nil)
+        #expect(AdminRoomDraft(name: " ", description: "", kind: .text, access: AdminRoomAccess(isListed: true, isMembersOnly: false), space: nil) == nil)
         #expect(AdminRoomDraft(
             name: String(repeating: "a", count: 81), description: "", kind: .text,
-            isListed: true, isMembersOnly: false, space: nil
+            access: AdminRoomAccess(isListed: true, isMembersOnly: false), space: nil
         ) == nil)
     }
 
     /// The server has rooms that are hidden and open to anyone with the
     /// address; a draft says what it is given and decides nothing.
     @Test func aDraftKeepsTheAccessItIsGiven() throws {
-        #expect(try !draft(isListed: false, isMembersOnly: false).isMembersOnly)
-        #expect(try draft(isListed: true, isMembersOnly: true).isMembersOnly)
+        #expect(try !draft(isListed: false, isMembersOnly: false).access.isMembersOnly)
+        #expect(try draft(isListed: true, isMembersOnly: true).access.isMembersOnly)
     }
 
     /// The server makes these three; any other kind is its own business.
@@ -107,8 +107,8 @@ struct AdminRoomsTests {
         #expect(port.admin.roomWrites == [.update(lounge.jid, draft)])
         #expect(changed.name == "Salon")
         #expect(changed.kind == .forum)
-        #expect(!changed.isListed)
-        #expect(!changed.isMembersOnly)
+        #expect(!changed.access.isListed)
+        #expect(!changed.access.isMembersOnly)
         #expect(changed.presentCount == 4)
         #expect(changed.memberCount == 9)
         #expect(port.topologyRequests == 1)

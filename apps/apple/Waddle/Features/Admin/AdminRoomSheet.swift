@@ -2,38 +2,21 @@ import SwiftUI
 import WaddleKit
 
 /// Makes a room, or opens one: its settings, who is there, the roles
-/// people hold in it, and deleting it. A change that fails keeps the
-/// sheet open and says why.
+/// people hold in it, and deleting it.
 struct AdminRoomSheet: View {
-    enum Subject: Identifiable, Hashable {
-        case new
-        case room(AdminRoom)
-
-        var id: String {
-            switch self {
-            case .new: ""
-            case let .room(room): room.jid.description
-            }
-        }
-    }
-
     @Environment(SessionCoordinator.self) private var session
-    @Environment(\.dismiss) private var dismiss
+    @Environment(NavigationModel.self) private var navigation
     /// The list the sheet was opened from, kept in step with what is done.
     private let rooms: AdminList<AdminRoom>
     /// The room as it was when opened; `current` follows the list.
-    private let room: AdminRoom?
+    private let opened: AdminRoom?
     @State private var name: String
     @State private var description: String
     @State private var kind: AdminRoomKind
-    @State private var isListed: Bool
-    @State private var isMembersOnly: Bool
+    @State private var access: AdminRoomAccess
     /// The space a new room goes in, by its id; nil for none.
     @State private var spaceID: AdminSpace.ID?
     @State private var spaces: AdminList<AdminSpace>?
-    @State private var isBusy = false
-    @State private var errorMessage: String?
-    @State private var deleteError: String?
     @State private var occupants: AdminList<AdminRoomOccupant>?
     @State private var members: AdminList<AdminRoomMember>?
     /// People a change about whom is on its way to the server.
@@ -41,47 +24,46 @@ struct AdminRoomSheet: View {
     @State private var peopleError: String?
     /// A role change or a removal waiting for a yes.
     @State private var pending: PendingAction?
-    @State private var confirmsDelete = false
 
-    init(subject: Subject, rooms: AdminList<AdminRoom>) {
+    init(subject: AdminSheetSubject<AdminRoom>, rooms: AdminList<AdminRoom>) {
         self.rooms = rooms
-        if case let .room(room) = subject {
-            self.room = room
-        } else {
-            room = nil
-        }
-        _name = State(initialValue: room?.name ?? "")
-        _description = State(initialValue: room?.description ?? "")
-        _kind = State(initialValue: room?.kind ?? .text)
-        _isListed = State(initialValue: room?.isListed ?? true)
-        _isMembersOnly = State(initialValue: room?.isMembersOnly ?? false)
+        opened = subject.row
+        _name = State(initialValue: opened?.name ?? "")
+        _description = State(initialValue: opened?.description ?? "")
+        _kind = State(initialValue: opened?.kind ?? .text)
+        _access = State(initialValue: opened?.access ?? .open)
     }
 
+    private static let copy = AdminSheetScaffold<AnyView, AnyView>.Copy(
+        newTitle: "New room",
+        title: "Room",
+        saveFailure: "Couldn't save the room. Try again.",
+        deleteTitle: "Delete room",
+        deleteQuestion: "Delete room?",
+        deleteFailure: "Couldn't delete the room. Try again.",
+        newMinHeight: 440,
+        minHeight: 640
+    )
+
     var body: some View {
-        NavigationStack {
-            Form {
-                details
-                access
-                if let room {
-                    occupantsSection
-                    membersSection
-                    deleteSection(room)
-                }
-            }
-            .formStyle(.grouped)
-            .disabled(isBusy)
-            .navigationTitle(room == nil ? "New room" : "Room")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar { toolbar }
+        AdminSheetScaffold(
+            isNew: opened == nil,
+            copy: Self.copy,
+            deleteWarning: Self.deleteWarning(name: opened?.name ?? ""),
+            canSave: canSave,
+            isChanging: !changing.isEmpty,
+            save: save,
+            delete: delete
+        ) { submit in
+            AnyView(fields(submit: submit))
+        } lists: {
+            AnyView(people)
         }
-        .interactiveDismissDisabled(isWaiting)
         .task {
-            if let room {
+            if let opened {
                 guard occupants == nil else { return }
-                let occupants = session.adminRoomOccupantsList(of: room)
-                let members = session.adminRoomMembersList(of: room)
+                let occupants = session.adminRoomOccupantsList(of: opened)
+                let members = session.adminRoomMembersList(of: opened)
                 self.occupants = occupants
                 self.members = members
                 async let here: Void = occupants.load()
@@ -90,25 +72,8 @@ struct AdminRoomSheet: View {
             } else if spaces == nil {
                 let spaces = session.adminSpacesList()
                 self.spaces = spaces
-                await spaces.load()
-                // Every space can be chosen, not only the first page.
-                while spaces.hasMore, spaces.moreFailure == nil, !Task.isCancelled {
-                    await spaces.loadMore()
-                }
+                await Self.loadEvery(spaces)
             }
-        }
-        .confirmationDialog(
-            "Delete room?",
-            isPresented: $confirmsDelete,
-            titleVisibility: .visible,
-            presenting: room
-        ) { room in
-            Button("Delete", role: .destructive) { delete(room) }
-            Button("Cancel", role: .cancel) {
-                // Nothing to undo: the dialog closes itself.
-            }
-        } message: { room in
-            Text(Self.deleteWarning(name: room.name))
         }
         .confirmationDialog(
             pending?.title ?? "",
@@ -121,9 +86,8 @@ struct AdminRoomSheet: View {
                 // Nothing to undo: the dialog closes itself.
             }
         } message: { action in
-            Text(action.message(roomName: room?.name ?? "this room"))
+            Text(action.message(roomName: opened?.name ?? "this room"))
         }
-        .managementSheetFrame(minHeight: room == nil ? 440 : 640)
     }
 
     /// What is asked about before it is done, because it cannot be put
@@ -186,34 +150,15 @@ struct AdminRoomSheet: View {
     // MARK: Settings
 
     @ViewBuilder
-    private var details: some View {
-        Section {
-            TextField("Name", text: $name, prompt: Text("Room name"))
-                .labelsHidden()
-                .onSubmit(save)
-        } header: {
-            Text("Name")
-        } footer: {
-            if AdminSpaceDraft.isNameTooLong(name) {
-                Text("A name can be up to \(AdminSpaceDraft.maxNameLength) characters.")
-                    .foregroundStyle(Theme.Colors.dangerText)
-            }
-        }
-        Section {
-            TextField("Description", text: $description, prompt: Text("What is it about? (optional)"), axis: .vertical)
-                .labelsHidden()
-                .lineLimit(2...5)
-        } header: {
-            Text("Description")
-        } footer: {
-            if room?.description != nil, draft?.description == nil {
-                Text("A description can be changed, but not removed yet.")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var access: some View {
+    private func fields(submit: @escaping () -> Void) -> some View {
+        AdminNameFields(
+            name: $name,
+            description: $description,
+            namePrompt: "Room name",
+            descriptionPrompt: "What is it about? (optional)",
+            keepsOldDescription: opened?.description != nil && draft?.description == nil,
+            submit: submit
+        )
         Section {
             if kind.canBeChosen {
                 Picker("Kind", selection: $kind) {
@@ -224,25 +169,29 @@ struct AdminRoomSheet: View {
             } else {
                 LabeledContent("Kind", value: AdminRoomCopy.title(kind))
             }
-            if room == nil {
+            if opened == nil {
                 spacePicker
             }
-            Toggle("People can find it", isOn: $isListed)
-                .onChange(of: isListed) { _, isListed in
+            Toggle("People can find it", isOn: $access.isListed)
+                .onChange(of: access.isListed) { _, isListed in
                     // Hiding a room suggests keeping it to its members;
                     // the next toggle can say otherwise.
-                    if !isListed { isMembersOnly = true }
+                    if !isListed { access.isMembersOnly = true }
                 }
-            Toggle("Only members can join", isOn: $isMembersOnly)
+            Toggle("Only members can join", isOn: $access.isMembersOnly)
         } footer: {
-            if !isListed, !isMembersOnly {
+            if !access.isListed, !access.isMembersOnly {
                 Text("Anyone who has the room's address can join it.")
             }
         }
-        if let errorMessage {
-            Section {
-                ManagementErrorLabel(message: errorMessage)
-            }
+    }
+
+    /// Every space can be chosen, not only the first page. A page that
+    /// fails stops the loading; trying again starts over.
+    private static func loadEvery(_ spaces: AdminList<AdminSpace>) async {
+        await spaces.reload()
+        while spaces.hasMore, spaces.moreFailure == nil, !Task.isCancelled {
+            await spaces.loadMore()
         }
     }
 
@@ -250,7 +199,7 @@ struct AdminRoomSheet: View {
     /// loaded or failed, so a room is not made outside a space by accident.
     @ViewBuilder
     private var spacePicker: some View {
-        if let spaces, spaces.hasLoaded, !spaces.hasMore || spaces.moreFailure != nil {
+        if let spaces, spacesAreSettled {
             if !spaces.rows.isEmpty {
                 Picker("Space", selection: $spaceID) {
                     Text("None").tag(AdminSpace.ID?.none)
@@ -259,56 +208,34 @@ struct AdminRoomSheet: View {
                     }
                 }
             }
-        } else if spaces?.failure != nil {
-            LabeledContent("Spaces didn't load") {
-                Button("Try again") { Task { await spaces?.reload() } }
+            if spaces.failure != nil || spaces.moreFailure != nil {
+                LabeledContent(spaces.rows.isEmpty ? "Spaces didn't load" : "Some spaces didn't load") {
+                    Button("Try again") { Task { await Self.loadEvery(spaces) } }
+                }
             }
         } else {
             LabeledContent("Space", value: "Loading…")
         }
     }
 
+    /// Every page of spaces is in, or one could not be had, and none is
+    /// on its way.
     private var spacesAreSettled: Bool {
-        guard let spaces else { return false }
-        return spaces.failure != nil || (spaces.hasLoaded && (!spaces.hasMore || spaces.moreFailure != nil))
-    }
-
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
-            Button(room == nil ? "Cancel" : "Close") { dismiss() }
-                .disabled(isWaiting)
-        }
-        ToolbarItem(placement: .confirmationAction) {
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel(Text("Working"))
-            } else {
-                Button(room == nil ? "Create" : "Save", action: save)
-                    .disabled(!canSave || !changing.isEmpty)
-            }
-        }
+        guard let spaces, !spaces.isLoading, !spaces.isLoadingMore else { return false }
+        return spaces.failure != nil || spaces.moreFailure != nil || (spaces.hasLoaded && !spaces.hasMore)
     }
 
     private var draft: AdminRoomDraft? {
         AdminRoomDraft(
-            name: name, description: description, kind: kind,
-            isListed: isListed, isMembersOnly: isMembersOnly,
+            name: name, description: description, kind: kind, access: access,
             space: spaces?.rows.first { $0.id == spaceID }
         )
     }
 
-    /// The room as the list now holds it: a save or a removal here
-    /// changes its row.
+    /// The room as the list now holds it: a save here changes its row.
     private var current: AdminRoom? {
-        guard let room else { return nil }
-        return rooms.rows.first { $0.id == room.id } ?? room
+        opened.map(rooms.current)
     }
-
-    /// Something is on its way to the server, so the sheet stays to show
-    /// how it went.
-    private var isWaiting: Bool { isBusy || !changing.isEmpty }
 
     /// A room that is open has something to save once it differs from
     /// what the server holds. A cleared description is not a difference:
@@ -319,70 +246,80 @@ struct AdminRoomSheet: View {
         return draft.name != room.name
             || (draft.description != nil && draft.description != room.description)
             || draft.kind != room.kind
-            || draft.isListed != room.isListed
-            || draft.isMembersOnly != room.isMembersOnly
+            || draft.access != room.access
     }
 
-    private func save() {
-        guard let draft, canSave, !isWaiting else { return }
-        isBusy = true
-        errorMessage = nil
-        Task {
-            do {
-                if let room = current {
-                    rooms.replace(try await session.updateAdminRoom(room, to: draft))
-                } else {
-                    try await session.createAdminRoom(draft)
-                    await rooms.reload()
-                }
-                dismiss()
-            } catch {
-                errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't save the room. Try again.")
-            }
-            isBusy = false
+    private func save() async throws {
+        guard let draft else { return }
+        if let room = current {
+            rooms.replace(try await session.updateAdminRoom(room, to: draft))
+        } else {
+            try await session.createAdminRoom(draft)
+            await rooms.reload()
         }
     }
 
-    // MARK: Who is there
+    private func delete() async throws {
+        guard let opened else { return }
+        try await session.deleteAdminRoom(opened)
+        rooms.remove(opened.id)
+        // Home or Inbox may still have the room open in their own stack.
+        navigation.close(.room(opened.jid))
+    }
+
+    // MARK: Who is there, and roles
 
     @ViewBuilder
-    private var occupantsSection: some View {
-        Section {
-            if let peopleError {
-                ManagementErrorLabel(message: peopleError)
-            }
-            if let occupants {
-                AdminSheetList(list: occupants, noun: "people", emptyText: "No one is here right now.") { occupant in
-                    AdminRoomOccupantRow(occupant: occupant, isRemoving: changing.contains(occupant.jid)) {
-                        // Someone removed can come straight back, except
-                        // to a room for members only.
-                        if current?.isMembersOnly == true, occupant.affiliation == .member {
-                            pending = .removeMember(occupant)
-                        } else {
-                            remove(occupant)
-                        }
-                    }
+    private var people: some View {
+        AdminPeopleSection(
+            title: "Here now", list: occupants, noun: "people",
+            emptyText: "No one is here right now.", error: peopleError
+        ) { occupant in
+            AdminRoomOccupantRow(occupant: occupant, isRemoving: changing.contains(occupant.jid)) {
+                // Someone removed can come straight back, except to a
+                // room for members only.
+                if current?.access.isMembersOnly == true, occupant.affiliation == .member {
+                    pending = .removeMember(occupant)
+                } else {
+                    remove(occupant)
                 }
-            } else {
-                Text("Loading…")
-                    .foregroundStyle(Theme.Colors.fgMuted)
             }
-        } header: {
-            Text("Here now")
+        }
+        AdminPeopleSection(
+            title: "Roles", footer: "Someone banned can't join the room.", list: members,
+            noun: "roles", emptyText: "No one has a role here yet."
+        ) { member in
+            AdminRoleRow(
+                address: member.jid.description,
+                note: member.reason,
+                role: member.affiliation,
+                choices: [RoomAffiliation.owner, .admin, .member, .outcast],
+                title: AdminRoomCopy.title,
+                removeTitle: "Remove role",
+                isChanging: changing.contains(member.jid),
+                choose: { affiliation in
+                    if affiliation == .outcast {
+                        pending = .ban(member)
+                    } else {
+                        setAffiliation(affiliation, of: member)
+                    }
+                },
+                remove: { pending = .removeRole(member) }
+            )
         }
     }
 
-    /// The server may end a membership with the removal, so the roles are
-    /// asked for again.
+    /// The server takes out one of the names they are there under, and
+    /// may end a membership with it, so both lists are asked for again.
     private func remove(_ occupant: AdminRoomOccupant) {
-        guard let room = current, let occupants, changing.insert(occupant.jid).inserted else { return }
+        guard let opened, let occupants, changing.insert(occupant.jid).inserted else { return }
         peopleError = nil
         Task {
             do {
-                try await session.removeFromAdminRoom(occupant.jid, room: room)
-                // Every device they were in the room from is out.
-                for row in occupants.rows where row.jid == occupant.jid { occupants.remove(row.id) }
-                await members?.reload()
+                try await session.removeFromAdminRoom(occupant.jid, room: opened)
+                async let here: Void = occupants.reload()
+                async let roles: Void? = members?.reload()
+                _ = await (here, roles)
             } catch {
                 peopleError = ActionErrorCopy.message(
                     for: error, fallback: "Couldn't remove \(occupant.nick). Try again."
@@ -392,52 +329,16 @@ struct AdminRoomSheet: View {
         }
     }
 
-    // MARK: Roles
-
-    @ViewBuilder
-    private var membersSection: some View {
-        Section {
-            if let members {
-                AdminSheetList(list: members, noun: "roles", emptyText: "No one has a role here yet.") { member in
-                    AdminRoleRow(
-                        address: member.jid.description,
-                        note: member.reason,
-                        role: member.affiliation,
-                        choices: [RoomAffiliation.owner, .admin, .member, .outcast],
-                        title: AdminRoomCopy.title,
-                        removeTitle: "Remove role",
-                        isChanging: changing.contains(member.jid),
-                        choose: { affiliation in
-                            if affiliation == .outcast {
-                                pending = .ban(member)
-                            } else {
-                                setAffiliation(affiliation, of: member)
-                            }
-                        },
-                        remove: { pending = .removeRole(member) }
-                    )
-                }
-            } else {
-                Text("Loading…")
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-        } header: {
-            Text("Roles")
-        } footer: {
-            Text("Someone banned can't join the room.")
-        }
-    }
-
     /// Shows the role the server answers with; someone left with no role
     /// is no longer listed. A role shows on the people in the room, and a
     /// ban takes them out, so who is there is asked for again.
     private func setAffiliation(_ affiliation: RoomAffiliation, of member: AdminRoomMember) {
-        guard let room = current, let members, affiliation != member.affiliation,
+        guard let opened, let members, affiliation != member.affiliation,
               changing.insert(member.jid).inserted else { return }
         peopleError = nil
         Task {
             do {
-                let changed = try await session.setAdminRoomAffiliation(affiliation, of: member.jid, in: room)
+                let changed = try await session.setAdminRoomAffiliation(affiliation, of: member.jid, in: opened)
                 if changed.affiliation == .none {
                     members.remove(changed.id)
                 } else {
@@ -452,82 +353,6 @@ struct AdminRoomSheet: View {
             }
             changing.remove(member.jid)
         }
-    }
-
-    // MARK: Deleting
-
-    private func deleteSection(_ room: AdminRoom) -> some View {
-        Section {
-            Button("Delete room", role: .destructive) { confirmsDelete = true }
-                .foregroundStyle(Theme.Colors.dangerText)
-                .disabled(!changing.isEmpty)
-            if let deleteError {
-                ManagementErrorLabel(message: deleteError)
-            }
-        } footer: {
-            Text(Self.deleteWarning(name: room.name))
-        }
-    }
-
-    private func delete(_ room: AdminRoom) {
-        guard !isWaiting else { return }
-        isBusy = true
-        deleteError = nil
-        Task {
-            do {
-                try await session.deleteAdminRoom(room)
-                rooms.remove(room.id)
-                dismiss()
-            } catch {
-                deleteError = ActionErrorCopy.message(for: error, fallback: "Couldn't delete the room. Try again.")
-            }
-            isBusy = false
-        }
-    }
-}
-
-/// A list inside a sheet's form: its rows, what it says while loading,
-/// when empty or when it failed, and a way to load more.
-///
-/// It is one row of the form whatever it holds. A grouped form on macOS
-/// draws its cards wrongly when the number of rows in a section changes
-/// after a load, so the rows are stacked here.
-struct AdminSheetList<Row: Identifiable & Sendable, RowView: View>: View {
-    let list: AdminList<Row>
-    /// What the rows are, for "Couldn't refresh the …".
-    let noun: String
-    let emptyText: String
-    @ViewBuilder let row: (Row) -> RowView
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-            if list.failure != nil {
-                HStack {
-                    Text(list.rows.isEmpty ? "Couldn't load the \(noun)." : "Couldn't refresh the \(noun).")
-                    Spacer(minLength: Theme.Spacing.xs)
-                    Button("Try again") { Task { await list.reload() } }
-                        .disabled(list.isLoading)
-                }
-            } else if list.rows.isEmpty {
-                Text(list.hasLoaded ? emptyText : "Loading…")
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-            ForEach(Array(list.rows.enumerated()), id: \.element.id) { index, item in
-                if index > 0 || list.failure != nil { Divider() }
-                row(item)
-            }
-            if list.hasMore {
-                Button(list.isLoadingMore ? "Loading…" : "Load more") {
-                    Task { await list.loadMore() }
-                }
-                .disabled(list.isLoadingMore)
-            }
-            if list.moreFailure != nil {
-                Text("Couldn't load more. Try again.")
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
