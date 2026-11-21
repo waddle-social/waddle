@@ -88,6 +88,9 @@ mod presence;
 mod reassert;
 mod recipient_inventory;
 mod registration;
+mod remote_room_request;
+mod space_bookmark_publication;
+mod space_deletion;
 mod types;
 mod validation;
 
@@ -252,6 +255,8 @@ pub struct OrderedRelayDeliveryServices {
 pub struct OrderedRelayDeliveryBridge {
     /// Wakes this node's mailbox poller when a peer's hint arrives.
     mailbox_wake: Arc<tokio::sync::Notify>,
+    space_publication_hint_capacity: tokio::sync::Semaphore,
+    space_deletion_capacity: tokio::sync::Semaphore,
     services: OnceLock<Arc<OrderedRelayDeliveryServices>>,
     origin_signer: OnceLock<RelayOriginSigner>,
     sender_state: Mutex<OrderedRelaySenderState>,
@@ -296,6 +301,8 @@ impl OrderedRelayDeliveryBridge {
     pub fn new(stop_token: CancellationToken, messaging: &ClusteringMessagingConfig) -> Arc<Self> {
         Arc::new(Self {
             mailbox_wake: Arc::new(tokio::sync::Notify::new()),
+            space_publication_hint_capacity: tokio::sync::Semaphore::new(8),
+            space_deletion_capacity: tokio::sync::Semaphore::new(8),
             services: OnceLock::new(),
             origin_signer: OnceLock::new(),
             sender_state: Mutex::new(OrderedRelaySenderState::default()),

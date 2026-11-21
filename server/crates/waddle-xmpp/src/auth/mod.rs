@@ -20,6 +20,7 @@ pub use scram::{
     ServerFinalMessage, ServerFirstMessage, DEFAULT_ITERATIONS,
 };
 
+use crate::identity::parse_bare_jid;
 use crate::XmppError;
 
 /// SASL authentication mechanism.
@@ -239,9 +240,9 @@ fn parse_oauth_authzid(encoded: &str) -> Result<BareJid, OAuthBearerParseError> 
             ch => decoded.push(ch),
         }
     }
-    let jid = decoded
-        .parse::<BareJid>()
-        .map_err(|_| OAuthBearerParseError::InvalidAuthzid)?;
+    // An authorization identity names an account, so the decoded text must
+    // already be a canonical bare JID; it is never folded into another one.
+    let jid = parse_bare_jid(&decoded).map_err(|_| OAuthBearerParseError::InvalidAuthzid)?;
     if jid.node().is_none() {
         return Err(OAuthBearerParseError::InvalidAuthzid);
     }

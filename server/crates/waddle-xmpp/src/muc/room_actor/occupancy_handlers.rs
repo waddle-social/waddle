@@ -58,6 +58,56 @@ pub struct JoinWithAffiliation {
     pub session: OccupancySessionGeneration,
 }
 
+/// Whether the decision a caller made before it sent a message still holds.
+///
+/// The room actor asks it in the turn that applies the message, before it
+/// records anything. A caller whose authority lives outside the room (a
+/// grant store the room only mirrors) decides before it asks the actor, and
+/// the message then waits in the mailbox: the check lets a decision that was
+/// overtaken meanwhile change nothing. It is synchronous and must not block.
+#[derive(Clone)]
+pub struct AdmissionCheck(std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl AdmissionCheck {
+    pub fn new(check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(check))
+    }
+
+    /// Whether the caller's decision still holds, as of now.
+    pub fn holds(&self) -> bool {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for AdmissionCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmissionCheck").finish_non_exhaustive()
+    }
+}
+
+/// [`JoinWithAffiliation`] for a caller whose decision to admit the joiner
+/// can be overtaken: the actor asks `admission` in the turn that seats the
+/// occupant, before the join changes anything, and answers
+/// [`RoomActorError::StaleAdmissionRevision`] when the decision no longer
+/// holds, as it does for a join its own affiliation changes overtook.
+pub struct JoinWithAffiliationIfAdmitted {
+    pub join: JoinWithAffiliation,
+    pub admission: AdmissionCheck,
+}
+
+impl kameo::message::Message<JoinWithAffiliationIfAdmitted> for RoomActor {
+    type Reply = Result<JoinOutcome, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: JoinWithAffiliationIfAdmitted,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.join_with_affiliation(msg.join, Some(&msg.admission))
+            .await
+    }
+}
+
 impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
     type Reply = Result<JoinOutcome, RoomActorError>;
 
@@ -66,7 +116,19 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let reply: Self::Reply = async {
+        self.join_with_affiliation(msg, None).await
+    }
+}
+
+impl RoomActor {
+    /// Seat a joiner. `admission`, when given, is asked before the join
+    /// changes anything.
+    async fn join_with_affiliation(
+        &mut self,
+        msg: JoinWithAffiliation,
+        admission: Option<&AdmissionCheck>,
+    ) -> Result<JoinOutcome, RoomActorError> {
+        let reply: Result<JoinOutcome, RoomActorError> = async {
             let _handler_timer = MucOccupancyHandlerTimer::start("join");
             // #1108: a caller holding a stale ActorRef must retry through the
             // registry. For an inactivity seal this also re-checks ownership so
@@ -83,6 +145,13 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             }
             let joining_bare_jid = msg.sender_jid.to_bare();
             if !self.admission_revision_is_current(&joining_bare_jid, msg.admission_revision) {
+                return Err(RoomActorError::StaleAdmissionRevision);
+            }
+            // The caller's decision is asked before the join changes
+            // anything, the affiliation it carries included: a decision
+            // overtaken while the join waited in the mailbox seats nobody
+            // and leaves the room's list as it is.
+            if admission.is_some_and(|admission| !admission.holds()) {
                 return Err(RoomActorError::StaleAdmissionRevision);
             }
 

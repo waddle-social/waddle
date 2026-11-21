@@ -61,6 +61,7 @@ tokio::task_local! {
 mod routing_plan_failure_tests;
 
 mod implementation;
+mod remote;
 use implementation::bounce_for_account_rejection;
 pub(crate) use implementation::bounce_undeliverable_iq;
 pub(super) use implementation::deliver_bare_jid_via_ordered_relay;

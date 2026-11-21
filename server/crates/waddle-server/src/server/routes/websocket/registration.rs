@@ -33,7 +33,7 @@ use waddle_xmpp::registry::{
 /// The same budget covers local registration after a foreign claim disappears.
 const RESUME_REGISTRATION_BUSY_ATTEMPTS: usize = 3;
 
-const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 tokio::task_local! {
@@ -239,6 +239,10 @@ pub(super) enum RegistrationAfterFrame {
     /// The resource is still converging on an authoritative actor owner.
     /// The client can establish a new stream and retry registration.
     RegistrationTemporarilyUnavailable,
+    /// The bound account is retired (this replica holds its retirement):
+    /// neither a fresh binding nor a resume of one is published, and the
+    /// stream ends with `<not-authorized/>`.
+    AccountRetired,
     AuthorityRevoked,
     /// Resume finalization has moved the durable detached snapshot into the
     /// live connection. Retain registry ownership so normal shutdown cleanup
@@ -1240,6 +1244,14 @@ where
     }
     if pending_tx.is_none() && conn.recovered_pending_endpoint.is_none() {
         return RegistrationAfterFrame::Unchanged;
+    }
+    // A retired account may hold no session. Its credentials and session
+    // rows are gone, but a stream that authenticated before the retirement
+    // committed can still bind or resume; once this replica has taken the
+    // retirement up, nothing of the account is published.
+    if state.deps.protocol.retired_accounts.holds(&jid.to_bare()) {
+        info!("binding refused: the account is retired");
+        return RegistrationAfterFrame::AccountRetired;
     }
 
     // Mirror the bind transition into the per-connection state machine (#229

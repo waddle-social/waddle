@@ -17,6 +17,7 @@
 
 use waddle_ws_test_support as ws_common;
 
+use minidom::rxml::xml_ncname;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
@@ -132,9 +133,104 @@ fn find_field_value(element: &Element, var: &str) -> Option<String> {
         .find_map(|child| find_field_value(child, var))
 }
 
+/// The `var` field of the `spaces:list` row for `space_jid`.
+fn list_row_field(frame: &str, space_jid: &str, var: &str) -> Option<String> {
+    let iq = parse_iq(frame)?;
+    let form = iq
+        .get_child("command", NS_COMMANDS)?
+        .get_child("x", NS_DATA)?;
+    form.children()
+        .filter(|child| child.name() == "item")
+        .find(|item| find_field_value(item, "space_jid").as_deref() == Some(space_jid))
+        .and_then(|item| find_field_value(item, var))
+}
+
+// XEP-0503 0.3.0, "Spaces images": a Space's avatar and banner are items of
+// its node at these reserved ids, holding XEP-0084 metadata.
+const ITEM_SPACE_AVATAR: &str = "urn:xmpp:spaces:avatar:metadata:0";
+const ITEM_SPACE_BANNER: &str = "urn:xmpp:spaces:banner:metadata:0";
+const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
+
+/// A `<publish/>` to the Space `node` of an image item `item_id` naming
+/// one image at a loopback URL nothing serves.
+fn image_publish(node: &str, item_id: &str) -> Element {
+    let info = Element::builder("info", NS_AVATAR_METADATA)
+        .attr(xml_ncname!("bytes").to_owned(), "420")
+        .attr(xml_ncname!("height").to_owned(), "64")
+        .attr(xml_ncname!("width").to_owned(), "64")
+        .attr(xml_ncname!("type").to_owned(), "image/png")
+        .attr(
+            xml_ncname!("url").to_owned(),
+            "http://127.0.0.1:9/image.png",
+        )
+        .attr(xml_ncname!("id").to_owned(), "image-hash")
+        .build();
+    let metadata = Element::builder("metadata", NS_AVATAR_METADATA)
+        .append(info)
+        .build();
+    let item = Element::builder("item", NS_PUBSUB)
+        .attr(xml_ncname!("id").to_owned(), item_id)
+        .append(metadata)
+        .build();
+    Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            Element::builder("publish", NS_PUBSUB)
+                .attr(xml_ncname!("node").to_owned(), node)
+                .append(item)
+                .build(),
+        )
+        .build()
+}
+
 // ---------------------------------------------------------------------------
 // spaces:list
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn spaces_list_counts_channels_without_the_spaces_images() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-spaces-list-images").await;
+    let general = "general@spaces.localhost";
+
+    let before = send_command(
+        &mut admin,
+        NODE_SPACES_LIST,
+        "spaces-list-before-images",
+        &submit_form(NODE_SPACES_LIST, ""),
+    )
+    .await;
+    assert!(is_result(&before), "expected result, got: {before}");
+    let channels = list_row_field(&before, general, "channel_count")
+        .expect("the General space's channel count");
+
+    for item_id in [ITEM_SPACE_AVATAR, ITEM_SPACE_BANNER] {
+        let published = send_iq_set_to(
+            &mut admin,
+            &["publish-", item_id].concat(),
+            SPACES_JID,
+            &String::from(&image_publish("general", item_id)),
+        )
+        .await;
+        assert!(is_result(&published), "publishing {item_id}: {published}");
+    }
+
+    // The avatar and banner are items of the Space's node but not Channels.
+    let after = send_command(
+        &mut admin,
+        NODE_SPACES_LIST,
+        "spaces-list-after-images",
+        &submit_form(NODE_SPACES_LIST, ""),
+    )
+    .await;
+    assert!(is_result(&after), "expected result, got: {after}");
+    assert_eq!(
+        list_row_field(&after, general, "channel_count").as_deref(),
+        Some(channels.as_str()),
+        "{after}"
+    );
+    let _ = admin.close().await;
+}
 
 #[tokio::test]
 async fn spaces_list_includes_bootstrapped_general_space() {
@@ -849,6 +945,73 @@ async fn spaces_set_role_round_trips_through_members() {
         list_resp.contains(">admin<"),
         "members list missing 'admin' role marker, got: {list_resp}"
     );
+    let _ = admin.close().await;
+}
+
+/// ADR-0020 D8 at issuance: the owner and admin roles are the node's Owner
+/// and Publisher affiliations, written only for an account of this
+/// deployment or of a trusted home. With S2S off no home is trusted, so an
+/// account at another server is refused both and may still be a member.
+#[tokio::test]
+async fn spaces_set_role_refuses_a_privileged_role_for_an_account_at_another_server() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-spaces-role-remote").await;
+
+    let create_resp = send_command(
+        &mut admin,
+        NODE_SPACES_CREATE,
+        "spaces-remote-role-create",
+        &submit_form(NODE_SPACES_CREATE, &text_field("name", "RemoteRoleSpace")),
+    )
+    .await;
+    let space_jid = extract_field(&create_resp, "space_jid").expect("space_jid");
+    let set_role = |role: &str| {
+        format!(
+            "{}{}{}",
+            text_field("space_jid", &space_jid),
+            text_field("member_jid", "stranger@elsewhere.example"),
+            text_field("role", role),
+        )
+    };
+
+    for (role, id) in [
+        ("owner", "spaces-remote-owner"),
+        ("admin", "spaces-remote-admin"),
+    ] {
+        let resp = send_command(
+            &mut admin,
+            NODE_SPACES_SET_ROLE,
+            id,
+            &submit_form(NODE_SPACES_SET_ROLE, &set_role(role)),
+        )
+        .await;
+        assert!(is_error(&resp), "expected a refusal of {role}, got: {resp}");
+        assert!(
+            resp.contains("not-allowed"),
+            "expected <not-allowed/> for {role}, got: {resp}"
+        );
+    }
+    let list_resp = send_command(
+        &mut admin,
+        NODE_SPACES_MEMBERS,
+        "spaces-remote-role-list",
+        &submit_form(NODE_SPACES_MEMBERS, &text_field("space_jid", &space_jid)),
+    )
+    .await;
+    assert!(
+        !list_resp.contains("stranger@elsewhere.example"),
+        "a refused role must write nothing, got: {list_resp}"
+    );
+
+    let resp = send_command(
+        &mut admin,
+        NODE_SPACES_SET_ROLE,
+        "spaces-remote-member",
+        &submit_form(NODE_SPACES_SET_ROLE, &set_role("member")),
+    )
+    .await;
+    assert!(is_result(&resp), "expected the member role, got: {resp}");
     let _ = admin.close().await;
 }
 

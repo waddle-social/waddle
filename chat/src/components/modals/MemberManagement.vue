@@ -11,6 +11,7 @@ import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableAffiliation } from "@/lib/chat-ui";
 import type { RoomPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
+import { memberIdentityLabel } from "@/waddles/remote-community-presentation";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -25,6 +26,8 @@ defineProps<{
   canManageMembers: boolean;
   roomPresence?: RoomPresence;
   roomLastSeen?: Record<string, number>;
+  /** This deployment's account domain; members elsewhere are named by full address. */
+  homeDomain?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -135,7 +138,7 @@ const note = css({ py: "6", justifyContent: "center", textAlign: "center", font:
       <div v-for="member in members" :key="member.jid" :class="row">
         <UserAvatar :name="member.username" :jid="member.jid" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />
         <div :class="f.rowText">
-          <span :class="f.rowName">{{ member.username }}</span>
+          <span :class="f.rowName" :title="member.jid">{{ memberIdentityLabel(member, homeDomain) }}</span>
           <span :class="[f.rowSub, capitalize]">
             {{ inferredMemberJids.has(member.jid) ? "Present now" : affiliationLabel(member.affiliation as EditableAffiliation) }}
           </span>
@@ -151,7 +154,8 @@ const note = css({ py: "6", justifyContent: "center", textAlign: "center", font:
           <button
             :class="iconbtn({ size: 'sm' })"
             type="button"
-            :aria-label="`Remove ${member.username}`"
+            :aria-label="`Revoke ${memberIdentityLabel(member, homeDomain)}'s access`"
+            :title="`Revoke ${memberIdentityLabel(member, homeDomain)}'s access`"
             @click="emit('removeMember', member)"
           >
             <X aria-hidden="true" />

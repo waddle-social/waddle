@@ -66,6 +66,7 @@ const {
   openUnread,
   openCreateChannelDialog,
   handleAddPeopleToDm,
+  remoteCommunities,
 } = props.controller;
 
 const callParticipantAvatarJid = useCallParticipantAvatarJid();
@@ -89,6 +90,11 @@ interface RoomTile {
 
 function roomKey(jid: string | undefined | null): string {
   return jid ? barePeerJid(jid).toLowerCase() : "";
+}
+
+/** Forget a bookmarked room on another server while the home server does not federate. */
+async function forgetUnavailableRoom(roomJid: string) {
+  await remoteCommunities.forgetRoom(roomJid);
 }
 
 const tiles = computed<RoomTile[]>(() => {
@@ -120,19 +126,23 @@ const tiles = computed<RoomTile[]>(() => {
       const hereCount = isActive ? hereCountForActiveRoom : null;
       const hasActivity = !!channel.jid && activeKeys.has(roomKey(channel.jid));
       const live = callCount > 0;
+      // A room on another server says where it is: two servers can each
+      // have a room of the same name.
+      const host = channel.remoteHost ?? null;
+      const place = host ? `Room on ${host}` : "Room";
       let kicker: string;
       if (live) {
         kicker = `${media?.video ? "Video" : "Voice"} huddle · ${callCount} in`;
       } else if (hereCount !== null) {
-        kicker = `Room · ${hereCount} here`;
+        kicker = `${place} · ${hereCount} here`;
       } else if (activity.mentions > 0) {
-        kicker = `Room · ${activity.mentions} mention${activity.mentions === 1 ? "" : "s"}`;
+        kicker = `${place} · ${activity.mentions} mention${activity.mentions === 1 ? "" : "s"}`;
       } else if (activity.unread > 0) {
-        kicker = `Room · ${activity.unread} unread`;
+        kicker = `${place} · ${activity.unread} unread`;
       } else if (hasActivity) {
-        kicker = "Room · active";
+        kicker = `${place} · active`;
       } else {
-        kicker = "Room · quiet";
+        kicker = `${place} · quiet`;
       }
       return {
         channel,
@@ -219,6 +229,8 @@ const desktopOnly = css({ display: "none", md: { display: "inline-flex" } });
 const newRoomSmBtn = btn({ variant: "primary", size: "sm" });
 const openBtn = btn({ size: "sm" });
 const joinBtn = btn({ variant: "live", size: "sm" });
+const joinRemoteBtn = btn();
+const forgetBtn = cx(btn({ size: "sm" }), css({ color: "danger.text" }));
 const mentionBadge = badge();
 const unreadBadge = badge({ variant: "quiet" });
 const emptyClass = cx(empty(), css({ pt: "16", "& h2": { margin: 0, font: "700 24px/1.25 {fonts.display}", color: "fg" } }));
@@ -251,6 +263,8 @@ const rowEnter = css({
   cursor: "pointer",
   "&:hover > :first-child": { textDecoration: "underline", textUnderlineOffset: "3px" },
 });
+/** Name and address column of a row that cannot be entered. */
+const rowText = css({ display: "flex", flexDirection: "column", gap: "0.5", flex: 1, minWidth: 0 });
 const rowName = css({ font: "700 15px/1.3 {fonts.body}", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const rowMeta = css({ font: "400 13px/1.35 {fonts.body}", color: "fg.muted", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
 const liveMeta = css({ color: "live.text" });
@@ -293,6 +307,16 @@ const embed = css({
             <h1 :class="page.h1">Browse rooms</h1>
             <p :class="page.lead">Sorted by what is happening: huddles first, then mentions and unread.</p>
           </div>
+          <!-- Offered only while the home server federates with other servers;
+               shown at every width, since the phone bar has no room for it. -->
+          <button
+            v-if="waddles.federationAvailable.value"
+            type="button"
+            :class="joinRemoteBtn"
+            @click="ui.showRemoteCommunities.value = true"
+          >
+            Join from another server
+          </button>
           <button v-if="waddles.canManageChannels.value && tiles.length > 0" type="button" :class="[newRoomBtn, desktopOnly]" @click="openCreateChannelDialog()">
             New room
           </button>
@@ -349,6 +373,35 @@ const embed = css({
                   Open
                 </button>
               </div>
+            </li>
+          </ul>
+        </section>
+
+        <!-- Rooms on other servers the user bookmarked, while this server
+             does not federate: nothing joins them, and only Forget is offered. -->
+        <section
+          v-if="waddles.unavailableRemoteRooms.value.length > 0"
+          :class="section"
+          aria-label="Rooms on other servers, unavailable"
+        >
+          <h2 :class="page.sectionTitle">Rooms on other servers — unavailable</h2>
+          <p :class="page.lead">
+            Your server doesn't connect to other servers right now, so these rooms can't be opened.
+          </p>
+          <ul :class="list">
+            <li v-for="room in waddles.unavailableRemoteRooms.value" :key="room.roomJid" :class="row">
+              <div :class="rowText">
+                <span :class="rowName">{{ room.name ?? room.roomJid }}</span>
+                <span :class="rowMeta">{{ room.roomJid }}</span>
+              </div>
+              <button
+                type="button"
+                :class="forgetBtn"
+                title="Remove the room's bookmark on every device. Your access to the room is not changed."
+                @click="forgetUnavailableRoom(room.roomJid)"
+              >
+                Forget
+              </button>
             </li>
           </ul>
         </section>

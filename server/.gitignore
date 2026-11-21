@@ -24,6 +24,9 @@ local.toml
 # Logs
 *.log
 
+# Python bytecode of the scripts under server/scripts
+__pycache__/
+
 # dhat-rs heap profile artifacts (produced by the
 # waddle-extensions `profile_all_extensions` example)
 dhat-heap*.json

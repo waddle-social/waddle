@@ -18,6 +18,7 @@ import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection"
 import { enqueueQueuedMessage, listQueuedDmMessages, removeQueuedMessage } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
+  clearMissingRemoteRooms,
   createLocalStorageResumePersistence,
   nullResumePersistence,
   resumeOwnerLifecycleSnapshotForTests,
@@ -2434,5 +2435,46 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     alice.clearCatchup();
     expect(alice.loadCatchup()).toBeNull();
     expect(evil.loadCatchup()?.dmLastSeen.map(([key]) => key)).toEqual(["mallory@example.com.evil"]);
+  });
+});
+
+describe("missing rooms on other servers", () => {
+  test("the record is the account's: every tab reads it and one tab's change keeps another's", () => {
+    const first = createLocalStorageResumePersistence("missing@example.com", "missing-first-tab");
+    const second = createLocalStorageResumePersistence("missing@example.com", "missing-second-tab");
+    first.addMissingRemoteRoom?.("Dev@Chat.Remote.Test");
+    second.addMissingRemoteRoom?.("ops@chat.remote.test");
+    expect(first.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test", "ops@chat.remote.test"]);
+
+    second.removeMissingRemoteRoom?.("dev@chat.remote.test");
+    expect(first.loadMissingRemoteRooms?.()).toEqual(["ops@chat.remote.test"]);
+    // Another account's record is its own.
+    expect(createLocalStorageResumePersistence("other@example.com", "missing-other").loadMissingRemoteRooms?.()).toEqual([]);
+  });
+
+  test("a reload or a replaced client of the account in this browser still reads it", () => {
+    const before = createLocalStorageResumePersistence("missing-later@example.com", "missing-before");
+    before.addMissingRemoteRoom?.("dev@chat.remote.test");
+    before.clearJoinedRooms();
+    before.clearAutoJoinBlocks?.();
+    before.dispose();
+    const after = createLocalStorageResumePersistence("missing-later@example.com", "missing-after");
+    expect(after.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test"]);
+    // Signed in again from another resource, the account is the same.
+    const otherResource = createLocalStorageResumePersistence("Missing-Later@example.com/phone", "missing-phone");
+    expect(otherResource.loadMissingRemoteRooms?.()).toEqual(["dev@chat.remote.test"]);
+  });
+
+  test("a sign-out forgets it for the account only", () => {
+    const signedIn = createLocalStorageResumePersistence("missing-out@example.com", "missing-out-tab");
+    signedIn.addMissingRemoteRoom?.("dev@chat.remote.test");
+    const other = createLocalStorageResumePersistence("missing-stays@example.com", "missing-stays-tab");
+    other.addMissingRemoteRoom?.("ops@chat.remote.test");
+    signedIn.dispose();
+
+    // The sign-out flow names the account by its full JID.
+    clearMissingRemoteRooms("Missing-Out@example.com/desktop");
+    expect(createLocalStorageResumePersistence("missing-out@example.com", "missing-next").loadMissingRemoteRooms?.()).toEqual([]);
+    expect(other.loadMissingRemoteRooms?.()).toEqual(["ops@chat.remote.test"]);
   });
 });

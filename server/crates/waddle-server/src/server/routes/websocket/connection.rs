@@ -1,6 +1,6 @@
 use super::batch_write::{
-    write_ingress_response_batch_with_admission, write_response_batch_with_admission,
-    BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    write_ingress_response_batch_with_protected_sink, write_response_batch_with_admission,
+    BatchAuthority, BatchSink, BatchSmPolicy, BatchWriteOutcome,
 };
 use super::cleanup::cleanup_connection_shutdown;
 use super::frame::{handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame};
@@ -19,8 +19,8 @@ use super::state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CA
 use super::stream_management::SmRegistrationFinalization;
 use super::timers::TransportTimers;
 use super::transport_xml::{
-    build_conflict_stream_error, build_system_shutdown_stream_error,
-    websocket_stream_close_element, websocket_stream_close_xml,
+    build_conflict_stream_error, build_not_authorized_stream_error,
+    build_system_shutdown_stream_error, websocket_stream_close_element, websocket_stream_close_xml,
 };
 use super::{
     batch_write, cleanup, debug, error, get, info, mpsc, warn, Arc, ConnectionPhase, InboundEvent,
@@ -46,7 +46,9 @@ use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::protocol::TimerId;
-use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint, SocketOutboundReceiver};
+use waddle_xmpp::registry::{
+    LocalSocketIo, SocketOutboundEndpoint, SocketOutboundFrame, SocketOutboundReceiver,
+};
 use waddle_xmpp::stream_management::SmRequest;
 
 mod binding;
@@ -329,9 +331,10 @@ impl<E: Send> SettleInbound for WebSocketInput<E> {
     }
 }
 
-pub(super) struct ConnectionIo<'a, S, R> {
+pub(super) struct ConnectionIo<'a, S: Sink<Message>, R> {
     pub(super) sender: &'a mut S,
     pub(super) receiver: &'a mut R,
+    pub(super) protected_reply_start: Option<super::send::StartProtectedSpaceReply<S, S::Error>>,
 }
 
 #[derive(Clone, Copy)]
@@ -556,8 +559,7 @@ enum LoopEvent {
     LiveResumeServiced,
     DeferredInbound,
     Inbound(Option<Result<Message, InputError<axum::Error>>>),
-    // Boxed so the largest payload does not set the size of every event.
-    Outbound(Option<Box<OutboundStanza>>),
+    Outbound(Option<SocketOutboundFrame>),
     OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
     TimerExpired(TimerId),
     SendWindowPauseDeadline,
@@ -1165,8 +1167,8 @@ impl LiveSocketState {
             // rather than overflowing the SM unacked queue. The inbound
             // source above stays active, so client acks keep arriving and
             // releasing the pause.
-            outbound = self.outbound_rx.recv(), if !send_window_paused => {
-                LoopEvent::Outbound(outbound.map(Box::new))
+            outbound = self.outbound_rx.recv_next(), if !send_window_paused => {
+                LoopEvent::Outbound(outbound)
             }
 
             handoff = self.handoff_rx.recv() => LoopEvent::OrderedRelayHandoff(handoff),
@@ -1305,6 +1307,7 @@ impl LiveSocketState {
                             // The old serving generation may no longer emit
                             // the optional `<conflict/>`. Still acknowledge
                             // only after normal detach persistence in `settle`.
+                            let cause = force_detach_cause(request.origin);
                             pending_force_detach.push(request);
                             if let Some(bound_bare) = bound_bare.as_ref() {
                                 pending_force_detach.extend(drain_ready_force_detach_requests(
@@ -1313,11 +1316,9 @@ impl LiveSocketState {
                                     conn.binding_ref.as_ref(),
                                 ));
                             }
-                            return ControlFlow::Break(Retire::settled(
-                                RetirementCause::ForceDetach,
-                            ));
+                            return ControlFlow::Break(Retire::settled(cause));
                         } else {
-                            info!("force-detaching this session (<conflict/> close)");
+                            let cause = force_detach_cause(request.origin);
                             // Deferred: acked only after this connection's own
                             // detach-for-resume cleanup in `settle` actually runs.
                             pending_force_detach.push(request);
@@ -1328,10 +1329,9 @@ impl LiveSocketState {
                                     conn.binding_ref.as_ref(),
                                 ));
                             }
-                            return ControlFlow::Break(Retire::owing(
-                                RetirementCause::ForceDetach,
-                                OwedClose::Conflict,
-                            ));
+                            let close = force_detach_close(state, conn, pending_force_detach);
+                            info!(?close, "force-detaching this session");
+                            return ControlFlow::Break(Retire::owing(cause, close));
                         }
                     }
                     None => {
@@ -1370,8 +1370,11 @@ impl LiveSocketState {
                             force_detach_rx: &mut *force_detach_rx,
                         },
                         ConnectionIo {
-                            sender: &mut ws_sender,
+                            sender: &mut *ws_sender,
                             receiver: &mut ws_receiver,
+                            protected_reply_start: Some(
+                                InterruptibleSink::start_protected_space_reply,
+                            ),
                         },
                         FrameAuthority {
                             permit: admission_permit,
@@ -1404,8 +1407,11 @@ impl LiveSocketState {
                                 force_detach_rx: &mut *force_detach_rx,
                             },
                             ConnectionIo {
-                                sender: &mut ws_sender,
+                                sender: &mut *ws_sender,
                                 receiver: &mut ws_receiver,
+                                protected_reply_start: Some(
+                                    InterruptibleSink::start_protected_space_reply,
+                                ),
                             },
                             FrameAuthority {
                                 permit: admission_permit,
@@ -1461,7 +1467,7 @@ impl LiveSocketState {
             // Handle outbound messages routed from other connections.
             LoopEvent::Outbound(outbound) => {
                 match outbound {
-                    Some(outbound_stanza) => {
+                    Some(SocketOutboundFrame::Ordinary(outbound_stanza)) => {
                         if !handle_outbound_stanza(
                             &mut ws_sender,
                             &mut ws_receiver,
@@ -1476,6 +1482,113 @@ impl LiveSocketState {
                         )
                         .await
                         {
+                            return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
+                        }
+                    }
+                    Some(
+                        outbound @ (SocketOutboundFrame::ProtectedSpace(_)
+                        | SocketOutboundFrame::SpaceDeletion(_)),
+                    ) => {
+                        use waddle_xmpp::registry::{
+                            SocketSpaceDeletion, SpaceDeletionSocketOutcome,
+                        };
+                        let (payload, deletion) = match outbound {
+                            SocketOutboundFrame::ProtectedSpace(payload) => (*payload, None),
+                            SocketOutboundFrame::SpaceDeletion(envelope) => {
+                                let SocketSpaceDeletion {
+                                    payload,
+                                    attempt_token,
+                                    completion,
+                                } = *envelope;
+                                (payload, Some((attempt_token, completion)))
+                            }
+                            SocketOutboundFrame::Ordinary(_) => unreachable!(),
+                        };
+                        let Some(recipient) = conn.phase.bound_jid() else {
+                            return ControlFlow::Continue(());
+                        };
+                        if !payload.protected_space_reply().is_some_and(|descriptor| {
+                            descriptor.service().as_str()
+                                == state.deps.service_domains.spaces.as_str()
+                                && if deletion.is_some() {
+                                    descriptor.deletion_operation().is_some()
+                                } else {
+                                    descriptor.bookmark_event().is_some()
+                                }
+                        }) {
+                            return ControlFlow::Continue(());
+                        }
+                        let gate = &state.deps.app_state.host_grants;
+                        let attempt = if let Some((token, _)) = &deletion {
+                            let Some(binding) = conn.binding_ref.as_ref() else {
+                                return ControlFlow::Continue(());
+                            };
+                            let Some(attempt) = load_local_deletion_attempt(
+                                gate, &payload, recipient, binding, *token,
+                            )
+                            .await
+                            else {
+                                return ControlFlow::Continue(());
+                            };
+                            Some(attempt)
+                        } else {
+                            None
+                        };
+                        let frame = super::resume_replay::authorize_protected_payload(
+                            payload,
+                            recipient,
+                            gate,
+                            attempt.as_ref(),
+                        )
+                        .await;
+                        let Some(frame) = frame else {
+                            if let Some((_, completion)) = deletion {
+                                let _ =
+                                    completion.send(SpaceDeletionSocketOutcome::RetryBeforeStage);
+                            }
+                            return ControlFlow::Continue(());
+                        };
+                        if deletion.is_some() {
+                            let began = match (gate.store(), attempt.as_ref()) {
+                                (Some(store), Some(attempt)) => store
+                                    .begin_local_space_deletion_binding_staging(attempt)
+                                    .await
+                                    .unwrap_or(false),
+                                _ => false,
+                            };
+                            if !began {
+                                return ControlFlow::Continue(());
+                            }
+                        }
+                        let report = write_ingress_response_batch_with_protected_sink(
+                            BatchSink {
+                                sender: &mut *ws_sender,
+                                protected_start: Some(
+                                    InterruptibleSink::start_protected_space_reply,
+                                ),
+                            },
+                            &mut ws_receiver,
+                            state,
+                            conn,
+                            &mut ResponseBatch::from_frames([frame]),
+                            BatchSmPolicy::Record,
+                            BatchAuthority {
+                                permit: admission_permit,
+                                shutdown: shutdown_token,
+                            },
+                        )
+                        .await;
+                        if let Some((_, completion)) = deletion {
+                            let outcome = if report.written_frame_count == 1
+                                || report.durable_custody_count == 1
+                            {
+                                SpaceDeletionSocketOutcome::Custody
+                            } else {
+                                SpaceDeletionSocketOutcome::Ambiguous
+                            };
+                            let _ = completion.send(outcome);
+                        }
+                        if !matches!(report.outcome, BatchWriteOutcome::Continue) {
                             return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                         }
                     }
@@ -1651,8 +1764,11 @@ impl LiveSocketState {
                             force_detach_rx: &mut *force_detach_rx,
                         },
                         ConnectionIo {
-                            sender: &mut ws_sender,
+                            sender: &mut *ws_sender,
                             receiver: &mut ws_receiver,
+                            protected_reply_start: Some(
+                                InterruptibleSink::start_protected_space_reply,
+                            ),
                         },
                         FrameAuthority {
                             permit: admission_permit,
@@ -1702,8 +1818,11 @@ impl LiveSocketState {
                             force_detach_rx: &mut *force_detach_rx,
                         },
                         ConnectionIo {
-                            sender: &mut ws_sender,
+                            sender: &mut *ws_sender,
                             receiver: &mut ws_receiver,
+                            protected_reply_start: Some(
+                                InterruptibleSink::start_protected_space_reply,
+                            ),
                         },
                         FrameAuthority {
                             permit: admission_permit,
@@ -1777,10 +1896,11 @@ impl LiveSocketState {
                 )
                 .await;
             }
-            OwedClose::Conflict => {
+            close @ (OwedClose::Conflict | OwedClose::NotAuthorized) => {
                 close_live_session_for_force_detach(
                     ws_sender.uninterrupted(),
                     &self.conn,
+                    force_detach_stream_error(close),
                     ctx.admission_permit,
                     ctx.shutdown_token,
                 )
@@ -1962,10 +2082,13 @@ pub(super) async fn finish_connection<S, R, E>(
             conn.binding_ref.as_ref(),
         ));
         if !was_detaching && !pending_force_detach.is_empty() {
+            let stream_error =
+                force_detach_stream_error(force_detach_close(state, conn, pending_force_detach));
             let (sender, _) = socket_io.halves_mut();
             close_live_session_for_force_detach(
                 sender.uninterrupted(),
                 conn,
+                stream_error,
                 admission_permit,
                 shutdown_token,
             )
@@ -2086,8 +2209,11 @@ pub(super) async fn finish_connection<S, R, E>(
         // node, and the acknowledgements below release a resumer. Neither may
         // happen for a transfer while the old pumps could still write.
         let pumps = observe_pump_termination(pump_witness.as_ref(), pump_deadline).await;
+        // A retirement's detach hands the full JID to nobody: missing its
+        // pumps' join leaves nothing a successor could write over, so it
+        // does not take the node's terminal failure path.
         let transfer = cause.is_transfer()
-            || primary_origin.is_some()
+            || primary_origin.is_some_and(waddle_xmpp::registry::ForceDetachOrigin::is_transfer)
             || superseded
             || late_transfer.load(std::sync::atomic::Ordering::Acquire);
         let fenced = pumps == PumpTermination::Missed && transfer;
@@ -2114,7 +2240,12 @@ pub(super) async fn finish_connection<S, R, E>(
         };
     // A waiter retained after the lifecycle check above still makes this a
     // transfer, and still must not be answered for an unobserved pump.
-    if pumps == PumpTermination::Missed && !fenced && !late_requests.is_empty() {
+    if pumps == PumpTermination::Missed
+        && !fenced
+        && late_requests
+            .iter()
+            .any(|request| request.origin.is_transfer())
+    {
         fail_unjoined_transfer(state, conn);
         fenced = true;
     }
@@ -2207,12 +2338,58 @@ fn fail_unjoined_transfer(state: &WebSocketState, conn: &WsConnState) {
     );
 }
 
-/// Close a live stream displaced by an XEP-0198 resume. The
-/// conflict wire frames are deliberately gated on a committed live stream;
-/// regardless of that gate the WebSocket transport is closed.
+/// The retirement cause of a force-detach the request with `origin` began:
+/// a displacement hands the full JID to its requester, and the account's
+/// retirement hands it to nobody.
+fn force_detach_cause(origin: waddle_xmpp::registry::ForceDetachOrigin) -> RetirementCause {
+    if origin.is_transfer() {
+        RetirementCause::ForceDetach
+    } else {
+        RetirementCause::AccountRetired
+    }
+}
+
+/// The close a force-detach owes its live stream: `<not-authorized/>` when
+/// the account's retirement asked for it or this replica holds the bound
+/// account as retired, and `<conflict/>` for a binding a resume or a
+/// replacing bind displaced.
+fn force_detach_close(
+    state: &WebSocketState,
+    conn: &WsConnState,
+    requests: &[waddle_xmpp::registry::ForceDetachRequest],
+) -> OwedClose {
+    let retired = requests.iter().any(|request| {
+        request.origin == waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
+    }) || conn
+        .phase
+        .bound_jid()
+        .is_some_and(|jid| state.deps.protocol.retired_accounts.holds(&jid.to_bare()));
+    if retired {
+        OwedClose::NotAuthorized
+    } else {
+        OwedClose::Conflict
+    }
+}
+
+/// The stream error of a force-detach close.
+fn force_detach_stream_error(close: OwedClose) -> String {
+    match close {
+        OwedClose::NotAuthorized => build_not_authorized_stream_error(),
+        OwedClose::Conflict
+        | OwedClose::None
+        | OwedClose::NodeUnavailable
+        | OwedClose::Transport => build_conflict_stream_error(),
+    }
+}
+
+/// Close a live stream displaced by an XEP-0198 resume or a replacing bind,
+/// or ended by its account's retirement, with `stream_error`. The stream
+/// error and framing close are deliberately gated on a committed live
+/// stream; regardless of that gate the WebSocket transport is closed.
 async fn close_live_session_for_force_detach<S, E>(
     ws_sender: &mut S,
     conn: &WsConnState,
+    stream_error: String,
     admission_permit: &NodeAdmissionPermit,
     shutdown_token: &tokio_util::sync::CancellationToken,
 ) where
@@ -2226,15 +2403,15 @@ async fn close_live_session_for_force_detach<S, E>(
         if conn.has_committed_live_stream_open() {
             let _ = send_ws_text_frames_with_authority(
                 ws_sender,
-                [build_conflict_stream_error(), websocket_stream_close_xml()],
-                "Failed to send conflict stream error",
+                [stream_error, websocket_stream_close_xml()],
+                "Failed to send force-detach stream error",
                 (admission_permit, shutdown_token),
             )
             .await;
         }
         let _ = close_ws_connection(
             ws_sender,
-            "Failed to send WebSocket close frame after conflict",
+            "Failed to send WebSocket close frame after force-detach stream error",
         )
         .await;
     })
@@ -2320,6 +2497,7 @@ pub(super) fn release_stale_force_detach_waiters_before_cross_node_cleanup(
         Some(
             waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
                 | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+                | waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
         )
     ) {
         return;
@@ -2403,7 +2581,9 @@ where
                     primary_origin,
                     &mut pending,
                 );
-                if !pending.is_empty() {
+                // A retained waiter makes the end a transfer, unless it is
+                // a retirement's, which hands the full JID to nobody.
+                if pending.iter().any(|request| request.origin.is_transfer()) {
                     retained.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
@@ -2475,6 +2655,7 @@ fn handle_late_force_detach_waiter_during_cross_node_cleanup(
         primary_origin,
         waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
             | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+            | waddle_xmpp::registry::ForceDetachOrigin::AccountRetirement
     ) && request.origin == waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
     {
         // While the cross-node cleanup is synchronously re-entering the
@@ -2705,6 +2886,7 @@ where
     let ConnectionIo {
         sender: ws_sender,
         receiver: ws_receiver,
+        protected_reply_start,
     } = io;
     let FrameAuthority {
         permit: admission_permit,
@@ -2756,6 +2938,7 @@ where
         ConnectionIo {
             sender: ws_sender,
             receiver: ws_receiver,
+            protected_reply_start,
         },
         FrameAuthority {
             permit: admission_permit,
@@ -2791,6 +2974,7 @@ where
     let ConnectionIo {
         sender: ws_sender,
         receiver: ws_receiver,
+        protected_reply_start,
     } = io;
     let FrameAuthority {
         permit: admission_permit,
@@ -2799,6 +2983,34 @@ where
     // A SASL2 exchange that authenticated with inline requests runs its
     // resume, or binds its resource, before registration looks at the phase.
     super::sasl::advance_sasl2_inline(state.as_ref(), conn).await;
+
+    // Refuse a protected replay before publishing the resumed resource.
+    // The outgoing batch obtains fresh tickets again for the physical sink.
+    let replay_deadline =
+        tokio::time::Instant::now() + super::registration::BIND_RETIREMENT_TIMEOUT;
+    if conn.durable_sm.is_hydrating() {
+        if let (Some(h), Some(jid)) = (conn.pending_resume_h, conn.phase.bound_jid().cloned()) {
+            let authorized = tokio::time::timeout_at(
+                replay_deadline,
+                super::resume_replay::protected_replay_is_authorized(
+                    &conn.sm_state,
+                    h,
+                    &jid,
+                    state.deps.service_domains.spaces.as_str(),
+                    &state.deps.app_state.host_grants,
+                ),
+            )
+            .await;
+            if !matches!(authorized, Ok(true)) {
+                if let SmRegistrationFinalization::ReplaceWithFailed(failed) =
+                    super::stream_management::reject_unregistered_resume(state.as_ref(), conn, &jid)
+                        .await
+                {
+                    responses = ResponseBatch::from_frames(vec![failed.to_element()]);
+                }
+            }
+        }
+    }
 
     // Mirror any phase transition `handle_xmpp_frame` performed (most
     // importantly Ready → Closing on SASL failure / stream error)
@@ -2836,7 +3048,8 @@ where
     {
         RegistrationAfterFrame::Unchanged => {}
         failure @ (RegistrationAfterFrame::SessionInitializationFailed
-        | RegistrationAfterFrame::RegistrationTemporarilyUnavailable) => {
+        | RegistrationAfterFrame::RegistrationTemporarilyUnavailable
+        | RegistrationAfterFrame::AccountRetired) => {
             if close_if_frame_authority_revoked(
                 state,
                 conn,
@@ -2848,6 +3061,7 @@ where
             {
                 return false;
             }
+            let account_retired = matches!(failure, RegistrationAfterFrame::AccountRetired);
             let stream_error = if matches!(
                 failure,
                 RegistrationAfterFrame::RegistrationTemporarilyUnavailable
@@ -2862,6 +3076,10 @@ where
                     )
                     .into(),
                 )
+            } else if account_retired {
+                // RFC 6120 §4.9.3.12: the account was retired after this
+                // stream authenticated; it may hold no session.
+                build_not_authorized_stream_error()
             } else {
                 build_internal_server_error_stream_error(
                     "Session initialization failed; please reconnect.",
@@ -2881,7 +3099,11 @@ where
                 && conn.pending_resume_stream_id.is_some()
             {
                 super::stream_management::observe_sm_resume_finalized(
-                    waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal,
+                    if account_retired {
+                        waddle_xmpp::telemetry::attributes::SmResumeOutcome::PrincipalUnavailable
+                    } else {
+                        waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal
+                    },
                     conn.pending_resume_stream_id
                         .as_deref()
                         .map(waddle_xmpp::pending_delivery::SmSessionId::new)
@@ -2924,12 +3146,30 @@ where
                     resumed,
                     replay_after_h,
                 } => {
+                    let Ok(Some(replay)) = tokio::time::timeout_at(
+                        replay_deadline,
+                        super::resume_replay::authorized_replay_frames(
+                            &conn.sm_state,
+                            replay_after_h,
+                            state.deps.auth_state.xmpp_domain.as_str(),
+                            conn.phase.bound_jid(),
+                            state.deps.service_domains.spaces.as_str(),
+                            &state.deps.app_state.host_grants,
+                        ),
+                    )
+                    .await
+                    else {
+                        // A stale protected ordinal cannot be dropped from the
+                        // replay sequence. Keep the batch in durable custody.
+                        let _ = close_ws_connection(
+                            ws_sender,
+                            "Failed to close WebSocket after protected replay refusal",
+                        )
+                        .await;
+                        return false;
+                    };
                     responses = ResponseBatch::from_frames(vec![resumed.to_element()]);
-                    responses.frames.extend(super::resume_replay::replay_frames(
-                        &conn.sm_state,
-                        replay_after_h,
-                        state.deps.auth_state.xmpp_domain.as_str(),
-                    ));
+                    responses.frames.extend(replay);
                     // W1.6c seam: queue a live stanza behind the unwritten replay.
                     #[cfg(feature = "test-support")]
                     super::characterization_seams::hold_until_live_stanza_queued(
@@ -2995,8 +3235,11 @@ where
     } else {
         BatchSmPolicy::Record
     };
-    let write_report = write_ingress_response_batch_with_admission(
-        ws_sender,
+    let write_report = write_ingress_response_batch_with_protected_sink(
+        BatchSink {
+            sender: ws_sender,
+            protected_start: protected_reply_start,
+        },
         ws_receiver,
         state.as_ref(),
         conn,
@@ -4302,7 +4545,14 @@ mod tests {
         conn.commit_server_stream_open_response();
         let mut sender = UpgradeCloseSink::default();
 
-        close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown).await;
+        close_live_session_for_force_detach(
+            &mut sender,
+            &conn,
+            build_conflict_stream_error(),
+            &permit,
+            &shutdown,
+        )
+        .await;
 
         assert_eq!(
             sender.sent,
@@ -4328,7 +4578,13 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown),
+            close_live_session_for_force_detach(
+                &mut sender,
+                &conn,
+                build_conflict_stream_error(),
+                &permit,
+                &shutdown,
+            ),
         )
         .await
         .expect("optional conflict writes must not block SM detach cleanup");
@@ -4343,7 +4599,14 @@ mod tests {
         conn.begin_server_stream_open_response();
         let mut sender = UpgradeCloseSink::default();
 
-        close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown).await;
+        close_live_session_for_force_detach(
+            &mut sender,
+            &conn,
+            build_conflict_stream_error(),
+            &permit,
+            &shutdown,
+        )
+        .await;
 
         assert!(sender.sent.is_empty());
         assert!(sender.closed);
@@ -5757,4 +6020,25 @@ mod tests {
 
         assert_eq!(responses.len(), 1);
     }
+}
+
+async fn load_local_deletion_attempt(
+    gate: &crate::permissions::host_grant::HostGrantGate,
+    payload: &waddle_xmpp::stream_management::persistence::SmReplayPayload,
+    recipient: &jid::FullJid,
+    binding: &waddle_xmpp::ownership::BindingRef,
+    token: uuid::Uuid,
+) -> Option<crate::permissions::host_grant::SpaceDeletionBindingAttempt> {
+    use crate::permissions::host_grant::{GrantOperationId, ScopeKey};
+
+    let descriptor = payload.protected_space_reply()?;
+    if descriptor.recipient() != recipient {
+        return None;
+    }
+    let operation = GrantOperationId::from_uuid(descriptor.deletion_operation()?);
+    let key = ScopeKey::new(descriptor.service().clone(), descriptor.node()).ok()?;
+    gate.store()?
+        .load_local_space_deletion_binding_attempt(&key, operation, recipient, binding, token)
+        .await
+        .ok()?
 }

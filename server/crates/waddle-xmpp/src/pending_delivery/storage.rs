@@ -147,6 +147,9 @@ pub enum PendingStorageError {
     #[error("pending delivery store does not support exact-claim deletion")]
     ClaimDeletionUnsupported,
 
+    #[error("pending delivery store does not support unclaimed-row deletion")]
+    UnclaimedDeletionUnsupported,
+
     #[error("invalid pending-delivery claim token: {0}")]
     InvalidClaimToken(#[from] uuid::Error),
 
@@ -223,6 +226,10 @@ pub enum CustodyInsertOutcome {
     Inserted,
     AlreadyCompleted,
     QuotaExceeded,
+    /// The recipient's account was retired: nothing was written, and the
+    /// allocation's custody ended without delivery in the same transaction
+    /// ([`InsertOutcome::RecipientRetired`]).
+    RecipientRetired,
 }
 
 /// Trusted host backend capability, never inferred from wire IDs or row data.
@@ -253,8 +260,20 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// [`InsertOutcome::QuotaExceeded`] when the configured
     /// [`QuotaPolicy`] would be violated; the caller is then
     /// responsible for returning `<service-unavailable/>` per XEP-0160
-    /// §3 step 3 (locked Q9b).
+    /// §3 step 3 (locked Q9b). A store that reads the ledger of retired
+    /// account JIDs returns [`InsertOutcome::RecipientRetired`] for a
+    /// recipient it holds, from every insert path.
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError>;
+
+    /// Whether the account `recipient` names was retired, so that this
+    /// store refuses every row for it ([`InsertOutcome::RecipientRetired`]).
+    /// A producer reads it to discard such a message before it would try
+    /// any other sink. A store without the ledger of retired account JIDs
+    /// refuses no recipient.
+    async fn recipient_retired(&self, recipient: &BareJid) -> Result<bool, PendingStorageError> {
+        let _ = recipient;
+        Ok(false)
+    }
 
     /// Fenced variant of [`Self::insert`] for the XEP-0198 §5 Q6 promotion
     /// write path (ADR-0017 Phase 3 Slice 5 FIX 3, council-adjudicated):
@@ -519,6 +538,16 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// flush paths so a delivered row is removed without affecting
     /// rows that failed to push.
     async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
+
+    /// Delete a single row only while no session has claimed it for a
+    /// flush (`flushed_in_session` is unset). A purge that read the row
+    /// unclaimed must not delete it once a flush has claimed it since: that
+    /// flush may be offering it or have pushed it. The check and the delete
+    /// are one statement. Returns `0` when the row is claimed or gone.
+    async fn delete_unclaimed_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        let _ = id;
+        Err(PendingStorageError::UnclaimedDeletionUnsupported)
+    }
 
     /// Retire only the original producer's exact, still-unsequenced claim.
     /// Preoffer poison/block decisions require Unoffered; accepted non-SM
@@ -1355,6 +1384,25 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         for queue in guard.queues.values_mut() {
             let before = queue.len();
             queue.retain(|row| &row.id != id);
+            removed += (before - queue.len()) as u64;
+        }
+        guard.queues.retain(|_, q| !q.is_empty());
+        if removed > 0 {
+            self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
+            self.clear_claimed_at(std::slice::from_ref(id))?;
+        }
+        Ok(removed)
+    }
+
+    async fn delete_unclaimed_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut removed = 0u64;
+        for queue in guard.queues.values_mut() {
+            let before = queue.len();
+            queue.retain(|row| !(&row.id == id && row.flushed_in_session.is_none()));
             removed += (before - queue.len()) as u64;
         }
         guard.queues.retain(|_, q| !q.is_empty());

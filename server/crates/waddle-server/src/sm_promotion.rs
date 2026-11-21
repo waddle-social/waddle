@@ -21,7 +21,9 @@
 
 use std::collections::HashMap;
 mod custody;
-pub(crate) use custody::{promote_ingress_custody, promote_session_with_custody};
+pub(crate) use custody::{
+    custody_completion, promote_ingress_custody, promote_session_with_custody,
+};
 mod live;
 mod pending;
 mod stanza;
@@ -51,7 +53,11 @@ use waddle_xmpp::stream_management::{
 use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
-use pending::{insert_pending, promote_as_transient, DeliveryHandles, PromotionOrigin};
+pub(crate) use pending::is_remote_sender;
+use pending::{
+    discarded_for_retired_recipient, insert_pending, promote_as_transient, DeliveryHandles,
+    PromotionOrigin,
+};
 pub(crate) use stanza::parse_stanza;
 use stanza::{promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionFailureReason, PromotionSummary};

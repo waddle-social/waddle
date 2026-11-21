@@ -18,6 +18,7 @@ use crate::db::lineage::LineageReport;
 use crate::db::lineage::PgIdentity;
 use crate::db::Database;
 use crate::db::DatabaseDriver;
+use crate::destination::FederationDisabled;
 use crate::dnd_projection::DndProjectionStore;
 use crate::dnd_reader::PepDndReader;
 use crate::inbox::DatabaseInboxStorage;
@@ -116,6 +117,8 @@ pub(crate) struct HttpServerDeps {
     pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     /// The one enclosing shutdown deadline (#2046 W1.10).
     pub(crate) shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
+    /// The S2S router, present exactly when S2S is enabled.
+    pub(crate) s2s_router: Option<crate::s2s::route::S2sRouter>,
 }
 
 const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
@@ -188,6 +191,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         sm_drain_complete,
         shutdown_deadline,
         connections_drained,
+        s2s_router,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
@@ -206,6 +210,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         sm_drain_complete: sm_drain_complete.clone(),
         connections_drained,
         shutdown_deadline: shutdown_deadline.clone(),
+        s2s_router,
     })
     .await;
     let app = match app {
@@ -641,6 +646,8 @@ pub(crate) struct RouterDeps {
     pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     /// The one enclosing shutdown deadline (#2046 W1.10).
     pub(crate) shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
+    /// The S2S router, present exactly when S2S is enabled.
+    pub(crate) s2s_router: Option<crate::s2s::route::S2sRouter>,
 }
 
 /// Create the Axum router with all routes and middleware.
@@ -658,6 +665,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         sm_drain_complete,
         shutdown_deadline,
         connections_drained,
+        s2s_router,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
@@ -677,10 +685,44 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             mam_storage,
             pubsub_database_storage,
             owner_outbox,
+            s2s_router: s2s_router.clone(),
         },
         shutdown_handle,
     )
     .await?;
+    // The router delivers correlated responses and their errors to local
+    // resources, and account traffic to local accounts, through the state
+    // it is part of.
+    if let Some(router) = &s2s_router {
+        router.attach_local(Arc::new(
+            crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery::new(
+                &websocket_state,
+            ),
+        ));
+        // The same state hosts the rooms remote occupants use. Their seats
+        // live in the global database, which every replica shares; a room's
+        // stanza for a remote occupant leaves through the router, which
+        // takes it only for a seat it holds; and decisions that name a
+        // seated remote occupant read the evidence its seat was admitted
+        // under.
+        crate::server::routes::websocket::s2s_rooms::host_rooms(
+            &websocket_state,
+            router,
+            state.db_pool.global().clone(),
+        );
+        // The same state serves its Spaces to remote principals: a Space is
+        // reached only while its `federated` setting is on, and its event
+        // notifications leave for the subscriptions remote accounts made
+        // themselves.
+        crate::server::routes::websocket::s2s_spaces::host_spaces(&websocket_state, router);
+        // The account side enables traffic between remote senders and
+        // local accounts in both directions (gate G18).
+        router.attach_accounts(Arc::new(
+            crate::server::routes::websocket::s2s_accounts::WebSocketLocalAccounts::new(
+                &websocket_state,
+            ),
+        ));
+    }
 
     // Install the OIDC → PEP profile bridge hook now that
     // `WebSocketState` (and its `pubsub_storage`) exists. The hook
@@ -755,6 +797,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         promote_to_serving_and_spawn_janitors(
             &websocket_state,
             server_config.clustering.orphan_reaper_interval,
+        );
+        super::space_deletion_delivery::spawn(
+            Arc::clone(&websocket_state),
+            s2s_router,
+            shutdown_stop_token.clone(),
         );
     }
     spawn_graceful_shutdown_drain(
@@ -885,6 +932,147 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     Ok(router)
 }
 
+/// Let the ingress authority admit rooms that enrolled host-grant scopes
+/// manage, if this replica's runtime role holds exactly the grant store's
+/// privileges and the store passes the restore fence for the replica's
+/// configured restore epoch. The attachment binds the authority the fence
+/// verified; an acceptance that reads another one is refused, and makes the
+/// replica's gate verify the fence again in place.
+///
+/// The first check runs before the WebSocket state exists, so when it
+/// passes no acceptance precedes it. A failure that a later attempt may pass
+/// (a statement that failed, a bound that expired, SpiceDB that did not
+/// answer, a fence refusal an operator can clear) is retried in the
+/// background with a capped exponential backoff until the check passes,
+/// finds that the role does not match the profile, or the replica stops. A
+/// role that does not match the profile is checked again about every
+/// [`REVERIFY_INTERVAL`](crate::permissions::host_grant::REVERIFY_INTERVAL),
+/// so the owner phase's corrected grants attach the replica without a
+/// restart. While the authority is unattached every acceptance for a
+/// managed room is refused with a committed stanza error, and rooms that no
+/// scope manages are unaffected, except the rooms of an enrollment only
+/// SpiceDB holds. Once attached, the gate runs the fence again at the same
+/// interval.
+/// SQLite holds no canonical grant store and no enrolled scope, so there is
+/// nothing to attach.
+async fn attach_host_grant_store(
+    ingress: &Arc<IngressAuthority>,
+    state: &AppState,
+    account_domain: waddle_xmpp::identity::CanonicalDomain,
+    service_domains: &XmppServiceDomains,
+    restore_epoch: crate::permissions::host_grant::RestoreEpoch,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    use crate::permissions::host_grant::{verification_retried, HostGrantStore};
+    let Ok(store) = HostGrantStore::open(state.db_pool.global().clone()) else {
+        return;
+    };
+    let gate = ingress.host_grant_gate();
+    let _ = state.host_grant_gate.set(Arc::clone(&gate));
+    // Every surface outside manifest acceptance decides managed rooms with
+    // the attachment this gate holds, as the fence verifies, replaces and
+    // drops it. When the surfaces' gate is already bound to another
+    // attachment gate, they refuse every managed room; this gate is then
+    // never verified either, so acceptance refuses them as well.
+    if !state.host_grants.bind_attachment(Arc::clone(&gate)) {
+        tracing::error!(
+            kind = "attachment_gate_conflict",
+            "The host-grant attachment gate was not bound: another one is bound already. Every \
+             room an enrolled scope manages is refused on this replica"
+        );
+        return;
+    }
+    // The replica registers with the revocation fence once it holds an
+    // attachment and a scope is enrolled, and decides nothing for a managed
+    // room before that.
+    if let Some(fence) = state.host_grants.fence() {
+        fence.start();
+    }
+    let permissions = state.permission_actor.clone();
+    // Admission, the initiator of a room administration request and
+    // projection recovery's issuance all decide from one value: the served
+    // account domain and the S2S snapshot this replica runs.
+    let principals = state.grant_principals(account_domain);
+    let issuance = service_domains.host_grant_issuance_policy(&principals);
+    gate.install_verifier(
+        store.clone(),
+        permissions.clone(),
+        principals,
+        restore_epoch,
+        stop.clone(),
+    );
+    // A failure is logged and counted by the gate.
+    if let Err(error) = gate.verify_once().await {
+        if verification_retried(&error) {
+            gate.verify_in_background();
+        }
+    }
+    gate.watch(crate::permissions::host_grant::REVERIFY_INTERVAL);
+    match issuance {
+        Some(issuance) => spawn_host_grant_recovery(gate, store, permissions, issuance, stop),
+        None => warn!(
+            kind = "issuance_policy",
+            "Host-grant projection recovery was not started: a service domain is not canonical"
+        ),
+    }
+}
+
+/// How often recovery looks whether the replica's gate has attached.
+const HOST_GRANT_RECOVERY_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Project and activate every recorded host-grant change whose projection
+/// was not verified before, once this replica's gate first holds an
+/// attachment (the restore fence passed): a change recorded by an
+/// administration request whose reconciliation did not finish (a stopped
+/// replica, an unreachable projection) becomes effective here, or stays
+/// recorded and not effective, and a scope a declared restore closed is
+/// reconstructed. Nothing is projected while the fence refuses the
+/// authority. A reconstruction records lowered grants, deciding by
+/// `issuance` what may be recorded for whom, so recovery runs under the
+/// replica's issuance policy. Outcomes are logged by kind, without a scope
+/// identifier.
+fn spawn_host_grant_recovery(
+    gate: Arc<crate::permissions::host_grant::HostGrantAttachmentGate>,
+    store: crate::permissions::host_grant::HostGrantStore,
+    permissions: kameo::actor::ActorRef<crate::permissions::PermissionActor>,
+    issuance: crate::permissions::host_grant::IssuancePolicy,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    use crate::permissions::host_grant::{HostGrantAuthority, Reconciliation};
+    tokio::spawn(async move {
+        while !gate.verified() {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(HOST_GRANT_RECOVERY_POLL) => {}
+            }
+        }
+        let authority = HostGrantAuthority::new(store, permissions, issuance);
+        match authority.recover_pending().await {
+            Ok(outcomes) => {
+                let unresolved = outcomes
+                    .iter()
+                    .filter(|(_, outcome)| {
+                        !matches!(
+                            outcome,
+                            Ok(Reconciliation::Activated(_) | Reconciliation::AlreadyActive(_))
+                        )
+                    })
+                    .count();
+                info!(
+                    scopes = outcomes.len(),
+                    unresolved, "Host-grant projection recovery pass finished"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    kind = error.kind(),
+                    "Host-grant projection recovery pass failed"
+                );
+            }
+        }
+    });
+}
+
 async fn open_ingress_authority(
     config: &ServerConfig,
     state: &AppState,
@@ -971,6 +1159,7 @@ struct WebSocketStorageDeps {
     mam_storage: Arc<dyn MamStorage>,
     pubsub_database_storage: Arc<DatabasePubSubStorage>,
     owner_outbox: Option<NotificationOutboxStore>,
+    s2s_router: Option<crate::s2s::route::S2sRouter>,
 }
 
 async fn create_websocket_state(
@@ -985,6 +1174,7 @@ async fn create_websocket_state(
         mam_storage,
         pubsub_database_storage,
         owner_outbox,
+        s2s_router,
     } = storage;
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
@@ -1058,6 +1248,21 @@ async fn create_websocket_state(
     // `AppState` — both are built in `start_with_config` so admin V2
     // handlers and the WebSocket transport operate on the same handles.
     let xmpp_domain = auth_state.xmpp_domain.clone();
+    // Every bound account JID and served address is built from these domains,
+    // so each must already be in the identity profile's canonical form.
+    let account_domain = crate::auth::identity_profile::require_canonical_domains(
+        &xmpp_domain,
+        &[
+            xmpp_config.muc_domain.as_str(),
+            xmpp_config.spaces_jid.domain().as_str(),
+        ],
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "WADDLE_XMPP_DOMAIN, WADDLE_MUC_DOMAIN and WADDLE_SPACES_JID must be canonical domains \
+             (lowercase, no trailing dot, A-labels): {error}"
+        )
+    })?;
     // #757: `muc`/`spaces` must match the registry/component domains the rest
     // of the server is built from, honoring `WADDLE_MUC_DOMAIN` /
     // `WADDLE_SPACES_JID`, rather than re-deriving `muc.<domain>`.
@@ -1348,19 +1553,46 @@ async fn create_websocket_state(
         // Account lookups match canonical keys only, so every account row
         // needs its key before the node serves; the roster prune that
         // follows uses them.
-        crate::auth::directory::reconcile_local_accounts(state.db_pool.global_actor())
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
+        // Contacts at domains this deployment does not serve are remote
+        // contacts and stay, with S2S enabled or not (gate G18).
+        let served = service_domains.served_domains(&xmpp_domain);
+        crate::auth::directory::reconcile_local_accounts(
+            state.db_pool.global_actor(),
+            served.as_ref(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
+        // Report, without identifiers, the accounts the identity profile
+        // treats differently from before; nothing is changed.
+        match crate::auth::identity_profile::reconcile_identity_profile(
+            state.db_pool.global_actor(),
+            &account_domain,
+        )
+        .await
+        {
+            Ok(report) => crate::auth::identity_profile::log_identity_profile_report(&report),
+            Err(error) => warn!(%error, "identity profile reconciliation failed"),
+        }
+        match crate::auth::identity_profile::reconcile_bookmark_item_ids(
+            &pubsub_database_storage.database(),
+            &state.spaces_jid,
+        )
+        .await
+        {
+            Ok(report) => crate::auth::identity_profile::log_bookmark_item_report(&report),
+            Err(error) => warn!(%error, "bookmark item id reconciliation failed"),
+        }
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,
-            &BootstrapMembershipConfig::from_env(),
+            &BootstrapMembershipConfig::from_env().serving(account_domain.as_str()),
         )
         .await;
         if let Err(error) = bootstrap_fresh_xmpp_topology(
             &state,
             Arc::clone(&pubsub_storage),
             &service_domains,
+            &account_domain,
             &room_registry,
         )
         .await
@@ -1593,13 +1825,31 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks = ProviderDispatchTracker::new();
     let ingress = open_ingress_authority(server_config, &state).await?;
+    attach_host_grant_store(
+        &ingress,
+        &state,
+        account_domain.clone(),
+        &service_domains,
+        server_config.host_grant_restore_epoch,
+        shutdown_handle.stop_token(),
+    )
+    .await;
     let websocket_state = Arc::new(WebSocketState {
         #[cfg(feature = "test-support")]
         sasl2_test_capability: false,
+        room_listings: Default::default(),
+        local_space_publications: Arc::new(tokio::sync::Semaphore::new(8)),
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),
             service_domains,
+            // With S2S enabled the router takes stanzas for remote
+            // destinations; otherwise every one is refused with a local
+            // stanza error.
+            remote_route: match s2s_router {
+                Some(router) => Arc::new(router),
+                None => Arc::new(FederationDisabled),
+            },
             protocol: ProtocolServices {
                 connection_registry,
                 user_registry,
@@ -1651,6 +1901,7 @@ async fn create_websocket_state(
                 pending_local_muc_departures: Arc::new(
                     PendingLocalMucDepartures::default(),
                 ),
+                retired_accounts: Arc::default(),
                 resolver_affiliation_syncs: Arc::new(
                     ResolverAffiliationSyncScheduler::default(),
                 ),
@@ -1668,6 +1919,12 @@ async fn create_websocket_state(
             shutdown: shutdown_handle,
         },
     });
+    // Admin commands notify the subscribers of what they take out of a
+    // node through the state that serves those subscribers.
+    websocket_state
+        .deps
+        .app_state
+        .bind_notifications(&websocket_state);
     websocket_state
         .deps
         .protocol
@@ -1675,6 +1932,9 @@ async fn create_websocket_state(
         .bind_recovery_environment(Arc::downgrade(&websocket_state)
             as std::sync::Weak<dyn crate::ingress::RecoveryEnvironment>);
     room_effect_arm_supervisor.attach_drain_state(&websocket_state);
+    // The revocation fence drives this replica's sweep of the rooms it
+    // hosts: a seated occupant the grants no longer admit is removed.
+    crate::server::host_grant_revocation::install(&websocket_state);
     crate::admin::channels::register(
         &websocket_state.deps.protocol.command_registry,
         Arc::clone(&state),
@@ -1827,6 +2087,8 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_room_effect_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
+    // Ends the sessions of accounts the owner's command retired.
+    crate::server::account_session_endings::spawn_account_session_endings(websocket_state);
     crate::auth::directory::spawn_account_key_backfill(
         websocket_state.deps.app_state.db_pool.global_actor(),
         ACCOUNT_KEY_BACKFILL_INTERVAL,

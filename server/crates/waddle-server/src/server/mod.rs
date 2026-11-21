@@ -1,3 +1,4 @@
+pub mod account_session_endings;
 mod acme;
 pub(crate) mod caps_resolution;
 mod config;
@@ -11,6 +12,7 @@ pub mod extension_host_adapter;
 mod extension_host_tools;
 mod fixed_account;
 mod health;
+pub(crate) mod host_grant_revocation;
 mod http;
 mod liveness;
 pub(crate) mod process_metrics;
@@ -21,11 +23,12 @@ pub mod push_notification_runtime;
 mod room_registry_gauge;
 pub mod runtime_owner;
 pub(crate) mod session_janitors;
+pub(crate) mod space_deletion_delivery;
 mod state;
 pub(crate) mod state_inventory;
 pub(crate) mod state_inventory_metrics;
 pub(crate) mod state_inventory_route;
-mod topology;
+pub(crate) mod topology;
 mod trace;
 #[cfg(test)]
 mod xmpp_account_state;
@@ -80,6 +83,10 @@ mod lifecycle;
 #[cfg(feature = "test-support")]
 pub(crate) use config::resolve_xmpp_database_url_values;
 #[cfg(feature = "test-support")]
+pub use fixed_account::{seed_fixed_test_account, FixedTestAccountConfig};
+#[cfg(feature = "test-support")]
+pub(crate) use health::attested_readiness_response;
+#[cfg(feature = "test-support")]
 pub(crate) use http::select_mam_storage_for_test;
 #[cfg(feature = "test-support")]
 pub(crate) use http::{
@@ -99,4 +106,6 @@ pub(crate) use lifecycle::register_inbox_lineage;
 pub use lifecycle::start;
 pub use lifecycle::start_with_config;
 pub use lifecycle::start_with_config_and_owner_outbox;
+#[cfg(feature = "test-support")]
+pub(crate) use lifecycle::with_replica_privileged_issuance;
 pub use lifecycle::RestrictedStartupError;

@@ -1135,7 +1135,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     ) -> Result<(), SmPersistenceError> {
         let stream_id = stanza.stream_id.clone();
         let fence = self.claim_fence_for(&stream_id).await?;
-        let xml = stanza.stanza.wire();
+        let xml = stanza.stanza.to_storage().into_owned();
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
 
         let mut tx = self
@@ -1681,7 +1681,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 crate::db_params![
                     stream_id.as_str().to_string(),
                     i64::from(stanza.sequence),
-                    stanza.stanza.wire(),
+                    stanza.stanza.to_storage().into_owned(),
                     stanza.original_receipt_at.timestamp_millis(),
                     crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
                 stanza.provenance.encode(),

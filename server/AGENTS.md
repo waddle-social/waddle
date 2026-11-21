@@ -41,12 +41,14 @@
 - Dedicated tests may be inline unit tests in `crates/waddle-xmpp/src/xep/xepNNNN.rs` or `crates/waddle-xmpp-core/src/xepNNNN.rs` for parsing, building, or validation, integration tests in `crates/waddle-xmpp/tests/xepNNNN_*.rs`, WebSocket tests in `crates/waddle-server/tests/xepNNNN_*.rs`, or a combination. Each suite must assert the behavior of the XEP it covers.
 - In-process server state for `tests/xepNNNN_*.rs` comes from `waddle_server::test_support` (feature `test-support`; suites that need it carry `#![cfg(feature = "test-support")]` and run in the `--all-features` lanes and the `waddle-server-xmpp-server-tests` lane, which enables the feature explicitly; never enabled in the release image).
 - The active C2S transport is WebSocket only; do not add TCP C2S harness tests.
-- Native independent-process S2S tests may be added for the restricted
-  federation pilot in [ADR-0020](docs/adrs/0020-independent-community-federation.md).
-  They must use separate deployment persistence and secrets, production-like
-  authorization, and real authenticated S2S transport. They do not authorize
-  deployment or replace the dedicated XEP suites; do not use Docker, CAAS, or
-  external containers for XMPP conformance tests.
+- Native independent-process S2S tests may be added for the federation
+  profile in [ADR-0020](docs/adrs/0020-independent-community-federation.md),
+  including interoperability tests against pinned Prosody and ejabberd server
+  processes provided through Nix. They must use separate deployment persistence
+  and secrets, production-like authorization, and real authenticated S2S
+  transport. They do not authorize deployment or replace the dedicated XEP
+  suites; do not use Docker, CAAS, or external containers for XMPP conformance
+  tests.
 
 ## Listener inheritance and graceful shutdown
 
@@ -58,6 +60,9 @@
   startup, before creating the runtime or opening unrelated descriptors, and
   register them with Tokio after entering the runtime. Cold starts bind fresh
   sockets. `waddle-ecdysis` is Unix-only.
+- The listener names are `http` and, only when S2S is enabled with a
+  `listen` address, `s2s` (the STARTTLS-only server-to-server listener). An
+  inherited descriptor the configuration does not use fails startup.
 - Process-local actors and registries are rebuilt on replacement. Determine
   resumption and delivery recovery from their durable storage and ownership
   fences; a process restart alone establishes neither loss nor completion.

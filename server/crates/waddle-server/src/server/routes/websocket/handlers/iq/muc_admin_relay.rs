@@ -226,7 +226,17 @@ pub(crate) async fn relayed_muc_admin_query(
     let answer = tokio::time::timeout(OWNER_ANSWER_BUDGET, async {
         match get_room_actor_result(state, &message.room).await {
             Ok(Some(room_actor)) => {
-                Some(answer_admin_list_get(&room_actor, &message.requester, &query).await)
+                // The forward carries a session's request: no stream.
+                Some(
+                    answer_admin_list_get(
+                        state,
+                        &room_actor,
+                        &message.requester,
+                        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                        &query,
+                    )
+                    .await,
+                )
             }
             // No live actor here: the claim moved, so the origin re-resolves.
             Ok(None) | Err(_) => None,

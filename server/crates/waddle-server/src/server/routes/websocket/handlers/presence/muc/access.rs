@@ -3,12 +3,205 @@ use super::{
     GetSnapshot, Object, ObjectType, Permission, Subject, WebSocketState, XmppChannelRecord,
     DEPLOYMENT_SERVER_ID,
 };
+use crate::permissions::host_grant::{PrincipalEvidence, PrincipalWitness, RoomAffiliation};
 use crate::permissions::{
-    DeleteTuple, ListRelations, PermissionError, Relation, SubjectType, Tuple, WriteTuple,
+    DeleteTuple, ListRelations, ListSubjects, PermissionError, Relation, SubjectType, Tuple,
+    WriteTuple,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 
-pub(super) async fn resolve_managed_channel_affiliation(
+/// What `account` is to a decision its request reaches with `evidence`,
+/// under the account domain this deployment serves and the S2S snapshot the
+/// replica runs (ADR-0020 D1 and D8). `None` when the deployment's account
+/// domain is not canonical, which decides nothing: callers fail closed.
+pub(crate) fn principal_witness(
+    state: &WebSocketState,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+) -> Option<PrincipalWitness> {
+    let domain = waddle_xmpp::identity::CanonicalDomain::parse_canonical(
+        state.deps.auth_state.xmpp_domain.as_str(),
+    )
+    .ok()?;
+    Some(
+        state
+            .deps
+            .app_state
+            .grant_principals(domain)
+            .witness(account, evidence),
+    )
+}
+
+/// The affiliation a room no enrolled scope manages gives `account`, as it
+/// is honoured for a request that reached the room with `evidence`: as
+/// stored for a session of this deployment, and for a remote principal as
+/// the effect boundary honours any stored standing (ADR-0020 D8). A ban
+/// always stands; an owner or admin standing counts only for a trusted home
+/// on a `pkix` stream and otherwise contributes nothing; nothing counts for
+/// a domain that is not admitted.
+pub(crate) fn honoured_legacy_affiliation(
+    state: &WebSocketState,
+    account: &BareJid,
+    evidence: &PrincipalEvidence,
+    affiliation: Option<Affiliation>,
+) -> Option<Affiliation> {
+    if matches!(evidence, PrincipalEvidence::NoStream) {
+        return affiliation;
+    }
+    let stored = match affiliation? {
+        Affiliation::Owner => RoomAffiliation::Owner,
+        Affiliation::Admin => RoomAffiliation::Admin,
+        Affiliation::Member => RoomAffiliation::Member,
+        Affiliation::Outcast => RoomAffiliation::Outcast,
+        Affiliation::None => RoomAffiliation::None,
+    };
+    let honoured = principal_witness(state, account, evidence)
+        .map_or(RoomAffiliation::None, |witness| witness.honour(stored));
+    match honoured {
+        RoomAffiliation::Owner => Some(Affiliation::Owner),
+        RoomAffiliation::Admin => Some(Affiliation::Admin),
+        RoomAffiliation::Member => Some(Affiliation::Member),
+        RoomAffiliation::Outcast => Some(Affiliation::Outcast),
+        // What is not honoured contributes nothing, the unaffiliated
+        // entry an open room gives anybody included only when that is
+        // what was stored.
+        RoomAffiliation::None if stored == RoomAffiliation::None => Some(Affiliation::None),
+        RoomAffiliation::None => None,
+    }
+}
+
+/// A managed channel's entry decision for one account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ManagedChannelAffiliation {
+    /// The affiliation the account enters with; `None` when it holds none.
+    pub(crate) affiliation: Option<Affiliation>,
+    /// Whether the room requires membership. A room an enrolled host-grant
+    /// scope manages always does, whatever its stored configuration says.
+    pub(crate) members_only: bool,
+    /// Whether an enrolled host-grant scope manages the room, so that the
+    /// affiliation is its canonical standing and nothing else.
+    pub(crate) host_grant_managed: bool,
+}
+
+/// A managed channel's entry decision for `user_jid`, together with the
+/// revocation-fence ticket of the decision for a room an enrolled
+/// host-grant scope manages: the caller that goes on to seat the account
+/// acts on the decision only while the ticket is current.
+///
+/// The account is decided on `evidence`, how its request reached the room:
+/// no stream for a session of this deployment, the inbound S2S stream for a
+/// remote principal. A remote principal's entry never repairs the
+/// permission graph, and a room no scope manages honours the affiliation
+/// its legacy stores give it as [`honoured_legacy_affiliation`] says.
+pub(crate) async fn resolve_managed_channel_admission(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    evidence: &PrincipalEvidence,
+    room_jid: &BareJid,
+    channel_id: &str,
+    members_only: bool,
+    allow_repairs: bool,
+) -> Result<
+    (
+        ManagedChannelAffiliation,
+        Option<crate::permissions::host_grant::FenceTicket>,
+    ),
+    (),
+> {
+    if let Some((affiliation, ticket)) =
+        host_grant_admission(state, user_jid, evidence, room_jid).await?
+    {
+        return Ok((
+            ManagedChannelAffiliation {
+                affiliation,
+                members_only: true,
+                host_grant_managed: true,
+            },
+            Some(ticket),
+        ));
+    }
+    let remote = matches!(evidence, PrincipalEvidence::Stream(_));
+    let affiliation = resolve_legacy_channel_affiliation(
+        state,
+        user_jid,
+        room_jid,
+        channel_id,
+        members_only,
+        allow_repairs && !remote,
+    )
+    .await?;
+    let affiliation = honoured_legacy_affiliation(state, user_jid, evidence, affiliation);
+    Ok((
+        ManagedChannelAffiliation {
+            affiliation,
+            members_only,
+            host_grant_managed: false,
+        },
+        None,
+    ))
+}
+
+/// The affiliation a room that an enrolled host-grant scope manages enters
+/// `user_jid` with, decided from the canonical grants alone: `Outcast` for a
+/// recorded or effective ban, the honoured standing of a grant that allows
+/// reading the room, and `None` otherwise (the room is members-only).
+/// `Ok(None)` when no scope manages the room; `Err` when that cannot be
+/// decided, which fails the caller closed.
+///
+/// Legacy channel tuples, Space membership, deployment roles and the room
+/// actor's affiliations are not consulted, and no Space-parent repair runs
+/// for such a room.
+pub(crate) async fn host_grant_affiliation(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    evidence: &PrincipalEvidence,
+    room_jid: &BareJid,
+) -> Result<Option<Option<Affiliation>>, ()> {
+    host_grant_admission(state, user_jid, evidence, room_jid)
+        .await
+        .map(|admission| admission.map(|(affiliation, _)| affiliation))
+}
+
+/// [`host_grant_affiliation`] together with the revocation-fence ticket the
+/// grants were read under. The standing is `None` once the ticket is no
+/// longer current, and a caller whose effect follows the decision later
+/// asks the ticket again where the effect happens.
+pub(crate) async fn host_grant_admission(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    evidence: &PrincipalEvidence,
+    room_jid: &BareJid,
+) -> Result<
+    Option<(
+        Option<Affiliation>,
+        crate::permissions::host_grant::FenceTicket,
+    )>,
+    (),
+> {
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room_jid))
+        .await
+    {
+        RoomGate::Unmanaged => Ok(None),
+        RoomGate::Unavailable => Err(()),
+        RoomGate::Managed(room) => Ok(Some((
+            match room.standing_as(user_jid, evidence) {
+                RoomAffiliation::Outcast => Some(Affiliation::Outcast),
+                RoomAffiliation::None => None,
+                RoomAffiliation::Member => Some(Affiliation::Member),
+                RoomAffiliation::Admin => Some(Affiliation::Admin),
+                RoomAffiliation::Owner => Some(Affiliation::Owner),
+            },
+            room.fence,
+        ))),
+    }
+}
+
+async fn resolve_legacy_channel_affiliation(
     state: &WebSocketState,
     user_jid: &BareJid,
     room_jid: &BareJid,
@@ -46,8 +239,8 @@ pub(super) async fn resolve_managed_channel_affiliation(
     }
 
     // The parent-tuple repair below issues `WriteTuple`/`DeleteTuple`
-    // effects. Join admission opts in (`allow_repairs = true`) so a stale
-    // Space→channel projection self-heals on the way into the room. The
+    // effects. Join admission opts in (`allow_repairs = true`) so a channel
+    // missing its Space parent regains it on the way into the room. The
     // read-only MAM archive gate opts out: an archive query must not
     // mutate the permission graph. A member whose Space-inherited read
     // access hinges on a broken parent tuple is denied here until their
@@ -86,9 +279,47 @@ pub async fn resolve_muc_room_archive_access(
     requester: Option<&BareJid>,
     channel: Option<&XmppChannelRecord>,
 ) -> RoomArchiveAccess {
+    resolve_muc_room_archive_access_as(
+        state,
+        room_jid,
+        requester,
+        &PrincipalEvidence::NoStream,
+        channel,
+    )
+    .await
+}
+
+/// [`resolve_muc_room_archive_access`] for a requester whose query reached
+/// the room with `evidence`. A remote principal whose domain is not
+/// admitted is denied whatever the room holds for it, and an owner or admin
+/// standing a room no scope manages gives it counts only as the effect
+/// boundary honours it (ADR-0020 D1 and D8).
+pub async fn resolve_muc_room_archive_access_as(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+    evidence: &PrincipalEvidence,
+    channel: Option<&XmppChannelRecord>,
+) -> RoomArchiveAccess {
     let Some(requester) = requester else {
         return RoomArchiveAccess::Denied;
     };
+    let remote = matches!(evidence, PrincipalEvidence::Stream(_));
+    if remote
+        && !principal_witness(state, requester, evidence)
+            .is_some_and(|witness| witness.grants_honoured())
+    {
+        return RoomArchiveAccess::Denied;
+    }
+
+    // A room an enrolled host-grant scope manages is decided from its
+    // canonical grants alone, whether or not it has a channel row or a live
+    // actor.
+    match host_grant_affiliation(state, requester, evidence, room_jid).await {
+        Ok(None) => {}
+        Ok(Some(affiliation)) => return host_grant_entry(affiliation),
+        Err(()) => return RoomArchiveAccess::Error,
+    }
 
     let snapshot = match get_room_actor(state, room_jid).await {
         Some(actor) => match actor.ask(GetSnapshot).await {
@@ -113,10 +344,11 @@ pub async fn resolve_muc_room_archive_access(
             .as_ref()
             .map(|snapshot| snapshot.room.config.members_only)
             .unwrap_or(channel.members_only);
-        return resolve_managed_channel_entry_access(
+        return managed_channel_entry_access(
             state,
             room_jid,
             requester,
+            evidence,
             channel,
             members_only,
         )
@@ -131,6 +363,18 @@ pub async fn resolve_muc_room_archive_access(
     // would otherwise leak its archive to non-members (the #1093 bypass).
     // Managed channels — the norm in Waddle — always resolve above via the
     // persisted channel row and are unaffected.
+    // A remote principal with an owner or admin entry the effect boundary
+    // does not honour is refused: the entry contributes nothing, and the
+    // actor's own check would count it.
+    if remote {
+        if let Some(snapshot) = &snapshot {
+            let stored = snapshot.room.affiliation(requester);
+            if honoured_legacy_affiliation(state, requester, evidence, Some(stored)) != Some(stored)
+            {
+                return RoomArchiveAccess::Denied;
+            }
+        }
+    }
     match snapshot {
         Some(snapshot) if snapshot.room.can_user_join(requester) => RoomArchiveAccess::Allowed,
         Some(_) => {
@@ -168,9 +412,29 @@ pub async fn resolve_managed_channel_entry_access(
     channel: &XmppChannelRecord,
     members_only: bool,
 ) -> RoomArchiveAccess {
-    match resolve_managed_channel_affiliation(
+    managed_channel_entry_access(
+        state,
+        room_jid,
+        requester,
+        &PrincipalEvidence::NoStream,
+        channel,
+        members_only,
+    )
+    .await
+}
+
+async fn managed_channel_entry_access(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: &BareJid,
+    evidence: &PrincipalEvidence,
+    channel: &XmppChannelRecord,
+    members_only: bool,
+) -> RoomArchiveAccess {
+    match resolve_managed_channel_admission(
         state,
         requester,
+        evidence,
         room_jid,
         &channel.id,
         members_only,
@@ -178,12 +442,71 @@ pub async fn resolve_managed_channel_entry_access(
         false,
     )
     .await
+    .map(|(affiliation, _)| affiliation)
     {
-        Ok(Some(Affiliation::Outcast)) => RoomArchiveAccess::Denied,
-        Ok(Some(_)) => RoomArchiveAccess::Allowed,
-        Ok(None) if members_only => RoomArchiveAccess::Denied,
-        Ok(None) => RoomArchiveAccess::Allowed,
+        Ok(ManagedChannelAffiliation {
+            affiliation: Some(Affiliation::Outcast),
+            ..
+        }) => RoomArchiveAccess::Denied,
+        Ok(ManagedChannelAffiliation {
+            affiliation: Some(_),
+            ..
+        }) => RoomArchiveAccess::Allowed,
+        Ok(ManagedChannelAffiliation {
+            affiliation: None,
+            members_only: true,
+            ..
+        }) => RoomArchiveAccess::Denied,
+        Ok(ManagedChannelAffiliation {
+            affiliation: None,
+            members_only: false,
+            ..
+        }) => RoomArchiveAccess::Allowed,
         Err(()) => RoomArchiveAccess::Error,
+    }
+}
+
+/// Whether `requester` may still read a room an enrolled host-grant scope
+/// manages, decided again after a protected read of it: `None` for a room
+/// no scope manages, whose read keeps its single check. A response is sent
+/// only if this read is admitted, so a page read after a revoke that
+/// committed before this decision is never sent.
+pub async fn host_grant_read_still_admitted(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+) -> Option<bool> {
+    host_grant_read_still_admitted_as(state, room_jid, requester, &PrincipalEvidence::NoStream)
+        .await
+}
+
+/// [`host_grant_read_still_admitted`] for a requester whose read reached
+/// the room with `evidence`.
+pub async fn host_grant_read_still_admitted_as(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+    evidence: &PrincipalEvidence,
+) -> Option<bool> {
+    let requester = requester?;
+    match host_grant_affiliation(state, requester, evidence, room_jid).await {
+        Ok(None) => None,
+        Ok(Some(affiliation)) => Some(matches!(
+            host_grant_entry(affiliation),
+            RoomArchiveAccess::Allowed
+        )),
+        Err(()) => Some(false),
+    }
+}
+
+/// The right to enter a room an enrolled host-grant scope manages: a
+/// standing that allows reading it, never a ban and never mere presence.
+fn host_grant_entry(affiliation: Option<Affiliation>) -> RoomArchiveAccess {
+    match affiliation {
+        Some(Affiliation::Owner | Affiliation::Admin | Affiliation::Member) => {
+            RoomArchiveAccess::Allowed
+        }
+        Some(Affiliation::Outcast | Affiliation::None) | None => RoomArchiveAccess::Denied,
     }
 }
 
@@ -224,85 +547,91 @@ fn read_access_affiliation(members_only: bool) -> Option<Affiliation> {
     }
 }
 
+/// Give a channel that has no parent the Space its link names, when that
+/// Space lists the channel's bookmark. A channel that already has a parent
+/// keeps it, whichever Space the link or a bookmark names: a join is not
+/// authority over the channel, and only a placement moves it.
 async fn restore_space_parent_tuples_for_room(
     state: &WebSocketState,
     room_jid: &BareJid,
     channel_id: &str,
 ) -> Result<(), ()> {
-    let item_id = room_jid.to_string();
-    let nodes = state
+    let parents = state
         .deps
-        .protocol
-        .pubsub_storage
-        .list_node_names_for_item(&state.deps.app_state.spaces_jid, &item_id)
+        .app_state
+        .permission_actor
+        .ask(ListSubjects {
+            object: Object::new(ObjectType::Channel, channel_id),
+            relation: Relation::new("parent"),
+        })
         .await
         .map_err(|error| {
             warn!(
                 room = %room_jid,
                 channel_id,
-                error = %error,
-                "Failed to enumerate Spaces bookmarks while repairing managed MUC permissions"
+                error = ?error,
+                "Failed to read channel parents while repairing managed MUC permissions"
             );
         })?;
-
-    let mut valid_nodes = Vec::new();
-    for node in nodes {
-        if space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
-            valid_nodes.push(node);
+    if !parents.is_empty() {
+        return Ok(());
+    }
+    let Some(node) = linked_space_node(state, room_jid, channel_id).await? else {
+        return Ok(());
+    };
+    let item_id = room_jid.to_string();
+    if !space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
+        return Ok(());
+    }
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, channel_id),
+        Relation::new("parent"),
+        Subject::userset(SubjectType::Space, &node, ""),
+    );
+    match state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: tuple.clone(),
+        })
+        .await
+    {
+        Ok(()) => {}
+        // Written by a concurrent repair or placement: not this call's to undo.
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {
+            return Ok(());
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                channel_id,
+                node,
+                error = ?error,
+                "Failed to repair managed MUC channel parent tuple"
+            );
+            return Err(());
         }
     }
-
-    let repair_nodes = space_parent_repair_nodes(state, room_jid, channel_id, valid_nodes).await?;
-    for node in repair_nodes {
-        let tuple = Tuple::new(
-            Object::new(ObjectType::Channel, channel_id),
-            Relation::new("parent"),
-            Subject::userset(SubjectType::Space, &node, ""),
-        );
+    if !space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
         match state
             .deps
             .app_state
             .permission_actor
-            .ask(WriteTuple {
-                tuple: tuple.clone(),
-            })
+            .ask(DeleteTuple { tuple })
             .await
         {
-            Ok(())
-            | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {}
+            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {
+            }
             Err(error) => {
                 warn!(
                     room = %room_jid,
                     channel_id,
                     node,
                     error = ?error,
-                    "Failed to repair managed MUC channel parent tuple"
+                    "Failed to clean up stale managed MUC channel parent tuple after revalidation"
                 );
                 return Err(());
-            }
-        }
-        if !space_node_has_room_bookmark(state, room_jid, channel_id, &node, &item_id).await? {
-            match state
-                .deps
-                .app_state
-                .permission_actor
-                .ask(DeleteTuple {
-                    tuple: tuple.clone(),
-                })
-                .await
-            {
-                Ok(())
-                | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {}
-                Err(error) => {
-                    warn!(
-                        room = %room_jid,
-                        channel_id,
-                        node,
-                        error = ?error,
-                        "Failed to clean up stale managed MUC channel parent tuple after revalidation"
-                    );
-                    return Err(());
-                }
             }
         }
     }
@@ -354,12 +683,13 @@ async fn space_node_has_room_bookmark(
     Ok(bookmark.jid == *room_jid)
 }
 
-async fn space_parent_repair_nodes(
+/// The Space node the channel's link names, on this deployment's Spaces
+/// service.
+async fn linked_space_node(
     state: &WebSocketState,
     room_jid: &BareJid,
     channel_id: &str,
-    valid_nodes: Vec<String>,
-) -> Result<Vec<String>, ()> {
+) -> Result<Option<String>, ()> {
     let link = state
         .deps
         .app_state
@@ -375,21 +705,8 @@ async fn space_parent_repair_nodes(
             );
         })?;
     let Some(link) = link else {
-        return match valid_nodes.as_slice() {
-            [] => Ok(Vec::new()),
-            [node] => Ok(vec![node.clone()]),
-            nodes => {
-                warn!(
-                    room = %room_jid,
-                    channel_id,
-                    nodes = ?nodes,
-                    "Refusing to repair ambiguous managed MUC Space parents without a channel-space projection"
-                );
-                Ok(Vec::new())
-            }
-        };
+        return Ok(None);
     };
-
     if link.space_jid.domain() != state.deps.app_state.spaces_jid.domain() {
         warn!(
             room = %room_jid,
@@ -398,29 +715,18 @@ async fn space_parent_repair_nodes(
             spaces = %state.deps.app_state.spaces_jid,
             "Refusing to repair managed MUC Space parent from a different Spaces service"
         );
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let Some(node) = link.space_jid.node().map(|node| node.to_string()) else {
+    let node = link.space_jid.node().map(|node| node.to_string());
+    if node.is_none() {
         warn!(
             room = %room_jid,
             channel_id,
             linked_space = %link.space_jid,
             "Refusing to repair managed MUC Space parent without a Space node"
         );
-        return Ok(Vec::new());
-    };
-    if valid_nodes.iter().any(|valid| valid == &node) {
-        return Ok(vec![node]);
     }
-
-    warn!(
-        room = %room_jid,
-        channel_id,
-        linked_space = %link.space_jid,
-        nodes = ?valid_nodes,
-        "Refusing to repair managed MUC Space parent because the projected Space lacks the bookmark"
-    );
-    Ok(Vec::new())
+    Ok(node)
 }
 
 async fn check_channel_permission(

@@ -20,6 +20,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use jid::BareJid;
+
+use crate::identity::QualifiedMessageId;
 use crate::judgments::{SafetyScores, SafetyScoresFastening, ScoreTarget, StampedScores};
 
 /// Same-author messages closer than this group under one header
@@ -298,8 +301,17 @@ struct RowIds {
     chosen: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct Scope {
+    conversation: BareJid,
+    authority: BareJid,
+}
+
 #[derive(Debug, Default)]
 pub struct Timeline {
+    /// The conversation this timeline shows and the authority that issued
+    /// its stanza ids, when the adapter supplied them.
+    scope: Option<Scope>,
     items: Vec<TimelineItem>,
     /// Ids of each row, parallel to `items`.
     ids: Vec<RowIds>,
@@ -342,6 +354,34 @@ pub struct Timeline {
 impl Timeline {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A timeline for `conversation` whose stanza ids were issued by
+    /// `authority` (XEP-0359 `by`): the room itself for a room, the user's
+    /// account for a DM archive.
+    pub fn scoped(conversation: BareJid, authority: BareJid) -> Self {
+        Self {
+            scope: Some(Scope {
+                conversation,
+                authority,
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// The row's server-assigned id qualified by conversation and issuing
+    /// authority. `None` for a row known only by a sender-chosen origin id
+    /// (anyone can choose any value), or when the timeline is unscoped.
+    pub fn qualified_id(&self, item: &TimelineItem) -> Option<QualifiedMessageId> {
+        let scope = self.scope.as_ref()?;
+        match &item.key {
+            ItemKey::Stanza(id) => QualifiedMessageId::new(
+                scope.conversation.clone(),
+                scope.authority.clone(),
+                id.clone(),
+            ),
+            ItemKey::Origin(_) => None,
+        }
     }
 
     pub fn items(&self) -> &[TimelineItem] {

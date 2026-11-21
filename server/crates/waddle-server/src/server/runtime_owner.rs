@@ -82,6 +82,11 @@ pub struct RestrictedRuntimeOwnerPlan {
     /// Root key the VAPID signing key is sealed under. The runtime must be
     /// started with the same session key.
     pub vapid_root_key: Vec<u8>,
+    /// The deployment's declared host-grant restore epoch. Above the epoch
+    /// the database records, the phase declares a restore of the host-grant
+    /// authority; below it, the phase is refused. The runtime must be
+    /// started with the same epoch.
+    pub host_grant_restore_epoch: crate::permissions::host_grant::RestoreEpoch,
     /// Present when the runtime serves with clustering enabled.
     #[cfg(feature = "clustering")]
     pub clustering: Option<ClusteringOwnerPlan>,
@@ -230,6 +235,8 @@ pub enum RestrictedRuntimeOwnerError {
     WebhookDeliveries(#[source] DatabaseError),
     #[error("could not activate the ingress protocol epoch")]
     ProtocolEpochActivation(#[source] DatabaseError),
+    #[error("the host-grant restore incarnation could not be prepared")]
+    HostGrantRestore(#[source] crate::permissions::host_grant::HostGrantError),
     #[error(
         "the ingress protocol epoch row is missing, or records epoch {live} beyond the \
          {supported} this binary implements"
@@ -292,6 +299,7 @@ impl RestrictedRuntimeOwnerEvidence {
 const NONE: &str = "";
 const READ: &str = "SELECT";
 const READ_INSERT: &str = "SELECT, INSERT";
+const READ_UPDATE: &str = "SELECT, UPDATE";
 const READ_INSERT_UPDATE: &str = "SELECT, INSERT, UPDATE";
 const READ_INSERT_DELETE: &str = "SELECT, INSERT, DELETE";
 const READ_WRITE: &str = "SELECT, INSERT, UPDATE, DELETE";
@@ -329,7 +337,80 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("device_auth", READ_WRITE),
     ("pending_auth", READ_INSERT_DELETE),
     ("xmpp_auth_codes", READ_INSERT_DELETE),
+    // Retired account JIDs (ADR-0020 D8). Retirement is an owner act; the
+    // runtime reads the ledger where it provisions an account and can
+    // neither retire a JID nor make one available again.
+    ("retired_account_jids", READ),
+    // Ending a retired account's sessions: the owner's command records a
+    // request, and a replica inserts and renews its lease and inserts and
+    // completes its acknowledgement of each request. The runtime deletes
+    // none of them; an expired lease is a row that no longer counts, and
+    // the command removes old rows.
+    ("account_session_ending_replicas", READ_INSERT_UPDATE),
+    ("account_session_ending_requests", READ),
+    ("account_session_ending_acks", READ_INSERT_UPDATE),
     ("permission_tuples", READ_WRITE),
+    // Host-grant authority (ADR-0020 D5). The owner phase alone enrolls a
+    // scope, binds its rooms and retires it, so the incarnation, the
+    // lifecycle ledger and the room bindings are read-only to the runtime;
+    // retirement stamps the ledger. The runtime row-locks
+    // and updates a scope's state, inserts and updates grant rows (a revoke
+    // is a row, never a delete), and appends to the operation journal, which
+    // it can neither rewrite nor delete. The store's attachment verifies
+    // exactly these sets.
+    ("host_grant_authority", READ),
+    ("host_grant_scope_lifecycles", READ),
+    ("host_grant_scopes", READ_UPDATE),
+    ("host_grant_rooms", READ),
+    ("host_grants", READ_INSERT_UPDATE),
+    ("host_grant_operations", READ_INSERT),
+    ("host_grant_operation_changes", READ_INSERT),
+    ("host_grant_space_bindings", READ),
+    ("host_grant_space_affiliations", READ_INSERT_UPDATE),
+    ("host_grant_space_operation_changes", READ_INSERT),
+    ("host_grant_space_deletions", READ_INSERT),
+    ("host_grant_space_deletion_audience", READ_INSERT),
+    ("host_grant_space_deletion_jobs", READ_INSERT_UPDATE),
+    ("host_grant_space_deletion_bindings", READ_INSERT_UPDATE),
+    ("host_grant_space_bookmark_versions", READ_INSERT_UPDATE),
+    ("local_space_subscriptions", READ_WRITE),
+    // The revocation fence: a replica inserts its lease and renews it, and
+    // inserts and advances its acknowledgement of each scope. It deletes
+    // neither; an expired lease is a row that no longer counts.
+    ("host_grant_fence_replicas", READ_INSERT_UPDATE),
+    ("host_grant_fence_acks", READ_INSERT_UPDATE),
+    // S2S IQ correlation: a pending request is inserted when it is written
+    // to a stream and deleted by the response, failure or expiry that ends
+    // it; a row is never updated. Each replica replaces its own liveness
+    // row on every expiry sweep, and a stopped replica's row is deleted.
+    ("s2s_iq_correlations", READ_INSERT_DELETE),
+    ("s2s_iq_correlation_owners", READ_WRITE),
+    // S2S remote room occupancy: a join inserts its row, every later change
+    // is an update conditional on the row's revision, and the end of the
+    // occupancy deletes it. The verdict cache is upserted and its expired
+    // rows deleted.
+    ("s2s_remote_room_occupancies", READ_WRITE),
+    ("s2s_remote_room_verdicts", READ_WRITE),
+    // Remote occupants' seats in local rooms: a join inserts its row, the
+    // owning replica updates the nickname and another replica marks the
+    // seat lost or adopts it, and the end of the seat deletes it.
+    ("s2s_local_room_seats", READ_WRITE),
+    // S2S account traffic: a remote sender's pending subscription request
+    // is upserted, one per sender and account, and deleted when the account
+    // answers it; a remote PubSub subscription is inserted when the
+    // account's request leaves and deleted when its unsubscribe does.
+    ("s2s_pending_subscriptions", READ_WRITE),
+    ("s2s_remote_pubsub_subscriptions", READ_WRITE),
+    // A remote stranger's message admitted to an account's offline store
+    // is counted by an inserted row; rows older than a day are deleted.
+    ("s2s_remote_offline_admissions", READ_WRITE),
+    // Spaces over S2S: a Space's `federated` setting is a row upserted when
+    // an owner turns it on and deleted when it is turned off; a remote
+    // account's subscription is upserted with the evidence of its stream
+    // and deleted when it unsubscribes, its Space is deleted or the
+    // setting is turned off.
+    ("s2s_federated_spaces", READ_WRITE),
+    ("s2s_space_subscriptions", READ_WRITE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),
@@ -610,6 +691,7 @@ const SEQUENCE_GRANTS: &[(&str, &str)] = &[
         "USAGE",
     ),
     ("pubsub_items_seq_seq", "SELECT"),
+    ("local_space_notification_order", "USAGE"),
     ("reactions_id_seq", NONE),
     ("clustering_claim_epoch_seq", NONE),
 ];
@@ -763,6 +845,8 @@ pub async fn prepare_restricted_runtime_owner(
         .await
         .map_err(RestrictedRuntimeOwnerError::WebhookDeliveries)?;
 
+    prepare_host_grant_restore(owner, plan).await?;
+
     grant_runtime(owner, &identity, plan).await?;
     verify_runtime_role(owner, &identity, plan).await?;
     activate_ingress_protocol_epoch(owner, &identity, &expected).await?;
@@ -776,6 +860,63 @@ pub async fn prepare_restricted_runtime_owner(
 
     Ok(RestrictedRuntimeOwnerEvidence { lineage: expected })
 }
+
+/// Bind the host-grant authority to the declared restore epoch and the
+/// lineage attested above, and declare a restore when the plan's epoch
+/// exceeds the recorded one: a new incarnation, with every scope that is not
+/// retired or exhausted closed until its projection is rebuilt, verified and
+/// activated and an operator reopens it. A plan below the recorded epoch,
+/// and an adopted database whose restore was not declared, are refused. A
+/// transition an earlier run did not finish is finished. See
+/// `permissions::host_grant::restore`.
+async fn prepare_host_grant_restore(
+    owner: &Database,
+    plan: &RestrictedRuntimeOwnerPlan,
+) -> Result<(), RestrictedRuntimeOwnerError> {
+    use crate::permissions::host_grant::{HostGrantStore, RestoreDeclaration};
+    let store = HostGrantStore::open(owner.clone())
+        .map_err(RestrictedRuntimeOwnerError::HostGrantRestore)?;
+    match store
+        .prepare_restore_incarnation(plan.host_grant_restore_epoch)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::HostGrantRestore)?
+    {
+        RestoreDeclaration::Unchanged => {}
+        RestoreDeclaration::LineageBound => {
+            tracing::info!("bound the host-grant authority incarnation to the database lineage");
+        }
+        RestoreDeclaration::Transitioned {
+            epoch,
+            restored_scopes,
+            ..
+        } => tracing::warn!(
+            epoch = epoch.value(),
+            restored_scopes,
+            "declared a host-grant restore: a new authority incarnation is established and \
+             every restored scope admits nothing until its reconstruction is verified and an \
+             operator reopens it"
+        ),
+        RestoreDeclaration::Resumed { restored_scopes } => tracing::warn!(
+            restored_scopes,
+            "finished a host-grant restore transition an earlier owner phase did not finish"
+        ),
+    }
+    // Leases of the revocation fence that ran out long ago count for
+    // nothing; the runtime role may not delete them, so the owner phase
+    // does. A failure leaves rows that are ignored anyway.
+    match store.prune_fence_replicas(FENCE_REPLICA_RETENTION).await {
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            kind = error.kind(),
+            "expired host-grant revocation fence leases were not pruned"
+        ),
+    }
+    Ok(())
+}
+
+/// How long the owner phase keeps the row of a revocation-fence lease that
+/// ran out.
+const FENCE_REPLICA_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Advance the ingress protocol epoch to the one this binary implements.
 ///

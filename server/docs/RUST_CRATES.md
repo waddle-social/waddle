@@ -130,6 +130,9 @@ This document lists the recommended Rust crates for Waddle Social, organized by 
 | Crate | Purpose | ADR Reference |
 |-------|---------|---------------|
 | `rustls` | TLS implementation | [ADR-0012](adrs/0012-transport-encryption.md) |
+| `rustls-webpki` | Certificate path validation and CRL checking for the S2S verifier | [ADR-0020](adrs/0020-independent-community-federation.md) |
+| `webpki-roots` | Compiled-in Mozilla roots: the S2S public-WebPKI trust profile | [ADR-0020](adrs/0020-independent-community-federation.md) |
+| `x509-parser` | Certificate and CRL metadata for the S2S verifier | [ADR-0020](adrs/0020-independent-community-federation.md) |
 | `hmac` | HMAC signatures | - |
 | `sha2` | SHA-2 hashing | - |
 

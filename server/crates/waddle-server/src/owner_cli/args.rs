@@ -15,9 +15,15 @@ use clap::{Args, Parser, Subcommand};
 use thiserror::Error;
 use uuid::Uuid;
 
+use jid::BareJid;
+use waddle_xmpp::identity::CanonicalDomain;
+
 use crate::db::lineage::PgSchemaName;
 use crate::db::physical_attestation::{validate_identifier, PgRoleName, PhysicalAttestationError};
 use crate::db::runtime_startup::valid_git_sha;
+use crate::permissions::host_grant::{
+    GrantGeneration, GrantSubject, PositionWitness, ScopeLifecycleId,
+};
 
 const ABOUT: &str = "Waddle XMPP server";
 
@@ -40,13 +46,18 @@ Order for one database:
   2. install-attestor  as the attestor installer login
   3. emit-handoff      as the migrator login
 
+host-grant runs as the migrator login when an operator acts on the host-grant
+authority after a restore (docs/operations/authz-host-grant-restore.md).
+
 Exit codes:
   0  completed
   1  the connection or the database returned an error, a lock stayed contended
      or timed out, or an outcome is unknown; a rerun may succeed
   2  invalid arguments or environment; nothing was sent to the database
-  3  owner-phase only: prepared, keypair-pool generation pending; run it again
-     after the printed activation time
+  3  pending; run it again later. owner-phase: prepared, keypair-pool
+     generation pending until the printed activation time. account retire:
+     retired, and a serving replica has not confirmed ending the account's
+     sessions
   4  refused: a verifier rejected the database, the plan or the document; a
      rerun refuses again until one of them changes";
 
@@ -62,6 +73,13 @@ Environment (no flag; secret values are never printed):
                                   deployment; unset otherwise.
   WADDLE_SESSION_KEY              The server's session key. The VAPID signing
                                   key is sealed under it.
+  WADDLE_HOST_GRANT_RESTORE_EPOCH The declared host-grant restore epoch
+                                  (default 0). Above the epoch the database
+                                  records, the phase declares a restore of
+                                  the host-grant authority; below it, the
+                                  phase is refused. The servers must be
+                                  started with the same value. See
+                                  docs/operations/authz-host-grant-restore.md.
   WADDLE_DB_BASELINE_ACTION       Unset or `stamp`: an empty database is built
                                   from the schema baseline, and a database
                                   that holds the complete retired migration
@@ -83,6 +101,56 @@ to standard output as JSON; install-attestor takes it as --identity.
 Without clustering the phase does not check that it has the database to
 itself: stop every server before it runs. --identity-output replaces an
 existing file atomically and refuses a symbolic link.";
+
+const HOST_GRANT_ENVIRONMENT: &str = "\
+Environment (no flag; secret values are never printed):
+  WADDLE_DATABASE_URL           PostgreSQL URL of the migrator login, as for
+                                owner-phase.
+  WADDLE_SPICEDB_ENDPOINT       Optional: the servers' SpiceDB, with
+  WADDLE_SPICEDB_PRESHARED_KEY  its key (and WADDLE_SPICEDB_INSECURE as the
+                                servers set it). With it, the action's
+                                witnesses are written at once instead of by
+                                the next fence pass of a server, and
+                                acknowledge-position reads the position
+                                witness itself.
+
+Each action is one or more short transactions on the host-grant store and can
+run while the servers run. The actions print what they recorded as JSON;
+repeat `revoke` or `revoke-account` with the same --operation-id after an
+unknown outcome or an acknowledgement that did not arrive.
+
+A revoke is effective at its commit. `revoke` and `revoke-account` then wait,
+for --fence-wait seconds, until the revocation fence has acknowledged it:
+every server that may still decide for the scope has installed the revoke, so
+none acts on a decision it read before. A server that stopped is waited for
+until its lease has run out. Exit code 1 with `acknowledged: false` means the
+revoke is recorded and not yet acknowledged; run the command again. See
+docs/operations/authz-host-grant-restore.md and
+docs/operations/authz-host-grant-reassignment.md.";
+
+const ACCOUNT_ENVIRONMENT: &str = "\
+Environment (no flag; secret values are never printed):
+  WADDLE_DATABASE_URL  PostgreSQL URL of the migrator login, as for
+                       owner-phase. Not read with --sqlite-database.
+
+`retire` records the account's JID in the ledger of retired JIDs and removes
+the account's native credentials, its account row, its identity-provider
+links and its sessions, in one transaction. No provisioning path issues a
+retired JID again: native registration refuses it, and an identity-provider
+login is given another name. A JID that holds no account is recorded as well.
+The act cannot be undone.
+
+It then ends the account's open sessions on every serving server: it records
+a request, and each server closes the account's live streams with
+<not-authorized/>, ends its detached stream-management sessions, refuses its
+bindings and acknowledges. The command waits for --session-wait seconds and
+prints each server's acknowledgement under `sessions`. Exit code 3 means the
+account is retired and a serving server has not confirmed ending its
+sessions; run the command again. A server that is stopped, or starts within
+a day, ends what is left when it serves.
+
+It does not change the account's grants in any room: revoke those first
+(`host-grant revoke-account`). See docs/operations/account-retirement.md.";
 
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -130,6 +198,13 @@ pub(super) enum Command {
     /// Compose or verify the handoff document the restricted server starts with
     #[command(after_help = EMIT_HANDOFF_ENVIRONMENT)]
     EmitHandoff(EmitHandoffArgs),
+    /// Reopen restored host-grant scopes, acknowledge the PostgreSQL position,
+    /// or list and revoke an account's grants through the revocation fence
+    #[command(after_help = HOST_GRANT_ENVIRONMENT)]
+    HostGrant(HostGrantArgs),
+    /// Retire an account so that its JID is never issued again
+    #[command(after_help = ACCOUNT_ENVIRONMENT)]
+    Account(AccountArgs),
 }
 
 /// The owner connection: the migrator login acting as the schema owner.
@@ -287,6 +362,214 @@ pub(super) enum ExclusiveDatabaseArg {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct HostGrantArgs {
+    #[command(flatten)]
+    pub(super) connection: OwnerConnectionArgs,
+    #[command(subcommand)]
+    pub(super) action: HostGrantActionArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum HostGrantActionArgs {
+    /// Bootstrap the enrolled whitelist Space, or rebind it after restore
+    BindSpace {
+        /// Lifecycle of the enrolled scope
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+        /// Scope generation the operator reviewed
+        #[arg(long, value_name = "GENERATION", value_parser = parse_grant_generation)]
+        expected_generation: GrantGeneration,
+        /// Bare account JID of the first owner, on the served domain
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        owner: GrantSubject,
+        /// Operation ID; reuse it with the same arguments when retrying
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// Permit remote access when the Space's runtime admission path is enabled
+        #[arg(long)]
+        federated: bool,
+        /// Account domain served by this deployment
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+    },
+    /// Reopen scopes whose reconstruction after a declared restore was
+    /// verified; the operator's acknowledgement of the restore
+    Reopen {
+        /// Lifecycle of the one scope to reopen (32 lowercase hex characters);
+        /// every reconstructed scope the restore lost no operations in when
+        /// absent
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: Option<ScopeLifecycleId>,
+        /// Confirm that the revokes and bans the restore lost in this scope
+        /// have been applied again (with `revoke`); a scope the restore lost
+        /// operations in reopens only with it
+        #[arg(long, requires = "scope")]
+        lost_operations_reapplied: bool,
+    },
+    /// Acknowledge the position witness for the PostgreSQL system and
+    /// timeline the server now writes on: after a promotion the witness
+    /// cannot verify, or a regression on the witnessed timeline the operator
+    /// accepts
+    AcknowledgePosition {
+        /// The position witness this acknowledgement supersedes, as SpiceDB
+        /// holds it (`<epoch>_<system>_<timeline>_<lsn>`); read from SpiceDB
+        /// when WADDLE_SPICEDB_ENDPOINT is set and the flag is absent
+        #[arg(long, value_name = "STAMP", value_parser = parse_position_witness)]
+        witnessed: Option<PositionWitness>,
+    },
+    /// Revoke or ban one account in one managed room, in a closed scope too
+    Revoke {
+        /// Lifecycle of the scope (32 lowercase hex characters)
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+        /// The managed room's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_bare_jid)]
+        room: BareJid,
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+        /// Record a ban (outcast) instead of a revoke (none)
+        #[arg(long)]
+        ban: bool,
+        /// Operation ID of this revoke; generate one UUID and keep it
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// The account domain the servers serve, as their WADDLE_XMPP_DOMAIN
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+        /// Seconds to wait for the revocation fence to acknowledge the revoke
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_FENCE_WAIT_SECONDS)]
+        fence_wait: u64,
+    },
+    /// List every grant an account holds, in every room of every scope
+    Grants {
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+    },
+    /// Revoke or ban one account in every managed room it holds a grant in,
+    /// and wait for the revocation fence: the act after a reported
+    /// reassignment of the account's JID
+    RevokeAccount {
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_subject)]
+        subject: GrantSubject,
+        /// Record a ban (outcast) instead of a revoke (none)
+        #[arg(long)]
+        ban: bool,
+        /// Operation ID of this act; generate one UUID and keep it. Each
+        /// room's revoke is recorded under an identity derived from it
+        #[arg(long, value_name = "UUID")]
+        operation_id: Uuid,
+        /// The account domain the servers serve, as their WADDLE_XMPP_DOMAIN
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_DOMAIN",
+            value_name = "DOMAIN",
+            value_parser = parse_account_domain
+        )]
+        account_domain: CanonicalDomain,
+        /// Seconds to wait for the revocation fence to acknowledge each revoke
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_FENCE_WAIT_SECONDS)]
+        fence_wait: u64,
+    },
+    /// Report whether the revocation fence has acknowledged a scope's
+    /// current generation
+    Fence {
+        /// Lifecycle of the scope (32 lowercase hex characters)
+        #[arg(long, value_name = "LIFECYCLE", value_parser = parse_lifecycle)]
+        scope: ScopeLifecycleId,
+    },
+}
+
+/// How long `revoke` and `revoke-account` wait for the revocation fence by
+/// default: longer than a stopped server's lease takes to run out.
+const DEFAULT_FENCE_WAIT_SECONDS: u64 = 15;
+
+#[derive(Debug, Args)]
+pub(super) struct AccountArgs {
+    #[command(subcommand)]
+    pub(super) action: AccountActionArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum AccountActionArgs {
+    /// Retire an account: its JID is recorded as retired and never issued
+    /// again, its account rows are removed, and every serving server ends
+    /// its open sessions
+    Retire {
+        /// The account's bare JID
+        #[arg(long, value_name = "JID", value_parser = parse_bare_jid)]
+        jid: BareJid,
+        /// The server's SQLite database file, for a deployment that runs on
+        /// SQLite. Without it the act runs on PostgreSQL as the migrator
+        /// login acting as the schema owner
+        #[arg(long, value_name = "FILE")]
+        sqlite_database: Option<PathBuf>,
+        /// Application schema that holds the server's relations (PostgreSQL)
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_MAM_CLAIM_SCHEMA",
+            hide_env_values = true,
+            value_parser = parse_schema
+        )]
+        schema: Option<PgSchemaName>,
+        /// Login that runs the owner phase (PostgreSQL)
+        #[arg(
+            long,
+            env = "WADDLE_DB_MIGRATOR_LOGIN",
+            hide_env_values = true,
+            value_parser = parse_role
+        )]
+        migrator_login: Option<PgRoleName>,
+        /// NOLOGIN role that owns the application schema (PostgreSQL)
+        #[arg(
+            long,
+            env = "WADDLE_XMPP_MAM_SCHEMA_OWNER",
+            hide_env_values = true,
+            value_parser = parse_role
+        )]
+        schema_owner: Option<PgRoleName>,
+        /// Seconds to wait for the serving servers to confirm ending the
+        /// account's open sessions (at most 600)
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = DEFAULT_SESSION_WAIT_SECONDS,
+            value_parser = clap::value_parser!(u64).range(..=MAX_SESSION_WAIT_SECONDS)
+        )]
+        session_wait: u64,
+    },
+}
+
+/// How long `account retire` waits for the serving servers by default:
+/// longer than a server takes to close a stream that does not answer (10
+/// s), and than the command takes to decide that a stopped server's lease
+/// lapsed (its lifetime and the grace beyond it, 17 s).
+const DEFAULT_SESSION_WAIT_SECONDS: u64 = 30;
+
+const _: () = assert!(
+    DEFAULT_SESSION_WAIT_SECONDS
+        > crate::auth::session_endings::SESSION_ENDING_LEASE_TTL.as_secs()
+            + crate::auth::session_endings::SESSION_ENDING_LAPSE_GRACE.as_secs()
+);
+
+/// The longest `account retire` may be told to wait. A server that has not
+/// confirmed by then is reported `pending`, and running the command again
+/// asks again.
+const MAX_SESSION_WAIT_SECONDS: u64 = 600;
+
+#[derive(Debug, Args)]
 pub(super) struct InstallAttestorArgs {
     /// Database identity JSON that owner-phase printed
     #[arg(long, value_name = "FILE")]
@@ -360,9 +643,48 @@ fn parse_schema(value: &str) -> Result<PgSchemaName, PhysicalAttestationError> {
 pub(super) enum ArgumentError {
     #[error("expected 40 lowercase hexadecimal characters")]
     GitSha,
+    #[error("expected 32 lowercase hexadecimal characters")]
+    Lifecycle,
+    #[error("expected a bare JID")]
+    BareJid,
+    #[error("expected the bare JID of an account in canonical form")]
+    Subject,
+    #[error("expected a canonical domain (lowercase, no trailing dot, A-labels)")]
+    Domain,
+    #[error("expected a position witness: <epoch>_<system>_<timeline>_<lsn> in decimal")]
+    PositionWitness,
     #[cfg(feature = "clustering")]
     #[error("expected a whole number followed by ms, s, m or h, such as 30s")]
     Duration,
+}
+
+fn parse_grant_generation(value: &str) -> Result<GrantGeneration, &'static str> {
+    value
+        .parse()
+        .ok()
+        .and_then(GrantGeneration::new)
+        .ok_or("expected a positive scope generation")
+}
+
+fn parse_lifecycle(value: &str) -> Result<ScopeLifecycleId, ArgumentError> {
+    ScopeLifecycleId::from_storage(value).ok_or(ArgumentError::Lifecycle)
+}
+
+fn parse_position_witness(value: &str) -> Result<PositionWitness, ArgumentError> {
+    PositionWitness::parse(value).ok_or(ArgumentError::PositionWitness)
+}
+
+fn parse_bare_jid(value: &str) -> Result<BareJid, ArgumentError> {
+    value.parse().map_err(|_| ArgumentError::BareJid)
+}
+
+fn parse_subject(value: &str) -> Result<GrantSubject, ArgumentError> {
+    let jid = parse_bare_jid(value).map_err(|_| ArgumentError::Subject)?;
+    GrantSubject::new(jid).map_err(|_| ArgumentError::Subject)
+}
+
+fn parse_account_domain(value: &str) -> Result<CanonicalDomain, ArgumentError> {
+    CanonicalDomain::parse_exact(value).map_err(|_| ArgumentError::Domain)
 }
 
 fn parse_git_sha(value: &str) -> Result<String, ArgumentError> {

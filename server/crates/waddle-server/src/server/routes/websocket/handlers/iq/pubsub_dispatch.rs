@@ -81,10 +81,54 @@ pub(super) async fn handle_pubsub_iq(
 
         debug!(?request, "Handling PubSub request via WebSocket");
 
+        // Enrolled Spaces use the host-grant authority. Do not fall
+        // through to the generic PubSub stores for one of these nodes.
+        if target_jid.as_str() == spaces_domain {
+            let enrolled = match enrolled_scope_guarded_node(&request) {
+                Ok(Some(node)) => state.deps.app_state.host_grants.space_enrolled(node).await,
+                Ok(None) => Ok(false),
+                Err(()) => Ok(true),
+            };
+            if enrolled != Ok(false) {
+                let response = match (enrolled, request) {
+                    (
+                        Ok(true),
+                        request @ (PubSubRequest::Publish { .. } | PubSubRequest::Retract { .. }),
+                    ) => {
+                        super::protected_space_bookmarks::write(
+                            iq,
+                            state,
+                            &target_jid,
+                            &user_jid,
+                            authenticated_session,
+                            request,
+                        )
+                        .await
+                    }
+                    _ => build_pubsub_error(iq, PubSubError::Forbidden),
+                };
+                return vec![iq_to_xml(response)];
+            }
+        }
+
         match request {
             PubSubRequest::Publish { node, item, .. } => {
                 if !matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
                     return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                }
+                // A room-bound extension node is written by the room's
+                // current right, not by an affiliation an earlier read left.
+                if super::extension_route_room_access(
+                    state,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    crate::permissions::Permission::SendMessage,
+                )
+                .await
+                    == super::ExtensionRouteAccess::Denied
+                {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
                 }
 
                 if target_jid.to_string() == spaces_domain {
@@ -97,7 +141,10 @@ pub(super) async fn handle_pubsub_iq(
                         item,
                         authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
-                    .await;
+                    .await
+                    .into_iter()
+                    .map(iq_to_xml)
+                    .collect();
                 }
                 if target_jid.to_string() == community_domain {
                     return handle_community_publish(
@@ -470,11 +517,17 @@ pub(super) async fn handle_pubsub_iq(
                         state,
                         muc_domain,
                         spaces_domain,
-                        &node,
-                        &item_id,
+                        super::SpacesRetract {
+                            node: &node,
+                            item_id: &item_id,
+                            notify,
+                        },
                         authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
-                    .await;
+                    .await
+                    .into_iter()
+                    .map(iq_to_xml)
+                    .collect();
                 }
 
                 if target_jid.to_string() == community_domain {
@@ -497,8 +550,30 @@ pub(super) async fn handle_pubsub_iq(
                 if node == waddle_xmpp::xep::xep0402::PEP_NODE
                     && !is_valid_xep0402_bookmark_item_id(&item_id)
                 {
-                    let error = build_pubsub_error(iq, PubSubError::InvalidJid);
-                    return vec![iq_to_xml(error)];
+                    // The store can hold bookmarks under an id that is not
+                    // canonical (`Room@muc.example.com`): earlier releases
+                    // stored ids as written. Such an item is retracted by
+                    // its exact id so its owner can remove it; any other
+                    // non-canonical id is refused.
+                    let item_filter = [item_id.clone()];
+                    match state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .get_items(&target_jid, &node, Some(1), &item_filter)
+                        .await
+                    {
+                        Ok(items) if !items.is_empty() => {}
+                        Ok(_) => {
+                            let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                            return vec![iq_to_xml(error)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub bookmark lookup before retract failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::InternalServerError);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
                 }
 
                 let result = state
@@ -548,11 +623,39 @@ pub(super) async fn handle_pubsub_iq(
                     authenticated_session,
                     request,
                 )
-                .await;
+                .await
+                .into_iter()
+                .map(iq_to_xml)
+                .collect();
             }
         }
     }
     Vec::new()
+}
+
+/// The node a PubSub request on the Spaces service names, when the request
+/// must be refused for the Space node of an enrolled host-grant scope;
+/// `Ok(None)` for a request that is never refused for it, and `Err` for a
+/// request kind this build does not classify, which is refused.
+fn enrolled_scope_guarded_node(request: &PubSubRequest) -> Result<Option<&str>, ()> {
+    Ok(match request {
+        PubSubRequest::Unsupported { .. } => None,
+        PubSubRequest::Publish { node, .. }
+        | PubSubRequest::Retract { node, .. }
+        | PubSubRequest::Items { node, .. }
+        | PubSubRequest::CreateNode { node }
+        | PubSubRequest::ConfigureNode { node }
+        | PubSubRequest::DeleteNode { node }
+        | PubSubRequest::Subscribe { node, .. }
+        | PubSubRequest::Unsubscribe { node, .. }
+        | PubSubRequest::PurgeNode { node }
+        | PubSubRequest::ConfigureNodeSet { node, .. }
+        | PubSubRequest::AffiliationsGet { node }
+        | PubSubRequest::AffiliationsSet { node, .. }
+        | PubSubRequest::OwnerSubscriptionsGet { node }
+        | PubSubRequest::OwnerSubscriptionsSet { node, .. } => Some(node),
+        _ => return Err(()),
+    })
 }
 
 /// The item id of a bot's single-item vCard4 node, as on the vCard4 node
@@ -652,10 +755,11 @@ fn validate_xep0402_bookmark_publish_request(
     Ok(())
 }
 
+/// A XEP-0402 item id must be a room's canonical bare JID with a localpart.
+/// The id is stored and matched as written, so a spelling the `jid` parser
+/// would fold is refused rather than stored as a second key for one room.
 fn is_valid_xep0402_bookmark_item_id(item_id: &str) -> bool {
-    item_id
-        .parse::<BareJid>()
-        .is_ok_and(|jid| jid.node().is_some())
+    waddle_xmpp::xep::xep0402::parse_bookmark_item_id(item_id).is_ok_and(|jid| jid.node().is_some())
 }
 
 fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSubError {
@@ -687,9 +791,9 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
     }
 }
 
-/// Bring a well-known PEP node's stored config into line with the
-/// current `NodeConfig::pep_for_node` defaults BEFORE a publish lands
-/// its item.
+/// Bring a well-known PEP node's stored config into line with
+/// `NodeConfig::reconciled_for_node` BEFORE a publish lands its item:
+/// the current `NodeConfig::pep_for_node` defaults for most nodes.
 ///
 /// Use case: an earlier version of Waddle auto-created the
 /// `urn:xmpp:vcard4` node with `AccessModel::Presence` (the bare
@@ -702,16 +806,24 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// publish lands on a spec-conformant node.
 ///
 /// Avatar nodes are repaired only from the legacy Presence default and
-/// never after the owner configured them (see `NodeConfig::needs_reconcile`).
+/// never after the owner configured them (see `NodeConfig::reconciled_for_node`).
+///
+/// The joined-spaces node is not reset to its defaults: its stored config
+/// is rewritten only when its privacy and durability invariants
+/// (`NodeConfig::normalize_waddle_joined_spaces`) do not hold, and then
+/// with those invariants forced onto it, so a `max_items` the owner chose
+/// within the node's bound survives the publish.
 ///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
 /// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
-/// nodes, DND) — we don't bulk-rewrite arbitrary user node configs here.
+/// nodes, DND, joined-spaces) — we don't bulk-rewrite arbitrary user
+/// node configs here.
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES
     {
         return;
     }
@@ -737,16 +849,36 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             return;
         }
     };
-    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(node, &existing.config) {
+    let Some(reconciled) =
+        waddle_xmpp_core::pubsub::NodeConfig::reconciled_for_node(node, &existing.config)
+    else {
         return;
-    }
-    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
-    if let Err(error) = storage.update_node_config(owner, node, &canonical).await {
+    };
+    if let Err(error) = storage.update_node_config(owner, node, &reconciled).await {
         warn!(
             node,
             error = %error,
-            "Failed to reconcile PEP node config to XEP-defaults on publish; \
+            "Failed to reconcile PEP node config on publish; \
              publish will proceed against the divergent config"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsubscribe_uses_the_enrolled_space_guard() {
+        let request = PubSubRequest::Unsubscribe {
+            node: "engineering".to_owned(),
+            jid: "alice@example.test".parse().expect("fixture JID"),
+            subid: Some("subscription-id".to_owned()),
+        };
+
+        assert_eq!(
+            enrolled_scope_guarded_node(&request),
+            Ok(Some("engineering"))
         );
     }
 }

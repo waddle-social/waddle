@@ -1,6 +1,7 @@
 import { computed, ref } from "vue";
 import { useWaddleDirectory } from "@/waddles/directory";
 import { useWaddleMembers } from "@/waddles/members";
+import { useRemoteCommunities } from "@/waddles/remote-communities";
 import { useDirectMessageConversations } from "@/dms/conversations";
 import { useDirectMessages } from "@/dms/messages";
 import { useChannelMessages } from "@/channels/messages";
@@ -18,7 +19,7 @@ import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation } from "@/router";
-import { jidDomain, jidDomainOrEmpty } from "@/lib/xmpp-client";
+import { bareJidKey, jidDomain, jidDomainOrEmpty } from "@/lib/xmpp-client";
 import { createNotifySettingsStore } from "@/lib/notify-settings";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
@@ -177,7 +178,7 @@ export function useChatAppController() {
     waddles.activeSpaceId,
     waddles.activeChannelId,
     waddles.members,
-    waddles.canManageMembers,
+    waddles.canManageCurrentMembers,
     ui.normalizeError,
     ui.actionError,
     ui.clearActionError,
@@ -249,6 +250,45 @@ export function useChatAppController() {
     activeExtensionRouteKey,
     cancelPendingRoute: () => routeSyncHandle?.cancelPendingRoute(),
     updateUrl,
+  });
+
+  const remoteCommunities = useRemoteCommunities({
+    xmppClient,
+    session,
+    home: computed(() => {
+      const jid = session.value?.jid;
+      if (!jid) return null;
+      return {
+        accountDomain: jidDomain(jid),
+        // Only a discovered MUC service tells home rooms from remote ones.
+        mucService: waddles.homeMucService.value,
+        spacesService: waddles.spacesServiceJid.value,
+        components: waddles.homeComponents.value,
+      };
+    }),
+    federation: waddles.federationAvailable,
+    reloadRooms: () => {
+      const activeChannelId = waddles.activeChannelId.value;
+      return activeChannelId
+        ? waddles.loadStructure(activeChannelId)
+        : waddles.loadStructure(null, { noChannelSelect: true });
+    },
+    openRoom: async (roomJid) => {
+      // A room opens from the room list, which lists it once its bookmark
+      // is saved; until then the dialog stays open with its note.
+      const listed = waddles.channels.value.some((channel) =>
+        !!channel.jid && bareJidKey(channel.jid) === bareJidKey(roomJid),
+      );
+      if (!listed) return false;
+      ui.showRemoteCommunities.value = false;
+      await roomSync.selectChannelByRoomJid(roomJid);
+      return true;
+    },
+    closeRoom: (roomJid) => {
+      // Showing a room joins it, so a room the user left stops being shown.
+      const active = roomSync.activeChannelRoomJid.value;
+      if (active && bareJidKey(active) === bareJidKey(roomJid)) pageNavigation.openRooms();
+    },
   });
 
   const extension = useExtensionRoutes({
@@ -456,6 +496,7 @@ export function useChatAppController() {
     connectionStore,
     ui,
     waddles,
+    remoteCommunities,
     messaging,
     dmConversations,
     channelUnread,

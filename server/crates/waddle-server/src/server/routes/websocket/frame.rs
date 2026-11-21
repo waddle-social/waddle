@@ -3,8 +3,8 @@ use super::frame_backstop::{
     StanzaTimeout,
 };
 use super::parse_errors::{
-    is_sasl2_parse_failure, is_sasl2_response_parse_failure, is_sasl_parse_failure,
-    parse_error_responses,
+    is_refused_client_stanza, is_sasl2_parse_failure, is_sasl2_response_parse_failure,
+    is_sasl_parse_failure, parse_error_responses,
 };
 use super::resource_binding::handle_resource_binding;
 use super::sasl::{
@@ -27,6 +27,9 @@ use crate::ingress::ExecutionReport;
 use crate::ingress::ImmediateSink;
 use crate::ingress::IngressDecisionClass;
 use crate::ingress::IngressPrincipal;
+use crate::permissions::host_grant::{
+    LocalSpaceReplyGrant, SpaceReplyAuthority, UnmanagedSpaceReplyGuard,
+};
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
 use crate::server::routes::interpret::effects::{ClientRoomOrigin, IngressPlan};
@@ -38,6 +41,8 @@ use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;
+use std::sync::Arc;
+use waddle_xmpp::stream_management::persistence::{SmPersistenceError, SmReplayPayload};
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stream_error::{DefinedCondition, StreamError};
 
@@ -73,6 +78,8 @@ pub(crate) enum ResponseFrame {
     SmEnabled(Element),
     /// Typed transport-only stream error emitted by the websocket adapter.
     StreamError(StreamErrorFrame),
+    /// An IQ result that needs the Space fence at the physical socket.
+    ProtectedSpace(Box<ProtectedSpaceFrame>),
     /// Origin of this exact retained frame, independent of completion receipts.
     Provenanced {
         frame: Box<ResponseFrame>,
@@ -85,12 +92,62 @@ pub(crate) enum ResponseFrame {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProtectedSpaceFrame {
+    pub(super) payload: SmReplayPayload,
+    pub(super) grant: SpaceReplyAuthority,
+}
+
+impl ProtectedSpaceFrame {
+    pub(super) fn initial_deletion(&self) -> Option<&LocalSpaceReplyGrant> {
+        match &self.grant {
+            SpaceReplyAuthority::Managed(grant) if grant.requires_deletion_staging() => Some(grant),
+            _ => None,
+        }
+    }
+}
+
 impl ResponseFrame {
+    pub(super) fn protected_space_frame(
+        xml: String,
+        grant: LocalSpaceReplyGrant,
+    ) -> Result<Self, SmPersistenceError> {
+        let payload =
+            SmReplayPayload::from_protected_space_reply(xml, grant.replay_identity().clone())?;
+        Ok(Self::ProtectedSpace(Box::new(ProtectedSpaceFrame {
+            payload,
+            grant: SpaceReplyAuthority::Managed(Arc::new(grant)),
+        })))
+    }
+
+    pub(super) fn unmanaged_space_frame(
+        xml: String,
+        guard: UnmanagedSpaceReplyGuard,
+    ) -> Result<Self, SmPersistenceError> {
+        Ok(Self::ProtectedSpace(Box::new(ProtectedSpaceFrame {
+            payload: SmReplayPayload::from_wire(xml)?,
+            grant: SpaceReplyAuthority::Unmanaged(Arc::new(guard)),
+        })))
+    }
+
+    pub(super) fn protected_space_reply(&self) -> Option<&ProtectedSpaceFrame> {
+        match self {
+            Self::ProtectedSpace(reply) => Some(reply),
+            Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
+                frame.protected_space_reply()
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn into_serialized_xml(self) -> String {
         match self {
             Self::Stanza(stanza) => stanza_to_xml(&stanza),
             Self::Element(element) | Self::SmEnabled(element) => element_to_xml(element),
             Self::StreamError(error) => error.into_serialized_xml(),
+            Self::ProtectedSpace(_) => {
+                unreachable!("protected Space replies use the fenced batch writer")
+            }
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
                 frame.into_serialized_xml()
             }
@@ -113,7 +170,7 @@ impl ResponseFrame {
             Self::Element(element) => {
                 element.name() == "close" && element.ns() == "urn:ietf:params:xml:ns:xmpp-framing"
             }
-            Self::SmEnabled(_) | Self::StreamError(_) => false,
+            Self::SmEnabled(_) | Self::StreamError(_) | Self::ProtectedSpace(_) => false,
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
                 frame.is_websocket_stream_close()
             }
@@ -140,7 +197,10 @@ impl ResponseFrame {
         match self {
             Self::Stanza(stanza) => Some(stanza),
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => frame.stanza(),
-            Self::Element(_) | Self::SmEnabled(_) | Self::StreamError(_) => None,
+            Self::Element(_)
+            | Self::SmEnabled(_)
+            | Self::StreamError(_)
+            | Self::ProtectedSpace(_) => None,
         }
     }
 
@@ -451,6 +511,10 @@ enum MalformedInboundInput {
     Protocol {
         sasl: MalformedSaslInput,
         responses: Option<Vec<ResponseFrame>>,
+        /// The frame is a stanza that parsing refused (see
+        /// [`is_refused_client_stanza`]); it counts toward the XEP-0198
+        /// handled count like any other stanza the server processed.
+        stanza: bool,
     },
 }
 
@@ -504,8 +568,13 @@ impl ClassifiedInboundFrame {
                             let responses = parse_error_responses(frame, &error).map(|responses| {
                                 responses.into_iter().map(ResponseFrame::from).collect()
                             });
+                            let stanza = is_refused_client_stanza(frame, &error);
                             warn!(error = %error, len = frame.len(), "Classified malformed XMPP frame");
-                            MalformedInboundInput::Protocol { sasl, responses }
+                            MalformedInboundInput::Protocol {
+                                sasl,
+                                responses,
+                                stanza,
+                            }
                         }
                     };
                     ClassifiedInboundInput::Malformed(malformed)
@@ -717,7 +786,11 @@ async fn handle_xmpp_frame_impl(
             conn.begin_server_stream_open_response();
             return stream_open_error_response(domain, None, condition);
         }
-        ClassifiedInboundInput::Malformed(MalformedInboundInput::Protocol { sasl, responses }) => {
+        ClassifiedInboundInput::Malformed(MalformedInboundInput::Protocol {
+            sasl,
+            responses,
+            stanza,
+        }) => {
             if sasl2_authentication_pending(phase) {
                 if sasl == MalformedSaslInput::Sasl2Response {
                     clear_sasl2_authentication_pending(phase, AuthFailure::ScramMalformed);
@@ -731,6 +804,15 @@ async fn handle_xmpp_frame_impl(
                 *phase = ConnectionPhase::closing(None);
                 *authenticated_session = None;
                 return vec![websocket_stream_close_element()].into();
+            }
+            if stanza {
+                count_refused_stanza(
+                    state,
+                    phase,
+                    registry_owner.as_ref(),
+                    sm_state,
+                    sm_inbound_completion,
+                );
             }
             if let Some(responses) = responses {
                 if phase.scram_pending_username().is_some() && sasl != MalformedSaslInput::None {
@@ -1190,7 +1272,21 @@ async fn handle_xmpp_frame_impl(
             // an IQ get/set gets a conformant resource-constraint/wait error and
             // message/presence are dropped (logged + metered).
             let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
-            if let Stanza::Message(message) = stanza.as_ref() {
+            // RFC 6120 §10.4: a message for a domain this deployment does
+            // not serve belongs to the remote route, never to the ingress
+            // authority's local delivery.
+            let unserved_message = match (stanza.as_ref(), phase.bound_jid()) {
+                (Stanza::Message(message), Some(sender)) => {
+                    handlers::unserved_route::unserved_destination(
+                        message.to.as_ref(),
+                        domain,
+                        state,
+                    )
+                    .map(|destination| (destination, sender.clone()))
+                }
+                _ => None,
+            };
+            if let (Stanza::Message(message), None) = (stanza.as_ref(), &unserved_message) {
                 if let Some(principal) = authenticated_session
                     .as_ref()
                     .and_then(|session| session.authenticated_principal_ref().ok())
@@ -1254,17 +1350,29 @@ async fn handle_xmpp_frame_impl(
                         .into()
                     }
 
-                    Stanza::Message(message) => handlers::message::handle_message(
-                        message,
-                        state,
-                        phase,
-                        state_machine.as_mut(),
-                        authenticated_session.as_ref(),
-                        ordered_relay_origin.clone(),
-                        None,
-                    )
-                    .await
-                    .into(),
+                    Stanza::Message(message) => match unserved_message {
+                        Some((destination, sender)) => {
+                            handlers::unserved_route::route_unserved_message(
+                                message,
+                                destination,
+                                &sender,
+                                state,
+                            )
+                            .await
+                            .into()
+                        }
+                        None => handlers::message::handle_message(
+                            message,
+                            state,
+                            phase,
+                            state_machine.as_mut(),
+                            authenticated_session.as_ref(),
+                            ordered_relay_origin.clone(),
+                            None,
+                        )
+                        .await
+                        .into(),
+                    },
                 }
             });
             let (dispatch_result, authority_revoked_after_start) = match admission {
@@ -1302,6 +1410,47 @@ async fn handle_xmpp_frame_impl(
             responses
         }
     }
+}
+
+/// Count a stanza that parsing refused as handled (XEP-0198 §4).
+///
+/// "Handled" means the server has accepted responsibility for the stanza,
+/// which includes processing it directly. A stanza refused at parsing has
+/// been processed to completion: it was answered with a stanza error where
+/// RFC 6120 allows one, or dropped where it forbids one, and resending it
+/// after resumption would be refused again. The client counts every stanza
+/// it sends, so leaving one out would also shift every later
+/// acknowledgement onto the wrong stanza. It completes in order behind any
+/// stanza still being dispatched.
+///
+/// Only a bound stream with stream management enabled counts, and a stream
+/// that lost its registry slot to a replacement counts nothing more, as for
+/// parsed stanzas.
+fn count_refused_stanza(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
+    sm_state: &mut waddle_xmpp::stream_management::StreamManagementState,
+    completion: &mut SmInboundCompletionTracker,
+) {
+    if !sm_state.enabled {
+        return;
+    }
+    let Some(bound) = phase.bound_jid() else {
+        return;
+    };
+    if let Some(owner) = registry_owner {
+        if !state
+            .deps
+            .protocol
+            .connection_registry
+            .is_owned_by(bound, owner)
+        {
+            return;
+        }
+    }
+    let sequence = completion.reserve(sm_state);
+    completion.complete(sequence, sm_state);
 }
 
 pub(super) fn settle_inbound_dispatch(

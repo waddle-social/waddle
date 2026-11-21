@@ -177,7 +177,7 @@ pub(super) async fn send_current_roster_push_to_resources(
     Ok(())
 }
 
-async fn load_existing_roster_item(
+pub(in crate::server::routes::websocket::handlers::presence) async fn load_existing_roster_item(
     storage: &DatabaseRosterStorage,
     user: &BareJid,
     contact: &BareJid,
@@ -234,7 +234,9 @@ fn roster_row_to_item(row: RosterItemRow) -> Result<RosterItem, RosterConvertErr
     })
 }
 
-fn roster_item_to_row(item: &RosterItem) -> RosterItemRow {
+pub(in crate::server::routes::websocket::handlers::presence) fn roster_item_to_row(
+    item: &RosterItem,
+) -> RosterItemRow {
     RosterItemRow {
         contact_jid: item.jid.to_string(),
         name: item.name.clone(),

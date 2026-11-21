@@ -31,6 +31,8 @@ pub use shared_correctness::{
     SharedPendingResolverFixture,
 };
 #[cfg(feature = "test-support")]
+pub mod spicedb_wire;
+#[cfg(feature = "test-support")]
 pub mod supervised_io;
 
 use crate::db::DatabasePool;
@@ -213,9 +215,64 @@ pub use crate::server::routes::websocket::muc_invites::{
     claim_invite, list_invites, record_invite_at, InviteStorageError, OutstandingInvite,
     RecordOutcome,
 };
+/// Hold an ingress acceptance transaction that the host-grant authority
+/// admitted, with the scope's guard held, until `proceed` is notified.
+/// `entered` is notified when the transaction reaches the gate.
+#[cfg(feature = "test-support")]
+pub async fn with_host_grant_admission_gate<F: std::future::Future>(
+    entered: Arc<tokio::sync::Notify>,
+    proceed: Arc<tokio::sync::Notify>,
+    future: F,
+) -> F::Output {
+    crate::ingress::commit::commit_hooks::with_host_grant_admission_gate(entered, proceed, future)
+        .await
+}
+
+/// Activate the operation `marker` names as a verified projection would,
+/// without a projection behind it. Activation otherwise accepts only the
+/// witness that verification of a SpiceDB projection produces; suites that
+/// exercise the canonical store and SQL admission without SpiceDB, and
+/// cases that replay a delayed activation, use this instead.
+///
+/// # Errors
+/// Returns the store's refusal or failure, as `HostGrantStore::activate`.
+#[cfg(feature = "test-support")]
+pub async fn activate_host_grant_marker(
+    store: &crate::permissions::host_grant::HostGrantStore,
+    marker: &crate::permissions::host_grant::ProjectionMarker,
+) -> Result<
+    crate::permissions::host_grant::Activation,
+    crate::permissions::host_grant::HostGrantError,
+> {
+    store
+        .activate(
+            &crate::permissions::host_grant::VerifiedProjection::without_projection_for_test(
+                marker.clone(),
+            ),
+        )
+        .await
+}
+
+/// What `/readyz` answers for a replica whose database is healthy and whose
+/// lineage is attested, given its host-grant gate: the status code and the
+/// body, as the readiness handler builds them.
+#[cfg(feature = "test-support")]
+pub fn host_grant_readiness_response(
+    gate: &crate::permissions::host_grant::HostGrantAttachmentGate,
+) -> (u16, serde_json::Value) {
+    let (status, body) = crate::server::attested_readiness_response(Some(gate));
+    (status.as_u16(), body.0)
+}
+
+/// The production source a room actor hydrates its durable audience from:
+/// the channel and parent Space membership the permission store holds.
+pub use crate::server::durable_membership::PermissionDurableMembershipSource;
 /// The production `/ws` RFC 7395 router, so suites can serve a test state
 /// over a real loopback WebSocket and drive the live connection loop.
 pub use crate::server::routes::websocket::router;
+pub use crate::server::routes::websocket::s2s_accounts::WebSocketLocalAccounts;
+pub use crate::server::routes::websocket::s2s_delivery::WebSocketLocalDelivery;
+pub use crate::server::routes::websocket::s2s_rooms::RoomCarrier;
 pub use crate::server::routes::websocket::test_bindings::sync_registry_bindings;
 pub use crate::server::routes::websocket::test_state::{
     create_test_session, register_test_connection, seed_local_account,
@@ -233,6 +290,438 @@ pub use crate::server::routes::websocket::WebSocketState;
 pub async fn websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
+        TestStateOverrides::default(),
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// [`websocket_state`] whose stream-management session registry keeps its
+/// sessions and their ingress custody in `persistence`, which the caller
+/// keeps to seed and read them.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_sm_persistence(
+    persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            sm_session_registry: Some(Arc::new(
+                waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+                    .with_persistence(persistence),
+            )),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// Run one pass of the recovery of ingress custody whose stream-management
+/// session is gone, as the session janitor does: a payload the store takes
+/// is handed to the recipient's offline store. Returns whether every
+/// candidate was settled.
+#[cfg(feature = "test-support")]
+pub async fn run_ingress_custody_sweep(state: &WebSocketState) -> bool {
+    let mut cursor = None;
+    crate::server::session_janitors::run_ingress_custody_sweep(state, &mut cursor).await
+}
+
+/// The default in-memory WebSocket state of a replica that runs the S2S
+/// snapshot `config`, as startup records it when S2S is enabled: decisions
+/// about remote principals read its admission policy and trusted-home list.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_running_s2s(
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            s2s_federation: Some(crate::permissions::host_grant::FederationSnapshot::of(
+                config,
+            )),
+            ..Default::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// Have `router` host the rooms of `state` for remote occupants, with their
+/// seats in `seats`, as startup does for a replica with S2S enabled: the
+/// router hands what remote principals ask of the MUC service to the
+/// state's rooms, a room's stanza for a remote occupant leaves through the
+/// router, and decisions that name a seated remote occupant read the
+/// evidence its seat was admitted under.
+#[cfg(feature = "test-support")]
+pub fn host_rooms_for_remote_occupants(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+    seats: crate::db::Database,
+) {
+    crate::server::routes::websocket::s2s_rooms::host_rooms(state, router, seats);
+}
+
+/// `actor` deciding issuance of the privileged relations as startup makes a
+/// replica's permission actor decide it, for the served domain of `xmpp`
+/// and the trusted homes of `s2s` (ADR-0020 D8). It is the function startup
+/// calls, so a case that writes through the result shows what a serving
+/// replica refuses.
+#[cfg(feature = "test-support")]
+pub fn permission_actor_as_startup_builds(
+    actor: crate::permissions::PermissionActor,
+    xmpp: &crate::server::XmppConfig,
+    s2s: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::PermissionActor {
+    crate::server::with_replica_privileged_issuance(actor, xmpp, s2s)
+}
+
+/// Wait until the Spaces host attached to `router` has decided every
+/// publication it took, so that a case reads what left for subscribers at
+/// other servers after its last publication.
+#[cfg(feature = "test-support")]
+pub async fn spaces_publications_settled(router: &crate::s2s::route::S2sRouter) {
+    router.spaces_publications_settled().await;
+}
+
+/// Process one publication through the Spaces host against a live test router.
+#[cfg(feature = "test-support")]
+pub async fn notify_space_publication(
+    state: &WebSocketState,
+    router: &crate::s2s::route::S2sRouter,
+    publication: &crate::s2s::route::SpacePublication,
+) -> usize {
+    crate::server::routes::websocket::s2s_spaces::notify_remote_subscribers(
+        state,
+        router,
+        publication,
+    )
+    .await
+}
+
+/// Have admin commands run against the application state of `state`
+/// notify the subscribers of what they take out of a node, as startup
+/// binds it once the WebSocket state exists. The state is held weakly, so
+/// call it once nothing needs the state unshared any more.
+#[cfg(feature = "test-support")]
+pub fn bind_admin_notifications(state: &Arc<WebSocketState>) {
+    state.deps.app_state.bind_notifications(state);
+}
+
+/// Hold the next subscription of the remote `account` to the Space `node`
+/// just after its record committed and before its ban is read again, so a
+/// suite can write a ban there as a concurrent request would.
+#[cfg(feature = "test-support")]
+pub fn hold_space_subscription_after_record(
+    node: &str,
+    account: jid::BareJid,
+) -> Arc<SpaceSubscriptionGate> {
+    crate::server::routes::websocket::s2s_spaces::subscription_gates::hold_after_record(
+        node, account,
+    )
+}
+
+#[cfg(feature = "test-support")]
+pub use crate::server::routes::websocket::s2s_spaces::subscription_gates::SubscriptionGate as SpaceSubscriptionGate;
+
+/// Have `router` serve the Spaces of `state` to remote principals, as
+/// startup does for a replica with S2S enabled: the router hands what
+/// remote principals ask of the Spaces PubSub service to the state's
+/// Spaces, and takes their event notifications for subscribers at other
+/// servers. The state's remote route must be `router` for those
+/// notifications to leave.
+#[cfg(feature = "test-support")]
+pub fn host_spaces_for_remote_principals(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+) {
+    crate::server::routes::websocket::s2s_spaces::host_spaces(state, router);
+}
+
+/// Start the production remote deletion worker on an S2S test router.
+#[cfg(feature = "test-support")]
+pub fn spawn_remote_space_deletion_worker(
+    state: &Arc<WebSocketState>,
+    router: crate::s2s::route::S2sRouter,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    crate::server::space_deletion_delivery::spawn_remote_for_test(state, router, stop);
+}
+
+/// [`host_rooms_for_remote_occupants`] for a replica whose requests for
+/// rooms another replica holds are carried by `carrier`, in place of the
+/// cluster's room claims and relay.
+#[cfg(feature = "test-support")]
+pub fn host_rooms_for_remote_occupants_carrying(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+    seats: crate::db::Database,
+    carrier: Arc<dyn RoomCarrier>,
+) {
+    crate::server::routes::websocket::s2s_rooms::host_rooms_carrying(
+        state,
+        router,
+        seats,
+        Some(carrier),
+    );
+}
+
+/// The owner side of a remote principal's room request carried over the
+/// cluster relay (`waddle.clustering.relay.remote_room_request.v1`), as
+/// the relay's handler runs it on the replica that receives the message.
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub async fn relayed_remote_room_request(
+    state: &WebSocketState,
+    message: crate::clustering::relay::RelayRemoteRoomRequest,
+) -> crate::clustering::relay::RelayRemoteRoomRequestReply {
+    crate::server::routes::websocket::relayed_remote_room_request(state, message).await
+}
+
+/// Whether a failed ask of a room's owner over the cluster relay says that
+/// the owner did not answer or could not be reached, so that the router
+/// answers the room's requests without asking it for a while, rather than
+/// that it answered without taking the request.
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub fn room_owner_silent(error: &crate::clustering::relay::RelayAskError) -> bool {
+    crate::server::routes::websocket::owner_silent(error)
+}
+
+/// The occupants told that a remote joiner left when its seat, given on a
+/// standing its stream does not honour, was undone: of those the room
+/// seats now (`seated`), every one but the joiner, those the room answered
+/// the joiner with (`present`) and those that hold the joiner's nickname
+/// now (`nick_holders`).
+#[cfg(feature = "test-support")]
+pub fn undone_join_recipients(
+    seated: Vec<jid::FullJid>,
+    present: &std::collections::HashSet<jid::FullJid>,
+    joiner: &jid::FullJid,
+    nick_holders: &[jid::FullJid],
+) -> Vec<jid::FullJid> {
+    crate::server::routes::websocket::handlers::presence::undone_join_recipients(
+        seated,
+        present,
+        joiner,
+        nick_holders,
+    )
+}
+
+/// The most entries each table of a replica's XEP-0353 call state (its
+/// pending offers and its active calls) holds before its oldest are pruned.
+#[cfg(feature = "test-support")]
+pub fn dm_call_state_capacity() -> usize {
+    crate::server::routes::interpret::dm_call_state_capacity()
+}
+
+/// Record in `state`'s call state an active XEP-0353 call under `key`,
+/// which `initiator` proposed and the other peer accepted, whose call
+/// thread the peers in `projected` have projected into their inboxes: the
+/// state a replica holds once a `proceed` was accepted.
+#[cfg(feature = "test-support")]
+pub fn seed_active_dm_call(
+    state: &WebSocketState,
+    key: waddle_xmpp::ingress::DmCallThreadKey,
+    initiator: jid::BareJid,
+    projected: &[jid::BareJid],
+) {
+    let protocol = &state.deps.protocol;
+    for owner in projected {
+        protocol
+            .dm_call_thread_projections
+            .insert((owner.clone(), key.clone()));
+    }
+    protocol.dm_call_threads.insert(
+        key.clone(),
+        crate::server::routes::websocket::ActiveCallThread {
+            anchor_origin_id: String::new(),
+            initiator,
+            media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            started: chrono::Utc::now(),
+            thread_id: key.sid.0,
+        },
+    );
+}
+
+/// Make the account `localpart` of the state's domain an owner of the
+/// deployment in the legacy permission store: the standing that lets an
+/// account create a room no channel backs.
+///
+/// # Panics
+/// Panics if the relationship cannot be written.
+#[cfg(feature = "test-support")]
+pub async fn make_deployment_owner(state: &WebSocketState, localpart: &str) {
+    use crate::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
+    let account = [localpart, "@", state.deps.auth_state.xmpp_domain.as_str()].concat();
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(
+                    ObjectType::Server,
+                    crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID,
+                ),
+                Relation::new("owner"),
+                Subject::user(&account),
+            ),
+        })
+        .await
+        .expect("deployment owner relationship");
+}
+
+/// Run the startup reconciliation of local accounts against `state`'s
+/// database, with the domains `state` serves, as a node does before it
+/// serves: account keys are backfilled and roster items naming nobody are
+/// pruned, while contacts at domains the deployment does not serve stay.
+///
+/// # Errors
+/// Returns the reconciliation's error as text.
+pub async fn reconcile_local_accounts(state: &WebSocketState) -> Result<(), String> {
+    let served = state
+        .deps
+        .service_domains
+        .served_domains(state.deps.auth_state.xmpp_domain.as_str());
+    crate::auth::directory::reconcile_local_accounts(
+        state.deps.app_state.db_pool.global_actor(),
+        served.as_ref(),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Every resource the account coordinator of `state` still binds for
+/// `account`, with no presence filter: what the routes read as the
+/// account's connected resources. A connection that ended is listed until
+/// the coordinator has unbound it.
+pub async fn account_resources(
+    state: &WebSocketState,
+    account: &jid::BareJid,
+) -> Vec<jid::FullJid> {
+    crate::server::routes::websocket::handlers::account_reads::resources(state, account).await
+}
+
+/// The default in-memory WebSocket state whose app state runs the S2S
+/// snapshot of `config`, as a replica with S2S enabled does
+/// (`AppState::s2s_federation`), so that the account side of S2S traffic
+/// decides admission, and the client paths treat remote contacts, as in
+/// production.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_federation(
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::try_new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
+            .await
+            .expect("db pool"),
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    app_state.s2s_federation = Some(crate::permissions::host_grant::FederationSnapshot::of(
+        config,
+    ));
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// [`websocket_state_with_federation`] whose PubSub service is the
+/// database-backed store a deployment runs (`DatabasePubSubStorage`, on an
+/// in-memory database of its own) rather than the in-memory one the
+/// default test state uses: it keeps one subscription for an account,
+/// under its bare JID, whichever of its addresses subscribes, as the
+/// Spaces host relies on.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_federation_and_database_pubsub(
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::try_new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
+            .await
+            .expect("db pool"),
+    );
+    let pubsub = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("pubsub storage"),
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    app_state.s2s_federation = Some(crate::permissions::host_grant::FederationSnapshot::of(
+        config,
+    ));
+    app_state.pubsub_storage = pubsub.clone();
+    // The Spaces service the state's service domains name, which admin
+    // commands address as startup has them address it.
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("the Spaces service JID");
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            database_pubsub_storage: Some(pubsub),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// The default in-memory WebSocket state whose app state names the Spaces
+/// service the test state's Spaces handlers serve (`spaces.example.com`),
+/// so that the code reading the app state's service (a join's Space parent
+/// repair) reads the nodes those handlers write.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_test_spaces_service() -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::try_new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
+            .await
+            .expect("db pool"),
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("test Spaces service parses as BareJid");
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// The default in-memory WebSocket state with `extension_manager` in place
+/// of the empty one, for suites that serve extension routes.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_extension_manager(
+    extension_manager: Arc<waddle_extensions::ExtensionManager>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        extension_manager,
         TestStateOverrides::default(),
         || std::future::ready(None),
     )
@@ -958,6 +1447,390 @@ pub async fn websocket_state_with_ingress(
     ingress: Arc<IngressAuthority>,
 ) -> Arc<WebSocketState> {
     build_websocket_state_with_ingress(db_pool, move || std::future::ready(Some(ingress))).await
+}
+
+/// Build a WebSocket state over a caller-owned PostgreSQL pool and ingress
+/// authority whose authorization is wired as a PostgreSQL deployment's: the
+/// permission actor is fenced by the global database's host-grant store,
+/// the actor and the state's host-grant gate share one enrolled set, and the
+/// WebSocket routes use the app state's room registry, whose room actors
+/// take the members-only binding of managed rooms. The host-grant gate is
+/// bound to the ingress authority's attachment gate, so a suite attaches the
+/// surfaces and acceptance together (through `attach_host_grants`, the
+/// gate's verifier, or `host_grants.attach`, which reaches the same gate),
+/// and a re-verification of that gate closes them together. The app state
+/// names the WebSocket test state's MUC and Spaces services, so the admin
+/// commands a suite registers act on the rooms and Spaces its clients see.
+///
+/// The enrolled set is loaded in the background; a suite that enrolls a
+/// scope after building the state calls `host_grants.enrolled().refresh()`
+/// instead of waiting for the next refresh interval.
+///
+/// # Panics
+/// Panics if the pool is not PostgreSQL, or if fixture construction fails.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_host_grant_fence(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+) -> Arc<WebSocketState> {
+    host_grant_fence_state(db_pool, ingress, None, None).await
+}
+
+/// [`websocket_state_with_host_grant_fence`] for a replica that runs the
+/// S2S snapshot `config`, as startup records it when S2S is enabled.
+///
+/// # Panics
+/// Panics if the pool is not PostgreSQL, or if fixture construction fails.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_host_grant_fence_running_s2s(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+    config: &crate::s2s::config::S2sConfig,
+) -> Arc<WebSocketState> {
+    host_grant_fence_state(
+        db_pool,
+        ingress,
+        Some(crate::permissions::host_grant::FederationSnapshot::of(
+            config,
+        )),
+        None,
+    )
+    .await
+}
+
+/// A federating test replica using the supplied permission backend under
+/// the same canonical scope guard as its ingress and room registry.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_host_grant_fence_and_backend(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+    config: &crate::s2s::config::S2sConfig,
+    backend: crate::permissions::PermissionActor,
+) -> Arc<WebSocketState> {
+    host_grant_fence_state(
+        db_pool,
+        ingress,
+        Some(crate::permissions::host_grant::FederationSnapshot::of(
+            config,
+        )),
+        Some(backend),
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+async fn host_grant_fence_state(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
+    s2s_federation: Option<crate::permissions::host_grant::FederationSnapshot>,
+    permission_backend: Option<crate::permissions::PermissionActor>,
+) -> Arc<WebSocketState> {
+    use crate::permissions::host_grant::{EnrolledScopes, HostGrantGate, HostGrantStore};
+    use kameo::actor::Spawn;
+    let database = db_pool.global().clone();
+    let store =
+        HostGrantStore::open(database.clone()).expect("the host-grant fence needs PostgreSQL");
+    let enrolled = EnrolledScopes::watch(store.clone());
+    let permission_actor = crate::permissions::PermissionActor::spawn(
+        permission_backend
+            .unwrap_or_else(|| {
+                crate::permissions::PermissionActor::new_for_tests(Arc::new(database.clone()))
+            })
+            .with_host_grant_authority(store.clone(), enrolled.clone()),
+    );
+    let host_grants = HostGrantGate::with_enrolled_scopes(store, enrolled);
+    // The surfaces decide managed rooms with the attachment the ingress
+    // authority's attachment gate holds, the one acceptance uses, as a
+    // replica's startup binds them.
+    assert!(
+        host_grants.bind_attachment(ingress.host_grant_gate()),
+        "a fresh host-grant gate binds the ingress authority's attachment gate"
+    );
+    let mut app_state = crate::server::AppState::new(Arc::clone(&db_pool));
+    // The admin commands read the app state's services; they are the
+    // WebSocket test state's own.
+    app_state.muc_domain = "muc.example.com"
+        .parse()
+        .expect("test MUC domain parses as DomainPart");
+    app_state.spaces_jid = "spaces.example.com"
+        .parse()
+        .expect("test Spaces service parses as BareJid");
+    let membership: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> = Arc::new(
+        crate::server::durable_membership::PermissionDurableMembershipSource::new(
+            permission_actor.clone(),
+        )
+        .with_host_grants(host_grants.clone()),
+    );
+    app_state.room_registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
+        waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            crate::config::test_occupant_id_secret(),
+        )
+        .with_server_hats(app_state.server_hats.clone())
+        .with_membership_source(membership),
+    );
+    app_state.permission_actor = permission_actor;
+    app_state.host_grants = host_grants;
+    app_state.s2s_federation = s2s_federation;
+    let pubsub = Arc::new(
+        crate::pubsub::DatabasePubSubStorage::open(Some(database.database_url()))
+            .await
+            .expect("PubSub storage in the host-grant database"),
+    );
+    app_state.pubsub_storage = pubsub.clone();
+    let pending_delivery_storage = Arc::new(
+        DatabasePendingDeliveryStorage::from_database(
+            database.clone(),
+            waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+        )
+        .await
+        .expect("database-backed pending delivery test storage"),
+    );
+    let notification_settings_projection =
+        Arc::new(NotificationSettingsProjectionStore::new(database.clone()));
+    NotificationOutboxStore::try_new(database)
+        .await
+        .expect("notification outbox test schema");
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            app_state: Some(Arc::new(app_state)),
+            database_pubsub_storage: Some(pubsub),
+            pending_delivery_storage: Some(pending_delivery_storage),
+            notification_settings_projection: Some(notification_settings_projection),
+            share_app_room_registry: true,
+            ..Default::default()
+        },
+        move || std::future::ready(Some(ingress)),
+    )
+    .await
+}
+
+/// Broadcast a room's own message (a system message from the room's bare
+/// JID) the way the call-thread and pin surfaces do: archived, then routed
+/// to the room's seated occupants that may receive it. `Some` with the
+/// assigned stanza ID when it was archived.
+#[cfg(feature = "test-support")]
+pub async fn broadcast_room_system_message(
+    state: &WebSocketState,
+    room: jid::BareJid,
+    message: xmpp_parsers::message::Message,
+) -> Option<String> {
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    crate::server::routes::interpret::broadcast_room_system_message(&deps, room, Box::new(message))
+        .await
+}
+
+/// Sweep one managed room now, as the revocation fence's sweep does when
+/// this replica installs a new generation of the room's scope: occupants the
+/// grants no longer admit are removed and affiliations the room actor
+/// mirrors above the recorded ones are lowered. `true` when the room is in
+/// line with its grants or this state holds no actor for it.
+#[cfg(feature = "test-support")]
+pub async fn sweep_host_grant_room(state: &WebSocketState, room: &jid::BareJid) -> bool {
+    crate::server::host_grant_revocation::sweep_room_for_test(state, room).await
+}
+
+/// Hold the configuration lock of `room` in this process until the permit
+/// is dropped, as an administration request of the room holds it from
+/// before it records a change until the room actor has applied it.
+#[cfg(feature = "test-support")]
+pub async fn hold_room_config_lock(room: &jid::BareJid) -> tokio::sync::OwnedSemaphorePermit {
+    crate::admin::channels::acquire_room_config_lock(room).await
+}
+
+/// Whether `requester` may still read `room`, decided again after a
+/// protected read: `None` for a room no enrolled host-grant scope manages.
+#[cfg(feature = "test-support")]
+pub async fn host_grant_read_still_admitted(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    requester: Option<&jid::BareJid>,
+) -> Option<bool> {
+    crate::server::routes::websocket::handlers::presence::host_grant_read_still_admitted(
+        state, room, requester,
+    )
+    .await
+}
+
+/// Record one affiliation change of the managed room `room` as an XEP-0045
+/// administration request does, with the store's commit ending as `fault`
+/// says, and answer with the request's reply: `Ok` when the change is
+/// recorded, otherwise the stanza error's defined condition.
+///
+/// # Panics
+/// Panics if no enrolled scope manages `room` on this state.
+#[cfg(feature = "test-support")]
+pub async fn record_room_affiliation_under_commit_fault(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    initiator: &jid::BareJid,
+    target: &jid::BareJid,
+    affiliation: waddle_xmpp::Affiliation,
+    fault: crate::permissions::host_grant::HostGrantCommitFault,
+) -> Result<(), xmpp_parsers::stanza_error::DefinedCondition> {
+    use crate::permissions::host_grant::{with_host_grant_commit_fault, RoomBinding, RoomGate};
+    let RoomGate::Managed(grants) = state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room))
+        .await
+    else {
+        panic!("the room is not a managed room of this state");
+    };
+    with_host_grant_commit_fault(
+        fault,
+        crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::record_host_grant_affiliation(
+            state,
+            &grants,
+            initiator,
+            &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+            target,
+            affiliation,
+        ),
+    )
+    .await
+    .map_err(|refusal| refusal.error.defined_condition)
+}
+
+/// Record one affiliation change of a managed room as an XEP-0045
+/// administration request does, against `grants`, the room's grants as the
+/// request read them: a snapshot older than the scope's generation is the
+/// request that another change overtook between its read and its commit.
+/// Answers with the request's reply: `Ok` when the change is recorded,
+/// otherwise the stanza error's defined condition.
+#[cfg(feature = "test-support")]
+pub async fn record_room_affiliation_with_grants(
+    state: &WebSocketState,
+    grants: &crate::permissions::host_grant::ManagedRoomGrants,
+    initiator: &jid::BareJid,
+    target: &jid::BareJid,
+    affiliation: waddle_xmpp::Affiliation,
+) -> Result<(), xmpp_parsers::stanza_error::DefinedCondition> {
+    crate::server::routes::websocket::handlers::iq::muc_admin_host_grant::record_host_grant_affiliation(
+        state,
+        grants,
+        initiator,
+        &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+        target,
+        affiliation,
+    )
+    .await
+    .map_err(|refusal| refusal.error.defined_condition)
+}
+
+/// Fan out the publication of `payload` as item `item_id` on the node
+/// `node` of `owner`, as a publish request does once the item is stored.
+/// `is_pep` is the request's PEP classification, which is `true` for a
+/// request addressed to a service as well as for one to an account.
+#[cfg(feature = "test-support")]
+pub async fn fan_out_published_item(
+    state: &WebSocketState,
+    owner: &jid::BareJid,
+    node: &str,
+    item_id: &str,
+    payload: xmpp_parsers::minidom::Element,
+    is_pep: bool,
+) {
+    use crate::server::routes::websocket::handlers::pubsub_fanout::{
+        fan_out_publish, FanOutRequest,
+    };
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some(item_id.to_owned()),
+        publisher: None,
+        payload: Some(payload),
+    };
+    fan_out_publish(
+        state,
+        FanOutRequest {
+            owner,
+            node,
+            published_item: &item,
+            item_id,
+            publisher: None,
+            publisher_full: None,
+            is_pep,
+        },
+    )
+    .await;
+}
+
+/// Run the topology bootstrap a WebSocket server runs at startup against
+/// this state: its catalog, Spaces and community nodes, room actors and
+/// seeds.
+#[cfg(feature = "test-support")]
+pub async fn bootstrap_fresh_topology(state: &Arc<WebSocketState>) -> Result<(), String> {
+    let account_domain =
+        waddle_xmpp::identity::CanonicalDomain::parse_exact(&state.deps.auth_state.xmpp_domain)
+            .map_err(|error| error.to_string())?;
+    crate::server::topology::bootstrap_fresh_xmpp_topology(
+        &state.deps.app_state,
+        Arc::clone(&state.deps.protocol.pubsub_storage),
+        &state.deps.service_domains,
+        &account_domain,
+        &state.deps.protocol.room_registry,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Record `member` as a member of the group DM `group_dm_id` through the
+/// group-DM member writers (the permission relation and its mirror).
+#[cfg(feature = "test-support")]
+pub async fn persist_group_dm_member(
+    state: &crate::server::AppState,
+    group_dm_id: &str,
+    member: &jid::BareJid,
+) -> Result<(), waddle_xmpp::XmppError> {
+    crate::admin::channels::persist_group_dm_member_tuple(state, group_dm_id, member).await
+}
+
+/// Plan the extension bot of `plugin` posting `body` into `room`, as the
+/// extension host does before it submits the message, and return the
+/// planner's refusal: `None` when the bot was seated and the post planned.
+#[cfg(feature = "test-support")]
+pub async fn extension_bot_groupchat_refusal(
+    state: &Arc<WebSocketState>,
+    plugin: &str,
+    room: &jid::BareJid,
+    body: &str,
+) -> Option<String> {
+    use crate::server::routes::interpret::{
+        plan_extension_bot_groupchat, BotOccupancy, ExtensionRoomMessage,
+    };
+    let plugin = waddle_extensions::PluginId::try_new(plugin).expect("plugin id");
+    let bot = state
+        .deps
+        .service_domains
+        .extension_bot_jid(&plugin)
+        .expect("extension bot JID");
+    let message = ExtensionRoomMessage {
+        plugin,
+        body: waddle_extensions::DisplayText::try_new(body).expect("message body"),
+        room: waddle_extensions::RoomJid::try_new(room.to_string()).expect("room JID"),
+        preferred_nick: None,
+        stanza_id: None,
+        thread_id: None,
+        reply_to: None,
+        markup: Vec::new(),
+        extensions: None,
+    };
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let mut occupancy = BotOccupancy::default();
+    plan_extension_bot_groupchat(
+        &deps,
+        room.clone(),
+        bot,
+        message,
+        state,
+        None,
+        &mut occupancy,
+    )
+    .await
+    .err()
+    .map(|refusal| refusal.to_string())
 }
 
 /// Build all fixture schemas before creating an authority that starts maintenance.

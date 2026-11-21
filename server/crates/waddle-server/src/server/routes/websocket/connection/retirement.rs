@@ -57,6 +57,9 @@ pub(in crate::server::routes::websocket) enum RetirementCause {
     PermitRevoked,
     /// An identity-matched force-detach request displaced the binding.
     ForceDetach,
+    /// An identity-matched force-detach request ended the binding because
+    /// its account was retired. Nothing takes the full JID over.
+    AccountRetired,
     /// A newer binding of the same full JID replaced this one in the
     /// registry.
     Replaced,
@@ -118,6 +121,7 @@ impl RetirementCause {
             Self::ForceDetach | Self::Replaced | Self::SessionSuperseded => {
                 ActorRetirementCause::Replaced
             }
+            Self::AccountRetired => ActorRetirementCause::Policy,
             Self::WriteFailure | Self::PumpExit => ActorRetirementCause::TransportError,
             Self::OwnerCancelled => ActorRetirementCause::Abandoned,
             Self::PeerUnresponsive | Self::DispatchTimeout => ActorRetirementCause::Deadline,
@@ -138,6 +142,9 @@ pub(super) enum OwedClose {
     NodeUnavailable,
     /// The bounded conflict close of a displaced binding.
     Conflict,
+    /// The same bounded close with `<not-authorized/>`, for a binding of an
+    /// account this replica holds as retired.
+    NotAuthorized,
     /// The WebSocket close alone.
     Transport,
 }

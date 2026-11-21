@@ -1,48 +1,61 @@
-# Space fanout subscriber-capture negative control
+# Space fanout subscriber capture: the fence test
 
-This test-only characterization protects the distinction between a stored
-membership change, a captured subscriber list and protected-effect admission.
-It does not select a grant authority or change the existing fanout contract.
+Fan-out from a Space node lists the node's deliverable subscribers, builds the
+event and enumerates each subscriber's resources before it hands anything
+over. This suite protects the distinction between a stored membership change,
+a captured subscriber list and what is handed to a subscriber's queue.
 
-The dedicated native PostgreSQL test runs production `fan_out_publish` with the
-real `DatabasePubSubStorage`. A delegating test adapter pauses exactly one
-`list_deliverable_subscribers` call after its SQL query has returned; it returns
-those unchanged rows after release. Every other storage operation delegates to
-the same real database implementation. No production hook or routing logic changes.
+Until the revocation slice of #2047 the suite was an unsafe negative control
+(#2056): a subscriber banned after the capture still received the event. The
+same schedule is now a passing fence test. Fan-out from a node of the Spaces
+service reads each captured subscription again
+(`PubSubStorage::subscription_deliverable`) immediately before the first
+hand-over to its subscriber, and hands nothing to a subscription that no
+longer exists, is no longer subscribed or whose entity is an outcast. A read
+that fails withholds the event from that subscriber.
 
-The deterministic schedule commits a Space item, starts its fanout and observes
-the subscriber-query barrier. An independent storage handle then commits Outcast
-for the captured subscriber, reads it back and proves that a fresh deliverable
-query excludes that account. A late subscriber is committed separately. While
-the original fanout is still paused, another Space node completes an affiliation
-mutation and actual notification queue acceptance. Resuming the original call
-queues the exact captured item to the now-Outcast resource and excludes the late
-subscriber. A later fresh fanout reaches the late subscriber and excludes Outcast.
+`crates/waddle-server/tests/xep0060_space_fanout_fence.rs` runs the production
+fan-out with the real `DatabasePubSubStorage` on a PostgreSQL database of its
+own. A delegating adapter pauses exactly one `list_deliverable_subscribers`
+call after its SQL query has returned and returns those unchanged rows after
+release; every other storage operation delegates to the same real
+implementation.
 
-The stale notification is an expected **unsafe negative control** for a future
-community grant fence. Passing means that this current behavior was observed;
-subscriber capture is not asserted to be authorized admission or guaranteed
-future policy. The acknowledged operation is the production PubSub storage
-Outcast write, independently observed in PostgreSQL; this is not an IQ success
-or a demonstrated canonical community revoke across SpiceDB and all replicas.
+The schedule commits a Space item with two subscribers, starts its fan-out and
+observes the subscriber-query barrier. An independent storage handle then
+commits Outcast for one captured subscriber and reads it back, and commits a
+late subscription. While the original fan-out is still paused, another Space
+node completes a fan-out and its notification is accepted by a queue.
+Resuming the original call hands the event to the subscriber that is still
+deliverable, hands nothing to the banned one and does not add the late
+subscriber. A later fan-out reaches the two subscribers that remain. A second
+case removes a captured subscription instead of banning its entity.
 
-Assertions compare the complete typed event, payload, item ID, node, sender,
-resource destination and direct-frame queue metadata. They inspect real
-connection-registry queues with production dual registration. Queue acceptance
-is not durable SM custody, a socket write or recipient observation. Other fixture
-services use the existing test-state defaults; no production SpiceDB authority,
-S2S, actor restart, clustered fanout, datastore outage, cancellation recovery or
-end-to-end XMPP claim is made. Independent progress assumes healthy storage and
-means another node under the same Spaces service, not another deployment.
+What the test does not establish:
 
-Run `bash server/experiments/space-fanout/run-native.sh` from the repository root.
-The runner pins the repository Rust/Nix inputs and PostgreSQL 17.11. It requires
-the exact one-test inventory and one executed pass with no ignored test; missing
-PostgreSQL configuration fails rather than silently skipping. General test lanes
-ignore this native prerequisite case; its separate nonpublishing CI lane runs it.
-The runner uses a private mode-0700 Unix-socket cluster, local trust authentication
-without password material, no TCP listener and bounded coordinated PostgreSQL
-shutdown. Unconfirmed shutdown retains the private directory and fails the run.
-Uncatchable host/process termination requires external cleanup. The fixture and
-runner are adapted from the reviewed #2052 native room-child characterization,
-without importing its production or accepted-child assertions.
+- The acknowledged operation is the PubSub storage write, observed in
+  PostgreSQL. A PubSub affiliation or subscription change on a Space that no
+  host-grant scope enrolls has no replica acknowledgement: its fence is its
+  storage commit, decided against at the hand-over, so a hand-over whose read
+  preceded the commit can still follow it. The acknowledged revocation fence
+  covers enrolled scopes
+  ([host-grant design](../../server/docs/planning/host-grant-authority-2047.md#revocation-fence-decisions)),
+  and the Space node of an enrolled scope delivers nothing at all.
+- Queue acceptance is not durable stream-management custody, a socket write
+  or recipient observation. The detached stream-management append that
+  follows a closed or absent live queue is behind the same read and is not
+  driven by the test.
+- The other fixture services use the test-state defaults; no SpiceDB
+  authority, S2S, actor restart, clustered fan-out, datastore outage or
+  end-to-end XMPP claim is made. Independent progress assumes healthy storage
+  and means another node under the same Spaces service.
+
+Run `bash server/experiments/space-fanout/run-native.sh` from the repository
+root. The runner pins the repository Rust/Nix inputs and PostgreSQL 17.11,
+requires the exact two-test inventory and two executed passes with no ignored
+test, and sets `WADDLE_TEST_REQUIRE_POSTGRES=1` so that a missing PostgreSQL
+fails. It uses a private mode-0700 Unix-socket cluster, local trust
+authentication without password material, no TCP listener and bounded
+coordinated PostgreSQL shutdown; an unconfirmed shutdown retains the private
+directory and fails the run. The suite also runs with the other PostgreSQL
+integration suites, where each case creates and drops its own database.

@@ -244,7 +244,7 @@ describe("scroll direction preference", () => {
   });
 
   test("room initial load ignores older last-seen and persists the newest visible message", async () => {
-    setLastSeen(roomKey("c1"), "room-1");
+    setLastSeen(roomKey("w1-c1@rooms.example.com"), "room-1");
     const queryMam = mock(async () => [
       {
         id: "room-1",
@@ -269,7 +269,7 @@ describe("scroll direction preference", () => {
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
-      ref({ id: "c1", name: "general", channel_type: "text" }),
+      ref({ id: "c1", jid: "w1-c1@rooms.example.com", name: "general", channel_type: "text" }),
       String,
       actionError,
       () => {
@@ -283,7 +283,7 @@ describe("scroll direction preference", () => {
 
     expect(messaging.firstUnseenId.value).toBeNull();
     expect(timelineEl.scrollTop).toBe(480);
-    expect(localStorage.getItem(roomKey("c1"))).toBe("room-2");
+    expect(localStorage.getItem(roomKey("w1-c1@rooms.example.com"))).toBe("room-2");
   });
 
   test("room initial load advances first unseen from stored MDS displayed state", async () => {
@@ -363,7 +363,7 @@ describe("scroll direction preference", () => {
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
-      ref({ id: "c1", name: "general", channel_type: "text" }),
+      ref({ id: "c1", jid: "w1-c1@rooms.example.com", name: "general", channel_type: "text" }),
       String,
       actionError,
       () => {
@@ -373,7 +373,7 @@ describe("scroll direction preference", () => {
 
     await messaging.loadMessages("w1", "c1");
     expect(virtualScroll).not.toHaveBeenCalled();
-    expect(localStorage.getItem(roomKey("c1"))).toBeNull();
+    expect(localStorage.getItem(roomKey("w1-c1@rooms.example.com"))).toBeNull();
 
     messaging.timelineEl.value = makeTimelineEl();
     messaging.timelineEdgeScroller.value = virtualScroll;
@@ -384,7 +384,7 @@ describe("scroll direction preference", () => {
     await flushAsync();
 
     expect(virtualScroll).toHaveBeenCalledWith("chat");
-    expect(localStorage.getItem(roomKey("c1"))).toBe("room-2");
+    expect(localStorage.getItem(roomKey("w1-c1@rooms.example.com"))).toBe("room-2");
   });
 
   test("room initial load waits for a scroll target before persisting last-seen or older loading", async () => {
@@ -434,7 +434,7 @@ describe("scroll direction preference", () => {
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
       ref("w1"),
       ref("c1"),
-      ref({ id: "c1", name: "general", channel_type: "text" }),
+      ref({ id: "c1", jid: "w1-c1@rooms.example.com", name: "general", channel_type: "text" }),
       String,
       actionError,
       () => {
@@ -445,7 +445,7 @@ describe("scroll direction preference", () => {
     await messaging.loadMessages("w1", "c1");
     await messaging.loadOlderMessages();
 
-    expect(localStorage.getItem(roomKey("c1"))).toBeNull();
+    expect(localStorage.getItem(roomKey("w1-c1@rooms.example.com"))).toBeNull();
     expect(queryMamPage).toHaveBeenCalledTimes(1);
   });
 
@@ -480,7 +480,7 @@ describe("scroll direction preference", () => {
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       activeChannelId,
-      ref({ id: "c1", name: "general", channel_type: "text" }),
+      ref({ id: "c1", jid: "w1-c1@rooms.example.com", name: "general", channel_type: "text" }),
       String,
       actionError,
       () => {
@@ -498,7 +498,7 @@ describe("scroll direction preference", () => {
     pin.resolve();
     await load;
 
-    expect(localStorage.getItem(roomKey("c1"))).toBeNull();
+    expect(localStorage.getItem(roomKey("w1-c1@rooms.example.com"))).toBeNull();
   });
 
   test("room older-history loads are blocked until the latest page is pinned", async () => {

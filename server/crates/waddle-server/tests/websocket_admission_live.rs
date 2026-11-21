@@ -1207,12 +1207,48 @@ async fn full_actor_mailbox_drains_while_the_connection_keeps_serving() {
     assert_not_failed(&h.state);
 }
 
+/// The stack the server gives its runtime workers (`main.rs`).
+const SERVER_WORKER_STACK: usize = 8 * 1024 * 1024;
+
+/// Run `test` on a current-thread runtime whose thread has the stack the
+/// server gives its runtime workers. The suite hosts the server's connection
+/// actors on the test's own runtime, so their turns run on the test thread;
+/// the deepest of them, a chat message accepted by the ingress authority and
+/// delivered to a live peer's connection, takes about the 2 MiB a test
+/// thread has by default in an unoptimised build, and more than that with
+/// some feature sets.
+fn on_server_worker_stack<F, Test>(test: F)
+where
+    F: FnOnce() -> Test + Send + 'static,
+    Test: std::future::Future<Output = ()>,
+{
+    let worker = std::thread::Builder::new()
+        .stack_size(SERVER_WORKER_STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(test());
+        })
+        .expect("test thread");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// With the loop parked, queue inbound frames in the socket, stanzas in the
 /// outbound queue and messages in the mailbox, then let the loop run. Every
 /// wait then finds a command and connection data ready together, so the order
 /// in which they are handled shows the scheduling: they must alternate.
-#[tokio::test]
-async fn commands_and_connection_data_take_turns_while_both_stay_ready() {
+/// Bob's messages reach Alice through the ingress authority, the server's
+/// deepest path, so the test runs on a server worker's stack.
+#[test]
+fn commands_and_connection_data_take_turns_while_both_stay_ready() {
+    on_server_worker_stack(commands_and_connection_data_take_turns);
+}
+
+async fn commands_and_connection_data_take_turns() {
     const INBOUND: usize = 30;
     const OUTBOUND: usize = 30;
     const COMMANDS: usize = 100;

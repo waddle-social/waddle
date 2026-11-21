@@ -102,6 +102,122 @@ const ACCOUNT_BINDING_RELATIONS: &[Relation] = &[
         delete: true,
     },
 ];
+/// The host-grant store reads the authority incarnation, the lifecycle
+/// ledger and the room bindings, which the owner phase alone writes. It
+/// row-locks and updates scope state, inserts and updates grant rows, and
+/// appends to the operation journal. The runtime can remove a local
+/// subscription preference while durable grant rows are retained. A replica
+/// renews its revocation-fence lease and advances its acknowledgements.
+const HOST_GRANT_RELATIONS: &[Relation] = &[
+    Relation {
+        name: "host_grant_authority",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_scope_lifecycles",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_scopes",
+        insert: false,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_rooms",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grants",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_operations",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_operation_changes",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_bindings",
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_affiliations",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_bookmark_versions",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "local_space_subscriptions",
+        insert: true,
+        update: true,
+        delete: true,
+    },
+    Relation {
+        name: "host_grant_space_deletion_audience",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_deletion_bindings",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_deletion_jobs",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_deletions",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_space_operation_changes",
+        insert: true,
+        update: false,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_fence_replicas",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Relation {
+        name: "host_grant_fence_acks",
+        insert: true,
+        update: true,
+        delete: false,
+    },
+];
 const PENDING_RELATIONS: &[Relation] = &[
     Relation {
         name: "pending_delivery",
@@ -165,6 +281,25 @@ pub(crate) async fn verify_account_bindings(
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
     verify(tx, schema, ACCOUNT_BINDING_RELATIONS, false).await
+}
+
+pub(crate) async fn verify_host_grants(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    if let Some(relation) = verify(tx, schema, HOST_GRANT_RELATIONS, false).await? {
+        return Ok(Some(relation));
+    }
+    Ok((!local_space_sequence_is_safe(tx, schema).await?)
+        .then_some("local_space_notification_order"))
+}
+
+/// The host-grant relations carry no trigger and no rule.
+pub(crate) async fn unexpected_host_grant_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, HOST_GRANT_RELATIONS, false).await
 }
 
 pub(crate) async fn verify_pending(
@@ -414,6 +549,33 @@ async fn relation_privileges_match(
             schema,
             relation.name
         ],
+    ).await?;
+    match rows.next().await? {
+        Some(row) => row.get(0),
+        None => Ok(false),
+    }
+}
+
+async fn local_space_sequence_is_safe(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<bool, DatabaseError> {
+    let mut rows = tx.query(
+        "SELECT c.relkind = 'S' AND c.relowner <> r.oid
+         AND NOT pg_catalog.pg_has_role(r.oid, c.relowner, 'SET')
+         AND s.seqtypid = 'pg_catalog.int8'::pg_catalog.regtype
+         AND s.seqstart = 1 AND s.seqmin = 1 AND s.seqmax = 9223372036854775807
+         AND s.seqincrement = 1 AND s.seqcache = 1 AND NOT s.seqcycle
+         AND pg_catalog.has_sequence_privilege(r.oid, c.oid, 'USAGE')
+         AND NOT pg_catalog.has_sequence_privilege(r.oid, c.oid, 'SELECT,UPDATE')
+         AND NOT pg_catalog.has_sequence_privilege(r.oid, c.oid,
+           'USAGE WITH GRANT OPTION,SELECT WITH GRANT OPTION,UPDATE WITH GRANT OPTION')
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('S', c.relowner))) a WHERE a.grantee = 0)
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_roles r ON r.rolname = current_user
+         JOIN pg_catalog.pg_sequence s ON s.seqrelid = c.oid
+         WHERE n.nspname = ? AND c.relname = 'local_space_notification_order'",
+        crate::db_params![schema],
     ).await?;
     match rows.next().await? {
         Some(row) => row.get(0),

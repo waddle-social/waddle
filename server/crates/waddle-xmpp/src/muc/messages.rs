@@ -194,6 +194,7 @@ fn has_non_privacy_config_change(previous: &RoomConfig, next: &RoomConfig) -> bo
         || previous.group_dm != next.group_dm
         || previous.pin_permission != next.pin_permission
         || previous.federation_policy != next.federation_policy
+        || previous.federated != next.federated
 }
 
 /// Build the per-occupant config-change notification message.

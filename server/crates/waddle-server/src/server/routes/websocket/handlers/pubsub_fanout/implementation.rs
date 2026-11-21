@@ -95,8 +95,47 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     let is_pep = req.is_pep;
     let storage = &state.deps.protocol.pubsub_storage;
 
-    let node_cfg = match storage.get_node(owner, node).await {
-        Ok(Some(record)) => record.config,
+    // The Space node of an enrolled host-grant scope delivers no event:
+    // a captured subscriber list is not an admission, and the scope's
+    // authority is its canonical grants, which PubSub does not consult.
+    // Whether a node is enrolled is asked once more if it cannot be told,
+    // then the event is dropped. The Spaces and extensions services are
+    // recognised by the owner alone: a request addressed to a service
+    // counts as a PEP request for `is_pep`.
+    let space_node = owner.as_str() == state.deps.service_domains.spaces;
+    if space_node {
+        let host_grants = &state.deps.app_state.host_grants;
+        let enrolled = match host_grants.space_enrolled(node).await {
+            Err(_) => host_grants.space_enrolled(node).await,
+            decided => decided,
+        };
+        match enrolled {
+            Ok(false) => {}
+            Ok(true) => {
+                info!(
+                    node_kind = "enrolled_space",
+                    "Fan-out skipped: the node belongs to an enrolled host-grant scope"
+                );
+                return;
+            }
+            Err(_) => {
+                warn!(
+                    node_kind = "space",
+                    "Fan-out dropped: whether the node belongs to an enrolled host-grant scope \
+                     could not be told"
+                );
+                return;
+            }
+        }
+    }
+    // A room-bound extension node is resolved to its room once; each
+    // subscriber is then asked for its right in that room.
+    let route_room =
+        crate::server::routes::websocket::handlers::iq::extension_route_room(state, owner, node)
+            .await;
+
+    let node_record = match storage.get_node(owner, node).await {
+        Ok(Some(record)) => record,
         Ok(None) => {
             warn!(
                 owner = %owner,
@@ -115,6 +154,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
             return;
         }
     };
+
+    let node_cfg = node_record.config.clone();
 
     // Private PEP nodes carve out of roster + CAPS fan-out even though
     // the published payload is broadcast at the pubsub layer. Whitelist
@@ -197,7 +238,29 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
         already_delivered.insert(publisher_full.clone());
     }
 
+    // The subscriptions of a Space node that are deliverable when the
+    // event is handed over, read once per publication (below).
+    let mut still_deliverable: Option<HashSet<waddle_xmpp::pubsub::SubId>> = None;
+
     for sub in subscribers {
+        // A Space's subscriber at another server holds no resource here.
+        // Its notification leaves over S2S, decided apart (below).
+        if space_node && !state.serves(&sub.subscriber.to_bare()) {
+            continue;
+        }
+        // A room-bound extension node delivers to whoever may read the room
+        // now: a subscription and its affiliation outlive a ban.
+        if crate::server::routes::websocket::handlers::iq::extension_route_account_access(
+            state,
+            &route_room,
+            &sub.subscriber.to_bare(),
+            crate::permissions::Permission::View,
+        )
+        .await
+            == crate::server::routes::websocket::handlers::iq::ExtensionRouteAccess::Denied
+        {
+            continue;
+        }
         if is_private_pep_node
             && !private_node_subscriber_allowed(
                 state,
@@ -241,6 +304,42 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 all
             }
         };
+
+        // A Space node's event goes to whoever may receive it when it is
+        // handed over, not to whoever could when the subscribers were
+        // listed: the list was captured before the event was built and the
+        // resources were enumerated, and a subscription removed or an
+        // entity banned since then receives nothing. The node's deliverable
+        // subscriptions are read again once per publication, here, before
+        // its first hand-over, in one statement; a read that fails
+        // withholds the event from every subscriber of the node.
+        if space_node {
+            if still_deliverable.is_none() {
+                still_deliverable = Some(
+                    match storage.list_deliverable_subscribers(owner, node).await {
+                        Ok(current) => current
+                            .into_iter()
+                            .map(|subscription| subscription.subid)
+                            .collect(),
+                        Err(error) => {
+                            warn!(
+                                node_kind = "space",
+                                error = %error,
+                                "Fan-out withheld an event: the captured subscriptions could not \
+                                 be read again"
+                            );
+                            HashSet::new()
+                        }
+                    },
+                );
+            }
+            if !still_deliverable
+                .as_ref()
+                .is_some_and(|deliverable| deliverable.contains(&sub.subid))
+            {
+                continue;
+            }
+        }
 
         if target_resources.is_empty() {
             // Bare-JID subscriber fully offline (no live, no resumable),
@@ -313,6 +412,19 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 },
             }
         }
+    }
+
+    // A Space's subscribers at other servers: each is notified only for a
+    // subscription it made itself, decided on the evidence that
+    // subscription recorded, and only of a room it may be told of. That is
+    // decided off this request: the publication is only queued here.
+    if space_node {
+        crate::server::routes::websocket::s2s_spaces::queue_remote_notification(
+            state,
+            owner,
+            &node_record,
+            &event,
+        );
     }
 
     // XEP-0163 §3: presence-driven fan-out. Two passes follow the
@@ -397,8 +509,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
 ///
 /// Delegates to `pubsub_authz::can_subscribe_with_config` — the same
 /// decision arm as the subscribe/read gate — so the fan-out
-/// entitlement can never diverge from it: the XEP-0402 bookmarks
-/// owner-only carve-out and the Authorize arm apply identically here.
+/// entitlement can never diverge from it: the owner-only carve-out of the
+/// bookmarks and joined-spaces nodes and the Authorize arm apply here too.
 /// This matters because an XEP-0060 §8.8 owner subscriptions-set
 /// writes subscription rows WITHOUT a can_subscribe check — a row's
 /// existence is not authorization. The node config fetched once at the
@@ -449,6 +561,17 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn priva
 /// Service-node retractions use only explicit subscriptions.
 pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {
     fan_out_retract_with_options(state, req, None, false, false).await;
+}
+
+/// Service-node retractions with the request's `notify` (XEP-0060
+/// §7.2.2.1): subscribers are notified when the node's
+/// `pubsub#notify_retract` is on or the request asked for it.
+pub async fn fan_out_service_retract(
+    state: &WebSocketState,
+    req: FanOutRetractRequest<'_>,
+    notify: bool,
+) {
+    fan_out_retract_with_options(state, req, None, false, notify).await;
 }
 
 /// PEP retractions also reach roster contacts and the owner's other resources.

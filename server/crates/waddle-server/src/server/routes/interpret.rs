@@ -162,6 +162,13 @@ pub(crate) use message_plan::reject_malformed_message;
 pub use message_plan::{build_plan_deps, plan_message_dispatch};
 mod direct_archive;
 mod direct_call_thread;
+
+/// The most entries each table of a replica's XEP-0353 call state holds
+/// before its oldest are pruned.
+#[cfg(feature = "test-support")]
+pub(crate) fn dm_call_state_capacity() -> usize {
+    direct_archive::DM_CALL_STATE_MAX_KEYS
+}
 mod direct_inbox;
 mod direct_retraction;
 mod displayed_marker;
@@ -220,7 +227,8 @@ pub(crate) use groupchat_inbox::reconcile_groupchat_notification_recovery;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
-    resource_constraint_error, validate_groupchat_rich_targets,
+    resource_constraint_error, validate_groupchat_rich_targets, validate_groupchat_rich_targets_of,
+    RichTargetSender,
 };
 #[cfg(all(test, feature = "clustering"))]
 pub use handoff::ORDERED_RELAY_HANDOFF_CAPACITY;
@@ -284,6 +292,12 @@ pub(crate) use notification_activity_ingest::{
 mod relay_plan;
 #[cfg(feature = "clustering")]
 pub(crate) use relay_plan::plan_muc_for_relay;
+mod remote_direct_plan;
+pub(crate) use remote_direct_plan::{
+    classify_remote_direct_plan, plan_remote_direct_message, RemoteDirectPlan,
+};
+mod remote_occupant_plan;
+pub(crate) use remote_occupant_plan::plan_remote_occupant_groupchat;
 
 #[cfg(test)]
 pub(crate) mod tests;

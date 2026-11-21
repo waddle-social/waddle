@@ -440,12 +440,29 @@ fn test_xmpp_config_rejects_invalid_spaces_jid() {
 }
 
 #[test]
+fn test_xmpp_config_rejects_service_addresses_a_parser_would_fold() {
+    for (key, value) in [
+        ("WADDLE_MUC_DOMAIN", "Rooms.waddle.example"),
+        ("WADDLE_MUC_DOMAIN", "rooms.waddle.example."),
+        ("WADDLE_SPACES_JID", "Communities.waddle.example"),
+        ("WADDLE_SPACES_JID", "communities.b\u{fc}cher.example"),
+    ] {
+        let _guard = env_lock();
+        reset_xmpp_config_env();
+        std::env::set_var(key, value);
+        let error = XmppConfig::from_env().expect_err("non-canonical service address");
+        assert!(format!("{error:?}").contains(key), "{key}={value}");
+        reset_xmpp_config_env();
+    }
+}
+
+#[test]
 fn test_xmpp_config_rejects_invalid_muc_domain() {
     let _guard = env_lock();
     reset_xmpp_config_env();
 
     // An empty string violates `DomainPart::from_str`
-    // (`Error::DomainEmpty`); the trim in `parse_optional_env_value`
+    // (`Error::DomainEmpty`); the trim in `parse_optional_canonical_env`
     // returns `Ok(None)` only when the trimmed result is empty, so we
     // need an explicitly invalid non-empty value. A 2000-byte string
     // exceeds the 1023-byte nameprep limit.
@@ -900,7 +917,7 @@ async fn test_seed_fixed_test_account_creates_user() {
         email: Some("admin@localhost".to_string()),
     };
 
-    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+    fixed_account::seed_fixed_test_account(state.db_pool.global_actor(), &config)
         .await
         .unwrap();
 
@@ -938,7 +955,7 @@ async fn test_seed_fixed_test_account_replaces_existing_credentials() {
         domain: "localhost".to_string(),
         email: None,
     };
-    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+    fixed_account::seed_fixed_test_account(state.db_pool.global_actor(), &config)
         .await
         .unwrap();
 
@@ -988,7 +1005,7 @@ async fn test_seed_fixed_test_account_replaces_an_unkeyed_account() {
         email: None,
     };
 
-    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+    fixed_account::seed_fixed_test_account(state.db_pool.global_actor(), &config)
         .await
         .unwrap();
 
@@ -1044,6 +1061,7 @@ async fn test_app_for_state(state: Arc<AppState>) -> Router {
                 std::time::Duration::ZERO,
             ),
         ),
+        s2s_router: None,
     })
     .await
     .unwrap()

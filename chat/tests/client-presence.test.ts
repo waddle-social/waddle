@@ -18,8 +18,8 @@ afterEach(() => occupantJidDirectory.clear());
 
 function createManager(overrides: {
   currentRoom?: () => string | null;
-  onOwnSelfPresence?: (roomJid: string) => void;
-  onOwnUnavailable?: (roomJid: string) => void;
+  onOwnSelfPresence?: (roomJid: string) => boolean | void;
+  onOwnUnavailable?: (roomJid: string, statusCodes: readonly number[], departure: { destroyed: boolean }) => void;
   sendPresence?: (status?: string | null, show?: string | null, idleSince?: string | null) => Promise<unknown>;
 } = {}) {
   const events = new TypedEventBus<ClientEvents>();
@@ -221,7 +221,7 @@ describe("PresenceManager MUC occupant tracking", () => {
     const selfJoined: string[] = [];
     const revoked: string[] = [];
     const { manager } = createManager({
-      onOwnSelfPresence: (roomJid) => selfJoined.push(roomJid),
+      onOwnSelfPresence: (roomJid) => { selfJoined.push(roomJid); },
       onOwnUnavailable: (roomJid) => revoked.push(roomJid),
     });
 
@@ -378,5 +378,34 @@ describe("PresenceManager outbound presence", () => {
       [undefined, undefined, undefined],
       [undefined, "dnd", "2024-01-01T00:00:00.000Z"],
     ]);
+  });
+});
+
+describe("PresenceManager room destruction", () => {
+  test("a destroyed room's removal is our own departure, without status 110", () => {
+    const departures: Array<[string, boolean]> = [];
+    const nicks: Array<string | null> = [];
+    const { manager, events } = createManager({
+      onOwnUnavailable: (roomJid, _codes, departure) => departures.push([roomJid, departure.destroyed]),
+    });
+    events.on("ownOccupantNick", (_room, nick) => nicks.push(nick));
+    // XEP-0045 §10.9 Example 205: no status code and no real JID.
+    manager.handle(directPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "unavailable",
+      muc_affiliation: "none",
+      muc_role: "none",
+      muc_destroyed: true,
+    }));
+    expect(departures).toEqual([[ROOM, true]]);
+    expect(nicks).toEqual([null]);
+  });
+
+  test("a join the client refuses is not reported as our occupancy", () => {
+    const nicks: Array<string | null> = [];
+    const { manager, events } = createManager({ onOwnSelfPresence: () => false });
+    events.on("ownOccupantNick", (_room, nick) => nicks.push(nick));
+    manager.handle(directPresence({ from: `${ROOM}/alice`, muc_status_codes: [110, 201] }));
+    expect(nicks).toEqual([]);
   });
 });

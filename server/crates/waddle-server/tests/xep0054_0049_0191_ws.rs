@@ -451,6 +451,107 @@ async fn websocket_blocking_set_then_get_returns_blocklist() {
     let _ = client.close().await;
 }
 
+/// Block `jid` on `client`'s account.
+async fn block(client: &mut WsXmppClient, jid: &str, id: &str) {
+    let item = Element::builder("item", "urn:xmpp:blocking")
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("jid").to_owned(),
+            jid,
+        )
+        .build();
+    let request = xmpp_parsers::iq::Iq::Set {
+        from: None,
+        to: None,
+        id: id.to_owned(),
+        payload: Element::builder("block", "urn:xmpp:blocking")
+            .append(item)
+            .build(),
+    };
+    client
+        .send(&element_to_xml(Element::from(request)))
+        .await
+        .expect("send block set");
+    let response = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("blocking set response");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "expected blocking set result, got: {response}"
+    );
+}
+
+/// Send a ping to `to` and return the error that answers it.
+async fn ping_error(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) -> (Element, xmpp_parsers::stanza_error::StanzaError) {
+    let request = xmpp_parsers::iq::Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("a test JID")),
+        id: id.to_owned(),
+        payload: Element::builder("ping", NS_PING).build(),
+    };
+    client
+        .send(&element_to_xml(Element::from(request)))
+        .await
+        .expect("send ping");
+    let frame = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("the ping is answered");
+    let reply: Element = frame.parse().expect("reply XML");
+    assert_eq!(reply.attr("type"), Some("error"), "{frame}");
+    let error = reply
+        .children()
+        .find_map(|child| xmpp_parsers::stanza_error::StanzaError::try_from(child.clone()).ok())
+        .expect("a stanza error");
+    (reply, error)
+}
+
+/// XEP-0191 §3.3: a request to a remote address the sender blocked is
+/// answered with `not-acceptable` and `<blocked/>`, from that address, and
+/// is never offered to the remote route; an address the sender did not
+/// block still reaches the route, which refuses it while S2S is disabled.
+#[tokio::test]
+async fn websocket_request_to_a_blocked_remote_address_is_not_acceptable() {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
+    let (_server, mut client) = setup().await;
+    block(&mut client, "spammer@remote.test", "ws-block-remote").await;
+    block(&mut client, "blocked.test", "ws-block-remote-domain").await;
+
+    for (to, id) in [
+        ("spammer@remote.test", "ws-remote-bare"),
+        ("spammer@remote.test/phone", "ws-remote-full"),
+        ("anyone@blocked.test/phone", "ws-remote-domain"),
+    ] {
+        let (reply, error) = ping_error(&mut client, to, id).await;
+        assert_eq!(reply.attr("from"), Some(to), "{id}");
+        assert_eq!(error.type_, ErrorType::Cancel, "{id}");
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::NotAcceptable,
+            "{id}"
+        );
+        assert!(
+            error
+                .other
+                .as_ref()
+                .is_some_and(|other| other.is("blocked", "urn:xmpp:blocking:errors")),
+            "{id}: {error:?}"
+        );
+    }
+
+    let (_, error) = ping_error(&mut client, "friend@remote.test/phone", "ws-remote-open").await;
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::RemoteServerNotFound
+    );
+
+    let _ = client.close().await;
+}
+
 #[tokio::test]
 async fn websocket_disco_advertises_blocking() {
     let (_server, mut client) = setup().await;
@@ -670,9 +771,13 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
         response.contains("type='error'") || response.contains("type='error'"),
         "expected push enable error for invalid service jid, got: {response}"
     );
+    // The `jid` attribute of `<enable/>` names an entity, so the identity
+    // profile checks it with every other payload `jid` before any handler
+    // runs: an address outside the profile refuses the stanza with
+    // `<jid-malformed/>` (RFC 6120 §8.3.3.8), type `modify`.
     assert!(
-        response.contains("bad-request"),
-        "expected bad-request for invalid service jid, got: {response}"
+        response.contains("jid-malformed") && response.contains("type='modify'"),
+        "expected jid-malformed for invalid service jid, got: {response}"
     );
 
     let _ = client.close().await;
@@ -1319,6 +1424,41 @@ async fn websocket_rejects_spoofed_muc_domain_presence() {
         ))
         .await
         .expect("send spoofed MUC presence");
+    // The domain only ends like the MUC service's, so it is not served and
+    // the join is never handled as one for a local room. Presence to an
+    // unserved domain that the remote route does not take is answered with
+    // `remote-server-not-found` (RFC 6120 §10.4.3); with S2S disabled no
+    // route exists.
+    let frame = client
+        .recv_matching(|frame| frame.contains("muc.localhost.evil"))
+        .await
+        .expect("presence error for the unserved domain");
+    let error: Element = frame.parse().expect("presence error XML");
+    assert_eq!(error.name(), "presence", "{frame}");
+    assert_eq!(error.attr("type"), Some("error"), "{frame}");
+    assert_eq!(
+        error.attr("from"),
+        Some(format!("{room}/admin").as_str()),
+        "{frame}"
+    );
+    assert!(
+        error
+            .get_child("error", CLIENT_NS)
+            .and_then(|error| {
+                error.get_child(
+                    "remote-server-not-found",
+                    "urn:ietf:params:xml:ns:xmpp-stanzas",
+                )
+            })
+            .is_some(),
+        "{frame}"
+    );
+    assert!(
+        error
+            .get_child("x", "http://jabber.org/protocol/muc#user")
+            .is_none(),
+        "no occupant presence: {frame}"
+    );
     assert_no_frame_matching(
         &mut client,
         Duration::from_millis(250),

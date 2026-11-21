@@ -27,14 +27,20 @@
 //!    session, runs each unacked stanza through `classify_dm_intake`
 //!    and `pending_delivery` insertion (Q6 promotion).
 
-use crate::stream_management::SmIngressAppendKey;
-use crate::stream_management::SmIngressFrameReceipt;
+use crate::protocol::frame::MAX_FRAME_SIZE;
+use crate::stream_management::{
+    ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, SmIngressAppendKey,
+    SmIngressFrameReceipt, MAX_PROTECTED_SPACE_REPLY_BYTES,
+};
 use crate::tombstone::TombstoneTarget;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::Engine;
 use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
@@ -215,6 +221,10 @@ pub struct PersistedSession {
     pub presence_payloads: Vec<minidom::Element>,
 }
 
+const PROTECTED_SPACE_STORAGE_PREFIX: &str = "sm-protected-space:1:";
+const MAX_ENCODED_SPACE_DESCRIPTOR: usize = (MAX_PROTECTED_SPACE_REPLY_BYTES * 4).div_ceil(3);
+const MAX_ENCODED_SPACE_REPLY: usize = (MAX_FRAME_SIZE * 4).div_ceil(3);
+
 /// A typed stanza and the immutable wire representation of this replay entry.
 ///
 /// SM persistence is part of the retransmission log: reserializing the typed
@@ -225,12 +235,74 @@ pub struct PersistedSession {
 pub struct SmReplayPayload {
     stanza: Box<Stanza>,
     wire: String,
+    protected_space_reply: Option<ProtectedSpaceReplyDescriptor>,
 }
 
 impl SmReplayPayload {
-    /// Parse at the replay/storage boundary while preserving the original frame.
+    /// Whether a retained value needs protected replay handling.
+    pub fn is_protected_storage(value: &str) -> bool {
+        value.starts_with("sm-protected-space:")
+    }
+
+    /// Parse one wire stanza. Protected storage envelopes are not wire XML.
     pub fn from_wire(wire: String) -> Result<Self, SmPersistenceError> {
-        Self::parse_wire(wire, None)
+        Self::parse_wire(wire, None, None)
+    }
+
+    /// Pair the response bytes with their original Space decision. Validate the
+    /// exact result identity before typed stanza parsing can normalize it.
+    pub fn from_protected_space_reply(
+        wire: String,
+        descriptor: ProtectedSpaceReplyDescriptor,
+    ) -> Result<Self, SmPersistenceError> {
+        if wire.len() > MAX_FRAME_SIZE {
+            return Err(invalid_protected_space_reply());
+        }
+        Self::parse_wire(wire, None, Some(descriptor))
+    }
+
+    /// Decode the text stored in the replay row. Older rows retain their XML
+    /// representation. The protected envelope is never usable as wire XML.
+    pub fn from_storage(value: String) -> Result<Self, SmPersistenceError> {
+        let Some(envelope) = value.strip_prefix(PROTECTED_SPACE_STORAGE_PREFIX) else {
+            return Self::from_wire(value);
+        };
+        if envelope.len() > MAX_ENCODED_SPACE_DESCRIPTOR + 1 + MAX_ENCODED_SPACE_REPLY {
+            return Err(invalid_protected_space_reply());
+        }
+        let (descriptor, wire) = envelope
+            .split_once('.')
+            .ok_or_else(invalid_protected_space_reply)?;
+        if descriptor.len() > MAX_ENCODED_SPACE_DESCRIPTOR || wire.len() > MAX_ENCODED_SPACE_REPLY {
+            return Err(invalid_protected_space_reply());
+        }
+        let descriptor_bytes = STANDARD_NO_PAD
+            .decode(descriptor)
+            .map_err(|_| invalid_protected_space_reply())?;
+        let descriptor = ProtectedSpaceReplyDescriptor::decode(&descriptor_bytes)
+            .map_err(|_| invalid_protected_space_reply())?;
+        let wire = STANDARD_NO_PAD
+            .decode(wire)
+            .map_err(|_| invalid_protected_space_reply())?;
+        let wire = String::from_utf8(wire).map_err(|_| invalid_protected_space_reply())?;
+        Self::from_protected_space_reply(wire, descriptor)
+    }
+
+    /// Encode the full row value. Legacy XML decoders reject the entire
+    /// protected envelope, which contains no raw reply XML.
+    pub fn to_storage(&self) -> Cow<'_, str> {
+        match &self.protected_space_reply {
+            Some(descriptor) => Cow::Owned(format!(
+                "{PROTECTED_SPACE_STORAGE_PREFIX}{}.{}",
+                STANDARD_NO_PAD.encode(descriptor.encode()),
+                STANDARD_NO_PAD.encode(self.wire.as_bytes()),
+            )),
+            None => Cow::Borrowed(self.wire()),
+        }
+    }
+
+    pub fn protected_space_reply(&self) -> Option<&ProtectedSpaceReplyDescriptor> {
+        self.protected_space_reply.as_ref()
     }
 
     /// Serialize a typed stanza that no transport has written yet. The bytes
@@ -249,10 +321,14 @@ impl SmReplayPayload {
     /// Also require the captured XML to describe the supplied producer stanza.
     /// This is a structural comparison before typed parsing can discard fields.
     pub fn from_wire_matching(wire: String, expected: &Stanza) -> Result<Self, SmPersistenceError> {
-        Self::parse_wire(wire, Some(expected))
+        Self::parse_wire(wire, Some(expected), None)
     }
 
-    fn parse_wire(wire: String, expected: Option<&Stanza>) -> Result<Self, SmPersistenceError> {
+    fn parse_wire(
+        wire: String,
+        expected: Option<&Stanza>,
+        protected_space_reply: Option<ProtectedSpaceReplyDescriptor>,
+    ) -> Result<Self, SmPersistenceError> {
         let mut reader = std::io::Cursor::new(wire.as_bytes());
         let element = minidom::Element::from_reader(&mut reader)
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
@@ -265,6 +341,12 @@ impl SmReplayPayload {
             return Err(SmPersistenceError::Other(
                 "replay frame differs from its producer stanza".to_owned(),
             ));
+        }
+        if protected_space_reply
+            .as_ref()
+            .is_some_and(|descriptor| !matches_protected_space_reply(&element, descriptor))
+        {
+            return Err(invalid_protected_space_reply());
         }
         let stanza = match element.name() {
             "message" => xmpp_parsers::message::Message::try_from(element)
@@ -285,10 +367,12 @@ impl SmReplayPayload {
         Ok(Self {
             stanza: Box::new(stanza),
             wire,
+            protected_space_reply,
         })
     }
 
-    /// Captured frame bytes, for retransmission or a storage I/O boundary.
+    /// Captured frame bytes for retransmission. A protected reply requires
+    /// fresh admission before transfer. Storage writers use [Self::to_storage].
     pub fn wire(&self) -> &str {
         &self.wire
     }
@@ -306,8 +390,447 @@ impl From<Box<Stanza>> for SmReplayPayload {
             .write_to(&mut bytes)
             .expect("serializing a stanza to a byte buffer cannot fail");
         let wire = String::from_utf8(bytes).expect("serialized stanza is UTF-8");
-        Self { stanza, wire }
+        Self {
+            stanza,
+            wire,
+            protected_space_reply: None,
+        }
     }
+}
+
+fn invalid_protected_space_reply() -> SmPersistenceError {
+    SmPersistenceError::Other("invalid protected Space replay payload".to_owned())
+}
+
+fn matches_protected_space_reply(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    if descriptor.kind() == ProtectedSpaceReplyKind::DeleteEvent {
+        return descriptor.deletion_operation().is_some()
+            && waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
+                element,
+                descriptor.service().as_str(),
+                descriptor.recipient().to_bare().as_str(),
+                descriptor.node(),
+                descriptor.id(),
+            );
+    }
+    if element.attr("from") != Some(descriptor.service().as_str())
+        || element.attr("to") != Some(descriptor.recipient().as_str())
+    {
+        return false;
+    }
+    if descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent {
+        return matches_protected_bookmark_event(element, descriptor);
+    }
+    if descriptor.kind() == ProtectedSpaceReplyKind::OwnerAffiliationRefusals {
+        return matches_protected_owner_affiliation_refusals(element, descriptor);
+    }
+    element.is("iq", "jabber:client")
+        && element.attr("type") == Some("result")
+        && element.attr("id") == Some(descriptor.id())
+        && element.children().count() == 1
+        && match descriptor.kind() {
+            ProtectedSpaceReplyKind::DiscoInfo => element
+                .get_child("query", "http://jabber.org/protocol/disco#info")
+                .is_some_and(|query| query.attr("node") == Some(descriptor.node())),
+            ProtectedSpaceReplyKind::DiscoItems => element
+                .get_child("query", "http://jabber.org/protocol/disco#items")
+                .filter(|query| query.attr("node") == Some(descriptor.node()))
+                .is_some_and(|query| matches_protected_rooms(query, descriptor)),
+            ProtectedSpaceReplyKind::PubSubItems => element
+                .get_child("pubsub", crate::pubsub::NS_PUBSUB)
+                .filter(|pubsub| pubsub.children().count() == 1)
+                .and_then(|pubsub| pubsub.get_child("items", crate::pubsub::NS_PUBSUB))
+                .filter(|items| items.attr("node") == Some(descriptor.node()))
+                .is_some_and(|items| matches_protected_rooms(items, descriptor)),
+            ProtectedSpaceReplyKind::Subscribe => {
+                matches_protected_subscription(element, descriptor)
+            }
+            ProtectedSpaceReplyKind::OwnerAffiliations => {
+                matches_protected_owner_affiliations(element, descriptor)
+            }
+            ProtectedSpaceReplyKind::OwnerConfiguration => {
+                matches_protected_owner_configuration(element, descriptor.node())
+            }
+            ProtectedSpaceReplyKind::BookmarkEvent
+            | ProtectedSpaceReplyKind::DeleteEvent
+            | ProtectedSpaceReplyKind::OwnerAffiliationRefusals => false,
+        }
+}
+
+/// Validate the bounded node configuration form generated by this server.
+fn matches_protected_owner_configuration(iq: &minidom::Element, node: &str) -> bool {
+    use crate::pubsub::{AccessModel, PublishModel, SendLastPublishedItem, NS_PUBSUB_OWNER};
+    use crate::xep::xep0004::NS_DATA_FORMS;
+
+    let only_child = |parent: &minidom::Element| {
+        parent.children().count() == 1 && parent.text().trim().is_empty()
+    };
+    if iq.attrs().len() != 4 || !only_child(iq) {
+        return false;
+    }
+    let Some(form) = iq
+        .get_child("pubsub", NS_PUBSUB_OWNER)
+        .filter(|pubsub| pubsub.attrs().is_empty() && only_child(pubsub))
+        .and_then(|pubsub| pubsub.get_child("configure", NS_PUBSUB_OWNER))
+        .filter(|configure| {
+            configure.attr("node") == Some(node)
+                && configure.attrs().len() == 1
+                && only_child(configure)
+        })
+        .and_then(|configure| configure.get_child("x", NS_DATA_FORMS))
+        .filter(|form| {
+            form.attr("type") == Some("form")
+                && form.attrs().len() == 1
+                && form.text().trim().is_empty()
+        })
+    else {
+        return false;
+    };
+
+    let mut names = HashSet::new();
+    form.children().all(|field| {
+        let Some(name) = field.attr("var") else {
+            return false;
+        };
+        if !field.is("field", NS_DATA_FORMS) || !only_child(field) || !names.insert(name) {
+            return false;
+        }
+        let Some(value) = field.get_child("value", NS_DATA_FORMS) else {
+            return false;
+        };
+        if !value.attrs().is_empty() || value.children().next().is_some() {
+            return false;
+        }
+        let value = value.text();
+        if name == "FORM_TYPE" {
+            return field.attrs().len() == 2
+                && field.attr("type") == Some("hidden")
+                && value == "http://jabber.org/protocol/pubsub#node_config";
+        }
+        field.attrs().len() == 1
+            && match name {
+                "pubsub#access_model" => value.parse::<AccessModel>().is_ok(),
+                "pubsub#publish_model" => value.parse::<PublishModel>().is_ok(),
+                "pubsub#send_last_published_item" => value.parse::<SendLastPublishedItem>().is_ok(),
+                "pubsub#type" => !value.is_empty(),
+                "pubsub#max_items" => value.parse::<u32>().is_ok(),
+                "pubsub#persist_items"
+                | "pubsub#deliver_payloads"
+                | "pubsub#notify_retract"
+                | "pubsub#notify_delete" => matches!(value.as_str(), "0" | "1"),
+                _ => false,
+            }
+    }) && names.contains("FORM_TYPE")
+}
+
+fn matches_protected_owner_affiliations(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    element.attrs().len() == 4
+        && element.text().trim().is_empty()
+        && element
+            .get_child("pubsub", crate::pubsub::NS_PUBSUB_OWNER)
+            .is_some_and(|payload| {
+                matches_owner_affiliation_payload(payload, descriptor.node(), false)
+            })
+}
+
+fn matches_protected_owner_affiliation_refusals(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    const NS_STANZA_ERROR: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+
+    if !element.is("iq", "jabber:client")
+        || element.attr("type") != Some("error")
+        || element.attr("id") != Some(descriptor.id())
+        || element.attrs().len() != 4
+        || !element.text().trim().is_empty()
+    {
+        return false;
+    }
+    let mut children = element.children();
+    let (Some(payload), Some(error), None) = (children.next(), children.next(), children.next())
+    else {
+        return false;
+    };
+    if !matches_owner_affiliation_payload(payload, descriptor.node(), true)
+        || !error.is("error", "jabber:client")
+        || error.attr("type") != Some("modify")
+        || error.attrs().len() != 1
+        || !error.text().trim().is_empty()
+    {
+        return false;
+    }
+    let mut details = error.children();
+    let Some(condition) = details.next() else {
+        return false;
+    };
+    if !condition.is("not-acceptable", NS_STANZA_ERROR)
+        || !condition.attrs().is_empty()
+        || condition.children().next().is_some()
+        || !condition.text().trim().is_empty()
+    {
+        return false;
+    }
+    details.next().is_none_or(|text| {
+        text.is("text", NS_STANZA_ERROR)
+            && (text.attrs().is_empty()
+                || (text.attrs().len() == 1
+                    && text
+                        .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                        .is_some()))
+            && text.children().next().is_none()
+            && details.next().is_none()
+    })
+}
+
+fn matches_owner_affiliation_payload(
+    payload: &minidom::Element,
+    node: &str,
+    refusals: bool,
+) -> bool {
+    use crate::pubsub::NS_PUBSUB_OWNER;
+
+    // Match the enrolled scope's grant-row and change-batch limits.
+    const MAX_AFFILIATIONS: usize = 200;
+    const MAX_REFUSALS: usize = 64;
+
+    if !payload.is("pubsub", NS_PUBSUB_OWNER)
+        || !payload.attrs().is_empty()
+        || payload.children().count() != 1
+        || !payload.text().trim().is_empty()
+    {
+        return false;
+    }
+    let Some(affiliations) =
+        payload
+            .get_child("affiliations", NS_PUBSUB_OWNER)
+            .filter(|affiliations| {
+                affiliations.attrs().len() == 1
+                    && affiliations.attr("node") == Some(node)
+                    && affiliations.text().trim().is_empty()
+            })
+    else {
+        return false;
+    };
+    if refusals && affiliations.children().next().is_none() {
+        return false;
+    }
+    let max_rows = if refusals {
+        MAX_REFUSALS
+    } else {
+        MAX_AFFILIATIONS
+    };
+    let mut subjects = HashSet::new();
+    affiliations.children().enumerate().all(|(index, row)| {
+        let Some(jid) = row.attr("jid") else {
+            return false;
+        };
+        index < max_rows
+            && row.is("affiliation", NS_PUBSUB_OWNER)
+            && row.attrs().len() == 2
+            && row.children().next().is_none()
+            && row.text().trim().is_empty()
+            && match row.attr("affiliation") {
+                Some("owner" | "publisher" | "publish-only" | "member" | "outcast") => true,
+                Some("none") => refusals,
+                _ => false,
+            }
+            && jid
+                .parse::<jid::BareJid>()
+                .is_ok_and(|bare| bare.as_str() == jid)
+            && subjects.insert(jid)
+    })
+}
+
+/// A protected headline names one versioned bookmark mutation and no other data.
+fn matches_protected_bookmark_event(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    use crate::pubsub::NS_PUBSUB_EVENT;
+    use crate::xep::xep0402::NS_BOOKMARKS2;
+
+    let (Some(proof), [room]) = (descriptor.bookmark_event(), descriptor.room_dependencies())
+    else {
+        return false;
+    };
+    let id = (!descriptor.id().is_empty()).then_some(descriptor.id());
+    if descriptor.subscription_id().is_none()
+        || !element.is("message", "jabber:client")
+        || element.attr("type") != Some("headline")
+        || element.attr("id") != id
+        || element.attrs().len() != 3 + usize::from(id.is_some())
+        || element.children().count() != 1
+        || !element.text().trim().is_empty()
+    {
+        return false;
+    }
+    let Some(items) = element
+        .get_child("event", NS_PUBSUB_EVENT)
+        .filter(|event| {
+            event.attrs().is_empty()
+                && event.children().count() == 1
+                && event.text().trim().is_empty()
+        })
+        .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
+        .filter(|items| {
+            items.attrs().len() == 1
+                && items.attr("node") == Some(descriptor.node())
+                && items.children().count() == 1
+                && items.text().trim().is_empty()
+        })
+    else {
+        return false;
+    };
+    let name = if proof.present() { "item" } else { "retract" };
+    let Some(entry) = items.get_child(name, NS_PUBSUB_EVENT) else {
+        return false;
+    };
+    if entry.attrs().len() != 1
+        || entry.attr("id") != Some(room.room().as_str())
+        || !entry.text().trim().is_empty()
+    {
+        return false;
+    }
+    let mut payloads = entry.children();
+    match payloads.next() {
+        None => true,
+        Some(payload) => {
+            proof.present() && payload.is("conference", NS_BOOKMARKS2) && payloads.next().is_none()
+        }
+    }
+}
+
+/// A local subscribe result confirms exactly one bare-JID subscription.
+fn matches_protected_subscription(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    let Some(subid) = descriptor.subscription_id() else {
+        return false;
+    };
+    let bare_recipient = descriptor.recipient().to_bare();
+    element
+        .get_child("pubsub", crate::pubsub::NS_PUBSUB)
+        .filter(|pubsub| pubsub.children().count() == 1 && pubsub.attrs().is_empty())
+        .and_then(|pubsub| pubsub.get_child("subscription", crate::pubsub::NS_PUBSUB))
+        .is_some_and(|subscription| {
+            subscription.children().next().is_none()
+                && subscription.text().trim().is_empty()
+                && subscription.attrs().len() == 4
+                && subscription.attr("node") == Some(descriptor.node())
+                && subscription.attr("jid") == Some(bare_recipient.as_str())
+                && subscription.attr("subid") == Some(subid.as_str())
+                && subscription.attr("subscription") == Some("subscribed")
+        })
+}
+
+/// Content replies cover exactly the listed managed rooms. Known image
+/// items are owned by the Space and do not depend on room authority.
+fn matches_protected_rooms(
+    payload: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    use crate::xep::xep0059::NS_RSM;
+    use crate::xep::xep0503::{space_image_payload, SpaceImage};
+
+    let Some(dependencies) = descriptor.content_dependencies() else {
+        return false;
+    };
+    let mut rooms: HashSet<_> = dependencies
+        .iter()
+        .map(|room| room.room().as_str())
+        .collect();
+    let mut images = HashSet::new();
+    let mut first = None;
+    let mut last = None;
+    let mut paging = None;
+    for item in payload.children() {
+        if descriptor.kind() == ProtectedSpaceReplyKind::DiscoItems && item.is("set", NS_RSM) {
+            if paging.replace(item).is_some() {
+                return false;
+            }
+            continue;
+        }
+        let Some((id, is_image)) = (match descriptor.kind() {
+            ProtectedSpaceReplyKind::DiscoItems
+                if item.is("item", "http://jabber.org/protocol/disco#items")
+                    && item.attr("node").is_none() =>
+            {
+                match item.attr("jid") {
+                    Some(jid) if jid == descriptor.service().as_str() => item
+                        .attr("name")
+                        .map(|id| (id, SpaceImage::from_item_id(id).is_some())),
+                    jid => jid.map(|id| (id, false)),
+                }
+            }
+            ProtectedSpaceReplyKind::PubSubItems if item.is("item", crate::pubsub::NS_PUBSUB) => {
+                item.attr("id").and_then(|id| {
+                    if SpaceImage::from_item_id(id).is_some() {
+                        space_image_payload(item).ok().map(|_| (id, true))
+                    } else {
+                        (item.children().count() == 1
+                            && item
+                                .get_child("conference", crate::xep::xep0402::NS_BOOKMARKS2)
+                                .is_some())
+                        .then_some((id, false))
+                    }
+                })
+            }
+            _ => None,
+        }) else {
+            return false;
+        };
+        let new_item = if is_image {
+            images.insert(id)
+        } else {
+            rooms.remove(id)
+        };
+        if !new_item {
+            return false;
+        }
+        first.get_or_insert(id);
+        last = Some(id);
+    }
+    rooms.is_empty() && paging.is_none_or(|set| matches_protected_cursors(set, first, last))
+}
+
+/// A page may name its own ends. Count, index and cursors for omitted rooms
+/// would expose information beyond the retained decision.
+fn matches_protected_cursors(
+    set: &minidom::Element,
+    first: Option<&str>,
+    last: Option<&str>,
+) -> bool {
+    use crate::xep::xep0059::NS_RSM;
+
+    if !set.attrs().is_empty() {
+        return false;
+    }
+    let mut first_seen = false;
+    let mut last_seen = false;
+    for cursor in set.children() {
+        let (expected, seen) = match (cursor.ns().as_str(), cursor.name()) {
+            (NS_RSM, "first") => (first, &mut first_seen),
+            (NS_RSM, "last") => (last, &mut last_seen),
+            _ => return false,
+        };
+        if *seen
+            || !cursor.attrs().is_empty()
+            || cursor.children().next().is_some()
+            || !expected.is_some_and(|expected| expected == cursor.text())
+        {
+            return false;
+        }
+        *seen = true;
+    }
+    true
 }
 
 impl AsRef<Stanza> for SmReplayPayload {
@@ -1719,3 +2242,594 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod protected_space_reply_storage_tests {
+    use super::*;
+
+    const REPLY: &str = "<iq xmlns='jabber:client' type='result' from='spaces.example.test' to='alice@example.test/dev' id='disco-1'><query xmlns='http://jabber.org/protocol/disco#info' node='docs'/></iq>";
+
+    fn descriptor() -> ProtectedSpaceReplyDescriptor {
+        ProtectedSpaceReplyDescriptor::new(
+            "spaces.example.test".parse().expect("bare service JID"),
+            "docs".to_owned(),
+            "alice@example.test/dev".parse().expect("full client JID"),
+            "disco-1".to_owned(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            1,
+        )
+        .expect("reply descriptor")
+    }
+
+    #[test]
+    fn owner_configuration_round_trips_generated_form() {
+        use crate::pubsub::{build_pubsub_configure_form_result, NodeConfig};
+        use xmpp_parsers::iq::Iq;
+        let descriptor = descriptor().with_kind(ProtectedSpaceReplyKind::OwnerConfiguration);
+        let request = Iq::Get {
+            from: Some(descriptor.recipient().clone().into()),
+            to: Some(descriptor.service().clone().into()),
+            id: descriptor.id().into(),
+            payload: minidom::Element::bare("pubsub", crate::pubsub::NS_PUBSUB_OWNER),
+        };
+        let reply: minidom::Element =
+            build_pubsub_configure_form_result(&request, descriptor.node(), &NodeConfig::default())
+                .into();
+        let wire = String::from(&reply);
+        let payload = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("generated owner configure form");
+        let stored = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+        let restored = SmReplayPayload::from_storage(stored).expect("stored owner configure form");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        for (current, replacement) in [
+            ("docs", "other"),
+            ("node_config", "subscribe_options"),
+            ("pubsub#owner", "pubsub"),
+            ("pubsub#access_model", "FORM_TYPE"),
+            ("pubsub#max_items", "unknown"),
+            ("alice@example.test/dev", "alice@example.test/other"),
+            ("disco-1", "other"),
+        ] {
+            assert_ne!(current, replacement);
+            assert!(wire.contains(current));
+            assert!(
+                SmReplayPayload::from_protected_space_reply(
+                    wire.replace(current, replacement),
+                    descriptor.clone(),
+                )
+                .is_err(),
+                "accepted {replacement}"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_affiliation_refusals_round_trip_strict_iq_error() {
+        let descriptor = descriptor().with_kind(ProtectedSpaceReplyKind::OwnerAffiliationRefusals);
+        let row = "<affiliation jid='blocked@example.test' affiliation='none'/>";
+        let wire = format!("<iq xmlns='jabber:client' type='error' from='spaces.example.test' to='alice@example.test/dev' id='disco-1'><pubsub xmlns='http://jabber.org/protocol/pubsub#owner'><affiliations node='docs'>{row}</affiliations></pubsub><error type='modify'><not-acceptable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/><text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas' xml:lang='en'>Some changes were refused.</text></error></iq>");
+        let payload = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("owner affiliation refusals");
+        let stored = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+        let restored = SmReplayPayload::from_storage(stored).expect("owner refusals in storage");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        for (current, replacement) in [
+            (row, ""),
+            ("blocked@example.test", "blocked@example.test/device"),
+            ("type='modify'", "type='cancel'"),
+            ("type='error'", "type='result'"),
+            ("not-acceptable", "forbidden"),
+            ("xml:lang", "unexpected"),
+            ("pubsub#owner", "pubsub"),
+            ("node='docs'", "node='other'"),
+            ("id='disco-1'", "id='other'"),
+            ("alice@example.test/dev", "alice@example.test/other"),
+        ] {
+            assert!(
+                SmReplayPayload::from_protected_space_reply(
+                    wire.replace(current, replacement),
+                    descriptor.clone(),
+                )
+                .is_err(),
+                "accepted {replacement}"
+            );
+        }
+        let duplicate = wire.replace(row, &format!("{row}{row}"));
+        assert!(SmReplayPayload::from_protected_space_reply(duplicate, descriptor).is_err());
+    }
+
+    #[test]
+    fn owner_affiliations_round_trip_strict_owner_payload() {
+        let descriptor = descriptor().with_kind(ProtectedSpaceReplyKind::OwnerAffiliations);
+        let wire = "<iq xmlns='jabber:client' type='result' from='spaces.example.test' to='alice@example.test/dev' id='disco-1'><pubsub xmlns='http://jabber.org/protocol/pubsub#owner'><affiliations node='docs'><affiliation jid='alice@example.test' affiliation='owner'/><affiliation jid='blocked@example.test' affiliation='outcast'/></affiliations></pubsub></iq>";
+        let payload =
+            SmReplayPayload::from_protected_space_reply(wire.to_owned(), descriptor.clone())
+                .expect("owner affiliations");
+        let stored = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+        let restored =
+            SmReplayPayload::from_storage(stored).expect("owner affiliations in storage");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+
+        for (current, replacement) in [
+            ("pubsub#owner", "pubsub"),
+            ("node='docs'", "node='other'"),
+            ("affiliation='outcast'", "affiliation='none'"),
+            ("blocked@example.test", "alice@example.test"),
+            ("blocked@example.test", "blocked@example.test/device"),
+            ("blocked@example.test", "Blocked@EXAMPLE.TEST"),
+            (
+                "affiliation='outcast'/>",
+                "affiliation='outcast'><extra/></affiliation>",
+            ),
+            (
+                "affiliation='outcast'/>",
+                "affiliation='outcast' extra='yes'/>",
+            ),
+        ] {
+            assert!(
+                SmReplayPayload::from_protected_space_reply(
+                    wire.replace(current, replacement),
+                    descriptor.clone()
+                )
+                .is_err(),
+                "accepted {replacement}"
+            );
+        }
+        let excessive_rows = (0..201)
+            .map(|index| {
+                format!("<affiliation jid='member{index}@example.test' affiliation='member'/>")
+            })
+            .collect::<String>();
+        let excessive = wire.replace(
+            "<affiliation jid='blocked@example.test' affiliation='outcast'/>",
+            &excessive_rows,
+        );
+        assert!(SmReplayPayload::from_protected_space_reply(excessive, descriptor).is_err());
+    }
+
+    #[test]
+    fn typed_reply_envelopes_bind_operation_and_node() {
+        let original = descriptor();
+        assert_eq!(original.kind(), ProtectedSpaceReplyKind::DiscoInfo);
+        assert_eq!(&original.encode()[..4], b"SPR\x01");
+        let disco_items = REPLY.replace("disco#info", "disco#items");
+        let pubsub_items = REPLY.replace(
+            "<query xmlns='http://jabber.org/protocol/disco#info' node='docs'/>",
+            "<pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='docs'/></pubsub>",
+        );
+
+        for (kind, wire, mismatched) in [
+            (
+                ProtectedSpaceReplyKind::DiscoItems,
+                disco_items.as_str(),
+                pubsub_items.as_str(),
+            ),
+            (
+                ProtectedSpaceReplyKind::PubSubItems,
+                pubsub_items.as_str(),
+                disco_items.as_str(),
+            ),
+        ] {
+            let missing = original.clone().with_kind(kind);
+            assert!(ProtectedSpaceReplyDescriptor::decode(&missing.encode()).is_err());
+            assert!(
+                SmReplayPayload::from_protected_space_reply(wire.to_owned(), missing.clone())
+                    .is_err()
+            );
+            let descriptor = missing
+                .with_room_dependencies(Vec::new())
+                .expect("explicit empty coverage");
+            assert_eq!(&descriptor.encode()[..4], b"SPR\x02");
+            let mut unknown = descriptor.encode();
+            unknown[4] = 255;
+            assert!(ProtectedSpaceReplyDescriptor::decode(&unknown).is_err());
+            let reply =
+                SmReplayPayload::from_protected_space_reply(wire.to_owned(), descriptor.clone())
+                    .expect("matching protected reply");
+            let restored = SmReplayPayload::from_storage(reply.to_storage().into_owned())
+                .expect("typed envelope");
+            assert_eq!(restored.wire(), wire);
+            assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+            assert!(SmReplayPayload::from_protected_space_reply(
+                mismatched.to_owned(),
+                descriptor.clone()
+            )
+            .is_err());
+            assert!(SmReplayPayload::from_protected_space_reply(
+                wire.replace("node='docs'", "node='other'"),
+                descriptor
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn protected_content_requires_complete_unique_room_coverage() {
+        use crate::stream_management::ProtectedSpaceRoomDependency;
+
+        let room = "room@muc.example.test";
+        let dependency = ProtectedSpaceRoomDependency::new(
+            room.parse().expect("room JID"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            8,
+        )
+        .expect("canonical room dependency");
+        let disco_items = REPLY.replace("disco#info", "disco#items").replace(
+            "node='docs'/>",
+            &format!("node='docs'><item jid='{room}'/></query>"),
+        );
+        let pubsub_items = REPLY.replace(
+            "<query xmlns='http://jabber.org/protocol/disco#info' node='docs'/>",
+            &format!(
+                "<pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='docs'><item id='{room}'><conference xmlns='urn:xmpp:bookmarks:1'/></item></items></pubsub>"
+            ),
+        );
+        for (kind, wire) in [
+            (ProtectedSpaceReplyKind::DiscoItems, disco_items.as_str()),
+            (ProtectedSpaceReplyKind::PubSubItems, pubsub_items.as_str()),
+        ] {
+            let descriptor = descriptor().with_kind(kind);
+            let empty = descriptor
+                .clone()
+                .with_room_dependencies(Vec::new())
+                .expect("empty proof");
+            assert!(SmReplayPayload::from_protected_space_reply(wire.to_owned(), empty).is_err());
+            assert!(descriptor
+                .clone()
+                .with_room_dependencies(vec![dependency.clone(), dependency.clone()])
+                .is_err());
+
+            let full = descriptor
+                .with_room_dependencies(vec![dependency.clone()])
+                .expect("room proof");
+            let result = SmReplayPayload::from_protected_space_reply(wire.to_owned(), full.clone())
+                .expect("fully proved reply");
+            let restored = SmReplayPayload::from_storage(result.to_storage().into_owned())
+                .expect("retained reply");
+            assert_eq!(restored.wire(), wire);
+            assert_eq!(
+                restored
+                    .protected_space_reply()
+                    .expect("descriptor")
+                    .room_dependencies(),
+                std::slice::from_ref(&dependency)
+            );
+            assert!(SmReplayPayload::from_protected_space_reply(
+                wire.replace(room, "other@muc.example.test"),
+                full
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn protected_content_authorizes_space_images_and_only_returned_cursors() {
+        use crate::xep::xep0503::SpaceImage;
+
+        let avatar = SpaceImage::Avatar.item_id();
+        let query = format!(
+            "<query xmlns='http://jabber.org/protocol/disco#items' node='docs'><item jid='spaces.example.test' name='{avatar}'/><set xmlns='http://jabber.org/protocol/rsm'><first>{avatar}</first><last>{avatar}</last></set></query>"
+        );
+        let images = format!(
+            "<pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='docs'><item id='{avatar}'><metadata xmlns='urn:xmpp:avatar:metadata'><info bytes='42' id='name' type='image/png'/></metadata></item></items></pubsub>"
+        );
+        for (kind, payload) in [
+            (ProtectedSpaceReplyKind::DiscoItems, query),
+            (ProtectedSpaceReplyKind::PubSubItems, images),
+        ] {
+            let descriptor = descriptor()
+                .with_kind(kind)
+                .with_room_dependencies(Vec::new())
+                .expect("no room dependency for the Space image");
+            let wire = REPLY.replace(
+                "<query xmlns='http://jabber.org/protocol/disco#info' node='docs'/>",
+                &payload,
+            );
+            assert!(
+                SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+                    .is_ok()
+            );
+            assert!(SmReplayPayload::from_protected_space_reply(
+                wire.replace(avatar, "unknown-metadata"),
+                descriptor.clone()
+            )
+            .is_err());
+            if kind == ProtectedSpaceReplyKind::DiscoItems {
+                for invalid in [
+                    wire.replace("<first>", "<first index='8'>"),
+                    wire.replace("</set>", "<count>9</count></set>"),
+                    wire.replace(&format!("<last>{avatar}"), "<last>omitted@muc.example.test"),
+                ] {
+                    assert!(SmReplayPayload::from_protected_space_reply(
+                        invalid,
+                        descriptor.clone()
+                    )
+                    .is_err());
+                }
+            } else {
+                assert!(SmReplayPayload::from_protected_space_reply(
+                    wire.replace("image/png", "text/plain"),
+                    descriptor
+                )
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn subscribe_result_binds_the_full_resource_bare_account_and_chosen_subid() {
+        use crate::pubsub::SubId;
+
+        let subid = SubId::generate();
+        let wire = REPLY.replace(
+            "<query xmlns='http://jabber.org/protocol/disco#info' node='docs'/>",
+            &format!(
+                "<pubsub xmlns='http://jabber.org/protocol/pubsub'><subscription node='docs' jid='alice@example.test' subscription='subscribed' subid='{subid}'/></pubsub>"
+            ),
+        );
+        let missing = descriptor().with_kind(ProtectedSpaceReplyKind::Subscribe);
+        assert!(ProtectedSpaceReplyDescriptor::decode(&missing.encode()).is_err());
+        assert!(
+            SmReplayPayload::from_protected_space_reply(wire.clone(), missing.clone()).is_err()
+        );
+        assert!(missing
+            .clone()
+            .with_subscription(SubId::from_raw(""))
+            .is_err());
+        assert!(missing
+            .clone()
+            .with_subscription(SubId::from_raw("a".repeat(257)))
+            .is_err());
+
+        let descriptor = missing
+            .with_subscription(subid.clone())
+            .expect("exact subscription");
+        let payload = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("matching subscribe result");
+        let storage = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(storage.clone()).is_err());
+        let restored = SmReplayPayload::from_storage(storage).expect("subscribe envelope");
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        assert_eq!(restored.wire(), wire);
+        for (old, replacement) in [
+            ("alice@example.test/dev", "alice@example.test/other"),
+            ("jid='alice@example.test'", "jid='alice@example.test/dev'"),
+            ("jid='alice@example.test'", "jid='bob@example.test'"),
+            ("subscription='subscribed'", "subscription='pending'"),
+            ("node='docs'", "node='other'"),
+            ("id='disco-1'", "id='disco-2'"),
+            ("spaces.example.test", "other.example.test"),
+            (subid.as_str(), "another-subscription"),
+        ] {
+            assert!(SmReplayPayload::from_protected_space_reply(
+                wire.replace(old, replacement),
+                descriptor.clone()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn delete_event_round_trips_and_binds_tombstone_identity() {
+        let base = descriptor();
+        let operation = uuid::Uuid::new_v4();
+        let id = crate::stream_management::space_deletion_notice_id(
+            operation,
+            &base.recipient().to_bare(),
+        );
+        let other = crate::stream_management::space_deletion_notice_id(
+            operation,
+            &"bob@example.test".parse().expect("other subscriber"),
+        );
+        assert_ne!(id, other);
+        let descriptor = ProtectedSpaceReplyDescriptor::new(
+            base.service().clone(),
+            base.node().to_owned(),
+            base.recipient().clone(),
+            id.clone(),
+            base.lifecycle(),
+            base.incarnation(),
+            base.generation(),
+        )
+        .expect("deletion descriptor")
+        .with_kind(ProtectedSpaceReplyKind::DeleteEvent);
+        let wire = format!(
+            "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test' id='{id}'><event xmlns='http://jabber.org/protocol/pubsub#event'><delete node='docs'/></event></message>"
+        );
+        let parsed = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("exact deletion event");
+        let restored = SmReplayPayload::from_storage(parsed.to_storage().into_owned())
+            .expect("stored deletion event");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        assert_eq!(descriptor.deletion_operation(), Some(operation));
+
+        for wrong in [
+            wire.replace("node='docs'", "node='other'"),
+            wire.replace(&id, &other),
+            wire.replace("alice@example.test", "alice@example.test/dev"),
+            wire.replace("alice@example.test", "other@example.test"),
+            wire.replace(
+                "<delete node='docs'/>",
+                "<delete node='docs'><redirect uri='xmpp:other.example.test'/></delete>",
+            ),
+        ] {
+            assert!(
+                SmReplayPayload::from_protected_space_reply(wrong, descriptor.clone()).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn bookmark_event_round_trips_and_binds_each_wire_identity() {
+        use crate::pubsub::SubId;
+        use crate::stream_management::ProtectedSpaceRoomDependency;
+
+        let room = "room@muc.example.test";
+        let dependency = ProtectedSpaceRoomDependency::new(
+            room.parse().expect("room"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            9,
+        )
+        .expect("room dependency");
+        let operation = uuid::Uuid::new_v4();
+        let subid = SubId::generate();
+        for (present, stanza_id, id_attribute, name, payload) in [
+            (
+                true,
+                "event-1",
+                " id='event-1'",
+                "item",
+                "<conference xmlns='urn:xmpp:bookmarks:1'/>",
+            ),
+            (false, "", "", "retract", ""),
+        ] {
+            let wire = format!(
+                "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test/dev'{id_attribute}><event xmlns='http://jabber.org/protocol/pubsub#event'><items node='docs'><{name} id='{room}'>{payload}</{name}></items></event></message>"
+            );
+            let base = descriptor();
+            let descriptor = ProtectedSpaceReplyDescriptor::new(
+                base.service().clone(),
+                base.node().to_owned(),
+                base.recipient().clone(),
+                stanza_id.to_owned(),
+                base.lifecycle(),
+                base.incarnation(),
+                base.generation(),
+            )
+            .expect("event base")
+            .with_bookmark_event(subid.clone(), operation, dependency.clone(), present)
+            .expect("bookmark event proof");
+            let parsed =
+                SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+                    .expect("exact bookmark event");
+            let stored = parsed.to_storage().into_owned();
+            assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+            let restored = SmReplayPayload::from_storage(stored).expect("stored event");
+            assert_eq!(restored.wire(), wire);
+            assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+            assert_eq!(descriptor.subscription_id(), Some(&subid));
+            assert_eq!(
+                descriptor
+                    .bookmark_event()
+                    .expect("mutation identity")
+                    .operation(),
+                operation
+            );
+            assert_eq!(
+                descriptor
+                    .bookmark_event()
+                    .expect("mutation identity")
+                    .present(),
+                present
+            );
+            assert_eq!(
+                descriptor.room_dependencies(),
+                std::slice::from_ref(&dependency)
+            );
+
+            let mut bad_action = descriptor.encode();
+            *bad_action.last_mut().expect("action byte") = 2;
+            assert!(ProtectedSpaceReplyDescriptor::decode(&bad_action).is_err());
+            let wrong_action = if present { "retract" } else { "item" };
+            for changed in [
+                wire.replace("headline", "chat"),
+                wire.replace("node='docs'", "node='other'"),
+                wire.replace("spaces.example.test", "other.example.test"),
+                wire.replace("alice@example.test/dev", "alice@example.test/other"),
+                wire.replace(room, "other@muc.example.test"),
+                wire.replace(&format!("<{name} "), &format!("<{wrong_action} "))
+                    .replace(&format!("</{name}>"), &format!("</{wrong_action}>")),
+                wire.replace("</message>", "<body>extra data</body></message>"),
+            ] {
+                assert!(
+                    SmReplayPayload::from_protected_space_reply(changed, descriptor.clone())
+                        .is_err()
+                );
+            }
+            let wrong_id = if present {
+                wire.replace(" id='event-1'", "")
+            } else {
+                wire.replace(" type='headline'", " type='headline' id='unexpected'")
+            };
+            assert!(SmReplayPayload::from_protected_space_reply(wrong_id, descriptor).is_err());
+        }
+    }
+
+    #[test]
+    fn protected_reply_round_trips_with_no_legacy_wire_xml() {
+        let descriptor = descriptor();
+        let payload =
+            SmReplayPayload::from_protected_space_reply(REPLY.to_owned(), descriptor.clone())
+                .expect("protected payload");
+        let stored = payload.to_storage().into_owned();
+        assert!(stored.starts_with(PROTECTED_SPACE_STORAGE_PREFIX));
+        assert!(!stored.contains('<'));
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+
+        let restored = SmReplayPayload::from_storage(stored.clone()).expect("protected envelope");
+        assert_eq!(restored.wire(), REPLY);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        assert_eq!(restored.to_storage(), stored);
+
+        let ordinary = SmReplayPayload::from_storage(REPLY.to_owned()).expect("legacy XML");
+        assert_eq!(ordinary.wire(), REPLY);
+        assert_eq!(ordinary.protected_space_reply(), None);
+        assert_eq!(ordinary.to_storage(), REPLY);
+    }
+
+    #[test]
+    fn unknown_and_malformed_protected_storage_is_rejected() {
+        let descriptor = descriptor();
+        let encoded = STANDARD_NO_PAD.encode(descriptor.encode());
+        let payload = SmReplayPayload::from_protected_space_reply(REPLY.to_owned(), descriptor)
+            .expect("protected reply");
+        let stored = payload.to_storage();
+        for invalid in [
+            stored.replacen("space:1:", "space:2:", 1),
+            format!("{stored}.extra"),
+            format!("{stored}="),
+            format!("{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}"),
+            format!("{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}.!"),
+            format!(
+                "{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}.{}",
+                "A".repeat(MAX_ENCODED_SPACE_REPLY + 1)
+            ),
+            format!(
+                "{PROTECTED_SPACE_STORAGE_PREFIX}{encoded}.{}",
+                STANDARD_NO_PAD.encode(REPLY.replace("node='docs'", "node='other'"))
+            ),
+        ] {
+            assert!(SmReplayPayload::from_storage(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn protected_reply_identity_validates_stanza_shape_and_addresses() {
+        let descriptor = descriptor();
+        for (expected, wrong) in [
+            ("jabber:client", "jabber:server"),
+            ("type='result'", "type='get'"),
+            ("disco-1", "disco-2"),
+            ("spaces.example.test", "other.example.test"),
+            ("alice@example.test/dev", "alice@example.test/other"),
+            ("node='docs'", "node='other'"),
+            ("disco#info", "disco#items"),
+        ] {
+            let wrong_reply = REPLY.replace(expected, wrong);
+            assert!(
+                SmReplayPayload::from_protected_space_reply(wrong_reply, descriptor.clone())
+                    .is_err()
+            );
+        }
+    }
+}

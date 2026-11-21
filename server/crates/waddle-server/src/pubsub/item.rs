@@ -10,9 +10,10 @@ use waddle_xmpp::XmppError;
 use super::DatabasePubSubStorage;
 use crate::dnd_projection::{delete_dnd_projection_tx, upsert_dnd_projection_tx, DndProjection};
 use crate::notification_settings_projection::{
-    derive_dm_bookmark_projection_mutation, derive_validated_bookmark_projection_mutation,
-    validate_dm_bookmark_publish, validate_xep0402_bookmark_publish, ConversationKind,
-    NotificationSettingsProjectionMutation, NotificationSettingsSource,
+    derive_bookmark_projection_mutation, derive_dm_bookmark_projection_mutation,
+    derive_validated_bookmark_projection_mutation, validate_dm_bookmark_publish,
+    validate_xep0402_bookmark_publish, ConversationKind, NotificationSettingsProjectionMutation,
+    NotificationSettingsSource,
 };
 
 impl DatabasePubSubStorage {
@@ -254,6 +255,33 @@ impl DatabasePubSubStorage {
                 },
             )?;
         }
+        // `urn:waddle:joined-spaces:0` is the owner's private list of
+        // Spaces on other servers (XEP-0223): only the owner writes it,
+        // whatever affiliation or publish model the node was given, and
+        // each item is addressed by the Space it names, so a publish
+        // without an item id (which would get a generated one) is refused.
+        if node_name == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES {
+            match publisher {
+                Some(publisher_jid) if publisher_jid == owner => {}
+                _ => {
+                    warn!(
+                        owner = %owner,
+                        publisher = ?publisher,
+                        "urn:waddle:joined-spaces:0 publish rejected: publisher is not the node owner"
+                    );
+                    return Err(XmppError::forbidden(Some(
+                        "urn:waddle:joined-spaces:0 may only be published by the node owner"
+                            .to_string(),
+                    )));
+                }
+            }
+            if item.id.as_deref().is_none_or(str::is_empty) {
+                return Err(XmppError::bad_request(Some(
+                    "urn:waddle:joined-spaces:0 publish requires the item id of the Space it names"
+                        .to_string(),
+                )));
+            }
+        }
 
         let (node, node_created) = match self.get_node_impl(owner, node_name).await? {
             Some(node) => (node, false),
@@ -305,26 +333,14 @@ impl DatabasePubSubStorage {
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?
         } else {
-            tx.execute(
-                r#"
-                INSERT INTO pubsub_items (
-                    owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
-                    seq = excluded.seq,
-                    payload_xml = excluded.payload_xml,
-                    publisher_jid = excluded.publisher_jid,
-                    published_at_ms = excluded.published_at_ms
-                "#,
-                crate::db_params![
-                    owner.to_string(),
-                    node_name,
-                    item_id.clone(),
-                    payload_xml,
-                    publisher_jid,
-                    published_at_ms,
-                ],
+            Self::put_item_tx(
+                &mut tx,
+                owner,
+                node_name,
+                &item_id,
+                payload_xml,
+                publisher_jid,
+                published_at_ms,
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?
@@ -334,9 +350,10 @@ impl DatabasePubSubStorage {
                 "PubSub item belongs to a different publisher".to_string(),
             )));
         }
-        let evicted_item_ids = self
-            .enforce_max_items_tx(&mut tx, owner, node_name, node.config.max_items)
-            .await?;
+        let evicted_item_ids =
+            Self::enforce_max_items_tx(&mut tx, owner, node_name, node.config.max_items)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
         if let Some(bookmark) = validated_bookmark.as_ref() {
             let source_version = next_notification_settings_source_version_tx(&mut tx).await?;
             let payload = item.payload.as_ref().ok_or_else(|| {
@@ -353,9 +370,10 @@ impl DatabasePubSubStorage {
             .map_err(|error| XmppError::internal(error.to_string()))?;
             apply_projection_mutation_tx(&mut tx, mutation).await?;
             for evicted_item_id in &evicted_item_ids {
-                delete_bookmark_projection_for_item_tx(
+                reconcile_bookmark_projection_after_removal_tx(
                     &mut tx,
                     owner,
+                    node_name,
                     evicted_item_id,
                     NotificationSettingsSource::Xep0402Bookmarks,
                 )
@@ -378,9 +396,10 @@ impl DatabasePubSubStorage {
             // clobbers a MUC-sourced row that happens to share the same
             // conversation JID (the projection PK is source-agnostic).
             for evicted_item_id in &evicted_item_ids {
-                delete_bookmark_projection_for_item_tx(
+                reconcile_bookmark_projection_after_removal_tx(
                     &mut tx,
                     owner,
+                    node_name,
                     evicted_item_id,
                     NotificationSettingsSource::WaddleDmBookmarks,
                 )
@@ -511,20 +530,19 @@ impl DatabasePubSubStorage {
                 .begin()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            let affected = tx
-                .execute(
-                    "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
-                    crate::db_params![owner.to_string(), node_name, item_id],
-                )
+            let affected = Self::delete_item_tx(&mut tx, owner, node_name, item_id)
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            if affected > 0 {
-                delete_bookmark_projection_for_item_tx(&mut tx, owner, item_id, source).await?;
+            if affected {
+                reconcile_bookmark_projection_after_removal_tx(
+                    &mut tx, owner, node_name, item_id, source,
+                )
+                .await?;
             }
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            return Ok(affected > 0);
+            return Ok(affected);
         }
         if is_dnd_node(node_name) {
             // Retracting an `urn:waddle:dnd:0` item MUST clear the
@@ -536,14 +554,10 @@ impl DatabasePubSubStorage {
                 .begin()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            let affected = tx
-                .execute(
-                    "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
-                    crate::db_params![owner.to_string(), node_name, item_id],
-                )
+            let affected = Self::delete_item_tx(&mut tx, owner, node_name, item_id)
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            if affected > 0 {
+            if affected {
                 delete_dnd_projection_tx(&mut tx, owner)
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -551,7 +565,7 @@ impl DatabasePubSubStorage {
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            return Ok(affected > 0);
+            return Ok(affected);
         }
 
         let affected = self
@@ -629,13 +643,60 @@ impl DatabasePubSubStorage {
         Ok(affected)
     }
 
-    pub(super) async fn enforce_max_items_tx(
-        &self,
+    pub(crate) async fn put_item_tx(
+        tx: &mut Transaction<'_>,
+        owner: &BareJid,
+        node_name: &str,
+        item_id: &str,
+        payload_xml: Option<String>,
+        publisher_jid: Option<String>,
+        published_at_ms: i64,
+    ) -> Result<u64, crate::db::DatabaseError> {
+        tx.execute(
+            r#"
+            INSERT INTO pubsub_items (
+                owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
+                seq = excluded.seq,
+                payload_xml = excluded.payload_xml,
+                publisher_jid = excluded.publisher_jid,
+                published_at_ms = excluded.published_at_ms
+            "#,
+            crate::db_params![
+                owner.as_str(),
+                node_name,
+                item_id,
+                payload_xml,
+                publisher_jid,
+                published_at_ms,
+            ],
+        )
+        .await
+    }
+
+    pub(crate) async fn delete_item_tx(
+        tx: &mut Transaction<'_>,
+        owner: &BareJid,
+        node_name: &str,
+        item_id: &str,
+    ) -> Result<bool, crate::db::DatabaseError> {
+        Ok(tx
+            .execute(
+                "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
+                crate::db_params![owner.as_str(), node_name, item_id],
+            )
+            .await?
+            > 0)
+    }
+
+    pub(crate) async fn enforce_max_items_tx(
         tx: &mut Transaction<'_>,
         owner: &BareJid,
         node_name: &str,
         max_items: u32,
-    ) -> Result<Vec<String>, XmppError> {
+    ) -> Result<Vec<String>, crate::db::DatabaseError> {
         if max_items == 0 || max_items == u32::MAX {
             return Ok(Vec::new());
         }
@@ -660,18 +721,10 @@ impl DatabasePubSubStorage {
                     max_items,
                 ],
             )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+            .await?;
         let mut evicted_item_ids = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?
-        {
-            evicted_item_ids.push(
-                row.get(0)
-                    .map_err(|error| XmppError::internal(error.to_string()))?,
-            );
+        while let Some(row) = rows.next().await? {
+            evicted_item_ids.push(row.get(0)?);
         }
         Ok(evicted_item_ids)
     }
@@ -800,6 +853,112 @@ async fn delete_bookmark_projection_for_item_tx(
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;
     Ok(())
+}
+
+/// Bring the projection row of the conversation `item_id` names up to date
+/// after the item `item_id` left the owner's `node_name`.
+///
+/// Projection rows are keyed by the conversation the `jid` parser reads from
+/// an item id, so the store can hold two items that feed one row: one under
+/// the conversation's canonical id (`room@muc.example.com`) and one under a
+/// spelling the parser folds onto it (`Room@muc.example.com`), which earlier
+/// releases accepted as written. Removing the non-canonical item while the
+/// canonical one remains derives the row again from the remaining item
+/// instead of deleting it, so clearing a stray item never clears settings
+/// the canonical item still carries.
+async fn reconcile_bookmark_projection_after_removal_tx(
+    tx: &mut Transaction<'_>,
+    owner: &BareJid,
+    node_name: &str,
+    item_id: &str,
+    source: NotificationSettingsSource,
+) -> Result<(), XmppError> {
+    let conversation_jid: BareJid = item_id
+        .parse()
+        .map_err(|error| XmppError::internal(format!("invalid bookmark item id: {error}")))?;
+    let conversation_id = conversation_jid.to_string();
+    if conversation_id != item_id {
+        if let Some(mutation) =
+            remaining_bookmark_projection_tx(tx, owner, node_name, &conversation_id, source).await?
+        {
+            return apply_projection_mutation_tx(tx, mutation).await;
+        }
+    }
+    delete_bookmark_projection_for_item_tx(tx, owner, item_id, source).await
+}
+
+/// The projection mutation the item stored under `conversation_id` on the
+/// owner's `node_name` derives, or `None` when no such item is stored or its
+/// payload no longer derives one.
+async fn remaining_bookmark_projection_tx(
+    tx: &mut Transaction<'_>,
+    owner: &BareJid,
+    node_name: &str,
+    conversation_id: &str,
+    source: NotificationSettingsSource,
+) -> Result<Option<NotificationSettingsProjectionMutation>, XmppError> {
+    let mut rows = tx
+        .query(
+            "SELECT payload_xml, published_at_ms FROM pubsub_items \
+             WHERE owner_jid = ? AND node_name = ? AND item_id = ?",
+            crate::db_params![owner.to_string(), node_name, conversation_id],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let payload_xml: Option<String> = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let published_at_ms: i64 = row
+        .get(1)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(payload) = payload_xml.and_then(|xml| xml.parse::<minidom::Element>().ok()) else {
+        warn!(
+            owner = %owner,
+            node_name,
+            "stored bookmark item has no readable payload; clearing its projection row"
+        );
+        return Ok(None);
+    };
+    let source_version = next_notification_settings_source_version_tx(tx).await?;
+    let derived = match source {
+        NotificationSettingsSource::Xep0402Bookmarks => derive_bookmark_projection_mutation(
+            owner,
+            conversation_id,
+            Some(&payload),
+            ConversationKind::PrivateGroup,
+            published_at_ms,
+            source_version,
+        ),
+        NotificationSettingsSource::WaddleDmBookmarks => {
+            validate_dm_bookmark_publish(conversation_id, &payload).and_then(|dm_bookmark| {
+                derive_dm_bookmark_projection_mutation(
+                    owner,
+                    &dm_bookmark,
+                    published_at_ms,
+                    source_version,
+                )
+            })
+        }
+    };
+    match derived {
+        Ok(mutation) => Ok(Some(mutation)),
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node_name,
+                %error,
+                "stored bookmark item no longer derives a projection row; clearing it"
+            );
+            Ok(None)
+        }
+    }
 }
 
 async fn apply_projection_mutation_tx(

@@ -24,6 +24,8 @@ pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transact
 mod error;
 pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
+mod host_grant_admission;
+pub(crate) use host_grant_admission::HostGrantAdmissionRepository;
 mod mailbox;
 pub use mailbox::{
     LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal, MailboxDeadLetterReason,
@@ -76,6 +78,8 @@ pub(crate) use send_attempts::{start_fresh_postgres, start_fresh_sqlite};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
 mod projections;
 pub(crate) use projections::ProjectionRepository;
+mod remote_recipients;
+pub(crate) use remote_recipients::{RecipientAssertion, RemoteRecipientRepository};
 mod relation_guard;
 pub use relation_guard::{RelationGuardCapability, RelationGuardCapabilityError};
 mod settlement;
@@ -171,6 +175,14 @@ pub struct IngressUnitOfWork {
     /// the mailbox epoch; zero before any did. See
     /// [`Self::mailbox_acceptance_active_now`].
     mailbox_epoch_proven_at_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// Set once a transaction has seen the host-grant relations on an
+    /// unattested PostgreSQL handle, so later transactions do not look for
+    /// them again. Shared by every clone.
+    host_grant_relations: Arc<std::sync::atomic::AtomicBool>,
+    /// What this replica established about the host-grant store; empty
+    /// until [`Self::attach_host_grants`]. A room an enrolled scope manages
+    /// is admitted only while it holds an attachment. Shared by every clone.
+    host_grant_gate: Arc<crate::permissions::host_grant::HostGrantAttachmentGate>,
     /// Optional full-identity writer capability retained by the exact
     /// physically attested pool.
     attested_pg_writer: Option<AttestedPostgresWriterCapability>,
@@ -230,8 +242,27 @@ impl IngressUnitOfWork {
             attested_pg_writer,
             seated_rooms: Default::default(),
             mailbox_epoch_proven_at_ms: Default::default(),
+            host_grant_relations: Default::default(),
+            host_grant_gate: Default::default(),
             fencing: IngressFencing::SingleNode,
         })
+    }
+
+    /// Record that this replica verified its runtime role's privileges on
+    /// the host-grant store and its restore fence. Until then every
+    /// acceptance for a room an enrolled scope manages is refused. The first
+    /// attachment stays until the gate verifies a changed authority again;
+    /// the answer is whether this call set it.
+    pub fn attach_host_grants(
+        &self,
+        attachment: crate::permissions::host_grant::HostGrantAttachment,
+    ) -> bool {
+        self.host_grant_gate.attach(attachment)
+    }
+
+    /// The gate that holds this replica's host-grant attachment.
+    pub fn host_grant_gate(&self) -> Arc<crate::permissions::host_grant::HostGrantAttachmentGate> {
+        Arc::clone(&self.host_grant_gate)
     }
 
     /// Whether this unit of work can carry remote room acceptance through
@@ -541,6 +572,8 @@ impl IngressUnitOfWork {
             lineage,
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
+            host_grant_relations: Arc::clone(&self.host_grant_relations),
+            host_grant_gate: Arc::clone(&self.host_grant_gate),
             recorded_notification_candidates: Vec::new(),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
@@ -582,6 +615,10 @@ pub struct IngressUowTransaction<'a> {
     /// The canonical identity source bound at [`IngressUnitOfWork`]
     /// construction; single-node transactions cannot mint claim fences.
     fencing: IngressFencing,
+    /// Shared with the unit of work; see its field of the same name.
+    host_grant_relations: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the unit of work; see its field of the same name.
+    host_grant_gate: Arc<crate::permissions::host_grant::HostGrantAttachmentGate>,
     /// Node-authority guards minted for this transaction's claim fences.
     /// Held here — not on the independently droppable fence — so identity
     /// rotation or terminal disable cannot complete until this transaction
@@ -680,6 +717,21 @@ impl<'a> IngressUowTransaction<'a> {
     /// The lineage attestation verified on this same transaction.
     pub fn lineage(&self) -> &IngressLineage {
         &self.lineage
+    }
+
+    /// What this replica established about the host-grant store, if it
+    /// has.
+    pub(crate) fn host_grant_attachment(
+        &self,
+    ) -> Option<crate::permissions::host_grant::HostGrantAttachment> {
+        self.host_grant_gate.current()
+    }
+
+    /// The gate that holds this replica's host-grant attachment.
+    pub(crate) fn host_grant_gate(
+        &self,
+    ) -> Arc<crate::permissions::host_grant::HostGrantAttachmentGate> {
+        Arc::clone(&self.host_grant_gate)
     }
 
     pub(crate) fn receipt_schema(&self) -> Option<&str> {

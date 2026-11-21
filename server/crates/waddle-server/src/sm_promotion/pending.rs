@@ -11,6 +11,20 @@ use waddle_xmpp::Stanza;
 
 use super::{PromotedOutcome, PromotionFailureReason};
 
+/// The outcome of a stanza discarded because its recipient's account was
+/// retired (ADR-0020 D8), counted as it is decided: every path a promotion
+/// takes to [`PromotedOutcome::Discarded`] comes through here, the
+/// recovery of orphaned ingress custody included, which keeps no summary.
+pub(super) fn discarded_for_retired_recipient() -> PromotedOutcome {
+    waddle_xmpp::counter_add!(
+        "waddle.account_retirement.promotion_discarded",
+        "{stanza}",
+        "Stanzas a XEP-0198 promotion discarded because their recipient's account was retired",
+        1,
+    );
+    PromotedOutcome::Discarded
+}
+
 /// Bundled delivery handles for pending-storage promotion (ADR-0017 Phase 3
 /// Slice 9): the DashMap send surface plus the actor-authoritative registry
 /// used for bare-JID resource enumeration. Grouped into one type so
@@ -102,6 +116,11 @@ pub(super) async fn insert_pending(
                 Ok(CustodyInsertOutcome::AlreadyCompleted) => {
                     return PromotedOutcome::NotPromotable
                 }
+                // The store ended the custody without delivery in the same
+                // transaction.
+                Ok(CustodyInsertOutcome::RecipientRetired) => {
+                    return discarded_for_retired_recipient()
+                }
                 // A quota error sent to an in-memory socket is not a durable
                 // replacement for the retained original payload.
                 Ok(CustodyInsertOutcome::QuotaExceeded) => {
@@ -115,6 +134,9 @@ pub(super) async fn insert_pending(
     };
     match result {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
+        // The recipient's account was retired: its store keeps nothing, and
+        // no sender is answered for it.
+        Ok(InsertOutcome::RecipientRetired) => discarded_for_retired_recipient(),
         Ok(InsertOutcome::QuotaExceeded) => {
             if original_message.from.is_none() {
                 // No peer return target exists. Retire this nonbounceable
@@ -122,6 +144,13 @@ pub(super) async fn insert_pending(
                 // quota-bounce metric or a per-pass warning.
                 waddle_xmpp::telemetry::reliability::increment_sm_promotion_not_promotable();
                 return PromotedOutcome::NotPromotable;
+            }
+            if is_remote_sender(original_message, delivery.server_domain) {
+                // A message that arrived over S2S is never answered, so that
+                // its sender cannot tell an offline account from any other
+                // (gate G18): beyond the quota it is dropped, as the account
+                // side drops one it cannot store.
+                return PromotedOutcome::Dropped;
             }
             // A return error is a replacement custody sink only once a live
             // sender accepted it or its local offline queue committed it.
@@ -244,6 +273,8 @@ async fn return_quota_bounce(
         .await
     {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Bounced,
+        // The sender's own account was retired: nobody is left to answer.
+        Ok(InsertOutcome::RecipientRetired) => discarded_for_retired_recipient(),
         Ok(InsertOutcome::QuotaExceeded) => {
             PromotedOutcome::StorageFailure(if delivery.allow_unfenced_effects {
                 PromotionFailureReason::QuotaBounceUnavailable
@@ -256,4 +287,26 @@ async fn return_quota_bounce(
         }
         Err(_) => PromotedOutcome::StorageFailure(PromotionFailureReason::PendingStorage),
     }
+}
+
+/// Whether `message` came from a remote sender over S2S, as far as its
+/// `from` tells: an address at a domain that is neither `server_domain`
+/// nor below it. The S2S router admits only a `from` at the stream's
+/// authenticated remote domain, which is never a served one, and the
+/// deployment's own services are named below its domain unless an operator
+/// moves the MUC or Spaces service elsewhere; such a service's message is
+/// then treated as a remote sender's here and is dropped, not retained,
+/// beyond the offline quota.
+pub(crate) fn is_remote_sender(
+    message: &xmpp_parsers::message::Message,
+    server_domain: &str,
+) -> bool {
+    let Some(from) = message.from.as_ref() else {
+        return false;
+    };
+    let domain = from.domain().as_str();
+    domain != server_domain
+        && !domain
+            .strip_suffix(server_domain)
+            .is_some_and(|parent| parent.ends_with('.'))
 }

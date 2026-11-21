@@ -259,7 +259,7 @@ pub(crate) fn decode_unacked(row: &Row) -> Result<PersistedUnackedStanza, SmPers
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid receipt timestamp".into()))?;
     let stanza =
-        waddle_xmpp::stream_management::persistence::SmReplayPayload::from_wire(stanza_xml)?;
+        waddle_xmpp::stream_management::persistence::SmReplayPayload::from_storage(stanza_xml)?;
 
     Ok(PersistedUnackedStanza {
         provenance: decode_provenance(row, 5),
@@ -297,7 +297,7 @@ pub(super) fn decode_unacked_join_row(
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
     let stanza =
-        waddle_xmpp::stream_management::persistence::SmReplayPayload::from_wire(stanza_xml)?;
+        waddle_xmpp::stream_management::persistence::SmReplayPayload::from_storage(stanza_xml)?;
     let sequence =
         u32::try_from(sequence_i64).map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     Ok(PersistedUnackedStanza {

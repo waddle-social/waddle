@@ -238,8 +238,8 @@ pub use super::xep0430::{
 };
 
 pub use super::xep0402::{
-    build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark, Bookmark,
-    BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
+    build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark,
+    parse_bookmark_item_id, Bookmark, BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
 };
 
 pub use super::xep_waddle_dm_bookmarks::{
@@ -454,9 +454,12 @@ pub use super::xep_waddle_in_call::{
 
 pub use super::xep0503::{
     build_channel_item, build_room_metadata_form, build_server_role_form, build_space_node_iri,
-    build_space_parent_form, build_spaces_metadata_form, build_spaces_metadata_form_for_requester,
-    build_spaces_metadata_form_for_requester_with_owners, build_spaces_type_form, SpaceAffiliation,
-    NS_SPACES, NS_WADDLE_ROOM_METADATA,
+    build_space_parent_form, build_spaces_metadata_form, build_spaces_metadata_form_for_remote,
+    build_spaces_metadata_form_for_requester, build_spaces_metadata_form_for_requester_with_owners,
+    build_spaces_type_form, space_image_payload, validate_space_image_metadata, SpaceAffiliation,
+    SpaceImage, SpaceImageError, SpaceImageInfoPart, ITEM_SPACE_AVATAR_METADATA,
+    ITEM_SPACE_BANNER_METADATA, MAX_SPACE_IMAGE_FORMATS, MAX_SPACE_IMAGE_ID_LEN,
+    MAX_SPACE_IMAGE_URL_LEN, NS_SPACES, NS_WADDLE_ROOM_METADATA,
 };
 
 pub use super::xep0511::{

@@ -466,6 +466,50 @@ impl PubSubStorage for DatabasePubSubStorage {
         Ok(prev)
     }
 
+    async fn set_affiliation_unless_outcast(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<bool, XmppError> {
+        let written = if affiliation == Affiliation::None {
+            self.execute(
+                "DELETE FROM pubsub_affiliations WHERE owner_jid = ? AND node_name = ? \
+                 AND entity_jid = ? AND affiliation <> 'outcast'",
+                crate::db_params![owner.to_string(), node_name, entity.to_string()],
+            )
+            .await?
+        } else {
+            // The conflict update is conditioned on the stored row, so the
+            // check and the write are one statement.
+            self.execute(
+                r#"
+                INSERT INTO pubsub_affiliations (owner_jid, node_name, entity_jid, affiliation, updated_at_ms)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_jid, node_name, entity_jid) DO UPDATE SET
+                    affiliation = excluded.affiliation,
+                    updated_at_ms = excluded.updated_at_ms
+                WHERE pubsub_affiliations.affiliation <> 'outcast'
+                "#,
+                crate::db_params![
+                    owner.to_string(),
+                    node_name,
+                    entity.to_string(),
+                    affiliation.to_string(),
+                    crate::time::now_ms(),
+                ],
+            )
+            .await?
+        };
+        if written > 0 {
+            return Ok(true);
+        }
+        // Nothing was written: either the row holds `Outcast`, or (for a
+        // removal) there was no row to remove.
+        Ok(self.affiliation(owner, node_name, entity).await? != Affiliation::Outcast)
+    }
+
     async fn affiliation(
         &self,
         owner: &BareJid,

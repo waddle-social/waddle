@@ -30,6 +30,7 @@
 //! an oversized Close is reported as `FrameTooLarge` rather than retained.
 
 use crate::clustering::{NodeAdmissionError, NodeAdmissionPermit, NodeLifecycle};
+use crate::permissions::host_grant::SpaceReplyAuthority;
 use crate::server::routes::websocket::supervised_io::{
     fixed_terminal_text, start_reserved_supervised_io, FixedTerminalText, OrderedInboundTerminal,
     QueueItem, ReservedIoStartConfig, ShutdownProtocol, StopSignal, WriteAuthority, WriteSender,
@@ -49,6 +50,7 @@ use waddle_xmpp::ownership::{
     ConnectionRef, NodeIdentityStamp, NodeLeaseIdentity, SharedNodeIdentity,
 };
 use waddle_xmpp::registry::ActorOutboundStage;
+use waddle_xmpp::stream_management::persistence::SmReplayPayload;
 
 pub use crate::server::routes::websocket::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, CustodianSummary, InboundTerminal,
@@ -1305,9 +1307,29 @@ impl TransportAuthority {
 struct FrameAuthority {
     transport: Arc<TransportAuthority>,
     mode: FrameMode,
+    space_reply: Option<SpaceReplyAuthority>,
+    has_bookmark_payload: bool,
 }
 
 impl WriteAuthority for FrameAuthority {
+    fn prepare(
+        &self,
+    ) -> Option<crate::server::routes::websocket::supervised_io::WritePreparation<'_>> {
+        let Some(SpaceReplyAuthority::Managed(grant)) = self.space_reply.as_ref() else {
+            return None;
+        };
+        if !grant.needs_delivery_hold() {
+            return None;
+        }
+        Some(Box::pin(async move {
+            let guard = grant
+                .hold_delivery(self.has_bookmark_payload)
+                .await
+                .ok_or(())?;
+            Ok(Box::new(guard) as Box<dyn Send + '_>)
+        }))
+    }
+
     fn revoked(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             match self.mode {
@@ -1346,8 +1368,9 @@ impl WriteAuthority for FrameAuthority {
                 // The process and live-interruption tokens are independently
                 // cancellable, so those checks remain best effort. Source,
                 // node generation and the first pump stop fence the sink
-                // enqueue. Lock source, node, stop, then transport phase; no
-                // guard survives an await or enters actor/effect-owner locks.
+                // enqueue. Lock source, node, stop, then transport phase.
+                // For a protected reply the grant fence is innermost and
+                // only spans the synchronous sink attempt.
                 let result = self.transport.source.with_current(|| {
                     self.transport.permit.start_send_if_current(|| {
                         stop.start_send_if_running(|| {
@@ -1368,8 +1391,13 @@ impl WriteAuthority for FrameAuthority {
                             {
                                 return Err(());
                             }
-                            attempt();
-                            Ok(())
+                            match &self.space_reply {
+                                Some(grant) => grant.admit(attempt).ok_or(()),
+                                None => {
+                                    attempt();
+                                    Ok(())
+                                }
+                            }
                         })
                         .unwrap_or(Err(()))
                     })
@@ -1413,6 +1441,8 @@ impl WebSocketOutboundFrame {
             authority: Arc::new(FrameAuthority {
                 transport: Arc::clone(transport),
                 mode,
+                space_reply: None,
+                has_bookmark_payload: false,
             }),
         }
     }
@@ -1499,6 +1529,44 @@ where
             &self.authority,
             FrameMode::Data,
         ))
+    }
+
+    fn protected_space_reply_frame(
+        &self,
+        connection: &ConnectionRef,
+        requester: &jid::FullJid,
+        payload: SmReplayPayload,
+        grant: SpaceReplyAuthority,
+    ) -> Result<WebSocketOutboundFrame, OutputError<E>> {
+        if self.connection_ref() != connection {
+            return Err(OutputError::WrongConnection);
+        }
+        let permitted = match &grant {
+            SpaceReplyAuthority::Managed(grant) => {
+                requester == grant.replay_identity().recipient()
+                    && payload.protected_space_reply() == Some(grant.replay_identity())
+            }
+            SpaceReplyAuthority::Unmanaged(guard) => {
+                payload.protected_space_reply().is_none()
+                    && guard.permits_reply(&payload.as_ref().to_element(), requester)
+            }
+        };
+        if self.authority.phase() != TransportPhase::Open || !permitted {
+            return Err(OutputError::InvalidFrame);
+        }
+        let has_bookmark_payload = match &grant {
+            SpaceReplyAuthority::Managed(grant) => grant.bookmark_has_payload(&payload),
+            SpaceReplyAuthority::Unmanaged(_) => false,
+        };
+        Ok(WebSocketOutboundFrame {
+            frame: Message::Text(payload.wire().to_owned().into()),
+            authority: Arc::new(FrameAuthority {
+                transport: Arc::clone(&self.authority),
+                mode: FrameMode::Data,
+                space_reply: Some(grant),
+                has_bookmark_payload,
+            }),
+        })
     }
 
     /// Stop further ordinary data before constructing fixed shutdown frames.
@@ -1870,6 +1938,22 @@ where
         self.output.connection_ref()
     }
 
+    /// Stage the exact bytes and decision for a protected IQ reply. The
+    /// pump checks the decision before the physical write.
+    pub(crate) fn start_protected_space_reply(
+        &mut self,
+        connection: &ConnectionRef,
+        requester: &jid::FullJid,
+        payload: SmReplayPayload,
+        grant: SpaceReplyAuthority,
+    ) -> Result<(), OutputError<E>> {
+        self.check_start()?;
+        let frame = self
+            .output
+            .protected_space_reply_frame(connection, requester, payload, grant)?;
+        self.start_classified(frame, MessageClass::Data)
+    }
+
     fn classify(
         &mut self,
         frame: Message,
@@ -1900,10 +1984,23 @@ where
 
     /// Classify and park one frame. No admission may be parked.
     fn start(&mut self, frame: Message) -> Result<(), OutputError<E>> {
+        self.check_start()?;
+        let (frame, class) = self.classify(frame)?;
+        self.start_classified(frame, class)
+    }
+
+    fn check_start(&self) -> Result<(), OutputError<E>> {
         if self.output.closing || self.output.close_submitted || self.output.pending.is_some() {
             return Err(OutputError::Closing);
         }
-        let (frame, class) = self.classify(frame)?;
+        Ok(())
+    }
+
+    fn start_classified(
+        &mut self,
+        frame: WebSocketOutboundFrame,
+        class: MessageClass,
+    ) -> Result<(), OutputError<E>> {
         // With no parked admission these checks only inspect receipts that
         // already exist, so they never register the waker.
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());

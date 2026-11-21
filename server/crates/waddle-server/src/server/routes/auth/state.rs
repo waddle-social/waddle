@@ -73,6 +73,7 @@ impl AuthState {
         let caps_server_domain = ServerDomainJid::parse(&xmpp_domain).unwrap_or_else(|error| {
             panic!("WADDLE_XMPP_DOMAIN={xmpp_domain:?} is not a valid JID at startup: {error}")
         });
+        let bootstrap_membership = BootstrapMembershipConfig::from_env().serving(&xmpp_domain);
         Self {
             session_manager,
             identity_service,
@@ -87,7 +88,7 @@ impl AuthState {
             dynamic_oidc_clients: Arc::new(DashMap::new()),
             dynamic_oidc_client_locks: Arc::new(DashMap::new()),
             permission_actor: app_state.permission_actor.clone(),
-            bootstrap_membership: BootstrapMembershipConfig::from_env(),
+            bootstrap_membership,
             profile_publish_hook: OnceLock::new(),
         }
     }

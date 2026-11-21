@@ -1812,9 +1812,16 @@ impl RoomRegistryActor {
                 }
             }
         }
+        // A room whose admission belongs to an authority outside the actor
+        // keeps a members-only configuration, whatever spec built it.
+        let members_only_binding = self
+            .membership_source
+            .as_ref()
+            .is_some_and(|source| source.binds_members_only(&room_jid));
         let actor_guard = RoomPreparationGuard::new(RoomActor::spawn(
             RoomActor::new(room, self.occupant_id_secret.clone())
-                .with_server_hats(self.server_hats.clone()),
+                .with_server_hats(self.server_hats.clone())
+                .with_members_only_binding(members_only_binding),
         ));
         let actor_ref = actor_guard.actor_ref();
         if let Some(store) = &self.durable_store {

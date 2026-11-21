@@ -819,6 +819,8 @@
             // {
               doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
+              # The server library and its test build each need several GiB.
+              CARGO_BUILD_JOBS = "1";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";

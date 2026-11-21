@@ -247,6 +247,22 @@ pub(super) fn build_conflict_stream_error() -> String {
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 
+/// Build the RFC 6120 §4.9.3.12 `<not-authorized/>` stream error sent to a
+/// live stream of a retired account and to a stream that tries to bind or
+/// resume one: the account may no longer hold a session. It is the error a
+/// stream receives when ingress finds its principal gone. Pairs with
+/// `websocket_stream_close_xml()`, as `build_conflict_stream_error()` does.
+pub(super) fn build_not_authorized_stream_error() -> String {
+    element_to_xml(
+        xmpp_parsers::stream_error::StreamError {
+            condition: xmpp_parsers::stream_error::DefinedCondition::NotAuthorized,
+            texts: Default::default(),
+            application_specific: Vec::new(),
+        }
+        .into(),
+    )
+}
+
 pub(super) fn build_stream_features_element(authenticated: bool) -> Element {
     build_stream_features_element_with_sasl2(authenticated, false)
 }

@@ -21,6 +21,14 @@ use super::{ensure_fixed_test_account, fixed_test_account_enabled};
 use super::{resolve_server_owner_jids, AppState, AppStateDeps};
 use super::{select_websocket_mam_storage, start_http_server, HttpServerDeps, MamStartupStorage};
 
+/// Longest startup waits for the first load of the host-grant enrolled set.
+/// The load is retried every second meanwhile; a replica that cannot load
+/// it exits, like one whose database is unreachable, so the orchestrator's
+/// restart backoff retries a full startup instead of serving rooms whose
+/// management it cannot tell.
+const HOST_GRANT_ENROLLED_SET_STARTUP_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestrictedStartupError {
     #[error("the restricted runtime attaches its own notification outbox; an owner-prepared handle was supplied")]
@@ -124,12 +132,42 @@ pub async fn start_with_config_and_owner_outbox(
         ),
     );
 
+    // S2S is off unless configured. Its snapshot, with every credential,
+    // trust profile and limit, is loaded and validated before any S2S
+    // socket exists; while it is off nothing S2S is read, bound or dialled.
+    let s2s_config = crate::s2s::conn::load_enabled_config(&xmpp_config).await?;
+    if let Some(config) = &s2s_config {
+        check_trusted_homes(config, &xmpp_config)?;
+    }
+
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
+    let mut s2s_listener = None;
     let http_listener = if let Some(ref mut set) = inherited {
-        // Launcher inheritance path: all listeners MUST be inherited
+        // Launcher inheritance path: all listeners MUST be inherited. The
+        // `s2s` listener is taken only when S2S listens, and only when it
+        // is bound to the configured `listen` address, which must be
+        // loopback unless the peer scope is public; an inherited `s2s`
+        // descriptor without `listen` is left over and fails startup below.
+        let s2s_listen = s2s_config
+            .as_ref()
+            .and_then(|config| config.listen().map(|address| (config, address)));
+        if let Some((config, address)) = s2s_listen {
+            let listener = set.take(crate::s2s::conn::S2S_LISTENER_NAME);
+            crate::s2s::conn::check_inherited_listener_in(
+                address,
+                listener.local_addr()?,
+                config.admission().scope(),
+            )?;
+            s2s_listener = Some(listener);
+        }
         set.take("http")
     } else {
+        if let Some(address) = s2s_config.as_ref().and_then(|config| config.listen()) {
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            info!(addr = ?listener.local_addr().ok(), "Bound S2S listener");
+            s2s_listener = Some(listener);
+        }
         // Cold start path: bind listeners fresh
         let http_addr: SocketAddr = std::env::var("WADDLE_HTTP_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
@@ -174,6 +212,10 @@ pub async fn start_with_config_and_owner_outbox(
             anyhow::anyhow!("failed to initialize MUC destroy completion outbox: {error}")
         })?;
     }
+    // Every account provisioning, session creation and offline-store write
+    // reads the ledger of retired JIDs; a role that cannot is refused here,
+    // by name, before any of them runs.
+    crate::auth::retirement::verify_ledger_readable(db_pool.global()).await?;
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
     let permission_actor_impl = if server_config.spicedb.is_none() && fixed_test_account_enabled() {
@@ -181,6 +223,42 @@ pub async fn start_with_config_and_owner_outbox(
     } else {
         PermissionActor::from_server_config(&server_config).await?
     };
+    // PostgreSQL holds the canonical grants of enrolled host-grant scopes.
+    // Legacy tuple writes to their objects are refused from that store, so
+    // the refusal survives a restart; SQLite holds no such scope. Legacy
+    // reads and the host-grant gate decide whether an object is enrolled
+    // from one in-memory enrolled set, which the replica loads before it
+    // serves and refreshes in the background.
+    let host_grant_store =
+        crate::permissions::host_grant::HostGrantStore::open((*global_db).clone()).ok();
+    let host_grants = match &host_grant_store {
+        Some(store) => {
+            let enrolled = crate::permissions::host_grant::EnrolledScopes::watch(store.clone());
+            if !enrolled
+                .wait_loaded(HOST_GRANT_ENROLLED_SET_STARTUP_WAIT)
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "the host-grant enrolled set could not be loaded; refusing to serve until it is"
+                ));
+            }
+            crate::permissions::host_grant::HostGrantGate::with_enrolled_scopes(
+                store.clone(),
+                enrolled,
+            )
+        }
+        None => crate::permissions::host_grant::HostGrantGate::default(),
+    };
+    let permission_actor_impl = match &host_grant_store {
+        Some(store) => permission_actor_impl
+            .with_host_grant_authority(store.clone(), host_grants.enrolled().clone()),
+        None => permission_actor_impl,
+    };
+    let permission_actor_impl = with_replica_privileged_issuance(
+        permission_actor_impl,
+        &xmpp_config,
+        s2s_config.as_deref(),
+    );
     info!(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"
@@ -190,6 +268,27 @@ pub async fn start_with_config_and_owner_outbox(
         .ask(crate::permissions::EnsureSchema)
         .await
         .map_err(|error| anyhow::anyhow!("Failed to ensure permission schema: {}", error))?;
+    // Refuse to serve an authorization store written by another ID encoding;
+    // see `permissions::authz_incarnation`. The error names no identifiers.
+    permission_actor
+        .ask(crate::permissions::EnsureAuthzCodecIncarnation)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Authorization store is not usable with this server: {error}")
+        })?;
+    // Record the schema version only in a store the codec guard accepted, so
+    // a refused store gains no version marker; see
+    // `permissions::authz_schema_version`.
+    permission_actor
+        .ask(crate::permissions::RecordAuthzSchemaVersion)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to record the permission schema version: {error}")
+        })?;
+    // The host-grant restore fence runs when the ingress authority attaches
+    // to the grant store (`http::attach_host_grant_store`), so the binding
+    // the attachment keeps is the one the fence verified. A refusal leaves
+    // managed rooms unavailable on this replica and does not stop it.
     // Membership reconciliation (reads every user row and provisions
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must
@@ -235,10 +334,15 @@ pub async fn start_with_config_and_owner_outbox(
     // recipient set from the permission tuples, so offline channel
     // members keep receiving inbox rows / notification candidates
     // across deploys and actor respawns.
+    // Rooms that enrolled host-grant scopes manage hydrate from their
+    // canonical grants instead, and their actors keep a members-only
+    // configuration. The gate is the one the server state holds, so the
+    // attachment verified at startup reaches both.
     let durable_membership_source: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> =
-        Arc::new(durable_membership::PermissionDurableMembershipSource::new(
-            permission_actor.clone(),
-        ));
+        Arc::new(
+            durable_membership::PermissionDurableMembershipSource::new(permission_actor.clone())
+                .with_host_grants(host_grants.clone()),
+        );
     let server_hats = waddle_xmpp::xep::xep0317::ServerHats::default();
     let room_registry_handle = waddle_xmpp::muc::RoomRegistry::spawn(
         xmpp_config.muc_domain.to_string(),
@@ -326,11 +430,12 @@ pub async fn start_with_config_and_owner_outbox(
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
-    let server_owner_jids = resolve_server_owner_jids(
-        &bootstrap_membership::BootstrapMembershipConfig::from_env(),
-        &xmpp_config.domain,
-    );
-    let state = Arc::new(AppState::new_with_deps(AppStateDeps {
+    // Owner entries outside the identity profile fail configuration load
+    // here, before any membership is provisioned from them.
+    let owner_config = bootstrap_membership::BootstrapMembershipConfig::try_from_env()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let server_owner_jids = resolve_server_owner_jids(&owner_config, &xmpp_config.domain);
+    let mut state = AppState::new_with_deps(AppStateDeps {
         db_pool: Arc::clone(&db_pool),
         blob_storage,
         inbox_storage: Arc::clone(&inbox_storage),
@@ -349,7 +454,14 @@ pub async fn start_with_config_and_owner_outbox(
         clustering_claims: clustering_handles,
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
-    }));
+    });
+    state.host_grants = host_grants;
+    // Host-grant decisions about remote principals read the snapshot this
+    // replica runs; while S2S is off they admit no remote domain.
+    state.s2s_federation = s2s_config
+        .as_deref()
+        .map(crate::permissions::host_grant::FederationSnapshot::of);
+    let state = Arc::new(state);
     if let Some(matched) = global_adopt_matched {
         state.note_lineage_adopt_match(matched);
     }
@@ -447,6 +559,55 @@ pub async fn start_with_config_and_owner_outbox(
     let http_drain_complete = Arc::clone(&drain_complete);
     let http_pubsub_database_storage = Arc::clone(&pubsub_database_storage);
     let http_shutdown_deadline = shutdown_deadline.clone();
+    // With S2S enabled, the router is the remote route of local entities
+    // and the stanza sink of inbound streams. Its pending IQ correlations
+    // live in the global database, which every replica shares.
+    let s2s_router = match s2s_config.as_ref() {
+        Some(config) => Some(start_s2s_router(
+            Arc::clone(config),
+            &xmpp_config,
+            db_pool.global().clone(),
+            stop_token.clone(),
+        )?),
+        None => None,
+    };
+    // The S2S service starts draining when the process stop token fires,
+    // after the router's shutdown notices where a router runs, and is
+    // joined below. It shares no lock, permit or task with HTTP.
+    // Configured endpoints, and DNS discovery through the system's name
+    // servers when the configuration enables it (ADR-0020 D3).
+    let s2s_resolver = s2s_config
+        .as_ref()
+        .map(|config| {
+            crate::s2s::discovery::PeerEndpoints::for_config(std::sync::Arc::clone(config))
+        })
+        .transpose()?;
+    let s2s_service = s2s_config.map(|config| {
+        // With a router, the streams drain once the router has told the
+        // remote occupants of this replica's rooms that it is stopping,
+        // which it does when the process stop token fires; the notices
+        // need the streams. Without one they drain on that token itself.
+        let drain = crate::s2s::route::S2sRouter::service_stop(s2s_router.as_ref(), &stop_token);
+        let mut options = crate::s2s::conn::ServiceOptions {
+            stop: Some(drain),
+            resolver: s2s_resolver.map(|resolver| {
+                std::sync::Arc::new(resolver)
+                    as std::sync::Arc<dyn crate::s2s::conn::EndpointResolver>
+            }),
+            ..Default::default()
+        };
+        if let Some(router) = &s2s_router {
+            options.sink = Arc::new(router.clone());
+        }
+        let service = crate::s2s::conn::S2sService::start(config, s2s_listener, options);
+        if let Some(router) = &s2s_router {
+            router.attach_transport(service.handle());
+        }
+        service
+    });
+
+    // Discovery queries must see the attached S2S transport on their first request.
+    let http_s2s_router = s2s_router.clone();
     let http_handle = tokio::spawn(async move {
         start_http_server(HttpServerDeps {
             state: http_state,
@@ -462,6 +623,7 @@ pub async fn start_with_config_and_owner_outbox(
             sm_drain_complete,
             shutdown_deadline: http_shutdown_deadline,
             connections_drained,
+            s2s_router: http_s2s_router,
         })
         .await
     });
@@ -517,6 +679,19 @@ pub async fn start_with_config_and_owner_outbox(
     clustering_shutdown
         .await_drain_until(shutdown_deadline.start().deadline())
         .await;
+    // Join every S2S connection task within what remains of the shutdown
+    // budget; the service has been draining since the stop token fired.
+    if let Some(service) = s2s_service {
+        service
+            .shutdown(shutdown_deadline.start().remaining())
+            .await;
+    }
+    // The router's workers stopped taking stanzas once its shutdown
+    // notices were written or had their time; join them within what
+    // remains.
+    if let Some(router) = s2s_router {
+        router.shutdown(shutdown_deadline.start().remaining()).await;
+    }
 
     // Issue #1388: both drains just awaited above (SM/Q6 via `http_handle`,
     // clustering per-entity via `clustering_shutdown`) increment counters and
@@ -781,4 +956,126 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
         return Ok(());
     }
     anyhow::bail!("MAM storage did not expose a lineage backend")
+}
+
+/// Every trusted home of the S2S snapshot must be a remote domain host
+/// grants can be issued to (ADR-0020 D8): neither the account domain nor a
+/// domain of one of this deployment's services, the call mixer included.
+/// The snapshot's loader
+/// refuses the domains it names as local; this refuses the service domains
+/// it does not know, and a service domain that is not canonical, which no
+/// issuance policy can be built from. A deployment whose XMPP domain is not
+/// canonical is refused later in startup, with its own error.
+fn check_trusted_homes(
+    config: &crate::s2s::config::S2sConfig,
+    xmpp_config: &XmppConfig,
+) -> anyhow::Result<()> {
+    use crate::permissions::host_grant::{
+        FederationSnapshot, PrincipalPolicy, ServedAccountDomains,
+    };
+    let Ok(account) = waddle_xmpp::identity::CanonicalDomain::parse_canonical(&xmpp_config.domain)
+    else {
+        return Ok(());
+    };
+    let principals = PrincipalPolicy::new(
+        ServedAccountDomains::new([account]),
+        Some(FederationSnapshot::of(config)),
+    );
+    crate::server::routes::websocket::XmppServiceDomains::new(
+        &xmpp_config.domain,
+        xmpp_config.muc_domain.as_str(),
+        xmpp_config.spaces_jid.domain().as_str(),
+    )
+    .host_grant_issuance_policy(&principals)
+    .map(|_| ())
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "S2S configuration: admission.trusted_homes names a domain of one of this \
+             deployment's services, or a service domain is not canonical"
+        )
+    })
+}
+
+/// `actor` deciding issuance of the privileged relations as this replica
+/// does: the channel and Space owner and admin, the channel manager and
+/// moderator, the Space moderator and the role manager are written only for
+/// accounts of the served domain and of the trusted homes of the S2S
+/// snapshot it runs (ADR-0020 D8). Startup builds the replica's actor with
+/// it, and so does the test-support seam that stands for startup.
+pub(crate) fn with_replica_privileged_issuance(
+    actor: crate::permissions::PermissionActor,
+    xmpp_config: &XmppConfig,
+    s2s_config: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::PermissionActor {
+    actor.with_privileged_issuance(replica_privileged_issuance(xmpp_config, s2s_config))
+}
+
+/// The accounts a privileged relation may be written for on this replica:
+/// those of its account domain and of the trusted homes of the S2S snapshot
+/// it runs, none while S2S is off (ADR-0020 D8). A deployment whose domains
+/// are not canonical gets a policy that admits no account, so such a
+/// relation is written for nobody rather than for anybody.
+fn replica_privileged_issuance(
+    xmpp_config: &XmppConfig,
+    s2s_config: Option<&crate::s2s::config::S2sConfig>,
+) -> crate::permissions::host_grant::IssuancePolicy {
+    use crate::permissions::host_grant::{
+        FederationSnapshot, IssuancePolicy, PrincipalPolicy, ServedAccountDomains,
+    };
+    let Ok(account) = waddle_xmpp::identity::CanonicalDomain::parse_canonical(&xmpp_config.domain)
+    else {
+        return IssuancePolicy::default();
+    };
+    let principals = PrincipalPolicy::new(
+        ServedAccountDomains::new([account]),
+        s2s_config.map(FederationSnapshot::of),
+    );
+    crate::server::routes::websocket::XmppServiceDomains::new(
+        &xmpp_config.domain,
+        xmpp_config.muc_domain.as_str(),
+        xmpp_config.spaces_jid.domain().as_str(),
+    )
+    .host_grant_issuance_policy(&principals)
+    .unwrap_or_default()
+}
+
+/// The router's bounds under `config`: its defaults, with the pair queues
+/// the snapshot's `[limits] max_pair_queues` allows. Half of them may be
+/// opened for what remote senders ask for, as by default.
+fn router_limits(config: &crate::s2s::config::S2sConfig) -> crate::s2s::route::RouterLimits {
+    let pairs = config.limits().max_pair_queues;
+    crate::s2s::route::RouterLimits {
+        peer_queues: pairs,
+        reply_queues: (pairs / 2).max(1),
+        ..crate::s2s::route::RouterLimits::default()
+    }
+}
+
+/// The S2S router for an enabled S2S configuration: the destinations this
+/// deployment serves, exactly as the WebSocket classifier sees them, and the
+/// shared correlation and remote room tables in the global database.
+fn start_s2s_router(
+    config: Arc<crate::s2s::config::S2sConfig>,
+    xmpp_config: &XmppConfig,
+    global: crate::db::Database,
+    stop: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<crate::s2s::route::S2sRouter> {
+    let served = crate::server::routes::websocket::XmppServiceDomains::new(
+        &xmpp_config.domain,
+        xmpp_config.muc_domain.as_str(),
+        xmpp_config.spaces_jid.domain().as_str(),
+    )
+    .served_domains(&xmpp_config.domain)
+    .ok_or_else(|| anyhow::anyhow!("the XMPP domain is not a valid domain"))?;
+    let limits = router_limits(&config);
+    Ok(crate::s2s::route::S2sRouter::new(
+        crate::s2s::route::RouterOptions {
+            config,
+            served,
+            correlations: Arc::new(crate::s2s::route::SqlIqCorrelations::new(global.clone())),
+            rooms: Arc::new(crate::s2s::route::SqlRemoteRoomStore::new(global)),
+            limits,
+            stop: Some(stop),
+        },
+    ))
 }

@@ -48,7 +48,19 @@ waddle-extensions = { path = "../waddle-extensions" }
 
 # Graceful restart (Ecdysis pattern)
 waddle-ecdysis = { path = "../waddle-ecdysis" }
-jid = { workspace = true }
+# Pinned exactly, here rather than in the workspace table so that crates
+# shared with other workspaces keep the ordinary `0.12` requirement. Cargo
+# unifies the workspace on this version. The set of user IDs the SpiceDB
+# authorization codec accepts is "bare JIDs this parser leaves unchanged"
+# (`permissions::authz_id`), so changing that set is a codec version change.
+# The set also depends on `jid`'s own dependencies `stringprep` and `idna`,
+# which only Cargo.lock fixes: a lockfile update of `jid`, `stringprep` or
+# `idna` is a codec-affecting change, never a routine dependency update.
+jid = { version = "=0.12.2", features = ["serde"] }
+# Compatibility decomposition for deriving ASCII account names from OIDC
+# display names (`auth::jid::username_to_localpart`); already in the lockfile
+# through `stringprep`.
+unicode-normalization = "0.1"
 dashmap = { workspace = true, features = ["raw-api"] }
 minidom = { workspace = true }
 
@@ -92,6 +104,22 @@ tracing-opentelemetry = { workspace = true }
 # Security/Crypto
 rustls = { workspace = true, features = ["ring"] }
 rustls-acme = { workspace = true }
+# S2S certificate verification (`s2s::verify`, ADR-0020 D2). All three were
+# already in Cargo.lock at these versions. `rustls-webpki` is the path
+# builder rustls uses internally; the S2S verifier calls it directly because
+# the stock rustls verifiers cannot express its trust profiles, revocation
+# policy or XMPP identifiers. `webpki-roots` is the Mozilla root program
+# compiled in, which is the public-WebPKI profile's root store. `x509-parser`
+# reads the certificate and CRL metadata that webpki verifies but does not
+# expose (key usage, validity, issuing distribution points).
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
+webpki-roots = "1"
+x509-parser = "0.18.1"
+# S2S DNS discovery (`s2s::discovery`, ADR-0020 D3): SRV and A/AAAA lookups
+# that tell a negative answer from a failed lookup. Already in Cargo.lock at
+# this version through libp2p-dns; only its Tokio runtime and system
+# configuration features are used, which that version already enables.
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 p256 = { workspace = true }

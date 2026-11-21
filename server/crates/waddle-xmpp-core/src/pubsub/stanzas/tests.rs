@@ -488,3 +488,23 @@ fn build_pubsub_success_preserves_iq_routing() {
     assert_eq!(response.from(), to.as_ref());
     assert_eq!(response.to(), from.as_ref());
 }
+
+#[test]
+fn node_deletion_event_names_the_node_and_subscriber() {
+    let service = "spaces.example.test".parse().expect("Space service");
+    let recipient = "alice@example.test/phone"
+        .parse()
+        .expect("bound subscriber");
+    let event = crate::pubsub::build_pubsub_delete_event(&service, &recipient, "engineering");
+    assert_eq!(event.from, Some(service));
+    assert_eq!(event.to, Some(recipient));
+    assert_eq!(event.type_, xmpp_parsers::message::MessageType::Headline);
+    assert_eq!(event.payloads.len(), 1);
+    let ns = crate::pubsub::NS_PUBSUB_EVENT;
+    assert!(event.payloads[0].is("event", ns));
+    let deleted = event.payloads[0]
+        .get_child("delete", ns)
+        .expect("node deletion");
+    assert_eq!(deleted.attr("node"), Some("engineering"));
+    assert!(deleted.children().next().is_none());
+}

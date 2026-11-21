@@ -53,6 +53,11 @@ pub enum PromotedOutcome {
     /// the drain, so the promotion-time re-check scrubs the in-flight
     /// copy instead of delivering retracted content on next login.
     Scrubbed,
+    /// Discarded because the recipient's account was retired (ADR-0020
+    /// D8): no resource and no offline store of it takes the stanza, and
+    /// no sender is answered. Its ingress custody, if any, ends without
+    /// delivery.
+    Discarded,
     /// Promotion did not commit a durable handoff. The caller MUST skip
     /// `confirm_drained` and retain the replay/custody payload for retry.
     StorageFailure(PromotionFailureReason),
@@ -72,6 +77,9 @@ pub struct PromotionSummary {
     /// from `dropped` so retraction-race scrubs stay visible in the
     /// per-session summary logs.
     pub scrubbed: u32,
+    /// Number of stanzas discarded because the recipient's account was
+    /// retired.
+    pub discarded: u32,
     /// Number of stanzas whose durable promotion responsibility remains.
     /// Non-zero means the caller MUST NOT call `confirm_drained`.
     pub storage_failed: u32,
@@ -97,6 +105,7 @@ impl PromotionSummary {
             PromotedOutcome::NotPromotable => self.not_promotable += 1,
             PromotedOutcome::Unparseable => self.unparseable += 1,
             PromotedOutcome::Scrubbed => self.scrubbed += 1,
+            PromotedOutcome::Discarded => self.discarded += 1,
             PromotedOutcome::StorageFailure(reason) => {
                 self.storage_failed += 1;
                 self.first_failure.get_or_insert((sequence, *reason));

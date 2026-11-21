@@ -163,14 +163,21 @@ pub(super) async fn handoff(
             }
             PendingPayload::Transient(_) => None,
         };
-        if existing_custody.is_none()
-            && PendingReceiptRepository::insert(&mut tx, &row, storage.quota_policy()).await?
-                == InsertOutcome::QuotaExceeded
-        {
+        let inserted = if existing_custody.is_none() {
+            PendingReceiptRepository::insert(&mut tx, &row, storage.quota_policy()).await?
+        } else {
+            InsertOutcome::Inserted
+        };
+        if inserted == InsertOutcome::QuotaExceeded {
             // Preserve authority for retry; there is no durable custody.
             return Ok(None);
         }
-        if matches!(row.payload, PendingPayload::Archived(_)) {
+        // A retired recipient's store keeps nothing, now or later: the
+        // message is resolved without custody, as one the classifier
+        // forbids storing is, rather than retained for a retry that would
+        // meet the same refusal.
+        if inserted == InsertOutcome::Inserted && matches!(row.payload, PendingPayload::Archived(_))
+        {
             let physical_id = existing_custody
                 .as_ref()
                 .map(|custody| &custody.row_id)

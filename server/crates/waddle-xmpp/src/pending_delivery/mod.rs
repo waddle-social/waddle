@@ -254,6 +254,12 @@ pub enum InsertOutcome {
     /// Quota would be exceeded — caller MUST return `<service-unavailable/>`
     /// to the sender per XEP-0160 §3 step 3.
     QuotaExceeded,
+    /// The recipient's account was retired (ADR-0020 D8): its store holds
+    /// nothing, now or later, so nothing was written. The message is
+    /// discarded. The caller answers no sender for it, which RFC 6121
+    /// §8.5.1 allows for a message to an account that does not exist, and
+    /// owes no retry: a retired JID never names an account again.
+    RecipientRetired,
 }
 
 #[cfg(test)]

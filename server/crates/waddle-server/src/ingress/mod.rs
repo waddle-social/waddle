@@ -34,6 +34,7 @@ mod execute_uow;
 pub(crate) use execute_uow::ambiguous_offline_pending_id;
 mod frame_receipt_retry;
 pub(crate) mod gc;
+mod host_grant_plan;
 pub mod identity;
 mod invitation_authority;
 pub(crate) mod live_delivery;
@@ -45,7 +46,7 @@ pub(crate) use receipt_custody::receipt_operation as receipt_operation_for_test;
 #[cfg(feature = "test-support")]
 pub use receipt_custody::{ReceiptCustodyProbe, ReceiptCustodyUnresolved};
 pub(crate) mod room_manifest_replay;
-pub use principal::{ExtensionPrincipal, IngressPrincipal};
+pub use principal::{ExtensionPrincipal, IngressPrincipal, RemoteOccupantPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
 mod recovery;
@@ -85,7 +86,7 @@ pub use effects::{
     PlannedEffect, RoomExecutionPath,
 };
 pub use execute::{ExecutionReport, ExternalOutcome, FrameObligation};
-pub use identity::{IngressCanonicalRef, IngressStreamIdentity};
+pub use identity::{IngressCanonicalRef, IngressStreamIdentity, RemoteIngressTarget};
 pub use submission::IngressSubmission;
 
 use crate::config::{IngressConfig, IngressConfigError, LineageConfig};

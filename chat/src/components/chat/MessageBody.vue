@@ -38,6 +38,7 @@ import { useExtensionAnnotationActions } from "@/channels/extension-annotation-a
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { css, cx } from "styled-system/css";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
+import { remoteMediaPolicyKey } from "@/lib/remote-media";
 import { isMonoBandMeta } from "./message-system-band";
 import { actionChipClasses as chips, bandClasses as band } from "./message-band-classes";
 import HlsVideoPlayer from "@/components/chat/HlsVideoPlayer.vue";
@@ -55,6 +56,14 @@ const props = withDefaults(
 
 const messageRef = computed(() => props.message);
 const invokeExtensionActionRef = computed(() => props.invokeExtensionAction);
+
+// Media of a message from another server is fetched only once the user
+// asks (see `@/lib/remote-media`). Without a policy, media loads as before.
+const remoteMediaPolicy = inject(remoteMediaPolicyKey, () => null);
+const remoteMediaHost = computed(() => remoteMediaPolicy(props.message));
+const remoteMediaRequested = ref(false);
+watch(() => props.message.id, () => { remoteMediaRequested.value = false; });
+const mediaShown = computed(() => !remoteMediaHost.value || remoteMediaRequested.value);
 
 const {
   imageAttachments,
@@ -75,7 +84,7 @@ const {
   openLightbox,
   openInlineImageLightbox,
   downloadAttachment,
-} = useMessageAttachments(messageRef);
+} = useMessageAttachments(messageRef, { mediaAllowed: mediaShown });
 
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
 const linkPreviews = computed(() => props.message.linkPreviews ?? []);
@@ -194,6 +203,27 @@ const {
 });
 
 const isSticker = computed(() => !!props.message.isSticker && imageAttachments.value.length > 0);
+
+/** What a message from another server would fetch, named instead of loaded. */
+const withheldMedia = computed(() => {
+  if (mediaShown.value) return [];
+  const files = [
+    ...imageAttachments.value,
+    ...videoAttachments.value,
+    ...audioAttachments.value,
+    ...pdfAttachments.value,
+  ].map((file) => ({ key: attachmentKey(file), label: file.name ?? file.url, url: file.url }));
+  const bodyImage = isInlineImageBodyUrl.value
+    ? [{ key: "inline-body-image", label: props.message.body.trim(), url: props.message.body.trim() }]
+    : [];
+  const previewImages = linkPreviewCards.value.some((card) =>
+    card.mediaState.kind === "image"
+    || ((card.mediaState.kind === "video" || card.mediaState.kind === "player") && !!card.mediaState.poster),
+  )
+    ? [{ key: "link-preview-images", label: "Link preview pictures", url: "" }]
+    : [];
+  return [...files, ...bodyImage, ...previewImages];
+});
 
 // XEP-0245: a body starting with exactly "/me " renders as an italic
 // "* Author action" line. Corrections (XEP-0308) replace `body`, so an
@@ -488,6 +518,21 @@ const c = {
     "&[data-muted]": { bg: "surface.2", color: "fg.muted" },
   }),
   muted: css({ color: "fg.muted" }),
+  /** Media from another server, named until the user asks to load it. */
+  withheld: css({
+    display: "flex",
+    flexDirection: "column",
+    gap: "1.5",
+    width: "min(100%, 448px)",
+    maxWidth: "100%",
+    p: "3",
+    bg: "surface",
+    border: "1px dashed {colors.border}",
+    borderRadius: "control",
+  }),
+  withheldList: css({ display: "flex", flexDirection: "column", gap: "0.5", margin: 0, padding: 0, listStyle: "none" }),
+  withheldLoad: css({ alignSelf: "flex-start" }),
+  truncate: css({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
 };
 </script>
 
@@ -505,7 +550,7 @@ const c = {
          v-else-if chains with displayBody and isInlineImageBodyUrl so only one body/media branch
          renders per message (XEP-0449 stickers carry a <body> alt-text that must
          not also render as a text bubble). -->
-    <div v-else-if="isSticker">
+    <div v-else-if="isSticker && mediaShown">
       <img
         v-if="resolvedAttachmentUrl(imageAttachments[0])"
         :src="resolvedAttachmentUrl(imageAttachments[0])!"
@@ -525,7 +570,7 @@ const c = {
     </div>
 
     <!-- Inline image body URL -->
-    <div v-else-if="isInlineImageBodyUrl">
+    <div v-else-if="isInlineImageBodyUrl && mediaShown">
       <img
         :src="message.body.trim()"
         alt="Image"
@@ -551,7 +596,7 @@ const c = {
         {{ linkPreviewHost(preview.originalUrl) }}
       </span>
       <img
-        v-if="mediaState.kind === 'image'"
+        v-if="mediaState.kind === 'image' && mediaShown"
         :src="mediaState.image.url"
         :alt="mediaState.image.alt ?? preview.title ?? 'Link preview image'"
         :width="mediaState.image.width"
@@ -608,7 +653,7 @@ const c = {
         @click.stop.prevent="startVideoPlayback(card.preview)"
       >
         <img
-          v-if="card.poster"
+          v-if="card.poster && mediaShown"
           :src="card.poster.url"
           :alt="card.poster.alt ?? ''"
           loading="lazy"
@@ -657,7 +702,7 @@ const c = {
         @click.stop.prevent="startEmbedPlayback(card.preview)"
       >
         <img
-          v-if="card.poster"
+          v-if="card.poster && mediaShown"
           :src="card.poster.url"
           :alt="card.poster.alt ?? ''"
           loading="lazy"
@@ -767,8 +812,26 @@ const c = {
       </template>
     </div>
 
+    <!-- Media from another server, named until the user asks to load it -->
+    <div v-if="withheldMedia.length > 0" :class="c.withheld">
+      <span :class="c.fileMeta">
+        Images and files from {{ remoteMediaHost }} aren't loaded until you choose to.
+      </span>
+      <ul :class="c.withheldList">
+        <li
+          v-for="item in withheldMedia"
+          :key="item.key"
+          :class="[c.fileMeta, c.truncate]"
+          :title="item.url || undefined"
+        >{{ item.label }}</li>
+      </ul>
+      <button type="button" :class="[c.smallButton, c.withheldLoad]" @click.stop="remoteMediaRequested = true">
+        Load
+      </button>
+    </div>
+
     <!-- Image attachments gallery -->
-    <div v-if="imageAttachments.length > 0 && !isSticker" :class="c.strip">
+    <div v-if="imageAttachments.length > 0 && !isSticker && mediaShown" :class="c.strip">
       <div
         v-for="img in imageAttachments"
         :key="attachmentRenderKey(img)"
@@ -824,7 +887,7 @@ const c = {
     />
 
     <!-- Inline video attachments -->
-    <div v-if="videoAttachments.length > 0" :class="c.column">
+    <div v-if="videoAttachments.length > 0 && mediaShown" :class="c.column">
       <div
         v-for="file in videoAttachments"
         :key="attachmentKey(file)"
@@ -863,7 +926,7 @@ const c = {
     </div>
 
     <!-- Inline audio attachments -->
-    <div v-if="audioAttachments.length > 0" :class="c.column">
+    <div v-if="audioAttachments.length > 0 && mediaShown" :class="c.column">
       <div
         v-for="file in audioAttachments"
         :key="attachmentKey(file)"
@@ -904,7 +967,7 @@ const c = {
     <!-- Downloadable attachments (non-compact) / chip (compact) -->
     <template v-if="!compact">
       <!-- Inline PDF attachments -->
-      <div v-if="pdfAttachments.length > 0" :class="c.column">
+      <div v-if="pdfAttachments.length > 0 && mediaShown" :class="c.column">
         <div
           v-for="file in pdfAttachments"
           :key="attachmentKey(file)"

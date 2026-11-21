@@ -2,6 +2,7 @@ import { ref, computed, watch, type Ref } from "vue";
 import type { SpaceSummary, ChannelSummary, GroupDmSummary, MemberSummary, RoomBotSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { RemoteRoomSuggestion, UnavailableRemoteRoom } from "@/lib/xmpp/types";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
 import { defaultCreateForm, defaultCreateFormForContext } from "@/lib/chat-ui";
 import {
@@ -13,6 +14,7 @@ import {
   moveMucToSpace,
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
+import { fetchRoomFederated } from "@/lib/xmpp/federated-settings";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import { occupantJidDirectory } from "@/lib/avatars/author-jid";
 
@@ -44,6 +46,22 @@ export function useWaddleDirectory(
   const serverRole = ref<SpaceSummary["role"]>(null);
   const mucServiceJid = ref<string | null>(null);
   const spacesServiceJid = ref<string | null>(null);
+  /** The home MUC service as discovered; `null` until a discovery found it. */
+  const homeMucService = ref<string | null>(null);
+  /**
+   * The components the home server lists as its own, from the last
+   * discovery that could read that list; `null` before any did.
+   */
+  const homeComponents = ref<string[] | null>(null);
+  /**
+   * Whether the home server federates (it lists `urn:waddle:s2s:0`). Kept
+   * from the last discovery that could read it.
+   */
+  const federationAvailable = ref(false);
+  /** Rooms on other servers that home Spaces list, offered as suggestions only. */
+  const remoteRoomSuggestions = ref<RemoteRoomSuggestion[]>([]);
+  /** The user's bookmarks of rooms on other servers while the home server does not federate. */
+  const unavailableRemoteRooms = ref<UnavailableRemoteRoom[]>([]);
 
   const activeChannelId: Ref<string | null> = ref(null);
   const selectedSpaceId: Ref<string | null> = ref(null);
@@ -158,8 +176,29 @@ export function useWaddleDirectory(
     ["owner"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
   );
 
+  /**
+   * Whether the selected room is hosted by another server, as discovery
+   * placed it. Its settings belong to that server: a role on this
+   * deployment, or on one of its Spaces, is no standing in it.
+   */
+  const currentChannelIsRemote = computed(() => !!currentChannel.value?.remoteHost);
+
+  /** Room settings for the selected room: a channel manager, in a room of this deployment. */
+  const canManageCurrentChannel = computed(() =>
+    canManageChannels.value && !currentChannelIsRemote.value,
+  );
+
   const canManageMembers = computed(() =>
     ["owner", "admin"].includes(currentRole.value ?? ""),
+  );
+
+  /**
+   * Member controls for the selected room: a member manager, in a room of
+   * this deployment. Who holds what in a room on another server is that
+   * server's to change.
+   */
+  const canManageCurrentMembers = computed(() =>
+    canManageMembers.value && !currentChannelIsRemote.value,
   );
 
   watch(currentSpace, (w) => {
@@ -194,7 +233,17 @@ export function useWaddleDirectory(
     if (previous !== undefined && previous !== client) clearData();
     if (!client) return;
     const unsubscribe = client.onRoomIdAmbiguous?.(quarantineChannel);
-    if (unsubscribe) onCleanup(unsubscribe);
+    // Every discovery that learns the home services, a background retry's
+    // included, updates them here: they decide which rooms and senders are
+    // of this deployment (and so whose media loads).
+    const unsubscribeHome = client.onHomeServicesChanged?.((services) => {
+      if (services.mucService) homeMucService.value = services.mucService;
+      if (services.components) homeComponents.value = [...services.components];
+    });
+    onCleanup(() => {
+      unsubscribe?.();
+      unsubscribeHome?.();
+    });
     for (const id of client.listAmbiguousRoomIds?.() ?? []) quarantineChannel(id);
   }, { immediate: true, flush: "sync" });
 
@@ -265,8 +314,16 @@ export function useWaddleDirectory(
       serverRole.value = topology.serverRole ?? null;
       mucServiceJid.value = topology.services?.muc ?? null;
       spacesServiceJid.value = topology.services?.spaces ?? null;
+      if (topology.services?.muc && topology.services.mucDiscovered) {
+        homeMucService.value = topology.services.muc;
+      }
+      if (topology.services?.components) homeComponents.value = topology.services.components;
+      if (typeof topology.federation === "boolean") federationAvailable.value = topology.federation;
+      remoteRoomSuggestions.value = topology.remoteRoomSuggestions ?? [];
+      unavailableRemoteRooms.value = topology.unavailableRemoteRooms ?? [];
       const discoveredSpaces = topology.spaces.map((space) => ({
         id: space.id,
+        ...(space.serviceJid ? { serviceJid: space.serviceJid } : {}),
         name: space.name,
         role: space.role ?? null,
       }) satisfies SpaceSummary);
@@ -287,6 +344,7 @@ export function useWaddleDirectory(
         // non-owners get correct Pin action visibility without owner
         // affiliation.
         ...(c.pinPermission ? { pinPermission: c.pinPermission } : {}),
+        ...(c.remoteHost ? { remoteHost: c.remoteHost } : {}),
       }));
 
       const channelList = allRooms.filter((channel) => !channel.isGroupDm);
@@ -536,6 +594,39 @@ export function useWaddleDirectory(
     }
   }
 
+  /** The room's `federated` setting as its server holds it, for the edit form. */
+  const loadedChannelFederated = ref<boolean | null | undefined>(undefined);
+  let federationRequestId = 0;
+
+  /**
+   * Read the selected room's `federated` setting from its owner form, so
+   * the edit dialog shows the server's value (and hides the setting when
+   * the server does not offer it).
+   */
+  async function loadChannelFederation(): Promise<void> {
+    const channel = currentChannel.value;
+    const agent = xmppClient.value?.agent;
+    const requestId = ++federationRequestId;
+    if (!channel?.jid || !agent || !canManageCurrentChannel.value) {
+      loadedChannelFederated.value = null;
+      editChannelForm.value = { ...editChannelForm.value, federated: null };
+      return;
+    }
+    loadedChannelFederated.value = undefined;
+    editChannelForm.value = { ...editChannelForm.value, federated: undefined };
+    try {
+      const federated = await fetchRoomFederated(agent, channel.jid);
+      if (requestId !== federationRequestId || currentChannel.value?.id !== channel.id) return;
+      loadedChannelFederated.value = federated;
+      editChannelForm.value = { ...editChannelForm.value, federated };
+    } catch (error) {
+      if (requestId !== federationRequestId) return;
+      console.warn("Unable to read the room's federation setting", error);
+      loadedChannelFederated.value = null;
+      editChannelForm.value = { ...editChannelForm.value, federated: null };
+    }
+  }
+
   async function updateChannel(): Promise<boolean> {
     const generation = clientGeneration;
     const channel = currentChannel.value;
@@ -551,12 +642,28 @@ export function useWaddleDirectory(
     isSubmitting.value = true;
     try {
       client.assertRoomIdAvailable?.(channel.id);
+      // The setting is submitted only while the dialog offers it. Left out,
+      // the room's server keeps the value it holds.
+      const requestedFederated = editChannelForm.value.federated;
+      const federatedChanged = federationAvailable.value
+        && typeof requestedFederated === "boolean"
+        && requestedFederated !== loadedChannelFederated.value;
       await configureMucRoom(client, channel.jid, {
         name: editChannelForm.value.name.trim(),
         description: editChannelForm.value.description.trim(),
         pinPermission: editChannelForm.value.pinPermission,
+        ...(federatedChanged ? { federated: requestedFederated } : {}),
       });
       if (generation !== clientGeneration) return false;
+      if (federatedChanged) {
+        // Show the value the server holds now, not the one submitted.
+        await loadChannelFederation();
+        if (generation !== clientGeneration) return false;
+        if (loadedChannelFederated.value !== requestedFederated) {
+          actionError.value = "The room's server did not apply the change to who can reach the room.";
+          return false;
+        }
+      }
       // Optimistically apply locally so the action-sheet visibility
       // updates without waiting for a re-fetch. The server is
       // authoritative — a subsequent owner-config GET would refresh.
@@ -662,6 +769,11 @@ export function useWaddleDirectory(
     serverRole.value = null;
     mucServiceJid.value = null;
     spacesServiceJid.value = null;
+    homeMucService.value = null;
+    homeComponents.value = null;
+    federationAvailable.value = false;
+    remoteRoomSuggestions.value = [];
+    unavailableRemoteRooms.value = [];
     activeChannelId.value = null;
     selectedSpaceId.value = null;
     hasLoadedStructure.value = false;
@@ -682,6 +794,12 @@ export function useWaddleDirectory(
     memberLoadState,
     serverRole,
     mucServiceJid,
+    spacesServiceJid,
+    homeMucService,
+    homeComponents,
+    federationAvailable,
+    remoteRoomSuggestions,
+    unavailableRemoteRooms,
     activeSpaceId,
     activeChannelId,
     isLoadingStructure,
@@ -699,7 +817,11 @@ export function useWaddleDirectory(
     sortedMembers,
     canManageCommunity,
     canManageChannels,
+    canManageCurrentChannel,
+    currentChannelIsRemote,
+    loadChannelFederation,
     canManageMembers,
+    canManageCurrentMembers,
     loadSpace,
     loadStructure,
     reloadChannelMembers,

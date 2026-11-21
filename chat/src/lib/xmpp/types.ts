@@ -563,10 +563,31 @@ export interface DiscoveredChannel {
    * can render the Pin action correctly under the `anyone`
    * policy without needing owner-config access. */
   pinPermission?: PinPermission;
+  /** Canonical domain of the server that hosts the room, for a room outside this deployment. */
+  remoteHost?: string;
+}
+
+/**
+ * A room on another server that a home Space lists. It is no part of the
+ * Space here: it is offered only as a suggestion the user looks up on its
+ * host before joining.
+ */
+export interface RemoteRoomSuggestion {
+  spaceId: string;
+  roomJid: string;
+  name?: string;
+}
+
+/** A room on another server the user bookmarked, while the home server does not federate. */
+export interface UnavailableRemoteRoom {
+  roomJid: string;
+  name?: string;
 }
 
 export interface DiscoveredSpace {
   id: string;
+  /** PubSub service that hosts the Space node; `id` is the node on this service. */
+  serviceJid?: string;
   name: string;
   role?: "owner" | "admin" | "moderator" | "member" | null;
 }
@@ -582,6 +603,19 @@ export interface DiscoveredTopology {
   rooms: DiscoveredChannel[];
   /** False when room discovery or hydration degraded and `rooms` may be incomplete. */
   roomCatalogComplete: boolean;
+  /**
+   * Whether the home MUC service's room list was read. Only then does
+   * `rooms` say which rooms are of this deployment whatever their address.
+   */
+  mucCatalogRead?: boolean;
+  /**
+   * How many rooms that home Spaces or the user's bookmarks name this
+   * discovery could not place: their host is not shown to be of this
+   * deployment, and without an identified home MUC service it is not shown
+   * to be elsewhere either. They are left out of `rooms` until a discovery
+   * places them.
+   */
+  unplacedRooms?: number;
   /**
    * Exact authority available for terminal-denial reconciliation. Whole-cache
    * replacement remains gated by `roomCatalogComplete`.
@@ -603,7 +637,26 @@ export interface DiscoveredTopology {
   services?: {
     muc?: string;
     spaces?: string;
+    /**
+     * The MUC service was identified by its XEP-0045 feature, not assumed
+     * from its conventional name or an identity alone.
+     */
+    mucDiscovered?: boolean;
+    /**
+     * The components the home server lists as its own items; absent when
+     * that list could not be read.
+     */
+    components?: string[];
   };
+  /**
+   * Whether the home server's `disco#info` lists the federation feature;
+   * `null` when it could not be read.
+   */
+  federation?: boolean | null;
+  /** Rooms on other servers that home Spaces list. */
+  remoteRoomSuggestions?: RemoteRoomSuggestion[];
+  /** The user's bookmarks of rooms on other servers, while the home server does not federate. */
+  unavailableRemoteRooms?: UnavailableRemoteRoom[];
 }
 
 /** Cross-room activity event with optional mention data for notifications. */

@@ -29,6 +29,49 @@ pub(super) async fn handle_muc_self_ping_iq(
     };
     let room_jid = target.to_bare();
     let nick = target.resource().to_string();
+    // A room an enrolled host-grant scope manages answers from its grants
+    // before it answers from occupancy: an occupant whose grant was revoked
+    // is not joined, whether or not the room actor still seats it and
+    // whatever this replica recorded when it relayed the join (XEP-0410
+    // §4: `<not-acceptable/>` is the answer for "not joined"). While the
+    // grants cannot be read the answer is `<remote-server-timeout/>`, the
+    // one error XEP-0410 has a client take no decision from, so nobody
+    // leaves and rejoins a room over a database that did not answer.
+    {
+        use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .allows_as(
+                RoomBinding::Room(&room_jid),
+                &sender_jid.to_bare(),
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                HostGrantAction::Read,
+            )
+            .await
+        {
+            RoomGate::Unmanaged | RoomGate::Managed(true) => {}
+            RoomGate::Managed(false) => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    not_acceptable_iq_error("You are not joined to this room."),
+                )];
+            }
+            RoomGate::Unavailable => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    super::errors::remote_server_timeout_iq_error(
+                        "The room's grants could not be read; try again.",
+                    ),
+                )];
+            }
+        }
+    }
     // XEP-0410 server optimization: with the
     // `muc#self-ping-optimization` feature advertised, the service
     // answers a self-ping authoritatively — success means "joined",

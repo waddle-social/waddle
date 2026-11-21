@@ -6,10 +6,11 @@ mod extension_disco_tests {
     use super::*;
 
     #[test]
-    fn extension_namespaces_are_advertised_without_provider_gate() {
+    fn extension_namespaces_are_advertised_except_host_federation() {
         let features = extension_namespaces_for_disco(vec![
             "urn:waddle:bot:1".to_string(),
             "urn:example:extension:1".to_string(),
+            "urn:waddle:s2s:0".to_string(),
         ]);
 
         assert_eq!(

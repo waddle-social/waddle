@@ -1,3 +1,4 @@
+use super::super::HOME_FEDERATION_FEATURE;
 use super::{
     build_disco_info_response, build_disco_info_response_with_extensions, build_server_role_form,
     command_name_by_boundary, extension_features_for_disco, server_affiliation_for_requester,
@@ -57,6 +58,12 @@ pub(super) async fn handle_server_disco_info<'a>(
     let identities = vec![Identity::server(Some("Waddle"))];
     let mut features = waddle_xmpp::disco::info::server_features();
     features.push(Feature::new("jabber:iq:search"));
+    if req.node.is_none()
+        && req.target_to.unwrap_or(req.domain) == req.domain
+        && state.deps.remote_route.supports_client_federation()
+    {
+        features.push(Feature::new(HOME_FEDERATION_FEATURE));
+    }
     features.extend(extension_features_for_disco(state));
     // Advertise XMPP-native A/V calling only when the Jingle handler
     // is registered. `register_call_handlers` is invoked at startup

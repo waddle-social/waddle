@@ -116,15 +116,16 @@ async fn native_match_is_domain_scoped() {
     );
 }
 
-/// Account names match on the JID library's canonical localpart, not SQL
-/// `lower()`: a native `Äda` is `äda@localhost` (non-ASCII case folding) and
-/// an OIDC `straße` is `strasse@localhost` (nodeprep maps ß to ss).
+/// Lookups take the input exactly under the identity profile and compare it
+/// with the stored keys: a spelling preparation would change (`Ada`,
+/// `straße`) names no account, while an OIDC account written before the
+/// profile as `straße` is found under the key `strasse` it was given.
 #[tokio::test]
-async fn matches_names_on_their_canonical_localpart() {
+async fn lookups_take_inputs_exactly_and_match_stored_keys() {
     let actor = test_actor().await;
     NativeUserStore::new(actor.clone())
         .register(RegisterRequest {
-            username: "Äda".to_string(),
+            username: "ada".to_string(),
             domain: "localhost".to_string(),
             password: format!("{:x}", rand::random::<u64>()),
             email: None,
@@ -152,7 +153,7 @@ async fn matches_names_on_their_canonical_localpart() {
         .await
         .expect("seed oidc user");
 
-    for name in ["äda", "Äda", "ÄDA", "strasse", "STRASSE", "straße"] {
+    for name in ["ada", "strasse"] {
         assert!(
             local_account_exists(&actor, name, "localhost")
                 .await
@@ -160,11 +161,19 @@ async fn matches_names_on_their_canonical_localpart() {
             "{name} names an account"
         );
     }
-    let jid: jid::BareJid = "äda@localhost".parse().expect("jid");
+    for name in ["Ada", "ADA", "STRASSE", "straße", "ada\u{ad}"] {
+        assert!(
+            !local_account_exists(&actor, name, "localhost")
+                .await
+                .expect("directory lookup"),
+            "{name} is not folded onto an account"
+        );
+    }
+    let jid: jid::BareJid = "ada@localhost".parse().expect("jid");
     assert!(local_account_jid_exists(&actor, &jid, "localhost")
         .await
         .expect("directory lookup"));
-    assert!(!local_account_exists(&actor, "ada", "localhost")
+    assert!(!local_account_exists(&actor, "bob", "localhost")
         .await
         .expect("directory lookup"));
 }

@@ -6,10 +6,14 @@ use super::{
     WebSocketState,
 };
 
+/// Answer a channel search. A room an enrolled host-grant scope manages is
+/// found only by an account its canonical grants allow to view it; the
+/// catalog row describes it to nobody else.
 pub(super) async fn handle_channel_search_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
     state: &WebSocketState,
+    requester: Option<&jid::BareJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
 ) -> Vec<String> {
@@ -47,6 +51,21 @@ pub(super) async fn handle_channel_search_iq(
                 )];
             }
         };
+    let channel_ids: Vec<&str> = channels.iter().map(|channel| channel.id.as_str()).collect();
+    let Ok(enrolled) = state
+        .deps
+        .app_state
+        .host_grants
+        .enrolled_channels(&channel_ids)
+        .await
+    else {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            internal_server_error_iq_error("Internal server error."),
+        )];
+    };
     let mut results = Vec::new();
     for channel in channels {
         if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
@@ -55,15 +74,51 @@ pub(super) async fn handle_channel_search_iq(
         let Some(room_jid) = waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok() else {
             continue;
         };
+        let managed = enrolled.contains(&channel.id);
         let result = ChannelResult::new(room_jid.to_string())
             .with_name(channel.name)
             .with_description(channel.description.unwrap_or_default());
-        if result.matches_query(&request.query) {
-            results.push(result);
+        if !result.matches_query(&request.query) {
+            continue;
         }
+        if managed && !managed_room_viewable(state, &channel.id, requester).await {
+            continue;
+        }
+        results.push(result);
     }
     let (page, rsm) = search_result_page(&results, request.rsm.as_ref(), default_limit);
     vec![iq_to_xml(build_search_response_with_rsm(iq, &page, &rsm))]
+}
+
+/// Whether `requester` may view the room of the channel `channel_id`, which
+/// an enrolled host-grant scope manages: its canonical grants allow `view`.
+/// The grants are read by the channel, the key the enrolled check used, so
+/// they are the binding's whatever domain the result's address is built
+/// with. A room whose grants cannot be read now, or that the store does not
+/// hold as managed after all, is left out.
+async fn managed_room_viewable(
+    state: &WebSocketState,
+    channel_id: &str,
+    requester: Option<&jid::BareJid>,
+) -> bool {
+    use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+    let Some(requester) = requester else {
+        return false;
+    };
+    matches!(
+        state
+            .deps
+            .app_state
+            .host_grants
+            .allows_as(
+                RoomBinding::Channel(channel_id),
+                requester,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                HostGrantAction::View
+            )
+            .await,
+        RoomGate::Managed(true)
+    )
 }
 
 fn search_result_page(

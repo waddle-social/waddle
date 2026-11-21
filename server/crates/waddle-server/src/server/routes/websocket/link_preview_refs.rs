@@ -89,25 +89,70 @@ pub(crate) async fn clear_current_message_preview_refs(
     )
 }
 
+/// Unreference the cached preview media of the archived row `resolved_id`
+/// of the direct archive `archive_jid`, which a retraction named by the
+/// wire id `message_id`: the references kept under that wire id whose
+/// current revision is the row, and those kept under the row's own archive
+/// id. A wire id is unique only per author, so references another sender's
+/// message keeps under the same wire id are left.
+pub(crate) async fn clear_resolved_message_preview_refs(
+    global_db_actor: &ActorRef<DbActor>,
+    archive_jid: &BareJid,
+    message_id: &str,
+    resolved_id: &str,
+) -> Vec<IngressEffectIntent> {
+    let mut intents = committed_link_preview_media_ref_effects(
+        archive_jid,
+        message_id,
+        "",
+        cleared_message_preview_refs(global_db_actor, archive_jid, message_id, Some(resolved_id))
+            .await,
+        Vec::new(),
+    );
+    if resolved_id != message_id {
+        intents.extend(committed_link_preview_media_ref_effects(
+            archive_jid,
+            resolved_id,
+            "",
+            cleared_current_message_preview_refs(global_db_actor, archive_jid, resolved_id).await,
+            Vec::new(),
+        ));
+    }
+    intents
+}
+
 async fn cleared_current_message_preview_refs(
     global_db_actor: &ActorRef<DbActor>,
     archive_jid: &BareJid,
     message_id: &str,
 ) -> Vec<CurrentPreviewRefRow> {
+    cleared_message_preview_refs(global_db_actor, archive_jid, message_id, None).await
+}
+
+/// Unreference the current references kept under `message_id` in
+/// `archive_jid`, only those whose current revision is `revision` when one
+/// is named, and return them.
+async fn cleared_message_preview_refs(
+    global_db_actor: &ActorRef<DbActor>,
+    archive_jid: &BareJid,
+    message_id: &str,
+    revision: Option<&str>,
+) -> Vec<CurrentPreviewRefRow> {
     let now = chrono::Utc::now().to_rfc3339();
-    match global_db_actor
-        .ask(DbQuery {
-            sql: "UPDATE link_preview_media_refs SET state = ?, updated_at = ? WHERE archive_jid = ? AND message_id = ? AND state = ? RETURNING upload_slot_id, current_archive_id".to_string(),
-            params: vec![
-                Value::from(LinkPreviewMediaRefState::Unreferenced.as_str().to_string()),
-                Value::from(now),
-                Value::from(archive_jid.to_string()),
-                Value::from(message_id.to_string()),
-                Value::from(LinkPreviewMediaRefState::Current.as_str().to_string()),
-            ],
-        })
-        .await
-    {
+    let mut sql = "UPDATE link_preview_media_refs SET state = ?, updated_at = ? WHERE archive_jid = ? AND message_id = ? AND state = ?".to_string();
+    let mut params = vec![
+        Value::from(LinkPreviewMediaRefState::Unreferenced.as_str().to_string()),
+        Value::from(now),
+        Value::from(archive_jid.to_string()),
+        Value::from(message_id.to_string()),
+        Value::from(LinkPreviewMediaRefState::Current.as_str().to_string()),
+    ];
+    if let Some(revision) = revision {
+        sql.push_str(" AND current_archive_id = ?");
+        params.push(Value::from(revision.to_string()));
+    }
+    sql.push_str(" RETURNING upload_slot_id, current_archive_id");
+    match global_db_actor.ask(DbQuery { sql, params }).await {
         Ok(rows) => {
             let mut refs = Vec::new();
             for row in rows {

@@ -4,6 +4,13 @@
 //! event room's JID, and every operation resolves the current MUC affiliation.
 //! Notifications and subscriptions are intentionally unavailable: a stale
 //! subscription must never survive removal from the room.
+//!
+//! A room an enrolled host-grant scope manages is decided from its canonical
+//! grants instead (`HostGrantGate`): reading the workspace needs `read`,
+//! writing one's own objects `send_message`, and the organizer's rights (the
+//! `event` object, editing and retracting other members' objects) `manage`.
+//! The room actor's affiliation list is only a mirror there and decides
+//! nothing; its snapshot still selects the room incarnation's backing node.
 
 use jid::{BareJid, FullJid};
 use tracing::warn;
@@ -17,6 +24,9 @@ use super::{
     build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
     build_pubsub_success, build_xmpp_error_response, get_room_actor_result, iq_to_xml,
     WebSocketState,
+};
+use crate::permissions::host_grant::{
+    HostGrantAction, ManagedRoomGrants, PrincipalEvidence, RoomBinding, RoomGate,
 };
 
 fn error(iq: &Iq, condition: PubSubError) -> Vec<String> {
@@ -34,9 +44,105 @@ fn is_organizer(affiliation: Affiliation) -> bool {
     matches!(affiliation, Affiliation::Owner | Affiliation::Admin)
 }
 
-fn can_publish_kind(item: &PlanningItem, author: &BareJid, affiliation: Affiliation) -> bool {
+/// What a request may do in an event workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// Nothing: the workspace is not shown to it.
+    Outsider,
+    /// Read the workspace and write its own objects.
+    Member,
+    /// A member who also maintains the `event` object and may edit and
+    /// retract other members' objects.
+    Organizer,
+}
+
+impl Standing {
+    /// The standing a room actor's affiliation gives, in a room no enrolled
+    /// host-grant scope manages.
+    fn of(affiliation: Affiliation) -> Self {
+        if is_organizer(affiliation) {
+            Self::Organizer
+        } else if is_member(affiliation) {
+            Self::Member
+        } else {
+            Self::Outsider
+        }
+    }
+
+    fn is_organizer(self) -> bool {
+        self == Self::Organizer
+    }
+}
+
+/// The host-grant action a member needs for `request`: `read` to retrieve
+/// the workspace, `send_message` to write to it. Organizer rights need
+/// `manage` as well.
+fn member_action(request: &PubSubRequest) -> HostGrantAction {
+    match request {
+        PubSubRequest::Items { .. } => HostGrantAction::Read,
+        _ => HostGrantAction::SendMessage,
+    }
+}
+
+/// The workspace request of a session, which no S2S stream carries: a
+/// PubSub request to a room JID is refused on inbound S2S streams.
+const SESSION: PrincipalEvidence = PrincipalEvidence::NoStream;
+
+/// The standing `author` holds now in a managed room, from the decision
+/// `decided` and, once its fence ticket is no longer current, from the
+/// grants read again. A room that cannot be decided now gives none.
+async fn managed_standing(
+    state: &WebSocketState,
+    decided: &ManagedRoomGrants,
+    author: &BareJid,
+    action: HostGrantAction,
+) -> Standing {
+    let gate = &state.deps.app_state.host_grants;
+    if !gate.still_allows(decided, author, &SESSION, action).await {
+        Standing::Outsider
+    } else if gate
+        .still_allows(decided, author, &SESSION, HostGrantAction::Manage)
+        .await
+    {
+        Standing::Organizer
+    } else {
+        Standing::Member
+    }
+}
+
+/// Whether `author` still holds `standing` in a managed room, asked just
+/// before the effect or the response it was decided for, once awaits
+/// separated them. A room no enrolled scope manages (`decided` is `None`)
+/// keeps the room actor's snapshot it was decided with.
+async fn still_holds(
+    state: &WebSocketState,
+    decided: Option<&ManagedRoomGrants>,
+    author: &BareJid,
+    action: HostGrantAction,
+    standing: Standing,
+) -> bool {
+    let Some(decided) = decided else {
+        return true;
+    };
+    match standing {
+        Standing::Outsider => false,
+        Standing::Member => {
+            state
+                .deps
+                .app_state
+                .host_grants
+                .still_allows(decided, author, &SESSION, action)
+                .await
+        }
+        Standing::Organizer => {
+            managed_standing(state, decided, author, action).await == Standing::Organizer
+        }
+    }
+}
+
+fn can_publish_kind(item: &PlanningItem, author: &BareJid, standing: Standing) -> bool {
     if item.kind == PlanningKind::Event {
-        return item.id == "event" && is_organizer(affiliation);
+        return item.id == "event" && standing.is_organizer();
     }
     if item.id == "event" {
         return false;
@@ -55,6 +161,28 @@ pub(super) async fn handle_room_pubsub(
     sender: &FullJid,
     request: PubSubRequest,
 ) -> Vec<String> {
+    let author = sender.to_bare();
+    let action = member_action(&request);
+    // A room an enrolled host-grant scope manages is decided on this replica
+    // from its canonical grants, before anything about the room is read, and
+    // fails closed while they cannot be read. The room actor's affiliation
+    // list is a mirror of those grants there and admits nothing.
+    let managed = match state
+        .deps
+        .app_state
+        .host_grants
+        .room(RoomBinding::Room(room))
+        .await
+    {
+        RoomGate::Unmanaged => None,
+        RoomGate::Unavailable => return error(iq, PubSubError::InternalServerError),
+        RoomGate::Managed(decided) => {
+            if !decided.allows_as(&author, &SESSION, action) {
+                return error(iq, PubSubError::Forbidden);
+            }
+            Some(decided)
+        }
+    };
     // An alive actor can briefly remain on the previous owner after a
     // distributed claim moves. Resolve ownership before consulting it.
     #[cfg(feature = "clustering")]
@@ -110,12 +238,17 @@ pub(super) async fn handle_room_pubsub(
             }
         }
     };
-    let affiliation = access.affiliation;
     let storage_node = access.storage_node();
-    if !is_member(affiliation) {
+    // The snapshot selects the backing node in every room; it decides the
+    // standing only in a room no enrolled scope manages.
+    let standing = match managed.as_ref() {
+        None => Standing::of(access.affiliation),
+        Some(decided) => managed_standing(state, decided, &author, action).await,
+    };
+    if standing == Standing::Outsider {
         return error(iq, PubSubError::Forbidden);
     }
-    let author = sender.to_bare();
+    let decided = managed.as_ref();
     let storage = &state.deps.protocol.pubsub_storage;
     match request {
         PubSubRequest::Items {
@@ -149,6 +282,11 @@ pub(super) async fn handle_room_pubsub(
                             },
                         )];
                     }
+                    // The items are sent only if the grants still admit
+                    // the reader once they were read.
+                    if !still_holds(state, decided, &author, action, standing).await {
+                        return error(iq, PubSubError::Forbidden);
+                    }
                     let items: Vec<_> = stored.iter().map(|item| item.to_pubsub_item()).collect();
                     vec![iq_to_xml(build_pubsub_items_result(iq, &node, &items))]
                 }
@@ -176,7 +314,7 @@ pub(super) async fn handle_room_pubsub(
             if item.id.as_deref() != Some(planning.id.as_str()) {
                 return error(iq, PubSubError::InvalidPayload);
             }
-            if !can_publish_kind(&planning, &author, affiliation) {
+            if !can_publish_kind(&planning, &author, standing) {
                 return error(iq, PubSubError::Forbidden);
             }
             if planning.kind == PlanningKind::Vote {
@@ -230,7 +368,7 @@ pub(super) async fn handle_room_pubsub(
                             .to_pubsub_item()
                             .payload
                             .and_then(|payload| PlanningItem::from_element(&payload).ok());
-                        let organizer_edit = is_organizer(affiliation)
+                        let organizer_edit = standing.is_organizer()
                             && !matches!(
                                 planning.kind,
                                 PlanningKind::Attendance
@@ -282,6 +420,11 @@ pub(super) async fn handle_room_pubsub(
                 warn!(%room, %cause, "Event planning node configuration failed");
                 return error(iq, PubSubError::InternalServerError);
             }
+            // The lookups and node preparation above were awaits: the
+            // standing the write relies on is confirmed just before it.
+            if !still_holds(state, decided, &author, action, standing).await {
+                return error(iq, PubSubError::Forbidden);
+            }
             let result = storage
                 .publish_item_if_missing_or_publisher(
                     room,
@@ -306,10 +449,13 @@ pub(super) async fn handle_room_pubsub(
         PubSubRequest::Retract { node, item_id, .. }
             if node == NODE_EVENT_PLANNING && matches!(iq, Iq::Set { .. }) =>
         {
-            if item_id == "event" && !is_organizer(affiliation) {
+            if item_id == "event" && !standing.is_organizer() {
                 return error(iq, PubSubError::Forbidden);
             }
-            let result = if is_organizer(affiliation) {
+            if !still_holds(state, decided, &author, action, standing).await {
+                return error(iq, PubSubError::Forbidden);
+            }
+            let result = if standing.is_organizer() {
                 storage.retract_item(room, &storage_node, &item_id).await
             } else {
                 storage

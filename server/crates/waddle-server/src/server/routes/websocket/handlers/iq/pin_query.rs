@@ -175,6 +175,43 @@ pub(super) async fn handle_pin_query_iq(
         }
     };
 
+    // A room an enrolled host-grant scope manages shows its pins to whoever
+    // its canonical grants allow to read it, decided after the list was
+    // read: the actor may still seat an occupant whose grant was revoked.
+    {
+        use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .allows_as(
+                RoomBinding::Room(&room_jid),
+                &sender_bare,
+                &crate::permissions::host_grant::PrincipalEvidence::NoStream,
+                HostGrantAction::Read,
+            )
+            .await
+        {
+            RoomGate::Unmanaged | RoomGate::Managed(true) => {}
+            RoomGate::Managed(false) => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    forbidden_iq_error("Pin list is visible only to current room occupants."),
+                )];
+            }
+            RoomGate::Unavailable => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        }
+    }
+
     build_pin_query_result(iq, entries, response_from, response_to)
 }
 

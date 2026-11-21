@@ -23,9 +23,11 @@ pub enum ExitStatus {
     /// The arguments or the environment are incomplete or invalid. Nothing
     /// was sent to the database.
     Usage,
-    /// Every schema is prepared and granted, and the keypair-pool generation
-    /// is inside its activation delay. Run `owner-phase` again after the
-    /// printed time.
+    /// Run the subcommand again later. `owner-phase`: every schema is
+    /// prepared and granted, and the keypair-pool generation is inside its
+    /// activation delay; run it after the printed time. `account retire`:
+    /// the account is retired, and a serving replica has not confirmed
+    /// ending its sessions within the wait.
     Pending,
     /// A verifier refused the database, the plan or the document. A rerun
     /// refuses again until an operator changes one of them or, for a
@@ -80,6 +82,48 @@ pub enum OwnerCliError {
     Handoff(#[source] HandoffError),
     #[error("the composed handoff did not pass the pinned preflight on the runtime connection")]
     Preflight(#[source] RuntimeStartupError),
+    #[error("the host-grant action did not complete")]
+    HostGrant(#[source] crate::permissions::host_grant::HostGrantError),
+    /// The revokes are recorded and effective; the revocation fence did not
+    /// acknowledge every one of them within the wait.
+    #[error(
+        "recorded, and not yet acknowledged by the revocation fence: run the command again \
+         with the same --operation-id"
+    )]
+    FenceUnacknowledged,
+    /// A room's last owner of a served account cannot be revoked.
+    #[error("{refused} revoke(s) were refused; the rest are recorded")]
+    RevokesRefused { refused: usize },
+    /// Some rooms of a `revoke-account` act could not be revoked, or their
+    /// acknowledgement could not be read; the other rooms are recorded.
+    #[error(
+        "{failed} room(s) could not be revoked or their acknowledgement read; the rest are \
+         recorded: run the command again with the same --operation-id"
+    )]
+    RevokeAccountIncomplete { failed: usize },
+    #[error("the account was not retired")]
+    Retirement(#[source] crate::auth::retirement::RetireAccountError),
+    /// The account is retired; the messages its offline store keeps under
+    /// other spellings of its JID were not all removed.
+    #[error(
+        "the account is retired, and the messages its offline store keeps under other \
+         spellings of its JID were not all removed: run the command again"
+    )]
+    OfflineSweep(#[source] crate::auth::retirement::OfflineSweepError),
+    /// The account is retired; ending its open sessions could not be
+    /// requested, or the replicas' acknowledgements could not be read.
+    #[error(
+        "the account is retired, and ending its open sessions did not complete: run the \
+         command again"
+    )]
+    SessionEnding(#[source] crate::auth::session_endings::SessionEndingError),
+    /// The account is retired; `pending` serving replicas have not
+    /// confirmed ending its sessions within the wait.
+    #[error(
+        "the account is retired, and {pending} serving replica(s) have not confirmed ending \
+         its sessions: run the command again"
+    )]
+    SessionsUnconfirmed { pending: usize },
 }
 
 impl OwnerCliError {
@@ -88,12 +132,34 @@ impl OwnerCliError {
             Self::Configuration(_) | Self::Read { .. } | Self::OutputIsSymlink { .. } => {
                 ExitStatus::Usage
             }
-            Self::Write { .. } | Self::Connect(_) => ExitStatus::Failed,
-            Self::KeypoolActivationPending { .. } => ExitStatus::Pending,
+            Self::Write { .. }
+            | Self::Connect(_)
+            | Self::FenceUnacknowledged
+            | Self::RevokeAccountIncomplete { .. }
+            | Self::OfflineSweep(_)
+            | Self::SessionEnding(_) => ExitStatus::Failed,
+            Self::RevokesRefused { .. } => ExitStatus::Refused,
+            Self::Retirement(crate::auth::retirement::RetireAccountError::NotAnAccountJid) => {
+                ExitStatus::Usage
+            }
+            Self::Retirement(
+                crate::auth::retirement::RetireAccountError::Database(_)
+                | crate::auth::retirement::RetireAccountError::BoundsUnproven,
+            ) => ExitStatus::Failed,
+            Self::KeypoolActivationPending { .. } | Self::SessionsUnconfirmed { .. } => {
+                ExitStatus::Pending
+            }
             // The throwaway preflight pool did not close in time: the
             // preflight itself reached no verdict.
             Self::Preflight(RuntimeStartupError::PreflightPoolCloseIndeterminate) => {
                 ExitStatus::Failed
+            }
+            Self::HostGrant(error) => {
+                if host_grant_error_is_transient(error) {
+                    ExitStatus::Failed
+                } else {
+                    ExitStatus::Refused
+                }
             }
             Self::OwnerPhase(_) | Self::Attestor(_) | Self::Handoff(_) | Self::Preflight(_) => {
                 if transient_failure(self) {
@@ -143,6 +209,23 @@ fn transient_failure(error: &(dyn Error + 'static)) -> bool {
         cause = error.source();
     }
     false
+}
+
+/// A failed statement or connection, an expired bound or an unacknowledged
+/// commit: a rerun may succeed. Everything else is a verdict on the store or
+/// the request.
+pub(super) fn host_grant_error_is_transient(
+    error: &crate::permissions::host_grant::HostGrantError,
+) -> bool {
+    use crate::permissions::host_grant::HostGrantError;
+    matches!(
+        error,
+        HostGrantError::Database(_)
+            | HostGrantError::Busy
+            | HostGrantError::BoundsUnproven
+            | HostGrantError::CommitOutcomeUnknown
+            | HostGrantError::EpochUnproven(_)
+    )
 }
 
 /// Ledger, lineage and attestation errors are verdicts on the database.

@@ -10,6 +10,7 @@ pub mod bootstrap;
 mod catalog_fence;
 pub(crate) use catalog_fence::{try_catalog_fence_lock, CatalogFenceLock};
 pub mod lineage;
+pub mod local_space_subscriptions;
 mod migrations;
 pub mod physical_attestation;
 mod pool;
@@ -18,6 +19,8 @@ pub(crate) mod read_only_timeout;
 pub mod roster;
 pub mod runtime_startup;
 pub(crate) mod runtime_store_acl;
+pub mod s2s_accounts;
+pub mod s2s_spaces;
 mod schema;
 mod value;
 

@@ -119,9 +119,10 @@ impl DatabasePubSubStorage {
         )
         .await
         .map_err(storage)?;
-        let evicted_item_ids = self
-            .enforce_max_items_tx(&mut tx, service, node.as_str(), config.max_items)
-            .await?;
+        let evicted_item_ids =
+            Self::enforce_max_items_tx(&mut tx, service, node.as_str(), config.max_items)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
         tx.commit().await.map_err(storage)?;
         Ok(VersionedPublishResult::Applied(PublishResult {
             item_id: item_id.clone(),

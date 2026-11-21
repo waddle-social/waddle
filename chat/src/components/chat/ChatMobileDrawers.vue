@@ -169,7 +169,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
 
         <div :class="listClass">
           <button
-            v-if="waddles.currentChannel.value && waddles.canManageChannels.value"
+            v-if="waddles.currentChannel.value && waddles.canManageCurrentChannel.value"
             :class="rowClass"
             type="button"
             @click="openChannelEdit(); ui.showMobileDetails.value = false"

@@ -13,8 +13,8 @@ use waddle_xmpp::{Session as XmppSession, XmppError};
 pub use super::xmpp_app_state::XmppAppState;
 
 pub(crate) use super::xmpp_channels::{
-    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
-    XmppChannelRecord, XmppChannelUpsert,
+    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, set_xmpp_channel_federated,
+    upsert_xmpp_channel, XmppChannelRecord, XmppChannelUpsert,
 };
 
 #[cfg(test)]
@@ -112,21 +112,6 @@ impl waddle_xmpp::AppState for XmppAppState {
         )
         .await
         .map_err(|error| XmppError::internal(error.to_string()))
-    }
-
-    async fn set_room_affiliation(
-        &self,
-        channel_id: &str,
-        jid: &jid::BareJid,
-        affiliation: waddle_xmpp::Affiliation,
-    ) -> Result<(), XmppError> {
-        super::xmpp_permission_state::set_room_affiliation(
-            &self.permission_actor,
-            channel_id,
-            jid,
-            affiliation,
-        )
-        .await
     }
 
     /// Lookup SCRAM credentials for a native JID user.

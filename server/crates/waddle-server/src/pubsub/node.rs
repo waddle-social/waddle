@@ -454,6 +454,9 @@ fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
     if is_dm_bookmarks_node(node_name) {
         return config.clone().normalize_waddle_dm_bookmarks();
     }
+    if node_name == waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_JOINED_SPACES {
+        return config.clone().normalize_waddle_joined_spaces();
+    }
     let mut config = config.clone();
     // Well-known private PEP nodes (whitelist in `NodeConfig::pep_for_node`:
     // MDS per XEP-0490 §3, DND, story reads, status preference) must stay

@@ -40,9 +40,9 @@ fn assert_remote_error(reply: &Iq, request: &Iq) {
     };
     let mut expected = StanzaError::new(
         ErrorType::Cancel,
-        DefinedCondition::NotAllowed,
+        DefinedCondition::RemoteServerNotFound,
         "en",
-        "Remote Session routing is not allowed by this server.",
+        "Routing to remote domains is not enabled on this server.",
     );
     expected.by = Some(DOMAIN.parse().expect("home domain"));
     // Compare every error field, including the exact diagnostic language/text.
@@ -288,7 +288,7 @@ async fn session_results_and_errors_never_generate_a_reply() {
 }
 
 #[tokio::test]
-async fn foreign_session_before_binding_retains_existing_authentication_error() {
+async fn foreign_session_before_binding_is_refused_as_not_authorized() {
     let state = create_test_websocket_state().await;
     let session = create_test_server_owner_session(&state, "alice").await;
     for has_session in [false, true] {
@@ -303,7 +303,7 @@ async fn foreign_session_before_binding_retains_existing_authentication_error() 
                 let replies =
                     dispatch(&state, &mut conn, request(Some("remote.test"), set, None)).await;
                 let [Iq::Error { error, .. }] = replies.as_slice() else {
-                    panic!("authentication error: {replies:?}")
+                    panic!("RFC 6120 §7.1 not-authorized refusal: {replies:?}")
                 };
                 assert_eq!(error.defined_condition, DefinedCondition::NotAuthorized);
                 assert!(
@@ -325,12 +325,11 @@ async fn unregistered_session_namespace_keeps_feature_fallback() {
         .protocol
         .dispatcher = Arc::new(StanzaDispatcher::new());
     let (mut conn, _rx) = connection(&state).await;
-    let replies = dispatch(
-        &state,
-        &mut conn,
-        request(Some("remote.test"), true, Some(ORIGIN)),
-    )
-    .await;
+    // A server-addressed request reaches namespace dispatch; with no Session
+    // handler registered it gets the generic fallback. (A request to an
+    // unserved domain is refused by destination before any namespace is
+    // consulted, registered or not.)
+    let replies = dispatch(&state, &mut conn, request(None, true, Some(ORIGIN))).await;
     let [Iq::Error { error, .. }] = replies.as_slice() else {
         panic!("feature fallback: {replies:?}")
     };

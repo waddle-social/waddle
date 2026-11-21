@@ -56,6 +56,21 @@ pub fn build_pubsub_retract_event(from: &Jid, to: &Jid, node: &str, item_id: &st
     message
 }
 
+/// Build an XEP-0060 node deletion notification without a redirect.
+#[must_use]
+pub fn build_pubsub_delete_event(from: &Jid, to: &Jid, node: &str) -> Message {
+    let deleted = Element::builder("delete", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .build();
+    let event = Element::builder("event", NS_PUBSUB_EVENT)
+        .append(deleted)
+        .build();
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
+    message.from = Some(from.clone());
+    message.payloads.push(event);
+    message
+}
+
 /// Build a PubSub items result IQ.
 #[must_use]
 pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubItem]) -> Iq {
@@ -119,7 +134,9 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         PubSubError::BadRequest
         | PubSubError::InvalidJid
         | PubSubError::InvalidPayload
-        | PubSubError::PayloadRequired => (ErrorType::Modify, DefinedCondition::BadRequest),
+        | PubSubError::PayloadRequired
+        | PubSubError::SubscriptionIdRequired => (ErrorType::Modify, DefinedCondition::BadRequest),
+        PubSubError::InvalidSubscriptionId => (ErrorType::Modify, DefinedCondition::NotAcceptable),
         PubSubError::NotSubscribed => (ErrorType::Cancel, DefinedCondition::UnexpectedRequest),
         PubSubError::InternalServerError => {
             (ErrorType::Wait, DefinedCondition::InternalServerError)
@@ -141,6 +158,12 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         );
     } else if let PubSubError::ClosedNode = error {
         stanza_error.other = Some(Element::builder("closed-node", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::NotSubscribed = error {
+        stanza_error.other = Some(Element::builder("not-subscribed", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::InvalidSubscriptionId = error {
+        stanza_error.other = Some(Element::builder("invalid-subid", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::SubscriptionIdRequired = error {
+        stanza_error.other = Some(Element::builder("subid-required", NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::InvalidPayload = error {
         // XEP-0060 §7.1.3.4: attach the pubsub-namespaced
         // <invalid-payload/> condition so clients can distinguish

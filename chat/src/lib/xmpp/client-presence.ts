@@ -9,7 +9,7 @@
  * through narrow callbacks.
  */
 import { bareJidKey, barePeerJid, fullJidIdentityKey, resourceOf } from "./jid";
-import type { ClientEvents, TypedEventBus } from "./client-events";
+import type { ClientEvents, OwnRoomDeparture, TypedEventBus } from "./client-events";
 import { BOT_HAT_URI, parseMucAffiliation, parseMucRole } from "./types";
 import type { OccupantPresence, RoomAuthority, RoomHats, RoomPresence } from "./types";
 import {
@@ -38,7 +38,8 @@ function isMucPresence(presence: WasmPresence): boolean {
     presence.muc_jid !== undefined ||
     presence.muc_affiliation !== undefined ||
     presence.muc_role !== undefined ||
-    (presence.muc_status_codes?.length ?? 0) > 0
+    (presence.muc_status_codes?.length ?? 0) > 0 ||
+    presence.muc_destroyed === true
   );
 }
 
@@ -55,10 +56,14 @@ type PresenceManagerDeps = {
   requireConnectedXmpp: () => Promise<PresenceWasmClient>;
   /** MUC error presence addressed to a pending join; true when consumed. */
   handleMucPresenceError: (presence: WasmPresence) => boolean;
-  /** Own available self-presence (XEP-0045 §7.2.2 status 110): the join completed. */
-  onOwnSelfPresence: (roomJid: string) => void;
+  /**
+   * Own available self-presence (XEP-0045 §7.2.2 status 110): the join
+   * completed. Returns false when the client refused the occupancy (it is
+   * leaving at once), so nothing reports it as joined.
+   */
+  onOwnSelfPresence: (roomJid: string, statusCodes: readonly number[]) => boolean | void;
   /** Own unavailable self-presence that is not a §7.6 nick change: readiness revoked. */
-  onOwnUnavailable: (roomJid: string) => void;
+  onOwnUnavailable: (roomJid: string, statusCodes: readonly number[], departure: OwnRoomDeparture) => void;
 };
 
 export class PresenceManager {
@@ -208,10 +213,10 @@ export class PresenceManager {
       // service-modified nick or localpart-case difference still
       // matches the waiter.
       if (this.isOwnAvailableMucSelfPresence(presence)) {
-        this.deps.onOwnSelfPresence(room);
+        const accepted = this.deps.onOwnSelfPresence(room, presence.muc_status_codes ?? []) !== false;
         // XEP-0045 §7.2.9 (210): the room may have assigned a nick other
         // than the one requested; the self-presence's nick is the real one.
-        if (nick) this.deps.events.emitSafe("ownOccupantNick", room, nick);
+        if (accepted && nick) this.deps.events.emitSafe("ownOccupantNick", room, nick);
       }
       if (!nick && presence.vcard_avatar) this.deps.events.emit("roomAvatar", room, presence.vcard_avatar);
       if (!nick) return;
@@ -226,8 +231,14 @@ export class PresenceManager {
         // a departure — the available presence for the new nick follows —
         // so it must NOT revoke room readiness.
         const isNickChange = presence.muc_status_codes?.includes(303) ?? false;
-        if (this.isOwnMucSelfPresence(presence)) {
-          if (!isNickChange) this.deps.onOwnUnavailable(room);
+        // XEP-0045 §10.9: a destroyed room removes each occupant with one
+        // presence carrying `<destroy/>` and no status 110. It is sent
+        // only to the occupant it removes, so it is our own departure.
+        const destroyed = presence.muc_destroyed === true;
+        if (destroyed || this.isOwnMucSelfPresence(presence)) {
+          if (!isNickChange) {
+            this.deps.onOwnUnavailable(room, presence.muc_status_codes ?? [], { destroyed });
+          }
           // The old occupant stops identifying us immediately, including
           // during a nick change before the new available self-presence.
           this.deps.events.emitSafe("ownOccupantNick", room, null);

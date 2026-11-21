@@ -1,7 +1,4 @@
-use super::permissions::{
-    delete_channel_parent_tuple, write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
-};
-use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
+use super::permissions::{channel_parent_spaces, write_channel_parent_tuple_if_absent};
 use super::{
     build_pubsub_error, build_pubsub_items_result, get_xmpp_channel, iq_to_xml,
     spaces_service_bare_jid, warn, BareJid, PubSubError, WebSocketState,
@@ -149,6 +146,32 @@ async fn backfill_missing_space_bookmarks(
             warn!(channel = %channel_jid, "Skipping Spaces bookmark backfill for non-managed room JID");
             continue;
         };
+        // A room an enrolled host-grant scope manages is placed by its
+        // canonical topology only: a read never publishes its bookmark or
+        // writes its parent, nor does it while enrollment cannot be told.
+        match state
+            .deps
+            .app_state
+            .host_grants
+            .channel_enrolled(&channel_id)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) | Err(_) => continue,
+        }
+        // A read backfills a parent only where none exists: the link names
+        // this Space, and no Space is the channel's parent yet. A channel
+        // whose parent is another Space keeps it, and the link that
+        // disagrees with it moves nothing; only a placement by an account
+        // with authority over the channel does.
+        match channel_parent_spaces(state, &channel_id).await {
+            Ok(parents) if parents.iter().all(|parent| parent == node) => {}
+            Ok(_) => continue,
+            Err(error) => {
+                warn!(channel = %channel_jid, error = %error, "Failed to read channel parents for Spaces bookmark backfill");
+                continue;
+            }
+        }
         let room = match state
             .deps
             .protocol
@@ -194,19 +217,6 @@ async fn backfill_missing_space_bookmarks(
                 continue;
             }
         };
-        let stale_nodes = match state
-            .deps
-            .protocol
-            .pubsub_storage
-            .list_node_names_for_item(spaces_jid, &item_id)
-            .await
-        {
-            Ok(stale_nodes) => stale_nodes,
-            Err(error) => {
-                warn!(channel = %channel_jid, node, error = %error, "Failed to enumerate stale Spaces bookmarks before backfill");
-                continue;
-            }
-        };
         let publish_result = match state
             .deps
             .protocol
@@ -220,74 +230,14 @@ async fn backfill_missing_space_bookmarks(
                 continue;
             }
         };
-        let parent_tuple_created = match write_channel_parent_tuple_if_absent(
-            state,
-            &channel_id,
-            node,
-        )
-        .await
-        {
-            Ok(created) => created,
-            Err(error) => {
-                let _ = state
-                    .deps
-                    .protocol
-                    .pubsub_storage
-                    .retract_item(spaces_jid, node, &publish_result.item_id)
-                    .await;
-                warn!(channel = %channel_jid, node, error = %error, "Backfilled Spaces bookmark but failed to repair channel parent tuple; retracted backfill item");
-                continue;
-            }
-        };
-        if let Err(error) = cleanup_stale_space_bookmarks(
-            state,
-            spaces_jid,
-            &channel_id,
-            node,
-            &item_id,
-            &stale_nodes,
-        )
-        .await
-        {
-            let tuple_ready_for_retract = if parent_tuple_created {
-                match delete_channel_parent_tuple(state, &channel_id, node).await {
-                    Ok(_) => true,
-                    Err(delete_error) => {
-                        warn!(
-                            channel = %channel_jid,
-                            node,
-                            error = %delete_error,
-                            "Failed to delete operation-created parent tuple after stale cleanup failure; preserving backfilled Spaces bookmark"
-                        );
-                        false
-                    }
-                }
-            } else {
-                true
-            };
-            if tuple_ready_for_retract {
-                match state
-                    .deps
-                    .protocol
-                    .pubsub_storage
-                    .retract_item(spaces_jid, node, &publish_result.item_id)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(retract_error) => {
-                        if parent_tuple_created {
-                            let _ = write_channel_parent_tuple(state, &channel_id, node).await;
-                        }
-                        warn!(
-                            channel = %channel_jid,
-                            node,
-                            error = %retract_error,
-                            "Failed to retract backfilled Spaces bookmark after stale cleanup failure; preserving repaired parent tuple"
-                        );
-                    }
-                }
-            }
-            warn!(channel = %channel_jid, node, error = %error, "Backfilled Spaces bookmark but failed to clean stale bookmarks");
+        if let Err(error) = write_channel_parent_tuple_if_absent(state, &channel_id, node).await {
+            let _ = state
+                .deps
+                .protocol
+                .pubsub_storage
+                .retract_item(spaces_jid, node, &publish_result.item_id)
+                .await;
+            warn!(channel = %channel_jid, node, error = %error, "Backfilled Spaces bookmark but failed to repair channel parent tuple; retracted backfill item");
         }
     }
 }

@@ -358,3 +358,12 @@ between the two resources, a bind that replaces a resource hosted on the
 other replica, and a bind and a resume on the survivor after the owning
 replica is stopped. These instructions do not authorize or assert a
 deployment.
+
+## SpiceDB authorization ID codec (#2047)
+
+The SpiceDB ID codec change refuses to start against a store written by an
+earlier release, so the production store must be emptied, with every older
+replica stopped, inside an explicitly authorised `Recreate` window or the
+planned fresh production redeploy. Emptying deletes every grant, including
+channel bans, and the previous binary must not be restored onto the marked
+store. Follow [authz-codec-cutover.md](authz-codec-cutover.md).

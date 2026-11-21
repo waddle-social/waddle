@@ -33,6 +33,7 @@ pub mod ingress_append;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod lifecycle_model;
 pub mod persistence;
+mod protected_space_reply;
 mod provenance;
 mod replay;
 mod resume_checkpoint;
@@ -47,6 +48,11 @@ mod unacked_queue;
 pub use ingress_append::{
     ArchiveDispatchPosition, SmDrainedAppendTicket, SmDrainedIngressAppend, SmIngressAppendKey,
     SmKeyedAppendOutcome, SmRelayedAppendObligation,
+};
+pub use protected_space_reply::{
+    space_deletion_notice_id, ProtectedSpaceBookmarkEvent, ProtectedSpaceReplyCodecError,
+    ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency,
+    MAX_PROTECTED_SPACE_REPLY_BYTES, MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES,
 };
 pub use provenance::{
     SmFrameIngressClaims, SmFrameProvenance, SmProvenancedStanza, MAX_SM_PROVENANCE_BYTES,

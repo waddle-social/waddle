@@ -80,7 +80,7 @@ pub(super) async fn append(
             crate::db_params![
                 stream_id.as_str().to_string(),
                 i64::from(append.stanza.sequence),
-                append.stanza.stanza.wire(),
+                append.stanza.stanza.to_storage().into_owned(),
                 append.stanza.original_receipt_at.timestamp_millis(),
                 crate::sm_persistence::codec::encode_ingress_receipts(&append.stanza.ingress_receipts),
                 append.stanza.provenance.encode(),

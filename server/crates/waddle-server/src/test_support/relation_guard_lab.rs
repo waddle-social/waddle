@@ -376,8 +376,8 @@ impl Lab {
         let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM guarded._migrations")
             .fetch_one(&mut owner_connection).await?;
         ensure!(
-            latest >= crate::db::BASELINE_VERSION,
-            "expected the catalog through the schema baseline, got {latest}"
+            Some(latest) == MigrationRunner::single().latest_version(),
+            "expected the complete migration catalog, got {latest}"
         );
         if candidate_guard {
             sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
