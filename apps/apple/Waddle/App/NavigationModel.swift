@@ -57,6 +57,8 @@ enum SplitSection: Hashable {
     case feed
     /// The community calendar.
     case events
+    /// Everyone the account knows by address.
+    case people
 }
 
 /// A screen pushed inside the phone's Feed tab.
@@ -123,8 +125,8 @@ final class NavigationModel {
         }
     }
 
-    /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed or
-    /// Events.
+    /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed,
+    /// Events or People.
     func show(_ section: SplitSection) {
         selection = nil
         inspector = nil
@@ -144,6 +146,10 @@ final class NavigationModel {
         case .events:
             tab = .feed
             feedPath = [.events]
+        case .people:
+            // The phone reaches People from a row on Home.
+            tab = .home
+            homePath = []
         }
     }
 

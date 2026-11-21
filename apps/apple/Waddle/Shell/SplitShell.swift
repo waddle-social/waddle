@@ -54,6 +54,8 @@ struct SplitShell: View {
                 FeedView()
             case .events:
                 EventsView()
+            case .people:
+                PeopleView()
             }
         }
     }
