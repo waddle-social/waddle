@@ -27,6 +27,11 @@ spec:
       - apps.waddle.chat
       - waddle.chat
       - waddle.social
+    managedRecordTypes:
+      - A
+      - AAAA
+      - CNAME
+      - SRV
     policy: sync
     sources:
       - gateway-httproute
