@@ -453,7 +453,7 @@ async fn the_owner_removes_old_leases_requests_and_acknowledgements() {
 /// Run `waddle-server account retire` with `args`; its exit code and the
 /// object it printed.
 async fn account_retire(args: &[&str]) -> (i32, serde_json::Value, String) {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    let mut command = tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
     for (key, _) in std::env::vars_os() {
         let key = key.to_string_lossy().into_owned();
         if key.starts_with("WADDLE_") || key.starts_with("OTEL_") || key.starts_with("PG") {

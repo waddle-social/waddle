@@ -152,6 +152,35 @@ async fn apply_room_observation_schema(tx: &mut Transaction<'_>) -> Result<(), O
         (),
     )
     .await?;
+    // Create publications (and its index) before work so the ShareLock order
+    // matches `retention::collect_expired`'s RowExclusiveLock order
+    // (publications -> work) and cannot AB-BA deadlock during startup.
+    tx.execute(
+        r#"CREATE TABLE IF NOT EXISTS extension_room_publications (
+    id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL,
+    output_index BIGINT NOT NULL,
+    source_key TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    settled_at_ms BIGINT NULL,
+    UNIQUE (work_id, output_index)
+)"#,
+        (),
+    )
+    .await?;
+    tx.execute(
+        r#"CREATE INDEX IF NOT EXISTS extension_room_publications_pending
+    ON extension_room_publications(plugin_id, room_jid, status)"#,
+        (),
+    )
+    .await?;
     tx.execute(
         r#"CREATE TABLE IF NOT EXISTS extension_room_observation_work (
     id TEXT PRIMARY KEY,
@@ -195,32 +224,6 @@ async fn apply_room_observation_schema(tx: &mut Transaction<'_>) -> Result<(), O
     recorded_at_ms BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (plugin_id, generation, room_jid, message_key)
 )"#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        r#"CREATE TABLE IF NOT EXISTS extension_room_publications (
-    id TEXT PRIMARY KEY,
-    work_id TEXT NOT NULL,
-    output_index BIGINT NOT NULL,
-    source_key TEXT NOT NULL,
-    plugin_id TEXT NOT NULL,
-    generation BIGINT NOT NULL,
-    identity TEXT NOT NULL,
-    room_jid TEXT NOT NULL,
-    revision BIGINT NOT NULL,
-    source_json TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    status TEXT NOT NULL,
-    settled_at_ms BIGINT NULL,
-    UNIQUE (work_id, output_index)
-)"#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        r#"CREATE INDEX IF NOT EXISTS extension_room_publications_pending
-    ON extension_room_publications(plugin_id, room_jid, status)"#,
         (),
     )
     .await?;

@@ -774,7 +774,7 @@ async fn invitations_and_space_pubsub_grant_nothing_in_an_enrolled_scope() {
     )
     .await;
     assert!(
-        is_error(&reply, DefinedCondition::Forbidden),
+        is_error(&reply, DefinedCondition::ItemNotFound),
         "subscribe: {reply:?}"
     );
     let bookmark = waddle_xmpp::xep::xep0402::build_bookmark_element(

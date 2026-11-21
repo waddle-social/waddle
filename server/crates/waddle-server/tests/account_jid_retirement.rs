@@ -564,7 +564,7 @@ async fn a_retirement_that_cannot_lock_the_account_tables_in_time_changes_nothin
 /// Run `waddle-server account retire` with `args` and `env`, and answer its
 /// exit code and what it printed.
 async fn account_retire(args: &[&str], env: &[(&str, &str)]) -> (i32, serde_json::Value, String) {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    let mut command = tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
     for (key, _) in std::env::vars_os() {
         let key = key.to_string_lossy().into_owned();
         if key.starts_with("WADDLE_") || key.starts_with("OTEL_") || key.starts_with("PG") {

@@ -510,11 +510,11 @@ async fn host_grant_cli(
     let url = fixture.ingress.db.database_url().to_owned();
     // The fixture's login owns the schema: it is the login the act runs as
     // and the role it acts as.
-    let login = url::Url::parse(&url)
+    let login = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&url)
         .expect("database URL")
-        .username()
+        .get_username()
         .to_owned();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    let mut command = tokio::process::Command::new(waddle_ws_test_support::waddle_server_binary());
     for (key, _) in std::env::vars_os() {
         let key = key.to_string_lossy().into_owned();
         if key.starts_with("WADDLE_") || key.starts_with("OTEL_") || key.starts_with("PG") {

@@ -328,6 +328,7 @@
                 WADDLE_TEST_FIXED_ACCOUNT_PASSWORD
                 WADDLE_UPLOAD_DIR
                 RUST_BACKTRACE
+                RUST_MIN_STACK
                 NEXTEST_SHOW_PROGRESS
                 ;
               pname = "waddle-server-test-shard-${toString partition}";
@@ -672,6 +673,9 @@
             WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
+            # Unoptimized `opt-level = 0` test futures overflow the 2 MiB
+            # default worker/test thread stack; match the server's 8 MiB stack.
+            RUST_MIN_STACK = "8388608";
           };
           testArgs =
             baseArgs
@@ -942,6 +946,8 @@
               pname = "waddle-server-xmpp-server-tests";
               doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
+              # Keep one rustc job on 16 GB GitHub runners to avoid OOM.
+              CARGO_BUILD_JOBS = "1";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server --features test-support";
               cargoNextestExtraArgs = "--profile ci --lib --tests";

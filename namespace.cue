@@ -51,6 +51,7 @@ schema.#Project & {
 				CARGO_INCREMENTAL: "0"
 				// One large lib-test compile can use most of the runner’s 16 GB.
 				CARGO_BUILD_JOBS: "1"
+				RUST_MIN_STACK:   "8388608"
 			}
 			hermetic: sandbox: "dir"
 		}
@@ -60,7 +61,11 @@ schema.#Project & {
 			args: ["-euo", "pipefail", "-c", "python3 scripts/check-poison-recovery.py && python3 scripts/check-rust-structure.py --server-only && python3 scripts/check-test-postgres-env.py && python3 scripts/check-ingress-typed-entry.py && exec cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
-			env:    _nativeRustEnv
+			env: _nativeRustEnv & {
+				CARGO_INCREMENTAL: "0"
+				// One large lib-test compile can use most of the runner’s 16 GB.
+				CARGO_BUILD_JOBS: "1"
+			}
 			hermetic: sandbox: "dir"
 		}
 

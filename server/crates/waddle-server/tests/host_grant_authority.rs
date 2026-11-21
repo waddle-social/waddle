@@ -1441,10 +1441,25 @@ async fn the_runtime_role_holds_exactly_the_store_privileges() {
             .unwrap_or_else(|error| panic!("{statement}: {error}"));
     }
     let mut runtime_url = url::Url::parse(&owner_url).expect("database URL");
-    runtime_url.set_username(&role).expect("runtime user");
-    runtime_url
-        .set_password(Some(&password))
-        .expect("runtime password");
+    let retained: Vec<(String, String)> = runtime_url
+        .query_pairs()
+        .filter(|(key, _)| !matches!(key.as_ref(), "user" | "password"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if runtime_url.has_host() {
+        runtime_url.set_username(&role).expect("runtime user");
+        runtime_url
+            .set_password(Some(&password))
+            .expect("runtime password");
+        runtime_url.query_pairs_mut().clear().extend_pairs(retained);
+    } else {
+        runtime_url
+            .query_pairs_mut()
+            .clear()
+            .extend_pairs(retained)
+            .append_pair("user", &role)
+            .append_pair("password", &password);
+    }
     let runtime_db = Database::from_config(
         "host-grant-runtime",
         &DatabaseConfig::new(DatabaseDriver::Postgres, runtime_url.to_string()),
