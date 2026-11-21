@@ -7,8 +7,11 @@ public struct IncomingAlert: Hashable, Sendable {
     public let conversationTitle: String
     public let senderName: String
     public let body: String
-    /// The row id, for grouping and mark-read actions.
+    /// The timeline row id.
     public let messageID: String
+    /// The notification request's identifier: the id the server's push for
+    /// this message collapses on, so the two replace each other.
+    public let notificationID: String
     public let mentionsMe: Bool
 }
 
@@ -708,12 +711,17 @@ public final class SessionCoordinator {
         case .never: shouldAlert = false
         }
         guard shouldAlert else { return }
+        // A push is named after the id the room's archive gave the message,
+        // or the recipient's own archive for a 1:1 message (never the
+        // server's domain, which `directArchiveAuthorities` also accepts).
+        let archive = conversation.isRoom ? conversation.jid : account.jid
         onAlert?(IncomingAlert(
             conversation: conversation,
             conversationTitle: directory.title(for: conversation),
             senderName: item.authorName,
             body: preview(of: item) ?? "",
             messageID: item.id,
+            notificationID: item.identity.stanzaID(assignedBy: archive) ?? "\(conversation)#\(item.id)",
             mentionsMe: mentionsMe
         ))
     }

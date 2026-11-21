@@ -47,6 +47,13 @@ impl DiscoInfoResult {
         self.features.iter().any(|f| f == feature)
     }
 
+    #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+    pub(super) fn room_flags(&self) -> (bool, Option<bool>) {
+        let is_group_dm = self.has_feature(super::WADDLE_GROUP_DM_FEATURE_NS);
+        let members_only = self.has_feature(crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY);
+        (is_group_dm, Some(members_only))
+    }
+
     /// The room's current name, from its `conference` identity (XEP-0045 §6.4).
     #[must_use]
     pub fn room_name(&self) -> Option<&str> {
@@ -236,6 +243,9 @@ pub struct DiscoveredChannel {
     /// autojoin room (their live messages must flow) but belong on
     /// the DM surface, not the channel list.
     pub is_group_dm: bool,
+    /// Whether the room advertises XEP-0045's members-only feature. `None`
+    /// means room discovery information was unavailable.
+    pub members_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

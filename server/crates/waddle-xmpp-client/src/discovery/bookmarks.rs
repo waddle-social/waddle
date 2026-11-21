@@ -18,9 +18,7 @@ use super::ids::next_id;
 use super::iq::build_disco_info_iq;
 use super::parsing::parse_disco_info_result;
 use super::types::{DiscoveredChannel, DiscoveredChannelType, SpaceNode};
-use super::{
-    MUC_NS, STANDALONE_SPACE_ID, WADDLE_GROUP_DM_FEATURE_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
-};
+use super::{MUC_NS, STANDALONE_SPACE_ID, WADDLE_ROOM_METADATA_FORM_TYPE};
 
 /// Fetch the user's own-PEP XEP-0402 bookmarks. Any failure — stanza
 /// error, transport error, unparseable reply — yields an empty list so
@@ -166,6 +164,7 @@ pub(super) fn bookmark_only_channel(
                 .map(|node| node.as_str().to_string())
                 .unwrap_or_else(|| bookmark.jid.to_string())
         });
+    let (is_group_dm, members_only) = info.room_flags();
     Some(DiscoveredChannel {
         id: format!("{}::{}", STANDALONE_SPACE_ID, bookmark.jid),
         room_jid: bookmark.jid.clone(),
@@ -176,7 +175,8 @@ pub(super) fn bookmark_only_channel(
         space_id: standalone_space_id.clone(),
         autojoin: bookmark.autojoin,
         bookmark_name: bookmark.name.clone(),
-        is_group_dm: info.has_feature(WADDLE_GROUP_DM_FEATURE_NS),
+        is_group_dm,
+        members_only,
     })
 }
 

@@ -1015,6 +1015,7 @@ mod tests {
             autojoin: true,
             bookmark_name: None,
             is_group_dm: group_dm,
+            members_only: None,
         }
     }
 

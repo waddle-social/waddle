@@ -176,19 +176,61 @@ private struct HuddleChipBody: View {
             .foregroundStyle(isSelected ? Theme.Colors.fg : Theme.Colors.fgMuted)
             .padding(.horizontal, WaddleTokens.Spacing.s2Half)
             .frame(minHeight: WaddleTokens.ControlHeight.sm)
-            .background(Capsule().fill(isSelected ? Theme.Colors.actionSubtle : Theme.Colors.surface))
-            .overlay(Capsule().fill(Theme.Colors.fg.opacity(configuration.isPressed ? 0.1 : 0)))
-            .overlay(
-                Capsule().strokeBorder(
-                    isSelected ? Theme.Colors.actionText : Theme.Colors.border,
-                    lineWidth: isSelected ? WaddleTokens.BorderWidth.strong : WaddleTokens.BorderWidth.hair
-                )
+            // The outline is a capsule filled behind the chip's own fill, not
+            // a stroke: in a window, an animated view's stroked capsule is
+            // drawn as a layer of its own, which leaves a mark at each end.
+            .background(
+                Capsule()
+                    .fill(isSelected ? Theme.Colors.actionSubtle : Theme.Colors.surface)
+                    .padding(isSelected ? WaddleTokens.BorderWidth.strong : WaddleTokens.BorderWidth.hair)
+                    .background(Capsule().fill(isSelected ? Theme.Colors.actionText : Theme.Colors.border))
             )
+            .overlay(Capsule().fill(Theme.Colors.fg.opacity(configuration.isPressed ? 0.1 : 0)))
             .scaleEffect(configuration.isPressed && !reduceMotion ? HuddleMotion.pressScale : 1)
             .huddleTouchTarget()
             .huddleAnimation(.press, value: configuration.isPressed)
             .huddleAnimation(.pop, value: isSelected)
             .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+// MARK: - Icon button
+
+/// A bare glyph that acts (close, mute, add a link): sized with Dynamic
+/// Type, 36pt for a pointer and the 44pt target on touch. It takes the
+/// foreground style around it.
+struct HuddleIconButton: View {
+    let label: String
+    let symbol: String
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
+
+    init(_ label: String, symbol: String, action: @escaping () -> Void) {
+        self.label = label
+        self.symbol = symbol
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: glyph, weight: .semibold))
+                .frame(minWidth: Self.side, minHeight: Self.side)
+                .contentShape(Rectangle())
+                .opacity(isEnabled ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
+        .help(label)
+    }
+
+    private static var side: CGFloat {
+        #if os(iOS)
+        Theme.Size.minHitTarget
+        #else
+        WaddleTokens.ControlHeight.md
+        #endif
     }
 }
 

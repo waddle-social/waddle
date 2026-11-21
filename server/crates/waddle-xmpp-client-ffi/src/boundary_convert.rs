@@ -42,6 +42,7 @@ pub(crate) fn topology_to_ffi(
                 autojoin: channel.autojoin,
                 bookmark_name: channel.bookmark_name,
                 is_group_dm: channel.is_group_dm,
+                members_only: channel.members_only,
             })
             .collect(),
     }

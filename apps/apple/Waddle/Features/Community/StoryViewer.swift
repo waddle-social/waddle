@@ -1,5 +1,3 @@
-import AVKit
-import Combine
 import SwiftUI
 import WaddleKit
 
@@ -15,133 +13,222 @@ extension View {
     }
 }
 
-/// One story at a time, on a dark ground: tap or arrow through the stories
-/// that were up when it opened. Showing a story marks it seen.
+/// One story at a time, on the dark media ground (Night's deep sea, whatever
+/// the appearance). The sides of the story, or the arrow keys, go back and
+/// on through the stories that were up when it opened; the middle, or
+/// Space, pauses a video, and M mutes it. A video moves on when it ends,
+/// and is silent while a call rings or is on. Showing a story marks it
+/// seen.
 struct StoryViewer: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
-    @State private var stories: [Story]
-    @State private var index: Int
+    @State private var playthrough: StoryPlaythrough
+    @State private var video: StoryVideoPlayback?
     @State private var errorMessage: String?
+    #if os(iOS)
+    @State private var audio = StoryAudio(session: SharedStoryAudioSession())
+    #endif
     private let now: Date
-    @FocusState private var isFocused: Bool
+    private let loadsStories: Bool
+    private let standIn: Image?
 
     init(start: Story) {
-        _stories = State(initialValue: [start])
-        _index = State(initialValue: 0)
+        _playthrough = State(initialValue: StoryPlaythrough(start: start))
         now = Date()
         loadsStories = true
-        picture = nil
+        standIn = nil
     }
 
-    /// For snapshots: fixed stories, clock and picture, and no session
-    /// traffic.
-    init(start: Story, stories: [Story], now: Date, picture: Image) {
-        _stories = State(initialValue: stories)
-        _index = State(initialValue: stories.firstIndex(of: start) ?? 0)
+    /// For snapshots: fixed stories and clock, `standIn` drawn in place of
+    /// the story's picture or video, `video` the state its player is in,
+    /// and no session traffic.
+    init(playthrough: StoryPlaythrough, now: Date, standIn: Image, video: StoryVideoPlayback? = nil) {
+        _playthrough = State(initialValue: playthrough)
+        _video = State(initialValue: video)
         self.now = now
         loadsStories = false
-        self.picture = picture
+        self.standIn = standIn
     }
 
-    private let loadsStories: Bool
-    private let picture: Image?
-
     var body: some View {
-        let story = stories[index]
+        let story = playthrough.current
+        let sound = StorySound(during: session.calls.state)
+        let playing = playable(story)
         ZStack {
-            Color.black.ignoresSafeArea()
-            StoryMedia(story: story, picture: picture)
+            Theme.Colors.seaDeep.ignoresSafeArea()
+            media(story)
                 .id(story.id)
-            pager
+            pager(playing)
             VStack(spacing: 0) {
-                header(story)
+                header(story, video: playing, sound: sound)
                 Spacer(minLength: 0)
                 footer(story)
             }
         }
         .environment(\.colorScheme, .dark)
-        .environment(\.huddleGround, .black)
-        .focusable()
-        .focusEffectDisabled()
-        .focused($isFocused)
-        .onKeyPress(.leftArrow) { step(-1); return .handled }
-        .onKeyPress(.rightArrow) { step(1); return .handled }
-        .onKeyPress(.escape) { dismiss(); return .handled }
+        .environment(\.huddleGround, Theme.Colors.seaDeep)
         .onAppear {
-            isFocused = true
             if loadsStories {
-                let active = session.community.activeStories(at: now)
-                if let start = active.firstIndex(where: { $0.id == story.id }) {
-                    stories = active
-                    index = start
-                }
+                playthrough = StoryPlaythrough(start: story, among: session.community.activeStories(at: now))
             }
+            updateAudio(sound)
+        }
+        .onChange(of: sound) { _, sound in
+            // The session is the stories' again before the video is heard.
+            updateAudio(sound)
+            video?.setMuted(isMuted(sound))
+        }
+        .onChange(of: playthrough.isMuted) { _, _ in video?.setMuted(isMuted(sound)) }
+        .onDisappear {
+            video?.pause()
+            #if os(iOS)
+            audio.close()
+            #endif
         }
         .task(id: story.id) {
             guard loadsStories else { return }
             await session.markStoryRead(story.id)
         }
+        .task(id: story.id) { await play(story) }
+    }
+
+    /// The shown story's video while its player can play it. A video that
+    /// failed is treated like a picture.
+    private func playable(_ story: Story) -> StoryVideoPlayback? {
+        guard let video, video.storyID == story.id, !video.didFail else { return nil }
+        return video
+    }
+
+    private func isMuted(_ sound: StorySound) -> Bool {
+        playthrough.isMuted || sound == .silencedByCall
+    }
+
+    private func updateAudio(_ sound: StorySound) {
+        #if os(iOS)
+        audio.update(sound)
+        #endif
     }
 
     // MARK: Parts
 
-    /// Left third goes back, the rest goes on, as in every stories viewer.
-    private var pager: some View {
-        HStack(spacing: 0) {
-            Button { step(-1) } label: { Color.clear.contentShape(Rectangle()) }
-                .frame(maxWidth: .infinity)
-                .accessibilityLabel(Text("Previous story"))
-                .disabled(index == 0)
-            Button { step(1) } label: { Color.clear.contentShape(Rectangle()) }
-                .frame(maxWidth: .infinity)
-                .layoutPriority(2)
-                .accessibilityLabel(Text(index == stories.count - 1 ? "Close stories" : "Next story"))
+    @ViewBuilder
+    private func media(_ story: Story) -> some View {
+        if let standIn {
+            standIn.resizable().scaledToFit()
+        } else {
+            switch story.kind {
+            case .picture:
+                AsyncImage(url: story.media) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFit()
+                    case .failure:
+                        StoryMediaFailure(message: "This story didn't load.", symbol: "photo.badge.exclamationmark")
+                    default:
+                        ProgressView().tint(Theme.Colors.fg)
+                    }
+                }
+                .accessibilityLabel(Text("Picture from \(CommunityCopy.name(of: story.author))"))
+            case .webM:
+                StoryMediaFailure(
+                    message: "This video is in a format Apple devices can't play.",
+                    symbol: "film"
+                )
+            case .video:
+                if let video, video.storyID == story.id {
+                    StoryVideo(playback: video, author: story.author)
+                } else {
+                    ProgressView().tint(Theme.Colors.fg)
+                }
+            }
+        }
+    }
+
+    /// A quarter at each side goes back or on, as in every stories viewer;
+    /// the middle pauses a video, or goes on from a picture. The keys are
+    /// shortcuts on these buttons, so they work wherever focus is.
+    private func pager(_ video: StoryVideoPlayback?) -> some View {
+        GeometryReader { proxy in
+            let side = proxy.size.width / 4
+            HStack(spacing: 0) {
+                zone(.leftArrow) { move(by: -1) }
+                    .frame(width: side)
+                    .accessibilityLabel(Text("Previous story"))
+                    .disabled(playthrough.index == 0)
+                zone(.space) {
+                    if let video {
+                        video.togglePause()
+                    } else {
+                        move(by: 1)
+                    }
+                }
+                // The header's buttons say the same to VoiceOver.
+                .accessibilityHidden(true)
+                zone(.rightArrow) { move(by: 1) }
+                    .frame(width: side)
+                    .accessibilityLabel(Text(playthrough.isLast ? "Close stories" : "Next story"))
+            }
         }
         .buttonStyle(.plain)
     }
 
-    private func header(_ story: Story) -> some View {
+    private func zone(_ key: KeyEquivalent, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Color.clear.contentShape(Rectangle())
+        }
+        .keyboardShortcut(key, modifiers: [])
+    }
+
+    private func header(_ story: Story, video: StoryVideoPlayback?, sound: StorySound) -> some View {
         VStack(spacing: Theme.Spacing.m) {
-            HStack(spacing: Theme.Spacing.xs) {
-                ForEach(stories.indices, id: \.self) { position in
-                    Capsule()
-                        .fill(Color.white.opacity(position <= index ? 0.95 : 0.3))
-                        .frame(height: 3)
-                }
-            }
-            .accessibilityElement()
-            .accessibilityLabel(Text("Story \(index + 1) of \(stories.count)"))
+            StoryProgressBars(playthrough: playthrough, video: video)
             HStack(spacing: Theme.Spacing.m) {
                 if let author = story.author {
                     JIDAvatar(jid: author, size: Theme.Size.rowAvatar)
                 }
                 Text(CommunityCopy.name(of: story.author))
                     .huddleText(Theme.Typography.author)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                 if let age = CommunityCopy.age(of: story.postedAt, at: now) {
                     Text(age)
                         .huddleText(Theme.Typography.caption)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
                 Spacer(minLength: 0)
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .huddleTouchTarget()
+                HStack(spacing: 0) {
+                    if let video {
+                        HuddleIconButton(
+                            video.isPaused ? "Play" : "Pause",
+                            symbol: video.isPaused ? "play.fill" : "pause.fill"
+                        ) {
+                            video.togglePause()
+                        }
+                        muteButton(sound)
+                    }
+                    HuddleIconButton("Close", symbol: "xmark", action: close)
+                        .keyboardShortcut(.cancelAction)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text("Close"))
+                .foregroundStyle(Theme.Colors.fg)
             }
         }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.top, Theme.Spacing.m)
         .padding(.bottom, Theme.Spacing.xl)
-        .background(LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom))
+        .background(LinearGradient(colors: [Theme.Colors.scrim, .clear], startPoint: .top, endPoint: .bottom))
+    }
+
+    private func muteButton(_ sound: StorySound) -> some View {
+        let muted = isMuted(sound)
+        return HuddleIconButton(
+            muted ? "Unmute" : "Mute",
+            symbol: muted ? "speaker.slash.fill" : "speaker.wave.2.fill"
+        ) {
+            playthrough.isMuted.toggle()
+        }
+        .keyboardShortcut("m", modifiers: [])
+        .disabled(sound == .silencedByCall)
+        .accessibilityHint(sound == .silencedByCall ? Text("Story sound is off during a call.") : Text(""))
     }
 
     private func footer(_ story: Story) -> some View {
@@ -150,7 +237,7 @@ struct StoryViewer: View {
             if let body = story.body {
                 Text(body)
                     .huddleText(Theme.Typography.message)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.Colors.fg)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let errorMessage {
@@ -162,20 +249,36 @@ struct StoryViewer: View {
         }
         .padding(Theme.Spacing.l)
         .padding(.top, Theme.Spacing.xl)
-        .background(LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom))
+        .background(LinearGradient(colors: [.clear, Theme.Colors.scrim], startPoint: .top, endPoint: .bottom))
     }
 
     // MARK: Actions
 
-    private func step(_ offset: Int) {
-        let next = index + offset
-        guard next >= 0 else { return }
-        guard next < stories.count else {
-            dismiss()
-            return
-        }
+    /// Starts the shown story's video; the task ends, and the player
+    /// pauses, when the story is left.
+    private func play(_ story: Story) async {
+        guard loadsStories, story.kind == .video else { return }
+        let playback = StoryVideoPlayback(
+            storyID: story.id, url: story.media, isMuted: isMuted(StorySound(during: session.calls.state))
+        )
+        playback.onEnd = { closeIfFinished(playthrough.videoEnded(story.id)) }
+        video = playback
+        await playback.run()
+    }
+
+    private func move(by offset: Int) {
         errorMessage = nil
-        index = next
+        closeIfFinished(playthrough.move(by: offset))
+    }
+
+    private func closeIfFinished(_ outcome: StoryPlaythrough.Outcome) {
+        if outcome == .finished { close() }
+    }
+
+    /// Silent at once, not after the closing animation.
+    private func close() {
+        video?.pause()
+        dismiss()
     }
 
     private func react(_ emoji: String, to story: Story) {
@@ -192,96 +295,35 @@ struct StoryViewer: View {
     }
 }
 
-/// A story's picture or video, fitted to the viewer.
-private struct StoryMedia: View {
-    let story: Story
-    /// Shown in place of the fetched picture.
-    let picture: Image?
-    @State private var player: AVPlayer?
-    @State private var didFail = false
-
-    /// Starts the video and watches for it failing: a file that is gone,
-    /// cannot be fetched, or is in a format the player does not decode.
-    private func play() async {
-        let item = AVPlayerItem(url: story.media)
-        let player = AVPlayer(playerItem: item)
-        self.player = player
-        player.play()
-        for await status in item.publisher(for: \.status).values where status == .failed {
-            didFail = true
-            return
-        }
-    }
-
-    private func failure(_ message: String, symbol: String) -> some View {
-        Label(message, systemImage: symbol)
-            .huddleText(Theme.Typography.body)
-            .foregroundStyle(.white.opacity(0.7))
-    }
+/// One bar per story along the top: those seen are full, and a video's
+/// fills as it plays. The only part of the viewer that reads the video's
+/// progress, so only it is drawn again as the video plays.
+private struct StoryProgressBars: View {
+    let playthrough: StoryPlaythrough
+    let video: StoryVideoPlayback?
 
     var body: some View {
-        if let picture {
-            picture.resizable().scaledToFit()
-        } else if story.isWebM {
-            failure("This video can't be played here.", symbol: "film")
-        } else if story.isVideo {
-            if didFail {
-                failure("This video didn't load.", symbol: "film")
-            } else {
-                VideoPlayer(player: player)
-                    .task { await play() }
-                    .onDisappear { player?.pause() }
-                    .accessibilityLabel(Text("Video from \(CommunityCopy.name(of: story.author))"))
+        let played = video?.progress
+        HStack(spacing: Theme.Spacing.xs) {
+            ForEach(playthrough.stories.indices, id: \.self) { position in
+                bar(filled: playthrough.fill(at: position, played: played))
             }
-        } else {
-            AsyncImage(url: story.media) { phase in
-                switch phase {
-                case let .success(image):
-                    image.resizable().scaledToFit()
-                case .failure:
-                    failure("This story didn't load.", symbol: "photo.badge.exclamationmark")
-                default:
-                    ProgressView().tint(.white)
-                }
-            }
-            .accessibilityLabel(Text("Picture from \(CommunityCopy.name(of: story.author))"))
         }
-    }
-}
-
-/// The reactions a story has, each a toggle, then the quick ones nobody
-/// has used yet.
-struct StoryReactionBar: View {
-    let reactions: StoryReactions
-    let onToggle: (String) -> Void
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Theme.Spacing.m) {
-                ForEach(reactions.counts, id: \.emoji) { reaction in
-                    let isMine = reactions.mine.contains(reaction.emoji)
-                    Button { onToggle(reaction.emoji) } label: {
-                        Text("\(reaction.emoji) \(reaction.count)")
-                    }
-                    .buttonStyle(.huddleChip(isSelected: isMine))
-                    .accessibilityLabel(Text(CommunityCopy.reactionLabel(reaction, isMine: isMine)))
-                    .accessibilityAddTraits(isMine ? .isSelected : [])
-                }
-                ForEach(unused, id: \.self) { emoji in
-                    Button { onToggle(emoji) } label: {
-                        Text(emoji)
-                    }
-                    .buttonStyle(.huddleChip())
-                    .accessibilityLabel(Text("React with \(emoji)"))
-                }
-            }
-            // Room for the chips' outlines, which a scroll view clips.
-            .padding(Theme.Spacing.xxs)
-        }
+        .accessibilityElement()
+        .accessibilityLabel(Text("Story \(playthrough.index + 1) of \(playthrough.stories.count)"))
+        .accessibilityValue(played.map { Text("\(Int($0 * 100)) percent played") } ?? Text(""))
     }
 
-    private var unused: [String] {
-        let used = Set(reactions.counts.map(\.emoji))
-        return Theme.quickReactions.filter { !used.contains($0) }
+    private func bar(filled: Double) -> some View {
+        Capsule()
+            .fill(Theme.Colors.fg.opacity(0.3))
+            .overlay(alignment: .leading) {
+                GeometryReader { proxy in
+                    Capsule()
+                        .fill(Theme.Colors.fg)
+                        .frame(width: proxy.size.width * filled)
+                }
+            }
+            .frame(height: 3)
     }
 }

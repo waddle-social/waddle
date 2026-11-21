@@ -37,14 +37,6 @@ enum NotifyModeLabels {
         case .never: return "bell.slash"
         }
     }
-
-    /// The swipe "mute" toggle: muting sets `.never`; unmuting restores
-    /// the default for the conversation kind (mentions for rooms, all for
-    /// DMs), matching `DirectoryStore.notifyMode(for:)`.
-    static func toggledMute(_ current: NotifyMode, isRoom: Bool) -> NotifyMode {
-        guard current == .never else { return .never }
-        return isRoom ? .onMention : .always
-    }
 }
 
 /// RFC 6121 availability copy.

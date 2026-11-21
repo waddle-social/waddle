@@ -7293,6 +7293,11 @@ public struct WaddleChannel: Equatable, Hashable {
      * list.
      */
     public var isGroupDm: Bool
+    /**
+     * Whether room discovery advertised a members-only room. `None`
+     * means room discovery information was unavailable.
+     */
+    public var membersOnly: Bool?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7310,7 +7315,11 @@ public struct WaddleChannel: Equatable, Hashable {
          * Room advertises `urn:waddle:group-dm:0`: joined like any
          * autojoin room but surfaced on the DM list, never the channel
          * list.
-         */isGroupDm: Bool) {
+         */isGroupDm: Bool,
+        /**
+         * Whether room discovery advertised a members-only room. `None`
+         * means room discovery information was unavailable.
+         */membersOnly: Bool?) {
         self.id = id
         self.roomJid = roomJid
         self.name = name
@@ -7321,6 +7330,7 @@ public struct WaddleChannel: Equatable, Hashable {
         self.autojoin = autojoin
         self.bookmarkName = bookmarkName
         self.isGroupDm = isGroupDm
+        self.membersOnly = membersOnly
     }
 
 
@@ -7348,7 +7358,8 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
                 spaceId: FfiConverterString.read(from: &buf),
                 autojoin: FfiConverterBool.read(from: &buf),
                 bookmarkName: FfiConverterOptionString.read(from: &buf),
-                isGroupDm: FfiConverterBool.read(from: &buf)
+                isGroupDm: FfiConverterBool.read(from: &buf),
+                membersOnly: FfiConverterOptionBool.read(from: &buf)
         )
     }
 
@@ -7363,6 +7374,7 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
         FfiConverterBool.write(value.autojoin, into: &buf)
         FfiConverterOptionString.write(value.bookmarkName, into: &buf)
         FfiConverterBool.write(value.isGroupDm, into: &buf)
+        FfiConverterOptionBool.write(value.membersOnly, into: &buf)
     }
 }
 

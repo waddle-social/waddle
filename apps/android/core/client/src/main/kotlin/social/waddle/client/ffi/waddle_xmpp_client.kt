@@ -8948,6 +8948,12 @@ data class WaddleChannel (
      * list.
      */
     var `isGroupDm`: kotlin.Boolean
+    ,
+    /**
+     * Whether room discovery advertised a members-only room. `None`
+     * means room discovery information was unavailable.
+     */
+    var `membersOnly`: kotlin.Boolean?
 
 ){
 
@@ -8974,6 +8980,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
         )
     }
 
@@ -8987,7 +8994,8 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterString.allocationSize(value.`spaceId`) +
             FfiConverterBoolean.allocationSize(value.`autojoin`) +
             FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
-            FfiConverterBoolean.allocationSize(value.`isGroupDm`)
+            FfiConverterBoolean.allocationSize(value.`isGroupDm`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
     )
 
     override fun write(value: WaddleChannel, buf: ByteBuffer) {
@@ -9001,6 +9009,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterBoolean.write(value.`autojoin`, buf)
             FfiConverterOptionalString.write(value.`bookmarkName`, buf)
             FfiConverterBoolean.write(value.`isGroupDm`, buf)
+            FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
     }
 }
 

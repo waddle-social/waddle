@@ -20,9 +20,7 @@ use super::types::{
     DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, RoomBot, SpaceNode,
     UploadSlot,
 };
-use super::{
-    STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_GROUP_DM_FEATURE_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
-};
+use super::{STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
 
 const DISCO_CONCURRENCY: usize = 8;
 
@@ -319,7 +317,7 @@ impl DiscoveryExt for ClientHandle {
                         )
                         .filter(|description| !description.trim().is_empty())
                         .map(str::to_string);
-                    channel.is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
+                    (channel.is_group_dm, channel.members_only) = info.room_flags();
                 }
                 channel
             })
@@ -453,6 +451,7 @@ impl DiscoveryExt for ClientHandle {
                         let mut channel_type = DiscoveredChannelType::Text;
                         let mut description = None;
                         let mut is_group_dm = false;
+                        let mut members_only = None;
                         if let Ok(info) = self.discover_info(&room.jid, None).await {
                             if let Some(parsed_type) = info
                                 .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
@@ -467,7 +466,7 @@ impl DiscoveryExt for ClientHandle {
                                 )
                                 .filter(|description| !description.trim().is_empty())
                                 .map(str::to_string);
-                            is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
+                            (is_group_dm, members_only) = info.room_flags();
                         }
                         let name = room
                             .name
@@ -493,6 +492,7 @@ impl DiscoveryExt for ClientHandle {
                             autojoin: true,
                             bookmark_name: None,
                             is_group_dm,
+                            members_only,
                         }
                     }
                 })
