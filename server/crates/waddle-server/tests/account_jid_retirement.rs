@@ -667,9 +667,9 @@ async fn the_operator_subcommand_retires_an_account_on_postgres() {
     // The fixture's login owns the schema, so it is both the login the act
     // runs as and the role it acts as.
     let url = store.db.database_url().to_owned();
-    let login = url::Url::parse(&url)
+    let login = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&url)
         .expect("database URL")
-        .username()
+        .get_username()
         .to_owned();
     let (code, printed, stderr) = account_retire(
         &[
