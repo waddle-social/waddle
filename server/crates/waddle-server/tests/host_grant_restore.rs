@@ -1166,14 +1166,80 @@ async fn configure_and_delete_space_preserves_room_scope() {
         .begin_local_space_deletion_binding_staging(retry)
         .await
         .expect("stage phone"));
-    sqlx::query(
-        "UPDATE host_grant_space_deletion_jobs SET lease_until_ms = 0, attempts = 16
-                 WHERE lifecycle_id = $1 AND delivery_kind = 'local'",
+    let deadline: i64 = sqlx::query_scalar(
+        "UPDATE host_grant_space_deletion_jobs
+            SET lease_until_ms = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint + 2000,
+                attempts = 16
+          WHERE lifecycle_id = $1 AND delivery_kind = 'local' RETURNING lease_until_ms",
     )
     .bind(lifecycle.to_storage())
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
-    .expect("expire final lease");
+    .expect("shorten the final lease");
+    let mut blocker = pool.begin().await.expect("lock the staged child");
+    sqlx::query(
+        "SELECT 1 FROM host_grant_space_deletion_bindings
+          WHERE lifecycle_id = $1 AND resource_jid = $2 FOR UPDATE",
+    )
+    .bind(lifecycle.to_storage())
+    .bind(retry.target.resource.as_str())
+    .fetch_one(&mut *blocker)
+    .await
+    .expect("hold child row");
+    let hold = {
+        let store = fixture.store.clone();
+        let retry = retry.clone();
+        tokio::spawn(async move {
+            store
+                .hold_local_space_deletion_binding_staging(&retry)
+                .await
+                .expect("lease hold decision")
+                .is_some()
+        })
+    };
+    let settle = {
+        let store = fixture.store.clone();
+        let retry = retry.clone();
+        tokio::spawn(async move {
+            store
+                .finish_local_space_deletion_binding_attempt(&retry, Outcome::Custody)
+                .await
+                .expect("lease settlement decision")
+        })
+    };
+    tokio::time::timeout(Duration::from_millis(1500), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND query LIKE '%host_grant_space_deletion_bindings%'
+                  AND cardinality(pg_blocking_pids(pid)) > 0",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("observe both child lock waits");
+            if waiting >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both attempts reach the child lock before expiry");
+    sqlx::query("SELECT pg_sleep_until(to_timestamp($1::double precision / 1000.0) + interval '25 milliseconds')")
+        .bind(deadline as f64)
+        .execute(&mut *blocker)
+        .await
+        .expect("wait past the database lease deadline");
+    blocker.rollback().await.expect("release child row");
+    assert!(
+        !hold.await.expect("join hold"),
+        "expired child cannot stage"
+    );
+    assert!(
+        !settle.await.expect("join settlement"),
+        "expired child cannot settle"
+    );
     assert!(fixture
         .store
         .claim_space_deletion_jobs(Kind::Local, 1)

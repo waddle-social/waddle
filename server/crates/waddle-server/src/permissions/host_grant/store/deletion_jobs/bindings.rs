@@ -21,7 +21,7 @@ impl HostGrantStore {
         &self,
         parent: &SpaceDeletionAttempt,
     ) -> Result<bool, HostGrantError> {
-        let Some((tx, frozen)) = self.lock_local_deletion_parent(parent, false).await? else {
+        let Some((tx, frozen, _)) = self.lock_local_deletion_parent(parent, false).await? else {
             return Ok(false);
         };
         tx.rollback().await?;
@@ -45,7 +45,7 @@ impl HostGrantStore {
         {
             return Err(corrupt("local deletion binding snapshot"));
         }
-        let Some((mut tx, frozen)) = self.lock_local_deletion_parent(parent, true).await? else {
+        let Some((mut tx, frozen, _)) = self.lock_local_deletion_parent(parent, true).await? else {
             return Ok(false);
         };
         if !frozen {
@@ -83,7 +83,7 @@ impl HostGrantStore {
         let limit =
             i64::try_from(limit.min(AccountCoordinatorConfig::default().max_resources.get()))
                 .expect("bounded local deletion binding claim");
-        let Some((mut tx, true)) = self.lock_local_deletion_parent(parent, true).await? else {
+        let Some((mut tx, true, _)) = self.lock_local_deletion_parent(parent, true).await? else {
             return Ok(Vec::new());
         };
         recover_bindings(&mut tx, parent).await?;
@@ -199,7 +199,7 @@ impl HostGrantStore {
         &self,
         child: &SpaceDeletionBindingAttempt,
     ) -> Result<Option<Transaction<'_>>, HostGrantError> {
-        let Some((mut tx, true)) = self
+        let Some((mut tx, true, lease_until_ms)) = self
             .lock_local_deletion_parent(&child.parent, false)
             .await?
         else {
@@ -216,7 +216,8 @@ impl HostGrantStore {
             .await?;
         let found = rows.next().await?.is_some();
         drop(rows);
-        Ok(found.then_some(tx))
+        let live = found && deletion_lease_is_live(&mut tx, lease_until_ms).await?;
+        Ok(live.then_some(tx))
     }
 
     /// Settle the exact child. Retry requires proof that no transfer occurred.
@@ -241,12 +242,26 @@ impl HostGrantStore {
         state: &str,
         can_be_leased: bool,
     ) -> Result<bool, HostGrantError> {
-        let Some((mut tx, true)) = self
+        let Some((mut tx, true, lease_until_ms)) = self
             .lock_local_deletion_parent(&child.parent, false)
             .await?
         else {
             return Ok(false);
         };
+        let mut locked = tx
+            .query(
+                "SELECT 1 FROM host_grant_space_deletion_bindings
+              WHERE lifecycle_id = ? AND subject_jid = ? AND resource_jid = ? AND binding = ?
+                AND parent_token = ?::uuid AND attempt_token = ?::uuid
+              FOR UPDATE",
+                binding_params(child)?,
+            )
+            .await?;
+        let found = locked.next().await?.is_some();
+        drop(locked);
+        if !found || !deletion_lease_is_live(&mut tx, lease_until_ms).await? {
+            return Ok(false);
+        }
         let mut params = crate::db_params![state, state, state];
         params.extend(binding_params(child)?);
         params.extend(crate::db_params![state, i64::from(can_be_leased)]);
@@ -272,7 +287,7 @@ impl HostGrantStore {
         &self,
         parent: &SpaceDeletionAttempt,
     ) -> Result<bool, HostGrantError> {
-        let Some((mut tx, true)) = self.lock_local_deletion_parent(parent, true).await? else {
+        let Some((mut tx, true, _)) = self.lock_local_deletion_parent(parent, true).await? else {
             return Ok(false);
         };
         recover_bindings(&mut tx, parent).await?;
@@ -326,7 +341,7 @@ impl HostGrantStore {
         &self,
         parent: &SpaceDeletionAttempt,
         exclusive: bool,
-    ) -> Result<Option<(Transaction<'_>, bool)>, HostGrantError> {
+    ) -> Result<Option<(Transaction<'_>, bool, i64)>, HostGrantError> {
         if parent.kind != SpaceDeletionDeliveryKind::Local {
             return Ok(None);
         }
@@ -348,20 +363,28 @@ impl HostGrantStore {
         let frozen = row.get(0)?;
         let lease_until_ms: i64 = row.get(1)?;
         drop(rows);
-        let mut clock = tx
-            .query(
-                "SELECT (EXTRACT(EPOCH FROM pg_catalog.clock_timestamp()) * 1000)::bigint",
-                (),
-            )
-            .await?;
-        let now = clock
-            .next()
-            .await?
-            .ok_or(corrupt("deletion lease clock"))?
-            .get::<i64>(0)?;
-        drop(clock);
-        Ok((now < lease_until_ms).then_some((tx, frozen)))
+        let live = deletion_lease_is_live(&mut tx, lease_until_ms).await?;
+        Ok(live.then_some((tx, frozen, lease_until_ms)))
     }
+}
+
+/// Use the clock after the blocking row lock, never the statement's start.
+async fn deletion_lease_is_live(
+    tx: &mut Transaction<'_>,
+    lease_until_ms: i64,
+) -> Result<bool, HostGrantError> {
+    let mut clock = tx
+        .query(
+            "SELECT (EXTRACT(EPOCH FROM pg_catalog.clock_timestamp()) * 1000)::bigint",
+            (),
+        )
+        .await?;
+    let now = clock
+        .next()
+        .await?
+        .ok_or(corrupt("deletion lease clock"))?
+        .get::<i64>(0)?;
+    Ok(now < lease_until_ms)
 }
 
 /// Active claims all inherit the parent expiry. A parent replacement
