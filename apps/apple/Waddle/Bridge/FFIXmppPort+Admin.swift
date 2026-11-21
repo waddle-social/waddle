@@ -191,10 +191,10 @@ extension FFIXmppPort {
         return AdminPage(rows: occupants, nextCursor: page.nextCursor)
     }
 
-    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws {
+    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID, reason: String?) async throws {
         _ = try await mappingPortErrors {
             try await client.adminChannelsKick(
-                channelJid: room.description, occupantJid: occupant.description, reason: nil
+                channelJid: room.description, occupantJid: occupant.description, reason: reason
             )
         }
     }
@@ -217,17 +217,18 @@ extension FFIXmppPort {
         return AdminPage(rows: members, nextCursor: page.nextCursor)
     }
 
+    /// The server's answer has no reason, so the role carries the one sent.
     func setAdminRoomAffiliation(
-        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember {
         let result = try await mappingPortErrors {
             try await client.adminChannelsSetAffiliation(
                 channelJid: room.description, memberJid: member.description,
-                affiliation: FFIOutbound.affiliation(affiliation), reason: nil
+                affiliation: FFIOutbound.affiliation(affiliation), reason: reason
             )
         }
         return AdminRoomMember(
-            jid: member, affiliation: FFIInbound.roomAffiliation(result.affiliation), reason: nil
+            jid: member, affiliation: FFIInbound.roomAffiliation(result.affiliation), reason: reason
         )
     }
 

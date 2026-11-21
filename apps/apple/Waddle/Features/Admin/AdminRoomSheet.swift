@@ -22,8 +22,9 @@ struct AdminRoomSheet: View {
     /// People a change about whom is on its way to the server.
     @State private var changing: Set<BareJID> = []
     @State private var peopleError: String?
-    /// A role change or a removal waiting for a yes.
+    /// A role change or a removal waiting for a yes, and why, if said.
     @State private var pending: PendingAction?
+    @State private var reason = ""
     @State private var isGivingRole = false
     /// Who was picked to be given a role, and the role, until the picker
     /// has closed: a ban is asked about first.
@@ -79,18 +80,19 @@ struct AdminRoomSheet: View {
                 await spaces.loadEveryPage()
             }
         }
-        .confirmationDialog(
-            pending?.title ?? "",
-            isPresented: pendingBinding,
-            titleVisibility: .visible,
-            presenting: pending
-        ) { action in
+        // An alert, not a confirmation dialog, since only an alert takes
+        // a text field.
+        .alert(pending?.title ?? "", isPresented: pendingBinding, presenting: pending) { action in
+            TextField("Reason", text: $reason, prompt: Text("Reason (optional)"))
             Button(action.confirmTitle, role: .destructive) { perform(action) }
             Button("Cancel", role: .cancel) {
-                // Nothing to undo: the dialog closes itself.
+                // Nothing to undo: the alert closes itself.
             }
         } message: { action in
             Text(action.message(roomName: opened?.name ?? "this room"))
+        }
+        .onChange(of: pending) { _, pending in
+            if pending != nil { reason = "" }
         }
         .sheet(isPresented: $isGivingRole, onDismiss: givePickedRole) {
             AdminPersonPicker(
@@ -111,7 +113,7 @@ struct AdminRoomSheet: View {
     private static let roles: [RoomAffiliation] = [.owner, .admin, .member, .outcast]
 
     /// What is asked about before it is done, because it takes something
-    /// away.
+    /// away. Each can say why.
     enum PendingAction: Equatable {
         /// Leaves someone with no role.
         case removeRole(AdminRoomMember)
@@ -157,9 +159,9 @@ struct AdminRoomSheet: View {
 
     private func perform(_ action: PendingAction) {
         switch action {
-        case let .removeRole(member): setAffiliation(.none, of: member)
-        case let .ban(member): setAffiliation(.outcast, of: member)
-        case let .removeMember(occupant): remove(occupant)
+        case let .removeRole(member): setAffiliation(.none, of: member, reason: reason)
+        case let .ban(member): setAffiliation(.outcast, of: member, reason: reason)
+        case let .removeMember(occupant): remove(occupant, reason: reason)
         }
     }
 
@@ -345,12 +347,12 @@ struct AdminRoomSheet: View {
 
     /// The server takes out one of the names they are there under, and
     /// may end a membership with it, so both lists are asked for again.
-    private func remove(_ occupant: AdminRoomOccupant) {
+    private func remove(_ occupant: AdminRoomOccupant, reason: String? = nil) {
         guard let opened, let occupants, changing.insert(occupant.jid).inserted else { return }
         peopleError = nil
         Task {
             do {
-                try await session.removeFromAdminRoom(occupant.jid, room: opened)
+                try await session.removeFromAdminRoom(occupant.jid, room: opened, reason: reason)
                 async let here: Void = occupants.reload()
                 async let roles: Void? = members?.reload()
                 _ = await (here, roles)
@@ -367,13 +369,15 @@ struct AdminRoomSheet: View {
     /// is no longer listed, and someone not listed is added first. A role
     /// shows on the people in the room, and a ban takes them out, so who
     /// is there is asked for again.
-    private func setAffiliation(_ affiliation: RoomAffiliation, of member: AdminRoomMember) {
+    private func setAffiliation(_ affiliation: RoomAffiliation, of member: AdminRoomMember, reason: String? = nil) {
         guard let opened, let members, affiliation != member.affiliation,
               changing.insert(member.jid).inserted else { return }
         peopleError = nil
         Task {
             do {
-                let changed = try await session.setAdminRoomAffiliation(affiliation, of: member.jid, in: opened)
+                let changed = try await session.setAdminRoomAffiliation(
+                    affiliation, of: member.jid, in: opened, reason: reason
+                )
                 if changed.affiliation == .none {
                     members.remove(changed.id)
                 } else {

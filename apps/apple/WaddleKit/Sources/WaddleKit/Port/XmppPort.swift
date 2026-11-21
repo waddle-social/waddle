@@ -297,16 +297,18 @@ public protocol AdminPort: AnyObject, Sendable {
     /// One page of the people in `room` now.
     func adminRoomOccupants(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomOccupant>
 
-    /// Takes `occupant` out of `room`. They can come back, unless the room
-    /// is for members only: there the server also ends their membership.
-    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws
+    /// Takes `occupant` out of `room`, saying why if `reason` is given.
+    /// They can come back, unless the room is for members only: there the
+    /// server also ends their membership.
+    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID, reason: String?) async throws
 
     /// One page of the people with a lasting role in `room`.
     func adminRoomMembers(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomMember>
 
-    /// Answers with the person and the role the server gave them.
+    /// Answers with the person, the role the server gave them, and
+    /// `reason`, which is sent with it.
     func setAdminRoomAffiliation(
-        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember
 }
 

@@ -23,8 +23,8 @@ final class FakeAdmin {
         case create(AdminRoomDraft)
         case update(BareJID, AdminRoomDraft)
         case delete(BareJID)
-        case remove(BareJID, BareJID)
-        case setAffiliation(BareJID, BareJID, RoomAffiliation)
+        case remove(BareJID, BareJID, reason: String? = nil)
+        case setAffiliation(BareJID, BareJID, RoomAffiliation, reason: String? = nil)
     }
 
     /// What each request answers; one not scripted answers an empty page.
@@ -136,8 +136,8 @@ extension FakePort {
         try admin.page(admin.occupants, room.localpart, cursor)
     }
 
-    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID) async throws {
-        try admin.write(.remove(room, occupant))
+    func removeFromAdminRoom(_ occupant: BareJID, room: BareJID, reason: String?) async throws {
+        try admin.write(.remove(room, occupant, reason: reason))
     }
 
     func adminRoomMembers(of room: BareJID, after cursor: String?) async throws -> AdminPage<AdminRoomMember> {
@@ -145,9 +145,9 @@ extension FakePort {
     }
 
     func setAdminRoomAffiliation(
-        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID
+        _ affiliation: RoomAffiliation, of member: BareJID, in room: BareJID, reason: String?
     ) async throws -> AdminRoomMember {
-        try admin.write(.setAffiliation(room, member, affiliation))
-        return AdminRoomMember(jid: member, affiliation: affiliation, reason: nil)
+        try admin.write(.setAffiliation(room, member, affiliation, reason: reason))
+        return AdminRoomMember(jid: member, affiliation: affiliation, reason: reason)
     }
 }

@@ -301,6 +301,38 @@ struct AdminRoomsTests {
         #expect(changed == AdminRoomMember(jid: bo, affiliation: .outcast, reason: nil))
     }
 
+    // MARK: Reasons
+
+    @Test func aRemovalSendsItsReason() async throws {
+        let (coordinator, port) = online()
+
+        try await coordinator.removeFromAdminRoom(bo, room: lounge, reason: " Flooding ")
+
+        #expect(port.admin.roomWrites == [.remove(lounge.jid, bo, reason: "Flooding")])
+    }
+
+    /// The role shown after a ban carries the reason given for it.
+    @Test func aBanCarriesItsReason() async throws {
+        let (coordinator, port) = online()
+
+        let banned = try await coordinator.setAdminRoomAffiliation(.outcast, of: bo, in: lounge, reason: "Spam")
+
+        #expect(port.admin.roomWrites == [.setAffiliation(lounge.jid, bo, .outcast, reason: "Spam")])
+        #expect(banned == AdminRoomMember(jid: bo, affiliation: .outcast, reason: "Spam"))
+    }
+
+    @Test func aBlankReasonIsNoReason() async throws {
+        let (coordinator, port) = online()
+
+        try await coordinator.removeFromAdminRoom(bo, room: lounge, reason: "  ")
+        let banned = try await coordinator.setAdminRoomAffiliation(.outcast, of: bo, in: lounge, reason: "\n")
+
+        #expect(port.admin.roomWrites == [
+            .remove(lounge.jid, bo, reason: nil), .setAffiliation(lounge.jid, bo, .outcast, reason: nil),
+        ])
+        #expect(banned.reason == nil)
+    }
+
     /// Someone who had no role is listed first once given one.
     @Test func someoneGivenARoleIsListedFirst() async throws {
         let (coordinator, port) = online()
