@@ -11,7 +11,7 @@ use jid::{BareJid, DomainRef, FullJid, Jid};
 use minidom::Element;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::OwnedPermit;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
@@ -47,6 +47,7 @@ use crate::destination::{
     without_server_minted_credentials, InvalidDestination, RemoteOutbound, RemoteRoute,
     RemoteRouteOutcome, SeatAdoption, ServedDomains, ServedService, UnroutableReason,
 };
+use crate::permissions::host_grant::RemoteSpaceDeletionGrant;
 use crate::s2s::config::{AdmissionMode, S2sConfig};
 use crate::s2s::conn::{
     ConnectError, S2sHandle, SinkVerdict, SinkWait, StanzaSink, StreamDirection, StreamEnd,
@@ -502,6 +503,24 @@ enum Purpose {
         /// until it is sent or dropped.
         _share: spaces::EventShare,
     },
+    SpaceDeletion {
+        grant: Arc<RemoteSpaceDeletionGrant>,
+        completion: oneshot::Sender<SpaceDeletionCompletion>,
+        share: spaces::EventShare,
+    },
+}
+
+/// The result of one outbound attempt to send a durable Space deletion notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceDeletionCompletion {
+    /// The stream reported a successful TLS write.
+    WrittenToTls,
+    /// Nothing was staged on a stream. The durable job may retry.
+    RetryBeforeStage,
+    /// The peer, authority or connection permanently refused the notice.
+    PermanentRefusal,
+    /// The notice may have reached the stream. Suppress retry.
+    Ambiguous,
 }
 
 /// The two queues of one directional domain pair, served by one worker.
@@ -968,6 +987,21 @@ impl S2sRouter {
             .offer_space_event(service, subscriber, stanza, None)
     }
 
+    /// Offer a durable deletion notice to the bounded Spaces event lane.
+    ///
+    /// A closed completion channel leaves settlement to the durable job's
+    /// expiry. It does not prove that this notice can be retried.
+    pub fn offer_space_deletion(
+        &self,
+        service: &BareJid,
+        subscriber: &Jid,
+        stanza: Stanza,
+        grant: Arc<RemoteSpaceDeletionGrant>,
+    ) -> Result<oneshot::Receiver<SpaceDeletionCompletion>, SpaceDeletionCompletion> {
+        self.inner
+            .offer_space_deletion(service, subscriber, stanza, grant)
+    }
+
     /// The seats of the remote occupants this replica seats, with the
     /// stream evidence each was admitted under.
     pub fn seats(&self) -> Arc<SeatIndex> {
@@ -1315,6 +1349,7 @@ impl Inner {
             | Purpose::RoomReply
             | Purpose::Notice { .. }
             | Purpose::SpaceEvent { .. }
+            | Purpose::SpaceDeletion { .. }
             | Purpose::Account { .. } => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
@@ -2771,6 +2806,10 @@ impl Inner {
                 self.answer_account(&sender, &queued.stanza, failure).await;
                 return;
             }
+            Purpose::SpaceDeletion { completion, .. } => {
+                let _ = completion.send(SpaceDeletionCompletion::RetryBeforeStage);
+                return;
+            }
             Purpose::Response { .. }
             | Purpose::Reply { .. }
             | Purpose::Departure
@@ -3444,7 +3483,9 @@ impl PairWorker {
         self.receiver.close();
         self.seats.close();
         while let Ok(queued) = self.receiver.try_recv() {
-            self.router.answer(queued, Failure::Timeout, false).await;
+            if !matches!(queued.purpose, Purpose::SpaceDeletion { .. }) {
+                self.router.answer(queued, Failure::Timeout, false).await;
+            }
         }
         // A stopping replica's seats end with it; nothing is unseated.
         if !self.router.shutdown.is_cancelled() {
@@ -3485,6 +3526,17 @@ impl PairWorker {
     /// is offered once more on a new stream; one whose write outcome is
     /// unknown is never sent again.
     async fn send(&mut self, queued: Queued) {
+        if let Purpose::SpaceDeletion {
+            grant,
+            completion,
+            share: _share,
+        } = queued.purpose
+        {
+            if let Some(result) = self.send_space_deletion(queued.stanza, grant).await {
+                let _ = completion.send(result);
+            }
+            return;
+        }
         let Some(transport) = self.router.transport.get().cloned() else {
             return self.router.answer(queued, Failure::Timeout, false).await;
         };
@@ -3545,6 +3597,7 @@ impl PairWorker {
                 }
             }
             Purpose::Request { .. }
+            | Purpose::SpaceDeletion { .. }
             | Purpose::Response { .. }
             | Purpose::Reply { .. }
             | Purpose::Room { .. }
@@ -3614,6 +3667,7 @@ impl PairWorker {
             | Purpose::RoomReply
             | Purpose::Notice { .. }
             | Purpose::SpaceEvent { .. }
+            | Purpose::SpaceDeletion { .. }
             | Purpose::Account { .. } => false,
         };
         let mut element = stanza_element(&queued.stanza);
@@ -3659,7 +3713,9 @@ impl PairWorker {
                         .answer(queued, Failure::Timeout, registered)
                         .await;
                 }
-                Ok(Err(TransmitError::AuthorizationExpired)) => return,
+                Ok(Err(TransmitError::AuthorizationExpired | TransmitError::DeletionRefused)) => {
+                    return
+                }
                 Ok(Err(TransmitError::Refused(_))) => {
                     return self
                         .router
