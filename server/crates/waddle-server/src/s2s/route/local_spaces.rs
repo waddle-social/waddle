@@ -60,10 +60,13 @@ pub struct SpacePublication {
 /// A Spaces response and, for protected data, the grant for its write.
 pub enum SpaceReply {
     Ordinary(Vec<Stanza>),
-    Protected {
-        stanza: Stanza,
-        grant: ManagedSpaceGrant,
-    },
+    Protected(Box<(Stanza, ManagedSpaceGrant)>),
+}
+
+impl SpaceReply {
+    pub(crate) fn protected(stanza: Stanza, grant: ManagedSpaceGrant) -> Self {
+        Self::Protected(Box::new((stanza, grant)))
+    }
 }
 
 /// The Spaces of this deployment, as the S2S router reaches them.

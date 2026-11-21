@@ -79,7 +79,7 @@ pub(crate) enum ResponseFrame {
     /// Typed transport-only stream error emitted by the websocket adapter.
     StreamError(StreamErrorFrame),
     /// An IQ result that needs the Space fence at the physical socket.
-    ProtectedSpace(ProtectedSpaceFrame),
+    ProtectedSpace(Box<ProtectedSpaceFrame>),
     /// Origin of this exact retained frame, independent of completion receipts.
     Provenanced {
         frame: Box<ResponseFrame>,
@@ -105,20 +105,20 @@ impl ResponseFrame {
     ) -> Result<Self, SmPersistenceError> {
         let payload =
             SmReplayPayload::from_protected_space_reply(xml, grant.replay_identity().clone())?;
-        Ok(Self::ProtectedSpace(ProtectedSpaceFrame {
+        Ok(Self::ProtectedSpace(Box::new(ProtectedSpaceFrame {
             payload,
             grant: SpaceReplyAuthority::Managed(Arc::new(grant)),
-        }))
+        })))
     }
 
     pub(super) fn unmanaged_space_frame(
         xml: String,
         guard: UnmanagedSpaceReplyGuard,
     ) -> Result<Self, SmPersistenceError> {
-        Ok(Self::ProtectedSpace(ProtectedSpaceFrame {
+        Ok(Self::ProtectedSpace(Box::new(ProtectedSpaceFrame {
             payload: SmReplayPayload::from_wire(xml)?,
-            grant: SpaceReplyAuthority::Unmanaged(guard),
-        }))
+            grant: SpaceReplyAuthority::Unmanaged(Arc::new(guard)),
+        })))
     }
 
     pub(super) fn protected_space_reply(&self) -> Option<&ProtectedSpaceFrame> {

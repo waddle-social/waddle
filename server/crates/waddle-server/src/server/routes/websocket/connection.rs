@@ -1,6 +1,6 @@
 use super::batch_write::{
     write_ingress_response_batch_with_protected_sink, write_response_batch_with_admission,
-    BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    BatchAuthority, BatchSink, BatchSmPolicy, BatchWriteOutcome,
 };
 use super::cleanup::cleanup_connection_shutdown;
 use super::frame::{handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame};
@@ -1506,7 +1506,12 @@ impl LiveSocketState {
                             return ControlFlow::Continue(());
                         };
                         let report = write_ingress_response_batch_with_protected_sink(
-                            &mut *ws_sender,
+                            BatchSink {
+                                sender: &mut *ws_sender,
+                                protected_start: Some(
+                                    InterruptibleSink::start_protected_space_reply,
+                                ),
+                            },
                             &mut ws_receiver,
                             state,
                             conn,
@@ -1516,7 +1521,6 @@ impl LiveSocketState {
                                 permit: admission_permit,
                                 shutdown: shutdown_token,
                             },
-                            Some(InterruptibleSink::start_protected_space_reply),
                         )
                         .await;
                         if !matches!(report.outcome, BatchWriteOutcome::Continue) {
@@ -3167,7 +3171,10 @@ where
         BatchSmPolicy::Record
     };
     let write_report = write_ingress_response_batch_with_protected_sink(
-        ws_sender,
+        BatchSink {
+            sender: ws_sender,
+            protected_start: protected_reply_start,
+        },
         ws_receiver,
         state.as_ref(),
         conn,
@@ -3177,7 +3184,6 @@ where
             permit: admission_permit,
             shutdown: shutdown_token,
         },
-        protected_reply_start,
     )
     .await;
     // The terminal resume frame is always frame 0 of its batch, and the

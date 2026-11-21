@@ -420,7 +420,7 @@ fn refuse(iq: &Iq, error: StanzaError) -> Vec<Stanza> {
 /// The result answering the request `iq`, from the address it was sent to.
 fn protect_reply(stanza: Stanza, grant: ManagedSpaceGrant) -> SpaceReply {
     if matches!(&stanza, Stanza::Iq(iq) if matches!(iq.as_ref(), Iq::Result { .. })) {
-        SpaceReply::Protected { stanza, grant }
+        SpaceReply::protected(stanza, grant)
     } else {
         SpaceReply::Ordinary(vec![stanza])
     }
@@ -1015,7 +1015,7 @@ impl Asked<'_> {
         let node = DiscoInfoQuery::try_from(payload.clone()).ok()?.node?;
         let grant = self.protected_read(&node, principal).await?;
         let stanza = result(self.iq, Some(self.node_info(node).await)).pop()?;
-        Some(SpaceReply::Protected { stanza, grant })
+        Some(SpaceReply::protected(stanza, grant))
     }
 
     async fn protected_read(
@@ -1431,7 +1431,7 @@ impl Asked<'_> {
             .append(subscription)
             .build();
         let stanza = result(self.iq, Some(payload)).pop()?;
-        Some(SpaceReply::Protected { stanza, grant })
+        Some(SpaceReply::protected(stanza, grant))
     }
 
     /// XEP-0503, "Joining a space": a subscription to the Space's node, for
@@ -1626,10 +1626,10 @@ impl Asked<'_> {
             )
             .await
         {
-            Ok(true) => Some(SpaceReply::Protected {
-                stanza: Stanza::Iq(Box::new(build_pubsub_success(self.iq))),
+            Ok(true) => Some(SpaceReply::protected(
+                Stanza::Iq(Box::new(build_pubsub_success(self.iq))),
                 grant,
-            }),
+            )),
             Ok(false) => Some(SpaceReply::Ordinary(self.refuse(not_subscribed()))),
             Err(_) => Some(SpaceReply::Ordinary(self.refuse(internal()))),
         }

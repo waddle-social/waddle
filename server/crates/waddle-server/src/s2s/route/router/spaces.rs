@@ -186,7 +186,8 @@ impl Inner {
                     self.reply(&stream, answer);
                 }
             }
-            SpaceReply::Protected { stanza, grant } => {
+            SpaceReply::Protected(reply) => {
+                let (stanza, grant) = *reply;
                 self.reply_with_space_grant(&stream, stanza, Some(Arc::new(grant)));
             }
         }

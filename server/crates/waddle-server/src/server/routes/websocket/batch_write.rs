@@ -183,6 +183,11 @@ pub(super) struct BatchAuthority<'a> {
     pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
+pub(super) struct BatchSink<'a, S, SE> {
+    pub(super) sender: &'a mut S,
+    pub(super) protected_start: Option<StartProtectedSpaceReply<S, SE>>,
+}
+
 pub(super) async fn write_response_batch_with_admission<S, SE, R, RE, F>(
     sender: &mut S,
     reader: &mut R,
@@ -224,20 +229,28 @@ where
     RE: std::fmt::Display,
 {
     write_ingress_response_batch_with_protected_sink(
-        sender, reader, state, conn, responses, policy, authority, None,
+        BatchSink {
+            sender,
+            protected_start: None,
+        },
+        reader,
+        state,
+        conn,
+        responses,
+        policy,
+        authority,
     )
     .await
 }
 
 pub(super) async fn write_ingress_response_batch_with_protected_sink<S, SE, R, RE>(
-    sender: &mut S,
+    sink: BatchSink<'_, S, SE>,
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
     responses: &mut super::frame::ResponseBatch,
     policy: BatchSmPolicy,
     authority: BatchAuthority<'_>,
-    protected_start: Option<StartProtectedSpaceReply<S, SE>>,
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -246,14 +259,13 @@ where
     RE: std::fmt::Display,
 {
     let report = write_response_batch_impl(
-        sender,
+        sink,
         reader,
         state,
         conn,
         responses.frames.clone(),
         policy,
         Some((authority.permit, authority.shutdown)),
-        protected_start,
     )
     .await;
     if matches!(report.outcome, BatchWriteOutcome::Continue) {
@@ -304,27 +316,28 @@ where
     F: Into<ResponseFrame>,
 {
     write_response_batch_impl(
-        sender,
+        BatchSink {
+            sender,
+            protected_start: None,
+        },
         reader,
         state,
         conn,
         frames.into_iter().map(Into::into).collect(),
         policy,
         Some((authority.permit, authority.shutdown)),
-        None,
     )
     .await
 }
 
 async fn write_response_batch_impl<S, SE, R, RE>(
-    sender: &mut S,
+    sink: BatchSink<'_, S, SE>,
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
     frames: Vec<ResponseFrame>,
     policy: BatchSmPolicy,
     authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
-    protected_start: Option<StartProtectedSpaceReply<S, SE>>,
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -332,6 +345,10 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
+    let BatchSink {
+        sender,
+        protected_start,
+    } = sink;
     let total_frames = frames.len();
     let mut accepted_frame_indices = Vec::new();
     let mut written_frame_count = 0usize;
