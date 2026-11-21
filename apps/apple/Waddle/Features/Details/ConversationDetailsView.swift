@@ -19,7 +19,10 @@ struct ConversationDetailsView: View {
                 RoomDetailsForm(room: conversation.jid)
                     .id(conversation)
             case .direct:
+                // Keyed so one person's details are never drawn under the
+                // next person's name.
                 DirectDetailsForm(peer: conversation.jid)
+                    .id(conversation)
             }
         }
         .navigationTitle("Details")

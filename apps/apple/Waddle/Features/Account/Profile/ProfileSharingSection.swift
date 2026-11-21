@@ -53,9 +53,13 @@ struct ProfileSharingSection: View {
     }
 }
 
-private extension ProfileSharingSection {
+extension ProfileSharingSection {
+    /// How often a call shown as in progress is checked for having ended;
+    /// also for someone else's (`peerSharedStatus`).
     static let callCheckInterval: Duration = .seconds(10)
+}
 
+private extension ProfileSharingSection {
     /// Nothing tells this device when another one leaves its call, so
     /// while the row says "In a call" the activity is looked up again every
     /// few seconds. The row, and this task with it, goes away once the
@@ -85,8 +89,9 @@ enum ProfileTuneSummary {
 }
 
 /// An emoji when something is shared, else a neutral symbol; then a title
-/// and an optional second line.
-private struct ProfileSharingLabel: View {
+/// and an optional second line. Also draws what someone else shares
+/// (`PeerSharingSection`).
+struct ProfileSharingLabel: View {
     let emoji: String?
     let symbol: String
     let title: String

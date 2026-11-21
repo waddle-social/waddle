@@ -61,6 +61,19 @@ public struct SharedStatus: Hashable, Sendable {
         self.activity = activity
         self.tune = tune
     }
+
+    public var isEmpty: Bool { self == SharedStatus() }
+
+    /// What to show of someone else's status. The mark of a call is shown
+    /// only while they are online: a device that goes away without ending
+    /// its call leaves the mark behind (ADR-010). A tune with nothing in
+    /// it says the music stopped (XEP-0118 §3.2).
+    public func shown(isOnline: Bool) -> SharedStatus {
+        var shown = self
+        if !isOnline, activity?.showsACall == true { shown.activity = nil }
+        if tune?.isEmpty == true { shown.tune = nil }
+        return shown
+    }
 }
 
 /// The XEP-0292 details of an account. An empty field is one that is not

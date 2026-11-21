@@ -115,6 +115,7 @@
 		30243F605EAA21C1A81451A1 /* StoryComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB77FF64FFC9B9C5EF56922D /* StoryComposer.swift */; };
 		30646FB6C06C78F3A527767C /* RecipientTokenStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27BD2E6C1F3CBFD1B2F5480 /* RecipientTokenStrip.swift */; };
 		30963983A722C126E00B1501 /* RoomDetailsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */; };
+		30A391AFC1CBA29E53EAD28C /* PeerSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77153D8945E831391049BFF9 /* PeerSharingSection.swift */; };
 		30ACDED17007CD6C9E7E1546 /* ExtensionCommandFieldRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F073219F757D50441A200008 /* ExtensionCommandFieldRow.swift */; };
 		30B5EE8514ABFBFA0CB4996C /* ProfileAvatarSizing.swift in Sources */ = {isa = PBXBuildFile; fileRef = F42745ADE0C39F2B85B36F6C /* ProfileAvatarSizing.swift */; };
 		30D6772BFD9898D26B973F4E /* CommunityCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4AF57ED24C8ED289B82220 /* CommunityCopy.swift */; };
@@ -610,6 +611,7 @@
 		ECA0A3EE365A1E62B8D2AA9D /* StoryRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 295B8A0A46A4BAEE509334B6 /* StoryRail.swift */; };
 		ED1E74B2407A48AE9AA1BCC6 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6039ABBCA4C43BE7CFCF32 /* ProfileView.swift */; };
 		ED502C50B87BB729743286AF /* ConversationDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BC3620DC7095A2FBB42549 /* ConversationDetailsView.swift */; };
+		EDE1EF6091E72F2C9CCC4375 /* PeerSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77153D8945E831391049BFF9 /* PeerSharingSection.swift */; };
 		EDE44043376FFD1D40BAAE0B /* RoomManagementSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE1B270EB92BCD6313BCE33 /* RoomManagementSections.swift */; };
 		EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
 		EEC166182965A5C078ADF1CF /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
@@ -798,6 +800,7 @@
 		75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveKitCallMediaController.swift; sourceTree = "<group>"; };
 		763C66AFC397A7466126D6EC /* SignInServerRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInServerRow.swift; sourceTree = "<group>"; };
 		76ACA60CC9A88E920924472E /* MessageRowHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRowHeader.swift; sourceTree = "<group>"; };
+		77153D8945E831391049BFF9 /* PeerSharingSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerSharingSection.swift; sourceTree = "<group>"; };
 		776055A920EB7EA45F8E929E /* ComposerSendButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerSendButton.swift; sourceTree = "<group>"; };
 		79C0B6BD5F8A7D842A008370 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedAttachmentStatusCards.swift; sourceTree = "<group>"; };
@@ -1581,6 +1584,7 @@
 				7CAA209A6DBE12965CCB98D6 /* DirectDetailsForm.swift */,
 				4F7FC6CFC6DF2EAEE334F027 /* NotificationModeSection.swift */,
 				E570A12B625BCB30023E6AB0 /* PeerDetailsSection.swift */,
+				77153D8945E831391049BFF9 /* PeerSharingSection.swift */,
 				08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */,
 				433E995F4C4BBEEC367DF685 /* RoomHeaderSection.swift */,
 				3805CDDD91B6463E8D775D6B /* Logic */,
@@ -2266,6 +2270,7 @@
 				5AEC88F5B85E17A8D7B1B9FC /* NotificationModeSection.swift in Sources */,
 				641F7B16A2615FEBFE18C715 /* PeerDetailsSection.swift in Sources */,
 				121B2225C64E66826FF444AF /* PeerPresenceAvatar.swift in Sources */,
+				EDE1EF6091E72F2C9CCC4375 /* PeerSharingSection.swift in Sources */,
 				25EAC7A62E9EF8F58BDB7873 /* PeopleHomeRow.swift in Sources */,
 				80EF91F0C84BEB0CB8812817 /* PeopleList+Session.swift in Sources */,
 				D1A254D1FA5FED326D765CFF /* PeopleView.swift in Sources */,
@@ -2586,6 +2591,7 @@
 				BA6EACA5A6EE61165749CB9D /* NotificationModeSection.swift in Sources */,
 				3E0FF660DD115C0352051EBC /* PeerDetailsSection.swift in Sources */,
 				7DF0AE9977E8784003B0474C /* PeerPresenceAvatar.swift in Sources */,
+				30A391AFC1CBA29E53EAD28C /* PeerSharingSection.swift in Sources */,
 				9A9FA3D8492A4D379710CE75 /* PeopleHomeRow.swift in Sources */,
 				23FFF61C63530EADF8DEBA86 /* PeopleList+Session.swift in Sources */,
 				FA26FF441D93E02BBD7F5418 /* PeopleView.swift in Sources */,
