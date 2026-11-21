@@ -413,6 +413,7 @@ what a later rolling update has to respect.
 | Host-grant writer and revocation fences | A binary from before the fences decides managed rooms from the legacy stores, holds no fence lease, and so is neither waited for by a revoke nor bound by it | No scope is enrolled until every serving replica runs this release, and no older replica joins while a scope is enrolled (G11, G24) |
 | Bound Space bookmark writes | Migration 2017 rejects legacy item writes to a bound node. The canonical writer commits each change with its notification version | Retire pre-2017 serving binaries and owner tools in the `Recreate` window before applying the migration |
 | Protected Space subscriptions and events | The protected SM payload uses typed subscription and bookmark descriptors. The cluster sends a versioned publication hint whose recipient rebuilds the event from the canonical store. | Complete the `Recreate` window before serving enrolled Spaces. Apply migrations 2018–2019 and rerun the owner phase to provision the preference table and sequence grant. Devices renew subscriptions explicitly and retain the returned ID for unsubscribe. |
+| Enrolled Space configuration and deletion | PostgreSQL fences legacy configuration writes. A deletion reserves the node address, removes its bookmarks and records delivery jobs for the subscribers it captured. Replicas exchange a typed deletion request for the exact owning socket binding. | Apply migrations 2020–2021 and rerun the owner phase in the `Recreate` window. Start only replicas that understand the deletion route and the protected SM deletion descriptor. |
 | Session endings of a retired account | A replica without migration 2014's lease is not seen by `waddle-server account retire`, ends nothing, and keeps the account's streams open | Every serving replica runs this release before an account is retired ([account retirement, step 3](account-retirement.md#procedure)) |
 | `[host_policy]` in the S2S snapshot | A binary that predates the table refuses a snapshot that holds it, `federate_new_rooms` included; the snapshot is not read while S2S is off | Before a snapshot uses the table, every replica runs this release; a rollback to an older binary removes the table first |
 | Web and native clients | A client older than the server sees the new refusals (see [What users see](#what-users-see-with-s2s-off)); a web client newer than the server, between the `chat` deployment and step 9, behaves as with S2S off | No client-side migration is needed; see [Clients](#clients) |
@@ -497,6 +498,16 @@ or checksum differs from its own. There is no down migration.
 | 2017 | `host_grant_space_bookmark_versions` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | One committed version per enrolled Space room bookmark |
 | 2018 | `local_space_subscriptions` (PostgreSQL only) | `SELECT, INSERT, UPDATE, DELETE` | Empty until a served account subscribes |
 | 2019 | `local_space_notification_order` and preference and bookmark order columns (PostgreSQL only) | `USAGE` on the sequence | A renewed preference and a new publication establish their order |
+| 2020 | Bound Space configuration trigger and operation kind (PostgreSQL only) | Existing `pubsub_nodes` and journal privileges. The trigger permits a configuration update only through the canonical writer. | Active for every enrolled Space |
+| 2021 | Space deletion tombstones, captured audiences, subscriber jobs and exact local binding jobs (PostgreSQL only) | `SELECT, INSERT` on tombstones and audiences. `SELECT, INSERT, UPDATE` on subscriber and binding jobs. | Served subscribers can receive local deletion notices through their live resources |
+
+A deletion job survives a worker restart. A local job retains its first
+eligible resource snapshot and tracks custody per binding. The worker can
+retry a binding that is known to be unwritten. Expired staging without a
+receipt records an ambiguous outcome, which suppresses automatic retry.
+A restored authority incarnation invalidates pending notices from the old
+incarnation. The tombstone keeps the deleted Space address reserved while
+the shared room scope remains active.
 
 On SQLite, 2002, 2003 and 2006 create nothing. A development or test
 database that a build from before the final numbering migrated records

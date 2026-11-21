@@ -62,6 +62,7 @@ const CURRENT_GRANT: &str = "FROM host_grant_space_bindings b
 
 const ACTIVE_SPACE: &str = "b.lifecycle_id = ? AND b.service_jid = ? AND b.space_node = ?
     AND l.retired_at_ms IS NULL AND b.authority_incarnation = a.incarnation
+    AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
     AND s.admission_state = 'active' AND s.policy_version = ?
     AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)
     AND g.affiliation <> 'outcast'
@@ -181,6 +182,7 @@ impl LocalSpaceSubscriptions {
                     FROM local_space_subscriptions sub
                     JOIN host_grant_space_bindings b ON sub.lifecycle_id = b.lifecycle_id
                     WHERE b.service_jid = ? AND b.space_node = ? AND sub.subject_jid = ?
+                    AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
                     FOR UPDATE OF sub
                  ), removed AS (
                     DELETE FROM local_space_subscriptions sub USING target

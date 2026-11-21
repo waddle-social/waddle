@@ -62,10 +62,12 @@ use crate::ingress_substrate::{
 };
 use crate::permissions::{Object, ObjectType};
 
-/// Longest a store transaction waits for a row lock.
+mod deletion_jobs;
+
 // PostgreSQL advisory namespace for Space content writes and authority restore.
 pub(crate) const SPACE_BOOKMARK_RESTORE_LOCK: i64 = 0x5741_4444_4c45_5342;
 
+/// Longest a store transaction waits for a row lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest any one statement of a store transaction runs.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -921,6 +923,7 @@ impl HostGrantStore {
                 "SELECT l.service_jid, l.space_node FROM host_grant_scope_lifecycles l \
              JOIN pubsub_nodes p ON p.owner_jid = l.service_jid AND p.node_name = l.space_node \
              WHERE l.lifecycle_id = ? AND l.retired_at_ms IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = l.lifecycle_id) \
              AND p.access_model = 'whitelist' AND (p.node_type IS NULL OR p.node_type = ?) FOR UPDATE OF p",
                 crate::db_params![lifecycle.as_str(), waddle_xmpp::xep::xep0503::NS_SPACES],
             )
@@ -1069,6 +1072,7 @@ impl HostGrantStore {
              JOIN host_grants g ON g.lifecycle_id = b.lifecycle_id AND g.room_jid = r.room_jid
              WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
              AND b.service_jid = ? AND b.space_node = ? AND l.retired_at_ms IS NULL
+             AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
              AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)
              AND s.subject_jid = ? AND s.affiliation = 'owner'
              AND s.effective_affiliation = 'owner' AND s.issuance_basis = 'local'
@@ -1249,6 +1253,7 @@ impl HostGrantStore {
                        AND i.item_id = v.room_jid
                   WHERE b.service_jid = ? AND b.space_node = ? AND v.room_jid = ? AND v.operation_token = ?
                     AND l.retired_at_ms IS NULL AND b.authority_incarnation = a.incarnation
+                    AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
                     AND v.authority_incarnation = a.incarnation AND s.admission_state = 'active'
                     AND s.policy_version = ? AND p.access_model = b.access_model
                     AND (p.node_type IS NULL OR p.node_type = ?) AND v.publication_order IS NOT NULL
@@ -1368,6 +1373,7 @@ impl HostGrantStore {
              JOIN host_grant_space_affiliations s ON s.lifecycle_id = b.lifecycle_id
              WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
              AND b.service_jid = ? AND b.space_node = ? AND l.retired_at_ms IS NULL
+             AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
              AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)
              AND p.persist_items = 1 AND p.notify_retract = 1
              AND s.subject_jid = ? AND s.affiliation = 'owner'
@@ -1439,6 +1445,362 @@ impl HostGrantStore {
         .await?;
         commit(tx, mode).await?;
         Ok(MutationReceipt::Recorded(record))
+    }
+
+    /// Delete the Space's persistent items and reserve its address permanently.
+    pub async fn delete_space(
+        &self,
+        command: &super::DeleteSpace,
+        policy: &IssuancePolicy,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        if policy.check(&command.initiator, RoomAffiliation::Member)? != IssuanceBasis::Local {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        let store = self.clone();
+        let command = command.clone();
+        let mode = commit_mode();
+        own(async move { store.delete_space_owned(&command, mode).await }).await
+    }
+
+    async fn delete_space_owned(
+        &self,
+        command: &super::DeleteSpace,
+        mode: CommitMode,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let mut tx = self.begin_write().await?;
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+        let scope = load_scope(&mut tx, command.lifecycle, true)
+            .await
+            .map_err(statement_failure)?
+            .ok_or(HostGrantError::UnknownScope)?;
+        let fingerprint = command.fingerprint();
+        if let Some(recorded) = load_operation(&mut tx, command.operation).await? {
+            tx.rollback().await?;
+            return recorded.replay(&fingerprint);
+        }
+
+        let current = load_incarnation(&mut tx).await.map_err(statement_failure)?;
+        if current != command.expected_incarnation {
+            return Err(HostGrantError::IncarnationChanged);
+        }
+        refuse_unusable_scope(&scope, current)?;
+        if !scope_admits(&scope, current) {
+            return Err(HostGrantError::SpaceNotBindable);
+        }
+        if scope.generation != command.expected_generation {
+            return Err(HostGrantError::StaleGeneration {
+                current: scope.generation,
+            });
+        }
+        if scope.projection_pending() {
+            return Err(HostGrantError::Busy);
+        }
+
+        let lifecycle = command.lifecycle.to_storage();
+        let service = command.key.service();
+        let node = command.key.node();
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM host_grant_space_bindings b
+                 JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id
+                 JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
+                 JOIN host_grant_space_affiliations a ON a.lifecycle_id = b.lifecycle_id
+                 WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
+                 AND b.service_jid = ? AND b.space_node = ? AND l.retired_at_ms IS NULL
+                 AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)
+                 AND a.subject_jid = ? AND a.affiliation = 'owner'
+                 AND a.effective_affiliation = 'owner' AND a.issuance_basis = 'local'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id
+                 )
+                 FOR NO KEY UPDATE OF p",
+                crate::db_params![
+                    lifecycle.as_str(),
+                    current.to_storage(),
+                    service.as_str(),
+                    node,
+                    waddle_xmpp::xep::xep0503::NS_SPACES,
+                    command.initiator.as_str(),
+                ],
+            )
+            .await
+            .map_err(HostGrantError::from_database)
+            .map_err(statement_failure)?;
+        if rows.next().await?.is_none() {
+            return Err(HostGrantError::InitiatorNotAuthorized);
+        }
+        drop(rows);
+        let generation = scope
+            .generation
+            .next()
+            .ok_or(HostGrantError::ScopeExhausted)?;
+        tx.execute(
+            "SELECT pg_catalog.set_config('waddle.space_bookmark_lifecycle', ?, true)",
+            crate::db_params![lifecycle.as_str()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+        tx.execute(
+            "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ?",
+            crate::db_params![service.as_str(), node],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+
+        let now = Utc::now().timestamp_millis();
+        let record = OperationRecord {
+            operation: command.operation,
+            lifecycle: command.lifecycle,
+            generation,
+            kind: OperationKind::DeleteSpace,
+            authority_incarnation: current,
+            projection_digest: current_digest(&mut tx, &scope).await?,
+        };
+        insert_operation(
+            &mut tx,
+            &record,
+            &fingerprint,
+            Some(command.initiator.as_str()),
+            now,
+        )
+        .await?;
+        let operation = command.operation.to_storage();
+        tx.execute(
+            "INSERT INTO host_grant_space_deletions (lifecycle_id, operation_id) VALUES (?, ?)",
+            crate::db_params![lifecycle.as_str(), operation.as_str()],
+        )
+        .await
+        .map_err(HostGrantError::from_database)
+        .map_err(statement_failure)?;
+        capture_space_deletion_audience(&mut tx, command.lifecycle, now).await?;
+        advance_scope(&mut tx, &scope, generation, &operation, now).await?;
+        commit(tx, mode).await?;
+        Ok(MutationReceipt::Recorded(record))
+    }
+
+    /// Recover one deletion's fixed audience after its generation is projected.
+    pub async fn load_space_deletion_audience(
+        &self,
+        key: &super::ScopeKey,
+        operation: GrantOperationId,
+    ) -> Result<Option<super::SpaceDeletionAudience>, HostGrantError> {
+        use crate::db::s2s_spaces::{decode, MAX_REMOTE_SUBSCRIBERS_PER_SPACE};
+
+        let mut tx = self.begin_interactive_read().await?;
+        let Some((record, recorded_at_ms, _)) =
+            read_space_deletion_header(&mut tx, key, operation, false).await?
+        else {
+            return Ok(None);
+        };
+        let lifecycle = record.lifecycle.to_storage();
+        let incarnation = record.authority_incarnation.to_storage();
+        let mut rows = tx
+            .query(
+                "SELECT subject_jid, grant_generation, subid
+               FROM host_grant_space_deletion_audience
+              WHERE lifecycle_id = ? AND delivery_kind = 'local' ORDER BY subject_jid LIMIT ?",
+                crate::db_params![
+                    lifecycle.as_str(),
+                    i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1).expect("bounded audience")
+                ],
+            )
+            .await?;
+        let mut local = Vec::new();
+        while let Some(row) = rows.next().await? {
+            local.push(super::LocalSpaceSubscription {
+                account: GrantSubject::from_storage(&row.get::<String>(0)?)
+                    .ok_or(corrupt("Space deletion audience subject"))?,
+                grant: super::SpaceSubscriptionGrant {
+                    lifecycle: record.lifecycle,
+                    incarnation: record.authority_incarnation,
+                    generation: GrantGeneration::new(row.get(1)?)
+                        .ok_or(corrupt("Space deletion audience grant"))?,
+                },
+                subid: waddle_xmpp::pubsub::SubId::from_raw(row.get::<String>(2)?),
+            });
+        }
+        drop(rows);
+        let mut rows = tx
+            .query(
+                "SELECT subject_jid, strength, trust_profile, snapshot_generation,
+                    lifecycle_id, ?::text, grant_generation
+               FROM host_grant_space_deletion_audience
+              WHERE lifecycle_id = ? AND delivery_kind = 'remote' ORDER BY subject_jid LIMIT ?",
+                crate::db_params![
+                    incarnation,
+                    lifecycle.as_str(),
+                    i64::try_from(MAX_REMOTE_SUBSCRIBERS_PER_SPACE + 1).expect("bounded audience")
+                ],
+            )
+            .await?;
+        let mut remote = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let subject = GrantSubject::from_storage(&row.get::<String>(0)?)
+                .ok_or(corrupt("Space deletion audience subject"))?;
+            let subscription = decode(&row).map_err(|_| corrupt("Space deletion subscription"))?;
+            if subject.jid() != &subscription.account {
+                return Err(corrupt("Space deletion audience subject"));
+            }
+            remote.push(subscription);
+        }
+        drop(rows);
+        tx.rollback().await?;
+        if local.len() > HOST_GRANT_SCOPE_MAX_GRANT_ROWS
+            || remote.len() > MAX_REMOTE_SUBSCRIBERS_PER_SPACE
+        {
+            return Err(corrupt("Space deletion audience size"));
+        }
+        Ok(Some(super::SpaceDeletionAudience {
+            record,
+            recorded_at_ms,
+            local,
+            remote,
+        }))
+    }
+
+    /// Resolve a saved local recipient for an exact, already projected deletion.
+    pub async fn load_local_space_deletion_recipient(
+        &self,
+        key: &super::ScopeKey,
+        operation: GrantOperationId,
+        subject: &GrantSubject,
+    ) -> Result<Option<super::LocalSpaceDeletionRecipient>, HostGrantError> {
+        let mut tx = self.begin_interactive_read().await?;
+        let Some((record, recorded_at_ms, current_generation)) =
+            read_space_deletion_header(&mut tx, key, operation, false).await?
+        else {
+            return Ok(None);
+        };
+        let mut rows = tx
+            .query(
+                "SELECT grant_generation, subid FROM host_grant_space_deletion_audience
+              WHERE lifecycle_id = ? AND delivery_kind = 'local' AND subject_jid = ?",
+                crate::db_params![record.lifecycle.to_storage(), subject.as_str()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let preference = super::LocalSpaceSubscription {
+            account: subject.clone(),
+            grant: super::SpaceSubscriptionGrant {
+                lifecycle: record.lifecycle,
+                incarnation: record.authority_incarnation,
+                generation: GrantGeneration::new(row.get(0)?)
+                    .ok_or(corrupt("Space deletion audience grant"))?,
+            },
+            subid: waddle_xmpp::pubsub::SubId::from_raw(row.get::<String>(1)?),
+        };
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some(super::LocalSpaceDeletionRecipient {
+            record,
+            recorded_at_ms,
+            preference,
+            current_generation,
+        }))
+    }
+
+    /// Resolve one exact remote subscriber and the current fence generation.
+    pub(crate) async fn load_remote_space_deletion_recipient(
+        &self,
+        key: &super::ScopeKey,
+        operation: GrantOperationId,
+        subject: &GrantSubject,
+    ) -> Result<
+        Option<(
+            OperationRecord,
+            GrantGeneration,
+            crate::db::s2s_spaces::SpaceSubscription,
+        )>,
+        HostGrantError,
+    > {
+        let mut tx = self.begin_interactive_read().await?;
+        let Some((record, _, current_generation)) =
+            read_space_deletion_header(&mut tx, key, operation, false).await?
+        else {
+            return Ok(None);
+        };
+        let mut rows = tx
+            .query(
+                "SELECT subject_jid, strength, trust_profile, snapshot_generation,
+                    lifecycle_id, ?::text, grant_generation
+               FROM host_grant_space_deletion_audience
+              WHERE lifecycle_id = ? AND delivery_kind = 'remote' AND subject_jid = ?",
+                crate::db_params![
+                    record.authority_incarnation.to_storage(),
+                    record.lifecycle.to_storage(),
+                    subject.as_str()
+                ],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let subscription = crate::db::s2s_spaces::decode(&row)
+            .map_err(|_| corrupt("Space deletion subscription"))?;
+        if &subscription.account != subject.jid() {
+            return Err(corrupt("Space deletion audience subject"));
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some((record, current_generation, subscription)))
+    }
+
+    /// Hold restore and scope changes through the recipient's socket handoff.
+    pub(super) async fn hold_space_deletion_recipient(
+        &self,
+        key: &super::ScopeKey,
+        operation: GrantOperationId,
+        subject: &GrantSubject,
+        generation: GrantGeneration,
+        kind: super::SpaceDeletionDeliveryKind,
+    ) -> Result<Option<Transaction<'_>>, HostGrantError> {
+        let mut tx = self.db.begin().await?;
+        if !set_local_transaction_timeouts(
+            &mut tx,
+            ENROLLED_LOOKUP_LOCK_TIMEOUT,
+            ENROLLED_LOOKUP_STATEMENT_TIMEOUT,
+        )
+        .await?
+        {
+            return Err(HostGrantError::BoundsUnproven);
+        }
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await?;
+        let Some((record, _, current)) =
+            read_space_deletion_header(&mut tx, key, operation, true).await?
+        else {
+            return Ok(None);
+        };
+        if current != generation {
+            return Ok(None);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM host_grant_space_deletion_audience
+                  WHERE lifecycle_id = ? AND delivery_kind = ? AND subject_jid = ?",
+                crate::db_params![
+                    record.lifecycle.to_storage(),
+                    kind.as_storage(),
+                    subject.as_str()
+                ],
+            )
+            .await?;
+        let exists = rows.next().await?.is_some();
+        drop(rows);
+        Ok(exists.then_some(tx))
     }
 
     /// Record an atomic membership change from an authenticated served owner.
@@ -1523,6 +1885,7 @@ impl HostGrantStore {
              JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id
              WHERE b.lifecycle_id = ? AND b.authority_incarnation = ?
              AND l.retired_at_ms IS NULL AND p.access_model = b.access_model
+             AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
              AND (p.node_type IS NULL OR p.node_type = ?) LIMIT ? FOR SHARE OF p",
                 crate::db_params![
                     lifecycle.as_str(),
@@ -3696,6 +4059,133 @@ async fn own<T: Send + 'static>(
         .map_err(|_| HostGrantError::CommitOutcomeUnknown)?
 }
 
+async fn read_space_deletion_header(
+    tx: &mut Transaction<'_>,
+    key: &super::ScopeKey,
+    operation: GrantOperationId,
+    lock_scope: bool,
+) -> Result<Option<(OperationRecord, i64, GrantGeneration)>, HostGrantError> {
+    let Some(recorded) = load_operation(tx, operation).await? else {
+        return Ok(None);
+    };
+    let record = recorded.record;
+    if record.kind != OperationKind::DeleteSpace {
+        return Ok(None);
+    }
+    let lifecycle = record.lifecycle.to_storage();
+    let lock = if lock_scope { " FOR SHARE OF s" } else { "" };
+    let mut rows = tx.query(
+            &format!("SELECT o.recorded_at_ms, s.generation
+               FROM host_grant_space_deletions d
+               JOIN host_grant_operations o ON o.operation_id = d.operation_id
+               JOIN host_grant_space_bindings b ON b.lifecycle_id = d.lifecycle_id
+               JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = d.lifecycle_id
+               JOIN host_grant_scopes s ON s.lifecycle_id = d.lifecycle_id
+               JOIN host_grant_authority a ON a.singleton AND a.incarnation = s.authority_incarnation
+              WHERE d.lifecycle_id = ? AND d.operation_id = ? AND o.lifecycle_id = d.lifecycle_id
+                AND b.service_jid = ? AND b.space_node = ? AND b.authority_incarnation = a.incarnation
+                AND o.authority_incarnation = a.incarnation AND l.retired_at_ms IS NULL
+                AND s.admission_state = 'active' AND s.policy_version = ?
+                AND s.projected_generation >= o.generation{lock}"),
+            crate::db_params![
+                lifecycle.as_str(), operation.to_storage(), key.service().as_str(), key.node(),
+                HOST_GRANT_POLICY_VERSION
+            ],
+        ).await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let recorded_at_ms = row.get(0)?;
+    let current_generation =
+        GrantGeneration::new(row.get(1)?).ok_or(corrupt("Space deletion scope generation"))?;
+    Ok(Some((record, recorded_at_ms, current_generation)))
+}
+
+/// Freeze both audiences in one SQL snapshot while the parent transaction
+/// holds the scope and node against new subscriptions.
+async fn capture_space_deletion_audience(
+    tx: &mut Transaction<'_>,
+    lifecycle: ScopeLifecycleId,
+    deleted_at_ms: i64,
+) -> Result<(), HostGrantError> {
+    use crate::db::s2s_spaces::{MAX_REMOTE_SUBSCRIBERS_PER_SPACE, SUBSCRIPTION_LIFETIME_MS};
+
+    let mut rows = tx.query(
+        "WITH eligible AS (
+             SELECT b.lifecycle_id, b.service_jid, b.space_node, b.authority_incarnation,
+                    b.federated, p.created_at_ms, g.subject_jid, g.changed_generation,
+                    g.effective_affiliation, g.issuance_basis
+               FROM host_grant_space_bindings b
+               JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
+               JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id
+              WHERE b.lifecycle_id = ? AND g.affiliation <> 'outcast'
+         ), local_rows AS (
+             SELECT e.lifecycle_id, e.subject_jid, e.changed_generation, sub.subid
+               FROM eligible e
+               JOIN local_space_subscriptions sub ON sub.lifecycle_id = e.lifecycle_id
+                    AND sub.subject_jid = e.subject_jid
+                    AND sub.authority_incarnation = e.authority_incarnation
+                    AND sub.grant_generation = e.changed_generation
+              WHERE e.effective_affiliation = 'member'
+                 OR (e.effective_affiliation IN ('owner', 'publisher') AND e.issuance_basis = 'local')
+              ORDER BY e.subject_jid LIMIT ? FOR SHARE OF sub
+         ), remote_rows AS (
+             SELECT e.lifecycle_id, e.subject_jid, e.changed_generation,
+                    sub.strength, sub.trust_profile, sub.snapshot_generation
+               FROM eligible e
+               JOIN s2s_space_subscriptions sub ON sub.service_jid = e.service_jid
+                    AND sub.node_name = e.space_node AND sub.node_created_at_ms = e.created_at_ms
+                    AND sub.subscriber_jid = e.subject_jid AND sub.account_jid = e.subject_jid
+                    AND sub.grant_lifecycle_id = e.lifecycle_id
+                    AND sub.grant_authority_incarnation = e.authority_incarnation
+                    AND sub.grant_generation = e.changed_generation
+              WHERE e.federated AND sub.subscribed_at_ms >= ?
+                AND (e.effective_affiliation = 'member'
+                    OR (e.effective_affiliation IN ('owner', 'publisher')
+                        AND e.issuance_basis = 'trusted_home' AND sub.strength = 'pkix'))
+              ORDER BY e.subject_jid LIMIT ? FOR SHARE OF sub
+         ), captured AS (
+             INSERT INTO host_grant_space_deletion_audience
+                (lifecycle_id, subject_jid, delivery_kind, grant_generation, subid,
+                 strength, trust_profile, snapshot_generation)
+             SELECT lifecycle_id, subject_jid, 'local', changed_generation, subid, NULL, NULL, NULL
+               FROM local_rows
+             UNION ALL
+             SELECT lifecycle_id, subject_jid, 'remote', changed_generation, NULL,
+                    strength, trust_profile, snapshot_generation
+               FROM remote_rows
+             RETURNING lifecycle_id, subject_jid, delivery_kind
+         ), jobs AS (
+             INSERT INTO host_grant_space_deletion_jobs
+                (lifecycle_id, subject_jid, delivery_kind, due_at_ms)
+             SELECT lifecycle_id, subject_jid, delivery_kind, ? FROM captured
+             RETURNING delivery_kind
+         )
+         SELECT count(*) FILTER (WHERE delivery_kind = 'local'),
+                count(*) FILTER (WHERE delivery_kind = 'remote')
+           FROM jobs",
+        crate::db_params![
+            lifecycle.to_storage(),
+            i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1).expect("bounded audience"),
+            deleted_at_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS),
+            i64::try_from(MAX_REMOTE_SUBSCRIBERS_PER_SPACE + 1).expect("bounded audience"),
+            deleted_at_ms,
+        ],
+    ).await.map_err(HostGrantError::from_database).map_err(statement_failure)?;
+    let counts = rows
+        .next()
+        .await?
+        .ok_or(corrupt("Space deletion audience"))?;
+    if counts.get::<i64>(0)?
+        > i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS).expect("bounded audience")
+        || counts.get::<i64>(1)?
+            > i64::try_from(MAX_REMOTE_SUBSCRIBERS_PER_SPACE).expect("bounded audience")
+    {
+        return Err(HostGrantError::GrantLimit);
+    }
+    Ok(())
+}
+
 async fn notification_audience(
     tx: &mut Transaction<'_>,
     key: &super::ScopeKey,
@@ -4199,6 +4689,7 @@ impl RecordedOperation {
             | OperationKind::BindSpace
             | OperationKind::SetSpaceAffiliations
             | OperationKind::ConfigureSpace
+            | OperationKind::DeleteSpace
             | OperationKind::Retire
             | OperationKind::Restore
             | OperationKind::Reconstruct

@@ -43,7 +43,7 @@ use waddle_xmpp::telemetry::attributes::{
 
 use super::admission::{Claim, ConnectionAdmission};
 use super::capacity::{InboundSlot, OutboundSlot, SocketCount};
-use super::outbox::{self, OutboxReceiver, Transmission, Untransmitted};
+use super::outbox::{self, OutboxReceiver, SpaceTransmission, Transmission, Untransmitted};
 use super::peer_stream::{
     AuthenticationStrength, PeerStreamParts, StreamDirection, TlsParameters, VerifiedPeerStream,
 };
@@ -415,9 +415,8 @@ impl Session {
             space_grant,
             written,
         } = transmission;
-        let has_bookmark_payload = space_grant
-            .as_ref()
-            .is_some_and(|grant| grant.remote_bookmark_has_payload(&stanza));
+        let has_bookmark_payload = matches!(space_grant.as_ref(), Some(SpaceTransmission::Active(grant))
+            if grant.remote_bookmark_has_payload(&stanza));
         let outputs = match self.stream.send_stanza(stanza) {
             Ok(outputs) => outputs,
             Err(error) => {
@@ -429,10 +428,17 @@ impl Session {
             let [Output::Transmit(bytes)] = outputs.as_slice() else {
                 return Err(S2sOutcome::Protocol);
             };
-            match grant
-                .admit_remote(has_bookmark_payload, || self.transport.stage_tls(bytes))
-                .await
-            {
+            let staged = match grant {
+                SpaceTransmission::Active(grant) => {
+                    grant
+                        .admit_remote(has_bookmark_payload, || self.transport.stage_tls(bytes))
+                        .await
+                }
+                SpaceTransmission::Deletion(grant) => {
+                    grant.admit_remote(|| self.transport.stage_tls(bytes)).await
+                }
+            };
+            match staged {
                 None => {
                     let _ = written.send(Err(Untransmitted::AuthorizationExpired));
                     return Ok(());

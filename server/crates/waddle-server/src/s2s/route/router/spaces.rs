@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use jid::{BareJid, Jid};
+use tokio::sync::{mpsc::OwnedPermit, oneshot};
 use waddle_xmpp::identity::CanonicalDomain;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
@@ -20,8 +21,12 @@ use super::super::replies;
 use super::super::room_delivery::{RoomWork, SpaceTraffic};
 use super::super::telemetry;
 use super::hosting::{bucket, spend_refusal};
-use super::{lock, Allowance, Inner, Pair, Purpose, Queued};
-use crate::s2s::conn::{SinkVerdict, VerifiedPeerStream};
+use super::{
+    lock, stanza_element, Allowance, Inner, Pair, PairWorker, Purpose, Queued,
+    SpaceDeletionCompletion,
+};
+use crate::permissions::host_grant::RemoteSpaceDeletionGrant;
+use crate::s2s::conn::{SinkVerdict, TransmitError, VerifiedPeerStream};
 
 /// Remote domains whose allowance of requests for the Spaces service is
 /// kept. A domain that finds the table full of domains still spending
@@ -206,37 +211,7 @@ impl Inner {
         stanza: Stanza,
         grant: Option<Arc<crate::permissions::host_grant::ManagedSpaceGrant>>,
     ) -> bool {
-        let pair = match (
-            CanonicalDomain::parse_canonical(service.domain().as_str()),
-            CanonicalDomain::parse_canonical(subscriber.domain().as_str()),
-        ) {
-            (Ok(local), Ok(remote)) => Pair { local, remote },
-            _ => return false,
-        };
-        if !self.admits(&pair.remote) {
-            telemetry::space_event_dropped();
-            return false;
-        }
-        let share = {
-            let mut shares = lock(&self.space_event_shares);
-            let held = shares.get(&pair).copied().unwrap_or(0);
-            if held >= self.limits.space_events_per_peer {
-                None
-            } else {
-                shares.insert(pair.clone(), held + 1);
-                Some(EventShare {
-                    shares: Arc::clone(&self.space_event_shares),
-                    pair: pair.clone(),
-                })
-            }
-        };
-        let Some(share) = share else {
-            telemetry::space_event_dropped();
-            return false;
-        };
-        // Opened as a reply's queue is: within the share of the pair queues
-        // that what remote senders ask for may open.
-        let Some(permit) = self.reserve(pair, true) else {
+        let Ok((permit, share)) = self.reserve_space_event(service, subscriber) else {
             telemetry::space_event_dropped();
             return false;
         };
@@ -249,5 +224,121 @@ impl Inner {
         });
         telemetry::space_event_queued();
         true
+    }
+
+    pub(super) fn offer_space_deletion(
+        self: &Arc<Self>,
+        service: &BareJid,
+        subscriber: &Jid,
+        stanza: Stanza,
+        grant: Arc<RemoteSpaceDeletionGrant>,
+    ) -> Result<oneshot::Receiver<SpaceDeletionCompletion>, SpaceDeletionCompletion> {
+        let (permit, share) = self
+            .reserve_space_event(service, subscriber)
+            .inspect_err(|_| {
+                telemetry::space_event_dropped();
+            })?;
+        let (completion, receiver) = oneshot::channel();
+        permit.send(Queued {
+            stanza,
+            purpose: Purpose::SpaceDeletion {
+                grant,
+                completion,
+                share,
+            },
+        });
+        telemetry::space_event_queued();
+        Ok(receiver)
+    }
+
+    fn reserve_space_event(
+        self: &Arc<Self>,
+        service: &BareJid,
+        subscriber: &Jid,
+    ) -> Result<(OwnedPermit<Queued>, EventShare), SpaceDeletionCompletion> {
+        use SpaceDeletionCompletion::{PermanentRefusal, RetryBeforeStage};
+
+        let pair = match (
+            CanonicalDomain::parse_canonical(service.domain().as_str()),
+            CanonicalDomain::parse_canonical(subscriber.domain().as_str()),
+        ) {
+            (Ok(local), Ok(remote)) => Pair { local, remote },
+            _ => return Err(PermanentRefusal),
+        };
+        if !self.admits(&pair.remote) {
+            return Err(PermanentRefusal);
+        }
+        let share = {
+            let mut shares = lock(&self.space_event_shares);
+            let held = shares.get(&pair).copied().unwrap_or(0);
+            if held >= self.limits.space_events_per_peer {
+                return Err(RetryBeforeStage);
+            }
+            shares.insert(pair.clone(), held + 1);
+            EventShare {
+                shares: Arc::clone(&self.space_event_shares),
+                pair: pair.clone(),
+            }
+        };
+        // The event lane opens only within the queue budget reserved for
+        // traffic prompted by remote senders.
+        let permit = self.reserve(pair, true).ok_or(RetryBeforeStage)?;
+        Ok((permit, share))
+    }
+}
+
+impl PairWorker {
+    pub(super) async fn send_space_deletion(
+        &mut self,
+        stanza: Stanza,
+        grant: Arc<RemoteSpaceDeletionGrant>,
+    ) -> Option<SpaceDeletionCompletion> {
+        use SpaceDeletionCompletion::{
+            Ambiguous, PermanentRefusal, RetryBeforeStage, WrittenToTls,
+        };
+
+        let Some(transport) = self.router.transport.get().cloned() else {
+            return Some(RetryBeforeStage);
+        };
+        let mut element = stanza_element(&stanza);
+        let mut retried = false;
+        loop {
+            if self.router.shutdown.is_cancelled() {
+                return None;
+            }
+            if !self.router.admits(&self.pair.remote) {
+                return Some(PermanentRefusal);
+            }
+            let stream = match self.stream(&transport).await {
+                Ok(stream) => stream,
+                Err(_) if self.router.shutdown.is_cancelled() => return None,
+                Err(_) if !self.router.admits(&self.pair.remote) => return Some(PermanentRefusal),
+                Err(_) => return Some(RetryBeforeStage),
+            };
+            if !self.router.admits(&self.pair.remote) {
+                return Some(PermanentRefusal);
+            }
+            let transmit = transport.transmit_space_deletion(&stream, element, Arc::clone(&grant));
+            match tokio::time::timeout(self.router.limits.transmit_deadline, transmit).await {
+                Ok(Ok(())) => return Some(WrittenToTls),
+                Ok(Err(TransmitError::NotTaken(returned))) if !retried => {
+                    self.stream = None;
+                    retried = true;
+                    element = returned;
+                }
+                Ok(Err(TransmitError::NotTaken(_))) => {
+                    self.stream = None;
+                    return Some(RetryBeforeStage);
+                }
+                Ok(Err(TransmitError::AuthorizationExpired)) => return Some(RetryBeforeStage),
+                Ok(Err(TransmitError::Refused(_) | TransmitError::DeletionRefused)) => {
+                    return Some(PermanentRefusal);
+                }
+                Ok(Err(TransmitError::Unknown)) | Err(_) => {
+                    self.stream = None;
+                    return Some(Ambiguous);
+                }
+            }
+        }
     }
 }

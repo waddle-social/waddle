@@ -451,6 +451,16 @@ pub async fn handle_iq_with_conn_state(
     }
     if payload_ns == waddle_xmpp::pubsub::NS_PUBSUB_OWNER {
         let reply = if matches!(&iq, xmpp_parsers::iq::Iq::Set { .. }) {
+            if let Some(reply) = super::pubsub_space_membership::delete_enrolled_space(
+                &iq,
+                state,
+                phase.bound_jid(),
+                authenticated_session,
+            )
+            .await
+            {
+                return ResponseBatch::from_frames(vec![reply]);
+            }
             if let Some(reply) = super::pubsub_space_membership::configure_enrolled_space(
                 &iq,
                 state,

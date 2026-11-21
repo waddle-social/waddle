@@ -90,6 +90,8 @@ pub(super) struct BatchWriteReport {
     /// `accepted_frame_indices`, which tracks frames recorded/retained for
     /// XEP-0198 replay whether or not they reached the wire.
     pub(super) written_frame_count: usize,
+    /// Frames durably accepted by the authoritative XEP-0198 session.
+    pub(super) durable_custody_count: usize,
 }
 
 /// Normal upper bound on frames the mid-batch drain may park in
@@ -352,6 +354,7 @@ where
     let total_frames = frames.len();
     let mut accepted_frame_indices = Vec::new();
     let mut written_frame_count = 0usize;
+    let mut durable_custody_count = 0usize;
     complete_replayed_ingress_receipts(state, &[]).await;
     let mut frames = frames.into_iter().enumerate();
     if !batch_authoritative(authority) {
@@ -360,6 +363,7 @@ where
             outcome: BatchWriteOutcome::AuthorityRevoked,
             accepted_frame_indices,
             written_frame_count,
+            durable_custody_count,
         };
     }
     // Send-window pacing applies ONLY before frames that would actually grow
@@ -382,6 +386,7 @@ where
                 outcome: BatchWriteOutcome::AuthorityRevoked,
                 accepted_frame_indices,
                 written_frame_count,
+                durable_custody_count,
             };
         }
         // The response is tagged where SM enable succeeds, after enrollment
@@ -410,6 +415,7 @@ where
                     outcome: BatchWriteOutcome::TransportClosed,
                     accepted_frame_indices,
                     written_frame_count,
+                    durable_custody_count,
                 };
             };
             Some(permit)
@@ -445,6 +451,7 @@ where
                         outcome: BatchWriteOutcome::DeferredCapExhausted,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
                 SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
@@ -460,6 +467,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
                 SendWindowOutcome::AuthorityRevoked => {
@@ -475,6 +483,7 @@ where
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
             }
@@ -484,6 +493,18 @@ where
             // A durable session takes custody of the frame before the
             // connection's queue or the transport may hold it.
             let provenance = frame.provenance();
+            let deletion_hold =
+                if let Some(grant) = protected.and_then(|reply| reply.initial_deletion()) {
+                    let Some(hold) = grant.hold_delivery(false).await else {
+                        continue;
+                    };
+                    if grant.admit(|| ()).is_none() {
+                        continue;
+                    }
+                    Some(hold)
+                } else {
+                    None
+                };
             let custody = conn
                 .durable_sm
                 .take_live_custody(
@@ -498,10 +519,15 @@ where
                     },
                 )
                 .await;
+            drop(deletion_hold);
             let committed_sequence = match custody {
                 LiveCustody::Unmanaged => None,
-                LiveCustody::Exposed { sequence } => Some(sequence),
+                LiveCustody::Exposed { sequence } => {
+                    durable_custody_count += 1;
+                    Some(sequence)
+                }
                 LiveCustody::Retained => {
+                    durable_custody_count += 1;
                     // The authority holds the frame; a resume in progress
                     // writes it after its replay.
                     accepted_frame_indices.push(frame_index);
@@ -527,6 +553,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
             };
@@ -565,6 +592,7 @@ where
                 outcome: BatchWriteOutcome::AuthorityRevoked,
                 accepted_frame_indices,
                 written_frame_count,
+                durable_custody_count,
             };
         }
         // Only the final carrier bears the ordered prefix's obligations. Settle
@@ -588,6 +616,7 @@ where
                     outcome: BatchWriteOutcome::TransportClosed,
                     accepted_frame_indices,
                     written_frame_count,
+                    durable_custody_count,
                 };
             }
         }
@@ -650,6 +679,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     }
                 }
                 SendWindowOutcome::AuthorityRevoked => {
@@ -662,6 +692,7 @@ where
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     }
                 }
                 SendWindowOutcome::Recovered
@@ -679,6 +710,7 @@ where
                     outcome: BatchWriteOutcome::AuthorityRevoked,
                     accepted_frame_indices,
                     written_frame_count,
+                    durable_custody_count,
                 };
             }
             if let Err(outcome) = send_window_message(
@@ -697,6 +729,7 @@ where
                             outcome: BatchWriteOutcome::TransportClosed,
                             accepted_frame_indices,
                             written_frame_count,
+                            durable_custody_count,
                         }
                     }
                     SendWindowOutcome::AuthorityRevoked => {
@@ -706,6 +739,7 @@ where
                             outcome: BatchWriteOutcome::AuthorityRevoked,
                             accepted_frame_indices,
                             written_frame_count,
+                            durable_custody_count,
                         }
                     }
                     SendWindowOutcome::Recovered
@@ -726,6 +760,7 @@ where
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
                 DrainSignal::AuthorityRevoked => {
@@ -735,6 +770,7 @@ where
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
                         written_frame_count,
+                        durable_custody_count,
                     };
                 }
             }
@@ -744,6 +780,7 @@ where
         outcome: BatchWriteOutcome::Continue,
         accepted_frame_indices: (0..total_frames).collect(),
         written_frame_count,
+        durable_custody_count,
     }
 }
 
@@ -1123,6 +1160,10 @@ where
         let ingress_receipts = frame.ingress_receipts().to_vec();
         let provenance = frame.provenance();
         let protected = frame.protected_space_reply();
+        if protected.is_some_and(|reply| reply.initial_deletion().is_some()) {
+            // An initial deletion can enter SM only through the custody hold.
+            continue;
+        }
         let frame_xml = protected.map_or_else(
             || frame.clone().into_serialized_xml(),
             |reply| reply.payload.wire().to_owned(),

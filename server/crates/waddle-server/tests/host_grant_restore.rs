@@ -109,7 +109,7 @@ const SERVICE_UNAVAILABLE: (ErrorType, DefinedCondition) =
 
 /// Every relation of the canonical host-grant store: what a restore of the
 /// database brings back.
-const AUTHORITY_RELATIONS: [&str; 10] = [
+const AUTHORITY_RELATIONS: [&str; 14] = [
     "host_grant_authority",
     "host_grant_scope_lifecycles",
     "host_grant_scopes",
@@ -120,6 +120,10 @@ const AUTHORITY_RELATIONS: [&str; 10] = [
     "host_grant_space_bindings",
     "host_grant_space_affiliations",
     "host_grant_space_operation_changes",
+    "host_grant_space_deletions",
+    "host_grant_space_deletion_audience",
+    "host_grant_space_deletion_jobs",
+    "host_grant_space_deletion_bindings",
 ];
 
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which
@@ -683,11 +687,11 @@ fn reconstruction_lowers_only_and_records_subjects_only_the_projection_held() {
 }
 
 #[tokio::test]
-async fn configure_space_records_exact_policy_change_once() {
+async fn configure_and_delete_space_preserves_room_scope() {
     use waddle_server::db::local_space_subscriptions::LocalSpaceSubscriptions;
     use waddle_server::db::s2s_spaces::SpaceSubscriptionGrant;
     use waddle_server::permissions::host_grant::{
-        ConfigureSpace, SpaceBookmarkAction, SpaceBookmarkChange,
+        ConfigureSpace, DeleteSpace, SpaceBookmarkAction, SpaceBookmarkChange,
     };
 
     let Some(fixture) = GrantFixture::active("hg_configure_space").await else {
@@ -907,6 +911,427 @@ async fn configure_space_records_exact_policy_change_once() {
         .rollback()
         .await
         .expect("release delivery lock");
+
+    let remote_account = subject("alice@peer.test");
+    let member = fixture
+        .store
+        .set_space_affiliations(
+            &SetSpaceAffiliations {
+                operation: GrantOperationId::generate(),
+                lifecycle,
+                expected_generation: record.generation,
+                initiator: subject(OWNER),
+                changes: vec![SpaceAffiliationChange {
+                    subject: remote_account.clone(),
+                    affiliation: SpaceMembership::Member,
+                }],
+            },
+            &fixture.policy,
+        )
+        .await
+        .expect("record the remote member");
+    fixture.activate_current(&fixture.scope).await;
+    let remote_snapshot = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO s2s_space_subscriptions
+         (service_jid, node_name, subscriber_jid, account_jid, subscriber_domain,
+          node_created_at_ms, strength, trust_profile, snapshot_generation, subscribed_at_ms,
+          grant_lifecycle_id, grant_authority_incarnation, grant_generation)
+         VALUES ($1, $2, $3, $3, 'peer.test', 42, 'pkix', 'private_ca', $4, $5, $6, $7, $8),
+                ($1, $2, 'other@peer.test', 'other@peer.test', 'peer.test', 42,
+                 'pkix', 'private_ca', $4, $5, $6, $7, $8)",
+    )
+    .bind(command.key.service().as_str())
+    .bind(command.key.node())
+    .bind(remote_account.as_str())
+    .bind(remote_snapshot.to_string())
+    .bind(chrono::Utc::now().timestamp_millis())
+    .bind(lifecycle.to_storage())
+    .bind(command.expected_incarnation.to_storage())
+    .bind(member.record().generation.value())
+    .execute(&pool)
+    .await
+    .expect("seed exact and unrelated remote subscriptions");
+
+    let deletion = DeleteSpace {
+        operation: GrantOperationId::generate(),
+        key: command.key.clone(),
+        lifecycle,
+        expected_incarnation: command.expected_incarnation,
+        expected_generation: member.record().generation,
+        initiator: subject(OWNER),
+    };
+    let MutationReceipt::Recorded(deleted) = fixture
+        .store
+        .delete_space(&deletion, &fixture.policy)
+        .await
+        .expect("delete the enrolled Space")
+    else {
+        panic!("first delete records its tombstone");
+    };
+    assert_eq!(deleted.kind, OperationKind::DeleteSpace);
+    assert_eq!(
+        fixture
+            .store
+            .delete_space(&deletion, &fixture.policy)
+            .await
+            .expect("retry delete"),
+        MutationReceipt::Replayed(deleted.clone()),
+    );
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Activated
+    );
+    let audience = fixture
+        .store
+        .load_space_deletion_audience(&deletion.key, deletion.operation)
+        .await
+        .expect("read durable audience")
+        .expect("the committed deletion");
+    assert_eq!(audience.record, deleted);
+    assert_eq!(audience.local, [preference.clone()]);
+    let [remote] = audience.remote.as_slice() else {
+        panic!("only the eligible remote preference is captured");
+    };
+    assert_eq!(&remote.account, remote_account.jid());
+    assert_eq!(remote.snapshot, remote_snapshot);
+    assert_eq!(
+        remote.grant,
+        Some(SpaceSubscriptionGrant {
+            lifecycle,
+            incarnation: command.expected_incarnation,
+            generation: member.record().generation,
+        })
+    );
+    let local = fixture
+        .store
+        .load_local_space_deletion_recipient(&deletion.key, deletion.operation, &deletion.initiator)
+        .await
+        .expect("read exact local recipient")
+        .expect("the owner preference");
+    assert_eq!(local.preference, preference);
+    assert_eq!(local.current_generation, deleted.generation);
+    assert!(fixture
+        .store
+        .load_local_space_deletion_recipient(&deletion.key, deletion.operation, &subject(PEER))
+        .await
+        .expect("check unrelated subject")
+        .is_none());
+    sqlx::query("DELETE FROM s2s_space_subscriptions WHERE service_jid = $1 AND node_name = $2")
+        .bind(deletion.key.service().as_str())
+        .bind(deletion.key.node())
+        .execute(&pool)
+        .await
+        .expect("remove the mutable source preferences");
+    assert_eq!(
+        fixture
+            .store
+            .load_space_deletion_audience(&deletion.key, deletion.operation)
+            .await
+            .expect("recover after cleanup")
+            .expect("the same deletion")
+            .remote,
+        audience.remote
+    );
+    use waddle_server::permissions::host_grant::{
+        SpaceDeletionAttemptOutcome as Outcome, SpaceDeletionBinding,
+        SpaceDeletionDeliveryKind as Kind,
+    };
+    use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+
+    let mut jobs = fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Local, 2)
+        .await
+        .expect("claim local notice");
+    assert_eq!(jobs.len(), 1);
+    let parent = jobs.pop().unwrap();
+    assert_eq!(parent.subject, deletion.initiator);
+    assert_eq!(parent.record, deleted);
+    let bindings: Vec<_> = ["desktop", "phone"]
+        .into_iter()
+        .map(|name| SpaceDeletionBinding {
+            resource: format!("{OWNER}/{name}").parse().expect("owner resource"),
+            binding: BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process())),
+        })
+        .collect();
+    assert!(fixture
+        .store
+        .freeze_local_space_deletion_bindings(&parent, &bindings)
+        .await
+        .expect("freeze destinations"));
+    assert!(fixture
+        .store
+        .freeze_local_space_deletion_bindings(&parent, &[])
+        .await
+        .expect("repeat freeze"));
+    assert!(!fixture
+        .store
+        .begin_space_deletion_staging(&parent)
+        .await
+        .expect("reject binding-free staging"));
+    let children = fixture
+        .store
+        .claim_local_space_deletion_bindings(&parent, 3)
+        .await
+        .expect("claim destinations");
+    assert_eq!(children.len(), 2);
+    let desktop = children
+        .iter()
+        .find(|job| job.target == bindings[0])
+        .expect("desktop");
+    let phone = children
+        .iter()
+        .find(|job| job.target == bindings[1])
+        .expect("phone");
+    let exact = fixture
+        .store
+        .load_local_space_deletion_binding_attempt(
+            &deletion.key,
+            deletion.operation,
+            &desktop.target.resource,
+            &desktop.target.binding,
+            desktop.token,
+        )
+        .await
+        .expect("resolve exact destination")
+        .expect("live child");
+    assert_eq!(exact.token, desktop.token);
+    assert!(fixture
+        .store
+        .begin_local_space_deletion_binding_staging(desktop)
+        .await
+        .expect("stage desktop"));
+    assert!(!fixture
+        .store
+        .begin_local_space_deletion_binding_staging(desktop)
+        .await
+        .expect("duplicate stage"));
+    fixture
+        .store
+        .hold_local_space_deletion_binding_staging(desktop)
+        .await
+        .expect("check stage")
+        .expect("hold exact binding")
+        .rollback()
+        .await
+        .expect("release binding lock");
+    assert!(fixture
+        .store
+        .finish_local_space_deletion_binding_attempt(desktop, Outcome::Custody)
+        .await
+        .expect("record desktop custody"));
+    assert!(fixture
+        .store
+        .finish_local_space_deletion_binding_attempt(phone, Outcome::Retry)
+        .await
+        .expect("schedule proved unsent phone"));
+    assert!(fixture
+        .store
+        .settle_local_space_deletion_parent(&parent)
+        .await
+        .expect("back off parent"));
+    assert!(fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Local, 1)
+        .await
+        .expect("check backoff")
+        .is_empty());
+    sqlx::query(
+        "UPDATE host_grant_space_deletion_jobs SET due_at_ms = 0
+                 WHERE lifecycle_id = $1 AND delivery_kind = 'local'",
+    )
+    .bind(lifecycle.to_storage())
+    .execute(&pool)
+    .await
+    .expect("advance retry time");
+    let mut jobs = fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Local, 1)
+        .await
+        .expect("claim local retry");
+    let parent = jobs.pop().expect("parent retry");
+    let retries = fixture
+        .store
+        .claim_local_space_deletion_bindings(&parent, 3)
+        .await
+        .expect("claim pending child");
+    let [retry] = retries.as_slice() else {
+        panic!("desktop must not be reoffered");
+    };
+    assert_eq!(retry.target, phone.target);
+    assert_ne!(retry.token, phone.token);
+    assert!(fixture
+        .store
+        .begin_local_space_deletion_binding_staging(retry)
+        .await
+        .expect("stage phone"));
+    let deadline: i64 = sqlx::query_scalar(
+        "UPDATE host_grant_space_deletion_jobs
+            SET lease_until_ms = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint + 2000,
+                attempts = 16
+          WHERE lifecycle_id = $1 AND delivery_kind = 'local' RETURNING lease_until_ms",
+    )
+    .bind(lifecycle.to_storage())
+    .fetch_one(&pool)
+    .await
+    .expect("shorten the final lease");
+    let mut blocker = pool.begin().await.expect("lock the staged child");
+    sqlx::query(
+        "SELECT 1 FROM host_grant_space_deletion_bindings
+          WHERE lifecycle_id = $1 AND resource_jid = $2 FOR UPDATE",
+    )
+    .bind(lifecycle.to_storage())
+    .bind(retry.target.resource.as_str())
+    .fetch_one(&mut *blocker)
+    .await
+    .expect("hold child row");
+    let hold = {
+        let store = fixture.store.clone();
+        let retry = retry.clone();
+        tokio::spawn(async move {
+            store
+                .hold_local_space_deletion_binding_staging(&retry)
+                .await
+                .expect("lease hold decision")
+                .is_some()
+        })
+    };
+    let settle = {
+        let store = fixture.store.clone();
+        let retry = retry.clone();
+        tokio::spawn(async move {
+            store
+                .finish_local_space_deletion_binding_attempt(&retry, Outcome::Custody)
+                .await
+                .expect("lease settlement decision")
+        })
+    };
+    tokio::time::timeout(Duration::from_millis(1500), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND query LIKE '%host_grant_space_deletion_bindings%'
+                  AND cardinality(pg_blocking_pids(pid)) > 0",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("observe both child lock waits");
+            if waiting >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both attempts reach the child lock before expiry");
+    sqlx::query("SELECT pg_sleep_until(to_timestamp($1::double precision / 1000.0) + interval '25 milliseconds')")
+        .bind(deadline as f64)
+        .execute(&mut *blocker)
+        .await
+        .expect("wait past the database lease deadline");
+    blocker.rollback().await.expect("release child row");
+    assert!(
+        !hold.await.expect("join hold"),
+        "expired child cannot stage"
+    );
+    assert!(
+        !settle.await.expect("join settlement"),
+        "expired child cannot settle"
+    );
+    assert!(fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Local, 1)
+        .await
+        .expect("sweep local parent")
+        .is_empty());
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM host_grant_space_deletion_jobs
+             WHERE lifecycle_id = $1 AND delivery_kind = 'local'",
+    )
+    .bind(lifecycle.to_storage())
+    .fetch_one(&pool)
+    .await
+    .expect("read parent aggregate");
+    assert_eq!(state, "custody", "expiry cannot erase prior custody");
+
+    let mut jobs = fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Remote, 1)
+        .await
+        .expect("claim remote");
+    let expired = jobs.pop().expect("exact remote audience");
+    assert_eq!(expired.subject, remote_account);
+    sqlx::query(
+        "UPDATE host_grant_space_deletion_jobs SET lease_until_ms = 0
+                 WHERE lifecycle_id = $1 AND delivery_kind = 'remote'",
+    )
+    .bind(lifecycle.to_storage())
+    .execute(&pool)
+    .await
+    .expect("expire remote pre-stage lease");
+    let mut jobs = fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Remote, 1)
+        .await
+        .expect("reclaim remote");
+    let remote = jobs.pop().expect("retry unsent remote");
+    assert_ne!(expired.token, remote.token);
+    assert_eq!(remote.attempt, expired.attempt + 1);
+    assert!(!fixture
+        .store
+        .begin_space_deletion_staging(&expired)
+        .await
+        .expect("reject old lease"));
+    assert!(fixture
+        .store
+        .begin_space_deletion_staging(&remote)
+        .await
+        .expect("stage remote"));
+    sqlx::query(
+        "UPDATE host_grant_space_deletion_jobs SET lease_until_ms = 0
+                 WHERE lifecycle_id = $1 AND delivery_kind = 'remote'",
+    )
+    .bind(lifecycle.to_storage())
+    .execute(&pool)
+    .await
+    .expect("expire remote staging lease");
+    assert!(fixture
+        .store
+        .claim_space_deletion_jobs(Kind::Remote, 1)
+        .await
+        .expect("sweep remote")
+        .is_empty());
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM host_grant_space_deletion_jobs
+             WHERE lifecycle_id = $1 AND delivery_kind = 'remote'",
+    )
+    .bind(lifecycle.to_storage())
+    .fetch_one(&pool)
+    .await
+    .expect("read remote state");
+    assert_eq!(state, "ambiguous");
+    let scope = fixture.state(&fixture.scope).await;
+    assert_eq!(scope.admission, AdmissionState::Active);
+    assert_eq!(scope.projected_generation, Some(deleted.generation));
+    let (bound, items) = sqlx::query_as::<_, (bool, i64)>(
+        "SELECT EXISTS (SELECT 1 FROM host_grant_space_bindings WHERE lifecycle_id = $1),
+                (SELECT count(*) FROM pubsub_items WHERE owner_jid = $2 AND node_name = $3)",
+    )
+    .bind(lifecycle.to_storage())
+    .bind(deletion.key.service().as_str())
+    .bind(deletion.key.node())
+    .fetch_one(&pool)
+    .await
+    .expect("check the reserved node was emptied");
+    assert!(bound);
+    assert_eq!(items, 0);
+    assert!(subscriptions
+        .hold_delivery(&deletion.key, &preference, version, false)
+        .await
+        .expect("check tombstoned delivery")
+        .is_none());
 }
 
 #[tokio::test]
@@ -3047,6 +3472,10 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_deletion_jobs TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_deletion_bindings TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
         format!(
@@ -3323,6 +3752,10 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_deletion_jobs TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_deletion_bindings TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(

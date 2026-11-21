@@ -4,7 +4,9 @@ use crate::identity::CanonicalBareJid;
 use crate::protocol::frame::MAX_FRAME_SIZE;
 use crate::pubsub::SubId;
 use jid::{BareJid, FullJid};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 const HEADER: &[u8; 4] = b"SPR\x01";
@@ -26,6 +28,16 @@ pub const MAX_PROTECTED_SPACE_REPLY_BYTES: usize = FIXED_BYTES
     + MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES
         * (size_of::<u32>() + MAX_JID_BYTES + 2 * UUID_BYTES + size_of::<i64>());
 
+/// Identify one subscriber's deletion notification across transport retries.
+pub fn space_deletion_notice_id(operation: Uuid, subscriber: &BareJid) -> String {
+    let subscriber_digest = Sha256::digest(subscriber.as_str().as_bytes());
+    let mut id = format!("{}-", operation.simple());
+    for byte in subscriber_digest {
+        write!(id, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    id
+}
+
 /// Exact XMPP stanza payload admitted by the stored Space decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtectedSpaceReplyKind {
@@ -37,6 +49,7 @@ pub enum ProtectedSpaceReplyKind {
     OwnerAffiliations,
     OwnerAffiliationRefusals,
     OwnerConfiguration,
+    DeleteEvent,
 }
 
 /// Identity of the original access decision, without a replica lease.
@@ -253,6 +266,17 @@ impl ProtectedSpaceReplyDescriptor {
         self.bookmark_event.as_ref()
     }
 
+    /// Identify the deletion by its canonical stanza ID.
+    pub fn deletion_operation(&self) -> Option<Uuid> {
+        if self.kind != ProtectedSpaceReplyKind::DeleteEvent {
+            return None;
+        }
+        let (operation, _) = self.id.split_once('-')?;
+        let operation = Uuid::parse_str(operation).ok()?;
+        (space_deletion_notice_id(operation, &self.recipient.to_bare()) == self.id)
+            .then_some(operation)
+    }
+
     pub fn service(&self) -> &BareJid {
         &self.service
     }
@@ -321,6 +345,10 @@ impl ProtectedSpaceReplyDescriptor {
                 bytes.extend_from_slice(TYPED_HEADER);
                 bytes.push(7);
             }
+            ProtectedSpaceReplyKind::DeleteEvent => {
+                bytes.extend_from_slice(TYPED_HEADER);
+                bytes.push(8);
+            }
         }
         for field in fields {
             // The constructor limits every field below u32::MAX.
@@ -372,6 +400,7 @@ impl ProtectedSpaceReplyDescriptor {
                 Some((5, rest)) => (rest, ProtectedSpaceReplyKind::OwnerAffiliations),
                 Some((6, rest)) => (rest, ProtectedSpaceReplyKind::OwnerAffiliationRefusals),
                 Some((7, rest)) => (rest, ProtectedSpaceReplyKind::OwnerConfiguration),
+                Some((8, rest)) => (rest, ProtectedSpaceReplyKind::DeleteEvent),
                 _ => return Err(ProtectedSpaceReplyCodecError),
             }
         };
@@ -432,7 +461,10 @@ impl ProtectedSpaceReplyDescriptor {
             descriptor =
                 descriptor.with_bookmark_event(SubId::from_raw(subid), operation, room, present)?;
         }
-        if !input.is_empty() {
+        if !input.is_empty()
+            || (kind == ProtectedSpaceReplyKind::DeleteEvent
+                && descriptor.deletion_operation().is_none())
+        {
             return Err(ProtectedSpaceReplyCodecError);
         }
         Ok(descriptor)

@@ -441,6 +441,16 @@ pub fn host_spaces_for_remote_principals(
     crate::server::routes::websocket::s2s_spaces::host_spaces(state, router);
 }
 
+/// Start the production remote deletion worker on an S2S test router.
+#[cfg(feature = "test-support")]
+pub fn spawn_remote_space_deletion_worker(
+    state: &Arc<WebSocketState>,
+    router: crate::s2s::route::S2sRouter,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    crate::server::space_deletion_delivery::spawn_remote_for_test(state, router, stop);
+}
+
 /// [`host_rooms_for_remote_occupants`] for a replica whose requests for
 /// rooms another replica holds are carried by `carrier`, in place of the
 /// cluster's room claims and relay.

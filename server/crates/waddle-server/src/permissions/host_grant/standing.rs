@@ -293,6 +293,7 @@ async fn space_standing_in_tx(
          JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id \
          WHERE b.service_jid = ? AND b.space_node = ? AND g.subject_jid = ? \
          AND b.authority_incarnation = ? AND l.retired_at_ms IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id) \
          AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)",
         crate::db_params![
             key.service().as_str(), key.node(), subject.as_str(),

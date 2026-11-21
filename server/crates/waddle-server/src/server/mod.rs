@@ -23,6 +23,7 @@ pub mod push_notification_runtime;
 mod room_registry_gauge;
 pub mod runtime_owner;
 pub(crate) mod session_janitors;
+pub(crate) mod space_deletion_delivery;
 mod state;
 pub(crate) mod state_inventory;
 pub(crate) mod state_inventory_metrics;

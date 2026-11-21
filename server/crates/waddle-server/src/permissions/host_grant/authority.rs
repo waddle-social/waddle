@@ -304,6 +304,16 @@ impl HostGrantAuthority {
         Ok(receipt)
     }
 
+    /// Record a bound Space's deletion and schedule journal witnessing.
+    pub async fn delete_space(
+        &self,
+        command: &super::DeleteSpace,
+    ) -> Result<MutationReceipt, HostGrantError> {
+        let receipt = self.store.delete_space(command, &self.issuance).await?;
+        self.after_commit(command.lifecycle);
+        Ok(receipt)
+    }
+
     /// Close a scope for good, as [`HostGrantStore::retire_scope`] does,
     /// and witness the retirement after the commit. Owner phase only.
     pub async fn retire_scope(

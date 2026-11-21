@@ -50,9 +50,9 @@ pub use ingress_append::{
     SmKeyedAppendOutcome, SmRelayedAppendObligation,
 };
 pub use protected_space_reply::{
-    ProtectedSpaceBookmarkEvent, ProtectedSpaceReplyCodecError, ProtectedSpaceReplyDescriptor,
-    ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency, MAX_PROTECTED_SPACE_REPLY_BYTES,
-    MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES,
+    space_deletion_notice_id, ProtectedSpaceBookmarkEvent, ProtectedSpaceReplyCodecError,
+    ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency,
+    MAX_PROTECTED_SPACE_REPLY_BYTES, MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES,
 };
 pub use provenance::{
     SmFrameIngressClaims, SmFrameProvenance, SmProvenancedStanza, MAX_SM_PROVENANCE_BYTES,

@@ -1052,7 +1052,7 @@ fn log_unverified(error: &HostGrantError, retrying: bool, unserved: Result<bool,
 }
 
 /// Every host-grant relation, locked before the catalog is read.
-const RELATIONS: [&str; 14] = [
+const RELATIONS: [&str; 18] = [
     "host_grant_authority",
     "host_grant_scope_lifecycles",
     "host_grant_scopes",
@@ -1064,6 +1064,10 @@ const RELATIONS: [&str; 14] = [
     "host_grant_space_affiliations",
     "host_grant_space_operation_changes",
     "host_grant_space_bookmark_versions",
+    "host_grant_space_deletions",
+    "host_grant_space_deletion_audience",
+    "host_grant_space_deletion_jobs",
+    "host_grant_space_deletion_bindings",
     "local_space_subscriptions",
     "host_grant_fence_replicas",
     "host_grant_fence_acks",

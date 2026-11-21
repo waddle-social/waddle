@@ -1485,26 +1485,81 @@ impl LiveSocketState {
                             return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                         }
                     }
-                    Some(SocketOutboundFrame::ProtectedSpace(payload)) => {
+                    Some(
+                        outbound @ (SocketOutboundFrame::ProtectedSpace(_)
+                        | SocketOutboundFrame::SpaceDeletion(_)),
+                    ) => {
+                        use waddle_xmpp::registry::{
+                            SocketSpaceDeletion, SpaceDeletionSocketOutcome,
+                        };
+                        let (payload, deletion) = match outbound {
+                            SocketOutboundFrame::ProtectedSpace(payload) => (*payload, None),
+                            SocketOutboundFrame::SpaceDeletion(envelope) => {
+                                let SocketSpaceDeletion {
+                                    payload,
+                                    attempt_token,
+                                    completion,
+                                } = *envelope;
+                                (payload, Some((attempt_token, completion)))
+                            }
+                            SocketOutboundFrame::Ordinary(_) => unreachable!(),
+                        };
                         let Some(recipient) = conn.phase.bound_jid() else {
                             return ControlFlow::Continue(());
                         };
                         if !payload.protected_space_reply().is_some_and(|descriptor| {
-                            descriptor.bookmark_event().is_some()
-                                && descriptor.service().as_str()
-                                    == state.deps.service_domains.spaces.as_str()
+                            descriptor.service().as_str()
+                                == state.deps.service_domains.spaces.as_str()
+                                && if deletion.is_some() {
+                                    descriptor.deletion_operation().is_some()
+                                } else {
+                                    descriptor.bookmark_event().is_some()
+                                }
                         }) {
                             return ControlFlow::Continue(());
                         }
-                        let Some(frame) = super::resume_replay::authorize_protected_payload(
-                            *payload,
+                        let gate = &state.deps.app_state.host_grants;
+                        let attempt = if let Some((token, _)) = &deletion {
+                            let Some(binding) = conn.binding_ref.as_ref() else {
+                                return ControlFlow::Continue(());
+                            };
+                            let Some(attempt) = load_local_deletion_attempt(
+                                gate, &payload, recipient, binding, *token,
+                            )
+                            .await
+                            else {
+                                return ControlFlow::Continue(());
+                            };
+                            Some(attempt)
+                        } else {
+                            None
+                        };
+                        let frame = super::resume_replay::authorize_protected_payload(
+                            payload,
                             recipient,
-                            &state.deps.app_state.host_grants,
+                            gate,
+                            attempt.as_ref(),
                         )
-                        .await
-                        else {
+                        .await;
+                        let Some(frame) = frame else {
+                            if let Some((_, completion)) = deletion {
+                                let _ =
+                                    completion.send(SpaceDeletionSocketOutcome::RetryBeforeStage);
+                            }
                             return ControlFlow::Continue(());
                         };
+                        if deletion.is_some() {
+                            let began = match (gate.store(), attempt.as_ref()) {
+                                (Some(store), Some(attempt)) => store
+                                    .begin_local_space_deletion_binding_staging(attempt)
+                                    .await
+                                    .unwrap_or(false),
+                                _ => false,
+                            };
+                            if !began {
+                                return ControlFlow::Continue(());
+                            }
+                        }
                         let report = write_ingress_response_batch_with_protected_sink(
                             BatchSink {
                                 sender: &mut *ws_sender,
@@ -1523,6 +1578,16 @@ impl LiveSocketState {
                             },
                         )
                         .await;
+                        if let Some((_, completion)) = deletion {
+                            let outcome = if report.written_frame_count == 1
+                                || report.durable_custody_count == 1
+                            {
+                                SpaceDeletionSocketOutcome::Custody
+                            } else {
+                                SpaceDeletionSocketOutcome::Ambiguous
+                            };
+                            let _ = completion.send(outcome);
+                        }
                         if !matches!(report.outcome, BatchWriteOutcome::Continue) {
                             return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                         }
@@ -5955,4 +6020,25 @@ mod tests {
 
         assert_eq!(responses.len(), 1);
     }
+}
+
+async fn load_local_deletion_attempt(
+    gate: &crate::permissions::host_grant::HostGrantGate,
+    payload: &waddle_xmpp::stream_management::persistence::SmReplayPayload,
+    recipient: &jid::FullJid,
+    binding: &waddle_xmpp::ownership::BindingRef,
+    token: uuid::Uuid,
+) -> Option<crate::permissions::host_grant::SpaceDeletionBindingAttempt> {
+    use crate::permissions::host_grant::{GrantOperationId, ScopeKey};
+
+    let descriptor = payload.protected_space_reply()?;
+    if descriptor.recipient() != recipient {
+        return None;
+    }
+    let operation = GrantOperationId::from_uuid(descriptor.deletion_operation()?);
+    let key = ScopeKey::new(descriptor.service().clone(), descriptor.node()).ok()?;
+    gate.store()?
+        .load_local_space_deletion_binding_attempt(&key, operation, recipient, binding, token)
+        .await
+        .ok()?
 }

@@ -405,6 +405,16 @@ fn matches_protected_space_reply(
     element: &minidom::Element,
     descriptor: &ProtectedSpaceReplyDescriptor,
 ) -> bool {
+    if descriptor.kind() == ProtectedSpaceReplyKind::DeleteEvent {
+        return descriptor.deletion_operation().is_some()
+            && waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
+                element,
+                descriptor.service().as_str(),
+                descriptor.recipient().to_bare().as_str(),
+                descriptor.node(),
+                descriptor.id(),
+            );
+    }
     if element.attr("from") != Some(descriptor.service().as_str())
         || element.attr("to") != Some(descriptor.recipient().as_str())
     {
@@ -444,6 +454,7 @@ fn matches_protected_space_reply(
                 matches_protected_owner_configuration(element, descriptor.node())
             }
             ProtectedSpaceReplyKind::BookmarkEvent
+            | ProtectedSpaceReplyKind::DeleteEvent
             | ProtectedSpaceReplyKind::OwnerAffiliationRefusals => false,
         }
 }
@@ -2602,6 +2613,57 @@ mod protected_space_reply_storage_tests {
                 descriptor.clone()
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn delete_event_round_trips_and_binds_tombstone_identity() {
+        let base = descriptor();
+        let operation = uuid::Uuid::new_v4();
+        let id = crate::stream_management::space_deletion_notice_id(
+            operation,
+            &base.recipient().to_bare(),
+        );
+        let other = crate::stream_management::space_deletion_notice_id(
+            operation,
+            &"bob@example.test".parse().expect("other subscriber"),
+        );
+        assert_ne!(id, other);
+        let descriptor = ProtectedSpaceReplyDescriptor::new(
+            base.service().clone(),
+            base.node().to_owned(),
+            base.recipient().clone(),
+            id.clone(),
+            base.lifecycle(),
+            base.incarnation(),
+            base.generation(),
+        )
+        .expect("deletion descriptor")
+        .with_kind(ProtectedSpaceReplyKind::DeleteEvent);
+        let wire = format!(
+            "<message xmlns='jabber:client' type='headline' from='spaces.example.test' to='alice@example.test' id='{id}'><event xmlns='http://jabber.org/protocol/pubsub#event'><delete node='docs'/></event></message>"
+        );
+        let parsed = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("exact deletion event");
+        let restored = SmReplayPayload::from_storage(parsed.to_storage().into_owned())
+            .expect("stored deletion event");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        assert_eq!(descriptor.deletion_operation(), Some(operation));
+
+        for wrong in [
+            wire.replace("node='docs'", "node='other'"),
+            wire.replace(&id, &other),
+            wire.replace("alice@example.test", "alice@example.test/dev"),
+            wire.replace("alice@example.test", "other@example.test"),
+            wire.replace(
+                "<delete node='docs'/>",
+                "<delete node='docs'><redirect uri='xmpp:other.example.test'/></delete>",
+            ),
+        ] {
+            assert!(
+                SmReplayPayload::from_protected_space_reply(wrong, descriptor.clone()).is_err()
+            );
         }
     }
 

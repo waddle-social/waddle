@@ -37,7 +37,7 @@ pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, Sock
 pub use binding_permit::LocalBindingPermit;
 pub use endpoint::{
     BindingAdmissionState, ProtectedSpaceEventEnqueue, SocketOutboundEndpoint, SocketOutboundFrame,
-    SocketOutboundReceiver,
+    SocketOutboundReceiver, SocketSpaceDeletion, SpaceDeletionSocketOutcome,
 };
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};

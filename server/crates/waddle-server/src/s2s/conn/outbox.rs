@@ -17,17 +17,24 @@ use waddle_xmpp::s2s::SendError;
 
 use super::peer_stream::VerifiedPeerStream;
 use super::registry::Registry;
-use crate::permissions::host_grant::ManagedSpaceGrant;
+use crate::permissions::host_grant::{ManagedSpaceGrant, RemoteSpaceDeletionGrant};
 
 /// How many stanzas an outbound stream holds before its sender waits: the
 /// one being written.
 pub(super) const OUTBOX_CAPACITY: usize = 1;
 
+/// Authority carried to the TLS handoff for protected Space traffic.
+#[derive(Debug)]
+pub(super) enum SpaceTransmission {
+    Active(Arc<ManagedSpaceGrant>),
+    Deletion(Arc<RemoteSpaceDeletionGrant>),
+}
+
 /// One stanza for an outbound stream, and where to report its write.
 #[derive(Debug)]
 pub(super) struct Transmission {
     pub(super) stanza: Element,
-    pub(super) space_grant: Option<Arc<ManagedSpaceGrant>>,
+    pub(super) space_grant: Option<SpaceTransmission>,
     pub(super) written: oneshot::Sender<Result<(), Untransmitted>>,
 }
 
@@ -68,6 +75,9 @@ pub enum TransmitError {
     /// The protected stanza lost its grant before entering TLS.
     #[error("space authorization expired before transmission")]
     AuthorizationExpired,
+    /// The verified stream or the notice shape violates deletion delivery policy.
+    #[error("the stream refused the space deletion notice")]
+    DeletionRefused,
     /// The stream took the stanza and ended before its write completed or
     /// within it: the stanza may or may not have reached the peer.
     #[error("the stream ended while writing the stanza")]
@@ -80,7 +90,7 @@ pub(super) async fn transmit(
     registry: &Registry,
     stream: &VerifiedPeerStream,
     stanza: Element,
-    space_grant: Option<Arc<ManagedSpaceGrant>>,
+    space_grant: Option<SpaceTransmission>,
 ) -> Result<(), TransmitError> {
     let Some(outbox) = registry.outbox(stream) else {
         return Err(TransmitError::NotTaken(stanza));

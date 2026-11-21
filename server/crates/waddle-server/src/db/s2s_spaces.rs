@@ -462,6 +462,20 @@ pub(super) async fn hold_bookmark_delivery_version(
     version: &crate::permissions::host_grant::SpaceBookmarkVersion,
     has_payload: bool,
 ) -> Result<bool, super::DatabaseError> {
+    // Deletion takes an exclusive lock on this node. Read the tombstone
+    // in a fresh snapshot after the lock, including if deletion committed
+    // while this transaction was waiting.
+    let mut node_rows = tx
+        .query(
+            "SELECT 1 FROM pubsub_nodes WHERE owner_jid = ? AND node_name = ? FOR SHARE",
+            crate::db_params![service.as_str(), node],
+        )
+        .await?;
+    let node_exists = node_rows.next().await?.is_some();
+    drop(node_rows);
+    if !node_exists {
+        return Ok(false);
+    }
     let mut rows = tx
         .query(
             "SELECT 1 FROM host_grant_space_bookmark_versions v
@@ -469,9 +483,10 @@ pub(super) async fn hold_bookmark_delivery_version(
              JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node
              WHERE b.service_jid = ? AND b.space_node = ?
              AND b.authority_incarnation = v.authority_incarnation
+             AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id)
              AND v.lifecycle_id = ? AND v.room_jid = ? AND v.authority_incarnation = ?
              AND v.operation_token = ? AND v.present = (?::bigint <> 0)
-             AND (?::bigint = 0 OR p.deliver_payloads = 1) FOR SHARE OF v, p",
+             AND (?::bigint = 0 OR p.deliver_payloads = 1) FOR SHARE OF v",
             crate::db_params![
                 service.as_str(),
                 node,
@@ -503,6 +518,7 @@ async fn protected_subscription_still_allowed(
          JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id \
          WHERE b.lifecycle_id = ? AND b.service_jid = ? AND b.space_node = ? AND b.federated \
          AND b.authority_incarnation = a.incarnation AND a.incarnation = ? \
+         AND NOT EXISTS (SELECT 1 FROM host_grant_space_deletions d WHERE d.lifecycle_id = b.lifecycle_id) \
          AND s.admission_state = 'active' AND s.policy_version = ? \
          AND p.created_at_ms = ? AND p.access_model = b.access_model \
          AND (p.node_type IS NULL OR p.node_type = ?) \
@@ -751,7 +767,7 @@ async fn count_in(
 
 /// A row read back as the subscription it records. A row whose evidence
 /// cannot be read is an error, never evidence the row does not hold.
-fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
+pub(crate) fn decode(row: &Row) -> Result<SpaceSubscription, SpaceStoreError> {
     let account: String = row.get(0).map_err(storage)?;
     let strength: String = row.get(1).map_err(storage)?;
     let trust_profile: Option<String> = row.get(2).map_err(storage)?;

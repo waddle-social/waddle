@@ -50,14 +50,18 @@ use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::pubsub::Affiliation;
 use waddle_xmpp::stream_management::persistence::SmReplayPayload;
 use waddle_xmpp::stream_management::{
-    ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency,
+    space_deletion_notice_id, ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind,
+    ProtectedSpaceRoomDependency,
 };
 use xmpp_parsers::iq::Iq;
 
 use super::enrolled::{EnrolledScopes, Enrollment};
 use super::fence::{FenceTicket, ReplicaFence};
 use super::issuance::IssuanceBasis;
-use super::model::{GrantOperationId, GrantSubject, ScopeKey, SpaceBookmarkVersion};
+use super::model::{
+    GrantOperationId, GrantSubject, OperationRecord, ScopeKey, SpaceBookmarkVersion,
+    SpaceDeletionAttempt, SpaceDeletionBindingAttempt, SpaceDeletionDeliveryKind,
+};
 use super::policy::HostGrantAction;
 use super::principal::{
     named_evidence, NoSeats, PrincipalEvidence, PrincipalPolicy, PrincipalWitness, SeatEvidence,
@@ -70,7 +74,7 @@ use super::store::HostGrantStore;
 use crate::db::local_space_subscriptions::{LocalSpaceSubscription, LocalSpaceSubscriptions};
 use crate::db::s2s_spaces::{SpaceSubscription, SpaceSubscriptionGrant, SpaceSubscriptions};
 use crate::db::Database;
-use crate::s2s::conn::AuthenticationStrength;
+use crate::s2s::conn::{AuthenticationStrength, StreamDirection, VerifiedPeerStream};
 use crate::s2s::route::RemotePrincipal;
 
 /// At most one warning a minute that a managed room was refused on a replica
@@ -126,12 +130,33 @@ pub struct ManagedSpaceGrant {
     subscription_grant: SpaceSubscriptionGrant,
 }
 
-/// An exact local disco response and its current Space read authority.
+/// An exact protected reply and its current delivery authority.
 #[derive(Debug)]
 pub(crate) struct LocalSpaceReplyGrant {
-    grant: ManagedSpaceGrant,
+    authority: LocalSpaceReplyAuthority,
     replay: ProtectedSpaceReplyDescriptor,
     preference: Option<LocalReplyPreference>,
+}
+
+#[derive(Debug)]
+enum LocalSpaceReplyAuthority {
+    Active(ManagedSpaceGrant),
+    Deleted(LocalDeletionDelivery),
+}
+
+struct LocalDeletionDelivery {
+    fence: FenceTicket,
+    store: HostGrantStore,
+    attempt: Option<SpaceDeletionBindingAttempt>,
+}
+
+impl std::fmt::Debug for LocalDeletionDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalDeletionDelivery")
+            .field("fence", &self.fence)
+            .finish_non_exhaustive()
+    }
 }
 
 struct LocalReplyPreference {
@@ -150,7 +175,10 @@ impl std::fmt::Debug for LocalReplyPreference {
 
 impl LocalSpaceReplyGrant {
     pub(crate) fn admit<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
-        self.grant.admit(|_| effect())
+        match &self.authority {
+            LocalSpaceReplyAuthority::Active(grant) => grant.admit(|_| effect()),
+            LocalSpaceReplyAuthority::Deleted(deletion) => deletion.fence.admit(effect),
+        }
     }
 
     pub(crate) fn replay_identity(&self) -> &ProtectedSpaceReplyDescriptor {
@@ -162,12 +190,64 @@ impl LocalSpaceReplyGrant {
             && bookmark_item_has_payload(&payload.as_ref().to_element())
     }
 
-    pub(crate) async fn hold_subscription(
+    pub(crate) fn bind_deletion_attempt(&mut self, attempt: SpaceDeletionBindingAttempt) -> bool {
+        let LocalSpaceReplyAuthority::Deleted(deletion) = &mut self.authority else {
+            return false;
+        };
+        if attempt.parent.kind != SpaceDeletionDeliveryKind::Local
+            || attempt.parent.subject.jid() != &self.replay.recipient().to_bare()
+            || &attempt.target.resource != self.replay.recipient()
+            || HostGrantGate::local_space_deletion_event(
+                &attempt.parent.key,
+                self.replay.recipient(),
+                &attempt.parent.record,
+            )
+            .as_ref()
+                != Some(&self.replay)
+        {
+            return false;
+        }
+        deletion.attempt = Some(attempt);
+        true
+    }
+
+    pub(crate) fn requires_deletion_staging(&self) -> bool {
+        matches!(&self.authority, LocalSpaceReplyAuthority::Deleted(deletion) if deletion.attempt.is_some())
+    }
+
+    pub(crate) fn needs_delivery_hold(&self) -> bool {
+        self.preference.is_some() || matches!(&self.authority, LocalSpaceReplyAuthority::Deleted(_))
+    }
+
+    pub(crate) async fn hold_delivery(
         &self,
         has_bookmark_payload: bool,
     ) -> Option<crate::db::Transaction<'_>> {
-        let preference = self.preference.as_ref()?;
         tokio::time::timeout(ROOM_READ_DEADLINE, async {
+            if let LocalSpaceReplyAuthority::Deleted(deletion) = &self.authority {
+                if let Some(attempt) = &deletion.attempt {
+                    return deletion
+                        .store
+                        .hold_local_space_deletion_binding_staging(attempt)
+                        .await
+                        .ok()?;
+                }
+                let key = ScopeKey::new(self.replay.service().clone(), self.replay.node()).ok()?;
+                let subject = GrantSubject::new(self.replay.recipient().to_bare()).ok()?;
+                let operation = GrantOperationId::from_uuid(self.replay.deletion_operation()?);
+                return deletion
+                    .store
+                    .hold_space_deletion_recipient(
+                        &key,
+                        operation,
+                        &subject,
+                        deletion.fence.generation(),
+                        SpaceDeletionDeliveryKind::Local,
+                    )
+                    .await
+                    .ok()?;
+            }
+            let preference = self.preference.as_ref()?;
             if let Some(event) = self.replay.bookmark_event() {
                 let room = self.replay.room_dependencies().first()?.room().clone();
                 let version = SpaceBookmarkVersion {
@@ -205,10 +285,89 @@ impl LocalSpaceReplyGrant {
     ) -> Option<Self> {
         let (dependencies, decisions): (Vec<_>, Vec<_>) = rooms.into_iter().unzip();
         self.replay = self.replay.with_room_dependencies(dependencies).ok()?;
+        let LocalSpaceReplyAuthority::Active(grant) = &mut self.authority else {
+            return None;
+        };
         for decision in decisions {
-            self.grant.require_room(decision);
+            grant.require_room(decision);
         }
         Some(self)
+    }
+}
+
+/// A durable notice attempt for the exact saved remote Space subscriber.
+pub struct RemoteSpaceDeletionGrant {
+    store: HostGrantStore,
+    fence: FenceTicket,
+    attempt: SpaceDeletionAttempt,
+    subscription: SpaceSubscription,
+    principals: PrincipalPolicy,
+}
+
+impl std::fmt::Debug for RemoteSpaceDeletionGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteSpaceDeletionGrant")
+            .field("operation", &self.attempt.record.operation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RemoteSpaceDeletionGrant {
+    pub(crate) fn permits_stream(
+        &self,
+        stanza: &minidom::Element,
+        stream: &VerifiedPeerStream,
+    ) -> bool {
+        let key = &self.attempt.key;
+        let recipient = &self.subscription.account;
+        let saved = self.subscription.evidence;
+        if stream.direction() != StreamDirection::Outbound
+            || stream.local().as_str() != key.service().domain().as_str()
+            || stream.remote().as_str() != recipient.domain().as_str()
+            || (saved.strength() == AuthenticationStrength::Pkix
+                && stream.strength() != AuthenticationStrength::Pkix)
+            || saved
+                .trust_profile()
+                .is_some_and(|profile| stream.trust_profile() != Some(profile))
+        {
+            return false;
+        }
+        let evidence = PrincipalEvidence::Stream(StreamEvidence::recorded(
+            stream.strength(),
+            stream.trust_profile(),
+        ));
+        let witness = self.principals.witness(recipient, &evidence);
+        matches!(witness, PrincipalWitness::Remote(_))
+            && witness.grants_honoured()
+            && waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
+                stanza,
+                key.service().as_str(),
+                recipient.as_str(),
+                key.node(),
+                &space_deletion_notice_id(self.attempt.record.operation.as_uuid(), recipient),
+            )
+    }
+
+    pub(crate) async fn admit_remote<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
+        let hold = tokio::time::timeout(ROOM_READ_DEADLINE, async {
+            if !self
+                .store
+                .begin_space_deletion_staging(&self.attempt)
+                .await
+                .ok()?
+            {
+                return None;
+            }
+            self.store
+                .hold_space_deletion_staging(&self.attempt)
+                .await
+                .ok()?
+        })
+        .await
+        .ok()??;
+        let result = self.fence.admit(effect);
+        drop(hold);
+        result
     }
 }
 
@@ -1017,7 +1176,7 @@ impl HostGrantGate {
         .ok()?
         .with_kind(kind);
         Some(LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay,
             preference: None,
         })
@@ -1088,7 +1247,7 @@ impl HostGrantGate {
         .ok()?
         .with_kind(ProtectedSpaceReplyKind::OwnerAffiliationRefusals);
         Some(LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay,
             preference: None,
         })
@@ -1134,7 +1293,7 @@ impl HostGrantGate {
             subscription,
         };
         Some(LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay,
             preference: Some(preference),
         })
@@ -1231,6 +1390,72 @@ impl HostGrantGate {
         guard.permits_reply(reply, requester).then_some(guard)
     }
 
+    pub(crate) fn local_space_deletion_event(
+        key: &ScopeKey,
+        recipient: &FullJid,
+        record: &OperationRecord,
+    ) -> Option<ProtectedSpaceReplyDescriptor> {
+        Some(
+            ProtectedSpaceReplyDescriptor::new(
+                key.service().clone(),
+                key.node().to_owned(),
+                recipient.clone(),
+                space_deletion_notice_id(record.operation.as_uuid(), &recipient.to_bare()),
+                record.lifecycle.as_uuid(),
+                record.authority_incarnation.as_uuid(),
+                record.generation.value(),
+            )
+            .ok()?
+            .with_kind(ProtectedSpaceReplyKind::DeleteEvent),
+        )
+    }
+
+    async fn refresh_local_space_deletion(
+        &self,
+        replay: &ProtectedSpaceReplyDescriptor,
+        key: &ScopeKey,
+        subject: &GrantSubject,
+    ) -> Option<LocalSpaceReplyGrant> {
+        let operation = GrantOperationId::from_uuid(replay.deletion_operation()?);
+        let attachment = self.attachment()?;
+        if attachment.binding().incarnation.as_uuid() != replay.incarnation()
+            || !matches!(
+                attachment
+                    .principals()
+                    .witness(subject.jid(), &PrincipalEvidence::NoStream),
+                PrincipalWitness::Served
+            )
+        {
+            return None;
+        }
+        let fence = self.fence.as_ref()?;
+        let registration = fence.begin_decision().await?;
+        let store = self.store.as_ref()?;
+        let saved = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            store.load_local_space_deletion_recipient(key, operation, subject),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        let record = saved.record;
+        if Self::local_space_deletion_event(key, replay.recipient(), &record).as_ref()
+            != Some(replay)
+        {
+            return None;
+        }
+        let ticket = fence.ticket(registration, record.lifecycle, saved.current_generation);
+        ticket.is_current().then(|| LocalSpaceReplyGrant {
+            authority: LocalSpaceReplyAuthority::Deleted(LocalDeletionDelivery {
+                fence: ticket,
+                store: store.clone(),
+                attempt: None,
+            }),
+            replay: replay.clone(),
+            preference: None,
+        })
+    }
+
     /// Refresh a retained reply's lease only for its original scope decision.
     pub(crate) async fn refresh_local_space_reply(
         &self,
@@ -1243,6 +1468,11 @@ impl HostGrantGate {
         }
         let subject = GrantSubject::new(requester.to_bare()).ok()?;
         let key = ScopeKey::new(replay.service().clone(), replay.node()).ok()?;
+        if replay.kind() == ProtectedSpaceReplyKind::DeleteEvent {
+            return self
+                .refresh_local_space_deletion(replay, &key, &subject)
+                .await;
+        }
         let mut grant = self.space_read_local(&key, &subject).await?;
         if grant.fence.lifecycle().as_uuid() != replay.lifecycle()
             || grant.subscription_grant.incarnation.as_uuid() != replay.incarnation()
@@ -1282,13 +1512,13 @@ impl HostGrantGate {
             None
         };
         let result = LocalSpaceReplyGrant {
-            grant,
+            authority: LocalSpaceReplyAuthority::Active(grant),
             replay: replay.clone(),
             preference,
         };
         if replay.subscription_id().is_some() {
             let hold = result
-                .hold_subscription(result.bookmark_has_payload(payload))
+                .hold_delivery(result.bookmark_has_payload(payload))
                 .await?;
             let _ = hold.rollback().await;
         }
@@ -1325,6 +1555,44 @@ impl HostGrantGate {
         )
         .ok()?;
         Some((dependency, decision))
+    }
+
+    pub(crate) async fn remote_space_deletion_event(
+        &self,
+        attempt: &SpaceDeletionAttempt,
+    ) -> Option<RemoteSpaceDeletionGrant> {
+        if attempt.kind != SpaceDeletionDeliveryKind::Remote {
+            return None;
+        }
+        let attachment = self.attachment()?;
+        if attachment.binding().incarnation != attempt.record.authority_incarnation {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let fence = self.fence.as_ref()?;
+        let registration = fence.begin_decision().await?;
+        let (record, generation, subscription) = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            store.load_remote_space_deletion_recipient(
+                &attempt.key,
+                attempt.record.operation,
+                &attempt.subject,
+            ),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        if record != attempt.record || &subscription.account != attempt.subject.jid() {
+            return None;
+        }
+        let ticket = fence.ticket(registration, record.lifecycle, generation);
+        ticket.is_current().then(|| RemoteSpaceDeletionGrant {
+            store: store.clone(),
+            fence: ticket,
+            attempt: attempt.clone(),
+            subscription,
+            principals: attachment.principals().clone(),
+        })
     }
 
     /// Authorize a read for the account carried by the authenticated S2S stream.

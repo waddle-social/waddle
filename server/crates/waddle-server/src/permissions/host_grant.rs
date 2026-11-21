@@ -120,8 +120,8 @@ impl SpaceReplyAuthority {
     }
 }
 pub use gate::{
-    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, ManagedSpaceGrant, RoomGate,
-    StoredRoomGrants,
+    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, ManagedSpaceGrant,
+    RemoteSpaceDeletionGrant, RoomGate, StoredRoomGrants,
 };
 pub use issuance::{
     IssuanceBasis, IssuancePolicy, IssuanceRefusal, ServedAccountDomains, SubjectHome,
@@ -132,12 +132,14 @@ pub use marker::{
 pub(crate) use model::guard_queue_key;
 pub use model::{
     AdmissionState, AuthorityIncarnation, BindSpace, BootstrapGrant, CandidateAdmission,
-    ClosedReason, ConfigureSpace, EnrollScope, GrantGeneration, GrantOperationId, GrantRow,
-    GrantSubject, GrantSubjectError, LocalSpaceSubscription, ManagedRoom, MutationReceipt,
-    OperationKind, OperationOutcome, OperationRecord, ProjectionDigest, RetireScope,
-    RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState, SetAffiliation, SetSpaceAffiliations,
-    SpaceAffiliationChange, SpaceBookmarkAction, SpaceBookmarkChange, SpaceBookmarkNotification,
-    SpaceBookmarkOutcome, SpaceBookmarkVersion, SpaceBookmarkWrite, SpaceMembership,
+    ClosedReason, ConfigureSpace, DeleteSpace, EnrollScope, GrantGeneration, GrantOperationId,
+    GrantRow, GrantSubject, GrantSubjectError, LocalSpaceDeletionRecipient, LocalSpaceSubscription,
+    ManagedRoom, MutationReceipt, OperationKind, OperationOutcome, OperationRecord,
+    ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState,
+    SetAffiliation, SetSpaceAffiliations, SpaceAffiliationChange, SpaceBookmarkAction,
+    SpaceBookmarkChange, SpaceBookmarkNotification, SpaceBookmarkOutcome, SpaceBookmarkVersion,
+    SpaceBookmarkWrite, SpaceDeletionAttempt, SpaceDeletionAttemptOutcome, SpaceDeletionAudience,
+    SpaceDeletionBinding, SpaceDeletionBindingAttempt, SpaceDeletionDeliveryKind, SpaceMembership,
     SpaceSubscriptionGrant, HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
     HOST_GRANT_SCOPE_MAX_ROOMS,
 };
