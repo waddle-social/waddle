@@ -60,6 +60,9 @@ async fn dispatch(h: &mut Harness, id: &str, peer: Peer) -> Result<Outcome> {
         "flow.disco-ping" => transport::disco_ping(h, peer).await,
         "flow.space-on-peer-pubsub" => spaces::space_on_peer_pubsub(h, peer).await,
         "flow.chord-reads-waddle-space" => spaces::chord_reads_waddle_space(h).await,
+        "flow.ejabberd-receives-enrolled-space-deletion" => {
+            spaces::ejabberd_receives_enrolled_space_deletion(h).await
+        }
         "flow.waddle-reads-chord-space" => spaces::waddle_reads_chord_space(h).await,
         "flow.peer-reads-waddle-space" => spaces::peer_reads_waddle_space(h, peer).await,
         "flow.child-rooms-by-muc-jid" => spaces::child_rooms(h, peer).await,

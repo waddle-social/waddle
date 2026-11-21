@@ -16,6 +16,10 @@ use crate::scenarios::support::{self, ask, describe, is_result};
 use crate::topology::{self, Home, HOME_A};
 use crate::xml::{ns, stanza};
 
+#[path = "spaces/enrolled_deletion.rs"]
+mod enrolled_deletion;
+pub use enrolled_deletion::ejabberd_receives_enrolled_space_deletion;
+
 /// The XEP-0402 conference element a Space item carries.
 fn room_item(name: &str) -> Element {
     stanza::bookmark(name, "harness")

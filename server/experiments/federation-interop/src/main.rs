@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use waddle_federation_interop::evidence::{EvidenceLog, Section};
+use waddle_federation_interop::manifest;
 use waddle_federation_interop::scenarios::harness::{Binaries, Harness};
 use waddle_federation_interop::scenarios::runner::{self, Filter};
 use waddle_federation_interop::topology::Ports;
@@ -227,8 +228,13 @@ async fn main() -> Result<()> {
     // An interrupt abandons the work at its next await. During `prepare`
     // the services started so far are dropped, which kills their process
     // groups; afterwards the harness shuts every service down.
+    let enrolled_space_fixture = std::env::var_os("INTEROP_ENROLLED_SPACE_SEED_BIN").is_some()
+        && manifest::ROWS.iter().any(|row| {
+            row.id == "flow.ejabberd-receives-enrolled-space-deletion"
+                && options.filter.includes(row)
+        });
     let prepared = tokio::select! {
-        prepared = Harness::prepare(&root, options.ports, bins, git_sha) => Some(prepared),
+        prepared = Harness::prepare(&root, options.ports, bins, git_sha, enrolled_space_fixture) => Some(prepared),
         () = interrupts.recv() => None,
     };
     let interrupted = match prepared {
