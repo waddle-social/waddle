@@ -180,7 +180,7 @@ pub(crate) async fn offer_on_socket(
         &Jid::from(subject.jid().clone()),
         key.node(),
     );
-    notice.id = Some(Id(target.operation.simple().to_string()));
+    notice.id = Some(Id(descriptor.id().to_owned()));
     let Ok(payload) = SmReplayPayload::from_protected_space_reply(
         stanza_to_xml(&Stanza::Message(notice)),
         descriptor,

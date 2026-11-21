@@ -427,8 +427,15 @@ async fn exercise(exercise: Exercise) {
                 .expect("second deletion notice")
         );
         let id = notice.attr("id").expect("stable deletion notice ID");
-        let operation = uuid::Uuid::parse_str(id).expect("deletion operation ID");
-        assert_eq!(operation.simple().to_string(), id);
+        let (operation, _) = id.split_once('-').expect("deletion notice ID");
+        let operation = uuid::Uuid::parse_str(operation).expect("deletion operation ID");
+        assert_eq!(
+            waddle_xmpp::stream_management::space_deletion_notice_id(
+                operation,
+                &"alice@localhost".parse().expect("subscriber JID"),
+            ),
+            id,
+        );
         assert!(
             waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
                 &notice,

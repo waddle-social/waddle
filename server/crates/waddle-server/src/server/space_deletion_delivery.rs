@@ -7,7 +7,7 @@ use futures::{stream, StreamExt};
 use jid::Jid;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use waddle_xmpp::Stanza;
+use waddle_xmpp::{stream_management::space_deletion_notice_id, Stanza};
 use waddle_xmpp_core::pubsub::build_pubsub_delete_event;
 use xmpp_parsers::message::Id;
 
@@ -158,7 +158,10 @@ async fn offer_remote_attempt(
     let recipient = Jid::from(attempt.subject.jid().clone());
     let mut notice =
         build_pubsub_delete_event(&Jid::from(service.clone()), &recipient, attempt.key.node());
-    notice.id = Some(Id(attempt.record.operation.as_uuid().simple().to_string()));
+    notice.id = Some(Id(space_deletion_notice_id(
+        attempt.record.operation.as_uuid(),
+        attempt.subject.jid(),
+    )));
     let completion = match router.offer_space_deletion(
         service,
         &recipient,

@@ -4,6 +4,7 @@ use crate::identity::CanonicalBareJid;
 use crate::protocol::frame::MAX_FRAME_SIZE;
 use crate::pubsub::SubId;
 use jid::{BareJid, FullJid};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -25,6 +26,12 @@ pub const MAX_PROTECTED_SPACE_REPLY_BYTES: usize = FIXED_BYTES
     + size_of::<u16>()
     + MAX_PROTECTED_SPACE_ROOM_DEPENDENCIES
         * (size_of::<u32>() + MAX_JID_BYTES + 2 * UUID_BYTES + size_of::<i64>());
+
+/// Identify one subscriber's deletion notification across transport retries.
+pub fn space_deletion_notice_id(operation: Uuid, subscriber: &BareJid) -> String {
+    let subscriber_digest = Sha256::digest(subscriber.as_str().as_bytes());
+    format!("{}-{subscriber_digest:x}", operation.simple())
+}
 
 /// Exact XMPP stanza payload admitted by the stored Space decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,8 +266,10 @@ impl ProtectedSpaceReplyDescriptor {
         if self.kind != ProtectedSpaceReplyKind::DeleteEvent {
             return None;
         }
-        let operation = Uuid::parse_str(&self.id).ok()?;
-        (operation.simple().to_string() == self.id).then_some(operation)
+        let (operation, _) = self.id.split_once('-')?;
+        let operation = Uuid::parse_str(operation).ok()?;
+        (space_deletion_notice_id(operation, &self.recipient.to_bare()) == self.id)
+            .then_some(operation)
     }
 
     pub fn service(&self) -> &BareJid {

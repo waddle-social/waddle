@@ -50,7 +50,8 @@ use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::pubsub::Affiliation;
 use waddle_xmpp::stream_management::persistence::SmReplayPayload;
 use waddle_xmpp::stream_management::{
-    ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind, ProtectedSpaceRoomDependency,
+    space_deletion_notice_id, ProtectedSpaceReplyDescriptor, ProtectedSpaceReplyKind,
+    ProtectedSpaceRoomDependency,
 };
 use xmpp_parsers::iq::Iq;
 
@@ -343,7 +344,7 @@ impl RemoteSpaceDeletionGrant {
                 key.service().as_str(),
                 recipient.as_str(),
                 key.node(),
-                &self.attempt.record.operation.as_uuid().simple().to_string(),
+                &space_deletion_notice_id(self.attempt.record.operation.as_uuid(), recipient),
             )
     }
 
@@ -1399,7 +1400,7 @@ impl HostGrantGate {
                 key.service().clone(),
                 key.node().to_owned(),
                 recipient.clone(),
-                record.operation.as_uuid().simple().to_string(),
+                space_deletion_notice_id(record.operation.as_uuid(), &recipient.to_bare()),
                 record.lifecycle.as_uuid(),
                 record.authority_incarnation.as_uuid(),
                 record.generation.value(),

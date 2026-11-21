@@ -163,10 +163,10 @@ async fn live_spicedb_protected_space_deletion_reaches_the_remote_subscription_o
     .fetch_one(&pool)
     .await
     .expect("recorded deletion operation");
-    let event_id = uuid::Uuid::parse_str(&operation)
-        .expect("canonical operation UUID")
-        .simple()
-        .to_string();
+    let event_id = waddle_xmpp::stream_management::space_deletion_notice_id(
+        uuid::Uuid::parse_str(&operation).expect("canonical operation UUID"),
+        &GUEST.parse().expect("guest bare JID"),
+    );
     let is_node_deletion = |message: &Element| {
         message
             .get_child("event", NS_PUBSUB_EVENT)

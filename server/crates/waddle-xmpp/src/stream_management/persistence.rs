@@ -2620,7 +2620,15 @@ mod protected_space_reply_storage_tests {
     fn delete_event_round_trips_and_binds_tombstone_identity() {
         let base = descriptor();
         let operation = uuid::Uuid::new_v4();
-        let id = operation.simple().to_string();
+        let id = crate::stream_management::space_deletion_notice_id(
+            operation,
+            &base.recipient().to_bare(),
+        );
+        let other = crate::stream_management::space_deletion_notice_id(
+            operation,
+            &"bob@example.test".parse().expect("other subscriber"),
+        );
+        assert_ne!(id, other);
         let descriptor = ProtectedSpaceReplyDescriptor::new(
             base.service().clone(),
             base.node().to_owned(),
@@ -2645,7 +2653,7 @@ mod protected_space_reply_storage_tests {
 
         for wrong in [
             wire.replace("node='docs'", "node='other'"),
-            wire.replace(&id, &uuid::Uuid::new_v4().simple().to_string()),
+            wire.replace(&id, &other),
             wire.replace("alice@example.test", "alice@example.test/dev"),
             wire.replace("alice@example.test", "other@example.test"),
             wire.replace(
