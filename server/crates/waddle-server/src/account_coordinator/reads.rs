@@ -118,8 +118,30 @@ impl AccountAuthoritySelection {
             .map(|view| view.available)
     }
 
+    /// Every presence-available resource paired with its last announced
+    /// presence state from one coherent coordinator view.
+    pub(crate) async fn available_resources_with_presence(
+        &self,
+        account: &BareJid,
+    ) -> Result<Vec<(FullJid, Option<AccountResourcePresence>)>, AccountCoordinatorError> {
+        self.coordinator_view(account).await.map(|view| {
+            let mut presences = view.presence;
+            view.available
+                .into_iter()
+                .map(|(jid, _priority)| {
+                    let state = presences
+                        .iter()
+                        .position(|presence| presence.jid == jid)
+                        .map(|index| presences.swap_remove(index));
+                    (jid, state)
+                })
+                .collect()
+        })
+    }
+
     /// The presence an available resource last announced. `Ok(None)` means
     /// the resource is not available.
+    #[cfg(test)]
     pub(crate) async fn presence(
         &self,
         resource: &FullJid,

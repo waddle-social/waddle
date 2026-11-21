@@ -311,3 +311,35 @@ async fn an_owner_that_cannot_be_reached_leaves_the_request_undecided() {
     );
     assert!(harness.cluster.forwarded() > 1, "the request was retried");
 }
+
+#[tokio::test]
+async fn unclaimed_view_short_circuits_while_slot_status_still_uses_local_coordinator() {
+    let harness = harness("routed_unclaimed_view").await;
+    let jid = resource("phone");
+    let account = jid.to_bare();
+    harness
+        .cluster
+        .owners_then_remote(&[AccountOwner::Unclaimed, AccountOwner::Unclaimed]);
+    let view = harness
+        .routed
+        .view(&account)
+        .await
+        .expect("unclaimed view returns empty");
+    assert!(view.resources.is_empty());
+    assert!(view.available.is_empty());
+    assert_eq!(harness.cluster.forwarded(), 0);
+    assert_eq!(
+        harness.routed.local().loaded_accounts().await,
+        0,
+        "unclaimed view must not spawn a local coordinator"
+    );
+
+    // SlotStatus requires ClaimNeed::Taken so callers can feed claim_identity into Bind.
+    let status = harness
+        .routed
+        .slot_status(&jid)
+        .await
+        .expect("slot_status acquires claim through local coordinator");
+    assert_eq!(status.revision, AccountResourceRevision::INITIAL);
+    assert_eq!(harness.routed.local().loaded_accounts().await, 1);
+}

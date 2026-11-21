@@ -94,65 +94,72 @@ pub(crate) fn decode_session_principal(
 }
 
 pub(crate) fn decode_session(row: &Row) -> Result<PersistedSession, SmPersistenceError> {
+    decode_session_at(row, 0)
+}
+
+pub(crate) fn decode_session_at(
+    row: &Row,
+    offset: usize,
+) -> Result<PersistedSession, SmPersistenceError> {
     let stream_id: String = row
-        .get(0)
+        .get(offset)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let user_id: String = row
-        .get(1)
+        .get(offset + 1)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let full_jid_raw: String = row
-        .get(2)
+        .get(offset + 2)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let jid: FullJid = full_jid_raw
         .parse()
         .map_err(|e: jid::Error| SmPersistenceError::Other(e.to_string()))?;
     let occupancy_session_raw: Option<String> = row
-        .get(3)
+        .get(offset + 3)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let inbound_count: i64 = row
-        .get(4)
+        .get(offset + 4)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let outbound_count: i64 = row
-        .get(5)
+        .get(offset + 5)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let last_acked: i64 = row
-        .get(6)
+        .get(offset + 6)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let max_resume_secs: Option<i64> = row
-        .get(7)
+        .get(offset + 7)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let detached_at_ms: i64 = row
-        .get(8)
+        .get(offset + 8)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let max_resume_duration_ms: i64 = row
-        .get(9)
+        .get(offset + 9)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let carbons_enabled: i64 = row
-        .get(10)
+        .get(offset + 10)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let roster_interested: i64 = row
-        .get(11)
+        .get(offset + 11)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let blocklist_interested: i64 = row
-        .get(12)
+        .get(offset + 12)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let presence_available: i64 = row
-        .get(13)
+        .get(offset + 13)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let presence_show_raw: Option<String> = row
-        .get(14)
+        .get(offset + 14)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let presence_status: Option<String> = row
-        .get(15)
+        .get(offset + 15)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let presence_priority: i64 = row
-        .get(16)
+        .get(offset + 16)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let replay_gap_through: Option<i64> = row
-        .get(17)
+        .get(offset + 17)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let presence_payloads_raw: Option<String> = row
-        .get(18)
+        .get(offset + 18)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let detached_at = DateTime::<Utc>::from_timestamp_millis(detached_at_ms)

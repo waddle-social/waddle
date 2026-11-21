@@ -49,6 +49,33 @@ pub(crate) async fn available_resources(
     )
 }
 
+/// Every presence-available resource of `account` with its last announced
+/// presence state, fetched in a single coordinator read.
+pub(crate) async fn available_resources_with_presence(
+    state: &WebSocketState,
+    account: &BareJid,
+) -> Vec<(FullJid, Option<PresenceState>)> {
+    available_resources_with_presence_for_app_state(&state.deps.app_state, account).await
+}
+
+/// Same as [`available_resources_with_presence`], taking `&AppState` directly
+/// for off-task work that owns `Arc<AppState>`.
+pub(crate) async fn available_resources_with_presence_for_app_state(
+    app_state: &crate::server::AppState,
+    account: &BareJid,
+) -> Vec<(FullJid, Option<PresenceState>)> {
+    answered(
+        "available_resources_with_presence",
+        app_state
+            .account_authority()
+            .available_resources_with_presence(account)
+            .await,
+    )
+    .into_iter()
+    .map(|(jid, presence)| (jid, presence.map(into_presence_state)))
+    .collect()
+}
+
 /// The connected resources of `account` that want roster pushes.
 pub(crate) async fn roster_interested(state: &WebSocketState, account: &BareJid) -> Vec<FullJid> {
     answered(
@@ -62,21 +89,10 @@ pub(crate) async fn roster_interested(state: &WebSocketState, account: &BareJid)
     )
 }
 
-/// The presence `resource` last announced, when it is available.
-pub(crate) async fn presence_state(
-    state: &WebSocketState,
-    resource: &FullJid,
-) -> Option<PresenceState> {
-    answered(
-        "presence",
-        state
-            .deps
-            .app_state
-            .account_authority()
-            .presence(resource)
-            .await,
-    )
-    .map(|presence| PresenceState {
+fn into_presence_state(
+    presence: waddle_xmpp::ownership::account_coordinator::AccountResourcePresence,
+) -> PresenceState {
+    PresenceState {
         show: presence
             .show
             .as_ref()
@@ -84,5 +100,5 @@ pub(crate) async fn presence_state(
         status: presence.status,
         priority: presence.priority,
         payloads: presence.payloads,
-    })
+    }
 }

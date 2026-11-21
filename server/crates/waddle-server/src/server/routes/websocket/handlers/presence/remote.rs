@@ -31,8 +31,6 @@ use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::subscription::{load_existing_roster_item, roster_item_to_row, roster_storage};
-use crate::db::actor::GetDatabase;
-use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{DatabaseRosterStorage, RosterRowChange};
 use crate::db::s2s_accounts::{PendingOutcome, PendingSubscriptions};
 use crate::destination::{
@@ -117,12 +115,11 @@ async fn current_presence(
     contact: &BareJid,
 ) -> Vec<Stanza> {
     let mut presences = Vec::new();
-    for resource in available(state, account)
+    for (resource, stored) in account_reads::available_resources_with_presence(state, account)
         .await
         .into_iter()
         .take(MAX_ACCOUNT_REPLIES)
     {
-        let stored = account_reads::presence_state(state, &resource).await;
         let mut presence = build_available_presence(
             &resource,
             contact,
@@ -816,38 +813,20 @@ async fn probe_remote_contacts(
     served: &ServedDomains,
     account: &BareJid,
 ) {
-    let db = match app_state
+    let subscribed = match app_state
         .db_pool
-        .global_actor()
-        .clone()
-        .ask(GetDatabase)
+        .roster_storage()
+        .get_presence_subscription_jids(account)
         .await
     {
-        Ok(db) => db,
-        Err(error) => {
-            warn!(%error, "the account database is unavailable to probe remote contacts");
-            return;
-        }
-    };
-    let roster = match DatabaseRosterStorage::new(db.clone())
-        .get_roster(account)
-        .await
-    {
-        Ok(roster) => roster,
+        Ok(subscribed) => subscribed,
         Err(error) => {
             warn!(%error, "reading the roster to probe remote contacts failed");
             return;
         }
     };
-    let contacts: Vec<(BareJid, RemoteDestination)> = roster
+    let contacts: Vec<(BareJid, RemoteDestination)> = subscribed
         .into_iter()
-        .filter(|row| {
-            matches!(
-                row.subscription.parse().unwrap_or_default(),
-                Subscription::To | Subscription::Both
-            )
-        })
-        .filter_map(|row| row.contact_jid.parse::<BareJid>().ok())
         .filter_map(|contact| {
             match served
                 .classify(Some(&Jid::from(contact.clone())))
@@ -861,11 +840,13 @@ async fn probe_remote_contacts(
     if contacts.is_empty() {
         return;
     }
-    let blocked = match DatabaseBlockingStorage::new(db)
-        .list_blocked_jid_entries(account)
+    let blocked = match app_state
+        .db_pool
+        .blocking_storage()
+        .load_blocklist(account)
         .await
     {
-        Ok(entries) => waddle_xmpp::protocol::Blocklist::new(entries),
+        Ok(blocklist) => blocklist,
         Err(error) => {
             warn!(%error, "reading the blocking list to probe remote contacts failed");
             return;

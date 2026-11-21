@@ -22,6 +22,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
@@ -59,14 +61,27 @@ fun DmScreen(
         factory = DmViewModel.factory(graph, peerJid),
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
-    val contacts by graph.sessionManager.presenceStore.contacts.collectAsStateWithLifecycle()
-    val directory by graph.sessionManager.peopleDirectory.collectAsStateWithLifecycle()
-    val peerBare = normalizedBareJid(peerJid)
+    val peerBare = remember(peerJid) { normalizedBareJid(peerJid) }
+    val peerFlow = remember(graph.sessionManager, peerBare) {
+        graph.sessionManager.presenceStore.contacts
+            .map { contacts -> contacts[peerBare] }
+            .distinctUntilChanged()
+    }
+    val directoryShowFlow = remember(graph.sessionManager, peerBare) {
+        graph.sessionManager.peopleDirectory
+            .map { dir -> dir.people.firstOrNull { it.bareJid == peerBare }?.show }
+            .distinctUntilChanged()
+    }
+    val peer by peerFlow.collectAsStateWithLifecycle(
+        initialValue = graph.sessionManager.presenceStore.contacts.value[peerBare],
+    )
+    val directoryShow by directoryShowFlow.collectAsStateWithLifecycle(
+        initialValue = graph.sessionManager.peopleDirectory.value.people.firstOrNull { it.bareJid == peerBare }?.show,
+    )
     // Same lookup as the DM list: the People directory (rooms and contacts,
     // most-available), then contact presence. Seen nowhere this stream is
     // unknown, not "offline": no dot and no presence word.
-    val peer = contacts[peerBare]
-    val peerShow: PresenceShow? = directory.people.firstOrNull { it.bareJid == peerBare }?.show ?: peer?.show
+    val peerShow: PresenceShow? = directoryShow ?: peer?.show
     val scope = rememberCoroutineScope()
     var newGroupOpen by remember { mutableStateOf(false) }
 

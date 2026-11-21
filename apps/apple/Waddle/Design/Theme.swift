@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 
 /// The app's design vocabulary: Polar Huddle tokens (`WaddleTokens`,
@@ -77,15 +78,53 @@ extension Color {
     static var cardBorder: Color { Theme.Colors.borderSoft }
 }
 
+#if os(macOS)
+private typealias PlatformImage = NSImage
+#else
+private typealias PlatformImage = UIImage
+#endif
+
+@MainActor
+private enum DecodedImageCache {
+    static let cache: NSCache<NSString, PlatformImage> = {
+        let cache = NSCache<NSString, PlatformImage>()
+        cache.countLimit = 128
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
+
+    static func image(for data: Data) -> PlatformImage? {
+        let digest = SHA256.hash(data: data)
+        let key = digest.compactMap { String(format: "%02x", $0) }.joined() as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let decoded = PlatformImage(data: data) else { return nil }
+        cache.setObject(decoded, forKey: key, cost: data.count)
+        return decoded
+    }
+}
+
 extension Image {
     /// Decodes image bytes on either platform.
     init?(data: Data) {
+        guard let image = PlatformImage(data: data) else { return nil }
         #if os(macOS)
-        guard let image = NSImage(data: data) else { return nil }
         self.init(nsImage: image)
         #else
-        guard let image = UIImage(data: data) else { return nil }
         self.init(uiImage: image)
+        #endif
+    }
+
+    /// Decodes avatar bytes through a bounded main-actor cache so SwiftUI body
+    /// re-evaluations do not re-decode avatar images on every render.
+    @MainActor
+    static func cachedAvatar(data: Data) -> Image? {
+        guard let image = DecodedImageCache.image(for: data) else { return nil }
+        #if os(macOS)
+        return Image(nsImage: image)
+        #else
+        return Image(uiImage: image)
         #endif
     }
 }

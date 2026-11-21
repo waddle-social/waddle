@@ -180,8 +180,8 @@ use muc_self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;
 pub(crate) use permissions::managed_channel_permission_allowed;
 use permissions::{
-    build_muc_owner_config_response, build_xmpp_error_response, global_database,
-    muc_owner_authorized, server_affiliation_for_requester, space_affiliation_for_requester,
+    build_muc_owner_config_response, build_xmpp_error_response, muc_owner_authorized,
+    server_affiliation_for_requester, space_affiliation_for_requester,
     spaces_node_mutation_allowed,
 };
 use pin_query::{handle_pin_query_iq, is_pin_query_iq};
@@ -225,13 +225,13 @@ use super::presence::{
     RoomArchiveAccess,
 };
 use crate::auth::{local_account_exists, local_account_jid_exists, Session};
-use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
+use crate::db::actor::{DbExecute, DbQuery, DbQueryOne};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{
     DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterRowMutationKind,
     RosterStorageError,
 };
-use crate::db::{row_value, Database, Value, ValueExt};
+use crate::db::{row_value, Value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
     SubjectType, Tuple, WriteTuple,

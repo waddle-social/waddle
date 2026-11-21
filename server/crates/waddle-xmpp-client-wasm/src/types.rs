@@ -1248,6 +1248,26 @@ pub struct WaddleRosterContact {
     pub groups: Vec<String>,
 }
 
+/// XEP-0237 versioned roster fetch outcome.
+#[derive(Debug, Serialize)]
+pub struct WaddleRosterVersionedResult {
+    /// True when the server returned an empty IQ result indicating the cached version is current.
+    pub unchanged: bool,
+    /// Server-supplied roster version token, or the caller's version when `unchanged` is true.
+    pub ver: Option<String>,
+    /// Full roster items when `unchanged` is false; empty when `unchanged` is true.
+    pub contacts: Vec<WaddleRosterContact>,
+}
+
+/// RFC 6121 §2.1.6 incremental roster push payload.
+#[derive(Debug, Serialize)]
+pub struct WaddleRosterPush {
+    /// Optional updated XEP-0237 roster version token from the push `<query ver='...'/>`.
+    pub ver: Option<String>,
+    /// Roster items added, updated, or marked `subscription="remove"`.
+    pub items: Vec<WaddleRosterContact>,
+}
+
 /// Matching user identity returned by an XMPP directory search.
 #[derive(Debug, Serialize)]
 pub struct WaddleUserSearchResult {

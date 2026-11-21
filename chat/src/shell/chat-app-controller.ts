@@ -19,7 +19,7 @@ import { useChatReadActivity } from "@/shell/read-activity";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation } from "@/router";
-import { bareJidKey, jidDomain, jidDomainOrEmpty } from "@/lib/xmpp-client";
+import { bareJidKey, barePeerJid, jidDomain, jidDomainOrEmpty } from "@/lib/xmpp-client";
 import { createNotifySettingsStore } from "@/lib/notify-settings";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
@@ -105,7 +105,10 @@ export function useChatAppController() {
   );
 
   const channelUnread = useChannelInbox(xmppClient);
-  const rosterContacts = useXmppRosterContacts(xmppClient);
+  const rosterContacts = useXmppRosterContacts(
+    xmppClient,
+    computed(() => (session.value ? barePeerJid(session.value.jid) : null)),
+  );
 
   // Community service (`community.<user-domain>`) hosts the
   // XEP-0472 social feed and XEP-0501 stories nodes. Kept distinct

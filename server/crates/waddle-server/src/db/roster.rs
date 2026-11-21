@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 
 use super::Database;
 
+pub use query::RosterSnapshot;
 pub use types::{
     RosterItemRow, RosterRowChange, RosterRowMutation, RosterRowMutationKind, RosterStorageError,
     UserMutationLock,

@@ -326,7 +326,7 @@ pub(crate) fn try_request_stream_management_ack_for_pagehide(
     }
 
     let outcome = if core.runtime.commit_pagehide_ack_written(chrono::Utc::now()) {
-        publish_resume_state_snapshot(inner, &core.runtime, false);
+        publish_resume_state_snapshot(inner, &core.runtime, core.explicit_disconnect);
         PagehideSmAckEnqueueOutcome::Sent
     } else {
         PagehideSmAckEnqueueOutcome::AlreadyPending
@@ -474,6 +474,10 @@ fn drain_pagehide_command(
                 completions,
             );
             let failed = result.is_err();
+            if !failed {
+                core.explicit_disconnect = true;
+                publish_resume_state_snapshot(inner, &core.runtime, true);
+            }
             completions.push(PagehideCommandCompletion::Disconnect { responder, result });
             if failed {
                 Err(())

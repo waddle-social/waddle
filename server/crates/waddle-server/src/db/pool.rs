@@ -16,6 +16,8 @@ pub struct PoolConfig;
 pub struct DatabasePool {
     global_actor: ActorRef<DbActor>,
     global_db: Database,
+    roster_storage: super::roster::DatabaseRosterStorage,
+    blocking_storage: super::blocking::DatabaseBlockingStorage,
 }
 
 impl DatabasePool {
@@ -85,15 +87,29 @@ impl DatabasePool {
 
     pub(crate) fn from_database(global_db: Database) -> Self {
         let global_actor = DbActor::spawn(DbActor::new(global_db.clone()));
+        let roster_storage = super::roster::DatabaseRosterStorage::new(global_db.clone());
+        let blocking_storage = super::blocking::DatabaseBlockingStorage::new(global_db.clone());
 
         Self {
             global_actor,
             global_db,
+            roster_storage,
+            blocking_storage,
         }
     }
 
     pub fn global(&self) -> &Database {
         &self.global_db
+    }
+
+    /// Shared roster storage carrying the process-wide per-user mutation lock map.
+    pub fn roster_storage(&self) -> &super::roster::DatabaseRosterStorage {
+        &self.roster_storage
+    }
+
+    /// Shared XEP-0191 blocking storage backed directly by the global database pool.
+    pub fn blocking_storage(&self) -> &super::blocking::DatabaseBlockingStorage {
+        &self.blocking_storage
     }
 
     /// Return the ingress admission lane over the same private backend as

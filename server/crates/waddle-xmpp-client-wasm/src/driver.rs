@@ -299,6 +299,7 @@ impl WasmDriverTask {
         let core = Rc::new(RefCell::new(WasmDriverCore {
             runtime: XmppRuntime::try_new(config)?,
             web_socket: ws.web_socket().clone(),
+            explicit_disconnect: false,
         }));
         inner.borrow_mut().driver_core = Some(core.clone());
         Ok(Self {
@@ -312,7 +313,6 @@ impl WasmDriverTask {
             pending_mam_queries: HashMap::new(),
             pending_inbox_queries: HashMap::new(),
             deferred_commands: VecDeque::new(),
-            explicit_disconnect: false,
             sm_clock_timer: None,
             sm_clock_callback: None,
             sm_clock_tx,
@@ -621,7 +621,8 @@ impl WasmDriverTask {
                     let _ = responder.send(Ok(()));
                 }
                 PagehideCommandCompletion::Disconnect { responder, result } => {
-                    self.explicit_disconnect = result.is_ok();
+                    self.core.borrow_mut().explicit_disconnect = result.is_ok();
+                    self.publish_resume_state_snapshot();
                     let keep_running = result.is_ok();
                     let _ = responder.send(result);
                     if !keep_running {
@@ -708,7 +709,7 @@ impl WasmDriverTask {
                 true
             }
             WasmCommand::Disconnect { responder } => {
-                self.explicit_disconnect = true;
+                self.core.borrow_mut().explicit_disconnect = true;
                 self.publish_resume_state_snapshot();
                 let result = self
                     .send_transport_message(TransportMessage::Close(StreamClose))
@@ -933,7 +934,6 @@ impl WasmDriverTask {
                 return false;
             }
         };
-        self.publish_resume_state_snapshot();
 
         // A fresh `<enabled/>` after a failed resume (or a `<failed/>` that
         // leaves the fresh stream without SM) carries the runtime's retry of
@@ -991,7 +991,6 @@ impl WasmDriverTask {
             .borrow_mut()
             .runtime
             .apply_transport_event(event)?;
-        self.publish_resume_state_snapshot();
         for event in events {
             if let Some(follow_up) = self.dispatch_client_event(event).await {
                 // A successful application-stanza write can open the first
@@ -1219,11 +1218,8 @@ impl WasmDriverTask {
     }
 
     fn publish_resume_state_snapshot(&self) {
-        publish_resume_state_snapshot(
-            &self.inner,
-            &self.core.borrow().runtime,
-            self.explicit_disconnect,
-        );
+        let core = self.core.borrow();
+        publish_resume_state_snapshot(&self.inner, &core.runtime, core.explicit_disconnect);
     }
 
     async fn finish(&mut self) {
@@ -1242,6 +1238,15 @@ impl WasmDriverTask {
         self.sm_clock_schedule.clear();
         self.clear_sm_clock_timer();
         self.publish_resume_state_snapshot();
+        if self
+            .inner
+            .borrow()
+            .driver_core
+            .as_ref()
+            .is_some_and(|active| Rc::ptr_eq(active, &self.core))
+        {
+            self.inner.borrow_mut().driver_core = None;
+        }
         let resume_state = self.inner.borrow().resume_state.clone();
         let _ = self
             .event_tx
@@ -1432,6 +1437,7 @@ mod tests {
             on_mds_displayed: None,
             on_avatar_changed: None,
             on_pubsub_event: None,
+            on_roster_push: None,
             on_call: None,
             on_stream_management: None,
             resume_state: None,

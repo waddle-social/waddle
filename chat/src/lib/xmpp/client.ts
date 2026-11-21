@@ -48,6 +48,7 @@ import type {
   OwnRoomDeparture,
   PubsubEvent,
   RoomAccessChangedEvent,
+  RosterPushEvent,
   StreamManagementTelemetry,
 } from "./client-events";
 import {
@@ -209,6 +210,8 @@ import type {
   WasmAvatarChanged,
   WasmRoomMember,
   WasmRosterContact,
+  WasmRosterPush,
+  WasmRosterVersionedResult,
   WasmSendMessageOutcome,
   WasmServerVersion,
   WasmThreadsPage,
@@ -433,8 +436,10 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  set_on_roster_push?: (cb: (push: WasmRosterPush) => void) => void;
   set_on_avatar_changed?: (cb: (event: WasmAvatarChanged) => void) => void;
   set_on_stream_management?: (cb: (event: StreamManagementTelemetry) => void) => void;
+  list_roster_contacts_versioned?: (ver?: string | null) => Promise<WasmRosterVersionedResult>;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   resume_state?: () => XmppResumeState | null;
   resume_state_handle?: () => XmppResumeStateHandle | undefined;
@@ -762,6 +767,8 @@ export class BrowserXmppClient {
   private reconnectBlock: ReconnectBlockReason | null = null;
   private currentStatusSnapshot: XmppStatusSnapshot = { state: "offline", detail: "" };
   private fullJidHandler: ((fullJid: string) => void) | null = null;
+  private readonly inFlightInboxByXmpp = new WeakMap<XmppClientInstance, Map<string, Promise<InboxResult>>>();
+  private readonly mucCallObservedRooms = new Set<string>();
   constructor(session: WaddleSession, persistence?: ResumePersistence) {
     this.session = session;
     this.mucServiceJid = `muc.${jidDomain(session.jid)}`;
@@ -1222,6 +1229,7 @@ export class BrowserXmppClient {
   setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.events.set("authority", h); }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.events.set("activity", h); }
   setInboxPushHandler(h: (entry: InboxEntry) => void) { this.events.set("inboxPush", h); }
+  setRosterPushHandler(h: (push: RosterPushEvent) => void) { this.events.set("rosterPush", h); }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.events.set("roomAvatar", h); }
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.events.set("presence", h); }
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.events.set("lastSeen", h); }
@@ -3185,18 +3193,35 @@ export class BrowserXmppClient {
    */
   async fetchInbox(opts: FetchInboxOptions = {}): Promise<InboxResult> {
     const xmpp = await this.requireConnectedXmpp();
-    const result = await xmpp.fetch_inbox?.({
-      ...(opts.onlyUnread ? { only_unread: true } : {}),
-      ...(opts.noMessages ? { no_messages: true } : {}),
-    }) as WasmInboxResult | undefined;
-    return {
-      totalUnread: result?.total_unread ?? 0,
-      total: result?.total ?? (result?.conversations?.length ?? 0),
-      unreadConversations:
-        result?.unread_conversations
-          ?? (result?.conversations ?? []).filter((c) => c.unread > 0).length,
-      conversations: (result?.conversations ?? []).map(inboxEntryFromWasm),
+    const key = `${opts.onlyUnread ? "1" : "0"}:${opts.noMessages ? "1" : "0"}`;
+    let byKey = this.inFlightInboxByXmpp.get(xmpp);
+    if (!byKey) {
+      byKey = new Map();
+      this.inFlightInboxByXmpp.set(xmpp, byKey);
+    }
+    const existing = byKey.get(key);
+    if (existing) return existing;
+
+    const pending = (async (): Promise<InboxResult> => {
+      const result = await xmpp.fetch_inbox?.({
+        ...(opts.onlyUnread ? { only_unread: true } : {}),
+        ...(opts.noMessages ? { no_messages: true } : {}),
+      }) as WasmInboxResult | undefined;
+      return {
+        totalUnread: result?.total_unread ?? 0,
+        total: result?.total ?? (result?.conversations?.length ?? 0),
+        unreadConversations:
+          result?.unread_conversations
+            ?? (result?.conversations ?? []).filter((c) => c.unread > 0).length,
+        conversations: (result?.conversations ?? []).map(inboxEntryFromWasm),
+      };
+    })();
+    byKey.set(key, pending);
+    const cleanup = () => {
+      if (byKey.get(key) === pending) byKey.delete(key);
     };
+    pending.then(cleanup, cleanup);
+    return pending;
   }
 
   async markInboxRead(partnerJid: string, threadId?: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.mark_inbox_read?.(barePeerJid(partnerJid), threadId ?? null); }
@@ -3273,7 +3298,38 @@ export class BrowserXmppClient {
   async searchDmMessages(peerJid: string, query: string, max = 20, scope?: DmConversationScope): Promise<MessageSearchResult[]> { return this.mam.searchDmMessages(peerJid, query, max, scope); }
   async subscribeToPeerPresence(peerJid: string): Promise<void> { return this.presence.subscribeToPeerPresence(peerJid); }
   async setPresence(show: BroadcastShow, idleSince?: number | null): Promise<void> { return this.presence.setPresence(show, idleSince); }
-  async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jidLocalpart(jid) || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
+  private mapWasmRosterContact(item: WasmRosterContact): RosterContact {
+    const jid = barePeerJid(item.jid);
+    return {
+      jid,
+      name: item.name,
+      username: item.name?.trim() || jidLocalpart(jid) || jid,
+      subscription: (item.subscription ?? "none") as RosterContact["subscription"],
+      groups: item.groups ?? [],
+    };
+  }
+  async listRosterContacts(): Promise<RosterContact[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[];
+    return (roster ?? []).map((item) => this.mapWasmRosterContact(item));
+  }
+  async listRosterContactsVersioned(ver?: string | null): Promise<{
+    unchanged: boolean;
+    ver: string | null;
+    contacts: RosterContact[];
+  }> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.list_roster_contacts_versioned === "function") {
+      const result = await xmpp.list_roster_contacts_versioned(ver ?? null);
+      return {
+        unchanged: Boolean(result?.unchanged),
+        ver: result?.ver ?? null,
+        contacts: (result?.contacts ?? []).map((item) => this.mapWasmRosterContact(item)),
+      };
+    }
+    const contacts = await this.listRosterContacts();
+    return { unchanged: false, ver: null, contacts };
+  }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
   async discoverSpaceChannels(): Promise<DiscoveredChannel[]> {
     const xmpp = await this.requireConnectedXmpp();
@@ -4478,16 +4534,7 @@ export class BrowserXmppClient {
     xmpp.set_on_presence?.((presence: WasmPresence) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handlePresence(presence);
-      // Side-effect track: MUC presence carrying the call extension
-      // populates the per-room participants store so any consumer
-      // (channel header, sidebar, list) can render "N in call"
-      // without subscribing to the raw presence stream.
-      applyMucCallPresence(presence);
-      // #1029/#1030: the raised-hand and mute `<in-call>` presence states
-      // ride the same stanza; mirror each into its per-room store. Mute is
-      // the authoritative remote-mute source (replaces LiveKit signalling).
-      applyRaisedHandPresence(presence);
-      applyMutePresence(presence);
+      this.applyMucCallPresenceTrack(presence);
     });
     xmpp.set_on_message_delivery_acked?.((id: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
@@ -4512,6 +4559,13 @@ export class BrowserXmppClient {
     xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.events.emit("pubsubEvent", event);
+    });
+    xmpp.set_on_roster_push?.((push: WasmRosterPush) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.events.emitSafe("rosterPush", {
+        ...(push.ver ? { ver: push.ver } : {}),
+        items: (push.items ?? []).map((item) => this.mapWasmRosterContact(item)),
+      });
     });
     xmpp.set_on_avatar_changed?.((event: WasmAvatarChanged) => {
       if (!this.isCurrentXmpp(xmpp)) return;
@@ -4605,9 +4659,37 @@ export class BrowserXmppClient {
     xmpp.on?.("presence", (presence: WasmPresence) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handlePresence(presence);
-      applyMucCallPresence(presence);
-      applyRaisedHandPresence(presence);
-      applyMutePresence(presence);
+      this.applyMucCallPresenceTrack(presence);
     });
+  }
+
+  private applyMucCallPresenceTrack(presence: WasmPresence): void {
+    const from = presence.from;
+    if (!from) return;
+    const roomKey = bareJidKey(from);
+    const hasCallPayload = Boolean(presence.muji || presence.hand_raised || presence.muted);
+    if (hasCallPayload && roomKey) {
+      this.mucCallObservedRooms.add(roomKey);
+    }
+    const isMucPresence = Boolean(
+      hasCallPayload
+      || presence.muc_jid
+      || presence.muc_affiliation
+      || presence.muc_role
+      || (presence.muc_status_codes?.length ?? 0) > 0
+      || (roomKey && this.mucCallObservedRooms.has(roomKey))
+      || this.isKnownMucRoom(barePeerJid(from)),
+    );
+    if (!isMucPresence) return;
+    // Side-effect track: MUC presence carrying the call extension
+    // populates the per-room participants store so any consumer
+    // (channel header, sidebar, list) can render "N in call"
+    // without subscribing to the raw presence stream.
+    applyMucCallPresence(presence);
+    // #1029/#1030: the raised-hand and mute `<in-call>` presence states
+    // ride the same stanza; mirror each into its per-room store. Mute is
+    // the authoritative remote-mute source (replaces LiveKit signalling).
+    applyRaisedHandPresence(presence);
+    applyMutePresence(presence);
   }
 }

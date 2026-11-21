@@ -8,41 +8,71 @@ use waddle_xmpp_core::roster::RosterVersion;
 use super::retry::{is_sqlite_lock_error, now_utc_text, retry_delay, MAX_LOCK_RETRIES};
 use super::{DatabaseRosterStorage, RosterItemRow, RosterStorageError};
 
+/// Result of [`DatabaseRosterStorage::snapshot_roster_if_changed`].
+#[derive(Debug, Clone)]
+pub enum RosterSnapshot {
+    /// Client's cached version matches the stored version; no items were loaded.
+    Unchanged(RosterVersion),
+    /// Full roster items paired with the current version.
+    Full(Vec<RosterItemRow>, RosterVersion),
+}
+
 impl DatabaseRosterStorage {
+    /// Atomic roster snapshot with XEP-0237 §2.6 version fast path.
+    ///
+    /// Checks `roster_versions` first under the per-user lock; if `cached_ver`
+    /// already matches the stored version, returns [`RosterSnapshot::Unchanged`]
+    /// without querying or deserializing `roster_items`. Otherwise loads all
+    /// items under the same per-user lock so the returned pair is mutually
+    /// consistent.
+    #[instrument(skip(self, user_jid, cached_ver), fields(user = %user_jid))]
+    pub async fn snapshot_roster_if_changed(
+        &self,
+        user_jid: &BareJid,
+        cached_ver: Option<&RosterVersion>,
+    ) -> Result<RosterSnapshot, RosterStorageError> {
+        let lock = self.user_lock(user_jid);
+        let _guard = lock.lock().await;
+
+        let existing = match self.get_roster_version(user_jid).await? {
+            Some(stored) => Some(stored.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: stored.clone(),
+                }
+            })?),
+            None => None,
+        };
+        if let (Some(cached), Some(current)) = (cached_ver, existing.as_ref()) {
+            if cached == current {
+                return Ok(RosterSnapshot::Unchanged(current.clone()));
+            }
+        }
+
+        let items = self.get_roster(user_jid).await?;
+        let version = match existing {
+            Some(current) => current,
+            None => {
+                let v = RosterVersion::generate();
+                self.write_roster_version(user_jid, &v).await?;
+                v
+            }
+        };
+        Ok(RosterSnapshot::Full(items, version))
+    }
+
     /// Atomic roster snapshot: read all items and the current `RosterVersion`
     /// under the per-user lock so the returned pair is mutually consistent.
-    ///
-    /// Without the shared lock, a `get_roster` + `get_roster_version` pair can
-    /// straddle a concurrent mutation and produce a snapshot whose items reflect
-    /// version V+1 but whose `ver` reads as V. A client caching that pair would
-    /// believe it was up-to-date when it had in fact missed an item, since on
-    /// reconnect the server would respond to a `ver=V` query with an empty
-    /// result. That breaks the XEP-0237 §2.6 invariant that `ver` identifies
-    /// the roster state.
-    ///
-    /// Synthesises a fresh version if none exists, matching
-    /// [`get_or_create_roster_version`].
     #[instrument(skip(self, user_jid), fields(user = %user_jid))]
     pub async fn snapshot_roster(
         &self,
         user_jid: &BareJid,
     ) -> Result<(Vec<RosterItemRow>, RosterVersion), RosterStorageError> {
-        let lock = self.user_lock(user_jid);
-        let _guard = lock.lock().await;
-
-        let items = self.get_roster(user_jid).await?;
-        let version = if let Some(stored) = self.get_roster_version(user_jid).await? {
-            stored.parse::<RosterVersion>().map_err(|_| {
-                RosterStorageError::InvalidStoredVersion {
-                    value: stored.clone(),
-                }
-            })?
-        } else {
-            let v = RosterVersion::generate();
-            self.write_roster_version(user_jid, &v).await?;
-            v
-        };
-        Ok((items, version))
+        match self.snapshot_roster_if_changed(user_jid, None).await? {
+            RosterSnapshot::Full(items, version) => Ok((items, version)),
+            RosterSnapshot::Unchanged(_) => {
+                unreachable!("snapshot_roster passes cached_ver=None")
+            }
+        }
     }
 
     async fn write_roster_version(
@@ -285,6 +315,46 @@ impl DatabaseRosterStorage {
         }
 
         debug!(count = jids.len(), "Retrieved presence subscribers");
+        Ok(jids)
+    }
+
+    /// Get all roster contacts whose presence `user_jid` is subscribed to
+    /// (`subscription IN ('to', 'both')`), parsed into typed [`BareJid`] values.
+    #[instrument(skip(self, user_jid), fields(user = %user_jid))]
+    pub async fn get_presence_subscription_jids(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<Vec<BareJid>, RosterStorageError> {
+        let mut rows = self
+            .query_with_persistent(
+                "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('to', 'both')",
+                crate::db_params![user_jid.to_string()],
+            )
+            .await?;
+
+        let mut jids: Vec<BareJid> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| RosterStorageError::QueryFailed(format!("Failed to read row: {}", e)))?
+        {
+            let raw: String = row.get(0).map_err(|e| {
+                RosterStorageError::QueryFailed(format!("Failed to get jid: {}", e))
+            })?;
+            match raw.parse::<BareJid>() {
+                Ok(jid) => jids.push(jid),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        raw = %raw,
+                        user = %user_jid,
+                        "Skipping un-parseable contact_jid row in get_presence_subscription_jids"
+                    );
+                }
+            }
+        }
+
+        debug!(count = jids.len(), "Retrieved presence subscriptions");
         Ok(jids)
     }
 

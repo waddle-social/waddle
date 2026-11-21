@@ -25,8 +25,8 @@ extension FFIXmppPort {
     }
 
     func fetchNotifySettings() async throws -> NotifySettings {
-        let rooms = try await mappingPortErrors { try await client.fetchUserBookmarks() }
-        let direct = try await mappingPortErrors { try await client.fetchDmBookmarks() }
-        return FFIInbound.notifySettings(rooms: rooms, direct: direct)
+        async let rooms = mappingPortErrors { try await client.fetchUserBookmarks() }
+        async let direct = mappingPortErrors { try await client.fetchDmBookmarks() }
+        return try await FFIInbound.notifySettings(rooms: rooms, direct: direct)
     }
 }

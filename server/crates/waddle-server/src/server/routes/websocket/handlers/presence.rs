@@ -24,7 +24,6 @@ use super::super::{
     element_to_xml, get_or_create_room_actor, get_room_actor, stanza_to_xml, WebSocketState,
 };
 use crate::auth::Session;
-use crate::db::actor::GetDatabase;
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{
     DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterStorageError,

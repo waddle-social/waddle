@@ -1,8 +1,8 @@
 use super::{
     bad_format_iq_error, bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
-    global_database, internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error,
-    not_authorized_iq_error, row_value, warn, Arc, DbQueryOne, Element, FullJid, PubSubItem,
-    VCardStore, Value, ValueExt, WebSocketState,
+    internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error, not_authorized_iq_error,
+    row_value, warn, Arc, DbQueryOne, Element, FullJid, PubSubItem, VCardStore, Value, ValueExt,
+    WebSocketState,
 };
 use waddle_xmpp::xep::xep0049::{self, PrivateStorageError};
 
@@ -49,18 +49,7 @@ pub(super) async fn handle_vcard_iq(
         }
     }
 
-    let db = match global_database(state).await {
-        Ok(db) => Arc::new(db),
-        Err(error) => {
-            warn!(error = %error, "Failed to access database for vCard IQ");
-            return vec![build_iq_error_xml_typed(
-                iq.id(),
-                response_from,
-                response_to,
-                internal_server_error_iq_error("Internal server error."),
-            )];
-        }
-    };
+    let db = Arc::new(state.deps.app_state.db_pool.global().clone());
     let store = VCardStore::new(Arc::clone(&db));
 
     if waddle_xmpp::xep::xep0054::is_vcard_get(iq) {

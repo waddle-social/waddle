@@ -1,6 +1,9 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleAdminUsersPage
@@ -26,6 +29,12 @@ internal class RoomAdminVerbs(
     private val activeSession: ActiveSession,
     private val stores: SessionStores,
 ) {
+    private sealed interface TierOutcome {
+        data class Entries(val values: List<WaddleRoomMemberEntry>) : TierOutcome
+        data object Disconnected : TierOutcome
+        data object Failed : TierOutcome
+    }
+
     /**
      * Refresh a room's member list with the web `listRoomMembers`
      * fan-out: one `muc#admin` query per affiliation tier, tolerating
@@ -37,23 +46,44 @@ internal class RoomAdminVerbs(
     suspend fun refreshRoomMembers(roomJid: String) {
         val lease = activeSession.captureOwnerLease() ?: return
         if (!activeSession.applyIfCurrent(lease) { stores.roomMembersStore.markLoading(roomJid) }) return
+        val (outcomes, bots) = coroutineScope {
+            val botsDeferred = async {
+                try {
+                    activeSession.fetchIfCurrent(lease) { it.listRoomBots(roomJid) }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            val tierDeferreds = MEMBER_LIST_TIERS.map { tier ->
+                async {
+                    try {
+                        when (val result = activeSession.invokeIfCurrent(lease) { it.listRoomMembers(roomJid, tier) }) {
+                            ActiveSession.LeaseInvocation.Stale,
+                            ActiveSession.LeaseInvocation.NotConnected,
+                            -> TierOutcome.Disconnected
+                            is ActiveSession.LeaseInvocation.Completed -> TierOutcome.Entries(result.value)
+                        }
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (_: Throwable) {
+                        TierOutcome.Failed
+                    }
+                }
+            }
+            Pair(tierDeferreds.awaitAll(), botsDeferred.await())
+        }
         val members = mutableListOf<WaddleRoomMemberEntry>()
         var failures = 0
-        for (tier in MEMBER_LIST_TIERS) {
-            try {
-                when (val result = activeSession.invokeIfCurrent(lease) { it.listRoomMembers(roomJid, tier) }) {
-                    ActiveSession.LeaseInvocation.Stale,
-                    ActiveSession.LeaseInvocation.NotConnected,
-                    -> {
-                        activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyUnavailable(roomJid) }
-                        return
-                    }
-                    is ActiveSession.LeaseInvocation.Completed -> members += result.value
+        for (outcome in outcomes) {
+            when (outcome) {
+                TierOutcome.Disconnected -> {
+                    activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyUnavailable(roomJid) }
+                    return
                 }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Throwable) {
-                failures += 1
+                is TierOutcome.Entries -> members += outcome.values
+                TierOutcome.Failed -> failures += 1
             }
         }
         if (members.isEmpty() && failures > 0) {
@@ -61,7 +91,9 @@ internal class RoomAdminVerbs(
         } else {
             activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyLoaded(roomJid, members) }
         }
-        refreshRoomBots(roomJid)
+        if (bots != null) {
+            activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyBots(roomJid, bots) }
+        }
     }
 
     /**

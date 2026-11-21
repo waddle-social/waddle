@@ -113,7 +113,7 @@ async fn assert_upgrade_from_main_ledger(db: &Database, driver: DatabaseDriver) 
     );
     assert_eq!(
         MigrationRunner::single().run(db).await.expect("upgrade"),
-        (2003..=2022).collect::<Vec<_>>()
+        (2003..=2023).collect::<Vec<_>>()
     );
     let upgraded = ledger(db).await;
     assert_eq!(&upgraded[..before.len()], before.as_slice());

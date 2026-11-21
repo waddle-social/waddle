@@ -6,9 +6,6 @@ use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
 use super::{FanOutMetrics, WebSocketState};
-use crate::db::actor::GetDatabase;
-use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::roster::DatabaseRosterStorage;
 
 /// Constants threaded through both §3 fan-out passes.
 pub(super) struct CapsFanOutCtx<'a> {
@@ -22,17 +19,9 @@ pub(super) struct CapsFanOutCtx<'a> {
 /// CAPS include `<node>+notify`. Skips resources already reached via
 /// the explicit-subscribers loop (deduped through `already_delivered`).
 ///
-/// Honors XEP-0191 blocking in both directions, fail-closed: if the
-/// shared DB handle is unavailable the entire roster pass is aborted
-/// (failing OPEN would risk leaking PEP items to blocked contacts
-/// during a transient DB outage, which §3.3 forbids).
-///
-/// The DB handle is acquired ONCE for both the roster query and the
-/// blocking lookups (PR #439 review: avoid two `GetDatabase` actor
-/// round-trips and the fail-open window between them). The
-/// publisher's own blocklist is loaded ONCE and consulted via a
-/// `HashSet` membership test (PR #439 review: cuts the per-roster-
-/// contact query count in half on the publisher→contact direction).
+/// Honors XEP-0191 blocking in both directions, fail-closed: if either the
+/// publisher's blocklist or the batched contact→publisher blocklist check
+/// fails, the roster pass is aborted rather than leaking PEP items.
 pub(super) async fn roster_caps_fan_out(
     state: &WebSocketState,
     owner: &BareJid,
@@ -41,29 +30,8 @@ pub(super) async fn roster_caps_fan_out(
 ) -> FanOutMetrics {
     let mut metrics = FanOutMetrics::default();
 
-    let db = match state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .clone()
-        .ask(GetDatabase)
-        .await
-    {
-        Ok(db) => db,
-        Err(error) => {
-            warn!(
-                error = %error,
-                owner = %owner,
-                notify_filter = %ctx.notify_filter,
-                "Aborting §3 roster fan-out: cannot acquire DB handle; \
-                 cannot honor XEP-0191 — failing closed"
-            );
-            return metrics;
-        }
-    };
-    let roster = DatabaseRosterStorage::new(db.clone());
-    let blocking = DatabaseBlockingStorage::new(db);
+    let roster = state.deps.app_state.db_pool.roster_storage();
+    let blocking = state.deps.app_state.db_pool.blocking_storage();
 
     let presence_subscribers = match roster.get_presence_subscribers(owner).await {
         Ok(subs) => subs,
@@ -82,13 +50,10 @@ pub(super) async fn roster_caps_fan_out(
         return metrics;
     }
 
-    // Pre-load the publisher's blocklist as a typed set so the
-    // owner→contact direction is checked in O(1) per roster entry,
-    // not via a round-trip per check (PR #439 review). The
-    // contact→owner direction still needs a per-contact query
-    // because we don't have the contacts' blocklists pre-loaded.
-    let owner_blocklist = match blocking.list_blocked_jid_entries(owner).await {
-        Ok(list) => waddle_xmpp::protocol::Blocklist::new(list),
+    // Pre-load the publisher's blocklist once so the owner→contact direction
+    // is checked in O(1) per roster entry.
+    let owner_blocklist = match blocking.load_blocklist(owner).await {
+        Ok(list) => list,
         Err(error) => {
             warn!(
                 error = %error,
@@ -101,11 +66,35 @@ pub(super) async fn roster_caps_fan_out(
         }
     };
 
-    for contact_bare in presence_subscribers {
-        // XEP-0191 §2: do not deliver if either party blocked the other.
-        if owner_blocklist.contains(&contact_bare)
-            || is_blocked_jid(&blocking, &contact_bare, ctx.from).await
-        {
+    let unblocked_by_owner: Vec<BareJid> = presence_subscribers
+        .into_iter()
+        .filter(|contact_bare| !owner_blocklist.contains(contact_bare))
+        .collect();
+    if unblocked_by_owner.is_empty() {
+        return metrics;
+    }
+
+    // Batch-evaluate the contact→publisher blocklist direction in chunked SQL
+    // queries (fail-closed on DB error to honor XEP-0191 §3.3).
+    let blocked_by_contact = match blocking
+        .filter_blocking_recipients(&unblocked_by_owner, ctx.from)
+        .await
+    {
+        Ok(blocked) => blocked,
+        Err(error) => {
+            warn!(
+                error = %error,
+                owner = %owner,
+                notify_filter = %ctx.notify_filter,
+                "Aborting §3 roster fan-out: failed to check contacts' blocklists; \
+                 cannot honor XEP-0191 — failing closed"
+            );
+            return metrics;
+        }
+    };
+
+    for contact_bare in unblocked_by_owner {
+        if blocked_by_contact.contains(&contact_bare) {
             continue;
         }
 
@@ -256,25 +245,6 @@ async fn deliver_to_user_resources(
                     metrics.not_connected += 1;
                 }
             },
-        }
-    }
-}
-
-async fn is_blocked_jid(
-    storage: &DatabaseBlockingStorage,
-    recipient: &BareJid,
-    sender: &Jid,
-) -> bool {
-    match storage.is_blocked_jid(recipient, sender).await {
-        Ok(blocked) => blocked,
-        Err(error) => {
-            warn!(
-                error = %error,
-                recipient = %recipient,
-                sender = %sender,
-                "Blocking check failed during §3 fan-out; treating as blocked to fail closed"
-            );
-            true
         }
     }
 }

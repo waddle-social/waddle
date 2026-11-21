@@ -34,6 +34,15 @@ impl XmppRuntime {
             }
         }
 
+        if element.name() == "iq"
+            && type_attr == "set"
+            && element
+                .get_child("query", waddle_xmpp_core::roster::ROSTER_NS)
+                .is_some()
+        {
+            return handle_roster_push(element, self.account_bare_jid());
+        }
+
         if let Some(response) = caps::build_client_caps_disco_info_response(
             element,
             self.snapshot.binding.as_ref().map(|binding| &binding.jid),
@@ -290,4 +299,48 @@ fn jingle_iq_set_ack(inbound: &Element) -> Option<Element> {
         builder = builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), to);
     }
     Some(builder.build())
+}
+
+/// RFC 6121 §2.1.6: a receiving client MUST ignore a roster push unless it has
+/// no `from` attribute or its `from` attribute is the user's own bare JID
+/// (full JIDs, including the user's own resource, are rejected).
+fn roster_push_from_trusted(element: &Element, account: &jid::BareJid) -> bool {
+    match element.attr("from") {
+        None => true,
+        Some(from) => from
+            .parse::<jid::Jid>()
+            .ok()
+            .is_some_and(|jid| jid.resource().is_none() && &jid.to_bare() == account),
+    }
+}
+
+fn roster_push_iq_result_ack(inbound: &Element) -> Option<Element> {
+    let id = inbound.attr("id")?;
+    let mut builder = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id);
+    if let Some(from) = inbound.attr("from") {
+        builder = builder.attr(minidom::rxml::xml_ncname!("to").to_owned(), from);
+    }
+    Some(builder.build())
+}
+
+fn handle_roster_push(element: &Element, account: &jid::BareJid) -> Vec<ClientEvent> {
+    if !roster_push_from_trusted(element, account) {
+        return Vec::new();
+    }
+    let Some(roster) = crate::discovery::parse_roster_result(element) else {
+        return Vec::new();
+    };
+    let mut events = Vec::with_capacity(2);
+    if let Some(ack) = roster_push_iq_result_ack(element) {
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(ack),
+        )));
+    }
+    events.push(ClientEvent::RosterPush {
+        version: roster.ver,
+        items: roster.items,
+    });
+    events
 }

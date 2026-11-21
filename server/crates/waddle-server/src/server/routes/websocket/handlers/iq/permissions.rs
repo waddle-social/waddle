@@ -1,10 +1,10 @@
 use super::{
     build_config_form, build_iq_error_xml_typed, build_iq_result_xml,
-    server_policy_for_managed_channel, Affiliation, Arc, BareJid, CheckPermission, Database,
-    Element, FullJid, GetDatabase, GetSnapshot, ManagedChannelServerPolicy, Object, ObjectType,
-    Permission, PermissionError, Relation, RosterStorageError, Session, SpaceAffiliation,
-    StanzaErrorCondition, StanzaErrorType, Subject, SubjectType, Tuple, WebSocketState, WriteTuple,
-    XmppError, DEPLOYMENT_MEMBERSHIP_PERMISSIONS, DEPLOYMENT_SERVER_ID,
+    server_policy_for_managed_channel, Affiliation, Arc, BareJid, CheckPermission, Element,
+    FullJid, GetSnapshot, ManagedChannelServerPolicy, Object, ObjectType, Permission,
+    PermissionError, Relation, Session, SpaceAffiliation, StanzaErrorCondition, StanzaErrorType,
+    Subject, SubjectType, Tuple, WebSocketState, WriteTuple, XmppError,
+    DEPLOYMENT_MEMBERSHIP_PERMISSIONS, DEPLOYMENT_SERVER_ID,
 };
 use crate::permissions::DeleteTuple;
 use crate::server::routes::websocket::cleanup::get_room_actor_result;
@@ -70,20 +70,6 @@ fn stanza_error_from_parts(
     };
     error.other = other;
     error
-}
-
-pub(super) async fn global_database(
-    state: &WebSocketState,
-) -> Result<Database, RosterStorageError> {
-    state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .clone()
-        .ask(GetDatabase)
-        .await
-        .map_err(|error| RosterStorageError::ConnectionFailed(error.to_string()))
 }
 
 pub(super) async fn permission_allowed(

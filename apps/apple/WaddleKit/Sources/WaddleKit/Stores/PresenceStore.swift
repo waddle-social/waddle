@@ -136,8 +136,10 @@ public final class PresenceStore {
                 realJID: presence.occupant?.realJID?.bare,
                 hats: presence.hats
             )
-            occupants[room, default: [:]][nick] = occupant
-            if isSelf {
+            if occupants[room]?[nick] != occupant {
+                occupants[room, default: [:]][nick] = occupant
+            }
+            if isSelf, selfNicks[room] != nick {
                 selfNicks[room] = nick
             }
             if isSelf, !joinedRooms.contains(room) {
@@ -146,7 +148,9 @@ public final class PresenceStore {
             }
             return .occupant(room: room)
         case .unavailable:
-            occupants[room]?[nick] = nil
+            if occupants[room]?[nick] != nil {
+                occupants[room]?[nick] = nil
+            }
             if isSelf {
                 markLeft(room)
                 return .left(room: room)
@@ -173,7 +177,9 @@ public final class PresenceStore {
         }
         // The most available resource represents the contact.
         let best = resources[bare]?.values.min { $0.availability < $1.availability }
-        contacts[bare] = best
+        if contacts[bare] != best {
+            contacts[bare] = best
+        }
         return .contact
     }
 }

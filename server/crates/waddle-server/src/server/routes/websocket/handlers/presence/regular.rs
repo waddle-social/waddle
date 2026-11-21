@@ -1,8 +1,7 @@
 use super::subscription::{
-    recipient_blocks_sender, record_stanza_for_detached_available_resources_excluding,
-    roster_storage,
+    blocking_storage, record_stanza_for_detached_available_resources_excluding, roster_storage,
 };
-use super::{debug, info, warn, FullJid, Jid, WebSocketState};
+use super::{build_available_presence, debug, info, warn, BareJid, FullJid, Jid, WebSocketState};
 #[cfg(feature = "clustering")]
 use crate::clustering::codec::RemoteElement;
 #[cfg(feature = "clustering")]
@@ -15,9 +14,12 @@ use crate::pending_delivery::FlushContext;
 use crate::pending_delivery::MamArchiveResolver;
 use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use futures::StreamExt as _;
 use tracing::Instrument as _;
 use waddle_xmpp::ownership::account_coordinator::Presentation;
 use waddle_xmpp::Stanza;
+
+const PRESENCE_FANOUT_CONCURRENCY: usize = 16;
 
 /// Handle a broadcast (undirected) presence update from a live connection.
 ///
@@ -57,22 +59,22 @@ pub(super) async fn handle_regular_presence_update(
     // Issue #1208: each write re-verifies ownership INSIDE the registry call
     // (the owner-gated variants hold the connections entry guard across
     // check and write, see `update_presence_state_if_owner`). The gated
-    // `update_presence_if_owner` doubles as the ownership probe for the
-    // sibling writes in each branch: a refusal means this connection's slot
-    // is gone or belongs to a same-JID replacement, whose own presence
-    // supersedes ours — so every registry write (including the bare-JID
-    // last-activity bookkeeping and the once-per-session claims) is skipped.
-    let owned_availability_written = |available: bool| {
-        owner.filter(|owner| {
+    // `update_presence_if_owner_transition` doubles as the ownership probe for
+    // the sibling writes in each branch and reports the previous availability
+    // atomically so RFC 6121 §4.3.1 initial presence probes run only on an
+    // unavailable -> available transition.
+    let availability_transition = |available: bool| {
+        owner.and_then(|owner| {
             state
                 .deps
                 .protocol
                 .connection_registry
-                .update_presence_if_owner(sender_jid, owner, available, priority)
+                .update_presence_if_owner_transition(sender_jid, owner, available, priority)
+                .map(|was_available| (owner, was_available))
         })
     };
     if available {
-        if let Some(owner) = owned_availability_written(true) {
+        if let Some((owner, was_available)) = availability_transition(true) {
             state
                 .deps
                 .protocol
@@ -123,13 +125,16 @@ pub(super) async fn handle_regular_presence_update(
             // frame, once the account authority holds this availability: see
             // `present_pending_subscriptions`.
             spawn_session_recovery_delivery(state, sender_jid, owner, flush_plan, Vec::new());
+            if !was_available {
+                spawn_initial_presence_probes(state, sender_jid, owner, ordered_relay_origin);
+            }
         } else {
             debug!(
                 jid = %sender_jid,
                 "Skipping presence registry writes: connection does not own its registry slot"
             );
         }
-    } else if let Some(owner) = owned_availability_written(false) {
+    } else if let Some((owner, _was_available)) = availability_transition(false) {
         state
             .deps
             .protocol
@@ -464,6 +469,248 @@ fn spawn_session_recovery_delivery(
     );
 }
 
+struct InitialProbeDeps {
+    app_state: std::sync::Arc<crate::server::AppState>,
+    connection_registry: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
+    sm_session_registry: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    served: Option<crate::destination::ServedDomains>,
+}
+
+/// RFC 6121 §4.2.2 & §4.3.1: on a resource's initial available presence
+/// (transitioning from unavailable to available), deliver the current presence
+/// of the user's other available resources and probe subscribed contacts
+/// (`subscription` in `to`/`both`) off the connection task so large rosters
+/// cannot self-deadlock the connection's 256-slot outbound mpsc (issue #1220).
+fn spawn_initial_presence_probes(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
+) {
+    let deps = InitialProbeDeps {
+        app_state: std::sync::Arc::clone(&state.deps.app_state),
+        connection_registry: std::sync::Arc::clone(&state.deps.protocol.connection_registry),
+        sm_session_registry: std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
+        served: state
+            .deps
+            .service_domains
+            .served_domains(state.deps.auth_state.xmpp_domain.as_str()),
+    };
+    let sender_jid = sender_jid.clone();
+    let owner = *owner;
+    let ordered_relay_origin = ordered_relay_origin.cloned();
+    let probe_span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            run_initial_presence_probes(&deps, &sender_jid, &owner, ordered_relay_origin.as_ref())
+                .await;
+        }
+        .instrument(probe_span),
+    );
+}
+
+async fn run_initial_presence_probes(
+    deps: &InitialProbeDeps,
+    sender_jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
+) {
+    if deps
+        .connection_registry
+        .entry_if_owner(sender_jid, owner)
+        .is_none()
+    {
+        return;
+    }
+    let sender_bare = sender_jid.to_bare();
+
+    // RFC 6121 §4.2.2: deliver current presence of the user's other available
+    // resources to the newly available resource.
+    deliver_local_contact_presence_to_owner(deps, &sender_bare, sender_jid, owner, true).await;
+
+    let storage = deps.app_state.db_pool.roster_storage();
+    let contacts = match storage.get_presence_subscription_jids(&sender_bare).await {
+        Ok(contacts) => contacts,
+        Err(error) => {
+            warn!(
+                error = %error,
+                jid = %sender_jid,
+                "Failed to load presence subscriptions for initial probes"
+            );
+            return;
+        }
+    };
+    if contacts.is_empty() {
+        return;
+    }
+
+    let blocking = deps.app_state.db_pool.blocking_storage();
+    let sender_blocklist = match blocking.load_blocklist(&sender_bare).await {
+        Ok(blocklist) => blocklist,
+        Err(error) => {
+            warn!(
+                error = %error,
+                jid = %sender_jid,
+                "Failed to load sender blocklist for initial presence probes; skipping fail-closed"
+            );
+            return;
+        }
+    };
+    let candidates: Vec<BareJid> = contacts
+        .into_iter()
+        .filter(|contact| {
+            if *contact == sender_bare {
+                return false;
+            }
+            let contact_jid = Jid::from(contact.clone());
+            // Remote contacts are probed over S2S by `spawn_probe_remote_contacts`.
+            let is_remote = deps.served.as_ref().is_some_and(|served| {
+                matches!(
+                    served.classify(Some(&contact_jid)).unserved(),
+                    Some(crate::destination::UnservedDestination::Remote(_))
+                )
+            });
+            !is_remote && !sender_blocklist.contains_jid(&contact_jid)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let sender_bare_jid = Jid::from(sender_bare.clone());
+    let blocked_by_contacts = match blocking
+        .filter_blocking_recipients(&candidates, &sender_bare_jid)
+        .await
+    {
+        Ok(blocked) => blocked,
+        Err(error) => {
+            warn!(
+                error = %error,
+                jid = %sender_jid,
+                "Failed to batch-check contact blocklists for initial presence probes; skipping fail-closed"
+            );
+            return;
+        }
+    };
+
+    let targets: Vec<BareJid> = candidates
+        .into_iter()
+        .filter(|contact| !blocked_by_contacts.contains(contact))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+
+    futures::stream::iter(targets)
+        .for_each_concurrent(PRESENCE_FANOUT_CONCURRENCY, |contact| async move {
+            if deps
+                .connection_registry
+                .entry_if_owner(sender_jid, owner)
+                .is_none()
+            {
+                return;
+            }
+            let mut probe =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Probe);
+            probe.from = Some(Jid::from(sender_jid.clone()));
+            probe.to = Some(Jid::from(contact.clone()));
+            let probe_stanza = Stanza::Presence(probe);
+            if super::subscription::try_route_presence_to_bare_remote_for_app_state(
+                &deps.app_state,
+                &contact,
+                &probe_stanza,
+                ordered_relay_origin,
+            )
+            .await
+            {
+                return;
+            }
+            deliver_local_contact_presence_to_owner(deps, &contact, sender_jid, owner, false).await;
+        })
+        .await;
+}
+
+async fn deliver_local_contact_presence_to_owner(
+    deps: &InitialProbeDeps,
+    contact: &BareJid,
+    recipient_full: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    exclude_recipient: bool,
+) {
+    let available =
+        crate::server::routes::websocket::handlers::account_reads::available_resources_with_presence_for_app_state(
+            &deps.app_state,
+            contact,
+        )
+        .await;
+    let mut detached_available = match deps
+        .sm_session_registry
+        .available_detached_presence_states_for_user(contact)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(
+                error = %error,
+                contact = %contact,
+                "Failed to list detached resources for initial presence probe"
+            );
+            Vec::new()
+        }
+    };
+    detached_available.retain(|detached| {
+        !(exclude_recipient && detached.resource == *recipient_full)
+            && !available
+                .iter()
+                .any(|(live_resource, _)| *live_resource == detached.resource)
+    });
+
+    let recipient_bare = recipient_full.to_bare();
+    let registry = &deps.connection_registry;
+
+    for detached in detached_available {
+        let mut presence = build_available_presence(
+            &detached.resource,
+            &recipient_bare,
+            detached.show.as_ref().map(show_name),
+            detached.status.as_deref(),
+            detached.priority,
+        );
+        presence.to = Some(Jid::from(recipient_full.clone()));
+        presence.payloads.extend(detached.payloads);
+        let _ = registry
+            .send_to_if_owner(recipient_full, owner, Stanza::Presence(presence))
+            .await;
+    }
+
+    for (resource, presence_state) in available {
+        if exclude_recipient && resource == *recipient_full {
+            continue;
+        }
+        let mut presence = build_available_presence(
+            &resource,
+            &recipient_bare,
+            presence_state
+                .as_ref()
+                .and_then(|stored| stored.show.as_deref()),
+            presence_state
+                .as_ref()
+                .and_then(|stored| stored.status.as_deref()),
+            presence_state
+                .as_ref()
+                .map(|stored| stored.priority)
+                .unwrap_or(0),
+        );
+        presence.to = Some(Jid::from(recipient_full.clone()));
+        if let Some(stored) = &presence_state {
+            presence.payloads.extend(stored.payloads.iter().cloned());
+        }
+        let _ = registry
+            .send_to_if_owner(recipient_full, owner, Stanza::Presence(presence))
+            .await;
+    }
+}
+
 async fn broadcast_presence_to_subscribers(
     state: &WebSocketState,
     sender_jid: &FullJid,
@@ -473,77 +720,133 @@ async fn broadcast_presence_to_subscribers(
     let Some(storage) = roster_storage(state).await else {
         return;
     };
-    let subscribers = match storage
-        .get_presence_subscribers(&sender_jid.to_bare())
-        .await
-    {
+    let sender_bare = sender_jid.to_bare();
+    let subscribers = match storage.get_presence_subscribers(&sender_bare).await {
         Ok(subscribers) => subscribers,
         Err(error) => {
             warn!(error = %error, jid = %sender_jid, "Failed to load presence subscribers");
             return;
         }
     };
-    for subscriber_bare in subscribers {
-        if recipient_blocks_sender(state, &sender_jid.to_bare(), &subscriber_bare).await {
-            continue;
+    if subscribers.is_empty() {
+        return;
+    }
+
+    let blocking = blocking_storage(state);
+    let sender_blocklist = match blocking.load_blocklist(&sender_bare).await {
+        Ok(blocklist) => blocklist,
+        Err(error) => {
+            warn!(
+                error = %error,
+                jid = %sender_jid,
+                "Failed to load sender blocklist for presence broadcast; skipping fail-closed"
+            );
+            return;
         }
-        if recipient_blocks_sender(state, &subscriber_bare, &sender_jid.to_bare()).await {
-            continue;
-        }
-        // RFC 6121 §4.4.2: relay the user's own stanza (readdressed), never a
-        // rebuild — a rebuild drops extensions and would misattribute the
-        // server's XEP-0115 caps to the contact (issue #1101).
-        let mut relayed = presence.clone();
-        relayed.from = Some(Jid::from(sender_jid.clone()));
-        relayed.to = Some(Jid::from(subscriber_bare.clone()));
-        // A remote contact's server receives the presence through the
-        // remote route (RFC 6121 §4.2.2, §4.4.2; gate G18). A refusal, such
-        // as a full queue for the contact's domain, drops it.
-        if super::remote::is_remote_contact(state, &subscriber_bare) {
-            let _ = super::remote::offer_presence(state, relayed).await;
-            continue;
-        }
-        let stanza = Stanza::Presence(relayed);
-        if super::subscription::try_route_presence_to_bare_remote(
-            state,
-            &subscriber_bare,
-            &stanza,
-            ordered_relay_origin,
-        )
-        .await
+    };
+    let candidates: Vec<BareJid> = subscribers
+        .into_iter()
+        .filter(|subscriber| !sender_blocklist.contains_jid(&Jid::from(subscriber.clone())))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let (remote_candidates, local_candidates): (Vec<BareJid>, Vec<BareJid>) = candidates
+        .into_iter()
+        .partition(|subscriber| super::remote::is_remote_contact(state, subscriber));
+
+    let mut targets = remote_candidates;
+    if !local_candidates.is_empty() {
+        let sender_bare_jid = Jid::from(sender_bare);
+        let blocked_by_subscribers = match blocking
+            .filter_blocking_recipients(&local_candidates, &sender_bare_jid)
+            .await
         {
-            continue;
-        }
-        let mut delivered_resources = Vec::new();
-        for resource in
-            crate::server::routes::websocket::handlers::account_reads::available_resources(
+            Ok(blocked) => blocked,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    jid = %sender_jid,
+                    "Failed to batch-check subscriber blocklists for presence broadcast; skipping fail-closed"
+                );
+                return;
+            }
+        };
+        targets.extend(
+            local_candidates
+                .into_iter()
+                .filter(|subscriber| !blocked_by_subscribers.contains(subscriber)),
+        );
+    }
+    if targets.is_empty() {
+        return;
+    }
+
+    futures::stream::iter(targets)
+        .for_each_concurrent(PRESENCE_FANOUT_CONCURRENCY, |subscriber_bare| async move {
+            // RFC 6121 §4.4.2: relay the user's own stanza (readdressed), never a
+            // rebuild — a rebuild drops extensions and would misattribute the
+            // server's XEP-0115 caps to the contact (issue #1101).
+            let mut relayed = presence.clone();
+            relayed.from = Some(Jid::from(sender_jid.clone()));
+            relayed.to = Some(Jid::from(subscriber_bare.clone()));
+            // A remote contact's server receives the presence through the
+            // remote route (RFC 6121 §4.2.2, §4.4.2; gate G18). A refusal, such
+            // as a full queue for the contact's domain, drops it.
+            if super::remote::is_remote_contact(state, &subscriber_bare) {
+                let _ = super::remote::offer_presence(state, relayed).await;
+                return;
+            }
+            let stanza = Stanza::Presence(relayed);
+            if super::subscription::try_route_presence_to_bare_remote(
                 state,
                 &subscriber_bare,
+                &stanza,
+                ordered_relay_origin,
             )
             .await
-            .into_iter()
-            .map(|(jid, _)| jid)
-        {
-            if state
-                .deps
-                .protocol
-                .connection_registry
-                .send_to(&resource, stanza.clone())
-                .await
-                .is_sent()
             {
-                delivered_resources.push(resource);
+                return;
             }
-        }
-        record_stanza_for_detached_available_resources_excluding(
-            state,
-            &subscriber_bare,
-            &stanza,
-            "presence broadcast",
-            &delivered_resources,
-        )
+            let live_resources: Vec<FullJid> =
+                crate::server::routes::websocket::handlers::account_reads::available_resources(
+                    state,
+                    &subscriber_bare,
+                )
+                .await
+                .into_iter()
+                .map(|(jid, _)| jid)
+                .collect();
+            let mut excluded_resources = Vec::with_capacity(live_resources.len());
+            for resource in live_resources {
+                match state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(&resource, stanza.clone())
+                {
+                    waddle_xmpp::registry::BroadcastOutcome::Delivered
+                    | waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
+                        excluded_resources.push(resource);
+                    }
+                    waddle_xmpp::registry::BroadcastOutcome::NotConnected
+                    | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {}
+                }
+            }
+            // Exclude delivered and backpressured live resources (which are not
+            // detached), while allowing NotConnected / DroppedClosed resources
+            // that detached mid-fanout to fall through to detached SM recording.
+            record_stanza_for_detached_available_resources_excluding(
+                state,
+                &subscriber_bare,
+                &stanza,
+                "presence broadcast",
+                &excluded_resources,
+            )
+            .await;
+        })
         .await;
-    }
 }
 
 /// XEP-0115: drive caps resolution for an inbound `<presence>`

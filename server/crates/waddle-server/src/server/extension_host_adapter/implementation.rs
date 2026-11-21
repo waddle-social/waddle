@@ -156,9 +156,7 @@ impl ExtensionHostAdapter {
     pub(in crate::server::extension_host_adapter) async fn roster_storage(
         &self,
     ) -> Result<DatabaseRosterStorage, ExtensionHostAdapterError> {
-        Ok(DatabaseRosterStorage::new(
-            self.state.deps.app_state.db_pool.global().clone(),
-        ))
+        Ok(self.state.deps.app_state.db_pool.roster_storage().clone())
     }
 
     pub(in crate::server::extension_host_adapter) async fn roster_item(

@@ -97,6 +97,9 @@ mod imp {
         pub session: RefCell<Option<Session>>,
         /// Bumped on sign-out so events from an old session are ignored.
         pub generation: Cell<u64>,
+        /// Bumped on every `Connected` and `Disconnected` so a spawned
+        /// bootstrap from an earlier connection cannot overwrite a reconnect.
+        pub connect_epoch: Cell<u64>,
         pub connected: Cell<bool>,
         pub membership: RefCell<Membership>,
         pub outbound: RefCell<OutboundSends>,

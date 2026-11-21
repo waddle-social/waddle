@@ -215,6 +215,8 @@ pub(crate) fn map_command_reply(
 
 // ── Discovery orchestration ─────────────────────────────────────────────────
 
+const EXTENSION_DISCO_CONCURRENCY: usize = 8;
+
 /// Resolve the extension service JID: probe every candidate with
 /// `disco#info` and take the first advertising both the Waddle
 /// extension feature and XEP-0050 command support; fall back to the
@@ -228,14 +230,34 @@ async fn discover_extension_service(handle: &ClientHandle, domain: &str) -> Stri
             .collect(),
         Err(_) => Vec::new(),
     };
-    for candidate in core::extension_service_candidates(domain, &discovered) {
-        let Ok(reply) = send_iq_with_timeout(handle, build_disco_info_iq(&candidate, None)).await
-        else {
-            continue;
-        };
-        if parse_disco_info_result(&reply, &candidate)
-            .is_some_and(|info| core::is_extension_service(&info))
-        {
+    let candidates = core::extension_service_candidates(domain, &discovered);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(EXTENSION_DISCO_CONCURRENCY));
+    let mut join_set = tokio::task::JoinSet::new();
+    for (index, candidate) in candidates.iter().cloned().enumerate() {
+        let handle = handle.clone();
+        let semaphore = std::sync::Arc::clone(&semaphore);
+        join_set.spawn(async move {
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return (index, false);
+            };
+            let matched = send_iq_with_timeout(&handle, build_disco_info_iq(&candidate, None))
+                .await
+                .ok()
+                .and_then(|reply| parse_disco_info_result(&reply, &candidate))
+                .is_some_and(|info| core::is_extension_service(&info));
+            (index, matched)
+        });
+    }
+    let mut matches = vec![false; candidates.len()];
+    while let Some(joined) = join_set.join_next().await {
+        if let Ok((index, matched)) = joined {
+            if let Some(slot) = matches.get_mut(index) {
+                *slot = matched;
+            }
+        }
+    }
+    for (candidate, matched) in candidates.into_iter().zip(matches) {
+        if matched {
             return candidate;
         }
     }
@@ -282,14 +304,34 @@ impl WaddleClient {
             .await
             .map_err(|e| client_error_to_waddle(&e))?;
         let items = parse_disco_items_result(&reply).unwrap_or_default();
-        let mut commands = Vec::new();
-        for item in core::extension_command_refs(items, &service_jid) {
-            let metadata = fetch_command_metadata(&handle, &item.service_jid, &item.node).await;
-            commands.push(command_to_ffi(core::extension_command_descriptor(
-                item, metadata,
-            )));
+        let refs = core::extension_command_refs(items, &service_jid);
+        let semaphore =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(EXTENSION_DISCO_CONCURRENCY));
+        let mut join_set = tokio::task::JoinSet::new();
+        for (index, item) in refs.into_iter().enumerate() {
+            let handle = handle.clone();
+            let semaphore = std::sync::Arc::clone(&semaphore);
+            join_set.spawn(async move {
+                let metadata = match semaphore.acquire_owned().await {
+                    Ok(_permit) => {
+                        fetch_command_metadata(&handle, &item.service_jid, &item.node).await
+                    }
+                    Err(_) => core::ExtensionCommandMetadata::default(),
+                };
+                (
+                    index,
+                    command_to_ffi(core::extension_command_descriptor(item, metadata)),
+                )
+            });
         }
-        Ok(commands)
+        let mut ordered = Vec::new();
+        while let Some(joined) = join_set.join_next().await {
+            if let Ok(entry) = joined {
+                ordered.push(entry);
+            }
+        }
+        ordered.sort_by_key(|(index, _)| *index);
+        Ok(ordered.into_iter().map(|(_, command)| command).collect())
     }
 
     /// XEP-0050 §2.4: start an extension command with `execute`. In a

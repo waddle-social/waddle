@@ -41,7 +41,8 @@ export function presenceFromShow(show: RenderedShow | undefined): OccupantPresen
 /** Record a contact's rendered (resource-aggregated) subscription presence. */
 export function setContactPresence(jid: string, show: RenderedShow): void {
   const key = bareJidKey(jid);
-  if (key) $contactPresence.setKey(key, show);
+  if (!key || $contactPresence.get()[key] === show) return;
+  $contactPresence.setKey(key, show);
 }
 
 /** Replace the occupant snapshot: every joined room's shows per real bare JID. */

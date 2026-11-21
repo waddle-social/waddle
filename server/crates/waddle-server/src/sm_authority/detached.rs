@@ -52,7 +52,6 @@ use super::custody::{
 use super::error::DurableSmError;
 use super::record::{self, DurableSessionRecord};
 use super::store::DurableSmStore;
-use crate::sm_persistence::durable_rows;
 
 /// How often one admission is offered again while its commit outcome is
 /// unknown. Admission is idempotent under the frame's operation id.
@@ -94,21 +93,17 @@ impl DurableSmStore {
         account: &BareJid,
         now: DateTime<Utc>,
     ) -> Result<Vec<DetachedDurableSession>, DurableSmError> {
-        let mut tx = self.db.begin().await?;
-        let mut sessions = Vec::new();
-        for stored in record::load_awaiting_resume_account(&mut tx, account).await? {
+        let rows = record::load_awaiting_resume_account_with_snapshots(&self.db, account).await?;
+        let mut sessions = Vec::with_capacity(rows.len());
+        for (stored, resource) in rows {
             if stored.full_jid.to_bare() != *account || !resumable_at(&stored, now) {
                 continue;
             }
-            let resource =
-                durable_rows::load_resource_snapshot(&mut tx, &record::stream_id(stored.session))
-                    .await?;
             sessions.push(DetachedDurableSession {
                 record: stored,
                 resource,
             });
         }
-        tx.rollback().await?;
         Ok(sessions)
     }
 

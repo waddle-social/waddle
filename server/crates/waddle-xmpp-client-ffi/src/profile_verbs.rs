@@ -623,33 +623,34 @@ impl WaddleClient {
     ) -> Result<WaddlePepProfile, WaddleError> {
         let jid = self.require_bare_jid(&jid)?;
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
-        let mood = send_iq_with_timeout(
+        let mood_fut = send_iq_with_timeout(
             &handle,
             build_pep_items_iq(&mint_request_id(), jid.as_str(), NS_MOOD),
-        )
-        .await
-        .ok()
-        .as_ref()
-        .and_then(parse_pep_mood)
-        .map(mood_from_core);
-        let activity = send_iq_with_timeout(
+        );
+        let activity_fut = send_iq_with_timeout(
             &handle,
             build_pep_items_iq(&mint_request_id(), jid.as_str(), NS_ACTIVITY),
-        )
-        .await
-        .ok()
-        .as_ref()
-        .and_then(parse_pep_activity)
-        .map(activity_from_core);
-        let tune = send_iq_with_timeout(
+        );
+        let tune_fut = send_iq_with_timeout(
             &handle,
             build_pep_items_iq(&mint_request_id(), jid.as_str(), NS_TUNE),
-        )
-        .await
-        .ok()
-        .as_ref()
-        .and_then(parse_pep_tune)
-        .map(tune_from_core);
+        );
+        let (mood_res, activity_res, tune_res) = tokio::join!(mood_fut, activity_fut, tune_fut);
+        let mood = mood_res
+            .ok()
+            .as_ref()
+            .and_then(parse_pep_mood)
+            .map(mood_from_core);
+        let activity = activity_res
+            .ok()
+            .as_ref()
+            .and_then(parse_pep_activity)
+            .map(activity_from_core);
+        let tune = tune_res
+            .ok()
+            .as_ref()
+            .and_then(parse_pep_tune)
+            .map(tune_from_core);
         Ok(WaddlePepProfile {
             mood,
             activity,

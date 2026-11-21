@@ -48,34 +48,43 @@ export async function discoverExtensionCommands(
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
   const items = await rawDiscoItems(xmpp, serviceJid, NS_ADHOC_COMMANDS);
   const filtered = items.filter((item): item is { jid?: string; node: string; name?: string } => !!item.node && item.node !== INVOKE_COMMAND_NODE);
-  const commands: DiscoveredExtensionCommand[] = [];
-  for (const item of filtered) {
-    const itemServiceJid = item.jid ?? serviceJid;
-    const node = item.node;
-    let scope: ExtensionCommandScope = "global";
-    let composerPrefix: string | undefined;
-    let inlineField: string | undefined;
-    let composerExecute = false;
-    try {
-      const info = await rawDiscoInfoFull(xmpp, itemServiceJid, node);
-      const metadata = parseExtensionCommandMetadata(info.extensions);
-      if (metadata.scope) scope = metadata.scope;
-      composerPrefix = metadata.composerPrefix;
-      inlineField = metadata.inlineField;
-      composerExecute = metadata.composerExecute === true;
-    } catch {
-      // If disco#info is unavailable, fall back to global scope.
-    }
-    commands.push({
-      serviceJid: itemServiceJid,
-      node,
-      name: item.name || node,
-      scope,
-      ...(composerPrefix !== undefined ? { composerPrefix } : {}),
-      ...(inlineField !== undefined ? { inlineField } : {}),
-      ...(composerExecute ? { composerExecute } : {}),
-    });
-  }
+  const concurrency = 8;
+  const commands = new Array<DiscoveredExtensionCommand>(filtered.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, filtered.length) }, async () => {
+      while (nextIndex < filtered.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const item = filtered[index]!;
+        const itemServiceJid = item.jid ?? serviceJid;
+        const node = item.node;
+        let scope: ExtensionCommandScope = "global";
+        let composerPrefix: string | undefined;
+        let inlineField: string | undefined;
+        let composerExecute = false;
+        try {
+          const info = await rawDiscoInfoFull(xmpp, itemServiceJid, node);
+          const metadata = parseExtensionCommandMetadata(info.extensions);
+          if (metadata.scope) scope = metadata.scope;
+          composerPrefix = metadata.composerPrefix;
+          inlineField = metadata.inlineField;
+          composerExecute = metadata.composerExecute === true;
+        } catch {
+          // If disco#info is unavailable, fall back to global scope.
+        }
+        commands[index] = {
+          serviceJid: itemServiceJid,
+          node,
+          name: item.name || node,
+          scope,
+          ...(composerPrefix !== undefined ? { composerPrefix } : {}),
+          ...(inlineField !== undefined ? { inlineField } : {}),
+          ...(composerExecute ? { composerExecute } : {}),
+        };
+      }
+    }),
+  );
   return commands;
 }
 
@@ -117,12 +126,15 @@ export async function discoverExtensionCommandService(xmpp: XmppSendIq, userJid:
       fallbackServiceJid,
       items.map((item) => item.jid).filter((jid): jid is string => !!jid),
     );
-    for (const candidate of candidates) {
-      try {
-        const info = await rawDiscoInfo(xmpp, candidate);
-        if (isWaddleExtensionServiceInfo(info.features)) return candidate;
-      } catch {
-        // Try the next discovered component.
+    const settled = await Promise.allSettled(
+      candidates.map(async (candidate) => ({
+        candidate,
+        info: await rawDiscoInfo(xmpp, candidate),
+      })),
+    );
+    for (const entry of settled) {
+      if (entry.status === "fulfilled" && isWaddleExtensionServiceInfo(entry.value.info.features)) {
+        return entry.value.candidate;
       }
     }
   } catch {

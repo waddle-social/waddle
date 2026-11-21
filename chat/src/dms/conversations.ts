@@ -362,13 +362,7 @@ export function useDirectMessageConversations(
         || currentSessionJid !== (session.value?.jid ?? null)
       ) return true;
 
-      const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
       mergeInboxConversations(inbox.conversations);
-      for (const conversation of directConversations) {
-        const bare = barePeerJid(conversation.partner);
-        if (isRoomPeer(bare)) continue;
-        void currentClient.subscribeToPeerPresence(bare).catch(() => undefined);
-      }
       void dmCallActivityHydration;
       return true;
     } catch {
@@ -472,18 +466,28 @@ export function useDirectMessageConversations(
 
   function updatePresence(event: PresenceUpdateEvent) {
     const bare = barePeerJid(event.bareJid);
-    presenceByJid.value = { ...presenceByJid.value, [bare]: event.show };
-    // Always overwrite (including to undefined) so returning to Available
-    // clears a previously rendered idle age rather than stranding it.
-    presenceIdleByJid.value = { ...presenceIdleByJid.value, [bare]: event.idleSince };
-    conversations.value = conversations.value.map((c) => (
-      c.peerJid === bare
-        ? { ...c, presenceShow: event.show, presenceIdleSince: event.idleSince }
-        : c
-    ));
+    const showChanged = presenceByJid.value[bare] !== event.show;
+    const idleChanged = presenceIdleByJid.value[bare] !== event.idleSince;
+    if (showChanged) {
+      presenceByJid.value = { ...presenceByJid.value, [bare]: event.show };
+    }
+    if (idleChanged) {
+      // Always overwrite (including to undefined) so returning to Available
+      // clears a previously rendered idle age rather than stranding it.
+      presenceIdleByJid.value = { ...presenceIdleByJid.value, [bare]: event.idleSince };
+    }
+    const index = conversations.value.findIndex((c) => c.peerJid === bare);
+    if (index < 0) return;
+    const current = conversations.value[index];
+    if (!current || (current.presenceShow === event.show && current.presenceIdleSince === event.idleSince)) {
+      return;
+    }
+    const next = [...conversations.value];
+    next[index] = { ...current, presenceShow: event.show, presenceIdleSince: event.idleSince };
+    conversations.value = next;
   }
 
-  watch([conversations, activePeerJid], persist, { deep: true });
+  watch([conversations, activePeerJid], persist);
   watch([knownRoomKeys, xmppClient], () => {
     pruneRoomConversations();
     for (const conversation of conversations.value) {
@@ -508,12 +512,6 @@ export function useDirectMessageConversations(
       localReadAtByJid.value = {};
       restore();
       pruneRoomConversations();
-      for (const c of conversations.value) {
-        // #1256: occupant rows have no presence identity of their own —
-        // subscribing would bare-fold to the room JID.
-        if (c.mucPm || c.peerJid.includes("/")) continue;
-        xmppClient.value?.subscribeToPeerPresence(c.peerJid);
-      }
       if (activePeerJid.value) hydratePeerDmCallActivity(activePeerJid.value);
     },
     { immediate: true },

@@ -552,25 +552,44 @@ public final class SessionCoordinator {
     private func sessionReady() async {
         await refreshOwnPresence()
         guard !Task.isCancelled else { return }
+        // Start loading the roster in parallel with topology discovery, room
+        // joins, and inbox hydration so the People list is ready immediately.
+        async let contactsBootstrap: Void = refreshContacts()
         await syncPresenceModeOnConnect()
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            _ = await contactsBootstrap
+            return
+        }
         await refreshDirectory()
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            _ = await contactsBootstrap
+            return
+        }
+        async let notifyBootstrap: Void = loadNotifyModes()
         if await !hydrateInbox() {
             scheduleInboxHydrate()
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            _ = await notifyBootstrap
+            _ = await contactsBootstrap
+            return
+        }
         await bootstrapDisplayedCursors()
-        guard !Task.isCancelled else { return }
-        await loadNotifyModes()
-        guard !Task.isCancelled else { return }
+        await notifyBootstrap
+        guard !Task.isCancelled else {
+            _ = await contactsBootstrap
+            return
+        }
         isSendReady = true
         await flushOutboundQueue()
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            _ = await contactsBootstrap
+            return
+        }
         await drainPendingDisplayed()
         await reloadActiveConversation()
+        await contactsBootstrap
         guard !Task.isCancelled else { return }
-        await refreshContacts()
         // Only a session that got all the way through resets the backoff,
         // so a stream that drops right after binding keeps backing off.
         guard !Task.isCancelled else { return }

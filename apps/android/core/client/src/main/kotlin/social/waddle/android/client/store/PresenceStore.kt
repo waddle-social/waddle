@@ -153,8 +153,10 @@ class PresenceStore {
         val occupants = rooms[room].orEmpty()
         val next =
             if (presence.presenceType == PRESENCE_UNAVAILABLE) {
+                if (!occupants.containsKey(nick)) return
                 occupants - nick
             } else {
+                if (occupants[nick] == presence) return
                 occupants + (nick to presence)
             }
         _occupants.value = BareJidMap(if (next.isEmpty()) rooms - room else rooms + (room to next))
@@ -177,8 +179,10 @@ class PresenceStore {
         val collapsed = collapse(bare, resources)
         if (collapsed == null) contactResources.remove(bare)
         val contacts = _contacts.value
+        val current = contacts[bare]
+        if (collapsed == current && (collapsed != null || !contacts.containsKey(bare))) return
         val next = if (collapsed == null) contacts - bare else contacts + (bare to collapsed)
-        if (next != contacts) _contacts.value = BareJidMap(next)
+        _contacts.value = BareJidMap(next)
     }
 
     private fun collapse(bare: String, resources: Map<String, WaddlePresence>): ContactPresence? {

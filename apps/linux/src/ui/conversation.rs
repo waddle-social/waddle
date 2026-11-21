@@ -259,11 +259,15 @@ impl WaddleWindow {
         let imp = self.imp();
         match event {
             SessionEvent::Connected => {
+                let connect_epoch = imp.connect_epoch.get().wrapping_add(1);
+                imp.connect_epoch.set(connect_epoch);
                 imp.connected.set(true);
                 imp.reconnect_attempt.set(0);
-                self.on_connected().await;
+                self.spawn_on_connected(generation, connect_epoch);
             }
             SessionEvent::Disconnected => {
+                imp.connect_epoch
+                    .set(imp.connect_epoch.get().wrapping_add(1));
                 imp.connected.set(false);
                 self.clear_membership();
                 self.schedule_reconnect(generation);
@@ -403,49 +407,58 @@ impl WaddleWindow {
         }
     }
 
-    async fn on_connected(&self) {
+    fn spawn_on_connected(&self, generation: u64, connect_epoch: u64) {
         let imp = self.imp();
         let Some(session) = imp.session.borrow().clone() else {
             return;
         };
         imp.account_status.set_title("Choose a conversation");
         session.announce(imp.availability.get());
-        let rooms = session.rooms().await;
-        let inbox = session.inbox().await;
-        for room in rooms.iter().filter(|room| room.autojoin) {
-            self.ensure_room_joined(room);
-        }
-        let mut conversations = rooms;
-        for direct in session::direct_from(&inbox) {
-            if !conversations.iter().any(|known| known.jid == direct.jid) {
-                conversations.push(direct);
-            }
-        }
-        // Keep DMs that arrived live but are not in the inbox yet.
-        for known in imp.conversations.borrow().iter() {
-            if (known.kind == Kind::Direct || known.thread.is_some())
-                && !conversations.iter().any(|c| c.key() == known.key())
+        let window = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let (rooms, inbox) = tokio::join!(session.rooms(), session.inbox());
+            let imp = window.imp();
+            if imp.generation.get() != generation
+                || imp.connect_epoch.get() != connect_epoch
+                || !imp.connected.get()
             {
-                conversations.push(known.clone());
+                return;
             }
-        }
-        imp.conversations.replace(conversations);
-        for entry in &inbox {
-            self.update_inbox(entry);
-        }
-        self.render_conversations();
-        self.refresh_composer();
+            for room in rooms.iter().filter(|room| room.autojoin) {
+                window.ensure_room_joined(room);
+            }
+            let mut conversations = rooms;
+            for direct in session::direct_from(&inbox) {
+                if !conversations.iter().any(|known| known.jid == direct.jid) {
+                    conversations.push(direct);
+                }
+            }
+            // Keep DMs that arrived live but are not in the inbox yet.
+            for known in imp.conversations.borrow().iter() {
+                if (known.kind == Kind::Direct || known.thread.is_some())
+                    && !conversations.iter().any(|c| c.key() == known.key())
+                {
+                    conversations.push(known.clone());
+                }
+            }
+            imp.conversations.replace(conversations);
+            for entry in &inbox {
+                window.update_inbox(entry);
+            }
+            window.render_conversations();
+            window.refresh_composer();
 
-        // Reopen what was on screen (or asked for from a notification), or
-        // the first room on first connect.
-        let target = imp
-            .pending_open
-            .take()
-            .or_else(|| imp.current.borrow().clone())
-            .or_else(|| imp.conversations.borrow().first().map(Conversation::key));
-        if let Some(jid) = target {
-            self.open_conversation(&jid);
-        }
+            // Reopen what was on screen (or asked for from a notification), or
+            // the first room on first connect.
+            let target = imp
+                .pending_open
+                .take()
+                .or_else(|| imp.current.borrow().clone())
+                .or_else(|| imp.conversations.borrow().first().map(Conversation::key));
+            if let Some(jid) = target {
+                window.open_conversation(&jid);
+            }
+        });
     }
 
     /// Add a DM conversation the sidebar does not show yet.

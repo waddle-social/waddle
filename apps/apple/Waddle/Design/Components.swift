@@ -9,7 +9,7 @@ struct AvatarView: View {
 
     var body: some View {
         Group {
-            if let image, let decoded = Image(data: image.data) {
+            if let image, let decoded = Image.cachedAvatar(data: image.data) {
                 decoded
                     .resizable()
                     .scaledToFill()

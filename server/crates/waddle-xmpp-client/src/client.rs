@@ -62,12 +62,32 @@ impl ClientHandle {
             .map_err(|_| ClientError::Disconnected)
     }
 
+    /// Default request-level timeout applied by [`Self::send_iq`].
+    pub const DEFAULT_IQ_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// Send an IQ stanza and await a correlated result or error response.
+    ///
+    /// Bounded by [`Self::DEFAULT_IQ_TIMEOUT`] so an unanswered IQ never hangs
+    /// a caller indefinitely.
     ///
     /// # Errors
     ///
     /// Returns `ClientError::Disconnected` if the command channel or response channel closes; otherwise propagates the IQ timeout, stanza error, or transport failure reported by the driver.
     pub async fn send_iq(&self, stanza: Element) -> ClientResult<Element> {
+        self.send_iq_with_timeout(stanza, Self::DEFAULT_IQ_TIMEOUT)
+            .await
+    }
+
+    /// Send an IQ stanza and await a correlated result or error response within `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the command channel or response channel closes, `ClientError::IqTimeout` if `timeout` elapses before a reply arrives, or the stanza/transport error reported by the driver.
+    pub async fn send_iq_with_timeout(
+        &self,
+        stanza: Element,
+        timeout: Duration,
+    ) -> ClientResult<Element> {
         let (tx, rx) = oneshot::channel();
         self.commands
             .send(XmppCommand::SendIq {
@@ -76,7 +96,11 @@ impl ClientHandle {
             })
             .await
             .map_err(|_| ClientError::Disconnected)?;
-        rx.await.map_err(|_| ClientError::Disconnected)?
+        match time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ClientError::Disconnected),
+            Err(_) => Err(ClientError::IqTimeout { timeout }),
+        }
     }
 
     /// Request a clean disconnect.
@@ -220,7 +244,7 @@ where
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(64);
-        let (evt_tx, _) = broadcast::channel::<ClientEvent>(256);
+        let (evt_tx, _) = broadcast::channel::<ClientEvent>(2048);
         let state = watch::Sender::new(self.runtime.snapshot().clone());
 
         let handle = ClientHandle {
@@ -408,6 +432,10 @@ impl DriverTask {
         stanza: Element,
         responder: oneshot::Sender<ClientResult<Element>>,
     ) -> bool {
+        if responder.is_closed() {
+            return true;
+        }
+        self.prune_closed_pending_iqs();
         let id = stanza.attr("id").map(|s| s.to_string());
         match self
             .send_transport_message(TransportMessage::Element(stanza))
@@ -431,6 +459,13 @@ impl DriverTask {
                     true
                 }
             },
+        }
+    }
+
+    fn prune_closed_pending_iqs(&mut self) {
+        if !self.pending_iqs.is_empty() {
+            self.pending_iqs
+                .retain(|_, responder| !responder.is_closed());
         }
     }
 
@@ -497,6 +532,7 @@ impl DriverTask {
         previous_pulse: Option<chrono::DateTime<chrono::Utc>>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
+        self.prune_closed_pending_iqs();
         let client_events = self
             .runtime
             .pulse_stream_management_clock(previous_pulse, now);

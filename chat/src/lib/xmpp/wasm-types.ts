@@ -381,6 +381,17 @@ export interface WasmRosterContact {
   groups: string[];
 }
 
+export interface WasmRosterVersionedResult {
+  unchanged: boolean;
+  ver?: string | null;
+  contacts: WasmRosterContact[];
+}
+
+export interface WasmRosterPush {
+  ver?: string | null;
+  items: WasmRosterContact[];
+}
+
 interface WasmAvatar {
   jid: string;
   id: string;

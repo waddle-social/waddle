@@ -1284,74 +1284,87 @@ pub(super) async fn answer_admin_list_get(
             .await
         }
     }
-    let context = match room_actor
-        .ask(GetAdminContext {
-            sender_jid: sender_jid.clone(),
-        })
-        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-        .await
-    {
-        Ok(context) => honoured_admin_context(state, sender_jid, evidence, context),
-        Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
-    };
-    let has_admin_affiliation =
-        matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
-    let is_admin = has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
+    let has_role_shape = query.items.iter().any(admin_item_has_role_shape);
     // XEP-0045 §9.5: in a non-anonymous room (all Waddle rooms are
     // muc_nonanonymous) any member SHOULD be able to retrieve the
     // member list — even when not currently an occupant. Every other
     // list GET remains admin+ (#1265 item 12).
-    let member_list_get = !query.items.is_empty()
-        && !query.items.iter().any(admin_item_has_role_shape)
+    let member_list_only = !query.items.is_empty()
+        && !has_role_shape
         && query
             .items
             .iter()
-            .all(|item| item.affiliation == Some(Affiliation::Member))
-        && context.affiliation >= Affiliation::Member;
-    if !is_admin && !member_list_get {
-        return AdminListAnswer::Denied(AdminListDenial::Forbidden);
-    }
-    let snapshot = match room_actor
-        .ask(GetSnapshot)
+            .all(|item| item.affiliation == Some(Affiliation::Member));
+    let authorization = if matches!(evidence, PrincipalEvidence::NoStream) {
+        waddle_xmpp::muc::room_actor::AdminListAuthorization::CheckInRoom {
+            sender_jid: sender_jid.clone(),
+            member_list_only,
+        }
+    } else {
+        let context = match room_actor
+            .ask(GetAdminContext {
+                sender_jid: sender_jid.clone(),
+            })
+            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+            .await
+        {
+            Ok(context) => honoured_admin_context(state, sender_jid, evidence, context),
+            Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
+        };
+        let has_admin_affiliation =
+            matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
+        let is_admin =
+            has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
+        let member_list_get = member_list_only && context.affiliation >= Affiliation::Member;
+        let allowed = if has_role_shape {
+            is_admin
+        } else {
+            has_admin_affiliation || member_list_get
+        };
+        if !allowed {
+            return AdminListAnswer::Denied(AdminListDenial::Forbidden);
+        }
+        waddle_xmpp::muc::room_actor::AdminListAuthorization::PreAuthorized
+    };
+    let filter = if has_role_shape {
+        waddle_xmpp::muc::room_actor::AdminListFilter::Roles(
+            query.items.iter().find_map(|item| item.role),
+        )
+    } else {
+        waddle_xmpp::muc::room_actor::AdminListFilter::Affiliations(
+            query.items.iter().find_map(|item| item.affiliation),
+        )
+    };
+    let outcome = match room_actor
+        .ask(waddle_xmpp::muc::room_actor::GetAdminList {
+            authorization,
+            filter,
+        })
         .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
     {
-        Ok(snapshot) => snapshot.room,
+        Ok(outcome) => outcome,
         Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
     };
-    if query.items.iter().any(admin_item_has_role_shape) {
-        let role_filter = query.items.iter().find_map(|item| item.role);
-        return AdminListAnswer::Roles(
-            snapshot
-                .occupants
-                .values()
-                .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
-                .map(|occupant| AdminRoleEntry {
-                    nick: occupant.nick.clone(),
-                    role: occupant.role,
-                    affiliation: occupant.affiliation,
-                    real_jid: occupant.real_jid.clone(),
+    match outcome {
+        waddle_xmpp::muc::room_actor::AdminListOutcome::Forbidden => {
+            AdminListAnswer::Denied(AdminListDenial::Forbidden)
+        }
+        waddle_xmpp::muc::room_actor::AdminListOutcome::Roles(roles) => AdminListAnswer::Roles(
+            roles
+                .into_iter()
+                .map(|item| AdminRoleEntry {
+                    nick: item.nick,
+                    role: item.role,
+                    affiliation: item.affiliation,
+                    real_jid: item.real_jid,
                 })
                 .collect(),
-        );
+        ),
+        waddle_xmpp::muc::room_actor::AdminListOutcome::Affiliations(entries) => {
+            AdminListAnswer::Affiliations(entries)
+        }
     }
-    if !has_admin_affiliation && !member_list_get {
-        return AdminListAnswer::Denied(AdminListDenial::Forbidden);
-    }
-    let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
-    AdminListAnswer::Affiliations(if let Some(affiliation) = affiliation_filter {
-        snapshot
-            .jids_by_affiliation(affiliation)
-            .into_iter()
-            .map(|jid| (jid, affiliation))
-            .collect()
-    } else {
-        snapshot
-            .all_affiliations()
-            .into_iter()
-            .map(|entry| (entry.jid, entry.affiliation))
-            .collect()
-    })
 }
 
 /// The standing a room no enrolled scope manages gives the sender of an

@@ -908,6 +908,107 @@ fn app_stanza_acknowledges_jingle_iq_set_and_surfaces_call_event() {
 }
 
 #[test]
+fn app_stanza_acknowledges_trusted_roster_push_without_from_and_emits_event() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let stanza: Element =
+        r#"<iq xmlns='jabber:client' type='set' id='rp-1' to='alice@example.com/macbook'>
+        <query xmlns='jabber:iq:roster' ver='v42'>
+          <item jid='bob@example.com' name='Bob' subscription='both'>
+            <group>Friends</group>
+          </item>
+        </query>
+    </iq>"#
+            .parse()
+            .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+            ack,
+        ))) => {
+            assert_eq!(ack.name(), "iq");
+            assert_eq!(ack.attr("type"), Some("result"));
+            assert_eq!(ack.attr("id"), Some("rp-1"));
+            assert_eq!(ack.attr("to"), None);
+            assert_eq!(ack.children().count(), 0);
+        }
+        other => panic!("expected empty IQ result ack, got {other:?}"),
+    }
+    match &events[1] {
+        ClientEvent::RosterPush { version, items } => {
+            assert_eq!(version.as_deref(), Some("v42"));
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].jid.to_string(), "bob@example.com");
+            assert_eq!(items[0].name.as_deref(), Some("Bob"));
+            assert_eq!(items[0].subscription, crate::Subscription::Both);
+            assert_eq!(items[0].groups, vec!["Friends".to_string()]);
+        }
+        other => panic!("expected ClientEvent::RosterPush, got {other:?}"),
+    }
+}
+
+#[test]
+fn app_stanza_accepts_roster_push_from_own_bare_jid_with_remove() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let stanza: Element = r#"<iq xmlns='jabber:client' type='set' id='rp-2' from='alice@example.com' to='alice@example.com/macbook'>
+        <query xmlns='jabber:iq:roster' ver='v43'>
+          <item jid='bob@example.com' subscription='remove'/>
+        </query>
+    </iq>"#
+        .parse()
+        .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+            ack,
+        ))) => {
+            assert_eq!(ack.attr("type"), Some("result"));
+            assert_eq!(ack.attr("id"), Some("rp-2"));
+            assert_eq!(ack.attr("to"), Some("alice@example.com"));
+        }
+        other => panic!("expected outbound IQ result ack, got {other:?}"),
+    }
+    match &events[1] {
+        ClientEvent::RosterPush { version, items } => {
+            assert_eq!(version.as_deref(), Some("v43"));
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].subscription, crate::Subscription::Remove);
+        }
+        other => panic!("expected ClientEvent::RosterPush, got {other:?}"),
+    }
+}
+
+#[test]
+fn app_stanza_silently_drops_forged_roster_pushes() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    for forged_from in [
+        "mallory@example.com",
+        "mallory@example.com/evil",
+        "alice@example.com/other",
+        "alice@example.com/macbook",
+    ] {
+        let xml = format!(
+            "<iq xmlns='jabber:client' type='set' id='rp-forged' from='{forged_from}' to='alice@example.com/macbook'>\
+                <query xmlns='jabber:iq:roster' ver='v99'>\
+                    <item jid='mallory@example.com' subscription='both'/>\
+                </query>\
+            </iq>"
+        );
+        let stanza: Element = xml.parse().unwrap();
+        let events = runtime.handle_app_stanza(&stanza);
+        assert!(
+            events.is_empty(),
+            "forged roster push from {forged_from} must be silently dropped, got {events:?}"
+        );
+    }
+}
+
+#[test]
 fn runtime_bootstraps_auth_bind_and_ready_state() {
     let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();

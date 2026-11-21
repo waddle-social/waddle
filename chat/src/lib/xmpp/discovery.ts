@@ -555,6 +555,30 @@ interface DiscoverTopologyOptions {
   lastKnownFederation?: boolean | null;
 }
 
+const SPACE_HYDRATION_CONCURRENCY = 6;
+const ROOM_HYDRATION_CONCURRENCY = 8;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const current = nextIndex;
+        nextIndex += 1;
+        results[current] = await worker(items[current]!, current);
+      }
+    }),
+  );
+  return results;
+}
+
 export async function discoverTopology(
   xmpp: HybridClient,
   jid: string,
@@ -591,57 +615,90 @@ export async function discoverTopology(
   const seenSpaceKeys = new Set<string>();
   let serverRole: DiscoveryRole = null;
 
-  const serverInfoResult = await sendDiscoInfo(xmpp, domain).catch(() => null);
+  const [serverInfoSettled, spaceItemsSettled, userBookmarksSettled, mucRoomsSettled] =
+    await Promise.allSettled([
+      sendDiscoInfo(xmpp, domain),
+      sendDiscoItems(xmpp, services.spaces),
+      sendPubsubItems(xmpp, barePeerJid(jid), NS_BOOKMARKS_1),
+      sendDiscoItems(xmpp, services.muc),
+    ]);
+
+  const serverInfoResult = serverInfoSettled.status === "fulfilled" ? serverInfoSettled.value : null;
   if (serverInfoResult) {
     serverRole = parseDiscoveryRole(serverInfoResult.fields.get("waddle#server_affiliation") ?? null);
   }
   const advertisedFederation = serverInfoResult ? hasDiscoFeature(serverInfoResult, HOME_FEDERATION_FEATURE) : null;
   const federation = advertisedFederation ?? options.lastKnownFederation ?? false;
 
-  try {
-    const spaceList = await sendDiscoItems(xmpp, services.spaces);
-    for (const item of spaceList) {
+  if (spaceItemsSettled.status === "fulfilled") {
+    const spaceNodes: Array<{ jid?: string; node: string; name?: string; spaceKey: string }> = [];
+    for (const item of spaceItemsSettled.value) {
       if (!item.node) continue;
-      const spaceId = item.node;
       const spaceKey = qualifiedSpaceKey(services.spaces, item.node);
       if (seenSpaceKeys.has(spaceKey)) continue;
-      let role = serverRole;
-      try {
-        const info = await sendDiscoInfo(xmpp, services.spaces, item.node);
-        if (!isSpacesNodeInfo(info)) continue;
-        if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
-      } catch {
+      seenSpaceKeys.add(spaceKey);
+      spaceNodes.push({ ...item, node: item.node, spaceKey });
+    }
+    const hydratedSpaces = await mapWithConcurrency(
+      spaceNodes,
+      SPACE_HYDRATION_CONCURRENCY,
+      async (item) => {
+        const spaceId = item.node;
+        let info: DiscoInfoData | null;
+        try {
+          info = await sendDiscoInfo(xmpp, services.spaces, spaceId);
+        } catch {
+          return { kind: "info-failed" as const };
+        }
+        if (!isSpacesNodeInfo(info)) return { kind: "not-space" as const };
+        const role = parseDiscoveryRole(info?.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
+        let bookmarks: Array<{ jid?: string; name?: string; autojoin?: boolean }> = [];
+        let bookmarksFailed = false;
+        try {
+          bookmarks = await sendPubsubItems(xmpp, services.spaces, spaceId);
+        } catch {
+          bookmarksFailed = true;
+        }
+        return {
+          kind: "space" as const,
+          space: { id: spaceId, serviceJid: services.spaces, name: item.name ?? spaceId, role },
+          bookmarks,
+          bookmarksFailed,
+        };
+      },
+    );
+    for (const entry of hydratedSpaces) {
+      if (entry.kind === "info-failed") {
         roomCatalogComplete = false;
         bookmarkCatalogComplete = false;
         continue;
       }
-      try {
-        const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
-        for (const bookmark of bookmarks) {
-          if (bookmark.jid) {
-            spaceItems.push({
-              spaceId,
-              roomJid: barePeerJid(bookmark.jid),
-              autojoin: bookmark.autojoin ?? false,
-              name: bookmark.name,
-            });
-          }
-        }
-      } catch {
+      if (entry.kind === "not-space") continue;
+      if (entry.bookmarksFailed) {
         roomCatalogComplete = false;
         bookmarkCatalogComplete = false;
       }
-      seenSpaceKeys.add(spaceKey);
-      spaces.push({ id: spaceId, serviceJid: services.spaces, name: item.name ?? spaceId, role });
+      for (const bookmark of entry.bookmarks) {
+        if (bookmark.jid) {
+          spaceItems.push({
+            spaceId: entry.space.id,
+            roomJid: barePeerJid(bookmark.jid),
+            autojoin: bookmark.autojoin ?? false,
+            name: bookmark.name,
+          });
+        }
+      }
+      spaces.push(entry.space);
     }
-  } catch {
+  } else {
     roomCatalogComplete = false;
     bookmarkCatalogComplete = false;
   }
 
-  try {
-    const userBookmarks = await sendPubsubItems(xmpp, barePeerJid(jid), NS_BOOKMARKS_1);
-    for (const bookmark of userBookmarks) {
+  // Apply user PEP bookmarks AFTER space bookmarks so user autojoin/name
+  // preferences override space bookmark defaults while keeping spaceId.
+  if (userBookmarksSettled.status === "fulfilled") {
+    for (const bookmark of userBookmarksSettled.value) {
       if (!bookmark.jid) continue;
       userBookmarkItems.push({
         roomJid: barePeerJid(bookmark.jid),
@@ -649,32 +706,18 @@ export async function discoverTopology(
         name: bookmark.name,
       });
     }
-  } catch {
+  } else {
     roomCatalogComplete = false;
     bookmarkCatalogComplete = false;
     userBookmarksComplete = false;
   }
 
-  // Narrow try/catch JUST around `sendDiscoItems`: a wedged muc service
-  // (which now times out via `withIqTimeout` instead of hanging forever)
-  // degrades the sidebar to "no rooms" rather than failing the whole
-  // topology load and abandoning already-resolved spaces work. Subsequent
-  // hydration uses `Promise.allSettled` so a single broken room cannot
-  // poison the others; `hydrateRoomInfo` already self-catches, so the
-  // `allSettled` is belt-and-braces against a future regression there.
-  // Errors in barePeerJid, channelFromRoom, or the final rooms.map are
-  // intentionally left to propagate — those are programmer errors, not
-  // wire-state errors, and silently swallowing them would mask bugs.
   let mucRooms: Array<{ jid?: string; name?: string }> = [];
-  try {
-    mucRooms = await sendDiscoItems(xmpp, services.muc);
-  } catch (err) {
-    // sendDiscoItems already logged via logDiscoFailure; here we just
-    // continue with an empty room list. The cause is observable in the
-    // console for diagnostics.
+  if (mucRoomsSettled.status === "fulfilled") {
+    mucRooms = mucRoomsSettled.value;
+  } else {
     roomCatalogComplete = false;
     mucCatalogComplete = false;
-    void err;
   }
   const catalogRoomKeys = new Set(
     mucRooms.flatMap((room) => (room.jid ? [bareJidKey(room.jid)] : [])),
@@ -762,18 +805,29 @@ export async function discoverTopology(
   // Asking its host here would put a federated round trip (and, while that
   // server is down, a full timeout) into every structure load, and its
   // answer is no part of the home catalog: joining the room asks the host.
-  const hydratedSettled = await Promise.allSettled(
-    roomItems.map((room, position) => {
+  const hydratedSettled = await mapWithConcurrency(
+    roomItems,
+    ROOM_HYDRATION_CONCURRENCY,
+    async (room, position): Promise<PromiseSettledResult<RoomInfoHydration>> => {
       const roomJid = room.jid ?? "";
       const id = room.remote ? channelIdForRoom(roomJid, services.muc) : undefined;
       const channel = channelFromRoom({ jid: roomJid, name: room.name }, position, id);
-      return room.remote
-        ? Promise.resolve<RoomInfoHydration>({
-          room: { ...channel, remoteHost: roomHostDomain(roomJid) ?? undefined },
-          fingerprintComplete: false,
-        })
-        : hydrateRoomInfo(xmpp, channel, services.spaces);
-    }),
+      if (room.remote) {
+        return {
+          status: "fulfilled",
+          value: {
+            room: { ...channel, remoteHost: roomHostDomain(roomJid) ?? undefined },
+            fingerprintComplete: false,
+          },
+        };
+      }
+      try {
+        const value = await hydrateRoomInfo(xmpp, channel, services.spaces);
+        return { status: "fulfilled", value };
+      } catch (reason) {
+        return { status: "rejected", reason };
+      }
+    },
   );
   if (hydratedSettled.some(
     (entry, index) =>

@@ -7,7 +7,7 @@ extension SessionCoordinator {
     public func refreshContacts() async {
         contactsLoad = .loading
         let loaded = try? await port.fetchContacts()
-        guard !isStopped else { return }
+        guard !isStopped, !Task.isCancelled else { return }
         if let loaded {
             contacts = loaded
             contactsLoad = .idle
@@ -43,10 +43,33 @@ extension SessionCoordinator {
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
             .map(\.roomJID)
-        var joined: Set<BareJID> = []
-        for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
-            guard directory.isRoom(room) || onDemandRooms.contains(room) else { continue }
-            await join(room)
+        var seen: Set<BareJID> = []
+        let roomsToJoin = (listed + onDemandRooms.sorted(by: { $0.description < $1.description })).filter { room in
+            seen.insert(room).inserted && (directory.isRoom(room) || onDemandRooms.contains(room))
+        }
+        let maxConcurrentJoins = 4
+        await withTaskGroup(of: Void.self) { group in
+            var nextIndex = 0
+            while nextIndex < min(maxConcurrentJoins, roomsToJoin.count) {
+                let room = roomsToJoin[nextIndex]
+                nextIndex += 1
+                group.addTask { @MainActor in
+                    await self.join(room)
+                }
+            }
+            while await group.next() != nil {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
+                if nextIndex < roomsToJoin.count {
+                    let room = roomsToJoin[nextIndex]
+                    nextIndex += 1
+                    group.addTask { @MainActor in
+                        await self.join(room)
+                    }
+                }
+            }
         }
     }
 
@@ -79,6 +102,7 @@ extension SessionCoordinator {
 
     func loadNotifyModes() async {
         guard let settings = try? await port.fetchNotifySettings() else { return }
+        guard !isStopped, !Task.isCancelled else { return }
         directory.replaceNotifySettings(settings)
     }
 

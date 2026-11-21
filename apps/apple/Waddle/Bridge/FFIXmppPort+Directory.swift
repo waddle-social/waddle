@@ -65,20 +65,45 @@ extension FFIXmppPort {
     /// non-admins, so this throws only when every tier failed (or at once
     /// when there is no session).
     func listMembers(of room: BareJID) async throws -> [RoomMember] {
+        enum TierOutcome: Sendable {
+            case entries([RoomMember])
+            case notConnected
+            case error(PortError)
+        }
+        let roomJid = room.description
+        let outcomes = await withTaskGroup(of: (Int, TierOutcome).self, returning: [(Int, TierOutcome)].self) { group in
+            for (index, tier) in Self.memberTiers.enumerated() {
+                group.addTask {
+                    do {
+                        let entries = try await mappingPortErrors {
+                            try await self.client.listRoomMembers(roomJid: roomJid, affiliation: tier)
+                        }
+                        return (index, .entries(entries.compactMap(FFIInbound.roomMember)))
+                    } catch PortError.notConnected {
+                        return (index, .notConnected)
+                    } catch {
+                        return (index, .error(FFIOutbound.portError(error)))
+                    }
+                }
+            }
+            var collected: [(Int, TierOutcome)] = []
+            for await outcome in group {
+                collected.append(outcome)
+            }
+            return collected.sorted { $0.0 < $1.0 }
+        }
         var members: [RoomMember] = []
         var firstError: PortError?
         var anySucceeded = false
-        for tier in Self.memberTiers {
-            do {
-                let entries = try await mappingPortErrors {
-                    try await client.listRoomMembers(roomJid: room.description, affiliation: tier)
-                }
-                members += entries.compactMap(FFIInbound.roomMember)
+        for (_, outcome) in outcomes {
+            switch outcome {
+            case let .entries(entries):
+                members += entries
                 anySucceeded = true
-            } catch PortError.notConnected {
+            case .notConnected:
                 throw PortError.notConnected
-            } catch {
-                firstError = firstError ?? FFIOutbound.portError(error)
+            case let .error(error):
+                firstError = firstError ?? error
             }
         }
         guard anySucceeded else {

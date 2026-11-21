@@ -90,6 +90,11 @@ pub(crate) async fn handle_ordered_relay_presence_request(
                 );
                 return Err(());
             }
+            let from_full = presence
+                .from
+                .as_ref()
+                .and_then(|jid| jid.clone().try_into_full().ok());
+            let suppress_unavailable = from_full.is_some();
             let to_full = if to_was_full {
                 presence
                     .to
@@ -98,7 +103,16 @@ pub(crate) async fn handle_ordered_relay_presence_request(
             } else {
                 None
             };
-            handle_presence_probe(state, from, to, to_full, Some(&ordered_relay_origin)).await;
+            handle_presence_probe(
+                state,
+                from,
+                from_full,
+                to,
+                to_full,
+                suppress_unavailable,
+                Some(&ordered_relay_origin),
+            )
+            .await;
             Ok(())
         }
         Ok(PresenceAction::PresenceUpdate(_)) => {
@@ -475,8 +489,10 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
             handle_presence_probe(
                 context.state,
                 from,
+                None,
                 to,
                 to_full,
+                false,
                 context.ordered_relay_origin.as_ref(),
             )
             .await;

@@ -1,5 +1,7 @@
 //! Discovery and decoding of extension route descriptors at the JavaScript boundary.
 
+use futures::stream::{self, StreamExt};
+
 use super::{
     build_disco_info_iq, build_disco_items_iq, discovery, send_iq_command, Element, Rc, RefCell,
     WaddleClientInner, WaddleExtensionRoute, WaddleExtensionRouteItem,
@@ -9,6 +11,8 @@ use super::{
 };
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+const EXTENSION_DISCO_CONCURRENCY: usize = 8;
 
 pub(crate) async fn discover_extension_command_service(
     inner: Rc<RefCell<WaddleClientInner>>,
@@ -25,15 +29,28 @@ pub(crate) async fn discover_extension_command_service(
         }
     }
 
-    for candidate in extension_command_service_candidates(domain, &discovered_items) {
-        if let Ok(info_result) =
-            send_iq_command(inner.clone(), build_disco_info_iq(&candidate, None)).await
-        {
-            if let Some(info) = discovery::parse_disco_info_result(&info_result, &candidate) {
-                if is_waddle_extension_service(&info) {
-                    return candidate;
-                }
+    let candidates = extension_command_service_candidates(domain, &discovered_items);
+    let probed: Vec<(String, bool)> = stream::iter(candidates)
+        .map(|candidate| {
+            let inner = inner.clone();
+            async move {
+                let matched = send_iq_command(inner, build_disco_info_iq(&candidate, None))
+                    .await
+                    .ok()
+                    .and_then(|info_result| {
+                        discovery::parse_disco_info_result(&info_result, &candidate)
+                    })
+                    .is_some_and(|info| is_waddle_extension_service(&info));
+                (candidate, matched)
             }
+        })
+        .buffered(EXTENSION_DISCO_CONCURRENCY)
+        .collect()
+        .await;
+
+    for (candidate, matched) in probed {
+        if matched {
+            return candidate;
         }
     }
 

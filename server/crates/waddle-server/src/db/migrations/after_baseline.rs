@@ -78,6 +78,8 @@ pub const LOCAL_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2019;
 pub const LOCAL_SPACE_NOTIFICATION_ORDER_VERSION: i64 = 2020;
 pub const HOST_GRANT_SPACE_CONFIGURATION_VERSION: i64 = 2021;
 pub const HOST_GRANT_SPACE_DELETIONS_VERSION: i64 = 2022;
+/// Version of the migration that indexes `sm_durable_sessions` by `(bare_jid, state)`.
+pub const SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION: i64 = 2023;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -284,8 +286,19 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2022_host_grant_space_deletions.postgres.sql"
             ),
         },
+        Migration {
+            version: SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION,
+            description: "index sm_durable_sessions by bare_jid and state".to_owned(),
+            sql_sqlite: SM_DURABLE_SESSIONS_BARE_STATE_INDEX_SQL,
+            sql_postgres: SM_DURABLE_SESSIONS_BARE_STATE_INDEX_SQL,
+        },
     ]
 }
+
+const SM_DURABLE_SESSIONS_BARE_STATE_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sm_durable_sessions_bare_state
+    ON sm_durable_sessions (bare_jid, state);
+"#;
 
 const CALL_NOTIFICATIONS_POSTGRES: &str = r#"
 ALTER TABLE notification_candidates
