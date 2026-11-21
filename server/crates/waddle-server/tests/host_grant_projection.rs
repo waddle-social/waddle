@@ -846,6 +846,28 @@ async fn live_spicedb_the_first_projection_requires_a_fresh_namespace() {
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL and SpiceDB"]
 async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
+    exercise_protected_space(SpaceExercise::MembershipAndDiscovery).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL and SpiceDB"]
+async fn live_spicedb_space_subscription_lifecycle_over_websocket() {
+    exercise_protected_space(SpaceExercise::Subscription).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL and SpiceDB"]
+async fn live_spicedb_space_bookmark_events_over_websocket() {
+    exercise_protected_space(SpaceExercise::BookmarkEvents).await;
+}
+
+enum SpaceExercise {
+    MembershipAndDiscovery,
+    Subscription,
+    BookmarkEvents,
+}
+
+async fn exercise_protected_space(exercise: SpaceExercise) {
     use host_grant_revocation_support::{authenticate_unbound, Replica};
     use protected_space_subscriptions::{receive_sm, wait_for_detach};
     use s2s_inbound_muc_support::Wiring;
@@ -860,7 +882,12 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
 
     const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
     let _serial = LIVE_SPICEDB.lock().await;
-    let live = Live::start("hg_space_owner_ws").await;
+    let label = match exercise {
+        SpaceExercise::MembershipAndDiscovery => "hg_space_owner_ws",
+        SpaceExercise::Subscription => "hg_space_subscription_ws",
+        SpaceExercise::BookmarkEvents => "hg_space_bookmark_event_ws",
+    };
+    let live = Live::start(label).await;
     let wiring = Wiring::new(|_| {}).await;
     let authority = live.replica().await;
     let lifecycle = live.fixture.scope.lifecycle;
@@ -998,14 +1025,35 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
     )
     .await;
     assert!(is_result(&granted), "{granted:?}");
-    protected_space_events::assert_local_bookmark_events(
-        first,
-        &mut owner,
-        &service,
-        node,
-        &live.fixture.scope.room,
-    )
-    .await;
+    match exercise {
+        SpaceExercise::MembershipAndDiscovery => {}
+        SpaceExercise::Subscription => {
+            protected_space_subscriptions::assert_local_subscription_lifecycle(
+                &service,
+                node,
+                first,
+                &mut member,
+                live.fixture.ingress.db.database_url(),
+            )
+            .await;
+            drop((owner, member, replicas));
+            live.close().await;
+            return;
+        }
+        SpaceExercise::BookmarkEvents => {
+            protected_space_events::assert_local_bookmark_events(
+                first,
+                &mut owner,
+                &service,
+                node,
+                &live.fixture.scope.room,
+            )
+            .await;
+            drop((owner, member, replicas));
+            live.close().await;
+            return;
+        }
+    }
     protected_space_contents::assert_canonical_space_children(
         &live,
         &authority,
@@ -1013,14 +1061,6 @@ async fn live_spicedb_space_owner_acknowledges_membership_over_websocket() {
         &mut owner,
         &mut member,
         &hidden_scope,
-    )
-    .await;
-    protected_space_subscriptions::assert_local_subscription_lifecycle(
-        &service,
-        node,
-        first,
-        &mut member,
-        live.fixture.ingress.db.database_url(),
     )
     .await;
     let scope = live.fixture.state(&live.fixture.scope).await;
