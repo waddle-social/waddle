@@ -815,6 +815,13 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
 
     override suspend fun publishStickerPack(pack: WaddleStickerPack): String = stickers.publish(pack)
 
+    /** Not used by Android yet: answers with the id an import keeps. */
+    override suspend fun importStickerPack(
+        ownerJid: String,
+        node: String?,
+        packId: String,
+    ): String = packId
+
     override suspend fun retractStickerPack(packId: String): Boolean = stickers.retract(packId)
 
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */

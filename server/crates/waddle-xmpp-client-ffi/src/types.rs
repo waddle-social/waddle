@@ -100,6 +100,9 @@ pub struct WaddleMessage {
     pub forum_title: Option<String>,
     /// XEP-0449: the message body is a sticker.
     pub is_sticker: bool,
+    /// XEP-0449: the pack the sticker is from, when its marker names
+    /// one. `pack_jid: None` means the sender's own PEP node.
+    pub sticker_pack: Option<WaddleStickerRef>,
     /// XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
     /// pipeline output), one entry per previewed URL.
     pub link_previews: Vec<WaddleLinkPreview>,
@@ -572,6 +575,9 @@ pub struct WaddleArchivedMessage {
     pub forum_title: Option<String>,
     /// XEP-0449: the archived body is a sticker.
     pub is_sticker: bool,
+    /// XEP-0449: the pack the sticker is from, when its marker names
+    /// one. `pack_jid: None` means the sender's own PEP node.
+    pub sticker_pack: Option<WaddleStickerRef>,
     /// Carries XEP-0045 `muc#user`: a room private message or a room
     /// invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
     pub muc_user: bool,
@@ -876,10 +882,10 @@ pub struct WaddleStickerPack {
     pub stickers: Vec<WaddlePackSticker>,
 }
 
-/// Reference to the source pack of an outbound sticker send
-/// (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
-/// `pack_node` locate packs hosted outside the sender's own PEP
-/// `urn:xmpp:stickers:0` node.
+/// Reference to the source pack of a sticker, on an outbound send or a
+/// received message (XEP-0449 §"Sending a sticker from a sticker
+/// pack"). `pack_jid` / `pack_node` locate packs hosted outside the
+/// sender's own PEP `urn:xmpp:stickers:0` node.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleStickerRef {
     pub pack_id: String,

@@ -4,6 +4,7 @@ use crate::error::StanzaError;
 use crate::messaging::namespaces::NS_WADDLE_EXTENSION;
 use crate::pin::PinEvent;
 use crate::pubsub_event::PubsubEvent;
+use crate::stickers::PackRef;
 use crate::stickers::StickerHash;
 use crate::stickers::StickerMarker;
 use crate::xep::call_thread::CallThreadAnchor;
@@ -411,6 +412,9 @@ pub struct InboundMessage {
     pub safety_scores: Option<SafetyScoresFastening>,
     /// Whether the file is marked as a sticker.
     pub is_sticker: bool,
+    /// XEP-0449: the pack the sticker is from, when the marker names one.
+    /// `jid: None` means the sender's own `urn:xmpp:stickers:0` PEP node.
+    pub sticker_pack: Option<PackRef>,
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.
     pub pin_event: Option<PinEvent>,

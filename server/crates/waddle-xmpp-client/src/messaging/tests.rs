@@ -1662,6 +1662,82 @@ fn build_outbound_message_without_sticker_option_has_no_marker() {
     assert!(stanza.get_child("sticker", "urn:xmpp:stickers:0").is_none());
 }
 
+/// A chat message carrying `marker` (a `<sticker/>` element), parsed.
+fn parse_sticker_marker(marker: Option<&str>) -> super::InboundMessage {
+    let mut element: Element =
+        "<message xmlns='jabber:client' type='chat' from='romeo@montague.lit/pda'>\
+            <body>😘</body>\
+        </message>"
+            .parse()
+            .expect("valid xml");
+    if let Some(marker) = marker {
+        element.append_child(marker.parse().expect("valid marker xml"));
+    }
+    let MessagingEvent::Message(parsed) = parse(&element).expect("parses") else {
+        panic!("expected message event");
+    };
+    *parsed
+}
+
+#[test]
+fn parse_message_reads_the_pack_a_sticker_is_from() {
+    // xep-0449.xml §send-from-pack: `pack` is the pubsub item id of the
+    // pack on the sender's own PEP node.
+    use crate::stickers::{PackId, PackRef};
+    let parsed = parse_sticker_marker(Some(
+        "<sticker xmlns='urn:xmpp:stickers:0' pack='EpRv28DHHzFrE4zd+xaNpVb4'/>",
+    ));
+    assert!(parsed.is_sticker);
+    assert_eq!(
+        parsed.sticker_pack,
+        Some(PackRef {
+            id: PackId::try_new("EpRv28DHHzFrE4zd+xaNpVb4").expect("non-empty"),
+            jid: None,
+            node: None,
+        })
+    );
+}
+
+#[test]
+fn parse_message_reads_a_pack_hosted_outside_the_senders_pep_node() {
+    // §send-from-pack: `jid` and `node` locate a pack that is not on the
+    // sender's `urn:xmpp:stickers:0` PEP node.
+    let parsed = parse_sticker_marker(Some(
+        "<sticker xmlns='urn:xmpp:stickers:0' pack='crabs' \
+                  jid='packs.montague.lit' node='generic/sticker/node'/>",
+    ));
+    let pack = parsed.sticker_pack.expect("pack reference");
+    assert_eq!(pack.id.as_str(), "crabs");
+    assert_eq!(
+        pack.jid,
+        Some("packs.montague.lit".parse().expect("valid jid"))
+    );
+    assert_eq!(pack.node.as_deref(), Some("generic/sticker/node"));
+}
+
+#[test]
+fn parse_message_keeps_a_sticker_without_a_usable_pack_reference() {
+    // `pack` is a MAY: a bare marker is still a sticker.
+    let bare = parse_sticker_marker(Some("<sticker xmlns='urn:xmpp:stickers:0'/>"));
+    assert!(bare.is_sticker);
+    assert_eq!(bare.sticker_pack, None);
+
+    let empty = parse_sticker_marker(Some("<sticker xmlns='urn:xmpp:stickers:0' pack=''/>"));
+    assert!(empty.is_sticker);
+    assert_eq!(empty.sticker_pack, None);
+
+    // A `jid` that does not parse leaves the pack's location unknown;
+    // falling back to the sender's PEP node would fetch the wrong pack.
+    let bad_jid = parse_sticker_marker(Some(
+        "<sticker xmlns='urn:xmpp:stickers:0' pack='crabs' jid='@@'/>",
+    ));
+    assert!(bad_jid.is_sticker);
+    assert_eq!(bad_jid.sticker_pack, None);
+
+    // A non-sticker message names no pack.
+    assert_eq!(parse_sticker_marker(None).sticker_pack, None);
+}
+
 #[test]
 fn parse_message_reads_file_desc_and_hashes_into_shared_file() {
     // Inbound XEP-0449 "Sending a sticker" wire shape (xep-0449.xml
