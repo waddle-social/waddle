@@ -42,15 +42,29 @@ public struct FeedPost: Hashable, Sendable, Identifiable {
     }
 }
 
-/// A feed post being written.
+/// A feed post being written, with an optional link.
 public struct FeedPostDraft: Hashable, Sendable {
     public let body: String
+    public let link: URL?
 
-    /// Trims the text; nil when nothing is left to post.
-    public init?(body: String) {
+    /// Trims the text; nil when nothing is left to post, or when `link`
+    /// is filled in but is not a web address. A blank link is no link.
+    public init?(body: String, link: String = "") {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return nil }
         self.body = body
+        if link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self.link = nil
+        } else {
+            guard let url = ComposerInsertion.linkURL(from: link) else { return nil }
+            self.link = url
+        }
+    }
+
+    /// Whether `text` is an http(s) address; `https://` is assumed when
+    /// no scheme is typed.
+    public static func isWebLink(_ text: String) -> Bool {
+        ComposerInsertion.linkURL(from: text) != nil
     }
 }
 

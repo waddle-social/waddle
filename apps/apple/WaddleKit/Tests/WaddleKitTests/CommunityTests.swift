@@ -438,6 +438,28 @@ struct CommunityTests {
 
     @Test func anEmptyPostIsNotADraft() {
         #expect(FeedPostDraft(body: " \n ") == nil)
+        #expect(FeedPostDraft(body: " ", link: "https://rink.example") == nil)
+    }
+
+    @Test func aPostCarriesItsLinkToTheServerAndTheFeed() async throws {
+        let (coordinator, port) = online()
+        let link = URL(string: "https://rink.example/today")
+
+        try await coordinator.postToFeed(#require(FeedPostDraft(body: "Ice report", link: " rink.example/today ")))
+
+        #expect(port.community.posts.map(\.link) == [link])
+        #expect(coordinator.community.posts.map(\.link) == [link])
+    }
+
+    @Test func aLinkIsOptionalButMustBeAWebAddress() {
+        #expect(FeedPostDraft(body: "hi", link: "  ")?.link == nil)
+        #expect(FeedPostDraft(body: "hi", link: "  ") != nil)
+        #expect(FeedPostDraft(body: "hi", link: "http://rink.example")?.link == URL(string: "http://rink.example"))
+        #expect(FeedPostDraft(body: "hi", link: "ftp://rink.example/ice") == nil)
+        #expect(FeedPostDraft(body: "hi", link: "javascript:alert(1)") == nil)
+        #expect(FeedPostDraft(body: "hi", link: "the rink") == nil)
+        #expect(FeedPostDraft.isWebLink("rink.example"))
+        #expect(!FeedPostDraft.isWebLink("the rink"))
     }
 
     @Test func myNewStoryIsShownAndAlreadySeen() async throws {

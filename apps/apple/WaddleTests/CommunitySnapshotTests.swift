@@ -20,10 +20,12 @@ final class CommunitySnapshotTests: XCTestCase {
     private static let screen = CGSize.phone
     private static let viewer = CGSize.phone
     private static let sheet = CGSize.phone
+    private static let composers = CGSize(width: 393, height: 360)
     #else
     private static let screen = CGSize(width: 760, height: 720)
     private static let viewer = CGSize(width: 420, height: 720)
     private static let sheet = CGSize(width: 440, height: 600)
+    private static let composers = CGSize(width: 560, height: 320)
     #endif
 
     // MARK: - Feed
@@ -48,6 +50,19 @@ final class CommunitySnapshotTests: XCTestCase {
         _ = store.begin()
         store.finish(feedFailed: true, storiesFailed: true)
         try await assertFeed(sample)
+    }
+
+    /// One link that will be posted, and one that is not a web address.
+    func testNewPostWithALink() async throws {
+        let sample = SampleSession()
+        let composers = VStack(spacing: Theme.Spacing.l) {
+            FeedComposerCard(text: "The rink opens at seven tomorrow.", link: "waddle.social/rink")
+            FeedComposerCard(text: "Skate times for the week", link: "the rink page")
+            Spacer(minLength: 0)
+        }
+        .padding(Theme.Spacing.l)
+        .background(Theme.Colors.bg)
+        try await assertScreenSnapshot(of: sample.host(composers), size: Self.composers)
     }
 
     private func assertFeed(_ sample: SampleSession, testName: String = #function) async throws {
