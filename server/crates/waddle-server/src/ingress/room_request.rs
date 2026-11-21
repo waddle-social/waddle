@@ -644,6 +644,69 @@ impl IngressAuthority {
         tx.commit().await?;
         Ok(true)
     }
+
+    /// Populate `presence` on the durable occupancy row written by
+    /// `record_seat_before_join` after a direct local join completes.
+    ///
+    /// Remote mailbox joins mark their row confirmed through
+    /// `decide_room_request` (`confirm_join`, which writes `join_request` and
+    /// `presence`). Populating `presence` for completed direct local joins
+    /// ensures every confirmed seat — local or remote — is distinguishable
+    /// from an unconfirmed pre-join seat left behind by a failed mailbox
+    /// `RoomJoin`.
+    pub async fn confirm_local_join_presence(
+        &self,
+        confirmation: LocalJoinPresenceConfirmation<'_>,
+    ) -> Result<bool, IngressUowError> {
+        if !self.uow.mailbox_acceptance_enabled() {
+            return Ok(false);
+        }
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        if !self.uow.mailbox_acceptance_active(&tx) {
+            return Ok(false);
+        }
+        let _room_claim = ClaimRepository::assert_room_claim(
+            &mut tx,
+            confirmation.room,
+            confirmation.owner,
+            confirmation.epoch,
+        )
+        .await?;
+        let updated = RoomOccupantRepository::update_presence(
+            &mut tx,
+            &RoomOccupantRecord {
+                room: confirmation.room.clone(),
+                occupant: confirmation.occupant.clone(),
+                nick: confirmation.nick.to_owned(),
+                role: confirmation.role,
+                affiliation: confirmation.affiliation,
+                generation: confirmation.generation,
+                seat: None,
+                join_request: None,
+                presence: Some(confirmation.presence.clone()),
+                room_epoch: confirmation.epoch,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+}
+
+/// Parameters for [`IngressAuthority::confirm_local_join_presence`].
+pub struct LocalJoinPresenceConfirmation<'a> {
+    pub room: &'a BareJid,
+    pub owner: &'a NodeIdentity,
+    pub epoch: ClaimEpoch,
+    pub occupant: &'a FullJid,
+    pub nick: &'a str,
+    pub role: Role,
+    pub affiliation: Affiliation,
+    pub generation: OccupancySessionGeneration,
+    pub presence: &'a Presence,
 }
 
 /// The room store's writer of durable occupancy: the ingress authority,

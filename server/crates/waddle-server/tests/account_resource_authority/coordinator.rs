@@ -1448,3 +1448,383 @@ async fn the_binding_publisher_maps_publish_confirm_and_retire_onto_the_coordina
         Some(AccountResourceBindingState::Active)
     );
 }
+
+#[tokio::test]
+async fn cluster_lease_liveness_maps_every_state_and_tracks_rotated_local_incarnation() {
+    use std::collections::HashMap;
+    use waddle_server::account_coordinator::{ClusterLeaseLiveness, NodeLeaseRead};
+    use waddle_xmpp::ownership::NodeLeaseState;
+
+    struct MapLeaseRead(HashMap<NodeIdentity, Option<NodeLeaseState>>);
+
+    #[async_trait]
+    impl NodeLeaseRead for MapLeaseRead {
+        async fn lease_state(&self, node: &NodeIdentity) -> Option<NodeLeaseState> {
+            self.0.get(node).copied().flatten()
+        }
+    }
+
+    let active_node = NodeIdentity::new("node-a", "epoch-new");
+    let rotated_old = NodeIdentity::new("node-a", "epoch-old");
+    let draining_node = NodeIdentity::new("node-b", "epoch-b");
+    let expired_node = NodeIdentity::new("node-c", "epoch-c");
+    let unreadable_node = NodeIdentity::new("node-d", "epoch-d");
+
+    let mut states = HashMap::new();
+    states.insert(active_node.clone(), Some(NodeLeaseState::Active));
+    states.insert(rotated_old.clone(), Some(NodeLeaseState::Expired));
+    states.insert(draining_node.clone(), Some(NodeLeaseState::Draining));
+    states.insert(expired_node.clone(), Some(NodeLeaseState::Expired));
+    states.insert(unreadable_node.clone(), None);
+
+    let liveness = ClusterLeaseLiveness::new(Arc::new(MapLeaseRead(states)));
+    let binding_for = |node: &NodeIdentity| {
+        BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            node,
+        )))
+    };
+
+    assert_eq!(
+        liveness.liveness(&binding_for(&active_node), None).await,
+        BindingLiveness::Live
+    );
+    assert_eq!(
+        liveness.liveness(&binding_for(&rotated_old), None).await,
+        BindingLiveness::Expired,
+        "a superseded local incarnation must not read as live"
+    );
+    assert_eq!(
+        liveness.liveness(&binding_for(&draining_node), None).await,
+        BindingLiveness::Draining
+    );
+    assert_eq!(
+        liveness.liveness(&binding_for(&expired_node), None).await,
+        BindingLiveness::Expired
+    );
+    assert_eq!(
+        liveness
+            .liveness(&binding_for(&unreadable_node), None)
+            .await,
+        BindingLiveness::Unknown
+    );
+    assert_eq!(
+        liveness.liveness(&fresh_binding(), None).await,
+        BindingLiveness::Unknown,
+        "a standalone process binding has no clustered lease"
+    );
+}
+
+#[tokio::test]
+async fn takeover_leaves_draining_bindings_unadopted_and_settles_only_after_expiry() {
+    use std::collections::HashMap;
+    use waddle_server::account_coordinator::{
+        retire_expired_bindings_page, EXPIRED_BINDING_SWEEP_ACCOUNTS,
+    };
+
+    struct MutableLiveness(Mutex<HashMap<BindingRef, BindingLiveness>>);
+
+    impl MutableLiveness {
+        fn set(&self, binding: &BindingRef, liveness: BindingLiveness) {
+            self.0
+                .lock()
+                .expect("liveness lock")
+                .insert(binding.clone(), liveness);
+        }
+    }
+
+    #[async_trait]
+    impl ConnectionLiveness for MutableLiveness {
+        async fn liveness(
+            &self,
+            binding: &BindingRef,
+            _session: Option<waddle_xmpp::ownership::SmSessionKey>,
+        ) -> BindingLiveness {
+            self.0
+                .lock()
+                .expect("liveness lock")
+                .get(binding)
+                .copied()
+                .unwrap_or(BindingLiveness::Unknown)
+        }
+    }
+
+    let harness = harness("account-coordinator-draining-takeover", config()).await;
+    let current = harness.claim();
+    let draining_node = || {
+        BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            &NodeIdentity::new("node-draining", "epoch-1"),
+        )))
+    };
+
+    let ephemeral_jid = resource("draining-ephemeral");
+    let sm_jid = resource("draining-sm");
+    let ephemeral_binding = draining_node();
+    let sm_binding_ref = draining_node();
+
+    activate_binding(&harness.coordinators, &ephemeral_jid, &ephemeral_binding).await;
+    let sm_rev = activate_binding(&harness.coordinators, &sm_jid, &sm_binding_ref).await;
+    let session = insert_session(&harness.db).await;
+    let snapshot = AccountResourceSnapshot {
+        stream_management_ref: Some(sm_binding(session, 1)),
+        ..presence(true, 0, false)
+    };
+    drive(
+        &harness.coordinators,
+        &sm_jid,
+        update(&current, sm_rev, &sm_binding_ref, snapshot),
+    )
+    .await;
+
+    let liveness = Arc::new(MutableLiveness(Mutex::new(HashMap::from([
+        (ephemeral_binding.clone(), BindingLiveness::Draining),
+        (sm_binding_ref.clone(), BindingLiveness::Draining),
+    ]))));
+
+    harness.claims.move_to(claim(2));
+    let successor = Arc::new(AccountCoordinators::new(
+        Arc::clone(&harness.store) as Arc<dyn AccountBindingStore>,
+        Arc::clone(&harness.claims) as Arc<dyn AccountClaimSource>,
+        Arc::clone(&liveness) as Arc<dyn ConnectionLiveness>,
+        config(),
+    ));
+    let account = ephemeral_jid.to_bare();
+    let report = successor
+        .adopt_account(&account)
+        .await
+        .expect("adopt account while host is draining");
+
+    assert!(
+        report.adopted.is_empty(),
+        "draining bindings must not be adopted as live destinations"
+    );
+    assert!(
+        report.expired.is_empty(),
+        "draining bindings must not be treated as expired during rolling drain"
+    );
+    assert_eq!(report.unadopted.len(), 2);
+    assert!(
+        resources(&successor, &ephemeral_jid).await.is_empty(),
+        "unadopted draining bindings must not be routed to"
+    );
+    assert_eq!(
+        successor
+            .slot_status(&ephemeral_jid)
+            .await
+            .expect("ephemeral status")
+            .binding,
+        Some((
+            ephemeral_binding.clone(),
+            AccountResourceBindingState::Active
+        )),
+        "ephemeral binding remains intact while host is still draining"
+    );
+    assert_eq!(
+        successor
+            .slot_status(&sm_jid)
+            .await
+            .expect("sm status")
+            .binding,
+        Some((sm_binding_ref.clone(), AccountResourceBindingState::Active)),
+        "SM binding is not prematurely detached while host is still draining"
+    );
+
+    let mut cursor = None;
+    assert_eq!(
+        retire_expired_bindings_page(&successor, &mut cursor, EXPIRED_BINDING_SWEEP_ACCOUNTS).await,
+        0,
+        "expired-binding sweep leaves draining bindings alone"
+    );
+
+    // Once the draining pod's lease expires, the sweep retires the ephemeral
+    // binding and adopts-then-detaches the SM binding so its resume right
+    // stays intact.
+    liveness.set(&ephemeral_binding, BindingLiveness::Expired);
+    liveness.set(&sm_binding_ref, BindingLiveness::Expired);
+
+    assert_eq!(
+        retire_expired_bindings_page(&successor, &mut cursor, EXPIRED_BINDING_SWEEP_ACCOUNTS).await,
+        1,
+        "ephemeral binding is retired once its node expires"
+    );
+    assert_eq!(
+        successor
+            .slot_status(&ephemeral_jid)
+            .await
+            .expect("ephemeral status after expiry")
+            .binding,
+        None
+    );
+    assert_eq!(
+        successor
+            .slot_status(&sm_jid)
+            .await
+            .expect("sm status after expiry")
+            .binding,
+        Some((sm_binding_ref, AccountResourceBindingState::Detached)),
+        "unadopted SM binding transitions to Detached upon expiry to preserve XEP-0198 resume"
+    );
+    assert!(resources(&successor, &sm_jid).await.is_empty());
+}
+
+#[tokio::test]
+async fn expired_binding_reaper_cursor_scans_short_pages_every_sweep_and_paginates_large_sets() {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use waddle_server::account_coordinator::retire_expired_bindings_page;
+
+    struct AccountClaimMap(Mutex<HashMap<BareJid, UserClaimIdentity>>);
+
+    impl AccountClaimMap {
+        fn set(&self, account: &BareJid, claim_id: UserClaimIdentity) {
+            self.0
+                .lock()
+                .expect("claim map lock")
+                .insert(account.clone(), claim_id);
+        }
+    }
+
+    #[async_trait]
+    impl AccountClaimSource for AccountClaimMap {
+        async fn current_claim(
+            &self,
+            account: &BareJid,
+        ) -> Result<UserClaimIdentity, AccountClaimError> {
+            self.0
+                .lock()
+                .expect("claim map lock")
+                .get(account)
+                .cloned()
+                .ok_or(AccountClaimError::HeldElsewhere)
+        }
+    }
+
+    struct ToggleLiveness(AtomicBool);
+
+    #[async_trait]
+    impl ConnectionLiveness for ToggleLiveness {
+        async fn liveness(
+            &self,
+            _binding: &BindingRef,
+            _session: Option<waddle_xmpp::ownership::SmSessionKey>,
+        ) -> BindingLiveness {
+            if self.0.load(Ordering::SeqCst) {
+                BindingLiveness::Expired
+            } else {
+                BindingLiveness::Live
+            }
+        }
+    }
+
+    let db = Database::in_memory("account-coordinator-reaper-cursor")
+        .await
+        .expect("in-memory database");
+    let store = Arc::new(
+        DatabaseAccountBindingStore::open(db, false)
+            .await
+            .expect("open store"),
+    );
+    let claims = Arc::new(AccountClaimMap(Mutex::new(HashMap::new())));
+    let expired = Arc::new(ToggleLiveness(AtomicBool::new(false)));
+    let coordinators = Arc::new(AccountCoordinators::new(
+        Arc::clone(&store) as Arc<dyn AccountBindingStore>,
+        Arc::clone(&claims) as Arc<dyn AccountClaimSource>,
+        Arc::clone(&expired) as Arc<dyn ConnectionLiveness>,
+        config(),
+    ));
+    let make_claim = |account: &BareJid, epoch: i64| {
+        UserClaimIdentity::fresh(
+            account.clone(),
+            NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("node-a", "epoch-a")),
+            waddle_xmpp::ownership::ClaimEpoch(epoch),
+        )
+    };
+
+    // Part 1: short page (< page_limit) must reset cursor to None so the very
+    // next sweep does NOT waste a full interval on an empty tail query.
+    let alice: FullJid = "alice@example.test/desk".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.test/desk".parse().expect("bob jid");
+    for jid in [&alice, &bob] {
+        claims.set(&jid.to_bare(), make_claim(&jid.to_bare(), 1));
+        activate_binding(&coordinators, jid, &fresh_binding()).await;
+    }
+
+    expired.0.store(true, Ordering::SeqCst);
+    let mut cursor = None;
+    let retired = retire_expired_bindings_page(&coordinators, &mut cursor, 10).await;
+    assert_eq!(retired, 2);
+    assert_eq!(
+        cursor, None,
+        "a short page (< limit) must reset the cursor immediately instead of skipping the next sweep"
+    );
+    assert_eq!(
+        coordinators
+            .slot_status(&alice)
+            .await
+            .expect("alice status")
+            .binding,
+        None
+    );
+    assert_eq!(
+        coordinators
+            .slot_status(&bob)
+            .await
+            .expect("bob status")
+            .binding,
+        None
+    );
+
+    // Re-activate alice and expire it again; the immediately following sweep
+    // must settle it without an empty wrap-around tick.
+    expired.0.store(false, Ordering::SeqCst);
+    activate_binding(&coordinators, &alice, &fresh_binding()).await;
+    expired.0.store(true, Ordering::SeqCst);
+    let retired_next = retire_expired_bindings_page(&coordinators, &mut cursor, 10).await;
+    assert_eq!(retired_next, 1);
+    assert_eq!(cursor, None);
+    assert_eq!(
+        coordinators
+            .slot_status(&alice)
+            .await
+            .expect("alice status after second sweep")
+            .binding,
+        None
+    );
+
+    // Part 2: multi-page set (5 accounts with limit 2) paginates across 3
+    // sweeps and resets to None on the short final page.
+    expired.0.store(false, Ordering::SeqCst);
+    let mut users = Vec::new();
+    for index in 1..=5 {
+        let jid: FullJid = format!("user{index}@example.test/r")
+            .parse()
+            .expect("user jid");
+        claims.set(&jid.to_bare(), make_claim(&jid.to_bare(), 1));
+        activate_binding(&coordinators, &jid, &fresh_binding()).await;
+        users.push(jid);
+    }
+    expired.0.store(true, Ordering::SeqCst);
+
+    let page1 = retire_expired_bindings_page(&coordinators, &mut cursor, 2).await;
+    assert_eq!(page1, 2);
+    assert!(cursor.is_some(), "full page advances pagination cursor");
+
+    let page2 = retire_expired_bindings_page(&coordinators, &mut cursor, 2).await;
+    assert_eq!(page2, 2);
+    assert!(cursor.is_some(), "second full page advances cursor");
+
+    let page3 = retire_expired_bindings_page(&coordinators, &mut cursor, 2).await;
+    assert_eq!(page3, 1);
+    assert_eq!(cursor, None, "short final page wraps cursor back to None");
+
+    for jid in &users {
+        assert_eq!(
+            coordinators
+                .slot_status(jid)
+                .await
+                .expect("user status")
+                .binding,
+            None,
+            "every account in the multi-page sweep must be settled: {jid}"
+        );
+    }
+}

@@ -266,12 +266,12 @@ pub(crate) use route_to_connection::{
 pub(crate) use route_to_connection::{
     ControlledRemoteObligations, CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS,
 };
-#[cfg(feature = "clustering")]
-pub(crate) use routing::deliver_peer_to_full_at;
 pub(crate) use routing::existing_ingress_delivery;
 pub(crate) use routing::{
     close_call_setup_from_outcome, deliver_direct_to_full, FullJidDeliveryOutcome,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use routing::{deliver_peer_to_full_at, deliver_to_detached_at};
 use routing::{
     deliver_peer_to_live_only, run_fanout_recipient_pass, run_headless_recipient_pass,
     FanoutPassResult,

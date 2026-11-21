@@ -21,6 +21,10 @@ pub struct AccountCoordinatorConfig {
     pub replacement_deadline: Duration,
     /// How long an account with no binding stays loaded.
     pub idle_after: Duration,
+    /// How often the reaper sweeps bound accounts for bindings on expired
+    /// nodes. Kept shorter than `idle_after` so stale bindings are settled
+    /// promptly even without an explicit watchdog wake-up.
+    pub expired_binding_sweep_interval: Duration,
 }
 
 impl Default for AccountCoordinatorConfig {
@@ -34,6 +38,7 @@ impl Default for AccountCoordinatorConfig {
             max_pending_retirements: 32,
             replacement_deadline: Duration::from_secs(30),
             idle_after: Duration::from_secs(300),
+            expired_binding_sweep_interval: Duration::from_secs(30),
         }
     }
 }

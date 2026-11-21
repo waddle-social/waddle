@@ -6011,7 +6011,7 @@ mod local_muc_departure_tests {
         // (recording bob on its entry) and dies before carol: simulated by
         // skipping carol.
         let skip_carol = HashSet::from([carol.clone()]);
-        crate::server::routes::websocket::broadcast_muc_leave_to_remaining_resumable(
+        let result = crate::server::routes::websocket::broadcast_muc_leave_to_remaining_resumable(
             &state,
             &room,
             &alice,
@@ -6026,6 +6026,8 @@ mod local_muc_departure_tests {
             }),
         )
         .await;
+        assert!(result.completed);
+        assert_eq!(result.newly_notified, vec![bob.clone()]);
         let first = bob_rx
             .try_recv()
             .expect("bob got the live task's unavailable");

@@ -550,14 +550,117 @@ impl UndoneJoin {
     }
 }
 
+/// Overall wall-clock cap for remote occupant fan-out inside a room presence
+/// operation (join, occupant update, or leave). Strictly above
+/// `BOUND_DECISION_BUDGET` (2 s) with DB-roundtrip headroom so single-wave
+/// slow remote deliveries settle as `MaybeCommitted` instead of racing this
+/// timeout and causing duplicate `Direct` submissions on retry, and strictly
+/// below `ORDERED_RECEIVER_DELIVERY_TIMEOUT` (6 s) so post-fanout room work
+/// (such as call-thread broadcasts) still completes inside the receiver budget.
+pub(crate) const MUC_PRESENCE_FANOUT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(3500);
+
+/// Maximum remote occupant deliveries in flight concurrently during one room
+/// presence fan-out.
+const MUC_PRESENCE_FANOUT_CONCURRENCY: usize = 16;
+
+/// Deliver per-recipient presence batches across a room's occupants.
+///
+/// Recipients hosted locally are delivered synchronously first. Remaining
+/// (remote or detached) recipients are delivered concurrently up to
+/// [`MUC_PRESENCE_FANOUT_CONCURRENCY`] under [`MUC_PRESENCE_FANOUT_TIMEOUT`],
+/// preserving strict stanza ordering within each recipient's batch.
+/// `on_recipient_done` is invoked once each recipient's batch finishes (never
+/// for recipients cut short by the timeout). Returns `true` when every
+/// recipient batch finished within the timeout, or `false` if any remote
+/// recipient remained unfinished.
+pub(crate) async fn fan_out_room_presences<F>(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    batches: Vec<(FullJid, Vec<Stanza>)>,
+    mut on_recipient_done: F,
+) -> bool
+where
+    F: FnMut(&FullJid),
+{
+    let mut remote_batches = Vec::new();
+    for (recipient, stanzas) in batches {
+        if stanzas.is_empty() {
+            on_recipient_done(&recipient);
+            continue;
+        }
+        let locally_hosted = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(&recipient)
+            .is_some_and(|entry| entry.is_locally_hosted());
+        if locally_hosted {
+            let mut all_local = true;
+            let mut remaining = Vec::new();
+            for stanza in stanzas {
+                if all_local && deliver_room_presence_locally(state, room_jid, &recipient, &stanza)
+                {
+                    continue;
+                }
+                all_local = false;
+                remaining.push(stanza);
+            }
+            if remaining.is_empty() {
+                on_recipient_done(&recipient);
+            } else {
+                remote_batches.push((recipient, remaining));
+            }
+        } else {
+            remote_batches.push((recipient, stanzas));
+        }
+    }
+    if remote_batches.is_empty() {
+        return true;
+    }
+    let total_remote = remote_batches.len();
+    let mut completed = 0usize;
+    let mut stream = futures::stream::iter(remote_batches.into_iter().map(
+        |(recipient, stanzas)| async move {
+            for stanza in stanzas {
+                route_room_presence_to_occupant(state, room_jid, &recipient, stanza).await;
+            }
+            recipient
+        },
+    ))
+    .buffer_unordered(MUC_PRESENCE_FANOUT_CONCURRENCY);
+
+    use futures::StreamExt as _;
+    let fanout = async {
+        while let Some(recipient) = stream.next().await {
+            completed += 1;
+            on_recipient_done(&recipient);
+        }
+    };
+    if tokio::time::timeout(MUC_PRESENCE_FANOUT_TIMEOUT, fanout)
+        .await
+        .is_err()
+    {
+        warn!(
+            room = %room_jid,
+            completed_remote = completed,
+            unfinished_remote = total_remote.saturating_sub(completed),
+            timeout_ms = MUC_PRESENCE_FANOUT_TIMEOUT.as_millis() as u64,
+            "MUC presence fan-out timed out waiting on unreachable remote occupants; continuing"
+        );
+        return false;
+    }
+    true
+}
+
 pub(crate) async fn route_room_presence_to_occupant(
     state: &WebSocketState,
     room_jid: &BareJid,
     recipient: &FullJid,
     stanza: Stanza,
 ) {
-    // An occupant the room seats from another server is reached through
-    // server-to-server routing, which takes only what a room sends a seat.
+    // 0. An occupant the room seats from another server is reached through
+    //    server-to-server routing, which takes only what a room sends a seat.
     let stanza = match state
         .deps
         .protocol
@@ -567,9 +670,59 @@ pub(crate) async fn route_room_presence_to_occupant(
         Ok(()) => return,
         Err(stanza) => *stanza,
     };
-    if super::try_deliver_registered_remote_resource(state, recipient, &stanza).await {
+
+    // 1. Locally hosted connection: fast, synchronous, non-blocking send
+    //    (mirrors `bot.rs` and avoids an async coordinator round-trip for
+    //    every local occupant).
+    if state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(recipient)
+        .is_some_and(|entry| entry.is_locally_hosted())
+        && deliver_room_presence_locally(state, room_jid, recipient, &stanza)
+    {
         return;
     }
+
+    // 2. Remote bound delivery when clustering is enabled: distinguish a
+    //    confirmed remote `Unavailable` (target node expired or binding
+    //    refused) from `None` (no remote binding known). On definite remote
+    //    `Unavailable`, attempt detached XEP-0198 custody directly instead of
+    //    falling through to `route_to_connection`, which would double-call
+    //    `deliver_bound` or block on `deliver_seeded_direct`.
+    #[cfg(feature = "clustering")]
+    if let Some(addressing) = state.deps.app_state.clustering_claims.addressing() {
+        match addressing
+            .connection(recipient)
+            .deliver_to_registered_remote(
+                &stanza,
+                waddle_xmpp::registry::DeliveryKind::DirectFrame,
+                None,
+            )
+            .await
+        {
+            Some(
+                FullJidDeliveryOutcome::Delivered
+                | FullJidDeliveryOutcome::Dropped
+                | FullJidDeliveryOutcome::MaybeCommitted
+                | FullJidDeliveryOutcome::QueuedDetached,
+            ) => return,
+            Some(FullJidDeliveryOutcome::Unavailable) => {
+                let _ = crate::server::routes::interpret::deliver_to_detached_at(
+                    Some(&state.deps.protocol.sm_session_registry),
+                    recipient,
+                    &stanza,
+                    None,
+                    None,
+                )
+                .await;
+                return;
+            }
+            None => {}
+        }
+    }
+
     let delivered = deliver_room_presence_locally(state, room_jid, recipient, &stanza);
     #[cfg(not(feature = "clustering"))]
     let _ = delivered;
@@ -659,40 +812,6 @@ pub(crate) enum RegisteredRemoteDelivery {
     Retryable,
 }
 
-pub(crate) async fn registered_remote_resource_delivery(
-    state: &WebSocketState,
-    target: &FullJid,
-    stanza: &Stanza,
-) -> RegisteredRemoteDelivery {
-    #[cfg(feature = "clustering")]
-    {
-        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
-            return RegisteredRemoteDelivery::Absent;
-        };
-        match addressing
-            .connection(target)
-            .deliver_to_registered_remote(
-                stanza,
-                waddle_xmpp::registry::DeliveryKind::DirectFrame,
-                None,
-            )
-            .await
-        {
-            Some(FullJidDeliveryOutcome::Delivered) => RegisteredRemoteDelivery::Delivered,
-            Some(FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted) => {
-                RegisteredRemoteDelivery::Retryable
-            }
-            Some(FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::QueuedDetached)
-            | None => RegisteredRemoteDelivery::Absent,
-        }
-    }
-    #[cfg(not(feature = "clustering"))]
-    {
-        let _ = (state, target, stanza);
-        RegisteredRemoteDelivery::Absent
-    }
-}
-
 pub(crate) async fn registered_remote_resource_write_accepted_delivery(
     state: &WebSocketState,
     target: &FullJid,
@@ -721,17 +840,6 @@ pub(crate) async fn registered_remote_resource_write_accepted_delivery(
         let _ = (state, target, stanza);
         RegisteredRemoteDelivery::Absent
     }
-}
-
-pub(crate) async fn try_deliver_registered_remote_resource(
-    state: &WebSocketState,
-    target: &FullJid,
-    stanza: &Stanza,
-) -> bool {
-    !matches!(
-        super::registered_remote_resource_delivery(state, target, stanza).await,
-        RegisteredRemoteDelivery::Absent
-    )
 }
 
 #[cfg(feature = "clustering")]
@@ -1034,6 +1142,67 @@ async fn seat_recorded_occupancy(
     if let Some(fence) = snapshot.claim_fence {
         crate::clustering::route_bridge::ensure_room_occupancy_seated(state, room_jid, fence.epoch)
             .await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+struct LocalJoinOccupancy<'a> {
+    room_jid: &'a BareJid,
+    sender_jid: &'a jid::FullJid,
+    nick: &'a str,
+    role: waddle_xmpp::Role,
+    affiliation: Affiliation,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+    presence: &'a xmpp_parsers::presence::Presence,
+}
+
+/// Populate `presence` on the durable occupancy row written by
+/// `record_seat_before_join` once a direct local join completes, keeping
+/// completed local seats distinguishable from unconfirmed pre-join rows left
+/// behind by failed mailbox `RoomJoin` attempts.
+#[cfg(feature = "clustering")]
+async fn confirm_local_join_occupancy(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    join: LocalJoinOccupancy<'_>,
+) {
+    let Ok(snapshot) = room_actor
+        .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
+            sender_jid: join.sender_jid.clone(),
+        })
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await
+    else {
+        return;
+    };
+    let Some(fence) = snapshot.claim_fence else {
+        return;
+    };
+    if let Err(error) = state
+        .deps
+        .protocol
+        .ingress
+        .confirm_local_join_presence(
+            crate::ingress::room_request::LocalJoinPresenceConfirmation {
+                room: join.room_jid,
+                owner: &fence.owner,
+                epoch: fence.epoch,
+                occupant: join.sender_jid,
+                nick: join.nick,
+                role: join.role,
+                affiliation: join.affiliation,
+                generation: join.occupancy_session,
+                presence: join.presence,
+            },
+        )
+        .await
+    {
+        debug!(
+            room = %join.room_jid,
+            sender = %join.sender_jid,
+            %error,
+            "could not record local join presence on durable occupancy row"
+        );
     }
 }
 
@@ -2206,30 +2375,37 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         // presence self-heals via the next MUC presence/probe round-trip.
         if !join_outcome.is_same_bare_multi_session_join && !join_outcome.is_existing_session_rejoin
         {
-            for existing in &join_outcome.existing_occupants {
-                let presence_stanza = build_muc_join_presence_stanza(MucJoinPresence {
-                    occupant_id_secret: &state.deps.occupant_id_secret,
-                    server_hats: &state.deps.app_state.server_hats,
-                    room_jid,
-                    nick: &nick,
-                    to_jid: &existing.jid,
-                    affiliation: join_outcome.new_occupant_affiliation,
-                    role: join_outcome.new_occupant_role,
-                    real_jid: sender_jid,
-                    disclose_real_jid: true,
-                    include_self_status: false,
-                    room_created: false,
-                    warn_nonanonymous_join: false,
-                    muji: None,
-                    in_call: waddle_xmpp::xep::InCallPresenceState::default(),
-                });
-                let stanza = Stanza::Presence(presence_stanza);
-                route_room_presence_to_occupant(state, room_jid, &existing.jid, stanza).await;
-            }
+            let batches: Vec<(FullJid, Vec<Stanza>)> = join_outcome
+                .existing_occupants
+                .iter()
+                .map(|existing| {
+                    let presence_stanza = build_muc_join_presence_stanza(MucJoinPresence {
+                        occupant_id_secret: &state.deps.occupant_id_secret,
+                        server_hats: &state.deps.app_state.server_hats,
+                        room_jid,
+                        nick: &nick,
+                        to_jid: &existing.jid,
+                        affiliation: join_outcome.new_occupant_affiliation,
+                        role: join_outcome.new_occupant_role,
+                        real_jid: sender_jid,
+                        disclose_real_jid: true,
+                        include_self_status: false,
+                        room_created: false,
+                        warn_nonanonymous_join: false,
+                        muji: None,
+                        in_call: waddle_xmpp::xep::InCallPresenceState::default(),
+                    });
+                    (
+                        existing.jid.clone(),
+                        vec![Stanza::Presence(presence_stanza)],
+                    )
+                })
+                .collect();
+            let _ = fan_out_room_presences(state, room_jid, batches, |_| {}).await;
         }
 
         // Send self-presence to the joining user (with status code 110)
-        responses.push(build_muc_join_presence_xml(MucJoinPresence {
+        let self_presence = build_muc_join_presence_stanza(MucJoinPresence {
             occupant_id_secret: &state.deps.occupant_id_secret,
             server_hats: &state.deps.app_state.server_hats,
             room_jid,
@@ -2246,7 +2422,27 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
             warn_nonanonymous_join: true,
             muji: self_muji,
             in_call: self_in_call,
-        }));
+        });
+        #[cfg(feature = "clustering")]
+        if ordered_relay_origin.is_some()
+            && state.deps.protocol.ingress.mailbox_acceptance_enabled()
+        {
+            confirm_local_join_occupancy(
+                state,
+                &room_actor,
+                LocalJoinOccupancy {
+                    room_jid,
+                    sender_jid,
+                    nick: &nick,
+                    role: join_outcome.new_occupant_role,
+                    affiliation: join_outcome.new_occupant_affiliation,
+                    occupancy_session,
+                    presence: &self_presence,
+                },
+            )
+            .await;
+        }
+        responses.push(stanza_to_xml(&Stanza::Presence(self_presence)));
 
         // Same-account sibling resources share one MUC nick. If a
         // sibling already advertised Muji for this nick, reflect exact
@@ -2627,36 +2823,38 @@ pub async fn handle_muc_leave(
     // is used by `cleanup_muc_presence` for unclean disconnects, so
     // both the explicit-leave path and the tab-close path produce the
     // same wire shape.
-    super::super::super::super::cleanup::broadcast_muc_leave_to_remaining_resumable(
-        state,
-        room_jid,
-        sender_jid,
-        &outcome,
-        // The occupant asked to leave: the §7.14 shape, no removal code.
-        waddle_xmpp::muc::MucRemovalCause::Voluntary,
-        Some(super::super::super::super::cleanup::LeaveFanOutProgress {
-            skip: &super::super::super::super::cleanup::NO_SKIP,
-            record: Some((
-                &state.deps.protocol.pending_local_muc_departures,
-                &in_flight,
-            )),
-        }),
-    )
-    .await;
-    super::super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining_resumable(
-        state,
-        room_jid,
-        sender_jid,
-        &outcome,
-        Some(super::super::super::super::cleanup::LeaveFanOutProgress {
-            skip: &super::super::super::super::cleanup::NO_SKIP,
-            record: Some((
-                &state.deps.protocol.pending_local_muc_departures,
-                &in_flight,
-            )),
-        }),
-    )
-    .await;
+    let leave_fanout =
+        super::super::super::super::cleanup::broadcast_muc_leave_to_remaining_resumable(
+            state,
+            room_jid,
+            sender_jid,
+            &outcome,
+            // The occupant asked to leave: the §7.14 shape, no removal code.
+            waddle_xmpp::muc::MucRemovalCause::Voluntary,
+            Some(super::super::super::super::cleanup::LeaveFanOutProgress {
+                skip: &super::super::super::super::cleanup::NO_SKIP,
+                record: Some((
+                    &state.deps.protocol.pending_local_muc_departures,
+                    &in_flight,
+                )),
+            }),
+        )
+        .await;
+    let muji_fanout =
+        super::super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining_resumable(
+            state,
+            room_jid,
+            sender_jid,
+            &outcome,
+            Some(super::super::super::super::cleanup::LeaveFanOutProgress {
+                skip: &super::super::super::super::cleanup::NO_SKIP,
+                record: Some((
+                    &state.deps.protocol.pending_local_muc_departures,
+                    &in_flight,
+                )),
+            }),
+        )
+        .await;
 
     let response = vec![build_muc_self_unavailable_xml(
         state,
@@ -2665,16 +2863,32 @@ pub async fn handle_muc_leave(
         sender_jid,
         outcome.affiliation,
     )];
-    // Eviction is not response-critical: hand it off without awaiting so the
-    // self-presence below is returned before any registry wait.
-    super::super::super::super::cleanup::evict_empty_room_detached(state, room_jid, &outcome);
-    // Every effect ran: the write-ahead entry becomes the owed acknowledgement
-    // (atomically) and is cleared only on the actor's authoritative answer.
-    crate::server::routes::websocket::acknowledge_in_flight(
-        &state.deps.protocol.pending_local_muc_departures,
-        &room_actor,
-        &in_flight,
-        outcome.acknowledge,
-    );
+    if leave_fanout.completed && muji_fanout.completed {
+        // Eviction is not response-critical: hand it off without awaiting so the
+        // self-presence below is returned before any registry wait.
+        super::super::super::super::cleanup::evict_empty_room_detached(state, room_jid, &outcome);
+        // Every effect ran: the write-ahead entry becomes the owed acknowledgement
+        // (atomically) and is cleared only on the actor's authoritative answer.
+        crate::server::routes::websocket::acknowledge_in_flight(
+            &state.deps.protocol.pending_local_muc_departures,
+            &room_actor,
+            &in_flight,
+            outcome.acknowledge,
+        );
+    } else {
+        // The leaver receives its §7.14 self-presence via `response` below,
+        // while unfinished remaining occupants stay queued on the janitor with
+        // the actor's receipt unacknowledged so only unnotified peers are retried.
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .note_notified(&in_flight, sender_jid);
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .handoff_in_flight_to_retry(&in_flight);
+    }
     response
 }

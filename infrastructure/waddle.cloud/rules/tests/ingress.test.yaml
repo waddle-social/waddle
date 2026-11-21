@@ -98,6 +98,8 @@ tests:
         values: '0x30'
       - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="none"}'
         values: '0x30'
+      - series: 'cnpg_waddle_ingress_mailbox_dead_letters_pending_entries'
+        values: '0x30'
     promql_expr_test:
       - expr: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing"}'
         eval_time: 14m
@@ -109,6 +111,67 @@ tests:
             value: 1
       - expr: 'ALERTS{alertname="IngressNonTerminalAge"}'
         eval_time: 15m
+        exp_samples: []
+
+  - name: missing mailbox dead-letter telemetry fires IngressCnpgQueriesMissing
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_gc_eligible_messages'
+        values: '0x30'
+      - series: 'cnpg_waddle_ingress_gc_oldest_eligible_age_seconds'
+        values: '0x30'
+      - series: 'cnpg_waddle_ingress_nonterminal_age_oldest_seconds'
+        values: '0x30'
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="none"}'
+        values: '0x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing"}'
+        eval_time: 14m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing"}'
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: pending mailbox dead letters fire after 5m and clear once repaired
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_mailbox_dead_letters_pending_entries'
+        # Zero at 0-4m; pending at 5-11m; repaired at 12m.
+        values: '0x4 3x6 0x5'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressMailboxDeadLetters",alertstate="firing"}'
+        eval_time: 9m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressMailboxDeadLetters",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressMailboxDeadLetters",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="IngressMailboxDeadLetters"}'
+        eval_time: 12m
+        exp_samples: []
+
+  - name: sustained unconsumed room request decisions fire after 15m across replicas
+    interval: 1m
+    input_series:
+      - series: 'ingress_mailbox_room_requests_unconsumed_decisions{instance="pod-a"}'
+        # Zero at 0-4m; unconsumed at 5-21m; cleared at 22m.
+        values: '0x4 2x16 0x5'
+      - series: 'ingress_mailbox_room_requests_unconsumed_decisions{instance="pod-b"}'
+        values: '0x4 2x16 0x5'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressRoomRequestUnconsumedDecisions",alertstate="firing"}'
+        eval_time: 19m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressRoomRequestUnconsumedDecisions",alertstate="firing"}'
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressRoomRequestUnconsumedDecisions",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="IngressRoomRequestUnconsumedDecisions"}'
+        eval_time: 22m
         exp_samples: []
 
   - name: backlog growth still warns per kind

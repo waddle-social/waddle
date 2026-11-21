@@ -1106,10 +1106,18 @@ pub enum MailboxDeliveryOutcome {
     Retried,
     /// The entry was parked for an operator.
     DeadLettered,
+    /// A session-scoped room request exhausted retries and was settled as
+    /// rejected to release its lane.
+    ExhaustedRejected,
 }
 
 impl MailboxDeliveryOutcome {
-    pub const ALL: [Self; 3] = [Self::Decided, Self::Retried, Self::DeadLettered];
+    pub const ALL: [Self; 4] = [
+        Self::Decided,
+        Self::Retried,
+        Self::DeadLettered,
+        Self::ExhaustedRejected,
+    ];
 }
 
 impl sealed::Sealed for MailboxDeliveryOutcome {}
@@ -1123,6 +1131,7 @@ impl MetricAttribute for MailboxDeliveryOutcome {
             Self::Decided => "decided",
             Self::Retried => "retried",
             Self::DeadLettered => "dead_lettered",
+            Self::ExhaustedRejected => "exhausted_rejected",
         }
     }
 }

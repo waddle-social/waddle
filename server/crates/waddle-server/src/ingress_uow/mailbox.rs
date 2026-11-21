@@ -105,6 +105,10 @@ pub struct MailboxCutoverRefusal {
 pub struct MailboxLaneId(Uuid);
 
 impl MailboxLaneId {
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
     pub fn as_uuid(self) -> Uuid {
         self.0
     }
@@ -134,6 +138,14 @@ pub enum MailboxDeadLetterReason {
 }
 
 impl MailboxDeadLetterReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RetriesExhausted => "retries_exhausted",
+            Self::CanonicalEvidenceInvalid => "canonical_evidence_invalid",
+            Self::OperatorHold => "operator_hold",
+        }
+    }
+
     fn to_storage(self) -> i32 {
         match self {
             Self::RetriesExhausted => 1,
@@ -150,6 +162,18 @@ impl MailboxDeadLetterReason {
             _ => Err(MailboxError::InvalidStored),
         }
     }
+}
+
+/// One pending dead-lettered mailbox entry, as inspected by an operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetteredMailboxEntry {
+    pub lane: MailboxLaneId,
+    pub sequence: MailboxLaneSequence,
+    pub operation: MailboxOperationKey,
+    pub target_owner: NodeIdentity,
+    pub attempts: u32,
+    pub reason: MailboxDeadLetterReason,
+    pub dead_lettered_at: String,
 }
 
 /// One stored mailbox entry.
@@ -1146,6 +1170,16 @@ impl MailboxRepository {
             Ok(FenceOrder::Current) => Ok(true),
             Ok(FenceOrder::Supersedes) => {
                 Self::write_fence(tx, &relations, locked.id, &presented).await?;
+                tx.execute(
+                    &format!(
+                        "UPDATE {} SET next_attempt_at = NULL \
+                         WHERE lane_id = ?::uuid AND disposition = 0 \
+                           AND dead_lettered_at IS NULL AND next_attempt_at IS NOT NULL",
+                        relations.entries
+                    ),
+                    crate::db_params![locked.id.to_storage()],
+                )
+                .await?;
                 Ok(true)
             }
             Err(StaleMailboxLaneFence) => Ok(false),
@@ -1241,6 +1275,40 @@ impl MailboxRepository {
         Ok(attempts)
     }
 
+    /// Defer the next attempt of a pending entry by `retry_after` without
+    /// incrementing `attempt_count` or parking it as a dead letter. Used when
+    /// a deposed or unclaimed node cannot settle a retry-exhausted entry so it
+    /// backs off instead of hot-spinning while waiting for claim adoption.
+    pub async fn defer_attempt(
+        transaction: &mut IngressUowTransaction<'_>,
+        lane: &LockedMailboxLane,
+        operation: MailboxOperationKey,
+        retry_after: std::time::Duration,
+    ) -> Result<(), IngressUowError> {
+        let entry = Self::lock_entry(transaction, lane, operation).await?;
+        if entry.disposition != MailboxEntryDisposition::Pending || entry.dead_letter.is_some() {
+            return Ok(());
+        }
+        let retry_after_ms = i64::try_from(retry_after.as_millis()).unwrap_or(i64::MAX);
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        tx.execute(
+            &format!(
+                "UPDATE {} SET next_attempt_at = now() + (? * interval '1 millisecond') \
+                 WHERE lane_id = ?::uuid AND sequence = ?::numeric AND disposition = 0 \
+                   AND dead_lettered_at IS NULL",
+                relations.entries
+            ),
+            crate::db_params![
+                retry_after_ms,
+                entry.lane.to_storage(),
+                entry.sequence.to_storage(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Whether the pending entry's deferred next attempt is still in the
     /// future by the database clock.
     pub async fn attempt_deferred(
@@ -1330,6 +1398,72 @@ impl MailboxRepository {
             return Err(MailboxError::EntryMissing.into());
         }
         Ok(())
+    }
+
+    /// Lock a lane `FOR UPDATE` for an operator repair without filtering by
+    /// `target_owner` (which may name a stopped node incarnation) or rewriting
+    /// the lane fence. Waits up to the transaction's lock timeout rather than
+    /// skipping a briefly contended lane.
+    pub async fn lock_lane_for_operator(
+        transaction: &mut IngressUowTransaction<'_>,
+        lane: MailboxLaneId,
+    ) -> Result<Option<LockedMailboxLane>, IngressUowError> {
+        let transaction_identity = transaction.identity();
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        Self::lock_by_id(tx, &relations, lane, transaction_identity, false).await
+    }
+
+    /// Pending dead-lettered mailbox entries, oldest first, at most `limit`.
+    /// The read takes no lock.
+    pub async fn list_dead_letters(
+        transaction: &mut IngressUowTransaction<'_>,
+        limit: u32,
+    ) -> Result<Vec<DeadLetteredMailboxEntry>, IngressUowError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT e.lane_id::text, e.sequence::text, e.operation_kind::int, \
+                            e.message_key::text, e.disposition::int, e.attempt_count, \
+                            e.dead_letter_reason::int, e.request_key::text, e.direct_key::text, \
+                            l.target_node_id, l.target_node_epoch, \
+                            to_char(e.dead_lettered_at AT TIME ZONE 'UTC', \
+                                    'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
+                     FROM {entries} e \
+                     JOIN {lanes} l ON l.lane_id = e.lane_id \
+                     WHERE e.disposition = 0 \
+                       AND e.dead_lettered_at IS NOT NULL \
+                     ORDER BY e.dead_lettered_at ASC, e.lane_id ASC, e.sequence ASC \
+                     LIMIT ?",
+                    entries = relations.entries,
+                    lanes = relations.lanes,
+                ),
+                crate::db_params![i64::from(limit)],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let entry = decode_entry(&row)?;
+            let reason = entry.dead_letter.ok_or(MailboxError::InvalidStored)?;
+            let target_node_id: String = row.get(9)?;
+            let target_node_epoch: String = row.get(10)?;
+            let dead_lettered_at: String = row.get(11)?;
+            out.push(DeadLetteredMailboxEntry {
+                lane: entry.lane,
+                sequence: entry.sequence,
+                operation: entry.operation,
+                target_owner: NodeIdentity::new(target_node_id, target_node_epoch),
+                attempts: entry.attempts,
+                reason,
+                dead_lettered_at,
+            });
+        }
+        Ok(out)
     }
 
     /// Record the top-level `xml:lang` of the request a pending entry

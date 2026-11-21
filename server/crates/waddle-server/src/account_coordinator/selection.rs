@@ -75,6 +75,7 @@ pub enum AccountAuthoritySelection {
     Coordinator {
         coordinators: Arc<AccountCoordinators>,
         authority: Arc<RoutedAccountAuthority>,
+        expired_binding_sweep_wake: Arc<tokio::sync::Notify>,
     },
 }
 
@@ -82,7 +83,7 @@ impl AccountAuthoritySelection {
     /// Select the account coordinator over the ingress database: open the
     /// binding store, take claims from the cluster claim store on a
     /// clustered node and from the process otherwise, and start the task
-    /// that reclaims idle coordinators.
+    /// that sweeps expired bindings and reclaims idle coordinators.
     pub async fn open(
         db: &Database,
         clustering: &ClusteringHandles,
@@ -110,14 +111,13 @@ impl AccountAuthoritySelection {
                     return Err(AccountAuthoritySelectionError::ClusterIdentityMissing);
                 };
                 peers = Some(cluster_peers);
-                let lease = NodeLeaseIdentity::from_node_identity(&node_identity.current());
                 (
                     Arc::new(ClaimStoreClaimSource::with_mirror(
                         Arc::clone(&claim_store),
                         node_identity,
                         Arc::clone(&mirror_holds),
                     )),
-                    Arc::new(ClusterLeaseLiveness::new(lease, node_leases)),
+                    Arc::new(ClusterLeaseLiveness::new(node_leases)),
                 )
             } else {
                 (
@@ -130,9 +130,11 @@ impl AccountAuthoritySelection {
             AccountCoordinators::new(Arc::new(store), claims, liveness, config)
                 .with_mirror_holds(mirror_holds),
         );
+        let expired_binding_sweep_wake = Arc::new(tokio::sync::Notify::new());
         tokio::spawn(reclaim_idle_coordinators(
             Arc::downgrade(&coordinators),
             config,
+            Arc::clone(&expired_binding_sweep_wake),
         ));
         let authority = match peers {
             Some(peers) => RoutedAccountAuthority::new(Arc::clone(&coordinators), peers),
@@ -141,6 +143,7 @@ impl AccountAuthoritySelection {
         Ok(Self::Coordinator {
             coordinators,
             authority: Arc::new(authority),
+            expired_binding_sweep_wake,
         })
     }
 
@@ -159,6 +162,18 @@ impl AccountAuthoritySelection {
         match self {
             Self::Unselected => None,
             Self::Coordinator { authority, .. } => Some(authority),
+        }
+    }
+
+    /// Wake the expired-binding reaper immediately (for example after the
+    /// stale-node watchdog commits `expired = true` for a departed peer).
+    pub fn wake_expired_binding_sweep(&self) {
+        if let Self::Coordinator {
+            expired_binding_sweep_wake,
+            ..
+        } = self
+        {
+            expired_binding_sweep_wake.notify_one();
         }
     }
 }
@@ -183,8 +198,11 @@ struct ClusterNodeLeases(Arc<dyn crate::clustering::claims::NodeLeaseStore>);
 #[cfg(feature = "clustering")]
 #[async_trait::async_trait]
 impl NodeLeaseRead for ClusterNodeLeases {
-    async fn unexpired(&self, node: &waddle_xmpp::ownership::NodeIdentity) -> Option<bool> {
-        self.0.is_unexpired(node).await.ok()
+    async fn lease_state(
+        &self,
+        node: &waddle_xmpp::ownership::NodeIdentity,
+    ) -> Option<waddle_xmpp::ownership::NodeLeaseState> {
+        self.0.lease_state(node).await.ok()
     }
 }
 
@@ -200,83 +218,171 @@ fn cluster_node_leases(_clustering: &ClusteringHandles) -> Option<Arc<dyn NodeLe
     None
 }
 
-/// How many accounts one sweep examines for bindings without a connection.
-const EXPIRED_BINDING_SWEEP_ACCOUNTS: u32 = 256;
+/// How many accounts one sweep page examines for bindings without a connection.
+pub const EXPIRED_BINDING_SWEEP_ACCOUNTS: u32 = 256;
 
-/// Settle the bindings whose connection is gone: its node lost its lease,
-/// or its process ended. Such a binding has no connection to retire it, so
-/// its resource would stay reserved and its account's claim held. Each
-/// account's coordinator detaches the ones whose session can still resume
-/// and retires the rest, stating that the recovery paths own the work they
-/// accepted. A binding whose liveness is unknown is left alone.
+/// Maximum pages drained during a single node-expiry wake-up pass, bounding
+/// burst DB load while covering typical clusters in one pass.
+const EXPIRED_BINDING_WAKE_MAX_PAGES: usize = 16;
+
+/// Settle one bounded page of accounts whose connection is gone: its node lost
+/// its lease, or its process ended. Such a binding has no connection to retire
+/// it, so its resource would stay reserved and its account's claim held. Each
+/// account's coordinator detaches the ones whose session can still resume and
+/// retires the rest, stating that the recovery paths own the work they
+/// accepted. A binding whose liveness is unknown or draining is left alone.
 ///
 /// The sweep takes over an account whose claim nobody holds or whose
 /// holder's node lease is lost, because nobody else acts for the rows such
 /// an account still has. An account another node holds is skipped.
 ///
-/// One sweep examines a bounded page of the accounts that hold a binding
-/// and resumes after it on the next; `cursor` restarts at the beginning
-/// once the last page was read. Returns how many bindings were retired.
-async fn retire_expired_bindings(
+/// One call examines at most `page_limit` accounts after `cursor`. When a
+/// full page is returned, `cursor` advances to its last account; when a short
+/// page is returned, `cursor` resets to `None` immediately so the next sweep
+/// starts from the beginning instead of issuing an empty pass. Returns how
+/// many bindings were retired.
+pub async fn retire_expired_bindings_page(
     coordinators: &Arc<AccountCoordinators>,
     cursor: &mut Option<jid::BareJid>,
+    page_limit: u32,
 ) -> usize {
+    retire_expired_bindings_page_checked(coordinators, cursor, page_limit)
+        .await
+        .unwrap_or(0)
+}
+
+async fn retire_expired_bindings_page_checked(
+    coordinators: &Arc<AccountCoordinators>,
+    cursor: &mut Option<jid::BareJid>,
+    page_limit: u32,
+) -> Option<usize> {
     let accounts = match coordinators
         .store()
-        .bound_accounts(cursor.as_ref(), EXPIRED_BINDING_SWEEP_ACCOUNTS)
+        .bound_accounts(cursor.as_ref(), page_limit)
         .await
     {
         Ok(accounts) => accounts,
         Err(error) => {
             tracing::warn!(%error, "account coordinator reaper: bound accounts could not be read");
-            return 0;
+            return None;
         }
     };
-    *cursor = accounts.last().cloned();
+    let full_page = accounts.len() >= page_limit as usize;
+    *cursor = full_page.then(|| accounts.last().cloned()).flatten();
     let mut retired = 0;
     for account in accounts {
         match coordinators.settle_expired(&account).await {
             Ok(settled) => retired += settled,
+            Err(super::error::AccountCoordinatorError::Claim(
+                super::claims::AccountClaimError::HeldElsewhere,
+            )) => {
+                tracing::debug!(%account, "account coordinator reaper: account held by another node");
+            }
             Err(error) => {
-                tracing::debug!(%error, "account coordinator reaper: account not settled");
+                tracing::warn!(%account, %error, "account coordinator reaper: account not settled");
             }
         }
     }
-    retired
+    Some(retired)
 }
 
-/// Reclaim idle coordinators for as long as the directory exists. Each
-/// sweep runs in a `janitor.sweep` span and is counted as a janitor sweep,
-/// so a stalled reaper shows as a missing heartbeat like any other janitor.
+/// Sweep expired bindings and reclaim idle coordinators for as long as the
+/// directory exists.
+///
+/// Expired-binding retirement runs on `config.expired_binding_sweep_interval`
+/// (default 30 s) and also wakes immediately when `wake` is notified (for
+/// example after the stale-node watchdog commits `expired = true`). Idle
+/// coordinator eviction stays on `config.idle_after` (default 300 s) and does
+/// not run on burst wake-ups. Each periodic sweep runs in a `janitor.sweep`
+/// span and records a janitor heartbeat.
 async fn reclaim_idle_coordinators(
     coordinators: Weak<AccountCoordinators>,
     config: AccountCoordinatorConfig,
+    wake: Arc<tokio::sync::Notify>,
 ) {
-    // An interval's period must be positive.
-    let period = config.idle_after.max(std::time::Duration::from_secs(1));
-    let mut ticks = tokio::time::interval(period);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Interval periods must be positive.
+    let sweep_period = config
+        .expired_binding_sweep_interval
+        .max(std::time::Duration::from_secs(1));
+    let idle_period = config.idle_after.max(std::time::Duration::from_secs(1));
+    let mut sweep_ticks = tokio::time::interval(sweep_period);
+    sweep_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut idle_ticks = tokio::time::interval(idle_period);
+    idle_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Skip the immediate idle tick at startup; no coordinators are idle yet.
+    idle_ticks.tick().await;
     let mut cursor = None;
     loop {
-        ticks.tick().await;
+        enum Trigger {
+            Sweep,
+            Idle,
+            Wake,
+        }
+        let trigger = tokio::select! {
+            _ = wake.notified() => Trigger::Wake,
+            _ = sweep_ticks.tick() => Trigger::Sweep,
+            _ = idle_ticks.tick() => Trigger::Idle,
+        };
         let Some(coordinators) = coordinators.upgrade() else {
             return;
         };
-        async {
-            let retired = retire_expired_bindings(&coordinators, &mut cursor).await;
-            let reclaimed = coordinators.reclaim_idle().await;
-            tracing::debug!(
-                reclaimed,
-                retired,
-                "account coordinator reaper: sweep finished"
-            );
-            record_janitor_sweep(Janitor::AccountCoordinatorReaper, SweepOutcome::Completed);
+        match trigger {
+            Trigger::Wake => {
+                // Reset cursor so accounts before the periodic sweep's current
+                // position are settled immediately after a node expires.
+                cursor = None;
+                let mut retired = 0;
+                for _ in 0..EXPIRED_BINDING_WAKE_MAX_PAGES {
+                    let Some(page_retired) = retire_expired_bindings_page_checked(
+                        &coordinators,
+                        &mut cursor,
+                        EXPIRED_BINDING_SWEEP_ACCOUNTS,
+                    )
+                    .await
+                    else {
+                        break;
+                    };
+                    retired += page_retired;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                tracing::debug!(
+                    retired,
+                    "account coordinator reaper: node-expiry wake sweep finished"
+                );
+            }
+            Trigger::Sweep => {
+                async {
+                    let retired = retire_expired_bindings_page(
+                        &coordinators,
+                        &mut cursor,
+                        EXPIRED_BINDING_SWEEP_ACCOUNTS,
+                    )
+                    .await;
+                    tracing::debug!(
+                        retired,
+                        "account coordinator reaper: expired-binding sweep finished"
+                    );
+                    record_janitor_sweep(
+                        Janitor::AccountCoordinatorReaper,
+                        SweepOutcome::Completed,
+                    );
+                }
+                .instrument(tracing::info_span!(
+                    parent: None,
+                    "janitor.sweep",
+                    janitor = Janitor::AccountCoordinatorReaper.value()
+                ))
+                .await;
+            }
+            Trigger::Idle => {
+                let reclaimed = coordinators.reclaim_idle().await;
+                tracing::debug!(
+                    reclaimed,
+                    "account coordinator reaper: idle coordinator reclamation finished"
+                );
+            }
         }
-        .instrument(tracing::info_span!(
-            parent: None,
-            "janitor.sweep",
-            janitor = Janitor::AccountCoordinatorReaper.value()
-        ))
-        .await;
     }
 }

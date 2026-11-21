@@ -50,6 +50,15 @@ use crate::server::routes::interpret::SmIngressAppendContext;
 /// working its backlog.
 const DIRECT_DECISION_BUDGET: Duration = Duration::from_secs(10);
 
+/// How long an origin waits for a hosting node's decision on a bound request
+/// (`deliver_bound`). Strictly below `MUC_PRESENCE_FANOUT_TIMEOUT` (3.5 s)
+/// with DB-roundtrip headroom so a single slow remote occupant settles as
+/// `MaybeCommitted` instead of racing the outer fan-out cap and causing
+/// duplicate `Direct` submissions on retry, and strictly below
+/// `ORDERED_RECEIVER_DELIVERY_TIMEOUT` (6 s) so an unreachable hosting node
+/// cannot wedge a room-request handler.
+const BOUND_DECISION_BUDGET: Duration = Duration::from_secs(2);
+
 /// The append obligation a payload carries, if it is a copy an ingress
 /// transaction owns.
 fn append_obligation(
@@ -225,11 +234,10 @@ impl OrderedRelayDeliveryBridge {
             ingress_append_context,
             received_at,
         } = delivery;
-        let Some(state) = self
-            .services
-            .get()
-            .and_then(|services| services.web_socket_state.upgrade())
-        else {
+        let Some(services) = self.services.get() else {
+            return FullJidDeliveryOutcome::Unavailable;
+        };
+        let Some(state) = services.web_socket_state.upgrade() else {
             return FullJidDeliveryOutcome::Unavailable;
         };
         let recipient = jid::Jid::from(target.clone());
@@ -256,6 +264,24 @@ impl OrderedRelayDeliveryBridge {
                 ingress_append: obligation,
             })
             .await;
+        }
+        // Do not commit a bound request to a node incarnation whose lease is
+        // already committed-expired: no successor can accept a bound request
+        // for that incarnation (it would only ever be rejected as
+        // HostedElsewhere). Leaving `Draining` alone preserves delivery to
+        // live sockets during normal rolling deploys within
+        // `BOUND_DECISION_BUDGET`.
+        if matches!(
+            services.node_lease.lease_state(&node).await,
+            Ok(waddle_xmpp::ownership::NodeLeaseState::Expired)
+        ) {
+            tracing::debug!(
+                %target,
+                node_id = %node.node_id,
+                node_epoch = %node.node_epoch,
+                "bound request skipped before commit: target node lease is expired"
+            );
+            return FullJidDeliveryOutcome::Unavailable;
         }
         let authority = Arc::clone(&state.deps.protocol.ingress);
         if !authority.room_requests_carried_now().await {
@@ -307,7 +333,7 @@ impl OrderedRelayDeliveryBridge {
             }
         };
         match authority
-            .await_direct_request(&pending, DIRECT_DECISION_BUDGET)
+            .await_direct_request(&pending, BOUND_DECISION_BUDGET)
             .await
         {
             Ok(DirectDecision::Accepted) => FullJidDeliveryOutcome::Delivered,

@@ -301,6 +301,26 @@ impl LeaveFanOutProgress<'_> {
 pub(crate) static NO_SKIP: std::sync::LazyLock<HashSet<FullJid>> =
     std::sync::LazyLock::new(HashSet::new);
 
+/// Outcome of one resumable departure fan-out pass.
+#[must_use]
+pub(crate) struct LeaveFanOutResult {
+    /// `true` when every unskipped recipient finished within the fan-out
+    /// timeout; `false` when the pass timed out with unfinished recipients.
+    pub(crate) completed: bool,
+    /// Recipients whose presence batch completed during this pass (never
+    /// includes recipients cut short by a timeout).
+    pub(crate) newly_notified: Vec<FullJid>,
+}
+
+impl LeaveFanOutResult {
+    pub(crate) const fn completed() -> Self {
+        Self {
+            completed: true,
+            newly_notified: Vec::new(),
+        }
+    }
+}
+
 pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -308,13 +328,15 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     outcome: &LeaveOutcome,
     removal: MucRemovalCause,
     progress: Option<LeaveFanOutProgress<'_>>,
-) {
+) -> LeaveFanOutResult {
     // Those who stay never saw an unannounced occupancy begin.
     if !outcome.removed_last_session || !removal.is_announced() {
-        return;
+        return LeaveFanOutResult::completed();
     }
     let from_jid = outcome.leaving_room_jid.clone();
     let sender_bare = sender_jid.to_bare();
+    let mut batches: Vec<(FullJid, Vec<Stanza>)> =
+        Vec::with_capacity(outcome.remaining_occupants.len());
     for occupant_jid in &outcome.remaining_occupants {
         if progress
             .as_ref()
@@ -335,16 +357,24 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
             waddle_xmpp::muc::MucPresenceStatus::new(false, false).removed_by(removal),
             &identity,
         );
-        super::handlers::presence::route_room_presence_to_occupant(
-            state,
-            room_jid,
-            occupant_jid,
-            Stanza::Presence(presence),
-        )
-        .await;
-        if let Some(progress) = progress.as_ref() {
-            progress.notified(occupant_jid);
-        }
+        batches.push((occupant_jid.clone(), vec![Stanza::Presence(presence)]));
+    }
+    let mut newly_notified = Vec::with_capacity(batches.len());
+    let completed = super::handlers::presence::fan_out_room_presences(
+        state,
+        room_jid,
+        batches,
+        |occupant_jid| {
+            if let Some(progress) = progress.as_ref() {
+                progress.notified(occupant_jid);
+            }
+            newly_notified.push(occupant_jid.clone());
+        },
+    )
+    .await;
+    LeaveFanOutResult {
+        completed,
+        newly_notified,
     }
 }
 
@@ -357,15 +387,17 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
     leaving_real_jid: &FullJid,
     outcome: &LeaveOutcome,
     progress: Option<LeaveFanOutProgress<'_>>,
-) {
+) -> LeaveFanOutResult {
     if outcome.removed_last_session || !outcome.cleared_muji_state {
-        return;
+        return LeaveFanOutResult::completed();
     }
     let from_jid = outcome.leaving_room_jid.clone();
     let mut entries = Vec::with_capacity(outcome.remaining_muji_sessions.len() + 1);
     entries.push((leaving_real_jid.clone(), Muji::default()));
     entries.extend(outcome.remaining_muji_sessions.iter().cloned());
     entries.sort_by_key(|(owner_jid, muji)| (muji_reflection_rank(muji), owner_jid.to_string()));
+    let mut batches: Vec<(FullJid, Vec<Stanza>)> =
+        Vec::with_capacity(outcome.remaining_occupants.len());
     for occupant_jid in &outcome.remaining_occupants {
         if progress
             .as_ref()
@@ -373,6 +405,7 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
         {
             continue;
         }
+        let mut stanzas = Vec::with_capacity(entries.len());
         for (owner_jid, muji) in &entries {
             let owner_bare = owner_jid.to_bare();
             let identity = OccupantIdentity {
@@ -393,17 +426,26 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
             if !muji.is_empty() {
                 presence.payloads.push(muji.to_element());
             }
-            super::handlers::presence::route_room_presence_to_occupant(
-                state,
-                room_jid,
-                occupant_jid,
-                Stanza::Presence(presence),
-            )
-            .await;
+            stanzas.push(Stanza::Presence(presence));
         }
-        if let Some(progress) = progress.as_ref() {
-            progress.notified(occupant_jid);
-        }
+        batches.push((occupant_jid.clone(), stanzas));
+    }
+    let mut newly_notified = Vec::with_capacity(batches.len());
+    let completed = super::handlers::presence::fan_out_room_presences(
+        state,
+        room_jid,
+        batches,
+        |occupant_jid| {
+            if let Some(progress) = progress.as_ref() {
+                progress.notified(occupant_jid);
+            }
+            newly_notified.push(occupant_jid.clone());
+        },
+    )
+    .await;
+    LeaveFanOutResult {
+        completed,
+        newly_notified,
     }
 }
 
@@ -3164,16 +3206,21 @@ async fn cleanup_muc_presence_in(
         .occupancy_sessions_for_occupant_below(jid, remote_ceiling, connection_generation);
     // Refused SM detach can re-enter shutdown once. Keep the remote relay
     // future out of the enclosing shutdown future so that bounded re-entry
-    // also fits the default debug-test stack.
-    let mut completed = Box::pin(cleanup_remote_muc_presence(
-        state,
-        jid,
-        origin,
-        remote_ceiling,
-        connection_generation,
-        remote_retry,
-    ))
-    .await;
+    // also fits the default debug-test stack. Single-room sweeps target only
+    // that local room and must not tear down unrelated remote memberships.
+    let mut completed = if only.is_some() {
+        true
+    } else {
+        Box::pin(cleanup_remote_muc_presence(
+            state,
+            jid,
+            origin,
+            remote_ceiling,
+            connection_generation,
+            remote_retry,
+        ))
+        .await
+    };
 
     let listed = match only {
         Some(room) => Ok(vec![room.clone()]),
@@ -3214,10 +3261,12 @@ async fn cleanup_muc_presence_in(
     };
     for room_jid in room_jids {
         let session = match remote_membership_sessions.get(&room_jid) {
-            Some(occupant_session) => LeaveSessionSelector::Generation(*occupant_session),
+            Some(occupant_session) if only.is_none() => {
+                LeaveSessionSelector::Generation(*occupant_session)
+            }
             #[cfg(feature = "clustering")]
             None if matches!(sweep_scope, LocalRoomSweepScope::MembershipBacked { .. }) => continue,
-            None => session,
+            _ => session,
         };
         let room_actor = match get_room_actor_result(state, &room_jid).await {
             Ok(Some(room_actor)) => room_actor,
@@ -3225,7 +3274,21 @@ async fn cleanup_muc_presence_in(
             Err(error) => {
                 completed = false;
                 warn!(room = %room_jid, error = %error, "Failed to get room actor");
-                if let Some(occupant_session) = remote_membership_sessions.get(&room_jid) {
+                if only.is_some() {
+                    if sweep_recording == SweepFailureRecording::RecordSweep {
+                        state.deps.protocol.pending_local_muc_departures.record(
+                            LocalDepartureItem::RoomDeparture {
+                                room: room_jid.clone(),
+                                jid: jid.clone(),
+                                cause: OccupancyLeaveCause::Disconnect,
+                                selector: session,
+                                attempt: sweep_attempt,
+                                notified: HashSet::new(),
+                                removal,
+                            },
+                        );
+                    }
+                } else if let Some(occupant_session) = remote_membership_sessions.get(&room_jid) {
                     retain_remote_membership_departure(
                         state,
                         room_jid.clone(),
@@ -3347,7 +3410,7 @@ async fn cleanup_muc_presence_in(
                 // (`handle_muc_leave`) calls the same helper, so the
                 // wire shape is identical regardless of how the
                 // session ended.
-                broadcast_muc_leave_to_remaining_resumable(
+                let leave_fanout = broadcast_muc_leave_to_remaining_resumable(
                     state,
                     &room_jid,
                     jid,
@@ -3362,7 +3425,7 @@ async fn cleanup_muc_presence_in(
                     }),
                 )
                 .await;
-                if removal.is_announced() {
+                let muji_fanout = if removal.is_announced() {
                     broadcast_muc_muji_clear_to_remaining_resumable(
                         state,
                         &room_jid,
@@ -3376,17 +3439,32 @@ async fn cleanup_muc_presence_in(
                             )),
                         }),
                     )
-                    .await;
+                    .await
+                } else {
+                    LeaveFanOutResult::completed()
+                };
+                if leave_fanout.completed && muji_fanout.completed {
+                    if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
+                        completed = false;
+                    }
+                    acknowledge_in_flight(
+                        &state.deps.protocol.pending_local_muc_departures,
+                        &room_actor,
+                        &in_flight,
+                        outcome.acknowledge,
+                    );
+                } else {
+                    // Fan-out timed out with unfinished remote recipients: keep
+                    // the actor's departure receipt unacknowledged and hand the
+                    // accumulated `notified` set off to the per-room janitor
+                    // retry so remaining occupants are notified without
+                    // re-notifying peers already reached.
+                    state
+                        .deps
+                        .protocol
+                        .pending_local_muc_departures
+                        .handoff_in_flight_to_retry(&in_flight);
                 }
-                if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
-                    completed = false;
-                }
-                acknowledge_in_flight(
-                    &state.deps.protocol.pending_local_muc_departures,
-                    &room_actor,
-                    &in_flight,
-                    outcome.acknowledge,
-                );
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
