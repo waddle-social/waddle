@@ -272,6 +272,32 @@ struct AdminSpacesTests {
         #expect(!list.isLoading)
     }
 
+    /// Home and the sidebar show spaces from the directory.
+    @Test func everyChangeToASpaceIsFollowedByAFreshDirectory() async throws {
+        let (coordinator, port) = online()
+        let draft = try #require(AdminSpaceDraft(name: "Studio", description: ""))
+        port.topology = Topology(
+            spaces: [Space(id: "studio", serviceJID: nil, name: "Studio", summary: nil)], channels: []
+        )
+
+        try await coordinator.createAdminSpace(draft)
+        #expect(coordinator.directory.spaces.map(\.name) == ["Studio"])
+
+        _ = try await coordinator.updateAdminSpace(design, to: draft)
+        try await coordinator.deleteAdminSpace(ops)
+        #expect(port.topologyRequests == 3)
+    }
+
+    @Test func aRefusedChangeAsksForNoDirectory() async throws {
+        let (coordinator, port) = online()
+        port.admin.writeFailure = .rejected
+        let draft = try #require(AdminSpaceDraft(name: "Studio", description: ""))
+
+        await #expect(throws: PortError.rejected) { try await coordinator.createAdminSpace(draft) }
+
+        #expect(port.topologyRequests == 0)
+    }
+
     @Test func aChangeTheServerRefusesIsThrown() async throws {
         let (coordinator, port) = online()
         port.admin.writeFailure = .rejected

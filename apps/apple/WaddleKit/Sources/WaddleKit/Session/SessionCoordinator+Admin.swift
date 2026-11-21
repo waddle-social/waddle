@@ -44,13 +44,19 @@ extension SessionCoordinator {
         }
     }
 
+    // Home, the sidebar and the switcher show spaces from the directory,
+    // so each change to a space is followed by a fresh discovery.
+
     public func createAdminSpace(_ draft: AdminSpaceDraft) async throws {
         try await whileOnline { try await port.createAdminSpace(draft) }
+        await refreshDirectory()
     }
 
     /// Answers with the space as the server now holds it.
     public func updateAdminSpace(_ space: AdminSpace, to draft: AdminSpaceDraft) async throws -> AdminSpace {
-        try await whileOnline { try await port.updateAdminSpace(space, to: draft) }
+        let updated = try await whileOnline { try await port.updateAdminSpace(space, to: draft) }
+        await refreshDirectory()
+        return updated
     }
 
     /// Deletes the space and the rooms that belong to it.
@@ -64,7 +70,6 @@ extension SessionCoordinator {
     public func deleteAdminSpace(_ space: AdminSpace) async throws {
         try await whileOnline { try await port.deleteAdminSpace(space) }
         let rooms = directory.channels(in: space.node).map(\.roomJID)
-        guard !rooms.isEmpty else { return }
         roomsOfDeletedSpaces.formUnion(rooms)
         onDemandRooms.subtract(rooms)
         await refreshDirectory()
