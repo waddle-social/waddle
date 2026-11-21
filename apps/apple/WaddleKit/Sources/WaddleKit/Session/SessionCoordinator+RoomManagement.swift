@@ -132,6 +132,7 @@ extension SessionCoordinator {
     /// never joined.
     func isFenced(_ room: BareJID) -> Bool {
         destroyedRooms.contains(room) || departingRooms.contains(room) || unconfirmedDeletions.contains(room)
+            || roomsOfDeletedSpaces.contains(room)
     }
 
     /// Whether the user is in, or joining, the huddle in `room`.

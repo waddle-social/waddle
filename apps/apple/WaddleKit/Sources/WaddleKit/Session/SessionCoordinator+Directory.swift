@@ -21,19 +21,29 @@ extension SessionCoordinator {
     /// Rediscovers spaces and rooms, then joins every autojoin room, group
     /// DM, and room the user opened or created this session. A failed
     /// discovery keeps the last known directory.
-    func refreshDirectory() async {
+    ///
+    /// A fresh connection is in no room, so every one is joined. A look
+    /// taken mid-session (`joiningOnlyNewRooms`) leaves the rooms we are
+    /// already in alone: joining again makes the server send everyone in
+    /// each of them once more.
+    func refreshDirectory(joiningOnlyNewRooms: Bool = false) async {
         let mutationStart = directoryMutations.count
         directoryRefreshesInFlight += 1
         defer {
             directoryRefreshesInFlight -= 1
             if directoryRefreshesInFlight == 0 { directoryMutations.removeAll() }
         }
+        let epoch = connectionEpoch
         let result = await port.discoverTopology()
         // A superseded ready pipeline (the stream dropped and reconnected
         // meanwhile) must not overwrite the directory with its answer.
-        guard !Task.isCancelled else { return }
+        // Neither must a look asked for elsewhere, whose task a reconnect
+        // does not cancel.
+        guard !Task.isCancelled, epoch == connectionEpoch else { return }
         if case let .success(topology) = result {
             directory.apply(topology)
+            // A room that outlived its space is listed again.
+            roomsOfDeletedSpaces.subtract(topology.channels.map(\.roomJID))
             for mutation in directoryMutations.dropFirst(mutationStart) {
                 switch mutation {
                 case .upsert(let channel): directory.upsert(channel)
@@ -48,6 +58,7 @@ extension SessionCoordinator {
         var seen: Set<BareJID> = []
         let roomsToJoin = (listed + onDemandRooms.sorted(by: { $0.description < $1.description })).filter { room in
             seen.insert(room).inserted && (directory.isRoom(room) || onDemandRooms.contains(room))
+                && !(joiningOnlyNewRooms && presence.joinedRooms.contains(room))
         }
         await withTaskGroup(of: Void.self) { group in
             var pending = roomsToJoin[...]
@@ -177,6 +188,7 @@ extension SessionCoordinator {
         // A room deleted earlier in the session exists again.
         destroyedRooms.remove(room)
         unconfirmedDeletions.remove(room)
+        roomsOfDeletedSpaces.remove(room)
         calls.sealedGroupRooms.remove(room)
         upsertChannel(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
         // create_room joined, configured and then left the room. Its

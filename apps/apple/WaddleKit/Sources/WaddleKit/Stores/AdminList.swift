@@ -28,6 +28,8 @@ public final class AdminList<Row: Identifiable & Sendable> {
     @ObservationIgnored private var cursor: String?
     /// Counts searches; an answer to an earlier one is dropped.
     @ObservationIgnored private var serial = 0
+    /// Rows changed here while a page was on its way.
+    @ObservationIgnored private var changesSinceAsking: [Change] = []
 
     init(fetch: @escaping Fetch) {
         self.fetch = fetch
@@ -48,10 +50,12 @@ public final class AdminList<Row: Identifiable & Sendable> {
         let result = await Self.attempt { try await self.fetch(text.isEmpty ? nil : text, nil) }
         guard search == serial else { return }
         isLoading = false
+        let changes = changesSinceAsking
+        changesSinceAsking = []
         guard !Task.isCancelled else { return }
         switch result {
         case let .success(page):
-            rows = page.rows
+            rows = Self.applying(changes, to: page.rows)
             cursor = page.nextCursor
             hasLoaded = true
             failure = nil
@@ -80,16 +84,54 @@ public final class AdminList<Row: Identifiable & Sendable> {
         let result = await Self.attempt { try await self.fetch(self.query.isEmpty ? nil : self.query, cursor) }
         guard search == serial else { return }
         isLoadingMore = false
+        let changes = changesSinceAsking
+        changesSinceAsking = []
         guard !Task.isCancelled else { return }
         switch result {
         case let .success(page):
             // The list may have changed between the two pages.
             let shown = Set(rows.map(\.id))
-            rows += page.rows.filter { !shown.contains($0.id) }
+            rows += Self.applying(changes, to: page.rows).filter { !shown.contains($0.id) }
             self.cursor = page.nextCursor
         case let .failure(error):
             moreFailure = error
         }
+    }
+
+    /// Shows a row as the server now holds it, where it was.
+    public func replace(_ row: Row) {
+        noteChange(.replace(row))
+        rows = Self.applying([.replace(row)], to: rows)
+    }
+
+    /// Takes out a row the server no longer has.
+    public func remove(_ id: Row.ID) {
+        noteChange(.remove(id))
+        rows = Self.applying([.remove(id)], to: rows)
+    }
+
+    /// A page asked for before a change may not know of it, so the change
+    /// is made again over that page when it answers.
+    private func noteChange(_ change: Change) {
+        if isLoading || isLoadingMore { changesSinceAsking.append(change) }
+    }
+
+    private enum Change {
+        case replace(Row)
+        case remove(Row.ID)
+    }
+
+    private static func applying(_ changes: [Change], to rows: [Row]) -> [Row] {
+        var rows = rows
+        for change in changes {
+            switch change {
+            case let .replace(row):
+                if let index = rows.firstIndex(where: { $0.id == row.id }) { rows[index] = row }
+            case let .remove(id):
+                rows.removeAll { $0.id == id }
+            }
+        }
+        return rows
     }
 
     private static func attempt(_ fetch: () async throws -> AdminPage<Row>) async -> Result<AdminPage<Row>, PortError> {

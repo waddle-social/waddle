@@ -124,6 +124,10 @@ public final class SessionCoordinator {
     /// Rooms whose delete got no clear answer (timed out, cut off). They
     /// may be gone, so they are not joined again this session.
     @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
+    /// Rooms a space listed when it was deleted here. The server deletes
+    /// some and keeps others without saying which, so none is joined
+    /// until a discovery lists it again.
+    @ObservationIgnored var roomsOfDeletedSpaces: Set<BareJID> = []
     /// Rooms being deleted or left; not joined until the request settles.
     @ObservationIgnored var departingRooms: Set<BareJID> = []
     /// Rooms with a management action in flight; one at a time per room.
@@ -434,6 +438,7 @@ public final class SessionCoordinator {
         departingRooms.removeAll()
         roomsBeingManaged.removeAll()
         unconfirmedDeletions.removeAll()
+        roomsOfDeletedSpaces.removeAll()
         joinTails.removeAll()
         directoryMutations.removeAll()
         extensionCommands.removeAll()
