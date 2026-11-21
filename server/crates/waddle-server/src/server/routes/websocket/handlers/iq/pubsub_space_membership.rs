@@ -108,6 +108,82 @@ pub(super) async fn read_space_owner_state(
     }
 }
 
+struct EnrolledSpaceOwner {
+    key: ScopeKey,
+    initiator: GrantSubject,
+    lifecycle: ScopeLifecycleId,
+    incarnation: AuthorityIncarnation,
+    generation: GrantGeneration,
+    authority: HostGrantAuthority,
+}
+
+async fn enrolled_space_owner(
+    iq: &Iq,
+    state: &WebSocketState,
+    requester: Option<&FullJid>,
+    session: Option<&Session>,
+    node: &str,
+) -> Result<Option<EnrolledSpaceOwner>, Iq> {
+    let service = state.deps.service_domains.spaces.as_str();
+    let gate = &state.deps.app_state.host_grants;
+    match gate.space_enrolled(node).await {
+        Ok(false) => return Ok(None),
+        Ok(true) => {}
+        Err(_) => return Err(build_pubsub_error(iq, PubSubError::InternalServerError)),
+    }
+    let Some(requester) = requester else {
+        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+    };
+    let bare = requester.to_bare();
+    if session.is_none_or(|session| session.user_jid != bare.as_str())
+        || iq
+            .from()
+            .is_some_and(|from| from.as_str() != requester.as_str())
+    {
+        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+    }
+    let (Ok(service), Ok(initiator)) = (service.parse(), GrantSubject::new(bare)) else {
+        return Err(build_pubsub_error(iq, PubSubError::BadRequest));
+    };
+    let Ok(key) = ScopeKey::new(service, node) else {
+        return Err(build_pubsub_error(iq, PubSubError::BadRequest));
+    };
+    let Some(decision) = gate.space_read_local(&key, &initiator).await else {
+        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+    };
+    if decision.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true) {
+        return Err(build_pubsub_error(iq, PubSubError::Forbidden));
+    }
+    let (Some(store), Some(attachment)) = (gate.store(), gate.attachment()) else {
+        return Err(build_pubsub_error(iq, PubSubError::InternalServerError));
+    };
+    let Some(policy) = state
+        .deps
+        .service_domains
+        .host_grant_issuance_policy(attachment.principals())
+    else {
+        return Err(build_pubsub_error(iq, PubSubError::InternalServerError));
+    };
+    let binding = decision.subscription_grant();
+    let scope = match store.scope(binding.lifecycle).await {
+        Ok(Some(scope)) if scope.authority_incarnation == binding.incarnation => scope,
+        Ok(_) => return Err(build_pubsub_error(iq, PubSubError::NodeNotFound)),
+        Err(error) => return Err(membership_mutation_error(iq, error)),
+    };
+    Ok(Some(EnrolledSpaceOwner {
+        key,
+        initiator,
+        lifecycle: binding.lifecycle,
+        incarnation: binding.incarnation,
+        generation: scope.generation,
+        authority: HostGrantAuthority::new(
+            store.clone(),
+            state.deps.app_state.permission_actor.clone(),
+            policy,
+        ),
+    }))
+}
+
 pub(super) async fn configure_enrolled_space(
     iq: &Iq,
     state: &WebSocketState,
@@ -125,56 +201,16 @@ pub(super) async fn configure_enrolled_space(
     let node = configure.attr("node")?;
     let ordinary = |reply| Some(ResponseFrame::from(iq_to_xml(reply)));
     let failure = |condition| ordinary(build_pubsub_error(iq, condition));
-    let gate = &state.deps.app_state.host_grants;
-    match gate.space_enrolled(node).await {
-        Ok(false) => return None,
-        Ok(true) => {}
-        Err(_) => return failure(PubSubError::InternalServerError),
-    }
-    let Some(requester) = requester else {
-        return failure(PubSubError::Forbidden);
-    };
-    let bare = requester.to_bare();
-    if session.is_none_or(|session| session.user_jid != bare.as_str())
-        || iq
-            .from()
-            .is_some_and(|from| from.as_str() != requester.as_str())
-    {
-        return failure(PubSubError::Forbidden);
-    }
-    let (Ok(service), Ok(initiator)) = (service.parse(), GrantSubject::new(bare)) else {
-        return failure(PubSubError::BadRequest);
-    };
-    let Ok(key) = ScopeKey::new(service, node) else {
-        return failure(PubSubError::BadRequest);
-    };
-    let Some(decision) = gate.space_read_local(&key, &initiator).await else {
-        return failure(PubSubError::Forbidden);
-    };
-    if decision.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true) {
-        return failure(PubSubError::Forbidden);
-    }
-    let (Some(store), Some(attachment)) = (gate.store(), gate.attachment()) else {
-        return failure(PubSubError::InternalServerError);
-    };
-    let Some(policy) = state
-        .deps
-        .service_domains
-        .host_grant_issuance_policy(attachment.principals())
-    else {
-        return failure(PubSubError::InternalServerError);
-    };
-    let binding = decision.subscription_grant();
-    let scope = match store.scope(binding.lifecycle).await {
-        Ok(Some(scope)) if scope.authority_incarnation == binding.incarnation => scope,
-        Ok(_) => return failure(PubSubError::NodeNotFound),
-        Err(error) => return ordinary(membership_mutation_error(iq, error)),
+    let owner = match enrolled_space_owner(iq, state, requester, session, node).await {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return None,
+        Err(error) => return ordinary(error),
     };
     let current = match state
         .deps
         .protocol
         .pubsub_storage
-        .get_node(key.service(), node)
+        .get_node(owner.key.service(), node)
         .await
     {
         Ok(Some(record)) => record.config,
@@ -197,29 +233,30 @@ pub(super) async fn configure_enrolled_space(
             ));
         }
     };
-    let authority = HostGrantAuthority::new(
-        store.clone(),
-        state.deps.app_state.permission_actor.clone(),
-        policy,
-    );
     let command = ConfigureSpace {
         operation: GrantOperationId::generate(),
-        key,
-        lifecycle: binding.lifecycle,
-        expected_incarnation: binding.incarnation,
-        expected_generation: scope.generation,
-        initiator,
+        key: owner.key,
+        lifecycle: owner.lifecycle,
+        expected_incarnation: owner.incarnation,
+        expected_generation: owner.generation,
+        initiator: owner.initiator,
         deliver_payloads,
     };
-    let mut result = authority.configure_space(&command).await;
+    let mut result = owner.authority.configure_space(&command).await;
     if matches!(result, Err(HostGrantError::CommitOutcomeUnknown)) {
-        result = authority.configure_space(&command).await;
+        result = owner.authority.configure_space(&command).await;
     }
     let receipt = match result {
         Ok(receipt) => receipt,
         Err(error) => return ordinary(membership_mutation_error(iq, error)),
     };
-    if settle_owner_mutation(gate, &authority, receipt.record()).await {
+    if settle_owner_mutation(
+        &state.deps.app_state.host_grants,
+        &owner.authority,
+        receipt.record(),
+    )
+    .await
+    {
         ordinary(build_pubsub_success(iq))
     } else {
         ordinary(error(
