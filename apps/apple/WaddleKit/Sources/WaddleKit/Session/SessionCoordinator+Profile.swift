@@ -54,8 +54,11 @@ extension SessionCoordinator {
     /// the call (ADR-010). What is published is looked up first, and while
     /// it shows a call it is left alone: writing over it would end the "in
     /// a call" mark for everyone. A lookup that fails throws, so nothing
-    /// is written while what is published is unknown.
+    /// is written while what is published is unknown. For the same reason
+    /// an activity that would itself show a call is refused: it is a
+    /// call's to publish, and once published it could not be changed here.
     public func setActivity(_ activity: UserActivity?) async throws {
+        guard activity?.showsACall != true else { throw PortError.invalidRequest }
         if let published = try await port.fetchOwnActivity(), published.showsACall {
             status.activity = published
             throw PortError.rejected

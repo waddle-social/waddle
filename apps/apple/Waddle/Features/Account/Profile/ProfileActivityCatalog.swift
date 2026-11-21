@@ -44,9 +44,10 @@ enum ProfileActivityCatalog {
     ]
 
     /// General activities the picker does not offer but another client may
-    /// have published.
+    /// have published. `on_the_phone` and `on_video_phone` are never
+    /// offered under `talking`: they mark a call (`UserActivity.showsACall`).
     private static let others: [Entry] = [
-        Entry(value: "talking", emoji: "💬", title: "Talking", specifics: ["in_real_life", "on_the_phone", "on_video_phone"]),
+        Entry(value: "talking", emoji: "💬", title: "Talking", specifics: ["in_real_life"]),
         Entry(value: "undefined", emoji: "💭", title: "Something else", specifics: []),
     ]
 
@@ -71,7 +72,9 @@ enum ProfileActivityCatalog {
     /// own when it is one the list lacks (another app may publish others).
     static func specifics(of general: String?, including current: UserActivity?) -> [String] {
         let defined = general.flatMap(entry)?.specifics ?? []
-        guard let kept = current?.specific, current?.general == general, !defined.contains(kept) else { return defined }
+        guard let current, !current.showsACall, let kept = current.specific,
+              current.general == general, !defined.contains(kept)
+        else { return defined }
         return [kept] + defined
     }
 

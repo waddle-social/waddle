@@ -129,6 +129,19 @@ struct OwnProfileTests {
         #expect(coordinator.status.activity == nil)
     }
 
+    /// Only a call publishes the mark of a call. Set by hand it would lock
+    /// the activity, since a call's mark is never written over.
+    @Test func anActivityThatWouldShowACallIsNotPublished() async {
+        let (coordinator, port) = session()
+
+        await #expect(throws: PortError.invalidRequest) {
+            try await coordinator.setActivity(UserActivity(general: "talking", specific: "on_video_phone"))
+        }
+
+        #expect(port.publishedActivities.isEmpty)
+        #expect(coordinator.status.activity == nil)
+    }
+
     /// Talking to someone in the room is an ordinary activity, not a call.
     @Test func anActivityThatIsNotACallCanBeReplaced() async throws {
         let (coordinator, port) = session()
