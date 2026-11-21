@@ -927,6 +927,27 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         .update_node_config(&service, node, &NodeConfig::spaces_private())
         .await
         .expect("configure private Space");
+    if matches!(exercise, SpaceExercise::MembershipAndDiscovery) {
+        let conn = live
+            .fixture
+            .ingress
+            .db
+            .guard()
+            .await
+            .expect("fixture database");
+        let updated = conn
+            .execute(
+                "UPDATE pubsub_nodes SET node_type = ? WHERE owner_jid = ? AND node_name = ?",
+                waddle_server::db_params![
+                    waddle_xmpp::xep::xep0503::NS_SPACES,
+                    service.as_str(),
+                    node
+                ],
+            )
+            .await
+            .expect("persist XEP-0503 node type before enrollment");
+        assert_eq!(updated, 1);
+    }
     let hidden_scope = protected_space_contents::seed_legacy_child(&live, first).await;
     live.fixture
         .store
@@ -1136,66 +1157,104 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
     )
     .await;
     assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
-    let configuration = |id| {
-        get(
-            id,
-            service.as_str(),
-            Element::builder("pubsub", NS_PUBSUB_OWNER)
-                .append(
-                    Element::builder("configure", NS_PUBSUB_OWNER)
-                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-                        .build(),
-                )
-                .build(),
-        )
+    const DATA_FORMS: &str = xmpp_parsers::ns::DATA_FORMS;
+    const NODE_CONFIG_FORM: &str = "http://jabber.org/protocol/pubsub#node_config";
+    let configuration = |form: Option<Element>| {
+        let mut configure = Element::builder("configure", NS_PUBSUB_OWNER)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+        if let Some(form) = form {
+            configure = configure.append(form);
+        }
+        Element::builder("pubsub", NS_PUBSUB_OWNER)
+            .append(configure.build())
+            .build()
     };
-    let reply = round_trip(&mut owner, configuration("space-owner-configuration")).await;
-    let Iq::Result {
-        payload: Some(payload),
-        ..
-    } = reply
-    else {
-        panic!("Space owner configuration query returned {reply:?}");
+    let get_configuration = |id| get(id, service.as_str(), configuration(None));
+    let disable_payloads = |id| {
+        let field = |name, kind, value| {
+            Element::builder("field", DATA_FORMS)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), name)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), kind)
+                .append(Element::builder("value", DATA_FORMS).append(value).build())
+                .build()
+        };
+        let submitted = Element::builder("x", DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+            .append(field("FORM_TYPE", "hidden", NODE_CONFIG_FORM))
+            .append(field("pubsub#deliver_payloads", "boolean", "0"))
+            .build();
+        set(id, service.as_str(), configuration(Some(submitted)))
     };
-    assert!(payload.is("pubsub", NS_PUBSUB_OWNER), "{payload:?}");
-    let config = payload
-        .get_child("configure", NS_PUBSUB_OWNER)
-        .expect("node configuration");
-    assert_eq!(config.attr("node"), Some(node));
-    let form = config
-        .get_child("x", xmpp_parsers::ns::DATA_FORMS)
-        .expect("configuration data form");
-    assert_eq!(form.attr("type"), Some("form"));
-    let field = |name| {
-        form.children()
-            .find(|child| {
-                child.is("field", xmpp_parsers::ns::DATA_FORMS) && child.attr("var") == Some(name)
-            })
-            .expect("configuration field")
+    let assert_configuration = |reply: Iq, deliver_payloads| {
+        let Iq::Result {
+            payload: Some(payload),
+            ..
+        } = reply
+        else {
+            panic!("Space owner configuration query returned {reply:?}");
+        };
+        assert!(payload.is("pubsub", NS_PUBSUB_OWNER), "{payload:?}");
+        let config = payload
+            .get_child("configure", NS_PUBSUB_OWNER)
+            .expect("node configuration");
+        assert_eq!(config.attr("node"), Some(node));
+        let form = config
+            .get_child("x", DATA_FORMS)
+            .expect("configuration data form");
+        assert_eq!(form.attr("type"), Some("form"));
+        let field = |name| {
+            form.children()
+                .find(|child| child.is("field", DATA_FORMS) && child.attr("var") == Some(name))
+                .expect("configuration field")
+        };
+        assert_eq!(field("FORM_TYPE").attr("type"), Some("hidden"));
+        for (name, expected) in [
+            ("FORM_TYPE", NODE_CONFIG_FORM),
+            ("pubsub#access_model", "whitelist"),
+            ("pubsub#publish_model", "publishers"),
+            ("pubsub#persist_items", "1"),
+            ("pubsub#deliver_payloads", deliver_payloads),
+        ] {
+            assert_eq!(
+                field(name)
+                    .get_child("value", DATA_FORMS)
+                    .expect("configuration field value")
+                    .text(),
+                expected,
+                "{name}",
+            );
+        }
     };
-    assert_eq!(field("FORM_TYPE").attr("type"), Some("hidden"));
-    for (name, expected) in [
-        ("FORM_TYPE", "http://jabber.org/protocol/pubsub#node_config"),
-        ("pubsub#access_model", "whitelist"),
-        ("pubsub#publish_model", "publishers"),
-        ("pubsub#persist_items", "1"),
-        ("pubsub#deliver_payloads", "1"),
-    ] {
-        assert_eq!(
-            field(name)
-                .get_child("value", xmpp_parsers::ns::DATA_FORMS)
-                .expect("configuration field value")
-                .text(),
-            expected,
-            "{name}",
-        );
-    }
     let denied = round_trip(
         &mut member,
-        configuration("space-member-configuration-denied"),
+        get_configuration("space-member-configuration-denied"),
     )
     .await;
     assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
+    let denied = round_trip(
+        &mut member,
+        disable_payloads("space-member-configuration-write-denied"),
+    )
+    .await;
+    assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
+    assert_configuration(
+        round_trip(&mut owner, get_configuration("space-owner-configuration")).await,
+        "1",
+    );
+    let changed = round_trip(
+        &mut owner,
+        disable_payloads("space-owner-disable-event-payloads"),
+    )
+    .await;
+    assert!(is_result(&changed), "{changed:?}");
+    assert_configuration(
+        round_trip(
+            &mut owner,
+            get_configuration("space-owner-configuration-updated"),
+        )
+        .await,
+        "0",
+    );
     protected_space_contents::assert_canonical_space_children(
         &live,
         &authority,
