@@ -4,8 +4,9 @@ import XCTest
 @testable import WaddleKit
 
 /// Night and Daylight goldens for the Feed and stories: the Feed filled,
-/// empty and after a failed refresh, a story open in the viewer, and the
-/// story composer before and after a picture is chosen. These screens
+/// empty and after a failed refresh, the post composer with a link, a
+/// picture and a paused video open in the viewer, and the story composer
+/// before and after a picture or a video is chosen. These screens
 /// have no design frame; they are drawn from the styleguide's components.
 /// Text fields and scroll views only draw in a real window, so these are
 /// screen snapshots, compared on the OS the goldens were recorded on (see
@@ -123,7 +124,13 @@ final class CommunitySnapshotTests: XCTestCase {
         let picture = AttachmentPayload(
             data: Self.pictureData, filename: "Photo-1.png", mediaType: "image/png", width: 360, height: 480
         )
-        try await assertComposer(StoryComposer(picture: picture, caption: "First ice of the season at the rink."))
+        try await assertComposer(StoryComposer(media: picture, caption: "First ice of the season at the rink."))
+    }
+
+    /// The picture stands in for the video's first frame.
+    func testNewStoryWithAVideo() async throws {
+        let clip = AttachmentPayload(data: Data(count: 64), filename: "story.mp4", mediaType: "video/mp4", width: nil, height: nil)
+        try await assertComposer(StoryComposer(media: clip, preview: Self.picture, caption: "Morning skate before the crowds."))
     }
 
     func testNewStoryThatFailedToPost() async throws {
