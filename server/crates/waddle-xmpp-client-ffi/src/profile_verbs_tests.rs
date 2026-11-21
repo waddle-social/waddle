@@ -17,14 +17,15 @@ use minidom::Element;
 use waddle_xmpp_client::avatar::{
     compute_avatar_item_id, AVATAR_REMOVE_ITEM_ID, NS_AVATAR_DATA, NS_AVATAR_METADATA, NS_PUBSUB,
 };
+use waddle_xmpp_client::messaging::NS_CLIENT;
 use waddle_xmpp_client::pep::{
     build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
     build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, UserActivity,
     UserMood, NS_ACTIVITY, NS_MOOD, NS_TUNE,
 };
-use waddle_xmpp_client::xep::xep0292::{parse_vcard4_element, NS_VCARD4};
+use waddle_xmpp_client::xep::xep0292::{parse_vcard4_element, NS_VCARD4, PEP_NODE_VCARD4};
 
-use waddle_xmpp_client::error::{StanzaError, StanzaErrorType};
+use waddle_xmpp_client::error::{StanzaError, StanzaErrorType, STANZA_CONDITION_ITEM_NOT_FOUND};
 use waddle_xmpp_client::ClientError;
 
 use crate::profile_verbs::{
@@ -788,7 +789,7 @@ mod validation {
             ),
             None => items,
         };
-        Element::builder("iq", "jabber:client")
+        Element::builder("iq", NS_CLIENT)
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "a1")
             .append(
@@ -836,7 +837,7 @@ mod validation {
             .unwrap()
             .is_none());
         assert!(
-            own_activity_from_lookup(Err(stanza_error("item-not-found")))
+            own_activity_from_lookup(Err(stanza_error(STANZA_CONDITION_ITEM_NOT_FOUND)))
                 .unwrap()
                 .is_none()
         );
@@ -866,7 +867,7 @@ mod validation {
     fn vcard4_lookup_reply(vcard: Option<Element>) -> Element {
         let items = Element::builder("items", NS_PUBSUB).attr(
             minidom::rxml::xml_ncname!("node").to_owned(),
-            "urn:xmpp:vcard4",
+            PEP_NODE_VCARD4,
         );
         let items = match vcard {
             Some(vcard) => items.append(
@@ -877,7 +878,7 @@ mod validation {
             ),
             None => items,
         };
-        Element::builder("iq", "jabber:client")
+        Element::builder("iq", NS_CLIENT)
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
             .append(
                 Element::builder("pubsub", NS_PUBSUB)
@@ -894,7 +895,7 @@ mod validation {
             &vcard4_to_core(super::xep0292::full_vcard()),
             "req-1",
         );
-        let vcard = publish_item(&published, "urn:xmpp:vcard4")
+        let vcard = publish_item(&published, PEP_NODE_VCARD4)
             .get_child("vcard", NS_VCARD4)
             .expect("vcard payload")
             .clone();
@@ -910,9 +911,11 @@ mod validation {
         assert!(own_vcard4_from_lookup(Ok(vcard4_lookup_reply(None)))
             .unwrap()
             .is_none());
-        assert!(own_vcard4_from_lookup(Err(stanza_error("item-not-found")))
-            .unwrap()
-            .is_none());
+        assert!(
+            own_vcard4_from_lookup(Err(stanza_error(STANZA_CONDITION_ITEM_NOT_FOUND)))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Publishing replaces the whole vCard, so an editor must be able
