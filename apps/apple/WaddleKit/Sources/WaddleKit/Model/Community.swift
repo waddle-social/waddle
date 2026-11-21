@@ -116,16 +116,26 @@ public struct Story: Hashable, Sendable, Identifiable {
         self.expiresAt = expiresAt
     }
 
-    /// By the declared type, or by the file's extension when the author's
-    /// client declared none.
-    public var isVideo: Bool {
-        if let mediaType { return mediaType.lowercased().hasPrefix("video/") }
-        return ["mp4", "m4v", "mov", "webm"].contains(media.pathExtension.lowercased())
+    /// What a story shows.
+    public enum Kind: Hashable, Sendable {
+        case picture
+        case video
+        /// WebM, which browsers record and Apple's players do not decode.
+        case webM
     }
 
-    /// WebM, which browsers record and Apple's players do not decode.
-    public var isWebM: Bool {
-        mediaType?.lowercased() == "video/webm" || media.pathExtension.lowercased() == "webm"
+    /// By the declared type, or by the file's extension when the author's
+    /// client declared none.
+    public var kind: Kind {
+        if let type = mediaType?.lowercased() {
+            if type == "video/webm" { return .webM }
+            return type.hasPrefix("video/") ? .video : .picture
+        }
+        switch media.pathExtension.lowercased() {
+        case "webm": return .webM
+        case "mp4", "m4v", "mov": return .video
+        default: return .picture
+        }
     }
 
     public func isActive(at now: Date) -> Bool {

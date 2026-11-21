@@ -19,56 +19,78 @@ struct StoryPlaythroughTests {
 
         #expect(playthrough.stories.map(\.id) == ["a", "b", "c"])
         #expect(playthrough.current.id == "b")
+        #expect(!playthrough.isLast)
     }
 
     @Test func aStoryNoLongerUpOpensAlone() {
         let playthrough = StoryPlaythrough(start: story("gone"), among: up)
 
         #expect(playthrough.stories.map(\.id) == ["gone"])
+        #expect(playthrough.isLast)
     }
 
-    @Test func goingBackFromTheFirstStaysAndGoingOnFromTheLastCloses() {
+    @Test func goingBackFromTheFirstChangesNothingAndGoingOnFromTheLastFinishes() {
         var playthrough = StoryPlaythrough(start: story("a"), among: up)
 
-        #expect(playthrough.step(-1) == .show)
+        #expect(playthrough.move(by: -1) == .unchanged)
         #expect(playthrough.current.id == "a")
-        #expect(playthrough.step(1) == .show)
-        #expect(playthrough.step(1) == .show)
-        #expect(playthrough.step(1) == .close)
+        #expect(playthrough.move(by: 1) == .moved)
+        #expect(playthrough.move(by: 1) == .moved)
+        #expect(playthrough.isLast)
+        #expect(playthrough.move(by: 1) == .finished)
         #expect(playthrough.current.id == "c")
     }
 
     @Test func aVideoThatEndsMovesOnToTheNextStory() {
         var playthrough = StoryPlaythrough(start: story("b", video: true), among: up)
 
-        #expect(playthrough.videoEnded("b") == .show)
+        #expect(playthrough.videoEnded("b") == .moved)
         #expect(playthrough.current.id == "c")
     }
 
-    @Test func theLastVideoEndingClosesTheViewer() {
+    @Test func theLastVideoEndingFinishes() {
         var playthrough = StoryPlaythrough(start: story("b", video: true), among: [story("a"), story("b", video: true)])
 
-        #expect(playthrough.videoEnded("b") == .close)
+        #expect(playthrough.videoEnded("b") == .finished)
     }
 
-    @Test func theEndOfAVideoAlreadyLeftIsIgnored() {
+    @Test func theEndOfAVideoAlreadyLeftChangesNothing() {
         var playthrough = StoryPlaythrough(start: story("b", video: true), among: up)
-        _ = playthrough.step(-1)
+        _ = playthrough.move(by: -1)
 
-        #expect(playthrough.videoEnded("b") == .show)
+        #expect(playthrough.videoEnded("b") == .unchanged)
         #expect(playthrough.current.id == "a")
     }
 
-    @Test func theNextStoryStartsPlayingFromTheBeginningAndStaysMuted() {
+    @Test func muteIsKeptFromOneStoryToTheNext() {
         var playthrough = StoryPlaythrough(start: story("a"), among: up)
         playthrough.isMuted = true
-        playthrough.isPaused = true
-        playthrough.progress = 0.6
 
-        _ = playthrough.step(1)
+        _ = playthrough.move(by: 1)
 
-        #expect(!playthrough.isPaused)
-        #expect(playthrough.progress == 0)
         #expect(playthrough.isMuted)
+    }
+
+    @Test func barsBeforeTheStoryAreFullAfterItEmptyAndItsOwnFillsAsItsVideoPlays() {
+        let playthrough = StoryPlaythrough(start: story("b", video: true), among: up)
+
+        #expect(playthrough.fill(at: 0, played: 0.4) == 1)
+        #expect(playthrough.fill(at: 1, played: 0.4) == 0.4)
+        #expect(playthrough.fill(at: 1, played: nil) == 1)
+        #expect(playthrough.fill(at: 2, played: 0.4) == 0)
+        #expect(playthrough.fill(at: 1, played: 1.3) == 1)
+    }
+}
+
+@Suite("Story sound")
+struct StorySoundTests {
+    @Test func storiesMixWithOtherAudioWhenNoCallIsOn() {
+        #expect(StorySound(during: .idle) == .mixed)
+        #expect(StorySound(during: .ended(sid: "s1", reason: .finished(nil))) == .mixed)
+    }
+
+    @Test func storiesAreSilentWhileACallRingsOrIsOn() {
+        let incoming = IncomingCall(from: JID(parsing: "bob@waddle.test/phone")!, sid: "s1", media: CallMedia(audio: true, video: false))
+        #expect(StorySound(during: .incoming(incoming)) == .silencedByCall)
     }
 }

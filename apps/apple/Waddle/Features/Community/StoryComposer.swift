@@ -13,12 +13,31 @@ final class StoryComposer {
         case posting(Double)
     }
 
-    /// Stories are smaller than chat attachments, as on web.
-    static let maxBytes = 10 * 1024 * 1024
+    /// What the story shows, ready to upload.
+    enum Media {
+        case picture(AttachmentPayload)
+        case video(AttachmentPayload)
 
-    /// The picture or video to upload.
-    private(set) var media: AttachmentPayload?
-    /// The picture, or the video's first frame, decoded once.
+        var payload: AttachmentPayload {
+            switch self {
+            case let .picture(payload), let .video(payload): payload
+            }
+        }
+
+        var isVideo: Bool {
+            if case .video = self { return true }
+            return false
+        }
+    }
+
+    /// Stories are smaller than chat attachments, as on web.
+    static let storyLimit = 10 * 1024 * 1024
+
+    /// The most a story's file may be: `storyLimit`, or less in tests.
+    let maxBytes: Int
+    private(set) var media: Media?
+    /// The picture, or the video's first frame, decoded once. A video
+    /// whose first frame could not be made has none.
     private(set) var preview: Image?
     var caption = ""
     private(set) var phase: Phase = .editing
@@ -27,17 +46,28 @@ final class StoryComposer {
     /// `preview` stands in for a video's first frame; a picture's is
     /// decoded from it.
     init(
-        media: AttachmentPayload? = nil,
+        media: Media? = nil,
         preview: Image? = nil,
         caption: String = "",
         phase: Phase = .editing,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        maxBytes: Int = StoryComposer.storyLimit
     ) {
         self.media = media
-        self.preview = preview ?? media.flatMap { Image(storyPicture: $0.data) }
+        if let preview {
+            self.preview = preview
+        } else if case let .picture(payload) = media {
+            self.preview = Image(storyPicture: payload.data)
+        }
         self.caption = caption
         self.phase = phase
         self.errorMessage = errorMessage
+        self.maxBytes = maxBytes
+    }
+
+    /// "10 MB": the cap, as people read it.
+    var limitText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(maxBytes), countStyle: .memory)
     }
 
     /// A chosen picture or video is still being read; posting waits for it.
@@ -45,7 +75,6 @@ final class StoryComposer {
     /// Counts choices, so a slow earlier one cannot replace a later one.
     private var choice = 0
 
-    var isVideo: Bool { media?.mediaType.hasPrefix("video/") == true }
     var isPosting: Bool { phase != .editing }
     var canPost: Bool { media != nil && !isPosting && !isPicking }
 
@@ -63,10 +92,10 @@ final class StoryComposer {
             }
             do {
                 let payload = try await AttachmentLoader.payload(fromPhoto: data, mediaType: mediaType, fileExtension: fileExtension)
-                guard payload.data.count <= Self.maxBytes else {
-                    return .failure(PickFailure(text: "Pictures in a story can be up to 10 MB."))
+                guard payload.data.count <= maxBytes else {
+                    return .failure(PickFailure(text: "Pictures in a story can be up to \(limitText)."))
                 }
-                return .success(Chosen(media: payload, preview: Image(storyPicture: payload.data)))
+                return .success(Chosen(media: .picture(payload), preview: Image(storyPicture: payload.data)))
             } catch {
                 return .failure(PickFailure(text: AttachmentUploadError.message(for: error)))
             }
@@ -81,14 +110,16 @@ final class StoryComposer {
             guard let source = await read() else {
                 return .failure(PickFailure(text: "Couldn't read that video. Try another one."))
             }
-            let limit = Self.maxBytes
+            let limit = maxBytes
             do {
                 let clip = try await Task.detached(priority: .userInitiated) {
                     try await StoryClip.prepare(source, maxBytes: limit)
                 }.value
-                return .success(Chosen(media: clip.payload, preview: clip.poster.map { Image(decorative: $0, scale: 1) }))
+                return .success(Chosen(media: .video(clip.payload), preview: clip.poster.map { Image(decorative: $0, scale: 1) }))
             } catch StoryClip.Failure.tooLarge {
-                return .failure(PickFailure(text: "Videos in a story can be up to 10 MB."))
+                return .failure(PickFailure(text: "Videos in a story can be up to \(limitText)."))
+            } catch StoryClip.Failure.notConverted {
+                return .failure(PickFailure(text: "Couldn't convert that video so everyone can play it. Try another one."))
             } catch {
                 return .failure(PickFailure(text: "Couldn't use that video. Try another one."))
             }
@@ -96,7 +127,7 @@ final class StoryComposer {
     }
 
     private struct Chosen {
-        let media: AttachmentPayload
+        let media: Media
         let preview: Image?
     }
 
@@ -125,7 +156,7 @@ final class StoryComposer {
     /// it), then posts the story. True once it is up. Cancelling the task
     /// stops the upload, and nothing is posted.
     func post(using session: SessionCoordinator) async -> Bool {
-        guard let media, !isPosting else { return false }
+        guard let media = media?.payload, !isPosting else { return false }
         phase = .posting(0)
         errorMessage = nil
         defer { phase = .editing }

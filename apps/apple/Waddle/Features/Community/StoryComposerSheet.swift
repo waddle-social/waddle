@@ -77,19 +77,15 @@ struct StoryComposerSheet: View {
 
     @ViewBuilder
     private var media: some View {
-        if let preview = composer.preview {
-            preview
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: .infinity, maxHeight: 360)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
-                .overlay { if composer.isVideo { videoMark } }
+        if let media = composer.media {
+            chosenPreview
+                .overlay { if media.isVideo { videoMark } }
                 .overlay(alignment: .bottom) { progress }
                 .accessibilityElement()
-                .accessibilityLabel(Text(composer.isVideo ? "The video for your story" : "The picture for your story"))
+                .accessibilityLabel(Text(media.isVideo ? "The video for your story" : "The picture for your story"))
             picker {
                 Label(
-                    composer.isVideo ? "Choose another video" : "Choose another picture",
+                    media.isVideo ? "Choose another video" : "Choose another picture",
                     systemImage: "photo.on.rectangle"
                 )
             }
@@ -100,7 +96,7 @@ struct StoryComposerSheet: View {
                 VStack(spacing: Theme.Spacing.s) {
                     if composer.isPicking {
                         ProgressView()
-                            .accessibilityLabel(Text("Getting it ready"))
+                            .accessibilityLabel(Text("Loading what you chose"))
                     } else {
                         Image(systemName: "photo.badge.plus")
                             .font(.system(size: addGlyph))
@@ -110,7 +106,7 @@ struct StoryComposerSheet: View {
                     Text("Choose a picture or video")
                         .huddleText(Theme.Typography.button)
                         .foregroundStyle(Theme.Colors.fg)
-                    Text("Up to 10 MB")
+                    Text("Up to \(composer.limitText)")
                         .huddleText(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.fgMuted)
                 }
@@ -118,6 +114,24 @@ struct StoryComposerSheet: View {
                 .huddleSurface(.card, radius: Theme.Radius.card)
             }
             .buttonStyle(.plain)
+        }
+    }
+
+    /// The picture, or the video's first frame; a plain ground for a video
+    /// whose first frame could not be made.
+    @ViewBuilder
+    private var chosenPreview: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+        if let preview = composer.preview {
+            preview
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: 360)
+                .clipShape(shape)
+        } else {
+            shape
+                .fill(Theme.Colors.surface2)
+                .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 220)
         }
     }
 

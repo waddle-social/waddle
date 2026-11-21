@@ -94,16 +94,18 @@ final class CommunitySnapshotTests: XCTestCase {
             expiresAt: date(80_000)
         )
         var playthrough = StoryPlaythrough(start: clip, among: [SampleSession.rink, clip])
-        playthrough.isPaused = true
         playthrough.isMuted = true
-        playthrough.progress = 0.4
-        try await assertViewer(playthrough, in: sample)
+        let video = StoryVideoPlayback(storyID: clip.id, isPaused: true, progress: 0.4)
+        try await assertViewer(playthrough, video: video, in: sample)
     }
 
     private func assertViewer(
-        _ playthrough: StoryPlaythrough, in sample: SampleSession, testName: String = #function
+        _ playthrough: StoryPlaythrough,
+        video: StoryVideoPlayback? = nil,
+        in sample: SampleSession,
+        testName: String = #function
     ) async throws {
-        let viewer = StoryViewer(playthrough: playthrough, now: date(0), picture: Self.picture)
+        let viewer = StoryViewer(playthrough: playthrough, now: date(0), standIn: Self.picture, video: video)
         // A sheet on a Mac, the whole screen on iPhone.
         #if os(macOS)
         try await assertScreenSnapshot(
@@ -124,13 +126,19 @@ final class CommunitySnapshotTests: XCTestCase {
         let picture = AttachmentPayload(
             data: Self.pictureData, filename: "Photo-1.png", mediaType: "image/png", width: 360, height: 480
         )
-        try await assertComposer(StoryComposer(media: picture, caption: "First ice of the season at the rink."))
+        try await assertComposer(StoryComposer(media: .picture(picture), caption: "First ice of the season at the rink."))
     }
 
     /// The picture stands in for the video's first frame.
     func testNewStoryWithAVideo() async throws {
         let clip = AttachmentPayload(data: Data(count: 64), filename: "story.mp4", mediaType: "video/mp4", width: nil, height: nil)
-        try await assertComposer(StoryComposer(media: clip, preview: Self.picture, caption: "Morning skate before the crowds."))
+        try await assertComposer(StoryComposer(media: .video(clip), preview: Self.picture, caption: "Morning skate before the crowds."))
+    }
+
+    /// A video whose first frame could not be made.
+    func testNewStoryWithAVideoWithoutAFrame() async throws {
+        let clip = AttachmentPayload(data: Data(count: 64), filename: "story.mp4", mediaType: "video/mp4", width: nil, height: nil)
+        try await assertComposer(StoryComposer(media: .video(clip)))
     }
 
     func testNewStoryThatFailedToPost() async throws {

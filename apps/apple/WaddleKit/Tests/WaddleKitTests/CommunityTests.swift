@@ -105,14 +105,16 @@ struct CommunityTests {
         #expect(store.activeStories(at: now).map(\.id) == ["new", "forever", "old"])
     }
 
-    @Test func aStoryIsAVideoByItsTypeOrElseItsFileName() {
+    @Test func aStorysKindIsItsDeclaredTypeOrElseItsFileName() {
         let clip = URL(string: "https://upload.waddle.test/story-1.webm")!
-        #expect(Story(id: "a", media: picture, mediaType: "video/mp4").isVideo)
-        #expect(!Story(id: "b", media: clip, mediaType: "image/jpeg").isVideo)
-        #expect(Story(id: "c", media: clip).isVideo)
-        #expect(Story(id: "c", media: clip).isWebM)
-        #expect(Story(id: "d", media: picture, mediaType: "video/webm").isWebM)
-        #expect(!Story(id: "e", media: picture, mediaType: "image/jpeg").isVideo)
+        let movie = URL(string: "https://upload.waddle.test/story-2.mov")!
+        #expect(Story(id: "a", media: picture, mediaType: "video/mp4").kind == .video)
+        #expect(Story(id: "b", media: clip, mediaType: "image/jpeg").kind == .picture)
+        #expect(Story(id: "c", media: clip).kind == .webM)
+        #expect(Story(id: "d", media: picture, mediaType: "video/webm").kind == .webM)
+        #expect(Story(id: "e", media: picture, mediaType: "image/jpeg").kind == .picture)
+        #expect(Story(id: "f", media: movie).kind == .video)
+        #expect(Story(id: "g", media: picture).kind == .picture)
     }
 
     @Test func theFeedIsNewestFirstWhateverOrderTheServerUses() async {
