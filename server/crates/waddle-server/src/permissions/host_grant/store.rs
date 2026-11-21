@@ -1594,7 +1594,7 @@ impl HostGrantStore {
 
         let mut tx = self.begin_interactive_read().await?;
         let Some((record, recorded_at_ms, _)) =
-            read_space_deletion_header(&mut tx, key, operation).await?
+            read_space_deletion_header(&mut tx, key, operation, false).await?
         else {
             return Ok(None);
         };
@@ -1673,7 +1673,7 @@ impl HostGrantStore {
     ) -> Result<Option<super::LocalSpaceDeletionRecipient>, HostGrantError> {
         let mut tx = self.begin_interactive_read().await?;
         let Some((record, recorded_at_ms, current_generation)) =
-            read_space_deletion_header(&mut tx, key, operation).await?
+            read_space_deletion_header(&mut tx, key, operation, false).await?
         else {
             return Ok(None);
         };
@@ -1705,6 +1705,49 @@ impl HostGrantStore {
             preference,
             current_generation,
         }))
+    }
+
+    /// Hold restore and scope changes through the recipient's socket handoff.
+    pub(super) async fn hold_local_space_deletion_recipient(
+        &self,
+        key: &super::ScopeKey,
+        operation: GrantOperationId,
+        subject: &GrantSubject,
+        generation: GrantGeneration,
+    ) -> Result<Option<Transaction<'_>>, HostGrantError> {
+        let mut tx = self.db.begin().await?;
+        if !set_local_transaction_timeouts(
+            &mut tx,
+            ENROLLED_LOOKUP_LOCK_TIMEOUT,
+            ENROLLED_LOOKUP_STATEMENT_TIMEOUT,
+        )
+        .await?
+        {
+            return Err(HostGrantError::BoundsUnproven);
+        }
+        tx.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![SPACE_BOOKMARK_RESTORE_LOCK],
+        )
+        .await?;
+        let Some((record, _, current)) =
+            read_space_deletion_header(&mut tx, key, operation, true).await?
+        else {
+            return Ok(None);
+        };
+        if current != generation {
+            return Ok(None);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM host_grant_space_deletion_audience
+                  WHERE lifecycle_id = ? AND delivery_kind = 'local' AND subject_jid = ?",
+                crate::db_params![record.lifecycle.to_storage(), subject.as_str()],
+            )
+            .await?;
+        let exists = rows.next().await?.is_some();
+        drop(rows);
+        Ok(exists.then_some(tx))
     }
 
     /// Record an atomic membership change from an authenticated served owner.
@@ -3967,6 +4010,7 @@ async fn read_space_deletion_header(
     tx: &mut Transaction<'_>,
     key: &super::ScopeKey,
     operation: GrantOperationId,
+    lock_scope: bool,
 ) -> Result<Option<(OperationRecord, i64, GrantGeneration)>, HostGrantError> {
     let Some(recorded) = load_operation(tx, operation).await? else {
         return Ok(None);
@@ -3976,8 +4020,9 @@ async fn read_space_deletion_header(
         return Ok(None);
     }
     let lifecycle = record.lifecycle.to_storage();
+    let lock = if lock_scope { " FOR SHARE OF s" } else { "" };
     let mut rows = tx.query(
-            "SELECT o.recorded_at_ms, s.generation
+            &format!("SELECT o.recorded_at_ms, s.generation
                FROM host_grant_space_deletions d
                JOIN host_grant_operations o ON o.operation_id = d.operation_id
                JOIN host_grant_space_bindings b ON b.lifecycle_id = d.lifecycle_id
@@ -3988,7 +4033,7 @@ async fn read_space_deletion_header(
                 AND b.service_jid = ? AND b.space_node = ? AND b.authority_incarnation = a.incarnation
                 AND o.authority_incarnation = a.incarnation AND l.retired_at_ms IS NULL
                 AND s.admission_state = 'active' AND s.policy_version = ?
-                AND s.projected_generation >= o.generation",
+                AND s.projected_generation >= o.generation{lock}"),
             crate::db_params![
                 lifecycle.as_str(), operation.to_storage(), key.service().as_str(), key.node(),
                 HOST_GRANT_POLICY_VERSION

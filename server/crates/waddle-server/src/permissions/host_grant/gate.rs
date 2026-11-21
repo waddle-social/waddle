@@ -139,7 +139,21 @@ pub(crate) struct LocalSpaceReplyGrant {
 #[derive(Debug)]
 enum LocalSpaceReplyAuthority {
     Active(ManagedSpaceGrant),
-    Deleted(FenceTicket),
+    Deleted(LocalDeletionDelivery),
+}
+
+struct LocalDeletionDelivery {
+    fence: FenceTicket,
+    store: HostGrantStore,
+}
+
+impl std::fmt::Debug for LocalDeletionDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalDeletionDelivery")
+            .field("fence", &self.fence)
+            .finish_non_exhaustive()
+    }
 }
 
 struct LocalReplyPreference {
@@ -160,7 +174,7 @@ impl LocalSpaceReplyGrant {
     pub(crate) fn admit<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
         match &self.authority {
             LocalSpaceReplyAuthority::Active(grant) => grant.admit(|_| effect()),
-            LocalSpaceReplyAuthority::Deleted(fence) => fence.admit(effect),
+            LocalSpaceReplyAuthority::Deleted(deletion) => deletion.fence.admit(effect),
         }
     }
 
@@ -173,12 +187,31 @@ impl LocalSpaceReplyGrant {
             && bookmark_item_has_payload(&payload.as_ref().to_element())
     }
 
-    pub(crate) async fn hold_subscription(
+    pub(crate) fn needs_delivery_hold(&self) -> bool {
+        self.preference.is_some() || matches!(&self.authority, LocalSpaceReplyAuthority::Deleted(_))
+    }
+
+    pub(crate) async fn hold_delivery(
         &self,
         has_bookmark_payload: bool,
     ) -> Option<crate::db::Transaction<'_>> {
-        let preference = self.preference.as_ref()?;
         tokio::time::timeout(ROOM_READ_DEADLINE, async {
+            if let LocalSpaceReplyAuthority::Deleted(deletion) = &self.authority {
+                let key = ScopeKey::new(self.replay.service().clone(), self.replay.node()).ok()?;
+                let subject = GrantSubject::new(self.replay.recipient().to_bare()).ok()?;
+                let operation = GrantOperationId::from_uuid(self.replay.deletion_operation()?);
+                return deletion
+                    .store
+                    .hold_local_space_deletion_recipient(
+                        &key,
+                        operation,
+                        &subject,
+                        deletion.fence.generation(),
+                    )
+                    .await
+                    .ok()?;
+            }
+            let preference = self.preference.as_ref()?;
             if let Some(event) = self.replay.bookmark_event() {
                 let room = self.replay.room_dependencies().first()?.room().clone();
                 let version = SpaceBookmarkVersion {
@@ -1285,11 +1318,10 @@ impl HostGrantGate {
         }
         let fence = self.fence.as_ref()?;
         let registration = fence.begin_decision().await?;
+        let store = self.store.as_ref()?;
         let saved = tokio::time::timeout(
             ROOM_READ_DEADLINE,
-            self.store
-                .as_ref()?
-                .load_local_space_deletion_recipient(key, operation, subject),
+            store.load_local_space_deletion_recipient(key, operation, subject),
         )
         .await
         .ok()?
@@ -1302,7 +1334,10 @@ impl HostGrantGate {
         }
         let ticket = fence.ticket(registration, record.lifecycle, saved.current_generation);
         ticket.is_current().then(|| LocalSpaceReplyGrant {
-            authority: LocalSpaceReplyAuthority::Deleted(ticket),
+            authority: LocalSpaceReplyAuthority::Deleted(LocalDeletionDelivery {
+                fence: ticket,
+                store: store.clone(),
+            }),
             replay: replay.clone(),
             preference: None,
         })
@@ -1370,7 +1405,7 @@ impl HostGrantGate {
         };
         if replay.subscription_id().is_some() {
             let hold = result
-                .hold_subscription(result.bookmark_has_payload(payload))
+                .hold_delivery(result.bookmark_has_payload(payload))
                 .await?;
             let _ = hold.rollback().await;
         }

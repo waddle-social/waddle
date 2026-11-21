@@ -1318,10 +1318,12 @@ impl WriteAuthority for FrameAuthority {
         let Some(SpaceReplyAuthority::Managed(grant)) = self.space_reply.as_ref() else {
             return None;
         };
-        grant.replay_identity().subscription_id()?;
+        if !grant.needs_delivery_hold() {
+            return None;
+        }
         Some(Box::pin(async move {
             let guard = grant
-                .hold_subscription(self.has_bookmark_payload)
+                .hold_delivery(self.has_bookmark_payload)
                 .await
                 .ok_or(())?;
             Ok(Box::new(guard) as Box<dyn Send + '_>)
