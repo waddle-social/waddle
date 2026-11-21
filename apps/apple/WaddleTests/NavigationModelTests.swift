@@ -237,4 +237,15 @@ final class NavigationModelTests: XCTestCase {
 
         XCTAssertEqual(navigation.splitSection, .home)
     }
+
+    /// People stays pushed on Home while Admin is open on You.
+    func testGoingBackFromAdminReturnsToPeopleWhenHomeShowsIt() {
+        let navigation = NavigationModel()
+        navigation.homePath = [.people]
+        navigation.youPath = [.admin]
+
+        navigation.youPath = []
+
+        XCTAssertEqual(navigation.splitSection, .people)
+    }
 }

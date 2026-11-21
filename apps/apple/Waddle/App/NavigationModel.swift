@@ -140,7 +140,7 @@ final class NavigationModel {
                 selection = nil
                 splitSection = .admin
             } else if !showsAdmin, splitSection == .admin, selection == nil, oldValue.last == .admin {
-                splitSection = .home
+                splitSection = homePath.last == .people ? .people : .home
             }
         }
     }

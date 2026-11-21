@@ -30,3 +30,17 @@ final class AdminListNoticeTests: XCTestCase {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: true, failure: .failed, query: "ada"), .failed)
     }
 }
+
+/// Which of the server's answers mean "not an owner".
+final class AdminErrorTests: XCTestCase {
+    func testOnlyForbiddenMeansNotAnOwner() {
+        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "forbidden", text: nil)), .rejected)
+        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "internal-server-error", text: nil)), .failed)
+        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Stanza(condition: "bad-request", text: nil)), .failed)
+    }
+
+    func testOtherErrorsKeepTheirMeaning() {
+        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.NotConnected), .notConnected)
+        XCTAssertEqual(FFIXmppPort.adminError(WaddleError.Timeout), .timeout)
+    }
+}

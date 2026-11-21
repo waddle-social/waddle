@@ -6,14 +6,14 @@ import Observation
 @MainActor
 @Observable
 public final class AdminList<Row: Identifiable & Sendable> {
-    /// One page, and where the next one starts (nil on the last page).
-    public typealias Page = (rows: [Row], nextCursor: String?)
-    typealias Fetch = @MainActor (_ prefix: String?, _ cursor: String?) async throws -> Page
+    typealias Fetch = @MainActor (_ prefix: String?, _ cursor: String?) async throws -> AdminPage<Row>
 
     public private(set) var rows: [Row] = []
     public private(set) var isLoading = false
     public private(set) var isLoadingMore = false
-    /// The rows shown answer the text last searched for.
+    /// The text the rows, or the lack of them, answer.
+    public private(set) var query = ""
+    /// The server has answered `query`.
     public private(set) var hasLoaded = false
     /// Why the last search or refresh failed; `rejected` when the account
     /// may not use the console.
@@ -23,8 +23,6 @@ public final class AdminList<Row: Identifiable & Sendable> {
     public var hasMore: Bool { cursor != nil }
 
     @ObservationIgnored private let fetch: Fetch
-    /// The text the rows shown were found for.
-    @ObservationIgnored private var query = ""
     @ObservationIgnored private var cursor: String?
     /// Counts searches; an answer to an earlier one is dropped.
     @ObservationIgnored private var serial = 0
@@ -36,6 +34,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
     /// Shows the first page of what starts with `text`; everything when it
     /// is blank. A refresh that fails keeps the rows shown; a search for
     /// other text that fails shows none, since they answered other text.
+    /// A search whose task was cancelled changes nothing.
     public func load(matching text: String = "") async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         serial += 1
@@ -46,6 +45,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
         let result = await Self.attempt { try await self.fetch(text.isEmpty ? nil : text, nil) }
         guard search == serial else { return }
         isLoading = false
+        guard !Task.isCancelled else { return }
         switch result {
         case let .success(page):
             rows = page.rows
@@ -77,6 +77,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
         let result = await Self.attempt { try await self.fetch(self.query.isEmpty ? nil : self.query, cursor) }
         guard search == serial else { return }
         isLoadingMore = false
+        guard !Task.isCancelled else { return }
         switch result {
         case let .success(page):
             // The list may have changed between the two pages.
@@ -88,7 +89,7 @@ public final class AdminList<Row: Identifiable & Sendable> {
         }
     }
 
-    private static func attempt(_ fetch: () async throws -> Page) async -> Result<Page, PortError> {
+    private static func attempt(_ fetch: () async throws -> AdminPage<Row>) async -> Result<AdminPage<Row>, PortError> {
         do {
             return .success(try await fetch())
         } catch {

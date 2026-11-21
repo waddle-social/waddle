@@ -262,7 +262,7 @@ public protocol StickerPort: AnyObject, Sendable {
 public protocol AdminPort: AnyObject, Sendable {
     /// One page of everyone with an account, by name. `prefix` keeps those
     /// whose name starts with it; `cursor` is a page's `nextCursor`.
-    func adminUsers(matching prefix: String?, after cursor: String?) async throws -> AdminUsersPage
+    func adminUsers(matching prefix: String?, after cursor: String?) async throws -> AdminPage<AdminUser>
 }
 
 /// The full surface the session coordinator drives.

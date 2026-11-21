@@ -14,7 +14,7 @@ struct AdminView: View {
     var body: some View {
         Group {
             if let users {
-                AdminUsersPanel(users: users, query: query)
+                AdminUsersPanel(users: users)
             } else {
                 Theme.Colors.bg
             }
@@ -23,10 +23,11 @@ struct AdminView: View {
         .navigationTitle("Admin")
         .searchable(text: $query, prompt: "Search users")
         .task(id: Search(query: query, isOnline: session.connection == .online)) {
+            let isFirstLoad = users == nil
             let users = users ?? session.adminUsersList()
             self.users = users
             // Wait for a pause in typing before asking.
-            if users.hasLoaded {
+            if !isFirstLoad {
                 try? await Task.sleep(for: .milliseconds(250))
             }
             guard !Task.isCancelled else { return }
@@ -56,7 +57,6 @@ struct AdminView: View {
 /// The users found, a page at a time, or why there are none to show.
 struct AdminUsersPanel: View {
     let users: AdminList<AdminUser>
-    let query: String
 
     var body: some View {
         ScrollView {
@@ -84,9 +84,9 @@ struct AdminUsersPanel: View {
                 isEmpty: users.rows.isEmpty,
                 hasLoaded: users.hasLoaded,
                 failure: users.failure,
-                query: query
+                query: users.query
             ) {
-                AdminNoticeView(notice: notice, query: query)
+                AdminNoticeView(notice: notice, query: users.query)
             }
         }
     }
@@ -105,7 +105,8 @@ enum AdminListNotice: Equatable {
     case empty
 
     /// Nil while there are rows to show. A list not loaded yet is loading,
-    /// never empty: "no one" is only said once the server has said so.
+    /// never empty: "no one" is only said once the server has said so,
+    /// and `query` is the text it answered, not the text being typed.
     init?(isEmpty: Bool, hasLoaded: Bool, failure: PortError?, query: String) {
         guard isEmpty else { return nil }
         switch failure {
@@ -133,7 +134,7 @@ private struct AdminNoticeView: View {
         case .notAllowed:
             EmptyStateView(
                 title: "Admin access only",
-                message: "Ask a community owner if you need to manage this server.",
+                message: "Ask a community owner if you need to manage this community.",
                 symbol: "lock"
             )
         case .offline:
@@ -141,7 +142,11 @@ private struct AdminNoticeView: View {
         case .failed:
             EmptyStateView(title: "Users didn't load", message: "Refresh to try again.", symbol: "exclamationmark.triangle")
         case .noMatches:
-            NoMatchesView(query: query)
+            EmptyStateView(
+                title: "No matches",
+                message: "No one's name or address starts with “\(query)”.",
+                symbol: "magnifyingglass"
+            )
         case .empty:
             EmptyStateView(title: "No users yet", message: "People show up here once they have an account.", symbol: "person.2")
         }

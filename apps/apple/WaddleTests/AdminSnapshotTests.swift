@@ -20,8 +20,8 @@ final class AdminSnapshotTests: XCTestCase {
     /// An owner, three members (one without a display name) and more to load.
     func testUsers() async throws {
         let sample = SampleSession()
-        sample.port.admin.users[.init()] = .success(AdminUsersPage(
-            users: [
+        sample.port.admin.users[.init()] = .success(AdminPage(
+            rows: [
                 AdminUser(jid: SampleSession.ana.jid, displayName: "Ana Lindqvist", isOwner: true),
                 AdminUser(jid: SampleSession.jo, displayName: "Jo Marchetti", isOwner: false),
                 AdminUser(jid: SampleSession.mika, displayName: nil, isOwner: false),
@@ -46,8 +46,8 @@ final class AdminSnapshotTests: XCTestCase {
     func testSplitAdmin() async throws {
         let sample = SampleSession()
         sample.coordinator.isCommunityOwner = true
-        sample.port.admin.users[.init()] = .success(AdminUsersPage(
-            users: [AdminUser(jid: SampleSession.ana.jid, displayName: "Ana Lindqvist", isOwner: true)],
+        sample.port.admin.users[.init()] = .success(AdminPage(
+            rows: [AdminUser(jid: SampleSession.ana.jid, displayName: "Ana Lindqvist", isOwner: true)],
             nextCursor: nil
         ))
         sample.navigation.show(.admin)

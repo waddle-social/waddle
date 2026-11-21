@@ -58,6 +58,18 @@ struct AdminTests {
         await coordinator.stop()
     }
 
+    /// The first question can time out, which reads as "no". Events asks
+    /// the same thing on every refresh.
+    @Test func anOwnerMissedOnConnectingIsFoundWhenEventsRefresh() async {
+        let (coordinator, port) = await connected(isOwner: false)
+        port.calendar.isOwner = true
+
+        await coordinator.refreshEvents()
+
+        #expect(coordinator.isCommunityOwner)
+        await coordinator.stop()
+    }
+
     @Test func signingOutForgetsTheOwner() async {
         let (coordinator, _) = await connected(isOwner: true)
 
@@ -91,7 +103,7 @@ struct AdminTests {
 
     @Test func theUsersListLoadsItsFirstPage() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada, bo], nextCursor: nil))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada, bo], nextCursor: nil))
         let list = coordinator.adminUsersList()
 
         await list.load()
@@ -105,8 +117,8 @@ struct AdminTests {
 
     @Test func loadingMoreAddsTheNextPage() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada], nextCursor: "after-ada"))
-        port.admin.users[.init(cursor: "after-ada")] = .success(AdminUsersPage(users: [bo], nextCursor: nil))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "after-ada"))
+        port.admin.users[.init(cursor: "after-ada")] = .success(AdminPage(rows: [bo], nextCursor: nil))
         let list = coordinator.adminUsersList()
         await list.load()
         #expect(list.hasMore)
@@ -120,8 +132,8 @@ struct AdminTests {
     /// A list that changed between two pages can name someone twice.
     @Test func someoneOnTwoPagesIsListedOnce() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada, bo], nextCursor: "next"))
-        port.admin.users[.init(cursor: "next")] = .success(AdminUsersPage(users: [bo, cy], nextCursor: nil))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada, bo], nextCursor: "next"))
+        port.admin.users[.init(cursor: "next")] = .success(AdminPage(rows: [bo, cy], nextCursor: nil))
         let list = coordinator.adminUsersList()
         await list.load()
 
@@ -132,8 +144,8 @@ struct AdminTests {
 
     @Test func searchingAsksForNamesThatStartWithTheText() async {
         let (coordinator, port) = online()
-        port.admin.users[.init(prefix: "a")] = .success(AdminUsersPage(users: [ada], nextCursor: "more-a"))
-        port.admin.users[.init(prefix: "a", cursor: "more-a")] = .success(AdminUsersPage(users: [cy], nextCursor: nil))
+        port.admin.users[.init(prefix: "a")] = .success(AdminPage(rows: [ada], nextCursor: "more-a"))
+        port.admin.users[.init(prefix: "a", cursor: "more-a")] = .success(AdminPage(rows: [cy], nextCursor: nil))
         let list = coordinator.adminUsersList()
 
         await list.load(matching: " a ")
@@ -145,8 +157,8 @@ struct AdminTests {
 
     @Test func aSlowerAnswerToEarlierTextDoesNotReplaceANewerOne() async {
         let (coordinator, port) = online()
-        port.admin.users[.init(prefix: "a")] = .success(AdminUsersPage(users: [ada], nextCursor: nil))
-        port.admin.users[.init(prefix: "b")] = .success(AdminUsersPage(users: [bo], nextCursor: nil))
+        port.admin.users[.init(prefix: "a")] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        port.admin.users[.init(prefix: "b")] = .success(AdminPage(rows: [bo], nextCursor: nil))
         let list = coordinator.adminUsersList()
         port.admin.usersFetches.isHolding = true
         let first = Task { await list.load(matching: "a") }
@@ -163,9 +175,9 @@ struct AdminTests {
 
     @Test func aNewSearchDropsTheNextPageOfTheOldOne() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada], nextCursor: "next"))
-        port.admin.users[.init(cursor: "next")] = .success(AdminUsersPage(users: [cy], nextCursor: nil))
-        port.admin.users[.init(prefix: "b")] = .success(AdminUsersPage(users: [bo], nextCursor: nil))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "next"))
+        port.admin.users[.init(cursor: "next")] = .success(AdminPage(rows: [cy], nextCursor: nil))
+        port.admin.users[.init(prefix: "b")] = .success(AdminPage(rows: [bo], nextCursor: nil))
         let list = coordinator.adminUsersList()
         await list.load()
         port.admin.usersFetches.isHolding = true
@@ -179,6 +191,44 @@ struct AdminTests {
 
         #expect(list.rows == [bo])
         #expect(!list.isLoadingMore)
+    }
+
+    /// Typing on cancels the search in flight; that is not a failure.
+    @Test func aCancelledSearchChangesNothingShown() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: nil))
+        port.admin.users[.init(prefix: "b")] = .failure(.failed)
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let search = Task { await list.load(matching: "b") }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        search.cancel()
+        port.admin.usersFetches.release()
+        await search.value
+
+        #expect(list.rows == [ada])
+        #expect(list.query == "")
+        #expect(list.failure == nil)
+        #expect(!list.isLoading)
+    }
+
+    /// What is said about an empty list is said about the text answered.
+    @Test func theListNamesTheTextItAnswered() async {
+        let (coordinator, port) = online()
+        let list = coordinator.adminUsersList()
+        await list.load(matching: "zz")
+        #expect(list.query == "zz")
+        port.admin.usersFetches.isHolding = true
+        let cleared = Task { await list.load() }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        #expect(list.query == "zz")
+
+        port.admin.usersFetches.release()
+        await cleared.value
+        #expect(list.query == "")
     }
 
     @Test func someoneWhoIsNotAnOwnerIsRefused() async {
@@ -195,7 +245,7 @@ struct AdminTests {
 
     @Test func aRefreshThatFailsKeepsTheUsersShown() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada], nextCursor: "next"))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "next"))
         let list = coordinator.adminUsersList()
         await list.load()
         port.admin.users[.init()] = .failure(.timeout)
@@ -210,7 +260,7 @@ struct AdminTests {
     /// Users found for other text are not an answer to this text.
     @Test func aSearchThatFailsShowsNoOneFromTheSearchBefore() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada], nextCursor: "next"))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "next"))
         port.admin.users[.init(prefix: "b")] = .failure(.timeout)
         let list = coordinator.adminUsersList()
         await list.load()
@@ -228,7 +278,7 @@ struct AdminTests {
         port.admin.users[.init()] = .failure(.timeout)
         let list = coordinator.adminUsersList()
         await list.load()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada], nextCursor: nil))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: nil))
 
         await list.reload()
 
@@ -238,7 +288,7 @@ struct AdminTests {
 
     @Test func aNextPageThatFailsCanBeAskedForAgain() async {
         let (coordinator, port) = online()
-        port.admin.users[.init()] = .success(AdminUsersPage(users: [ada], nextCursor: "next"))
+        port.admin.users[.init()] = .success(AdminPage(rows: [ada], nextCursor: "next"))
         port.admin.users[.init(cursor: "next")] = .failure(.timeout)
         let list = coordinator.adminUsersList()
         await list.load()
@@ -250,7 +300,7 @@ struct AdminTests {
         #expect(list.moreFailure == .timeout)
         #expect(list.failure == nil)
 
-        port.admin.users[.init(cursor: "next")] = .success(AdminUsersPage(users: [bo], nextCursor: nil))
+        port.admin.users[.init(cursor: "next")] = .success(AdminPage(rows: [bo], nextCursor: nil))
         await list.loadMore()
 
         #expect(list.rows == [ada, bo])

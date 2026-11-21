@@ -4,6 +4,7 @@ extension SessionCoordinator {
     /// Asks whether the account owns this community. The port answers "no"
     /// when it cannot ask, so only a "yes" is taken: an owner stays one
     /// until sign-out, and the server checks every admin request anyway.
+    /// Asked once connected; every refresh of Events asks again.
     func refreshCommunityOwnership() async {
         guard !isStopped, connection == .online else { return }
         let epoch = connectionEpoch
@@ -17,10 +18,9 @@ extension SessionCoordinator {
     public func adminUsersList() -> AdminList<AdminUser> {
         AdminList { [weak self] prefix, cursor in
             guard let self else { throw PortError.notConnected }
-            let page = try await self.whileOnline {
+            return try await self.whileOnline {
                 try await self.port.adminUsers(matching: prefix, after: cursor)
             }
-            return (page.users, page.nextCursor)
         }
     }
 }

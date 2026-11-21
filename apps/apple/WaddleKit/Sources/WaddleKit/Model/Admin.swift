@@ -24,14 +24,16 @@ public struct AdminUser: Hashable, Identifiable, Sendable {
     }
 }
 
-/// One page of the users list, and where the next one starts.
-public struct AdminUsersPage: Equatable, Sendable {
-    public let users: [AdminUser]
+/// One page of a list of the admin console, and where the next one starts.
+public struct AdminPage<Row: Sendable>: Sendable {
+    public let rows: [Row]
     /// Nil on the last page.
     public let nextCursor: String?
 
-    public init(users: [AdminUser], nextCursor: String?) {
-        self.users = users
+    public init(rows: [Row], nextCursor: String?) {
+        self.rows = rows
         self.nextCursor = nextCursor
     }
 }
+
+extension AdminPage: Equatable where Row: Equatable {}
