@@ -855,6 +855,10 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_ser
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_activity(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_vcard4(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
@@ -1143,6 +1147,10 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notif
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_ping_server(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_avatar(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_activity(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_vcard4(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_pep_profile(`ptr`: Long,`jid`: RustBuffer.ByValue,
 ): Long
@@ -1629,6 +1637,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_activity() != 10876) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_vcard4() != 59774) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile() != 55127) {
@@ -2933,6 +2947,26 @@ public interface WaddleClientInterface {
      * item so subscribers drop their cached avatar.
      */
     suspend fun `disableAvatar`()
+
+    /**
+     * XEP-0108: the activity the account publishes now, from its own
+     * PEP node. `Ok(None)` only when there is confirmed to be none;
+     * unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+     * (not connected, timeout, any stanza error but `item-not-found`)
+     * is an error. The node is account-wide and another device may be
+     * using it to show a call, so a caller checks this before it
+     * publishes or retracts.
+     */
+    suspend fun `fetchOwnActivity`(): WaddleActivity?
+
+    /**
+     * XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+     * when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+     * a lookup that fails (not connected, timeout, any stanza error but
+     * `item-not-found`) is an error. Publishing replaces the whole
+     * vCard, so an editor must not open empty on a failed lookup.
+     */
+    suspend fun `fetchOwnVcard4`(): WaddleVCard4?
 
     /**
      * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
@@ -5631,6 +5665,64 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         // lift function
         { Unit },
 
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0108: the activity the account publishes now, from its own
+     * PEP node. `Ok(None)` only when there is confirmed to be none;
+     * unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+     * (not connected, timeout, any stanza error but `item-not-found`)
+     * is an error. The node is account-wide and another device may be
+     * using it to show a call, so a caller checks this before it
+     * publishes or retracts.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchOwnActivity`() : WaddleActivity? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_activity(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddleActivity.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+     * when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+     * a lookup that fails (not connected, timeout, any stanza error but
+     * `item-not-found`) is an error. Publishing replaces the whole
+     * vCard, so an editor must not open empty on a failed lookup.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchOwnVcard4`() : WaddleVCard4? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_vcard4(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddleVCard4.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )

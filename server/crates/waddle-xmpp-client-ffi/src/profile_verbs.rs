@@ -23,6 +23,7 @@ use waddle_xmpp_client::avatar::{
     build_disable_avatar_iq, build_publish_avatar_data_iq, build_publish_avatar_metadata_iq,
     compute_avatar_item_id, AvatarPublishInfo,
 };
+use waddle_xmpp_client::error::STANZA_CONDITION_ITEM_NOT_FOUND;
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
     build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, parse_pep_activity,
@@ -99,6 +100,41 @@ pub struct WaddlePepProfile {
 // values. The exported methods call these; the per-XEP test suite
 // asserts their output against the XEP wire shapes, so the exact
 // stanzas the FFI emits are pinned without a live connection.
+
+/// What an XEP-0060 items request on the account's own XEP-0108 node
+/// says about its activity. `item-not-found` (the node was never
+/// published to) and a result with no activity in it are a confirmed
+/// "none"; every other failure is an error, so a caller that must know
+/// the current activity before replacing it can tell "none" from
+/// "unknown".
+pub(crate) fn own_activity_from_lookup(
+    reply: Result<Element, ClientError>,
+) -> Result<Option<WaddleActivity>, WaddleError> {
+    match reply {
+        Ok(result) => Ok(parse_pep_activity(&result).map(activity_from_core)),
+        Err(ClientError::StanzaError(err)) if err.condition == STANZA_CONDITION_ITEM_NOT_FOUND => {
+            Ok(None)
+        }
+        Err(e) => Err(client_error_to_waddle(&e)),
+    }
+}
+
+/// What an XEP-0060 items request on the account's own XEP-0292 node
+/// says about its vCard. As with [`own_activity_from_lookup`], only a
+/// result without a vCard and `item-not-found` are a confirmed "none";
+/// a caller that will publish a replacement must not take a failed
+/// lookup for an empty vCard.
+pub(crate) fn own_vcard4_from_lookup(
+    reply: Result<Element, ClientError>,
+) -> Result<Option<WaddleVCard4>, WaddleError> {
+    match reply {
+        Ok(result) => Ok(parse_pep_vcard4(&result).map(vcard4_from_core)),
+        Err(ClientError::StanzaError(err)) if err.condition == STANZA_CONDITION_ITEM_NOT_FOUND => {
+            Ok(None)
+        }
+        Err(e) => Err(client_error_to_waddle(&e)),
+    }
+}
 
 pub(crate) fn vcard4_to_core(vcard: WaddleVCard4) -> VCard4 {
     VCard4 {
@@ -468,6 +504,18 @@ impl WaddleClient {
         }
     }
 
+    /// XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+    /// when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+    /// a lookup that fails (not connected, timeout, any stanza error but
+    /// `item-not-found`) is an error. Publishing replaces the whole
+    /// vCard, so an editor must not open empty on a failed lookup.
+    pub async fn fetch_own_vcard4(&self) -> Result<Option<WaddleVCard4>, WaddleError> {
+        let jid = self.account_bare_jid()?;
+        let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        let iq = build_fetch_vcard4_iq(jid.as_str(), &Uuid::new_v4().to_string());
+        own_vcard4_from_lookup(send_iq_with_timeout(&handle, iq).await)
+    }
+
     /// XEP-0292: publish the account's own vCard4 at item id
     /// `current`. Empty (`None`) properties are omitted on the wire.
     pub async fn publish_vcard4(&self, vcard: WaddleVCard4) -> Result<(), WaddleError> {
@@ -548,6 +596,20 @@ impl WaddleClient {
     pub async fn retract_tune(&self) -> Result<(), WaddleError> {
         self.send_profile_iq(build_retract_tune_iq(&mint_request_id()))
             .await
+    }
+
+    /// XEP-0108: the activity the account publishes now, from its own
+    /// PEP node. `Ok(None)` only when there is confirmed to be none;
+    /// unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+    /// (not connected, timeout, any stanza error but `item-not-found`)
+    /// is an error. The node is account-wide and another device may be
+    /// using it to show a call, so a caller checks this before it
+    /// publishes or retracts.
+    pub async fn fetch_own_activity(&self) -> Result<Option<WaddleActivity>, WaddleError> {
+        let jid = self.account_bare_jid()?;
+        let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        let iq = build_pep_items_iq(&mint_request_id(), jid.as_str(), NS_ACTIVITY);
+        own_activity_from_lookup(send_iq_with_timeout(&handle, iq).await)
     }
 
     /// Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
