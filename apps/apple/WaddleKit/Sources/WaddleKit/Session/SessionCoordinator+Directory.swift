@@ -1,6 +1,13 @@
 import Foundation
 
 extension SessionCoordinator {
+    /// Loads the account's contact list. A lookup that fails keeps the
+    /// list already held: an older list is nearer the truth than none.
+    public func refreshContacts() async {
+        guard let loaded = try? await port.fetchContacts(), !isStopped else { return }
+        contacts = loaded
+    }
+
     /// Rediscovers spaces and rooms, then joins every autojoin room, group
     /// DM, and room the user opened or created this session. A failed
     /// discovery keeps the last known directory.

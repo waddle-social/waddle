@@ -33,6 +33,9 @@ public final class SessionCoordinator {
     public let deliveries: DeliveryStore
     public let pins: PinStore
     public let avatars: AvatarStore
+    /// The account's contact list; nil until it has been loaded once, so
+    /// "not known yet" is never shown as "no contacts".
+    public internal(set) var contacts: [Contact]?
     public let history: HistoryStore
     @ObservationIgnored let inbox: InboxStore
     @ObservationIgnored let readCursors: ReadCursorStore
@@ -245,6 +248,7 @@ public final class SessionCoordinator {
         connectWatchdog?.cancel()
         connectWatchdog = nil
         resetPresenceMode()
+        contacts = nil
         await stopCalls()
         await port.disconnect()
         eventTask?.cancel()
@@ -558,6 +562,8 @@ public final class SessionCoordinator {
         guard !Task.isCancelled else { return }
         await drainPendingDisplayed()
         await reloadActiveConversation()
+        guard !Task.isCancelled else { return }
+        await refreshContacts()
         // Only a session that got all the way through resets the backoff,
         // so a stream that drops right after binding keeps backing off.
         guard !Task.isCancelled else { return }

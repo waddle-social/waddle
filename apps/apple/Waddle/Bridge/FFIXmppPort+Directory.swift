@@ -108,6 +108,13 @@ extension FFIXmppPort {
         try await mappingPortErrors { try await client.kickOccupant(roomJid: room.description, nick: nick, reason: reason) }
     }
 
+    /// A contact whose address does not parse is skipped, not fatal.
+    func fetchContacts() async throws -> [Contact] {
+        try await mappingPortErrors { try await client.fetchRosterContacts() }.compactMap { contact in
+            FFIInbound.bareJID(contact.jid).map { Contact(jid: $0, name: contact.name) }
+        }
+    }
+
     func searchUsers(_ query: String) async throws -> [UserSearchResult] {
         let entries = try await mappingPortErrors { try await client.searchUsers(query: query) }
         return entries.compactMap(FFIInbound.userSearchResult)

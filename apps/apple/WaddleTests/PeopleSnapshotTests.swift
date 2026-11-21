@@ -18,9 +18,11 @@ final class PeopleSnapshotTests: XCTestCase {
     #endif
 
     /// Two people here (one asking not to be disturbed, with a status
-    /// message), one away, one offline.
+    /// message), one away, one offline, and a contact with a saved name
+    /// who has never been messaged and is offline.
     func testPeopleHereAndAway() async throws {
         let sample = SampleSession()
+        sample.coordinator.contacts = [Contact(jid: BareJID(parsing: "sam@waddle.test")!, name: "Sam Okafor")]
         _ = sample.coordinator.presence.apply(WirePresence(
             from: SampleSession.theo.with(resource: "phone")!,
             kind: .available, show: "dnd", status: "Reviewing the identity drafts",
@@ -32,5 +34,11 @@ final class PeopleSnapshotTests: XCTestCase {
         ))
         let view = NavigationStack { PeopleView() }
         try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
+    }
+
+    /// The row on the phone's Home that opens People.
+    func testHomeRowCountsPeopleHere() async throws {
+        let view = List { PeopleHomeRow() }.navigationListStyle()
+        try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.size.width, height: 120))
     }
 }

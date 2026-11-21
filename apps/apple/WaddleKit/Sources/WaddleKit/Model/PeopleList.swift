@@ -1,5 +1,17 @@
 import Foundation
 
+/// Someone on the account's contact list: their address and the name the
+/// account saved for them, when it saved one.
+public struct Contact: Hashable, Sendable {
+    public let jid: BareJID
+    public let name: String?
+
+    public init(jid: BareJID, name: String? = nil) {
+        self.jid = jid
+        self.name = name
+    }
+}
+
 /// Someone the account knows by address, as the People view lists them.
 public struct Person: Hashable, Sendable, Identifiable {
     public let jid: BareJID
@@ -17,9 +29,9 @@ public struct Person: Hashable, Sendable, Identifiable {
     }
 }
 
-/// Everyone the account knows by address: those whose presence it sees and
-/// those it has direct messages with, split into who is here now and who
-/// is not.
+/// Everyone the account knows by address: its contacts, anyone else whose
+/// presence it sees, and those it has direct messages with, split into who
+/// is here now and who is not.
 public struct PeopleList: Equatable, Sendable {
     /// Available, free to chat or do-not-disturb.
     public let here: [Person]
@@ -29,20 +41,23 @@ public struct PeopleList: Equatable, Sendable {
     public var isEmpty: Bool { here.isEmpty && away.isEmpty }
 
     /// `own` is left out: the account's other devices send presence too.
+    /// A contact's saved name is used when there is one, else `name`.
     /// `query` keeps people whose name or address contains it.
     public static func build(
-        contacts: [BareJID: PresenceStore.ContactPresence],
+        contacts: [Contact],
+        presence: [BareJID: PresenceStore.ContactPresence],
         directPeers: [BareJID],
         own: BareJID,
         name: (BareJID) -> String,
         query: String = ""
     ) -> PeopleList {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let people = Set(contacts.keys).union(directPeers).subtracting([own])
+        let savedNames = Dictionary(contacts.map { ($0.jid, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let people = Set(savedNames.keys).union(presence.keys).union(directPeers).subtracting([own])
             .map { jid in
                 Person(
-                    jid: jid, name: name(jid),
-                    availability: contacts[jid]?.availability ?? .offline, status: contacts[jid]?.status
+                    jid: jid, name: savedNames[jid].flatMap { $0 } ?? name(jid),
+                    availability: presence[jid]?.availability ?? .offline, status: presence[jid]?.status
                 )
             }
             .filter { person in
@@ -51,6 +66,12 @@ public struct PeopleList: Equatable, Sendable {
             }
             .sorted(by: inOrder)
         return PeopleList(here: people.filter(\.availability.isHere), away: people.filter { !$0.availability.isHere })
+    }
+
+    /// How many people are here now, without building the list: for a
+    /// badge that is drawn far more often than the list is opened.
+    public static func hereCount(presence: [BareJID: PresenceStore.ContactPresence], own: BareJID) -> Int {
+        presence.count { $0.key != own && $0.value.availability.isHere }
     }
 
     private static func inOrder(_ a: Person, _ b: Person) -> Bool {
@@ -73,6 +94,8 @@ private extension Availability {
         }
     }
 
+    /// The web app's order in the list. It is not `Availability`'s own
+    /// order, which ranks devices of one person and puts away first.
     var peopleRank: Int {
         switch self {
         case .available, .chat: 0

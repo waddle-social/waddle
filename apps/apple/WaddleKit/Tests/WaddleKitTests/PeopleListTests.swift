@@ -3,9 +3,9 @@ import Testing
 @testable import WaddleKit
 @testable import WaddleKitTestSupport
 
-/// The People view: everyone the account knows by address (those whose
-/// presence it sees and those it has direct messages with), split into
-/// who is here now and who is not.
+/// The People view: everyone the account knows by address (its contacts,
+/// anyone else whose presence it sees and those it has direct messages
+/// with), split into who is here now and who is not.
 @Suite("People list")
 struct PeopleListTests {
     private let ada = bare("ada@waddle.test")
@@ -18,12 +18,13 @@ struct PeopleListTests {
     }
 
     private func list(
+        saved: [Contact] = [],
         contacts: [BareJID: PresenceStore.ContactPresence] = [:],
         directPeers: [BareJID] = [],
         query: String = ""
     ) -> PeopleList {
         PeopleList.build(
-            contacts: contacts, directPeers: directPeers, own: me.jid,
+            contacts: saved, presence: contacts, directPeers: directPeers, own: me.jid,
             name: { $0.description.split(separator: "@").first.map { $0.capitalized } ?? "" },
             query: query
         )
@@ -38,6 +39,33 @@ struct PeopleListTests {
 
         #expect(people.here.map(\.jid) == [ada, bo])
         #expect(people.away.map(\.jid) == [cy, di])
+    }
+
+    /// Someone offline sends no presence at all. They are still a contact,
+    /// and are listed from the contact list.
+    @Test func aContactWhoIsOfflineIsStillListed() {
+        let people = list(saved: [Contact(jid: ada), Contact(jid: bo)], contacts: [ada: presence(.available)])
+
+        #expect(people.here.map(\.jid) == [ada])
+        #expect(people.away == [Person(jid: bo, name: "Bo", availability: .offline, status: nil)])
+    }
+
+    @Test func aContactIsShownByTheNameSavedForThem() {
+        let people = list(saved: [Contact(jid: ada, name: "Ada Lovelace"), Contact(jid: bo, name: nil)])
+
+        #expect(people.away.map(\.name) == ["Ada Lovelace", "Bo"])
+        #expect(list(saved: [Contact(jid: ada, name: "Ada Lovelace")], query: "lovelace").away.map(\.jid) == [ada])
+    }
+
+    /// The row on Home counts people here without building the list.
+    @Test func theCountOfPeopleHereMatchesTheList() {
+        let contacts = [
+            me.jid: presence(.available), ada: presence(.available), bo: presence(.doNotDisturb),
+            cy: presence(.away),
+        ]
+
+        #expect(PeopleList.hereCount(presence: contacts, own: me.jid) == 2)
+        #expect(list(contacts: contacts).here.count == 2)
     }
 
     @Test func someoneOnlyMessagedIsListedAsNotHere() {
@@ -57,7 +85,10 @@ struct PeopleListTests {
     /// The account's other devices send presence too; that is not a person
     /// to list.
     @Test func theAccountItselfIsNotListed() {
-        let people = list(contacts: [me.jid: presence(.available), ada: presence(.available)], directPeers: [me.jid])
+        let people = list(
+            saved: [Contact(jid: me.jid)], contacts: [me.jid: presence(.available), ada: presence(.available)],
+            directPeers: [me.jid]
+        )
 
         #expect(people.here.map(\.jid) == [ada])
         #expect(people.away.isEmpty)

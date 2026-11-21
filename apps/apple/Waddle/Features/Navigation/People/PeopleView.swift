@@ -1,14 +1,14 @@
 import SwiftUI
 import WaddleKit
 
-/// Everyone you know here by address: people whose status you see and
-/// people you have direct messages with, those here now first. Tapping
+/// Everyone you know here by address: your contacts, anyone else whose
+/// status you see and people you have direct messages with, those here
+/// now first. Tapping
 /// someone opens their profile, with their details and "Message".
 ///
 /// iPhone pushes it from Home; iPad and Mac show it from the sidebar.
 struct PeopleView: View {
     @Environment(SessionCoordinator.self) private var session
-    @Environment(NavigationModel.self) private var navigation
     @State private var query = ""
 
     var body: some View {
@@ -25,6 +25,7 @@ struct PeopleView: View {
         .background(Theme.Colors.bg)
         .navigationTitle("People")
         .searchable(text: $query, prompt: "Search people")
+        .refreshable { await session.refreshContacts() }
         .overlay {
             if people.isEmpty {
                 placeholder
@@ -42,29 +43,22 @@ struct PeopleView: View {
 
     @ViewBuilder
     private var placeholder: some View {
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            NoMatchesView(query: query)
+        } else if session.contacts == nil {
+            // Not known yet is not the same as no one.
             EmptyStateView(
-                title: "No one here yet",
-                message: "People you message, and people who share their status with you, show up here.",
+                title: session.connection == .online ? "Loading people" : "You're offline",
+                message: "Your contacts show up here once they have loaded.",
                 symbol: "person.2"
             )
         } else {
-            NoMatchesView(query: query)
+            EmptyStateView(
+                title: "No one here yet",
+                message: "Your contacts and the people you message show up here.",
+                symbol: "person.2"
+            )
         }
-    }
-}
-
-extension PeopleList {
-    /// The people `session` knows now, named as its lists name them.
-    @MainActor
-    init(session: SessionCoordinator, query: String = "") {
-        self = PeopleList.build(
-            contacts: session.presence.contacts,
-            directPeers: session.directory.directConversations.map(\.peer),
-            own: session.account.jid,
-            name: { session.directory.title(for: .direct($0)) },
-            query: query
-        )
     }
 }
 
@@ -97,7 +91,7 @@ private struct PersonRow: View {
 
     var body: some View {
         Button {
-            navigation.sheet = .peer(PeerProfileRoute(name: person.name, jid: person.jid, room: nil, nick: nil))
+            navigation.showProfile(PeerProfileRoute(name: person.name, jid: person.jid, room: nil, nick: nil))
         } label: {
             NavigationRowChrome {
                 HStack(spacing: Theme.Spacing.m) {
@@ -125,36 +119,5 @@ private struct PersonRow: View {
             return availability
         }
         return "\(availability) · \(status)"
-    }
-}
-
-/// Home's way into People on the phone: a row saying how many are here.
-struct PeopleHomeRow: View {
-    @Environment(SessionCoordinator.self) private var session
-
-    var body: some View {
-        let here = PeopleList(session: session).here.count
-        NavigationRowChrome {
-            NavigationRowLabel(title: "People") {
-                Image(systemName: "person.2")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            } trailing: {
-                if here > 0 {
-                    Text("\(here) here")
-                        .huddleText(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.fgSoft)
-                }
-            }
-        }
-        // The link sits behind the row so the list draws no chevron.
-        .background {
-            NavigationLink { PeopleView() } label: { EmptyView() }
-                .opacity(0)
-        }
-        .navigationListRow()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(here > 0 ? "People, \(here) here" : "People"))
-        .accessibilityAddTraits(.isButton)
     }
 }

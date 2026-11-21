@@ -69,6 +69,8 @@ extension View {
                 ThreadScreen(conversation: conversation, rootID: rootID)
             case let .details(conversation):
                 ConversationDetailsView(conversation: conversation)
+            case .people:
+                PeopleView()
             }
         }
     }

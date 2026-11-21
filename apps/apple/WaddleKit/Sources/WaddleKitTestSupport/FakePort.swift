@@ -110,6 +110,7 @@ final class FakePort: XmppPort {
     var avatarLookups: [BareJID] = []
     var publishedAvatarID = "own1"
     var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
+    var contacts: Result<[Contact], PortError> = .success([])
     var sharedStatus: Result<SharedStatus, PortError> = .success(SharedStatus())
     /// What a strict lookup of the account's own activity answers.
     var ownActivity: Result<UserActivity?, PortError> = .success(nil)
@@ -339,6 +340,7 @@ final class FakePort: XmppPort {
     }
     func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws {}
     func kick(nick: String, from room: BareJID, reason: String?) async throws {}
+    func fetchContacts() async throws -> [Contact] { try contacts.get() }
     func searchUsers(_ query: String) async throws -> [UserSearchResult] {
         userSearchRequests.append(query)
         if failsUserSearch { throw PortError.failed }

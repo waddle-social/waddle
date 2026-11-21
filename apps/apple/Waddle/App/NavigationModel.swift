@@ -7,11 +7,16 @@ enum Route: Hashable {
     case conversation(ConversationID)
     case thread(ConversationID, rootID: String)
     case details(ConversationID)
+    /// Everyone the account knows by address; pushed on the Home stack.
+    case people
 
-    var conversation: ConversationID {
+    /// The conversation the screen belongs to, if it belongs to one.
+    var conversation: ConversationID? {
         switch self {
         case let .conversation(conversation), let .thread(conversation, _), let .details(conversation):
             return conversation
+        case .people:
+            return nil
         }
     }
 }
@@ -147,9 +152,8 @@ final class NavigationModel {
             tab = .feed
             feedPath = [.events]
         case .people:
-            // The phone reaches People from a row on Home.
             tab = .home
-            homePath = []
+            homePath = [.people]
         }
     }
 

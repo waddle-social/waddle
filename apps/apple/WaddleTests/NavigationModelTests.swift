@@ -18,9 +18,9 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.inspector, .thread(rootID: "root-1"))
     }
 
-    /// The phone reaches People from a row on Home, so an iPad that
-    /// shrinks to compact width while showing People lands on Home.
-    func testShowingPeopleLeavesTheConversationAndPutsThePhoneOnHome() {
+    /// People is pushed on the phone's Home stack, so an iPad that shrinks
+    /// to compact width while showing People still shows People.
+    func testShowingPeopleLeavesTheConversationAndPushesItOnHome() {
         let navigation = NavigationModel()
         navigation.open(lobby)
 
@@ -29,7 +29,18 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertNil(navigation.selection)
         XCTAssertEqual(navigation.splitSection, .people)
         XCTAssertEqual(navigation.tab, .home)
-        XCTAssertEqual(navigation.homePath, [])
+        XCTAssertEqual(navigation.homePath, [.people])
+    }
+
+    /// Opening a room replaces People on the Home stack; the stack and
+    /// its path never disagree.
+    func testOpeningARoomFromPeopleReplacesItOnTheHomeStack() {
+        let navigation = NavigationModel()
+        navigation.show(.people)
+
+        navigation.open(lobby)
+
+        XCTAssertEqual(navigation.homePath, [.conversation(lobby)])
     }
 
     func testSelectingAnotherConversationClosesTheThread() {
