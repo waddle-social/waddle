@@ -128,6 +128,7 @@ impl Harness {
         ports: Ports,
         bins: Binaries,
         git_sha: String,
+        enrolled_space_fixture: bool,
     ) -> Result<Self> {
         let logs = root.join("logs");
         std::fs::create_dir_all(&logs)?;
@@ -271,6 +272,7 @@ impl Harness {
                 &logs,
                 &[home.label(), "-postgres"].concat(),
                 ports.postgres(home),
+                enrolled_space_fixture && home == Home::A,
             )
             .await?;
             cluster.create_database("waddle").await?;

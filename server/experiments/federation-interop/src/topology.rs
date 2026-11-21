@@ -184,6 +184,10 @@ impl Ports {
         self.at(home_offset(home) + 3)
     }
 
+    pub fn enrolled_space_spicedb(self) -> u16 {
+        self.at(home_offset(Home::A) + 5)
+    }
+
     pub fn postgres(self, home: Home) -> u16 {
         self.at(home_offset(home) + 4)
     }

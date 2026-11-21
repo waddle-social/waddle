@@ -40,6 +40,29 @@ override is used). It needs the same host as the other native experiments
 The evidence is written as `federation-interop-<unix time>-<commit>.json`
 and `.md`. Generated logs are run output, not source.
 
+### Enrolled Space deletion on ejabberd
+
+Build the disposable owner fixture with the same server commit:
+
+```sh
+cd server
+cargo test --locked -p waddle-server --features test-support --test stock_space_seed --no-run
+```
+
+Use the test executable printed by Cargo as `INTEROP_ENROLLED_SPACE_SEED_BIN`.
+From the repository root, run:
+
+```sh
+INTEROP_ENROLLED_SPACE_SEED_BIN=/absolute/path/to/stock_space_seed-executable \
+  bash server/experiments/federation-interop/run-native.sh \
+  --only flow.ejabberd-receives-enrolled-space-deletion
+```
+
+The seed uses a private PostgreSQL socket and disposable SpiceDB to enroll
+and bind the Space. Waddle starts under its attested restricted runtime
+role. The row checks the owner grant and deletion over WSS, and the stock
+account's subscription and deletion headline on the same ejabberd connection.
+
 ### Independent Spaces client
 
 Build [chord-cli at `df604efb0779e3ee8abc189d2c8f6169290dac15`](https://github.com/abbyfluoroethane/chord/tree/df604efb0779e3ee8abc189d2c8f6169290dac15)

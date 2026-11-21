@@ -3,6 +3,7 @@
 //! cluster holds that deployment's Waddle database and its SpiceDB
 //! datastore; nothing is shared between the deployments.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ pub struct Postgres {
     password: String,
     bin: PathBuf,
     data: PathBuf,
+    owner_socket: Option<PathBuf>,
     logs: PathBuf,
     process: Option<Supervised>,
 }
@@ -31,10 +33,16 @@ impl Postgres {
         logs: &Path,
         label: &str,
         port: u16,
+        owner_fixture: bool,
     ) -> Result<Self> {
         let cluster = root.join(label);
         std::fs::create_dir_all(&cluster)?;
         let data = cluster.join("data");
+        let owner_socket = owner_fixture.then(|| cluster.join("owner-socket"));
+        if let Some(socket) = &owner_socket {
+            std::fs::create_dir(socket)?;
+            std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o700))?;
+        }
         let password = uuid::Uuid::new_v4().simple().to_string();
         let password_file = cluster.join("initdb-password");
         crate::process::write_private(&password_file, password.as_bytes())?;
@@ -44,7 +52,11 @@ impl Postgres {
             .arg(&data)
             .arg("-U")
             .arg(USER)
-            .arg("--auth-local=scram-sha-256")
+            .arg(if owner_socket.is_some() {
+                "--auth-local=trust"
+            } else {
+                "--auth-local=scram-sha-256"
+            })
             .arg("--auth-host=scram-sha-256")
             .arg("--no-locale")
             .arg("-E")
@@ -60,6 +72,7 @@ impl Postgres {
             password,
             bin: bin.to_owned(),
             data,
+            owner_socket,
             logs: logs.to_owned(),
             process: None,
         };
@@ -77,7 +90,12 @@ impl Postgres {
             .arg("-c")
             .arg("listen_addresses=127.0.0.1")
             .arg("-c")
-            .arg("unix_socket_directories=")
+            .arg(format!(
+                "unix_socket_directories={}",
+                self.owner_socket
+                    .as_ref()
+                    .map_or_else(String::new, |socket| socket.display().to_string(),)
+            ))
             .arg("-c")
             .arg("max_connections=200")
             .arg("-c")
@@ -111,6 +129,21 @@ impl Postgres {
             database,
         ]
         .concat()
+    }
+
+    /// Private local endpoint for the explicit enrolled Space fixture.
+    pub fn owner_fixture_url(&self) -> Option<String> {
+        let socket = self.owner_socket.as_ref()?;
+        let encoded: String = socket
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect();
+        Some(format!(
+            "postgresql:///waddle?host={encoded}&port={}&user={USER}",
+            self.port,
+        ))
     }
 
     pub async fn create_database(&self, name: &str) -> Result<()> {

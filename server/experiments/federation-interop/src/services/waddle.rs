@@ -141,6 +141,17 @@ impl Waddle {
 
     /// Start the process and wait until `/readyz` answers 200.
     pub async fn start(&mut self, ports: Ports, s2s: S2s) -> Result<()> {
+        self.start_with_environment(ports, s2s, &BTreeMap::new())
+            .await
+    }
+
+    /// Start a separately provisioned test database through the normal binary.
+    pub async fn start_with_environment(
+        &mut self,
+        ports: Ports,
+        s2s: S2s,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<()> {
         anyhow::ensure!(
             self.process.is_none(),
             "{} is already running",
@@ -149,12 +160,12 @@ impl Waddle {
         self.s2s = s2s;
         self.starts += 1;
         let label = [self.spec.home.label(), "-", &self.starts.to_string()].concat();
-        let process = Supervised::spawn(
-            &label,
-            self.command(ports),
-            &self.logs,
-            StopSignal::TermGroup,
-        )?;
+        let mut command = self.command(ports);
+        if !environment.is_empty() {
+            command.env_remove("WADDLE_DB_LINEAGE_ACTION");
+            command.envs(environment);
+        }
+        let process = Supervised::spawn(&label, command, &self.logs, StopSignal::TermGroup)?;
         self.process = Some(process);
         self.wait_ready(ports, Duration::from_secs(240)).await
     }
