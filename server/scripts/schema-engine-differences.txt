@@ -52,6 +52,7 @@ postgres-only host_grant_space_affiliations
 postgres-only host_grant_space_bindings
 postgres-only host_grant_space_bookmark_versions
 postgres-only host_grant_space_deletion_audience
+postgres-only host_grant_space_deletion_jobs
 postgres-only host_grant_space_deletions
 postgres-only host_grant_space_operation_changes
 postgres-only host_grants

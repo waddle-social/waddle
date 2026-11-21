@@ -538,6 +538,44 @@ pub struct LocalSpaceDeletionRecipient {
     pub current_generation: GrantGeneration,
 }
 
+/// The addressed transport of one durable deletion notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceDeletionDeliveryKind {
+    Local,
+    Remote,
+}
+
+impl SpaceDeletionDeliveryKind {
+    pub(super) fn as_storage(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+}
+
+/// A bounded, exclusive attempt at one recipient's deletion notice.
+#[derive(Clone, Debug)]
+pub struct SpaceDeletionAttempt {
+    pub key: ScopeKey,
+    pub record: OperationRecord,
+    pub subject: GrantSubject,
+    pub kind: SpaceDeletionDeliveryKind,
+    pub token: Uuid,
+    pub attempt: i32,
+    pub lease_until_ms: i64,
+}
+
+/// One attempt's evidence at the transport custody boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceDeletionAttemptOutcome {
+    /// Definitive proof that nothing reached the transport.
+    Retry,
+    Custody,
+    Ambiguous,
+    Refused,
+}
+
 /// Set one subject's affiliation in one managed room.
 #[derive(Clone, Debug)]
 pub struct SetAffiliation {

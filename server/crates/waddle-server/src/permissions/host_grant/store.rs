@@ -62,10 +62,12 @@ use crate::ingress_substrate::{
 };
 use crate::permissions::{Object, ObjectType};
 
-/// Longest a store transaction waits for a row lock.
+mod deletion_jobs;
+
 // PostgreSQL advisory namespace for Space content writes and authority restore.
 pub(crate) const SPACE_BOOKMARK_RESTORE_LOCK: i64 = 0x5741_4444_4c45_5342;
 
+/// Longest a store transaction waits for a row lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest any one statement of a store transaction runs.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1707,13 +1709,60 @@ impl HostGrantStore {
         }))
     }
 
+    /// Resolve one exact remote subscriber and the current fence generation.
+    pub(crate) async fn load_remote_space_deletion_recipient(
+        &self,
+        key: &super::ScopeKey,
+        operation: GrantOperationId,
+        subject: &GrantSubject,
+    ) -> Result<
+        Option<(
+            OperationRecord,
+            GrantGeneration,
+            crate::db::s2s_spaces::SpaceSubscription,
+        )>,
+        HostGrantError,
+    > {
+        let mut tx = self.begin_interactive_read().await?;
+        let Some((record, _, current_generation)) =
+            read_space_deletion_header(&mut tx, key, operation, false).await?
+        else {
+            return Ok(None);
+        };
+        let mut rows = tx
+            .query(
+                "SELECT subject_jid, strength, trust_profile, snapshot_generation,
+                    lifecycle_id, ?::text, grant_generation
+               FROM host_grant_space_deletion_audience
+              WHERE lifecycle_id = ? AND delivery_kind = 'remote' AND subject_jid = ?",
+                crate::db_params![
+                    record.authority_incarnation.to_storage(),
+                    record.lifecycle.to_storage(),
+                    subject.as_str()
+                ],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let subscription = crate::db::s2s_spaces::decode(&row)
+            .map_err(|_| corrupt("Space deletion subscription"))?;
+        if &subscription.account != subject.jid() {
+            return Err(corrupt("Space deletion audience subject"));
+        }
+        drop(rows);
+        tx.rollback().await?;
+        Ok(Some((record, current_generation, subscription)))
+    }
+
     /// Hold restore and scope changes through the recipient's socket handoff.
-    pub(super) async fn hold_local_space_deletion_recipient(
+    pub(super) async fn hold_space_deletion_recipient(
         &self,
         key: &super::ScopeKey,
         operation: GrantOperationId,
         subject: &GrantSubject,
         generation: GrantGeneration,
+        kind: super::SpaceDeletionDeliveryKind,
     ) -> Result<Option<Transaction<'_>>, HostGrantError> {
         let mut tx = self.db.begin().await?;
         if !set_local_transaction_timeouts(
@@ -1741,8 +1790,12 @@ impl HostGrantStore {
         let mut rows = tx
             .query(
                 "SELECT 1 FROM host_grant_space_deletion_audience
-                  WHERE lifecycle_id = ? AND delivery_kind = 'local' AND subject_jid = ?",
-                crate::db_params![record.lifecycle.to_storage(), subject.as_str()],
+                  WHERE lifecycle_id = ? AND delivery_kind = ? AND subject_jid = ?",
+                crate::db_params![
+                    record.lifecycle.to_storage(),
+                    kind.as_storage(),
+                    subject.as_str()
+                ],
             )
             .await?;
         let exists = rows.next().await?.is_some();
@@ -4101,16 +4154,22 @@ async fn capture_space_deletion_audience(
              SELECT lifecycle_id, subject_jid, 'remote', changed_generation, NULL,
                     strength, trust_profile, snapshot_generation
                FROM remote_rows
+             RETURNING lifecycle_id, subject_jid, delivery_kind
+         ), jobs AS (
+             INSERT INTO host_grant_space_deletion_jobs
+                (lifecycle_id, subject_jid, delivery_kind, due_at_ms)
+             SELECT lifecycle_id, subject_jid, delivery_kind, ? FROM captured
              RETURNING delivery_kind
          )
          SELECT count(*) FILTER (WHERE delivery_kind = 'local'),
                 count(*) FILTER (WHERE delivery_kind = 'remote')
-           FROM captured",
+           FROM jobs",
         crate::db_params![
             lifecycle.to_storage(),
             i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1).expect("bounded audience"),
             deleted_at_ms.saturating_sub(SUBSCRIPTION_LIFETIME_MS),
             i64::try_from(MAX_REMOTE_SUBSCRIBERS_PER_SPACE + 1).expect("bounded audience"),
+            deleted_at_ms,
         ],
     ).await.map_err(HostGrantError::from_database).map_err(statement_failure)?;
     let counts = rows

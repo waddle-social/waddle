@@ -120,8 +120,8 @@ impl SpaceReplyAuthority {
     }
 }
 pub use gate::{
-    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, ManagedSpaceGrant, RoomGate,
-    StoredRoomGrants,
+    HostGrantGate, HostGrantUnavailable, ManagedRoomGrants, ManagedSpaceGrant,
+    RemoteSpaceDeletionGrant, RoomGate, StoredRoomGrants,
 };
 pub use issuance::{
     IssuanceBasis, IssuancePolicy, IssuanceRefusal, ServedAccountDomains, SubjectHome,
@@ -138,8 +138,9 @@ pub use model::{
     ProjectionDigest, RetireScope, RoomAffiliation, ScopeKey, ScopeLifecycleId, ScopeState,
     SetAffiliation, SetSpaceAffiliations, SpaceAffiliationChange, SpaceBookmarkAction,
     SpaceBookmarkChange, SpaceBookmarkNotification, SpaceBookmarkOutcome, SpaceBookmarkVersion,
-    SpaceBookmarkWrite, SpaceDeletionAudience, SpaceMembership, SpaceSubscriptionGrant,
-    HOST_GRANT_POLICY_VERSION, HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
+    SpaceBookmarkWrite, SpaceDeletionAttempt, SpaceDeletionAttemptOutcome, SpaceDeletionAudience,
+    SpaceDeletionDeliveryKind, SpaceMembership, SpaceSubscriptionGrant, HOST_GRANT_POLICY_VERSION,
+    HOST_GRANT_SCOPE_MAX_GRANT_ROWS, HOST_GRANT_SCOPE_MAX_ROOMS,
 };
 pub use policy::{affiliation_allows, grant_allows, honoured_affiliation, HostGrantAction};
 pub use principal::{

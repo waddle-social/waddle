@@ -35,3 +35,28 @@ CREATE TABLE host_grant_space_deletion_audience (
             AND (trust_profile IS NULL OR trust_profile IN ('public_webpki', 'private_ca')))
     )
 );
+
+-- Mutable delivery progress is separate from immutable audience membership.
+CREATE TABLE host_grant_space_deletion_jobs (
+    lifecycle_id TEXT NOT NULL,
+    subject_jid TEXT NOT NULL,
+    delivery_kind TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    due_at_ms BIGINT NOT NULL,
+    attempt_token UUID,
+    lease_until_ms BIGINT,
+    PRIMARY KEY (lifecycle_id, subject_jid, delivery_kind),
+    FOREIGN KEY (lifecycle_id, subject_jid, delivery_kind)
+        REFERENCES host_grant_space_deletion_audience (lifecycle_id, subject_jid, delivery_kind),
+    CHECK (state IN ('pending', 'leased', 'staging', 'custody', 'ambiguous', 'refused')),
+    CHECK ((state IN ('leased', 'staging')) = (attempt_token IS NOT NULL)),
+    CHECK ((attempt_token IS NULL) = (lease_until_ms IS NULL))
+);
+
+CREATE INDEX host_grant_space_deletion_jobs_due
+    ON host_grant_space_deletion_jobs (delivery_kind, due_at_ms)
+    WHERE state = 'pending';
+CREATE INDEX host_grant_space_deletion_jobs_expiry
+    ON host_grant_space_deletion_jobs (delivery_kind, lease_until_ms)
+    WHERE state IN ('leased', 'staging');

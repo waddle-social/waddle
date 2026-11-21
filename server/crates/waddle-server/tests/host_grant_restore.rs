@@ -109,7 +109,7 @@ const SERVICE_UNAVAILABLE: (ErrorType, DefinedCondition) =
 
 /// Every relation of the canonical host-grant store: what a restore of the
 /// database brings back.
-const AUTHORITY_RELATIONS: [&str; 12] = [
+const AUTHORITY_RELATIONS: [&str; 13] = [
     "host_grant_authority",
     "host_grant_scope_lifecycles",
     "host_grant_scopes",
@@ -122,6 +122,7 @@ const AUTHORITY_RELATIONS: [&str; 12] = [
     "host_grant_space_operation_changes",
     "host_grant_space_deletions",
     "host_grant_space_deletion_audience",
+    "host_grant_space_deletion_jobs",
 ];
 
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which
@@ -1031,6 +1032,129 @@ async fn configure_and_delete_space_preserves_room_scope() {
             .remote,
         audience.remote
     );
+    use waddle_server::permissions::host_grant::{
+        SpaceDeletionAttemptOutcome as Outcome, SpaceDeletionDeliveryKind as Kind,
+    };
+    for (kind, expected) in [
+        (Kind::Local, &deletion.initiator),
+        (Kind::Remote, &remote_account),
+    ] {
+        let claimed = fixture
+            .store
+            .claim_space_deletion_jobs(kind, 2)
+            .await
+            .expect("claim notice");
+        let [attempt] = claimed.as_slice() else {
+            panic!("one job per saved recipient");
+        };
+        let replacement;
+        let attempt = if kind == Kind::Remote {
+            sqlx::query(
+                "UPDATE host_grant_space_deletion_jobs SET lease_until_ms = 0
+                         WHERE lifecycle_id = $1 AND delivery_kind = 'remote'",
+            )
+            .bind(lifecycle.to_storage())
+            .execute(&pool)
+            .await
+            .expect("expire pre-stage lease");
+            let mut replacement_jobs = fixture
+                .store
+                .claim_space_deletion_jobs(kind, 1)
+                .await
+                .expect("reclaim expired pre-stage lease");
+            replacement = replacement_jobs.pop().expect("retry the unsent notice");
+            assert_ne!(attempt.token, replacement.token);
+            assert_eq!(replacement.attempt, attempt.attempt + 1);
+            assert!(!fixture
+                .store
+                .begin_space_deletion_staging(attempt)
+                .await
+                .expect("reject expired token"));
+            &replacement
+        } else {
+            attempt
+        };
+        assert_eq!(&attempt.subject, expected);
+        assert_eq!(attempt.record, deleted);
+        assert!(fixture
+            .store
+            .claim_space_deletion_jobs(kind, 2)
+            .await
+            .expect("check lease")
+            .is_empty());
+        assert!(fixture
+            .store
+            .hold_space_deletion_staging(attempt)
+            .await
+            .expect("check preparation")
+            .is_none());
+        assert!(!fixture
+            .store
+            .finish_space_deletion_attempt(attempt, Outcome::Custody)
+            .await
+            .expect("reject receipt before staging"));
+        assert!(fixture
+            .store
+            .begin_space_deletion_staging(attempt)
+            .await
+            .expect("start attempt"));
+        assert!(!fixture
+            .store
+            .begin_space_deletion_staging(attempt)
+            .await
+            .expect("reject second start"));
+        fixture
+            .store
+            .hold_space_deletion_staging(attempt)
+            .await
+            .expect("load staging")
+            .expect("hold exact stage")
+            .rollback()
+            .await
+            .expect("release staging lock");
+        if kind == Kind::Local {
+            assert!(fixture
+                .store
+                .finish_space_deletion_attempt(attempt, Outcome::Custody)
+                .await
+                .expect("settle known transport custody"));
+        } else {
+            sqlx::query(
+                "UPDATE host_grant_space_deletion_jobs SET lease_until_ms = 0
+                         WHERE lifecycle_id = $1 AND delivery_kind = 'remote'",
+            )
+            .bind(lifecycle.to_storage())
+            .execute(&pool)
+            .await
+            .expect("expire staging lease");
+            assert!(fixture
+                .store
+                .hold_space_deletion_staging(attempt)
+                .await
+                .expect("check expired stage")
+                .is_none());
+            assert!(fixture
+                .store
+                .claim_space_deletion_jobs(kind, 1)
+                .await
+                .expect("sweep expired stage")
+                .is_empty());
+            let state: String = sqlx::query_scalar(
+                "SELECT state FROM host_grant_space_deletion_jobs
+                     WHERE lifecycle_id = $1 AND delivery_kind = 'remote'",
+            )
+            .bind(lifecycle.to_storage())
+            .fetch_one(&pool)
+            .await
+            .expect("read swept state");
+            assert_eq!(state, "ambiguous");
+        }
+        assert!(!fixture
+            .store
+            .finish_space_deletion_attempt(attempt, Outcome::Retry)
+            .await
+            .expect("refuse stale retry"));
+    }
     let scope = fixture.state(&fixture.scope).await;
     assert_eq!(scope.admission, AdmissionState::Active);
     assert_eq!(scope.projected_generation, Some(deleted.generation));
@@ -3193,6 +3317,7 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_deletion_jobs TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
         format!(
@@ -3471,6 +3596,7 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_deletion_audience TO {role}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON host_grant_space_deletion_jobs TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(
