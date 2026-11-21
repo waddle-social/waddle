@@ -52,7 +52,9 @@ extension View {
     /// changes, so it is looked up when the person is shown. DM details can
     /// stay open through a whole call, so for as long as "In a call" is
     /// shown it is looked up again every few seconds. A repeat lookup that
-    /// fails leaves what is shown.
+    /// fails leaves what is shown. When the person goes offline a call's
+    /// mark is forgotten, not just hidden: it may be one their device left
+    /// behind, and must not come back when they return (ADR-010).
     func peerSharedStatus(
         of jid: BareJID?, isOnline: Bool, session: SessionCoordinator, into status: Binding<SharedStatus?>
     ) -> some View {
@@ -65,6 +67,10 @@ extension View {
             let loaded = await session.sharedStatus(of: jid)
             guard !Task.isCancelled else { return }
             status.wrappedValue = loaded
+        }
+        .onChange(of: isOnline) { _, isOnline in
+            guard !isOnline, let held = status.wrappedValue else { return }
+            status.wrappedValue = held.shown(isOnline: false)
         }
         .task(id: PeerCallWatch(jid: jid, showsACall: showsACall)) {
             guard showsACall, let jid else { return }
