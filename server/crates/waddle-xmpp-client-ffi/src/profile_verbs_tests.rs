@@ -29,9 +29,10 @@ use waddle_xmpp_client::ClientError;
 
 use crate::profile_verbs::{
     activity_from_core, mint_request_id, mood_from_core, own_activity_from_lookup,
-    publish_avatar_iqs, require_activity_general, require_activity_specific, require_mood_kind,
-    require_pep_element_name, tune_from_core, tune_is_empty, tune_to_core, vcard4_from_core,
-    vcard4_to_core, WaddleTune, WaddleVCard4, GENERAL_ACTIVITIES, MOOD_KINDS,
+    own_vcard4_from_lookup, publish_avatar_iqs, require_activity_general,
+    require_activity_specific, require_mood_kind, require_pep_element_name, tune_from_core,
+    tune_is_empty, tune_to_core, vcard4_from_core, vcard4_to_core, WaddleTune, WaddleVCard4,
+    GENERAL_ACTIVITIES, MOOD_KINDS,
 };
 use crate::{WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError, WaddleEventListener};
 
@@ -259,7 +260,7 @@ mod xep0084 {
 mod xep0292 {
     use super::*;
 
-    fn full_vcard() -> WaddleVCard4 {
+    pub(super) fn full_vcard() -> WaddleVCard4 {
         WaddleVCard4 {
             full_name: Some("Juliet Capulet".to_string()),
             nickname: Some("Juliet".to_string()),
@@ -856,6 +857,87 @@ mod validation {
             own_activity_from_lookup(Err(stanza_error("forbidden"))).unwrap_err(),
             WaddleError::Stanza { .. }
         ));
+    }
+
+    // ── XEP-0292: the account's own vCard4, looked up strictly ────────
+
+    /// An XEP-0060 items result for the vCard4 node, holding `vcard` as
+    /// its one item, or no item at all.
+    fn vcard4_lookup_reply(vcard: Option<Element>) -> Element {
+        let items = Element::builder("items", NS_PUBSUB).attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            "urn:xmpp:vcard4",
+        );
+        let items = match vcard {
+            Some(vcard) => items.append(
+                Element::builder("item", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
+                    .append(vcard)
+                    .build(),
+            ),
+            None => items,
+        };
+        Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("pubsub", NS_PUBSUB)
+                    .append(items.build())
+                    .build(),
+            )
+            .build()
+    }
+
+    #[test]
+    fn own_vcard4_lookup_returns_the_published_vcard() {
+        // The vCard exactly as the publish builder puts it on the wire.
+        let published = waddle_xmpp_client::xep::xep0292::build_publish_vcard4_iq(
+            &vcard4_to_core(super::xep0292::full_vcard()),
+            "req-1",
+        );
+        let vcard = publish_item(&published, "urn:xmpp:vcard4")
+            .get_child("vcard", NS_VCARD4)
+            .expect("vcard payload")
+            .clone();
+        let found = own_vcard4_from_lookup(Ok(vcard4_lookup_reply(Some(vcard))))
+            .expect("lookup succeeded")
+            .expect("vcard present");
+        assert_eq!(found.full_name.as_deref(), Some("Juliet Capulet"));
+        assert_eq!(found.photo_uri, super::xep0292::full_vcard().photo_uri);
+    }
+
+    #[test]
+    fn own_vcard4_lookup_confirms_none_for_an_unpublished_node() {
+        assert!(own_vcard4_from_lookup(Ok(vcard4_lookup_reply(None)))
+            .unwrap()
+            .is_none());
+        assert!(own_vcard4_from_lookup(Err(stanza_error("item-not-found")))
+            .unwrap()
+            .is_none());
+    }
+
+    /// Publishing replaces the whole vCard, so an editor must be able
+    /// to tell "no vCard" from "could not look it up".
+    #[test]
+    fn own_vcard4_lookup_that_fails_is_an_error() {
+        assert_eq!(
+            own_vcard4_from_lookup(Err(ClientError::IqTimeout {
+                timeout: std::time::Duration::from_secs(30),
+            }))
+            .unwrap_err(),
+            WaddleError::Timeout
+        );
+        assert!(matches!(
+            own_vcard4_from_lookup(Err(stanza_error("internal-server-error"))).unwrap_err(),
+            WaddleError::Stanza { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_own_vcard4_requires_connection() {
+        assert_eq!(
+            offline_client().fetch_own_vcard4().await.unwrap_err(),
+            WaddleError::NotConnected
+        );
     }
 
     #[tokio::test]

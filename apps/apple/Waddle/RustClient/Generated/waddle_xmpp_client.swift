@@ -1225,6 +1225,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func fetchOwnActivity() async throws  -> WaddleActivity?
 
     /**
+     * XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+     * when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+     * a lookup that fails (not connected, timeout, any stanza error but
+     * `item-not-found`) is an error. Publishing replaces the whole
+     * vCard, so an editor must not open empty on a failed lookup.
+     */
+    func fetchOwnVcard4() async throws  -> WaddleVCard4?
+
+    /**
      * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
      * `fetch_user_pep_profile` parity): each node is queried with a
      * XEP-0060 items request, and per-node failures (absent node,
@@ -3607,6 +3616,30 @@ open func fetchOwnActivity()async throws  -> WaddleActivity?  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeWaddleActivity.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+     * when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+     * a lookup that fails (not connected, timeout, any stanza error but
+     * `item-not-found`) is an error. Publishing replaces the whole
+     * vCard, so an editor must not open empty on a failed lookup.
+     */
+open func fetchOwnVcard4()async throws  -> WaddleVCard4?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_vcard4(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleVCard4.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -22090,6 +22123,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_activity() != 10876) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_vcard4() != 59774) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile() != 55127) {

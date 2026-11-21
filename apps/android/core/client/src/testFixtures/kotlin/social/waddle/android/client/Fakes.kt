@@ -1346,6 +1346,11 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun fetchOwnActivity(): WaddleActivity? = pepProfile.activity
 
+    override suspend fun fetchOwnVcard4(): WaddleVCard4? {
+        fetchVcard4Failure?.let { throw it }
+        return vcard4
+    }
+
     override suspend fun publishVcard4(vcard: WaddleVCard4) {
         profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishVcard4(vcard)
