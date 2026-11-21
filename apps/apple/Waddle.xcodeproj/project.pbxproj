@@ -407,6 +407,7 @@
 		A4DC77BF3BFA5D27E6EF6783 /* MentionHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */; };
 		A527F88168503310C28FC065 /* GroupCallDockSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68BF996F6153724EA370719 /* GroupCallDockSnapshotTests.swift */; };
 		A5514123D2A2BE0352BB77F8 /* FFIOutbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */; };
+		A56677AA528DAACAEA448393 /* ProfileStatusSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CC7DD4CF9D585CB0C74C09 /* ProfileStatusSnapshotTests.swift */; };
 		A5C5002F8E6A32B541CAA220 /* SampleSession+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B80439B4A5C829C9077615C /* SampleSession+Events.swift */; };
 		A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */; };
 		A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
@@ -503,6 +504,7 @@
 		CC22BF9FF672212EE348E689 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42C60CA405BA040310F11F0 /* CredentialStore.swift */; };
 		CCF01AFB15AA3CFD545B666D /* SettingsAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520AC6A7D5F8E34A0A5EF018 /* SettingsAppVersion.swift */; };
 		CE56C59079181ACB4E8161DE /* MessageActionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C3FC76B6AA85AAC8DF37039 /* MessageActionModel.swift */; };
+		CE6352C89708600165433F4D /* UserInputMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFE8DFECBE88CCBCBD9F5BDA /* UserInputMonitor.swift */; };
 		CE708CBD87499B013CE7B1B6 /* AnimatedImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77EF83062F6AD53EB3E0377 /* AnimatedImageView.swift */; };
 		CEE7D811A19B454D75C2682F /* ProfileMoodCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A857EFDE807DD88C1AEA1EF1 /* ProfileMoodCatalog.swift */; };
 		CEEC3D09EF4B485C76B73465 /* WaddleXmppClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */; };
@@ -533,6 +535,7 @@
 		D752B816ABB92C682CEE176B /* ComposerIconButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC7A59F57E3733FDBC2338D9 /* ComposerIconButton.swift */; };
 		D785FF7BE50EB46180845BEA /* Controls.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE739129D4CC16065C7E43F2 /* Controls.swift */; };
 		D787293529B4CFF84AC00F21 /* FakePort.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81704B7DBD86ABF17B4778B /* FakePort.swift */; };
+		D87936FF4C15F24EDBF65F4B /* UserInputMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFE8DFECBE88CCBCBD9F5BDA /* UserInputMonitor.swift */; };
 		D9FACFA4B9D89DC4DA464CAA /* FFIXmppPort+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */; };
 		DA79559F7BD0D2FF7FFE8C18 /* MessageAttachmentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5EB80193A96E8F2BC698C32 /* MessageAttachmentsView.swift */; };
 		DB078D9D57598E0A108B674D /* GifPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 319EFC442EA192CBDC1E53C0 /* GifPickerView.swift */; };
@@ -589,6 +592,7 @@
 		F1B2AF7A6916B85F91A7413A /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */; };
 		F1DF87FDD51F3048D6878FE8 /* ComposerTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB21941A20189E780D173236 /* ComposerTextSelection.swift */; };
 		F285A3B0C90E08845DB991B6 /* LiveKitCallMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */; };
+		F32EE16E21BD119003F8CF60 /* ProfileStatusSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CC7DD4CF9D585CB0C74C09 /* ProfileStatusSnapshotTests.swift */; };
 		F360FF646064644F875C77AE /* ConversationNameFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE81F851C3F1438978561562 /* ConversationNameFilter.swift */; };
 		F4A7FB6D5EB66394DEBB4018 /* ComposerActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */; };
 		F4C5E65E09955F507235D9F1 /* NavigationSectionHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0DC7EF989C84CD50FE8B750 /* NavigationSectionHeader.swift */; };
@@ -636,6 +640,7 @@
 /* Begin PBXFileReference section */
 		0122F8ACD991E51B4298F006 /* GroupRenameEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupRenameEditor.swift; sourceTree = "<group>"; };
 		04AD95367192E794D6F0B2C6 /* SignInProviderPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInProviderPanel.swift; sourceTree = "<group>"; };
+		04CC7DD4CF9D585CB0C74C09 /* ProfileStatusSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStatusSnapshotTests.swift; sourceTree = "<group>"; };
 		0544D7793B1FDC868FA24526 /* CallMediaControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallMediaControls.swift; sourceTree = "<group>"; };
 		054BA3B46E4F6A85AE3F4DE1 /* ExtensionCommandActionBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandActionBar.swift; sourceTree = "<group>"; };
 		05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystemSnapshotTests.swift; sourceTree = "<group>"; };
@@ -889,6 +894,7 @@
 		DCF434E6AEFA6BF5F8F7C957 /* SelfMuteMarker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfMuteMarker.swift; sourceTree = "<group>"; };
 		DD90267CD2CEC512024017D9 /* RemoteImageDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteImageDataView.swift; sourceTree = "<group>"; };
 		DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Calls.swift"; sourceTree = "<group>"; };
+		DFE8DFECBE88CCBCBD9F5BDA /* UserInputMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserInputMonitor.swift; sourceTree = "<group>"; };
 		E0331D56B66C8F49E37D436C /* FFIXmppPort.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIXmppPort.swift; sourceTree = "<group>"; };
 		E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+Directory.swift"; sourceTree = "<group>"; };
 		E21403421F45AB27FBEED9FA /* SampleSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleSession.swift; sourceTree = "<group>"; };
@@ -1251,6 +1257,7 @@
 				0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */,
 				2A24803E67A2932C18014F56 /* NavigationModelTests.swift */,
 				202B94DA013CDD78783E5B8B /* OutboundBridgeTests.swift */,
+				04CC7DD4CF9D585CB0C74C09 /* ProfileStatusSnapshotTests.swift */,
 				98ED22994875718F88ABC97A /* PushControlsSnapshotTests.swift */,
 				39A5A759619EA0A17AE98EEE /* PushNotificationRoutingTests.swift */,
 				23FF35670E13DC9446E3D547 /* PushRegistrationStoreTests.swift */,
@@ -1666,6 +1673,7 @@
 				E44C43BC9F730169E101C375 /* AppDelegate.swift */,
 				93EB94A6DDD9F6A80D3D74C7 /* NotificationController.swift */,
 				D15328F4234ABE88A84E3ECF /* PushTokenRegistrar.swift */,
+				DFE8DFECBE88CCBCBD9F5BDA /* UserInputMonitor.swift */,
 				4B8CC3B9552CCA3481F65409 /* VoIPPushRegistry.swift */,
 				C89279F6B76B61FE072ACE59 /* Waddle-iOS-Info.plist */,
 				B0BADFB9DF0EC716C5BF2841 /* Waddle-iOS.entitlements */,
@@ -2270,6 +2278,7 @@
 				B746CAED385A5933D9F3EA21 /* TimelineRevealBanner.swift in Sources */,
 				69956BB0E13E43081B5AFD38 /* TimelineUnreadAnchor.swift in Sources */,
 				4144ED7450BB6A75EB46FE6E /* TypingText.swift in Sources */,
+				D87936FF4C15F24EDBF65F4B /* UserInputMonitor.swift in Sources */,
 				1EF194F668CB73811FEA7385 /* VoIPPushRegistry.swift in Sources */,
 				B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */,
 				5E8F6B82D60AA012464E9DA0 /* WaddleCommands.swift in Sources */,
@@ -2301,6 +2310,7 @@
 				A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */,
 				054EB87288E33AD493C3840A /* NavigationModelTests.swift in Sources */,
 				3377BA2A33F22965155FF970 /* OutboundBridgeTests.swift in Sources */,
+				F32EE16E21BD119003F8CF60 /* ProfileStatusSnapshotTests.swift in Sources */,
 				909058747F0DFEB5AF64753A /* PushControlsSnapshotTests.swift in Sources */,
 				C858CC46FDA096CCEBD829EC /* PushNotificationRoutingTests.swift in Sources */,
 				E6A4E192A6FEABE94AC3B5C4 /* PushRegistrationStoreTests.swift in Sources */,
@@ -2574,6 +2584,7 @@
 				9F35C0175C7B319390543E11 /* TimelineRevealBanner.swift in Sources */,
 				371C8128EA3B958841888C3E /* TimelineUnreadAnchor.swift in Sources */,
 				9132F59EBD80D73156184D83 /* TypingText.swift in Sources */,
+				CE6352C89708600165433F4D /* UserInputMonitor.swift in Sources */,
 				F6C523323D5F61D52C6B9EC6 /* VoIPPushRegistry.swift in Sources */,
 				6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */,
 				E2251A92756F306038DB1872 /* WaddleCommands.swift in Sources */,
@@ -2605,6 +2616,7 @@
 				D3B865E7071ED2E7DAB727A5 /* LiveKitCallMediaTests.swift in Sources */,
 				80B556D4C7F2A380A208E707 /* NavigationModelTests.swift in Sources */,
 				8C5BC5DCF477149BBC6EC719 /* OutboundBridgeTests.swift in Sources */,
+				A56677AA528DAACAEA448393 /* ProfileStatusSnapshotTests.swift in Sources */,
 				B5386E5160F1572EEF86C911 /* PushControlsSnapshotTests.swift in Sources */,
 				F83733C7A34A67BF10556C40 /* PushNotificationRoutingTests.swift in Sources */,
 				A335913BA0D6A8244A0C5D46 /* PushRegistrationStoreTests.swift in Sources */,

@@ -44,6 +44,20 @@ final class FakePort: XmppPort {
     var notifySettings = NotifySettings()
     var failsNotifySettingsFetch = false
 
+    struct PresenceSend: Equatable {
+        let availability: Availability
+        let status: String?
+        let idleSince: Date?
+    }
+    var presenceSends: [PresenceSend] = []
+    var storedPresenceMode: Result<PresenceMode, PortError> = .success(.automatic)
+    /// Every mode offered for storing, taken by the server or not.
+    var publishedPresenceModes: [PresenceMode] = []
+    var presenceModePublishResult: Result<Void, PortError> = .success(())
+    var holdsPresenceModePublishes = false
+    private var heldPresenceModeContinuations: [CheckedContinuation<Void, Never>] = []
+    var heldPresenceModePublishes: Int { heldPresenceModeContinuations.count }
+
     var sent: [OutboundMessage] = []
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
     var reactions: [(target: String, emojis: [String])] = []
@@ -136,7 +150,9 @@ final class FakePort: XmppPort {
         probeConnectionCount += 1
         return probeConnectionResult
     }
-    func sendPresence(_ availability: Availability, status: String?) async {}
+    func sendPresence(_ availability: Availability, status: String?, idleSince: Date?) async {
+        presenceSends.append(PresenceSend(availability: availability, status: status, idleSince: idleSince))
+    }
 
     func send(_ message: OutboundMessage) async -> SendOutcome {
         sent.append(message)
@@ -347,6 +363,19 @@ final class FakePort: XmppPort {
     func fetchMood(of jid: BareJID) async throws -> UserMood? { nil }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
+    func fetchPresenceMode() async throws -> PresenceMode { try storedPresenceMode.get() }
+    func publishPresenceMode(_ mode: PresenceMode) async throws {
+        publishedPresenceModes.append(mode)
+        if holdsPresenceModePublishes {
+            await withCheckedContinuation { heldPresenceModeContinuations.append($0) }
+        }
+        try presenceModePublishResult.get()
+    }
+    func releasePresenceModePublishes() {
+        let held = heldPresenceModeContinuations
+        heldPresenceModeContinuations = []
+        held.forEach { $0.resume() }
+    }
     func requestUploadSlot(filename: String, size: Int, mediaType: String) async -> UploadSlot? { nil }
     func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? {
         pushRegistrationRequests.append(deviceToken)

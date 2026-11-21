@@ -68,12 +68,12 @@ name the issue that tracks them.
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
-| Presence | RFC 6121 | 🟡 | ✅ | Availability and status message |
+| Presence | RFC 6121 | 🟡 | ✅ | Status and status message, set in the profile. The status is Automatic, or one picked by hand: Online, Away or Do not disturb (also `/active`, `/away`, `/dnd`) |
 | Avatars | 0084 | 🟡 | ✅ | Fetch (revalidated with known ids, refreshed on +notify events), publish (≤512 px PNG) and remove. Baseline: fetch only |
 | vCard / profile | 0292 | ❌ | ❌ | Not in this PR |
 | Mood / activity / tune | 0107, 0108, 0118 | ❌ | 🟡 | Mood only (XEP-0107 vocabulary). Baseline: all publish verbs were empty stubs |
-| Auto-away | 0319 | — | ❌ | Presence is always sent with `idleSince: nil`; a peer's idle time is shown in DM details (#2457) |
-| Cross-device manual status | urn:waddle:status-preference:0 | — | ❌ | `fetch_status_preference` is never called and `statusPreferenceChanged` events are dropped (#2457) |
+| Auto-away | 0319 | — | ✅ | While the status is Automatic: Away after 10 minutes without input and Extended Away after 30, stamped with when input stopped; input brings it back within 30 seconds. A Mac reads the system's idle time, so use of any app counts. An iPhone or iPad counts touches in Waddle and sent messages only, so reading without touching the screen turns Away. A call in progress holds it off. A peer's idle time is shown in DM details |
+| Cross-device manual status | urn:waddle:status-preference:0 | — | ✅ | A status picked by hand is stored on the account and taken up by every device, at once when both are online and otherwise on connect; Automatic resets it everywhere. A pick made offline is stored on the next connect and wins over the stored one. Signing out leaves the account's pick in place. "Free to chat" picked on another client shows as Online in the picker |
 | DND schedule | urn:waddle:dnd:0 | — | ❌ | No quiet-hours screen; only the `/dnd` presence command. The core has no verb yet (#2463) |
 | Blocking | 0191 | — | ❌ | No block or unblock. The core has no verb yet; server maturity is experimental (#2462) |
 

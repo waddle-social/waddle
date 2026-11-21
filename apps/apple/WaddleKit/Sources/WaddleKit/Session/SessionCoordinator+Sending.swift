@@ -32,6 +32,7 @@ extension SessionCoordinator {
         preview: String,
         in conversation: ConversationID
     ) async -> String? {
+        noteActivity()
         var options = composed.options
         // A sticker's text is its pack's description, not something the
         // sender typed, so nothing in it is taken as a mention.

@@ -144,6 +144,13 @@ public final class SessionCoordinator {
     @ObservationIgnored private var attempt = 0
     @ObservationIgnored var connectionEpoch = 0
 
+    /// The clock presence reads; tests set it.
+    @ObservationIgnored var now: () -> Date = Date.init
+    @ObservationIgnored var presenceModeSync = PresenceModeSync()
+    @ObservationIgnored var idleClock = IdleClock()
+    /// What the current stream was last told; nil on a fresh stream.
+    @ObservationIgnored var sentPresence: SentPresence?
+
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
     /// only as diagnostics, never as a disconnect). `outboxStore`: where
@@ -236,6 +243,7 @@ public final class SessionCoordinator {
         readyTask = nil
         connectWatchdog?.cancel()
         connectWatchdog = nil
+        resetPresenceMode()
         await stopCalls()
         await port.disconnect()
         eventTask?.cancel()
@@ -467,6 +475,7 @@ public final class SessionCoordinator {
             // Messages may have been missed while offline: loaded pages are
             // no longer known to be current.
             history.markAllStale()
+            sentPresence = nil
             presence.clear()
             calls.groupPresence.clear()
             mdsPublishSupported = nil
@@ -503,6 +512,8 @@ public final class SessionCoordinator {
             messageRejected(stanzaID, from: from, to: to)
         case let .avatarChanged(jid, id):
             avatars.avatarChanged(jid, id: id)
+        case let .presenceModeChanged(mode):
+            presenceModePicked(elsewhere: mode)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
@@ -527,7 +538,9 @@ public final class SessionCoordinator {
 
     /// The ready pipeline: presence, directory, joins, read state, queue.
     private func sessionReady() async {
-        await port.sendPresence(status.availability, status: status.statusText)
+        await sendOwnPresence()
+        guard !Task.isCancelled else { return }
+        await syncPresenceModeOnConnect()
         guard !Task.isCancelled else { return }
         await refreshDirectory()
         guard !Task.isCancelled else { return }
@@ -724,6 +737,10 @@ public final class SessionCoordinator {
 /// Observable session-wide status the UI binds to.
 public struct SessionStatus: Equatable, Sendable {
     public var connection: ConnectionStatus = .signedOut
+    /// How the account's presence is decided; the same on every device.
+    public var mode: PresenceMode = .automatic
+    /// What this device shows: the picked status, or what its idle time
+    /// says while the mode is automatic.
     public var availability: Availability = .available
     public var statusText: String?
     public var mood: UserMood?

@@ -40,4 +40,14 @@ extension FFIXmppPort {
     func retractMood() async throws {
         try await mappingPortErrors { try await client.retractMood() }
     }
+
+    func fetchPresenceMode() async throws -> PresenceMode {
+        FFIInbound.presenceMode(try await mappingPortErrors { try await client.fetchStatusPreference() })
+    }
+
+    func publishPresenceMode(_ mode: PresenceMode) async throws {
+        try await mappingPortErrors {
+            try await client.publishStatusPreference(preference: FFIOutbound.statusPreference(mode))
+        }
+    }
 }

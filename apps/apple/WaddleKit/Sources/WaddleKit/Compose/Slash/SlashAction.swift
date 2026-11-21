@@ -7,7 +7,7 @@ public enum SlashAction: Hashable, Sendable {
     /// Open the GIF picker searching for `query` (may be empty: trending).
     case searchGIFs(query: String)
     /// Set the account's manual presence.
-    case setAvailability(Availability)
+    case setPresenceMode(PresenceMode)
     /// Run a server extension command (XEP-0050).
     case runExtension(ExtensionCommand, ExtensionInvocation)
     /// A required argument is missing: complete the command, do not send.
