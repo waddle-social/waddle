@@ -1392,6 +1392,23 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         generation: changed.record().generation,
     };
 
+    let invalid = "other@spaces.example.com"
+        .parse::<jid::BareJid>()
+        .expect("local service identity");
+    let remote_member = subject("alice@peer.test").jid().clone();
+    let requested = [
+        (remote_member.clone(), Affiliation::Outcast),
+        (invalid.clone(), Affiliation::Member),
+        (owner.jid().clone(), Affiliation::None),
+        (subject(PEER).jid().clone(), Affiliation::None),
+    ];
+    assert!(matches!(
+        fixture
+            .store
+            .plan_space_affiliation_changes(&key, &owner, &attached, &fixture.policy, &requested)
+            .await,
+        Err(HostGrantError::Busy)
+    ));
     let pending = fixture
         .store
         .space_affiliations(&key, &owner, &attached)
@@ -1414,6 +1431,43 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .await
         .expect("member cannot list affiliation rows")
         .is_none());
+    assert!(fixture
+        .store
+        .plan_space_affiliation_changes(
+            &key,
+            &subject(PEER),
+            &attached,
+            &fixture.policy,
+            &requested
+        )
+        .await
+        .expect("member cannot inspect refused rows")
+        .is_none());
+    let duplicate = [requested[0].clone(), requested[0].clone()];
+    assert!(matches!(
+        fixture
+            .store
+            .plan_space_affiliation_changes(&key, &owner, &attached, &fixture.policy, &duplicate)
+            .await,
+        Err(HostGrantError::InvalidSpaceMembershipBatch)
+    ));
+    let plan = fixture
+        .store
+        .plan_space_affiliation_changes(&key, &owner, &attached, &fixture.policy, &requested)
+        .await
+        .expect("classify the mixed request")
+        .expect("canonical owner");
+    assert_eq!(plan.lifecycle, lifecycle);
+    assert_eq!(plan.generation, era.generation);
+    assert_eq!(plan.changes.len(), 1);
+    assert_eq!(plan.changes[0].subject, subject(PEER));
+    assert_eq!(plan.changes[0].affiliation, SpaceMembership::None);
+    assert_eq!(plan.refused.len(), 3);
+    assert!(plan.refused.contains(&(remote_member, Affiliation::Member)));
+    assert!(plan
+        .refused
+        .contains(&(owner.jid().clone(), Affiliation::Owner)));
+    assert!(plan.refused.contains(&(invalid, Affiliation::None)));
     let active = fixture
         .store
         .space_affiliations(&key, &owner, &attached)

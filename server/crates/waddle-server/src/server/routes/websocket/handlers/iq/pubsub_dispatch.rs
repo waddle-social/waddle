@@ -91,18 +91,6 @@ pub(super) async fn handle_pubsub_iq(
             };
             if enrolled != Ok(false) {
                 let response = match (enrolled, request) {
-                    (Ok(true), PubSubRequest::AffiliationsSet { node, changes }) => {
-                        super::pubsub_space_membership::set_space_membership(
-                            iq,
-                            state,
-                            &target_jid,
-                            &user_jid,
-                            authenticated_session,
-                            &node,
-                            changes,
-                        )
-                        .await
-                    }
                     (
                         Ok(true),
                         request @ (PubSubRequest::Publish { .. } | PubSubRequest::Retract { .. }),

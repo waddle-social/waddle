@@ -450,14 +450,24 @@ pub async fn handle_iq_with_conn_state(
         }
     }
     if payload_ns == waddle_xmpp::pubsub::NS_PUBSUB_OWNER {
-        if let Some(reply) = super::pubsub_space_membership::list_space_membership(
-            &iq,
-            state,
-            phase.bound_jid(),
-            authenticated_session,
-        )
-        .await
-        {
+        let reply = if matches!(&iq, xmpp_parsers::iq::Iq::Set { .. }) {
+            super::pubsub_space_membership::set_space_membership_reply(
+                &iq,
+                state,
+                phase.bound_jid(),
+                authenticated_session,
+            )
+            .await
+        } else {
+            super::pubsub_space_membership::list_space_membership(
+                &iq,
+                state,
+                phase.bound_jid(),
+                authenticated_session,
+            )
+            .await
+        };
+        if let Some(reply) = reply {
             return ResponseBatch::from_frames(vec![reply]);
         }
     }

@@ -1009,6 +1009,50 @@ impl HostGrantGate {
         .then_some((reply, listing))
     }
 
+    pub(crate) async fn local_space_affiliation_refusals_reply(
+        &self,
+        key: &ScopeKey,
+        requester: &FullJid,
+        request: &Iq,
+        lifecycle: super::ScopeLifecycleId,
+        incarnation: super::AuthorityIncarnation,
+        generation: super::GrantGeneration,
+    ) -> Option<LocalSpaceReplyGrant> {
+        if !matches!(request, Iq::Set { .. })
+            || request.to().map(Jid::as_str) != Some(key.service().as_str())
+            || request
+                .from()
+                .is_some_and(|from| from.as_str() != requester.as_str())
+        {
+            return None;
+        }
+        let subject = GrantSubject::new(requester.to_bare()).ok()?;
+        let grant = self.space_read_local(key, &subject).await?;
+        if grant.fence.lifecycle() != lifecycle
+            || grant.subscription_grant.incarnation != incarnation
+            || grant.fence.generation() != generation
+            || grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
+        {
+            return None;
+        }
+        let replay = ProtectedSpaceReplyDescriptor::new(
+            key.service().clone(),
+            key.node().to_owned(),
+            requester.clone(),
+            request.id().to_owned(),
+            lifecycle.as_uuid(),
+            incarnation.as_uuid(),
+            generation.value(),
+        )
+        .ok()?
+        .with_kind(ProtectedSpaceReplyKind::OwnerAffiliationRefusals);
+        Some(LocalSpaceReplyGrant {
+            grant,
+            replay,
+            preference: None,
+        })
+    }
+
     pub(crate) async fn local_space_subscribe_reply(
         &self,
         key: &ScopeKey,
@@ -1164,8 +1208,11 @@ impl HostGrantGate {
         {
             return None;
         }
-        if replay.kind() == ProtectedSpaceReplyKind::OwnerAffiliations
-            && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
+        if matches!(
+            replay.kind(),
+            ProtectedSpaceReplyKind::OwnerAffiliations
+                | ProtectedSpaceReplyKind::OwnerAffiliationRefusals
+        ) && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
         {
             return None;
         }

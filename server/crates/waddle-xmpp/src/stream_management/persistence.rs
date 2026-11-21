@@ -413,6 +413,9 @@ fn matches_protected_space_reply(
     if descriptor.kind() == ProtectedSpaceReplyKind::BookmarkEvent {
         return matches_protected_bookmark_event(element, descriptor);
     }
+    if descriptor.kind() == ProtectedSpaceReplyKind::OwnerAffiliationRefusals {
+        return matches_protected_owner_affiliation_refusals(element, descriptor);
+    }
     element.is("iq", "jabber:client")
         && element.attr("type") == Some("result")
         && element.attr("id") == Some(descriptor.id())
@@ -437,7 +440,8 @@ fn matches_protected_space_reply(
             ProtectedSpaceReplyKind::OwnerAffiliations => {
                 matches_protected_owner_affiliations(element, descriptor)
             }
-            ProtectedSpaceReplyKind::BookmarkEvent => false,
+            ProtectedSpaceReplyKind::BookmarkEvent
+            | ProtectedSpaceReplyKind::OwnerAffiliationRefusals => false,
         }
 }
 
@@ -445,44 +449,117 @@ fn matches_protected_owner_affiliations(
     element: &minidom::Element,
     descriptor: &ProtectedSpaceReplyDescriptor,
 ) -> bool {
-    use crate::pubsub::NS_PUBSUB_OWNER;
+    element.attrs().len() == 4
+        && element.text().trim().is_empty()
+        && element
+            .get_child("pubsub", crate::pubsub::NS_PUBSUB_OWNER)
+            .is_some_and(|payload| {
+                matches_owner_affiliation_payload(payload, descriptor.node(), false)
+            })
+}
 
-    // Match the enrolled scope's canonical grant-row limit.
-    const MAX_AFFILIATIONS: usize = 200;
+fn matches_protected_owner_affiliation_refusals(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    const NS_STANZA_ERROR: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 
-    if element.attrs().len() != 4 || !element.text().trim().is_empty() {
+    if !element.is("iq", "jabber:client")
+        || element.attr("type") != Some("error")
+        || element.attr("id") != Some(descriptor.id())
+        || element.attrs().len() != 4
+        || !element.text().trim().is_empty()
+    {
         return false;
     }
-    let Some(affiliations) = element
-        .get_child("pubsub", NS_PUBSUB_OWNER)
-        .filter(|pubsub| {
-            pubsub.attrs().is_empty()
-                && pubsub.children().count() == 1
-                && pubsub.text().trim().is_empty()
-        })
-        .and_then(|pubsub| pubsub.get_child("affiliations", NS_PUBSUB_OWNER))
-        .filter(|affiliations| {
-            affiliations.attrs().len() == 1
-                && affiliations.attr("node") == Some(descriptor.node())
-                && affiliations.text().trim().is_empty()
-        })
+    let mut children = element.children();
+    let (Some(payload), Some(error), None) = (children.next(), children.next(), children.next())
     else {
         return false;
+    };
+    if !matches_owner_affiliation_payload(payload, descriptor.node(), true)
+        || !error.is("error", "jabber:client")
+        || error.attr("type") != Some("modify")
+        || error.attrs().len() != 1
+        || !error.text().trim().is_empty()
+    {
+        return false;
+    }
+    let mut details = error.children();
+    let Some(condition) = details.next() else {
+        return false;
+    };
+    if !condition.is("not-acceptable", NS_STANZA_ERROR)
+        || !condition.attrs().is_empty()
+        || condition.children().next().is_some()
+        || !condition.text().trim().is_empty()
+    {
+        return false;
+    }
+    details.next().is_none_or(|text| {
+        text.is("text", NS_STANZA_ERROR)
+            && (text.attrs().is_empty()
+                || (text.attrs().len() == 1
+                    && text
+                        .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                        .is_some()))
+            && text.children().next().is_none()
+            && details.next().is_none()
+    })
+}
+
+fn matches_owner_affiliation_payload(
+    payload: &minidom::Element,
+    node: &str,
+    refusals: bool,
+) -> bool {
+    use crate::pubsub::NS_PUBSUB_OWNER;
+
+    // Match the enrolled scope's grant-row and change-batch limits.
+    const MAX_AFFILIATIONS: usize = 200;
+    const MAX_REFUSALS: usize = 64;
+
+    if !payload.is("pubsub", NS_PUBSUB_OWNER)
+        || !payload.attrs().is_empty()
+        || payload.children().count() != 1
+        || !payload.text().trim().is_empty()
+    {
+        return false;
+    }
+    let Some(affiliations) =
+        payload
+            .get_child("affiliations", NS_PUBSUB_OWNER)
+            .filter(|affiliations| {
+                affiliations.attrs().len() == 1
+                    && affiliations.attr("node") == Some(node)
+                    && affiliations.text().trim().is_empty()
+            })
+    else {
+        return false;
+    };
+    if refusals && affiliations.children().next().is_none() {
+        return false;
+    }
+    let max_rows = if refusals {
+        MAX_REFUSALS
+    } else {
+        MAX_AFFILIATIONS
     };
     let mut subjects = HashSet::new();
     affiliations.children().enumerate().all(|(index, row)| {
         let Some(jid) = row.attr("jid") else {
             return false;
         };
-        index < MAX_AFFILIATIONS
+        index < max_rows
             && row.is("affiliation", NS_PUBSUB_OWNER)
             && row.attrs().len() == 2
             && row.children().next().is_none()
             && row.text().trim().is_empty()
-            && matches!(
-                row.attr("affiliation"),
-                Some("owner" | "publisher" | "publish-only" | "member" | "outcast")
-            )
+            && match row.attr("affiliation") {
+                Some("owner" | "publisher" | "publish-only" | "member" | "outcast") => true,
+                Some("none") => refusals,
+                _ => false,
+            }
             && jid
                 .parse::<jid::BareJid>()
                 .is_ok_and(|bare| bare.as_str() == jid)
@@ -2102,6 +2179,43 @@ mod protected_space_reply_storage_tests {
             1,
         )
         .expect("reply descriptor")
+    }
+
+    #[test]
+    fn owner_affiliation_refusals_round_trip_strict_iq_error() {
+        let descriptor = descriptor().with_kind(ProtectedSpaceReplyKind::OwnerAffiliationRefusals);
+        let row = "<affiliation jid='blocked@example.test' affiliation='none'/>";
+        let wire = format!("<iq xmlns='jabber:client' type='error' from='spaces.example.test' to='alice@example.test/dev' id='disco-1'><pubsub xmlns='http://jabber.org/protocol/pubsub#owner'><affiliations node='docs'>{row}</affiliations></pubsub><error type='modify'><not-acceptable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/><text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas' xml:lang='en'>Some changes were refused.</text></error></iq>");
+        let payload = SmReplayPayload::from_protected_space_reply(wire.clone(), descriptor.clone())
+            .expect("owner affiliation refusals");
+        let stored = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+        let restored = SmReplayPayload::from_storage(stored).expect("owner refusals in storage");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+        for (current, replacement) in [
+            (row, ""),
+            ("blocked@example.test", "blocked@example.test/device"),
+            ("type='modify'", "type='cancel'"),
+            ("type='error'", "type='result'"),
+            ("not-acceptable", "forbidden"),
+            ("xml:lang", "unexpected"),
+            ("pubsub#owner", "pubsub"),
+            ("node='docs'", "node='other'"),
+            ("id='disco-1'", "id='other'"),
+            ("alice@example.test/dev", "alice@example.test/other"),
+        ] {
+            assert!(
+                SmReplayPayload::from_protected_space_reply(
+                    wire.replace(current, replacement),
+                    descriptor.clone(),
+                )
+                .is_err(),
+                "accepted {replacement}"
+            );
+        }
+        let duplicate = wire.replace(row, &format!("{row}{row}"));
+        assert!(SmReplayPayload::from_protected_space_reply(duplicate, descriptor).is_err());
     }
 
     #[test]

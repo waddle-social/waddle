@@ -2,21 +2,26 @@
 
 use std::time::Duration;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use minidom::Element;
-use waddle_xmpp::pubsub::{Affiliation, NS_PUBSUB_ERRORS, NS_PUBSUB_OWNER};
+use waddle_xmpp::pubsub::{
+    parse_pubsub_iq, Affiliation, PubSubRequest, NS_PUBSUB_ERRORS, NS_PUBSUB_OWNER,
+};
 use xmpp_parsers::iq::Iq;
 
 use crate::permissions::host_grant::{
-    AdmissionState, GrantOperationId, GrantSubject, HostGrantAuthority, HostGrantError,
-    Reconciliation, ScopeKey, SetSpaceAffiliations, SpaceAffiliationChange, SpaceMembership,
-    FENCE_ACKNOWLEDGEMENT_DEADLINE,
+    AdmissionState, AuthorityIncarnation, GrantGeneration, GrantOperationId, GrantSubject,
+    HostGrantAuthority, HostGrantError, Reconciliation, ScopeKey, ScopeLifecycleId,
+    SetSpaceAffiliations, FENCE_ACKNOWLEDGEMENT_DEADLINE,
 };
 
 use super::errors::{
     feature_not_implemented_iq_error, resource_constraint_iq_error, service_unavailable_iq_error,
 };
-use super::{build_pubsub_error, build_pubsub_success, PubSubError, Session, WebSocketState};
+use super::{
+    build_pubsub_error, build_pubsub_success, iq_to_xml, PubSubError, Session, WebSocketState,
+};
+use crate::server::routes::websocket::frame::ResponseFrame;
 
 const RECONCILE_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -25,8 +30,7 @@ pub(super) async fn list_space_membership(
     state: &WebSocketState,
     requester: Option<&jid::FullJid>,
     session: Option<&Session>,
-) -> Option<crate::server::routes::websocket::frame::ResponseFrame> {
-    use crate::server::routes::websocket::frame::ResponseFrame;
+) -> Option<ResponseFrame> {
     use waddle_xmpp::pubsub::build_pubsub_affiliations_result;
 
     let Iq::Get { payload, to, .. } = iq else {
@@ -79,86 +83,182 @@ pub(super) async fn list_space_membership(
     }
 }
 
-pub(super) async fn set_space_membership(
+pub(super) async fn set_space_membership_reply(
     iq: &Iq,
     state: &WebSocketState,
-    service: &BareJid,
-    user: &BareJid,
+    requester: Option<&FullJid>,
     session: Option<&Session>,
-    node: &str,
-    changes: Vec<(BareJid, Affiliation)>,
-) -> Iq {
+) -> Option<ResponseFrame> {
+    use waddle_xmpp::pubsub::build_pubsub_affiliations_result;
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
     let Iq::Set { payload, to, .. } = iq else {
-        return build_pubsub_error(iq, PubSubError::BadRequest);
+        return None;
     };
-    if !payload.is("pubsub", NS_PUBSUB_OWNER)
-        || to.as_ref().is_none_or(|to| to.as_str() != service.as_str())
-    {
-        return build_pubsub_error(iq, PubSubError::BadRequest);
+    let service = state.deps.service_domains.spaces.as_str();
+    if !payload.is("pubsub", NS_PUBSUB_OWNER) || to.as_ref()?.as_str() != service {
+        return None;
     }
-    let mut operations = payload.children();
-    let Some(affiliations) = operations.next() else {
-        return build_pubsub_error(iq, PubSubError::BadRequest);
+    let PubSubRequest::AffiliationsSet { node, changes } = parse_pubsub_iq(iq).ok()? else {
+        return None;
     };
-    if !affiliations.is("affiliations", NS_PUBSUB_OWNER)
-        || operations.next().is_some()
-        || affiliations.children().any(|item| {
-            !item.is("affiliation", NS_PUBSUB_OWNER) || item.children().next().is_some()
+    let ordinary = |reply| Some(ResponseFrame::from(iq_to_xml(reply)));
+    let pubsub_error = |condition| ordinary(build_pubsub_error(iq, condition));
+    let gate = &state.deps.app_state.host_grants;
+    match gate.space_enrolled(&node).await {
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(_) => return pubsub_error(PubSubError::InternalServerError),
+    }
+    let Some(requester) = requester else {
+        return pubsub_error(PubSubError::Forbidden);
+    };
+    let bare = requester.to_bare();
+    if session.is_none_or(|session| session.user_jid != bare.as_str())
+        || iq
+            .from()
+            .is_some_and(|from| from.as_str() != requester.as_str())
+    {
+        return pubsub_error(PubSubError::Forbidden);
+    }
+    if !valid_membership_delta(payload, &node, &changes) {
+        return pubsub_error(PubSubError::BadRequest);
+    }
+    let (Ok(service), Ok(initiator)) = (service.parse::<BareJid>(), GrantSubject::new(bare)) else {
+        return pubsub_error(PubSubError::BadRequest);
+    };
+    let Ok(key) = ScopeKey::new(service, &node) else {
+        return pubsub_error(PubSubError::BadRequest);
+    };
+    let settled = match set_space_membership(iq, state, &key, initiator, &changes).await {
+        Ok(settled) => settled,
+        Err(reply) => return ordinary(*reply),
+    };
+    if settled.refused.is_empty() {
+        return ordinary(build_pubsub_success(iq));
+    }
+    let Some(grant) = gate
+        .local_space_affiliation_refusals_reply(
+            &key,
+            requester,
+            iq,
+            settled.lifecycle,
+            settled.incarnation,
+            settled.generation,
+        )
+        .await
+    else {
+        return ordinary(membership_mutation_error(iq, HostGrantError::Busy));
+    };
+    let Iq::Result {
+        payload: Some(payload),
+        ..
+    } = build_pubsub_affiliations_result(iq, &node, &settled.refused)
+    else {
+        return pubsub_error(PubSubError::InternalServerError);
+    };
+    let reply = Element::builder("iq", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            key.service().as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            requester.as_str(),
+        )
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq.id())
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+        .append(payload)
+        .append(Element::from(StanzaError::new(
+            ErrorType::Modify,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "",
+        )))
+        .build();
+    let wire = crate::server::routes::websocket::transport_xml::element_to_xml(reply);
+    match ResponseFrame::protected_space_frame(wire, grant) {
+        Ok(frame) => Some(frame),
+        Err(_) => pubsub_error(PubSubError::InternalServerError),
+    }
+}
+
+fn valid_membership_delta(
+    payload: &Element,
+    node: &str,
+    changes: &[(BareJid, Affiliation)],
+) -> bool {
+    let Some(list) = payload.get_child("affiliations", NS_PUBSUB_OWNER) else {
+        return false;
+    };
+    payload.attrs().is_empty()
+        && payload.text().trim().is_empty()
+        && payload.children().count() == 1
+        && list.attrs().len() == 1
+        && list.attr("node") == Some(node)
+        && list.text().trim().is_empty()
+        && list.children().count() == changes.len()
+        && list.children().zip(changes).all(|(entry, (jid, _))| {
+            entry.is("affiliation", NS_PUBSUB_OWNER)
+                && entry.attrs().len() == 2
+                && entry.attr("jid") == Some(jid.as_str())
+                && entry.attr("affiliation").is_some()
+                && entry.children().next().is_none()
+                && entry.text().trim().is_empty()
         })
-    {
-        return build_pubsub_error(iq, PubSubError::BadRequest);
-    }
-    if session.is_none_or(|session| session.user_jid != user.as_str()) {
-        return build_pubsub_error(iq, PubSubError::Forbidden);
-    }
-    let (Ok(key), Ok(initiator)) = (
-        ScopeKey::new(service.clone(), node),
-        GrantSubject::new(user.clone()),
-    ) else {
-        return build_pubsub_error(iq, PubSubError::BadRequest);
-    };
+}
+
+struct SettledAffiliations {
+    lifecycle: ScopeLifecycleId,
+    incarnation: AuthorityIncarnation,
+    generation: GrantGeneration,
+    refused: Vec<(BareJid, Affiliation)>,
+}
+
+async fn set_space_membership(
+    iq: &Iq,
+    state: &WebSocketState,
+    key: &ScopeKey,
+    initiator: GrantSubject,
+    changes: &[(BareJid, Affiliation)],
+) -> Result<SettledAffiliations, Box<Iq>> {
+    let pubsub_error = |condition| Box::new(build_pubsub_error(iq, condition));
     let gate = &state.deps.app_state.host_grants;
     let (Some(store), Some(attachment)) = (gate.store(), gate.attachment()) else {
-        return build_pubsub_error(iq, PubSubError::InternalServerError);
+        return Err(pubsub_error(PubSubError::InternalServerError));
     };
     let Some(policy) = state
         .deps
         .service_domains
         .host_grant_issuance_policy(attachment.principals())
     else {
-        return build_pubsub_error(iq, PubSubError::InternalServerError);
+        return Err(pubsub_error(PubSubError::InternalServerError));
     };
-    let Some(decision) = gate.space_read_local(&key, &initiator).await else {
-        return build_pubsub_error(iq, PubSubError::Forbidden);
+    let plan = match store
+        .plan_space_affiliation_changes(key, &initiator, attachment.binding(), &policy, changes)
+        .await
+    {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Err(pubsub_error(PubSubError::Forbidden)),
+        Err(error) => return Err(Box::new(membership_mutation_error(iq, error))),
     };
-    if decision.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true) {
-        return build_pubsub_error(iq, PubSubError::Forbidden);
+    if let [(_, affiliation)] = changes {
+        if !matches!(affiliation, Affiliation::Member | Affiliation::None) {
+            return Err(Box::new(unsupported_affiliation(iq, *affiliation)));
+        }
+        if plan.changes.is_empty() && !plan.refused.is_empty() {
+            return Err(pubsub_error(PubSubError::Forbidden));
+        }
     }
-    let binding = decision.subscription_grant();
-    let lifecycle = binding.lifecycle;
-    let mut membership = Vec::with_capacity(changes.len());
-    for (subject, affiliation) in changes {
-        let Ok(subject) = GrantSubject::new(subject) else {
-            return build_pubsub_error(iq, PubSubError::InvalidJid);
-        };
-        let affiliation = match affiliation {
-            Affiliation::Member => SpaceMembership::Member,
-            Affiliation::None => SpaceMembership::None,
-            other => return unsupported_affiliation(iq, other),
-        };
-        membership.push(SpaceAffiliationChange {
-            subject,
-            affiliation,
-        });
-    }
-    let Ok(Some(scope)) = store.scope(lifecycle).await else {
-        return build_pubsub_error(iq, PubSubError::InternalServerError);
+    let lifecycle = plan.lifecycle;
+    let mut settled = SettledAffiliations {
+        lifecycle,
+        incarnation: attachment.binding().incarnation,
+        generation: plan.generation,
+        refused: plan.refused,
     };
-    if scope.authority_incarnation != binding.incarnation {
-        return error(
-            iq,
-            service_unavailable_iq_error("The Space is unavailable."),
-        );
+    if plan.changes.is_empty() {
+        return Ok(settled);
     }
     let authority = HostGrantAuthority::new(
         store.clone(),
@@ -168,44 +268,23 @@ pub(super) async fn set_space_membership(
     let command = SetSpaceAffiliations {
         operation: GrantOperationId::generate(),
         lifecycle,
-        expected_generation: scope.generation,
+        expected_generation: plan.generation,
         initiator,
-        changes: membership,
+        changes: plan.changes,
     };
     let mut recorded = authority.set_space_affiliations(&command).await;
     if matches!(recorded, Err(HostGrantError::CommitOutcomeUnknown)) {
-        // An exact retry recovers the result without applying the batch twice.
+        // Retry the same operation and its already classified subset.
         recorded = authority.set_space_affiliations(&command).await;
     }
-    let receipt = match recorded {
-        Ok(receipt) => receipt,
-        Err(HostGrantError::InitiatorNotAuthorized | HostGrantError::Issuance(_)) => {
-            return build_pubsub_error(iq, PubSubError::Forbidden);
-        }
-        Err(HostGrantError::InvalidSpaceMembershipBatch) => {
-            return build_pubsub_error(iq, PubSubError::BadRequest);
-        }
-        Err(HostGrantError::StaleGeneration { .. } | HostGrantError::GrantLimit) => {
-            return error(
-                iq,
-                resource_constraint_iq_error("Space membership could not be changed; retry."),
-            );
-        }
-        Err(HostGrantError::UnknownScope | HostGrantError::SpaceNotBindable) => {
-            return error(
-                iq,
-                service_unavailable_iq_error("The Space is unavailable."),
-            );
-        }
-        Err(other) => {
-            tracing::warn!(
-                kind = other.kind(),
-                "Space membership outcome could not be verified"
-            );
-            return build_pubsub_error(iq, PubSubError::InternalServerError);
-        }
-    };
+    let receipt = recorded.map_err(|error| Box::new(membership_mutation_error(iq, error)))?;
     let record = receipt.record();
+    if record.authority_incarnation != settled.incarnation {
+        return Err(Box::new(error(
+            iq,
+            service_unavailable_iq_error("The Space is unavailable."),
+        )));
+    }
     if let Some(fence) = gate.fence() {
         fence.wake();
     }
@@ -234,14 +313,43 @@ pub(super) async fn set_space_membership(
         acknowledged,
     );
     if matches!(activated, Ok(true)) && acknowledged.is_ok_and(|reading| reading.acknowledged()) {
-        build_pubsub_success(iq)
+        settled.generation = record.generation;
+        Ok(settled)
     } else {
-        error(
+        Err(Box::new(error(
             iq,
             resource_constraint_iq_error(
                 "The membership change was recorded and is awaiting confirmation; retry.",
             ),
-        )
+        )))
+    }
+}
+
+fn membership_mutation_error(iq: &Iq, failure: HostGrantError) -> Iq {
+    match failure {
+        HostGrantError::InitiatorNotAuthorized | HostGrantError::Issuance(_) => {
+            build_pubsub_error(iq, PubSubError::Forbidden)
+        }
+        HostGrantError::InvalidSpaceMembershipBatch => {
+            build_pubsub_error(iq, PubSubError::BadRequest)
+        }
+        HostGrantError::StaleGeneration { .. }
+        | HostGrantError::GrantLimit
+        | HostGrantError::Busy => error(
+            iq,
+            resource_constraint_iq_error("Space membership could not be changed; retry."),
+        ),
+        HostGrantError::UnknownScope | HostGrantError::SpaceNotBindable => error(
+            iq,
+            service_unavailable_iq_error("The Space is unavailable."),
+        ),
+        other => {
+            tracing::warn!(
+                kind = other.kind(),
+                "Space membership outcome could not be verified"
+            );
+            build_pubsub_error(iq, PubSubError::InternalServerError)
+        }
     }
 }
 

@@ -24,10 +24,10 @@ use waddle_xmpp::pubsub::Affiliation;
 
 use super::enrolled::EnrolledSet;
 use super::error::HostGrantError;
-use super::issuance::IssuanceBasis;
+use super::issuance::{IssuanceBasis, IssuancePolicy};
 use super::model::{
     GrantGeneration, GrantSubject, RoomAffiliation, ScopeKey, ScopeLifecycleId,
-    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+    SpaceAffiliationChange, SpaceMembership, HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
 };
 use super::policy::{grant_allows, honoured_affiliation, HostGrantAction};
 use super::principal::{PrincipalEvidence, PrincipalPolicy};
@@ -38,6 +38,8 @@ use super::store::{
 };
 use crate::db::Transaction;
 
+pub(super) const MAX_SPACE_AFFILIATION_CHANGES: usize = 64;
+
 pub(super) struct SpaceStanding {
     pub lifecycle: ScopeLifecycleId,
     pub generation: GrantGeneration,
@@ -46,6 +48,7 @@ pub(super) struct SpaceStanding {
     pub recorded: Affiliation,
     pub effective: Affiliation,
     pub issuance_basis: IssuanceBasis,
+    projection_pending: bool,
 }
 
 /// The effective affiliations and exact scope generation read for the owner.
@@ -81,54 +84,17 @@ impl HostGrantStore {
         let Some(standing) = space_standing_in_tx(&mut tx, key, owner, attached).await? else {
             return Ok(None);
         };
-        if standing.recorded != Affiliation::Owner
-            || standing.effective != Affiliation::Owner
-            || standing.issuance_basis != IssuanceBasis::Local
-        {
+        if !standing.is_local_owner() {
             return Ok(None);
         }
-        let mut rows = tx
-            .query(
-                "SELECT subject_jid, affiliation, effective_affiliation, changed_generation
-               FROM host_grant_space_affiliations WHERE lifecycle_id = ?
-              ORDER BY subject_jid LIMIT ?",
-                crate::db_params![
-                    standing.lifecycle.to_storage(),
-                    i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1)
-                        .expect("bounded Space grants"),
-                ],
-            )
-            .await?;
-        let mut affiliations = Vec::new();
-        let mut rows_seen = 0;
-        while let Some(row) = rows.next().await? {
-            rows_seen += 1;
-            if rows_seen > HOST_GRANT_SCOPE_MAX_GRANT_ROWS {
-                return Err(corrupt("Space affiliation count"));
-            }
-            let subject = GrantSubject::from_storage(&row.get::<String>(0)?)
-                .ok_or(corrupt("Space affiliation subject"))?;
-            let recorded = row
-                .get::<String>(1)?
-                .parse::<Affiliation>()
-                .map_err(|_| corrupt("Space affiliation"))?;
-            let effective = row
-                .get::<String>(2)?
-                .parse::<Affiliation>()
-                .map_err(|_| corrupt("effective Space affiliation"))?;
-            GrantGeneration::new(row.get::<i64>(3)?)
-                .filter(|generation| *generation <= standing.generation)
-                .ok_or(corrupt("Space affiliation generation"))?;
-            let current = if recorded == Affiliation::Outcast {
-                Affiliation::Outcast
-            } else {
-                effective
-            };
-            if current != Affiliation::None {
-                affiliations.push((subject.jid().clone(), current));
-            }
-        }
-        drop(rows);
+        let affiliations = stored_space_affiliations(&mut tx, &standing)
+            .await?
+            .into_iter()
+            .filter_map(|(subject, roles)| {
+                let current = roles.current();
+                (current != Affiliation::None).then_some((subject, current))
+            })
+            .collect();
         tx.rollback().await?;
         Ok(Some(SpaceAffiliationListing {
             lifecycle: standing.lifecycle,
@@ -136,6 +102,178 @@ impl HostGrantStore {
             rows: affiliations,
         }))
     }
+
+    /// Classify requested changes against one fully projected canonical generation.
+    /// The writer must use this lifecycle and generation as its compare-and-set.
+    pub async fn plan_space_affiliation_changes(
+        &self,
+        key: &ScopeKey,
+        owner: &GrantSubject,
+        attached: &AuthorityBinding,
+        policy: &IssuancePolicy,
+        requested: &[(BareJid, Affiliation)],
+    ) -> Result<Option<SpaceAffiliationPlan>, HostGrantError> {
+        if requested.is_empty() || requested.len() > MAX_SPACE_AFFILIATION_CHANGES {
+            return Err(HostGrantError::InvalidSpaceMembershipBatch);
+        }
+        let mut targets = BTreeMap::new();
+        for (jid, affiliation) in requested {
+            if CanonicalBareJid::new(jid.clone()).is_err()
+                || targets.insert(jid.clone(), *affiliation).is_some()
+            {
+                return Err(HostGrantError::InvalidSpaceMembershipBatch);
+            }
+        }
+        let mut tx = self.begin_interactive_read().await?;
+        let Some(standing) = space_standing_in_tx(&mut tx, key, owner, attached).await? else {
+            return Ok(None);
+        };
+        if !standing.is_local_owner()
+            || !matches!(
+                policy.check(owner, RoomAffiliation::Member),
+                Ok(IssuanceBasis::Local)
+            )
+        {
+            return Ok(None);
+        }
+        // Activation can change effective affiliations within one generation.
+        if standing.projection_pending {
+            return Err(HostGrantError::Busy);
+        }
+        let current = stored_space_affiliations(&mut tx, &standing)
+            .await?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let mut changes = Vec::new();
+        let mut refused = Vec::new();
+        for (jid, affiliation) in targets {
+            let roles = current.get(&jid).copied().unwrap_or_default();
+            if let Some(change) = plan_space_affiliation_change(&jid, affiliation, roles, policy) {
+                changes.push(change);
+            } else {
+                refused.push((jid, roles.current()));
+            }
+        }
+        tx.rollback().await?;
+        Ok(Some(SpaceAffiliationPlan {
+            lifecycle: standing.lifecycle,
+            generation: standing.generation,
+            changes,
+            refused,
+        }))
+    }
+}
+
+/// An owner's requested changes and refused original affiliations at one generation.
+#[derive(Clone, Debug)]
+pub struct SpaceAffiliationPlan {
+    pub lifecycle: ScopeLifecycleId,
+    pub generation: GrantGeneration,
+    pub changes: Vec<SpaceAffiliationChange>,
+    pub refused: Vec<(BareJid, Affiliation)>,
+}
+
+impl SpaceStanding {
+    fn is_local_owner(&self) -> bool {
+        self.recorded == Affiliation::Owner
+            && self.effective == Affiliation::Owner
+            && self.issuance_basis == IssuanceBasis::Local
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StoredSpaceAffiliation {
+    recorded: Affiliation,
+    effective: Affiliation,
+}
+
+impl Default for StoredSpaceAffiliation {
+    fn default() -> Self {
+        Self {
+            recorded: Affiliation::None,
+            effective: Affiliation::None,
+        }
+    }
+}
+
+impl StoredSpaceAffiliation {
+    fn current(self) -> Affiliation {
+        if self.recorded == Affiliation::Outcast {
+            Affiliation::Outcast
+        } else {
+            self.effective
+        }
+    }
+}
+
+fn plan_space_affiliation_change(
+    jid: &BareJid,
+    requested: Affiliation,
+    roles: StoredSpaceAffiliation,
+    policy: &IssuancePolicy,
+) -> Option<SpaceAffiliationChange> {
+    if !matches!(roles.recorded, Affiliation::None | Affiliation::Member)
+        || !matches!(roles.effective, Affiliation::None | Affiliation::Member)
+    {
+        return None;
+    }
+    let subject = GrantSubject::new(jid.clone()).ok()?;
+    let affiliation = match requested {
+        Affiliation::Member => {
+            policy.check(&subject, RoomAffiliation::Member).ok()?;
+            SpaceMembership::Member
+        }
+        Affiliation::None => SpaceMembership::None,
+        _ => return None,
+    };
+    Some(SpaceAffiliationChange {
+        subject,
+        affiliation,
+    })
+}
+
+async fn stored_space_affiliations(
+    tx: &mut Transaction<'_>,
+    standing: &SpaceStanding,
+) -> Result<Vec<(BareJid, StoredSpaceAffiliation)>, HostGrantError> {
+    let mut rows = tx
+        .query(
+            "SELECT subject_jid, affiliation, effective_affiliation, changed_generation
+               FROM host_grant_space_affiliations WHERE lifecycle_id = ?
+              ORDER BY subject_jid LIMIT ?",
+            crate::db_params![
+                standing.lifecycle.to_storage(),
+                i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1).expect("bounded Space grants"),
+            ],
+        )
+        .await?;
+    let mut affiliations = Vec::new();
+    while let Some(row) = rows.next().await? {
+        if affiliations.len() == HOST_GRANT_SCOPE_MAX_GRANT_ROWS {
+            return Err(corrupt("Space affiliation count"));
+        }
+        let subject = GrantSubject::from_storage(&row.get::<String>(0)?)
+            .ok_or(corrupt("Space affiliation subject"))?;
+        let recorded = row
+            .get::<String>(1)?
+            .parse::<Affiliation>()
+            .map_err(|_| corrupt("Space affiliation"))?;
+        let effective = row
+            .get::<String>(2)?
+            .parse::<Affiliation>()
+            .map_err(|_| corrupt("effective Space affiliation"))?;
+        GrantGeneration::new(row.get::<i64>(3)?)
+            .filter(|generation| *generation <= standing.generation)
+            .ok_or(corrupt("Space affiliation generation"))?;
+        affiliations.push((
+            subject.jid().clone(),
+            StoredSpaceAffiliation {
+                recorded,
+                effective,
+            },
+        ));
+    }
+    Ok(affiliations)
 }
 
 async fn space_standing_in_tx(
@@ -193,6 +331,7 @@ async fn space_standing_in_tx(
             recorded,
             effective,
             issuance_basis,
+            projection_pending: scope.projection_pending(),
         }),
     )
 }

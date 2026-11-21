@@ -1313,7 +1313,9 @@ impl HostGrantStore {
         command: &super::SetSpaceAffiliations,
         policy: &IssuancePolicy,
     ) -> Result<MutationReceipt, HostGrantError> {
-        if command.changes.is_empty() || command.changes.len() > 64 {
+        if command.changes.is_empty()
+            || command.changes.len() > super::standing::MAX_SPACE_AFFILIATION_CHANGES
+        {
             return Err(HostGrantError::InvalidSpaceMembershipBatch);
         }
         if policy.check(&command.initiator, RoomAffiliation::Member)? != IssuanceBasis::Local {

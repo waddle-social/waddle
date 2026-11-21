@@ -162,7 +162,9 @@ pub use runtime_attach::{
     verification_retried, GateReadiness, GateState, HostGrantAttachment, HostGrantAttachmentGate,
     ReplicaFailure, INCOMPLETE_READINESS_GRACE, MAX_INCOMPLETE_PASSES, REVERIFY_INTERVAL,
 };
-pub use standing::{RoomBinding, RoomGrants, RoomLookup, SpaceAffiliationListing};
+pub use standing::{
+    RoomBinding, RoomGrants, RoomLookup, SpaceAffiliationListing, SpaceAffiliationPlan,
+};
 pub(crate) use store::SPACE_BOOKMARK_RESTORE_LOCK;
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};
