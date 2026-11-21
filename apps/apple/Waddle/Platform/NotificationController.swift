@@ -22,6 +22,8 @@ final class NotificationController: NSObject {
     /// the richer local XMPP notification.
     var hasLiveSession: ((BareJID) -> Bool)?
     var onAuthorizationResult: ((Bool) -> Void)?
+    var hasLivePushSession: (@MainActor (PushRegistrationStore.Owner) -> Bool)?
+    var onPushAction: (@MainActor (PushRegistrationStore.Owner, AppState.NotificationAction) async -> Void)?
 
     private let center = UNUserNotificationCenter.current()
     private var hasRequestedAuthorization = false
@@ -172,14 +174,14 @@ final class NotificationController: NSObject {
 
     /// The account and conversation a tapped notification leads to: the
     /// keys a local alert carries, else the routing object of an APNs push.
-    nonisolated private static func target(from userInfo: [AnyHashable: Any]) -> (BareJID, ConversationID)? {
+    nonisolated static func target(from userInfo: [AnyHashable: Any]) -> (account: BareJID, conversation: ConversationID, owner: PushRegistrationStore.Owner?)? {
         if let account = account(from: userInfo), let conversation = conversation(from: userInfo) {
-            return (account, conversation)
+            return (account, conversation, nil)
         }
         guard let route = pushRoute(from: userInfo),
-              let account = PushRegistrationStore.account(forNode: route.node)
+              let owner = PushRegistrationStore.account(forNode: route.node)
         else { return nil }
-        return (account, route.conversation)
+        return (owner.account, route.conversation, owner)
     }
 
     nonisolated private static func pushRoute(from userInfo: [AnyHashable: Any]) -> PushRoute? {
@@ -206,9 +208,11 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         if notification.request.trigger is UNPushNotificationTrigger {
-            let account = Self.target(from: notification.request.content.userInfo)?.0
+            let target = Self.target(from: notification.request.content.userInfo)
             let hasLiveSession = await MainActor.run {
-                self.isAppActive && account.map { self.hasLiveSession?($0) == true } == true
+                guard self.isAppActive, let target else { return false }
+                if let owner = target.owner { return self.hasLivePushSession?(owner) == true }
+                return self.hasLiveSession?(target.account) == true
             }
             // The matching live XMPP session posts a richer local alert for
             // messages it receives. When that session is absent, keep the
@@ -232,9 +236,21 @@ extension NotificationController: UNUserNotificationCenterDelegate {
             return
         }
         guard let target = Self.target(from: userInfo) else { return }
-        let (account, conversation) = target
+        let (account, conversation, owner) = target
         let action = response.actionIdentifier
         let text = (response as? UNTextInputNotificationResponse)?.userText
+        if let owner {
+            let pushAction: AppState.NotificationAction
+            switch action {
+            case Identifier.reply:
+                guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                pushAction = .reply(conversation, text)
+            case Identifier.markRead: pushAction = .markRead(conversation)
+            default: pushAction = .open(conversation)
+            }
+            await onPushAction?(owner, pushAction)
+            return
+        }
         await MainActor.run {
             switch action {
             case Identifier.reply:

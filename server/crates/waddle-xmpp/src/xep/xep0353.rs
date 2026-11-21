@@ -21,8 +21,8 @@
 //!   the [`Reason`-into-`Element`] conversion (XEP-0353 §3.5 SHOULD).
 
 use minidom::Element;
-use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
-use xmpp_parsers::message::Message;
+use xmpp_parsers::jingle::{Reason as JingleReason, ReasonElement, SessionId};
+use xmpp_parsers::message::{Message, MessageType};
 
 use super::xep_waddle_call_thread::CallThreadMedia;
 pub use xmpp_parsers::jingle_message::JingleMI;
@@ -94,6 +94,64 @@ pub fn jmi_propose(message: &Message) -> Option<(SessionId, CallThreadMedia)> {
         video: false,
     });
     Some((SessionId(sid.to_owned()), media))
+}
+
+/// Recognize a well-formed caller cancellation, excluding glare tie-breaking.
+/// A JMI message contains one action; a retract may carry an optional
+/// XEP-0166 reason. A tie-breaking retract joins the peer's call instead
+/// of representing a missed call (XEP-0353 §4.1).
+pub fn jmi_retract(message: &Message) -> Option<SessionId> {
+    if message.type_ != MessageType::Chat {
+        return None;
+    }
+    let mut actions = message
+        .payloads
+        .iter()
+        .filter(|payload| payload.ns() == NS_JINGLE_MESSAGE);
+    let retract = actions.next()?;
+    if actions.next().is_some() || !retract.is("retract", NS_JINGLE_MESSAGE) {
+        return None;
+    }
+    let sid = retract.attr("id").filter(|sid| !sid.is_empty())?;
+    if retract
+        .attrs()
+        .iter()
+        .any(|((namespace, name), _)| (namespace.as_ref(), name.as_ref()) != ("", "id"))
+        || !retract.text().trim().is_empty()
+    {
+        return None;
+    }
+    let mut reason_seen = false;
+    for child in retract.children() {
+        if !child.is("reason", NS_JINGLE)
+            || reason_seen
+            || ReasonElement::try_from(child.clone()).is_err()
+        {
+            return None;
+        }
+        reason_seen = true;
+    }
+    Some(SessionId(sid.to_owned()))
+}
+
+/// Recognize archived evidence that a call has an outcome. Unlike the
+/// cancellation classifier, this accepts action children such as reasons
+/// and glare tie-breaking: those still resolve the original proposal.
+pub fn jmi_call_outcome(message: &Message) -> Option<SessionId> {
+    message.payloads.iter().find_map(|payload| {
+        if payload.ns() != NS_JINGLE_MESSAGE
+            || !matches!(
+                payload.name(),
+                "proceed" | "accept" | "reject" | "finish" | "retract"
+            )
+        {
+            return None;
+        }
+        payload
+            .attr("id")
+            .filter(|id| !id.is_empty())
+            .map(|id| SessionId(id.to_owned()))
+    })
 }
 
 /// Recognize a bodyless message with a top-level JMI `retract`, `proceed`,
@@ -206,6 +264,47 @@ pub fn build_finish(sid: SessionId, reason: Option<JingleReason>) -> minidom::El
 mod tests {
     use super::*;
     use minidom::Element;
+
+    #[test]
+    fn call_outcomes_include_actions_with_reason_and_tie_break_children() {
+        for name in ["proceed", "accept", "reject", "finish", "retract"] {
+            let mut message = Message::new(None::<jid::Jid>);
+            message.payloads.push(
+                Element::builder(name, NS_JINGLE_MESSAGE)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call")
+                    .append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build())
+                    .append(Element::builder("reason", NS_JINGLE).build())
+                    .build(),
+            );
+            assert_eq!(
+                jmi_call_outcome(&message),
+                Some(SessionId("call".into())),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_outcomes_require_top_level_action_namespace_and_nonempty_id() {
+        for payload in [
+            Element::builder("reject", NS_JINGLE_MESSAGE).build(),
+            Element::builder("retract", NS_JINGLE_MESSAGE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
+                .build(),
+            Element::builder("reject", NS_JINGLE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call")
+                .build(),
+            build_propose(SessionId("call".into()), CallOffer::audio_only()),
+            build_ringing(SessionId("call".into())),
+            Element::builder("wrapper", NS_JINGLE_MESSAGE)
+                .append(Element::from(build_reject(SessionId("call".into()))))
+                .build(),
+        ] {
+            let mut message = Message::new(None::<jid::Jid>);
+            message.payloads.push(payload);
+            assert!(jmi_call_outcome(&message).is_none());
+        }
+    }
 
     #[test]
     fn bodyless_jmi_signals_include_each_recognized_element() {

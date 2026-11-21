@@ -6,6 +6,7 @@ struct RecipientResultsSection: View {
     let typedAddress: BareJID?
     let search: UserSearchState
     let tokens: [RecipientToken]
+    var emptyMessage = "No people found. You can also type a full address."
     let onToggle: (RecipientToken) -> Void
 
     var body: some View {
@@ -41,7 +42,7 @@ struct RecipientResultsSection: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         } else if search.hasSearched && search.results.isEmpty && typedAddress == nil {
-            Text("No people found. You can also type a full address.")
+            Text(emptyMessage)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }

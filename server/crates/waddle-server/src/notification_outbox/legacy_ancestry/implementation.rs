@@ -599,6 +599,7 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn source_matches(
         NotificationClass::DirectMessage
             | NotificationClass::DirectMessageMention
             | NotificationClass::Call
+            | NotificationClass::MissedCall
     ) {
         if message.type_ == xmpp_parsers::message::MessageType::Groupchat {
             return Ok(false);

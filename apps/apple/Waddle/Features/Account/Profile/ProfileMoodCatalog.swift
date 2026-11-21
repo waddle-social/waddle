@@ -1,18 +1,6 @@
 import Foundation
 import WaddleKit
 
-/// A mood offered in the profile picker.
-struct ProfileMoodOption: Identifiable, Hashable, Sendable {
-    /// XEP-0107 mood element name.
-    let value: String
-    /// Graphical representation, as XEP-0107 §i18n leaves presentation to
-    /// the receiving application.
-    let emoji: String
-
-    var id: String { value }
-    var title: String { ProfileMoodCatalog.title(for: value) }
-}
-
 /// XEP-0107 User Mood vocabulary. The schema defines a closed set of mood
 /// elements, so only these values may be published.
 enum ProfileMoodCatalog {
@@ -35,43 +23,47 @@ enum ProfileMoodCatalog {
     ]
 
     /// The curated moods shown in the picker, in display order.
-    static let curated: [ProfileMoodOption] = [
-        ProfileMoodOption(value: "happy", emoji: "😊"),
-        ProfileMoodOption(value: "excited", emoji: "🤩"),
-        ProfileMoodOption(value: "relaxed", emoji: "😌"),
-        ProfileMoodOption(value: "calm", emoji: "🧘"),
-        ProfileMoodOption(value: "curious", emoji: "🧐"),
-        ProfileMoodOption(value: "creative", emoji: "🎨"),
-        ProfileMoodOption(value: "thankful", emoji: "🙏"),
-        ProfileMoodOption(value: "playful", emoji: "😜"),
-        ProfileMoodOption(value: "proud", emoji: "😎"),
-        ProfileMoodOption(value: "hopeful", emoji: "🤞"),
-        ProfileMoodOption(value: "contemplative", emoji: "🤔"),
-        ProfileMoodOption(value: "surprised", emoji: "😮"),
-        ProfileMoodOption(value: "tired", emoji: "🥱"),
-        ProfileMoodOption(value: "sleepy", emoji: "😴"),
-        ProfileMoodOption(value: "stressed", emoji: "😫"),
-        ProfileMoodOption(value: "anxious", emoji: "😰"),
-        ProfileMoodOption(value: "sad", emoji: "😢"),
-        ProfileMoodOption(value: "sick", emoji: "🤒"),
-        ProfileMoodOption(value: "hungry", emoji: "😋"),
-        ProfileMoodOption(value: "grumpy", emoji: "😠"),
+    static let curated: [ProfileChoice] = [
+        choice("happy", "😊"),
+        choice("excited", "🤩"),
+        choice("relaxed", "😌"),
+        choice("calm", "🧘"),
+        choice("curious", "🧐"),
+        choice("creative", "🎨"),
+        choice("thankful", "🙏"),
+        choice("playful", "😜"),
+        choice("proud", "😎"),
+        choice("hopeful", "🤞"),
+        choice("contemplative", "🤔"),
+        choice("surprised", "😮"),
+        choice("tired", "🥱"),
+        choice("sleepy", "😴"),
+        choice("stressed", "😫"),
+        choice("anxious", "😰"),
+        choice("sad", "😢"),
+        choice("sick", "🤒"),
+        choice("hungry", "😋"),
+        choice("grumpy", "😠"),
     ]
+
+    private static func choice(_ value: String, _ emoji: String) -> ProfileChoice {
+        ProfileChoice(value: value, emoji: emoji, title: title(for: value))
+    }
 
     static func isValid(_ value: String) -> Bool {
         vocabulary.contains(value)
     }
 
     /// The curated option for `value`, if it is one.
-    static func option(for value: String) -> ProfileMoodOption? {
+    static func option(for value: String) -> ProfileChoice? {
         curated.first { $0.value == value }
     }
 
     /// The curated moods, preceded by `current` when it is a valid mood
     /// outside the curated set (for example one set from another client).
-    static func options(including current: String?) -> [ProfileMoodOption] {
+    static func options(including current: String?) -> [ProfileChoice] {
         guard let current, isValid(current), option(for: current) == nil else { return curated }
-        return [ProfileMoodOption(value: current, emoji: emoji(for: current))] + curated
+        return [choice(current, emoji(for: current))] + curated
     }
 
     /// Emoji for any mood; moods outside the curated set get a neutral glyph.

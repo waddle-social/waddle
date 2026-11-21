@@ -193,10 +193,19 @@ final class ComposerModel {
         return .send(draft)
     }
 
+    /// A sticker, in reply to the current reply target and in `thread`.
+    /// The draft text and pending attachments stay in the composer.
+    func takeStickerSubmission(_ sticker: Sticker, from pack: StickerPack, thread: String?) -> ComposerSubmission {
+        defer { reply = nil }
+        return .sticker(sticker, pack, reply: reply, thread: thread)
+    }
+
     func perform(_ submission: ComposerSubmission, session: SessionCoordinator, in conversation: ConversationID) async {
         switch submission {
         case let .send(draft):
             await session.send(draft, in: conversation)
+        case let .sticker(sticker, pack, reply, thread):
+            await session.send(sticker, from: pack, in: conversation, reply: reply, thread: thread)
         case let .edit(item, draft):
             let succeeded = await session.edit(item, draft: draft)
             if !succeeded {
@@ -218,6 +227,7 @@ final class ComposerModel {
 /// What one press of Send does.
 enum ComposerSubmission {
     case send(Draft)
+    case sticker(Sticker, StickerPack, reply: ReplyContext?, thread: String?)
     /// XEP-0308 correction of `item` to the draft's text and mentions.
     case edit(TimelineItem, Draft)
 }

@@ -179,7 +179,8 @@ pub(crate) async fn execute_with_received_at(
             .await,
         ),
         // Ordinary pending delivery and its receipts belong to execute_uow.
-        ExternalDeliveryEffect::QueueOfflineDelivery { .. } => EffectOutcome::Unavailable,
+        ExternalDeliveryEffect::QueueOfflineDelivery { .. }
+        | ExternalDeliveryEffect::NotificationCandidate { .. } => EffectOutcome::Unavailable,
     }
 }
 

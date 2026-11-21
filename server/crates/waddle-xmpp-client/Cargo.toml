@@ -33,6 +33,7 @@ minidom = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+urlencoding = "2.1"
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "ErrorEvent", "Event", "MessageEvent", "WebSocket", "console"], optional = true }

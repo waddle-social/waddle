@@ -1,6 +1,6 @@
 # Canonical PubSub admission for enrolled Spaces
 
-**Status:** PostgreSQL migration 2015 adds Space bindings and affiliations.
+**Status:** PostgreSQL migration 2016 adds Space bindings and affiliations.
 An operator can bind the enrolled node and stage an owner grant. The verified
 scope marker activates the grant. The protocol admission and ongoing
 affiliation mutation paths below are proposed.

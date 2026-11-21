@@ -99,6 +99,12 @@ public final class UnreadStore {
         threadCounts[thread] = nil
     }
 
+    /// Forgets a room that is gone, with its threads.
+    public func clearRoom(_ room: BareJID) {
+        clear(.room(room))
+        threadCounts = threadCounts.filter { $0.key.room != room }
+    }
+
     public func clearAll() {
         counts.removeAll()
         mentions.removeAll()

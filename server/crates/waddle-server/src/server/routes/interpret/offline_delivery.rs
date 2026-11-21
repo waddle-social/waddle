@@ -12,6 +12,7 @@ use crate::notification_outbox::DndState;
 use crate::notification_outbox::NoopDndReader;
 use crate::notification_outbox::NoopRoomPolicy;
 use crate::notification_outbox::NotificationCandidateInsertOutcome;
+use crate::notification_outbox::NotificationClass;
 use crate::notification_outbox::PushEvalCaches;
 use crate::notification_outbox::PushEvalDeps;
 use crate::notification_outbox::PushEvalStage;
@@ -19,6 +20,7 @@ use crate::notification_outbox::RoomPolicyCacheEntry;
 use crate::notification_outbox::T1PushDispatchOutcome;
 use crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS;
 use std::collections::BTreeMap;
+use waddle_xmpp::telemetry::attributes::PushSuppressReason;
 
 pub(super) async fn queue_offline_delivery(
     deps: &Deps<'_>,
@@ -36,6 +38,83 @@ pub(super) async fn queue_offline_delivery(
         outbound_sequence: None,
     };
     apply_offline_delivery_row(deps, row, original_message).await;
+}
+
+/// The selected recipient pass owns one call or missed-call candidate for all resources.
+pub(super) async fn prepare_live_call_notification(
+    deps: &Deps<'_>,
+    recipient: &BareJid,
+    message: &Message,
+) {
+    if !matches!(
+        crate::notification_outbox::direct_message_intrinsics(message, recipient).0,
+        crate::notification_outbox::NotificationClass::Call
+            | crate::notification_outbox::NotificationClass::MissedCall
+    ) {
+        return;
+    }
+    let by = Jid::from(recipient.clone());
+    let Some(id) = waddle_xmpp::xep::extract_stanza_id_by(message, &by) else {
+        return;
+    };
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(id, by);
+    // Canonicalization stamps even transient messages. Require the recipient's
+    // captured archive write, not just a stamp that may name no MAM row.
+    let archived_at = deps.ingress_effect_capture.as_ref().and_then(|capture| {
+        capture
+            .snapshot()
+            .intents
+            .iter()
+            .find_map(|intent| match intent {
+                IngressEffectIntent::ArchiveAuthoritative {
+                    archive,
+                    stanza_id,
+                    archived_at,
+                    ..
+                } if archive == recipient && stanza_id == &archive_stanza_id => Some(*archived_at),
+                _ => None,
+            })
+    });
+    let Some(archived_at) = archived_at else {
+        return;
+    };
+    let received_at = deps
+        .ingress_append_context
+        .as_ref()
+        .and_then(|context| context.received_at)
+        .unwrap_or(archived_at);
+    match prepare_offline_notification(
+        deps,
+        recipient,
+        Some(&archive_stanza_id),
+        message,
+        received_at,
+    )
+    .await
+    {
+        PreparedOfflineNotification::Prepared(candidate) => {
+            deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                owner: recipient.clone(),
+                mutation:
+                    waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                        conversation: recipient.clone(),
+                        archive_stanza_id,
+                        outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                    },
+            });
+            super::effects::delivery::record(
+                deps,
+                super::effects::delivery::ExternalDeliveryEffect::NotificationCandidate {
+                    candidate,
+                },
+            );
+        }
+        PreparedOfflineNotification::Suppressed => {}
+        PreparedOfflineNotification::RetryLater => {
+            warn!(%recipient, "live call notification preparation failed; no pending row anchors a retry");
+            waddle_xmpp::telemetry::reliability::increment_push_live_call_preparation_failed();
+        }
+    }
 }
 
 /// Capture the frozen row and notification obligations for the ingress arm.
@@ -85,6 +164,7 @@ pub(super) async fn apply_offline_delivery_row(
         &recipient,
         notification_archive_stanza_id.as_ref(),
         &original_message,
+        row.original_receipt_at,
     )
     .await;
     if matches!(
@@ -253,6 +333,7 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
     state: &WebSocketState,
     recipient: &BareJid,
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    received_at: chrono::DateTime<chrono::Utc>,
 ) -> NotificationCandidateQueueOutcome {
     let archive_bare = archive_stanza_id.by.to_bare();
     let archived = match state
@@ -303,6 +384,7 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
         &sender_jid,
         archive_stanza_id,
         &original_message,
+        received_at,
     )
     .await
 }
@@ -337,6 +419,7 @@ async fn recover_canonical_pending_notification(
             sender,
             stamp,
             message,
+            row.original_receipt_at,
         )
         .await;
         let policy = match prepared {
@@ -404,6 +487,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     sender_jid: &Jid,
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
+    received_at: chrono::DateTime<chrono::Utc>,
 ) -> NotificationCandidateQueueOutcome {
     let prepared = prepare_notification_candidate_for_message(
         state,
@@ -412,6 +496,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         sender_jid,
         archive_stanza_id,
         original_message,
+        received_at,
     )
     .await;
     insert_prepared_notification(Some(state), prepared).await
@@ -424,8 +509,52 @@ async fn prepare_notification_candidate_for_message(
     sender_jid: &Jid,
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
+    received_at: chrono::DateTime<chrono::Utc>,
 ) -> PreparedOfflineNotification {
-    if waddle_xmpp::xep::xep0353::is_bodyless_jmi_signal(original_message) {
+    let retract = original_message
+        .bodies
+        .is_empty()
+        .then(|| waddle_xmpp::xep::xep0353::jmi_retract(original_message))
+        .flatten();
+    if let Some(sid) = retract {
+        match state
+            .deps
+            .protocol
+            .notification_outbox
+            .has_recent_call_candidate(recipient, sender, &sid, received_at)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return PreparedOfflineNotification::Suppressed,
+            Err(error) => {
+                warn!(%recipient, %sender, %error, "missed-call evidence lookup failed; deferring candidate");
+                return PreparedOfflineNotification::RetryLater;
+            }
+        }
+        match crate::notification_outbox::call_outcome_recorded(
+            state.deps.protocol.mam_storage.as_ref(),
+            recipient,
+            sender,
+            &sid,
+            // The eligible invitation can predate this retract by the full
+            // missed-call window; include its preceding 60 seconds of
+            // evidence, and a minute after for archive clock skew.
+            (received_at
+                - chrono::Duration::seconds(
+                    crate::notification_outbox::MISSED_CALL_WINDOW_SECONDS + 60,
+                ))..(received_at + chrono::Duration::seconds(60)),
+            crate::notification_outbox::OutcomeAuthor::Callee,
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => return PreparedOfflineNotification::Suppressed,
+            Err(error) => {
+                warn!(%recipient, %sender, %error, "callee call-outcome lookup failed; deferring candidate");
+                return PreparedOfflineNotification::RetryLater;
+            }
+        }
+    } else if waddle_xmpp::xep::xep0353::is_bodyless_jmi_signal(original_message) {
         return PreparedOfflineNotification::Suppressed;
     }
     let candidate = match crate::notification_outbox::direct_candidate_from_envelope(
@@ -546,6 +675,40 @@ async fn prepare_notification_candidate_for_message(
             return PreparedOfflineNotification::RetryLater;
         }
     }
+    if candidate.class() == NotificationClass::Call {
+        match state
+            .deps
+            .protocol
+            .notification_outbox
+            .call_push_rate_limited(recipient, sender, archive_stanza_id, received_at)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                let reason = PushSuppressReason::WaddleCallRateLimit;
+                info!(
+                    recipient = %candidate.recipient_bare_jid(),
+                    conversation = %candidate.conversation_jid(),
+                    sender = %sender,
+                    notification_class = candidate.class().as_db_value(),
+                    push_stage = "suppressed",
+                    suppression_reason = reason.as_str(),
+                    "call push rate limit suppressed XEP-0357 candidate; no candidate row persisted"
+                );
+                waddle_xmpp::telemetry::reliability::increment_push_suppressed(reason);
+                return PreparedOfflineNotification::Suppressed;
+            }
+            Err(error) => {
+                warn!(
+                    recipient = %recipient,
+                    sender = %sender,
+                    error = ?error,
+                    "call push rate limit lookup failed; deferring candidate"
+                );
+                return PreparedOfflineNotification::RetryLater;
+            }
+        }
+    }
     PreparedOfflineNotification::Prepared(Box::new(candidate))
 }
 
@@ -596,6 +759,7 @@ async fn prepare_offline_notification(
     recipient: &BareJid,
     archive_stanza_id: Option<&waddle_xmpp_core::xep0359::StanzaId>,
     message: &Message,
+    received_at: chrono::DateTime<chrono::Utc>,
 ) -> PreparedOfflineNotification {
     let Some(archive_stanza_id) = archive_stanza_id else {
         return PreparedOfflineNotification::Suppressed;
@@ -617,6 +781,7 @@ async fn prepare_offline_notification(
         sender_jid,
         archive_stanza_id,
         message,
+        received_at,
     )
     .await
 }
@@ -716,7 +881,7 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
         };
         let outcome = match pending_storage.notification_custody_mode() {
             waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode::CanonicalRequired => recover_canonical_pending_notification(state, &row).await,
-            waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode::NoncanonicalMemory => enqueue_xep0357_notification_candidate_from_committed_archive(state, &row.recipient, archive_stanza_id).await,
+            waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode::NoncanonicalMemory => enqueue_xep0357_notification_candidate_from_committed_archive(state, &row.recipient, archive_stanza_id, row.original_receipt_at).await,
         };
         match outcome {
             NotificationCandidateQueueOutcome::CanonicalCompleted => completed += 1,

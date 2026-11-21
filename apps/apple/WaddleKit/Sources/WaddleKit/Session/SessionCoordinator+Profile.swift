@@ -1,5 +1,15 @@
 import Foundation
 
+/// How many times each part of the profile has been set from this device.
+/// A lookup that began before an edit holds an older value for that part,
+/// and must not put it back.
+struct ProfileEdits: Equatable {
+    var mood = 0
+    var activity = 0
+    var tune = 0
+    var details = 0
+}
+
 extension SessionCoordinator {
     /// A row showing `jid` rendered: look up its XEP-0084 avatar unless a
     /// current one is held. Offline rows wait for the next session, which
@@ -27,15 +37,6 @@ extension SessionCoordinator {
         avatars.set(account.jid, image: nil, id: nil)
     }
 
-    /// RFC 6121 availability with an optional status message.
-    public func setAvailability(_ availability: Availability, statusText: String?) async {
-        let text = statusText?.trimmingCharacters(in: .whitespacesAndNewlines)
-        status.availability = availability
-        status.statusText = (text?.isEmpty ?? true) ? nil : text
-        guard connection == .online else { return }
-        await port.sendPresence(availability, status: status.statusText)
-    }
-
     /// XEP-0107 mood; nil retracts it.
     public func setMood(_ mood: UserMood?) async throws {
         if let mood {
@@ -44,10 +45,94 @@ extension SessionCoordinator {
             try await port.retractMood()
         }
         status.mood = mood
+        profileEdits.mood += 1
     }
 
-    public func loadOwnMood() async {
-        status.mood = try? await port.fetchMood(of: account.jid)
+    /// XEP-0108 activity; nil retracts it.
+    ///
+    /// The account has one activity, and a device in a call uses it to show
+    /// the call (ADR-010). What is published is looked up first, and while
+    /// it shows a call it is left alone: writing over it would end the "in
+    /// a call" mark for everyone. A lookup that fails throws, so nothing
+    /// is written while what is published is unknown. For the same reason
+    /// an activity that would itself show a call is refused: it is a
+    /// call's to publish, and once published it could not be changed here.
+    public func setActivity(_ activity: UserActivity?) async throws {
+        guard activity?.showsACall != true else { throw PortError.invalidRequest }
+        if let published = try await port.fetchOwnActivity(), published.showsACall {
+            status.activity = published
+            throw PortError.rejected
+        }
+        if let activity {
+            try await port.publishActivity(activity)
+        } else {
+            try await port.retractActivity()
+        }
+        status.activity = activity
+        profileEdits.activity += 1
+    }
+
+    /// Looks up the activity the account publishes now. A failed lookup
+    /// leaves what is shown, and so does one overtaken by an edit here.
+    public func refreshOwnActivity() async {
+        let before = profileEdits
+        guard let published = try? await port.fetchOwnActivity() as UserActivity??,
+              profileEdits.activity == before.activity
+        else { return }
+        status.activity = published
+    }
+
+    /// XEP-0118 tune; nil retracts it. A tune with nothing in it means
+    /// "stopped" on the wire (§3.2), so it is refused rather than published.
+    public func setTune(_ tune: UserTune?) async throws {
+        let tune = tune?.cleaned
+        if let tune {
+            guard !tune.isEmpty, tune.hasUsableLink else { throw PortError.invalidRequest }
+            try await port.publishTune(tune)
+        } else {
+            try await port.retractTune()
+        }
+        status.tune = tune
+        profileEdits.tune += 1
+    }
+
+    /// The mood, activity and tune the account shares now. A failed lookup
+    /// leaves what is shown. The editors stay usable while this runs, so a
+    /// part set here in the meantime keeps its new value.
+    public func loadOwnSharedStatus() async {
+        let before = profileEdits
+        guard let shared = try? await port.fetchSharedStatus(of: account.jid) else { return }
+        if profileEdits.mood == before.mood { status.mood = shared.mood }
+        if profileEdits.activity == before.activity { status.activity = shared.activity }
+        if profileEdits.tune == before.tune { status.tune = shared.tune }
+    }
+
+    /// The account's own XEP-0292 details; empty only when it is confirmed
+    /// that none are published. A lookup that fails throws: saving replaces
+    /// every field, so details that could not be read must not be edited.
+    /// Details saved here while the lookup ran are newer than its answer,
+    /// and are what is kept and returned.
+    @discardableResult
+    public func loadOwnDetails() async throws -> ProfileDetails {
+        let before = profileEdits
+        let details = try await port.fetchOwnProfileDetails() ?? ProfileDetails()
+        if let saved = status.details, profileEdits.details != before.details { return saved }
+        status.details = details
+        return details
+    }
+
+    public func saveDetails(_ details: ProfileDetails) async throws {
+        let details = details.cleaned
+        guard details.hasUsableLink else { throw PortError.invalidRequest }
+        try await port.publishProfileDetails(details)
+        status.details = details
+        profileEdits.details += 1
+    }
+
+    /// Someone's details, or nil when they have published none we can read.
+    public func details(of jid: BareJID) async -> ProfileDetails? {
+        guard let details = try? await port.fetchProfileDetails(of: jid), !details.hasNoText else { return nil }
+        return details
     }
 
     /// XEP-0363 slot for an attachment the platform layer then uploads.

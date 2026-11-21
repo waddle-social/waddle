@@ -342,6 +342,10 @@ reliability_counters! {
         "xmpp.user_actor.reaped",
         "{session}",
         "Empty user actors removed by the periodic reaper.";
+    increment increment_push_live_call_preparation_failed,
+        "xmpp.push.live_call_preparation_failed",
+        "{notification}",
+        "Live-recipient call notifications lost at preparation without pending retry custody.";
     increment increment_dnd_projection_read_errored,
         "xmpp.dnd.projection_read_errored",
         "{event}",
@@ -433,6 +437,7 @@ pub fn register_reliability_counters() {
     }
     super::push_pipeline::register_pipeline_stages();
     super::call::register_call_setup_counters();
+    super::call::register_call_client_counters();
     super::call::register_admin_call_failed_counter();
 }
 
@@ -888,7 +893,11 @@ pub fn record_janitor_sweep(janitor: Janitor, outcome: SweepOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::attributes::MetricAttribute;
+    use crate::telemetry::attributes::{
+        ClientCallEndReason, ClientCallPlatform, ClientCallSetupOutcome, MessageKind,
+        MetricAttribute,
+    };
+    use waddle_xmpp_core::waddle_call_lifecycle::CallLifecycleKind;
 
     async fn setup() -> crate::telemetry::test_support::MetricsTestGuard {
         crate::telemetry::test_support::acquire().await
@@ -1438,6 +1447,9 @@ mod tests {
                 "waddle.call.setup.attempted",
                 "waddle.call.setup.ok",
                 "waddle.call.setup.failed",
+                "waddle.call.client.setup",
+                "waddle.call.client.end",
+                "waddle.call.client.kind",
             ])
             .collect()
     }
@@ -1598,6 +1610,69 @@ mod tests {
                 Some(0),
                 "call setup failure reason not registered"
             );
+        }
+        // Inspect actual samples: a filtered counter sum also returns zero
+        // when the instrument exists but the requested series is absent.
+        let client_series_value = |name, required: &[(&str, &str)]| {
+            guard.counter_samples(name).and_then(|samples| {
+                samples.into_iter().find_map(|(value, attributes)| {
+                    (attributes.len() == required.len()
+                        && required.iter().all(|(key, expected)| {
+                            attributes.iter().any(|(k, v)| k == key && v == expected)
+                        }))
+                    .then_some(value)
+                })
+            })
+        };
+        for (name, series_count) in [
+            ("waddle.call.client.setup", 20),
+            ("waddle.call.client.end", 16),
+            ("waddle.call.client.kind", 10),
+        ] {
+            assert_eq!(guard.counter_samples(name).unwrap().len(), series_count);
+        }
+        for platform in ClientCallPlatform::ALL {
+            for outcome in ClientCallSetupOutcome::ALL {
+                assert_eq!(
+                    client_series_value(
+                        "waddle.call.client.setup",
+                        &[
+                            ("platform", platform.value()),
+                            ("setup_outcome", outcome.value())
+                        ]
+                    ),
+                    Some(0),
+                    "client setup platform {platform:?} outcome {outcome:?} not registered"
+                );
+            }
+            for reason in ClientCallEndReason::ALL {
+                assert_eq!(
+                    client_series_value(
+                        "waddle.call.client.end",
+                        &[
+                            ("platform", platform.value()),
+                            ("end_reason", reason.value())
+                        ]
+                    ),
+                    Some(0),
+                    "client end platform {platform:?} reason {reason:?} not registered"
+                );
+            }
+        }
+        for kind in CallLifecycleKind::ALL {
+            for outcome in ClientCallSetupOutcome::ALL {
+                assert_eq!(
+                    client_series_value(
+                        "waddle.call.client.kind",
+                        &[
+                            ("kind", MessageKind::from(kind).value()),
+                            ("setup_outcome", outcome.value())
+                        ]
+                    ),
+                    Some(0),
+                    "client kind {kind:?} outcome {outcome:?} not registered"
+                );
+            }
         }
         for op in crate::telemetry::attributes::AdminOp::ALL {
             assert_eq!(

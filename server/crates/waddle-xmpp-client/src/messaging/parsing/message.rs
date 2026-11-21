@@ -27,6 +27,7 @@ use super::{
     NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_OPENGRAPH_VIDEO, NS_ORIGIN_ID, NS_RDF_SYNTAX,
     NS_REFERENCES, NS_SFS, NS_SIMS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
 };
+use crate::stickers::parse_sticker_marker_pack;
 
 /// Parse an XMPP element into a [`MessagingEvent`], or return `None` if the
 /// element is not a `<message>` or `<presence>`.
@@ -286,7 +287,9 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         };
 
     // XEP-0449: Stickers
-    let is_sticker = el.get_child("sticker", NS_STICKERS).is_some();
+    let sticker_marker = el.get_child("sticker", NS_STICKERS);
+    let is_sticker = sticker_marker.is_some();
+    let sticker_pack = sticker_marker.and_then(parse_sticker_marker_pack);
 
     Some(InboundMessage {
         from,
@@ -331,6 +334,7 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         call_thread_ended,
         safety_scores,
         is_sticker,
+        sticker_pack,
         pin_event,
         extension_envelope,
         extension_body_fallback,

@@ -85,7 +85,7 @@ environment of the owner-phase job and of every server.
   step is finished by the next run with the same epoch (`finished a
   host-grant restore transition ...`);
 - with the recorded epoch, changes nothing, except that it binds the lineage
-  the first time it runs after migration 2003;
+  the first time it runs after migration 2004;
 - with an epoch below the recorded one, or against a database that holds a
   scope and was adopted without a raised epoch, is refused (exit status 4,
   `restore_fence`) and changes nothing.

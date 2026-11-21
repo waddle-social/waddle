@@ -1,8 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// The signed-in user's profile: avatar, availability, status message,
-/// XEP-0107 mood, settings and sign out.
+/// The signed-in user's profile: avatar, details, status, what they share
+/// (mood, activity, tune), settings and sign out.
 ///
 /// iPhone shows it as the "You" tab; iPad and Mac present it as a sheet.
 struct ProfileView: View {
@@ -19,10 +19,11 @@ struct ProfileView: View {
                 ProfileHeader()
                 ProfileAvatarControls()
             }
-            ProfileStatusSection()
-            Section("Mood") {
-                ProfileMoodRow()
+            Section {
+                ProfileDetailsLink()
             }
+            ProfileStatusSection()
+            ProfileSharingSection()
             Section {
                 ProfileSettingsLink()
             }
@@ -42,7 +43,8 @@ struct ProfileView: View {
                 }
             }
         }
-        .task { await session.loadOwnMood() }
+        .task { await session.loadOwnSharedStatus() }
+        .task { _ = try? await session.loadOwnDetails() }
         #if os(macOS)
         .frame(minWidth: 440, idealWidth: 480, minHeight: 560, idealHeight: 640)
         #endif
@@ -51,6 +53,29 @@ struct ProfileView: View {
     /// Only the sheet presentation needs a way out; the phone tab does not.
     private var showsDoneButton: Bool {
         isPresented && navigation.sheet == SheetRoute.profile
+    }
+}
+
+/// Opens the details editor, with the name and pronouns as they stand.
+private struct ProfileDetailsLink: View {
+    @Environment(SessionCoordinator.self) private var session
+
+    var body: some View {
+        NavigationLink {
+            ProfileDetailsEditor()
+        } label: {
+            LabeledContent {
+                Text(summary)
+                    .lineLimit(1)
+            } label: {
+                Label("Your details", systemImage: "person.text.rectangle")
+            }
+        }
+    }
+
+    private var summary: String {
+        guard let details = session.status.details else { return "" }
+        return [details.fullName, details.pronouns].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 

@@ -124,6 +124,13 @@ struct RoomAuthorTests {
         #expect(coordinator.authorJID(of: row(coordinator, "s2")!) == me.jid)
     }
 
+    @Test func roomAssignedNickDecidesOurOccupant() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(selfPresence("alice2", codes: [110, 210])))
+        coordinator.handle(.presence(occupantPresence(me.nick, realJID: dave)))
+        #expect(coordinator.selfOccupant(in: room)?.nick == "alice2")
+    }
+
     @Test func peerOnOurConfiguredNickWithoutARealJIDIsNotUs() {
         let coordinator = coordinator()
         coordinator.handle(.presence(selfPresence("alice2", codes: [110, 210])))

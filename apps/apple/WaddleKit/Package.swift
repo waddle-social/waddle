@@ -3,7 +3,7 @@ import PackageDescription
 
 // WaddleKit is the UI-free core of the Apple apps: typed XMPP identities,
 // the conversation timeline reducer, session stores, the coordinator that
-// routes `XmppPort` events into them, and XEP-0448 file decryption. It never
+// routes `XmppPort` events into them, and XEP-0448 file encryption and decryption. It never
 // imports SwiftUI or the UniFFI bindings. Its one dependency, swift-crypto,
 // re-exports CryptoKit on Apple platforms and is BoringSSL-backed elsewhere,
 // so the package builds and tests on Linux as well as on Apple platforms.

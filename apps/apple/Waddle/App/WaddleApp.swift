@@ -2,14 +2,12 @@ import SwiftUI
 
 @main
 struct WaddleApp: App {
-    @State private var appState = AppState()
+    @State private var appState = AppState.shared
     #if os(iOS)
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #elseif os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #endif
-
-    private static let isHostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     init() {
         HuddleAppearance.apply()
@@ -17,14 +15,13 @@ struct WaddleApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if Self.isHostingTests {
+            if AppState.isHostingTests {
                 // The unit-test bundle runs inside the app: without the root
                 // view the host never restores a session or loads providers.
                 Color.clear
             } else {
                 RootView()
                     .environment(appState)
-                    .onAppear { appDelegate.attach(appState) }
             }
         }
         #if os(macOS)

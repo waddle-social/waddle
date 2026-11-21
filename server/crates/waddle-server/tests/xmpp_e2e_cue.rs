@@ -270,6 +270,10 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
         reason: "Private Waddle MAM extension namespace, not official XEP coverage.",
     },
     FeatureCoverageExemption {
+        feature: "urn:waddle:call-lifecycle:0",
+        reason: "Private Waddle operational report namespace, covered by xep_waddle_call_lifecycle and calls_e2e_ws.",
+    },
+    FeatureCoverageExemption {
         feature: "urn:waddle:transports:livekit:0",
         reason: "Private Waddle Jingle transport namespace, not official XEP coverage.",
     },

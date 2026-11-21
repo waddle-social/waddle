@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use waddle_xmpp::push::apns::{
-    ApnsCollapseId, ApnsDeviceToken, ApnsEnvironment, ApnsExpiration, ApnsOutcome, ApnsPayload,
-    ApnsPayloadError, ApnsPayloadFields, ApnsPriority, ApnsProviderJwt, ApnsProviderTokenSource,
-    ApnsPushType, ApnsRequest, ApnsSender, ApnsTopic, ApnsTransient, ApnsVoipPayload,
-    ApnsVoipPayloadFields,
+    ApnsAlertContent, ApnsCollapseId, ApnsDeviceToken, ApnsEnvironment, ApnsExpiration,
+    ApnsOutcome, ApnsPayload, ApnsPayloadError, ApnsPayloadFields, ApnsPriority, ApnsProviderJwt,
+    ApnsProviderTokenSource, ApnsPushType, ApnsRequest, ApnsSender, ApnsTopic, ApnsTransient,
+    ApnsVoipPayload, ApnsVoipPayloadFields,
 };
 use waddle_xmpp::push::types::TransientFailure;
 use waddle_xmpp::push::Urgency;
@@ -218,6 +218,10 @@ pub(super) async fn dispatch_apns_device(
             item,
             node: job.node,
             badge_count,
+            content: parsed.content.as_ref().map(|content| ApnsAlertContent {
+                sender: &content.sender,
+                body: content.body.as_deref(),
+            }),
         })
         .and_then(|payload| payload.encode())
     } {

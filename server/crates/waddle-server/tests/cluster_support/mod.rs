@@ -729,12 +729,14 @@ pub async fn wait_for_cross_node_stanza(
             "no stanza crossed between the nodes within 30 s"
         );
     }
+    // The sending probe's earlier pings may still be waiting on the other
+    // node, and the server answers the close only after them.
     sender_probe
-        .close()
+        .close_within(Duration::from_secs(30))
         .await
         .expect("close the sending mesh probe");
     recipient_probe
-        .close()
+        .close_within(Duration::from_secs(30))
         .await
         .expect("close the receiving mesh probe");
 }

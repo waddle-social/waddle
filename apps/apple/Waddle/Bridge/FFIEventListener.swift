@@ -48,10 +48,8 @@ final class FFIEventListener: WaddleEventListener {
             // just refuses anything else rather than truncating it.
             guard let owner = FFIInbound.bareJID(jid) else { return nil }
             return .avatarChanged(jid: owner, id: avatarId)
-        case .statusPreferenceChanged:
-            // ADR-010 cross-device manual status: the Apple client does not
-            // advertise its own presence through this bridge yet.
-            return nil
+        case let .statusPreferenceChanged(preference):
+            return .presenceModeChanged(FFIInbound.presenceMode(preference))
         case let .call(event):
             return FFIInbound.callEvent(event).map(XmppEvent.call)
         case let .inboxPush(entry):

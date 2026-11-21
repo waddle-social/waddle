@@ -626,6 +626,46 @@ impl Fixture {
             NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
 
         sqlx::query(&format!(
+            "DROP INDEX {}.idx_notification_candidates_missed_call",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE UNIQUE INDEX idx_notification_candidates_missed_call \
+             ON {}.notification_candidates \
+             (recipient_bare_jid, conversation_jid, call_sid) WHERE class = 'call'",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationOutboxStore::attach_existing(runtime_database.clone()).await {
+            Err(NotificationOutboxRuntimeAttachError::InvalidIndexes {
+                table: "notification_candidates",
+            }) => {}
+            Err(error) => {
+                bail!("missed-call index predicate returned an unexpected error: {error}")
+            }
+            Ok(_) => bail!("attachment accepted the wrong missed-call index predicate"),
+        }
+        sqlx::query(&format!(
+            "DROP INDEX {}.idx_notification_candidates_missed_call",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE UNIQUE INDEX idx_notification_candidates_missed_call \
+             ON {}.notification_candidates \
+             (recipient_bare_jid, conversation_jid, call_sid) WHERE class = 'missed_call'",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        let _after_missed_call_index_cleanup =
+            NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
+
+        sqlx::query(&format!(
             "ALTER TABLE {}.notification_outbox \
              ALTER COLUMN context_xml TYPE text COLLATE \"C\" USING context_xml::text",
             self.target

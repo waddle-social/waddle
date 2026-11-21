@@ -1,0 +1,92 @@
+import Foundation
+import WaddleKit
+
+/// The scripted sticker packs of a `FakePort`.
+@MainActor
+final class FakeStickers {
+    var packs: Result<[StickerPack], PortError> = .success([])
+    var publishResult: Result<Void, PortError> = .success(())
+    var retractResult: Result<Void, PortError> = .success(())
+    /// The id the next publish answers with.
+    var publishedID = "pack-new"
+
+    var packRequests = 0
+    var published: [StickerPackDraft] = []
+    var retracted: [String] = []
+    /// Packs kept somewhere other than the account's own packs.
+    var packsElsewhere: [StickerPackLocation: Result<StickerPack, PortError>] = [:]
+    var packLookups: [StickerPackLocation] = []
+    var copied: [StickerPackLocation] = []
+    var copyResult: Result<Void, PortError> = .success(())
+
+    /// The packs fetch waits for `releasePackFetch()` before answering
+    /// with the packs it saw when it was asked.
+    var holdsPackFetch = false
+    private var heldFetch: CheckedContinuation<Void, Never>?
+    private var fetchWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func hold() async {
+        guard holdsPackFetch else { return }
+        await withCheckedContinuation { continuation in
+            heldFetch = continuation
+            fetchWaiters.forEach { $0.resume() }
+            fetchWaiters = []
+        }
+    }
+
+    /// Returns once a packs fetch is being held.
+    func fetchHeld() async {
+        guard heldFetch == nil else { return }
+        await withCheckedContinuation { fetchWaiters.append($0) }
+    }
+
+    func releasePackFetch() {
+        holdsPackFetch = false
+        heldFetch?.resume()
+        heldFetch = nil
+    }
+}
+
+extension FakePort {
+    func fetchStickerPacks() async throws -> [StickerPack] {
+        stickers.packRequests += 1
+        let answer = stickers.packs
+        await stickers.hold()
+        return try answer.get()
+    }
+
+    /// One of the account's own packs reads back as it was published;
+    /// anyone else's comes from `packsElsewhere`.
+    func fetchStickerPack(at location: StickerPackLocation) async throws -> StickerPack? {
+        guard location.owner == me.jid, location.node == nil else {
+            stickers.packLookups.append(location)
+            return try stickers.packsElsewhere[location]?.get()
+        }
+        let id = location.packID
+        if let copy = stickers.copied.last(where: { $0.packID == id }), let pack = try stickers.packsElsewhere[copy]?.get() {
+            return pack
+        }
+        guard id == stickers.publishedID, let draft = stickers.published.last else {
+            return try stickers.packs.get().first { $0.id == id }
+        }
+        return StickerPack(id: id, name: draft.name, summary: draft.summary, stickers: draft.stickers)
+    }
+
+    /// A copy keeps the id it had, and reads back as the pack it was.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String {
+        try stickers.copyResult.get()
+        stickers.copied.append(location)
+        return location.packID
+    }
+
+    func publishStickerPack(_ draft: StickerPackDraft) async throws -> String {
+        try stickers.publishResult.get()
+        stickers.published.append(draft)
+        return stickers.publishedID
+    }
+
+    func retractStickerPack(_ packID: String) async throws {
+        try stickers.retractResult.get()
+        stickers.retracted.append(packID)
+    }
+}

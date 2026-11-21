@@ -11,8 +11,8 @@
 ## XMPP and XEP requirements
 
 - Waddle is XMPP-native. Do not use out-of-band APIs for application or protocol semantics.
-  - Operational telemetry only: browser beacons may go to the configured Grafana Faro collector. W3C trace context may go to configured backend origins as a `traceparent` query parameter on the XMPP WebSocket upgrade URL, since the browser WebSocket API cannot set headers.
-  - Telemetry must not carry XMPP control semantics, replace XMPP APIs, or alter XMPP wire behavior.
+  - Operational telemetry only: browser beacons may go to the configured Grafana Faro collector. W3C trace context may go to configured backend origins as a `traceparent` query parameter on the XMPP WebSocket upgrade URL, since the browser WebSocket API cannot set headers. A client may report closed-set operational telemetry to its own server in a `urn:waddle:*` IQ; the server only counts and acknowledges it, and it must not affect routing, state, or any other stanza.
+  - Telemetry must not carry XMPP control semantics, replace XMPP APIs, or alter XMPP wire behavior beyond that report IQ.
 - For work that changes XMPP wire behavior, feature advertisements, or protocol design, review the relevant specification in `./xeps/xep-NNNN.xml`. If the checkout or relevant specification is absent, obtain the official source from `xsf/xeps`. Use `docs/xep-conformance-audit.md` and `server/capabilities.toml` when their coverage applies.
 - Prefer a suitable XEP-defined shape. If Waddle advertises an XEP feature or uses an official `urn:xmpp:*`, `jabber:*`, or `http://jabber.org/*` namespace, its wire shape and behavior MUST conform to that specification. Waddle-specific semantics must not use official XEP namespaces; use `urn:waddle:*` only when no suitable XEP shape exists.
 - Rust protocol typing, XML construction, and XEP test requirements are in `server/AGENTS.md`.

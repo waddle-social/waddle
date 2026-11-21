@@ -10,7 +10,8 @@
 //!   while the XEP-0357 registration and sibling devices stay enabled
 //!   (§6), plus the unchanged last-device §6 path;
 //! - the minimal-payload privacy default: no sender and no body reach
-//!   Apple even when the XEP-0357 summary carried them;
+//!   Apple unless the XEP-0357 summary carried them, which the user
+//!   server does only for an opted-in conversation;
 //! - topic mismatch, provider-token refresh, and transient retry.
 
 pub mod ingress_support;
@@ -297,19 +298,23 @@ fn data_form_field(var: &str, value: &str) -> Element {
 /// `last-message-sender` / `last-message-body`, which XEP-0357 allows)
 /// and the Waddle routing context.
 fn notification_item(item_id: &str, message_count: u32, with_sender_and_body: bool) -> PubSubItem {
+    let content =
+        with_sender_and_body.then_some(("mallory@example.com/phone", "the launch code is 0000"));
+    notification_item_with_content(item_id, message_count, content)
+}
+
+fn notification_item_with_content(
+    item_id: &str,
+    message_count: u32,
+    sender_and_body: Option<(&str, &str)>,
+) -> PubSubItem {
     let mut summary = Element::builder("x", NS_DATA_FORMS)
         .append(data_form_field("FORM_TYPE", "urn:xmpp:push:summary"))
         .append(data_form_field("message-count", &message_count.to_string()));
-    if with_sender_and_body {
+    if let Some((sender, body)) = sender_and_body {
         summary = summary
-            .append(data_form_field(
-                "last-message-sender",
-                "mallory@example.com/phone",
-            ))
-            .append(data_form_field(
-                "last-message-body",
-                "the launch code is 0000",
-            ));
+            .append(data_form_field("last-message-sender", sender))
+            .append(data_form_field("last-message-body", body));
     }
     let context = Element::builder("context", "urn:waddle:push:context:0")
         .attr(
@@ -598,7 +603,7 @@ async fn xep0357_bad_device_token_on_the_last_apple_device_disables_the_registra
 }
 
 #[tokio::test]
-async fn xep0357_apns_payload_is_minimal_even_when_the_summary_has_sender_and_body() {
+async fn xep0357_apns_payload_is_minimal_when_the_summary_has_no_sender_or_body() {
     let sender = FakeApnsSender::default();
     let store = store_with_apns(sender.clone(), counting_tokens()).await;
     let owner = owner();
@@ -610,22 +615,14 @@ async fn xep0357_apns_payload_is_minimal_even_when_the_summary_has_sender_and_bo
         &store,
         &owner,
         node.node(),
-        notification_item("private-1", 7, true),
+        notification_item("private-1", 7, false),
     )
     .await;
 
     let calls = sender.calls();
     assert_eq!(calls.len(), 1);
-    let call = &calls[0];
-    for leaked in ["mallory", "launch code", "last-message", "body", "sender"] {
-        assert!(
-            !call.raw_payload.contains(leaked),
-            "APNs payload leaked {leaked:?}: {}",
-            call.raw_payload
-        );
-    }
     assert_eq!(
-        call.payload,
+        calls[0].payload,
         serde_json::json!({
             "aps": {
                 "alert": { "loc-key": "WADDLE_PUSH_DM" },
@@ -643,6 +640,74 @@ async fn xep0357_apns_payload_is_minimal_even_when_the_summary_has_sender_and_bo
         }),
         "only the generic alert, badge and routing context reach Apple"
     );
+}
+
+/// The user server adds `last-message-sender` and `last-message-body`
+/// only for a conversation whose owner opted in (`urn:waddle:push:rich:0`).
+#[tokio::test]
+async fn xep0357_apns_alert_carries_the_sender_and_body_of_an_opted_in_summary() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
+    register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+    seed_unread_entries(&store, &owner, "bob@example.com", 7).await;
+
+    publish(
+        &store,
+        &owner,
+        node.node(),
+        notification_item("private-1", 7, true),
+    )
+    .await;
+
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].payload,
+        serde_json::json!({
+            "aps": {
+                "alert": { "title": "mallory", "body": "the launch code is 0000" },
+                "badge": 7,
+                "sound": "default",
+                "thread-id": "bob@example.com",
+            },
+            "waddle": {
+                "v": 1,
+                "class": "dm",
+                "conversation": "bob@example.com",
+                "item": "stanza-42",
+                "node": node.node(),
+            },
+        }),
+    );
+}
+
+/// The content is optional: a summary whose sender is not a JID is
+/// still delivered, as the generic alert.
+#[tokio::test]
+async fn xep0357_apns_alert_stays_generic_when_the_summary_sender_is_not_a_jid() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
+    register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+
+    publish(
+        &store,
+        &owner,
+        node.node(),
+        notification_item_with_content("private-1", 1, Some(("not a jid@", "hello"))),
+    )
+    .await;
+
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].payload["aps"]["alert"],
+        serde_json::json!({ "loc-key": "WADDLE_PUSH_DM" })
+    );
+    assert!(!calls[0].raw_payload.contains("hello"));
 }
 
 #[tokio::test]
@@ -1365,6 +1430,82 @@ fn call_context_child(sid: &str, video: &str, expires: &str) -> Element {
     .attr(minidom::rxml::xml_ncname!("video").to_owned(), video)
     .attr(minidom::rxml::xml_ncname!("expires").to_owned(), expires)
     .build()
+}
+
+#[tokio::test]
+async fn missed_call_is_an_alert_on_ordinary_nodes_and_not_applicable_to_fcm() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let alert = store
+        .ensure_node(&owner, BUNDLE_ID)
+        .await
+        .expect("alert node");
+    let voip = store
+        .ensure_node(&owner, "p4x.waddle.social.voip")
+        .await
+        .expect("VoIP node");
+    register_apple_device(&store, &owner, alert.node(), "iphone", "prod", TOKEN_A).await;
+    register_apple_device(&store, &owner, voip.node(), "pushkit", "prod", TOKEN_B).await;
+    store
+        .upsert_device(
+            &owner,
+            PushDeviceRegistration::new("android", alert.node(), PushDevicePlatform::Fcm, "prod"),
+        )
+        .await
+        .expect("FCM device");
+    seed_unread_entries(&store, &owner, "bob@example.com", 3).await;
+    seed_unread_entries(&store, &owner, "carol@example.com", 2).await;
+    for (node, item) in [(alert.node(), "missed-alert"), (voip.node(), "missed-voip")] {
+        publish(
+            &store,
+            &owner,
+            node,
+            item_with_call_context(item, "missed_call", None),
+        )
+        .await;
+    }
+    let calls = sender.calls_for(TOKEN_A);
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.push_type, ApnsPushType::Alert);
+    assert_eq!(call.topic, BUNDLE_ID);
+    assert_eq!(call.priority, ApnsPriority::Immediate);
+    assert_eq!(
+        call.payload,
+        serde_json::json!({
+            "aps": {
+                "alert": { "loc-key": "WADDLE_PUSH_MISSED_CALL" },
+                "badge": 5, "sound": "default", "thread-id": "bob@example.com"
+            },
+            "waddle": {
+                "v": 1, "class": "missed_call", "conversation": "bob@example.com",
+                "item": "call-stanza", "node": alert.node()
+            }
+        })
+    );
+    assert!(
+        sender.calls_for(TOKEN_B).is_empty(),
+        "missed call never reaches PushKit"
+    );
+    assert_eq!(
+        attempt_statuses(&store, alert.node()).await,
+        vec![
+            ("android".to_owned(), "not-applicable".to_owned()),
+            (
+                "iphone".to_owned(),
+                ATTEMPT_STATUS_APNS_DELIVERED.to_owned()
+            ),
+        ]
+    );
+    assert!(attempt_statuses(&store, voip.node()).await.is_empty());
+    for item in ["missed-alert", "missed-voip"] {
+        assert_eq!(job_status(&store, item).await, "published");
+    }
+    assert_eq!(
+        device_status(&store, alert.node(), "android").await,
+        DEVICE_STATUS_ACTIVE
+    );
 }
 
 #[tokio::test]

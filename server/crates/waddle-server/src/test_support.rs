@@ -4,6 +4,8 @@
 //! creating fixed local fixtures; they are never enabled in release images.
 
 #[cfg(feature = "test-support")]
+pub(crate) mod call_candidate_effects;
+#[cfg(feature = "test-support")]
 pub mod iq_forward;
 #[cfg(feature = "test-support")]
 pub mod observer_quarantine;
@@ -2004,4 +2006,18 @@ pub fn spawn_notification_loops(
             ),
         ),
     ]
+}
+
+/// Drive the production unanswered-call scan without waiting for the ring deadline.
+#[cfg(feature = "test-support")]
+pub async fn sweep_unanswered_calls_for_test(
+    outbox: &crate::notification_outbox::NotificationOutboxStore,
+    mam: &dyn waddle_xmpp::mam::MamStorage,
+    settings: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    scan: &mut crate::notification_outbox::UnansweredCallScan,
+    now: chrono::DateTime<chrono::Utc>,
+    batch_size: usize,
+) -> bool {
+    crate::notification_outbox::sweep_unanswered_calls(outbox, mam, settings, scan, now, batch_size)
+        .await
 }

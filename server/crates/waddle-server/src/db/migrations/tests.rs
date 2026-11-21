@@ -74,6 +74,72 @@ fn versions_after_baseline() -> Vec<i64> {
         .collect()
 }
 
+async fn assert_upgrade_from_main_ledger(db: &Database, driver: DatabaseDriver) {
+    const MAIN_DEPLOYED_VERSION: i64 = 2002;
+    let mut deployed = MigrationRunner::deployment(BaselineAction::Apply);
+    deployed
+        .migrations
+        .retain(|migration| migration.version <= MAIN_DEPLOYED_VERSION);
+    assert_eq!(
+        deployed.run(db).await.expect("apply deployed migrations"),
+        [BASELINE_VERSION, 2001, MAIN_DEPLOYED_VERSION]
+    );
+    let before = ledger(db).await;
+    let (call, missed_call) = match driver {
+        DatabaseDriver::Postgres => (
+            "871273aa8447d77779b7be8bf7ce343692402789b80156592079a909c9bab05e",
+            "21ce9e7ffb867fded9f76453704d953a8a0109a9d0e8df78307dc99c52c501d6",
+        ),
+        DatabaseDriver::Sqlite => (
+            "d92817a1931e2e44dbcd621ffb71ebd5ff333350d6f969ad4eb161b162039c08",
+            "91e63d44e2c0399445f6b814be1b247d34fd94d215ed2fe911c979f2ceeed1b0",
+        ),
+    };
+    assert_eq!(
+        before[1..],
+        [
+            (
+                2001,
+                "offline call notification candidates".to_owned(),
+                Some(call.to_owned())
+            ),
+            (
+                2002,
+                "missed call alert notifications".to_owned(),
+                Some(missed_call.to_owned())
+            ),
+        ],
+        "deployed migration identities and SQL checksums are immutable"
+    );
+    assert_eq!(
+        MigrationRunner::single().run(db).await.expect("upgrade"),
+        (2003..=2022).collect::<Vec<_>>()
+    );
+    let upgraded = ledger(db).await;
+    assert_eq!(&upgraded[..before.len()], before.as_slice());
+    assert_eq!(upgraded, catalog_rows(driver));
+}
+
+#[tokio::test]
+async fn sqlite_upgrades_the_deployed_main_ledger() {
+    let db = Database::in_memory("deployed-main-ledger")
+        .await
+        .expect("sqlite");
+    assert_upgrade_from_main_ledger(&db, DatabaseDriver::Sqlite).await;
+}
+
+#[tokio::test]
+async fn postgres_upgrades_the_deployed_main_ledger() {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let schema = unique_postgres_schema_name("deployed_main_ledger");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    assert_upgrade_from_main_ledger(&db, DatabaseDriver::Postgres).await;
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
 async fn ledger(db: &Database) -> Vec<LedgerRow> {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn

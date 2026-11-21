@@ -1531,14 +1531,14 @@ async fn verify_space_write_guard(
     let (migration, name, events) = if table == "pubsub_items" {
         (
             include_str!(
-                "../../sql/migrations/2017_host_grant_space_bookmark_versions.postgres.sql"
+                "../../sql/migrations/2018_host_grant_space_bookmark_versions.postgres.sql"
             ),
             "guard_bound_space_item_write",
             31_i32,
         )
     } else {
         (
-            include_str!("../../sql/migrations/2020_host_grant_space_configuration.postgres.sql"),
+            include_str!("../../sql/migrations/2021_host_grant_space_configuration.postgres.sql"),
             "guard_bound_space_configuration_write",
             19_i32,
         )

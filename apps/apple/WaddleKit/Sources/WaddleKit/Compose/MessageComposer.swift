@@ -81,6 +81,27 @@ public enum MessageComposer {
         return (body, options)
     }
 
+    /// A sticker message: the description as its text, taken as it is
+    /// (no markdown), and the picture as its one file. Nil for a sticker
+    /// without a picture to point at.
+    public static func compose(
+        _ sticker: Sticker,
+        from pack: StickerPack,
+        reply: ReplyContext? = nil,
+        thread: String? = nil
+    ) -> (body: String, options: OutboundOptions)? {
+        guard let file = sticker.file else { return nil }
+        let quote = reply.flatMap { ReplyFallback.quote(parentBody: $0.parentBody) }
+        let options = OutboundOptions(
+            reply: reply.map { OutboundOptions.Reply(targetID: $0.targetID, author: $0.author, fallback: quote?.range) },
+            thread: thread,
+            sharedFiles: [file],
+            requestDisplayedMarker: true,
+            sticker: StickerReference(packID: pack.id)
+        )
+        return ((quote?.prefix ?? "") + sticker.text, options)
+    }
+
     /// Trims surrounding whitespace; returns the trimmed text and how many
     /// leading scalars were dropped.
     static func trim(_ text: String) -> (String, Int) {

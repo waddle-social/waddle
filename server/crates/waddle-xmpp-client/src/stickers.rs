@@ -623,11 +623,68 @@ pub fn build_pack_publish_iq(iq_id: &str, doc: &StickerPackDoc) -> (PackId, Elem
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str())
         .append(build_pack_element(&canonical))
         .build();
+    (id, build_publish_iq(iq_id, item))
+}
+
+/// What importing a fetched pack comes to (XEP-0449 §import).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackImport {
+    /// The IQ publishing the pack to the user's own PEP sticker node.
+    Publish(Element),
+    /// The reply holds no sticker pack under the requested id.
+    Missing,
+    /// The pack carries `<restricted/>`: its author does not let others
+    /// use or import it.
+    Restricted,
+}
+
+/// XEP-0449 §import: duplicate a fetched pack to the user's own PEP
+/// sticker node. `fetched` is the `<iq type='result'/>` of an items
+/// query on `node`; the item `pack_id` is published again with its
+/// payload untouched and under the same id, so translated names, the
+/// author's own id and anything the typed document does not model are
+/// all kept. The payload must still parse as a pack, and a restricted
+/// pack is refused.
+#[must_use]
+pub fn build_pack_import_iq(
+    iq_id: &str,
+    fetched: &Element,
+    node: &str,
+    pack_id: &PackId,
+) -> PackImport {
+    let pack = fetched
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+        .filter(|items| items.attr("node") == Some(node))
+        .into_iter()
+        .flat_map(Element::children)
+        .filter(|item| item.is("item", NS_PUBSUB) && item.attr("id") == Some(pack_id.as_str()))
+        .find_map(|item| item.get_child("pack", NS_STICKERS));
+    let Some(pack) = pack else {
+        return PackImport::Missing;
+    };
+    let Some(doc) = parse_pack_element(pack_id.clone(), pack) else {
+        return PackImport::Missing;
+    };
+    if doc.restricted {
+        return PackImport::Restricted;
+    }
+    let item = Element::builder("item", NS_PUBSUB)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            pack_id.as_str(),
+        )
+        .append(pack.clone())
+        .build();
+    PackImport::Publish(build_publish_iq(iq_id, item))
+}
+
+fn build_publish_iq(iq_id: &str, item: Element) -> Element {
     let publish = Element::builder("publish", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), STICKERS_NODE)
         .append(item)
         .build();
-    let iq = Element::builder("iq", NS_CLIENT)
+    Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
         .append(
@@ -635,8 +692,7 @@ pub fn build_pack_publish_iq(iq_id: &str, doc: &StickerPackDoc) -> (PackId, Elem
                 .append(publish)
                 .build(),
         )
-        .build();
-    (id, iq)
+        .build()
 }
 
 /// XEP-0060 §7.2 retract IQ removing one pack from the user's own PEP
@@ -709,6 +765,24 @@ pub fn build_sticker_marker_element(marker: &StickerMarker) -> Element {
         }
     }
     builder.build()
+}
+
+/// Read the pack a received `<sticker/>` marker names (XEP-0449
+/// §send-from-pack). `None` for a marker without a `pack`, and for one
+/// whose `jid` does not parse: the pack's location is then unknown, and
+/// the sender's own PEP node would be the wrong place to look.
+#[must_use]
+pub fn parse_sticker_marker_pack(marker: &Element) -> Option<PackRef> {
+    let id = PackId::try_new(marker.attr("pack")?)?;
+    let jid = match marker.attr("jid") {
+        Some(jid) => Some(jid.parse::<BareJid>().ok()?),
+        None => None,
+    };
+    Some(PackRef {
+        id,
+        jid,
+        node: marker.attr("node").map(str::to_owned),
+    })
 }
 
 #[cfg(test)]

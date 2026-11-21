@@ -1,4 +1,5 @@
 //! Pure direct-message candidate reconstruction from the canonical envelope.
+use super::candidate::NotificationCallData;
 use super::{
     NotificationCall, NotificationCandidate, NotificationClass, NotificationMessageHints,
     NotificationOutboxError,
@@ -44,22 +45,30 @@ pub(crate) fn direct_candidate_from_envelope(
     // N× in groupchat so the unified helper keeps both surfaces
     // consistent and avoids redundant XML traversals on the hot path.
     let (class, hints, call) = direct_message_intrinsics(message, recipient);
-    let candidate = if let Some(call) = call {
-        NotificationCandidate::call_with_hints(
+    let candidate = match call {
+        Some(NotificationCallData::Incoming(call)) => NotificationCandidate::call_with_hints(
             recipient.clone(),
             sender_jid.clone(),
             archive_stanza_id.clone(),
             call,
             hints,
-        )?
-    } else {
-        NotificationCandidate::direct_message_with_hints(
+        )?,
+        Some(NotificationCallData::Missed(session_id)) => {
+            NotificationCandidate::missed_call_with_hints(
+                recipient.clone(),
+                sender_jid.clone(),
+                archive_stanza_id.clone(),
+                session_id,
+                hints,
+            )?
+        }
+        None => NotificationCandidate::direct_message_with_hints(
             recipient.clone(),
             sender_jid.clone(),
             archive_stanza_id.clone(),
             class == NotificationClass::DirectMessageMention,
             hints,
-        )?
+        )?,
     };
     Ok(candidate.with_last_message_body(
         message
@@ -72,13 +81,13 @@ pub(crate) fn direct_candidate_from_envelope(
 
 /// Message-intrinsic classification is independent from archive provenance.
 /// Legacy alias adoption may reuse it without relaxing new-candidate authority checks.
-pub(super) fn direct_message_intrinsics(
+pub(crate) fn direct_message_intrinsics(
     message: &Message,
     recipient: &BareJid,
 ) -> (
     NotificationClass,
     NotificationMessageHints,
-    Option<NotificationCall>,
+    Option<NotificationCallData>,
 ) {
     let RecipientMentionBits { is_mention, noping } =
         mention_bits_for_recipient(message, recipient);
@@ -99,12 +108,25 @@ pub(super) fn direct_message_intrinsics(
         .flatten()
         // Only an audio or video offer rings; other proposals stay messages.
         .filter(|(_, media)| media.audio || media.video)
-        .map(|(session_id, media)| NotificationCall {
-            session_id,
-            video: media.video,
+        .map(|(session_id, media)| {
+            NotificationCallData::Incoming(NotificationCall {
+                session_id,
+                video: media.video,
+            })
+        })
+        .or_else(|| {
+            message
+                .bodies
+                .is_empty()
+                .then(|| waddle_xmpp::xep::xep0353::jmi_retract(message))
+                .flatten()
+                .map(NotificationCallData::Missed)
         });
-    let class = if call.is_some() {
-        NotificationClass::Call
+    let class = if let Some(call) = &call {
+        match call {
+            NotificationCallData::Incoming(_) => NotificationClass::Call,
+            NotificationCallData::Missed(_) => NotificationClass::MissedCall,
+        }
     } else if is_mention {
         NotificationClass::DirectMessageMention
     } else {

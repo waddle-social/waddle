@@ -5,11 +5,29 @@ use super::{
     NotificationThreadId, StanzaId,
 };
 
+use xmpp_parsers::jingle::SessionId;
+
+pub const CALL_RING_DURATION_SECONDS: i64 = 45;
+pub(super) const CALL_PUSH_BURST_LIMIT: usize = 3;
+pub(super) const CALL_PUSH_BURST_WINDOW_SECONDS: i64 = 60;
+pub(super) const CALL_PUSH_HOURLY_LIMIT: usize = 10;
+pub(super) const CALL_PUSH_HOURLY_WINDOW_SECONDS: i64 = 3600;
+pub const CALL_UNANSWERED_DEADLINE_SECONDS: i64 = CALL_RING_DURATION_SECONDS + 10;
+/// Retracts remain eligible for a short grace period after ringing expires.
+pub const MISSED_CALL_WINDOW_SECONDS: i64 = CALL_RING_DURATION_SECONDS + 15;
+
 /// Message-intrinsic invitation data, independent of scheduler timestamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationCall {
-    pub session_id: xmpp_parsers::jingle::SessionId,
+    pub session_id: SessionId,
     pub video: bool,
+}
+
+/// A missed call retains its session identity without invitation media.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotificationCallData {
+    Incoming(NotificationCall),
+    Missed(SessionId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +38,7 @@ pub struct NotificationCandidate {
     pub(super) thread_id: NotificationThreadId,
     pub(super) archive_stanza_id: StanzaId,
     pub(super) class: NotificationClass,
-    pub(super) call: Option<NotificationCall>,
+    pub(super) call: Option<NotificationCallData>,
     pub(super) reason: NotificationReason,
     pub(super) policy_error_count: i64,
     /// XEP-0513 `<noping/>` mention hint, message-frozen at T0. When
@@ -190,12 +208,70 @@ impl NotificationCandidate {
         )?;
         candidate.class = NotificationClass::Call;
         candidate.reason = NotificationReason::OfflineCall;
-        candidate.call = Some(call);
+        candidate.call = Some(NotificationCallData::Incoming(call));
+        Ok(candidate)
+    }
+
+    pub fn missed_call_with_hints(
+        recipient_bare_jid: BareJid,
+        sender_jid: Jid,
+        archive_stanza_id: StanzaId,
+        session_id: SessionId,
+        hints: NotificationMessageHints,
+    ) -> Result<Self, NotificationOutboxError> {
+        if session_id.0.is_empty() {
+            return Err(NotificationOutboxError::InvalidCallData);
+        }
+        let mut candidate = Self::direct_message_with_hints(
+            recipient_bare_jid,
+            sender_jid,
+            archive_stanza_id,
+            false,
+            hints,
+        )?;
+        candidate.class = NotificationClass::MissedCall;
+        candidate.reason = NotificationReason::CallRetracted;
+        candidate.call = Some(NotificationCallData::Missed(session_id));
         Ok(candidate)
     }
 
     pub fn call(&self) -> Option<&NotificationCall> {
-        self.call.as_ref()
+        match self.call.as_ref()? {
+            NotificationCallData::Incoming(call) => Some(call),
+            NotificationCallData::Missed(_) => None,
+        }
+    }
+
+    /// Derive the timer's missed-call alert from the original invitation.
+    pub fn unanswered_call(&self) -> Result<Self, NotificationOutboxError> {
+        let call = self
+            .call()
+            .ok_or(NotificationOutboxError::InvalidCallData)?;
+        let mut candidate = Self::missed_call_with_hints(
+            self.recipient_bare_jid.clone(),
+            self.sender_jid.clone(),
+            self.archive_stanza_id.clone(),
+            call.session_id.clone(),
+            NotificationMessageHints {
+                noping: self.noping,
+                no_store: self.no_store,
+                no_permanent_store: self.no_permanent_store,
+                reaction: self.reaction,
+            },
+        )?;
+        candidate.reason = NotificationReason::CallUnanswered;
+        Ok(candidate)
+    }
+
+    pub fn call_session_id(&self) -> Option<&SessionId> {
+        match self.call.as_ref()? {
+            NotificationCallData::Incoming(call) => Some(&call.session_id),
+            NotificationCallData::Missed(session_id) => Some(session_id),
+        }
+    }
+
+    pub fn call_video(&self) -> Option<bool> {
+        self.call().map(|call| call.video)
     }
 
     pub fn groupchat(
@@ -244,7 +320,8 @@ impl NotificationCandidate {
             NotificationClass::NotifyAll => NotificationReason::GroupchatNotifyAll,
             NotificationClass::DirectMessage
             | NotificationClass::DirectMessageMention
-            | NotificationClass::Call => {
+            | NotificationClass::Call
+            | NotificationClass::MissedCall => {
                 return Err(NotificationOutboxError::InvalidClass(
                     class.as_db_value().to_string(),
                 ));

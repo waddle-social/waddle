@@ -24,7 +24,7 @@ extension CallStore {
         var oldSessionIsOpen = true
         if !installIncoming(event, media: media, expected: .active(previous), accepting: true, epoch: epoch) {
             guard generation == epoch else { return }
-            let proposalDied = recentlyAbortedSids.contains(event.sid)
+            let proposalDied = recentlyAbortedSids.contains(event.sid) || isFinished(sid: event.sid)
             if proposalDied, slotStillMatches(.active(previous)) {
                 // The old sid is already retired on the wire; it cannot stay active.
                 cancelTimers()

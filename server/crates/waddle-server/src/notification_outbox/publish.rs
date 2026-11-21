@@ -454,7 +454,7 @@ impl NotificationOutboxStore {
         // compound a partial failure into total notification loss.
         // Absent entries keep the pre-#1126 behavior: publish with
         // count 0.
-        if unread == Some(0) {
+        if unread == Some(0) && job.class != super::NotificationClass::MissedCall {
             if self.suppress_claimed_job(job).await? {
                 return Ok(NotificationOutboxPublishOutcome::Suppressed {
                     job_id: job.job_id.clone(),

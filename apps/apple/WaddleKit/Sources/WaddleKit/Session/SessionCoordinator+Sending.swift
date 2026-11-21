@@ -9,8 +9,36 @@ extension SessionCoordinator {
     @discardableResult
     public func send(_ draft: Draft, in conversation: ConversationID) async -> String? {
         guard let composed = MessageComposer.compose(draft) else { return nil }
+        return await send(composed, preview: draft.text, in: conversation)
+    }
+
+    /// Sends a sticker of one of the account's packs, through the same
+    /// queue as any message.
+    @discardableResult
+    public func send(
+        _ sticker: Sticker,
+        from pack: StickerPack,
+        in conversation: ConversationID,
+        reply: ReplyContext? = nil,
+        thread: String? = nil
+    ) async -> String? {
+        guard let composed = MessageComposer.compose(sticker, from: pack, reply: reply, thread: thread) else { return nil }
+        return await send(composed, preview: sticker.text, in: conversation)
+    }
+
+    /// `preview` is what the conversation list shows for a 1:1 send.
+    private func send(
+        _ composed: (body: String, options: OutboundOptions),
+        preview: String,
+        in conversation: ConversationID
+    ) async -> String? {
+        noteActivity()
         var options = composed.options
-        options.mentionDirectory = mentionDirectory(for: conversation)
+        // A sticker's text is its pack's description, not something the
+        // sender typed, so nothing in it is taken as a mention.
+        if options.sticker == nil {
+            options.mentionDirectory = mentionDirectory(for: conversation)
+        }
         let message = OutboundMessage(
             clientID: Self.makeClientID(),
             conversation: conversation,
@@ -19,8 +47,8 @@ extension SessionCoordinator {
         )
         timelines.insertLocalEcho(localEcho(of: message), in: conversation)
         if conversation.kind == .direct {
-            let preview = MeAction.presentation(ofBody: draft.text, actor: account.jid.localpart ?? account.jid.domain)
-            directory.touchDirect(conversation.jid, at: Date(), preview: preview ?? draft.text)
+            let action = MeAction.presentation(ofBody: preview, actor: account.jid.localpart ?? account.jid.domain)
+            directory.touchDirect(conversation.jid, at: Date(), preview: action ?? preview)
         }
         stopTyping(in: conversation)
         enqueue(message)
@@ -267,6 +295,8 @@ extension SessionCoordinator {
             },
             markupSpans: message.options.markupSpans,
             references: message.options.references,
+            isSticker: message.options.sticker != nil,
+            stickerPack: message.options.sticker,
             sharedFiles: message.options.sharedFiles,
             authorRealJID: conversation.isRoom ? account.jid : nil
         )
@@ -309,10 +339,12 @@ extension SessionCoordinator {
     /// re-sends the whole message, as the XEP requires: the draft's text
     /// and mentions (markup and references are recomputed against the new
     /// body) with the original's reply, thread and attachments. The draft's
-    /// own reply, thread and attachments are ignored.
+    /// own reply, thread and attachments are ignored. A sticker is not
+    /// text and cannot be corrected.
     public func edit(_ item: TimelineItem, draft: Draft) async -> Bool {
         guard item.isMine,
               item.tombstone == nil,
+              !item.message.isSticker,
               let target = item.correctionTargetID,
               let from = ownJID(in: item.conversation),
               let composed = MessageComposer.compose(correctionDraft(of: item, draft: draft))
@@ -404,6 +436,7 @@ extension SessionCoordinator {
     /// Call on every composer edit. Sends `composing` once, then `paused`
     /// after a quiet period.
     public func userTyped(in conversation: ConversationID) {
+        noteActivity()
         guard connection == .online else { return }
         if sentChatStates[conversation] != .composing {
             sentChatStates[conversation] = .composing

@@ -32,6 +32,7 @@ struct ConversationComposer: View {
     @State private var showsFileImporter = false
     @State private var photoSelection: [PhotosPickerItem] = []
     @State private var gifSearch: ComposerGifSearch?
+    @State private var showsStickers = false
     @State private var linkPrompt = ComposerLinkPrompt()
     @State private var commands = ComposerCommandCenter()
     /// XEP-0055 directory results for the `@query` being typed in a room.
@@ -68,9 +69,11 @@ struct ConversationComposer: View {
         ))
         .modifier(ComposerCommandPresentations(
             gifSearch: $gifSearch,
+            showsStickers: $showsStickers,
             linkPrompt: $linkPrompt,
             commands: commands,
             onPickGIF: sendGIF,
+            onPickSticker: sendSticker,
             onAddLink: insertLink
         ))
         .onChange(of: model.text) { oldValue, newValue in
@@ -145,7 +148,7 @@ struct ConversationComposer: View {
     }
 
     private var uploader: AttachmentUploader {
-        AttachmentUploader(session: session)
+        AttachmentUploader(session: session, protection: .encrypted)
     }
 
     private var intake: ComposerAttachmentIntake {
@@ -179,6 +182,7 @@ struct ConversationComposer: View {
             pickPhoto: { showsPhotoPicker = true },
             pickFile: { showsFileImporter = true },
             pickGIF: { gifSearch = ComposerGifSearch(query: "") },
+            pickSticker: { showsStickers = true },
             paste: paste
         )
     }
@@ -311,11 +315,11 @@ struct ConversationComposer: View {
         case let .searchGIFs(query):
             model.clearText()
             gifSearch = ComposerGifSearch(query: query)
-        case let .setAvailability(availability):
+        case let .setPresenceMode(mode):
             model.clearText()
             let commands = self.commands
             let session = self.session
-            Task { await commands.setAvailability(availability, session: session) }
+            Task { await commands.setPresenceMode(mode, session: session) }
         case let .runExtension(command, invocation):
             model.clearText()
             let commands = self.commands
@@ -338,6 +342,11 @@ struct ConversationComposer: View {
     private func sendGIF(_ item: GifSearchItem) {
         gifSearch = nil
         dispatch(model.takeLinkSubmission(item.originalURL, thread: thread))
+    }
+
+    private func sendSticker(_ sticker: Sticker, from pack: StickerPack) {
+        showsStickers = false
+        dispatch(model.takeStickerSubmission(sticker, from: pack, thread: thread))
     }
 
     private func dispatch(_ submission: ComposerSubmission) {

@@ -12,12 +12,51 @@ final class FakePort: XmppPort {
     var holdExternalServicesFetch = false
     var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
 
+    var callLifecycleReports: [CallLifecycleReport] = []
+    var callLifecycleReportResult: CallLifecycleReportResult = .accepted
+    var holdCallLifecycleReports = false
+    var heldCallLifecycleReports: [CheckedContinuation<Void, Never>] = []
+
     var callSends: [CallSend] = []
     var completedCallSends: [CallSend] = []
     var callResults: [String: Bool] = [:]
     var callTerminateOutcome: CallTerminateOutcome = .ok
     var heldCallVerbs: Set<String> = []
     var heldCallSends: [CheckedContinuation<Void, Never>] = []
+
+    /// Device tokens offered for registration, in order.
+    var pushRegistrationRequests: [String] = []
+    var pushRegistrationResult: PushRegistration?
+    var enabledPush: [PushRegistration] = []
+    /// Every retirement asked for, confirmed or not.
+    var disabledPush: [PushRegistration] = []
+    var disablesPush = true
+
+    struct NotifySettingsWrite: Equatable {
+        let conversation: ConversationID
+        let mode: NotifyMode
+        let showsMessagesInPush: Bool
+    }
+    var notifySettingsWrites: [NotifySettingsWrite] = []
+    var notifySettingsWriteResult: Result<Void, PortError> = .success(())
+    /// Results for the next writes, in order, before `notifySettingsWriteResult`.
+    var notifySettingsWriteResults: [Result<Void, PortError>] = []
+    var notifySettings = NotifySettings()
+    var failsNotifySettingsFetch = false
+
+    struct PresenceSend: Equatable {
+        let availability: Availability
+        let status: String?
+        let idleSince: Date?
+    }
+    var presenceSends: [PresenceSend] = []
+    var storedPresenceMode: Result<PresenceMode, PortError> = .success(.automatic)
+    /// Every mode offered for storing, taken by the server or not.
+    var publishedPresenceModes: [PresenceMode] = []
+    var presenceModePublishResult: Result<Void, PortError> = .success(())
+    var holdsPresenceModePublishes = false
+    private var heldPresenceModeContinuations: [CheckedContinuation<Void, Never>] = []
+    var heldPresenceModePublishes: Int { heldPresenceModeContinuations.count }
 
     var sent: [OutboundMessage] = []
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
@@ -39,6 +78,26 @@ final class FakePort: XmppPort {
     var inboxReadRequests: [(partner: BareJID, threadID: String?)] = []
     var failingInboxReads = 0
     var failsInboxFetch = false
+    var roomSettingsUpdates: [(room: BareJID, patch: RoomSettingsPatch)] = []
+    var roomSettingsUpdateResult: Result<Void, PortError> = .success(())
+    var roomDestructions: [(room: BareJID, reason: String?)] = []
+    var roomDestructionResult: Result<Void, PortError> = .success(())
+    var groupDMRenames: [(room: BareJID, name: String?)] = []
+    var groupDMRenameResult: Result<Void, PortError> = .success(())
+    var groupDMInvitations: [(room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess)] = []
+    var groupDMInvitationResult: Result<Void, PortError> = .success(())
+    var groupDMLeaves: [BareJID] = []
+    var groupDMLeaveResult: Result<Void, PortError> = .success(())
+    var roomSettingsRequests: [BareJID] = []
+    var roomSettingsResult: Result<RoomSettings, PortError> = .success(RoomSettings(name: nil, summary: nil, pinPermission: nil))
+    var holdsTopology = false
+    private(set) var heldTopology: [CheckedContinuation<Void, Never>] = []
+    var heldDirectoryVerbs: Set<String> = []
+    let community = FakeCommunity()
+    let stickers = FakeStickers()
+    let calendar = FakeEvents()
+    private(set) var heldDirectoryRequests: [CheckedContinuation<Void, Never>] = []
+    var topologyRequests = 0
     var topology: Topology = .empty
     var inbox: [InboxEntry] = []
     var cursors: [DisplayedCursor] = []
@@ -51,6 +110,23 @@ final class FakePort: XmppPort {
     var avatarLookups: [BareJID] = []
     var publishedAvatarID = "own1"
     var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
+    var contacts: Result<[Contact], PortError> = .success([])
+    var sharedStatus: Result<SharedStatus, PortError> = .success(SharedStatus())
+    /// What a strict lookup of the account's own activity answers.
+    var ownActivity: Result<UserActivity?, PortError> = .success(nil)
+    /// Every activity and tune offered for publishing; nil is a retraction.
+    var publishedActivities: [UserActivity?] = []
+    var publishedTunes: [UserTune?] = []
+    var sharedStatusPublishResult: Result<Void, PortError> = .success(())
+    /// A held lookup answers with what was set when it began.
+    let sharedStatusFetches = HeldCalls()
+    let ownProfileDetailsFetches = HeldCalls()
+    /// What a strict lookup of the account's own details answers.
+    var ownProfileDetails: Result<ProfileDetails?, PortError> = .success(nil)
+    /// Other people's details.
+    var profileDetails: [BareJID: ProfileDetails] = [:]
+    var publishedProfileDetails: [ProfileDetails] = []
+    var profileDetailsPublishResult: Result<Void, PortError> = .success(())
 
     init() {
         var captured: AsyncStream<XmppEvent>.Continuation!
@@ -91,7 +167,9 @@ final class FakePort: XmppPort {
         probeConnectionCount += 1
         return probeConnectionResult
     }
-    func sendPresence(_ availability: Availability, status: String?) async {}
+    func sendPresence(_ availability: Availability, status: String?, idleSince: Date?) async {
+        presenceSends.append(PresenceSend(availability: availability, status: status, idleSince: idleSince))
+    }
 
     func send(_ message: OutboundMessage) async -> SendOutcome {
         sent.append(message)
@@ -188,9 +266,68 @@ final class FakePort: XmppPort {
         inboxReads.append(partner)
     }
 
-    func discoverTopology() async -> Result<Topology, PortError> { .success(topology) }
+    func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings {
+        roomSettingsRequests.append(room)
+        return try roomSettingsResult.get()
+    }
+    func updateRoomSettings(_ patch: RoomSettingsPatch, of room: BareJID) async throws {
+        roomSettingsUpdates.append((room, patch))
+        await holdDirectoryVerb("updateRoomSettings")
+        try roomSettingsUpdateResult.get()
+    }
+    func destroyRoom(_ room: BareJID, reason: String?) async throws {
+        roomDestructions.append((room, reason))
+        await holdDirectoryVerb("destroyRoom")
+        try roomDestructionResult.get()
+    }
+
+    func renameGroupDM(_ room: BareJID, name: String?) async throws {
+        groupDMRenames.append((room, name))
+        await holdDirectoryVerb("renameGroupDM")
+        try groupDMRenameResult.get()
+    }
+
+    func inviteToGroupDM(_ room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess) async throws {
+        groupDMInvitations.append((room, invitee, history))
+        await holdDirectoryVerb("inviteToGroupDM")
+        try groupDMInvitationResult.get()
+    }
+
+    func leaveGroupDM(_ room: BareJID) async throws {
+        groupDMLeaves.append(room)
+        await holdDirectoryVerb("leaveGroupDM")
+        try groupDMLeaveResult.get()
+    }
+
+    func holdDirectoryVerb(_ verb: String) async {
+        if heldDirectoryVerbs.contains(verb) {
+            await withCheckedContinuation { heldDirectoryRequests.append($0) }
+        }
+    }
+
+    func releaseDirectoryRequests() {
+        let held = heldDirectoryRequests
+        heldDirectoryRequests = []
+        held.forEach { $0.resume() }
+    }
+
+    func releaseTopology() {
+        let held = heldTopology
+        heldTopology = []
+        held.forEach { $0.resume() }
+    }
+
+    func discoverTopology() async -> Result<Topology, PortError> {
+        topologyRequests += 1
+        let snapshot = topology
+        if holdsTopology {
+            await withCheckedContinuation { heldTopology.append($0) }
+        }
+        return .success(snapshot)
+    }
 
     func joinRoom(_ room: BareJID, nick: String) async {
+        await holdDirectoryVerb("joinRoom")
         joined.append(room)
     }
 
@@ -203,6 +340,7 @@ final class FakePort: XmppPort {
     }
     func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws {}
     func kick(nick: String, from room: BareJID, reason: String?) async throws {}
+    func fetchContacts() async throws -> [Contact] { try contacts.get() }
     func searchUsers(_ query: String) async throws -> [UserSearchResult] {
         userSearchRequests.append(query)
         if failsUserSearch { throw PortError.failed }
@@ -217,8 +355,21 @@ final class FakePort: XmppPort {
         BareJID(localpart: "group", domain: "muc.waddle.test")!
     }
 
-    func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {}
-    func fetchNotifyModes() async throws -> [ConversationID: NotifyMode] { [:] }
+    func setNotifyMode(_ mode: NotifyMode, showsMessagesInPush: Bool, for conversation: ConversationID) async throws {
+        notifySettingsWrites.append(.init(conversation: conversation, mode: mode, showsMessagesInPush: showsMessagesInPush))
+        let result = notifySettingsWriteResults.isEmpty ? notifySettingsWriteResult : notifySettingsWriteResults.removeFirst()
+        try result.get()
+        notifySettings.modes[conversation] = mode
+        if showsMessagesInPush {
+            notifySettings.showingMessagesInPush.insert(conversation)
+        } else {
+            notifySettings.showingMessagesInPush.remove(conversation)
+        }
+    }
+    func fetchNotifySettings() async throws -> NotifySettings {
+        if failsNotifySettingsFetch { throw PortError.timeout }
+        return notifySettings
+    }
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
         avatarLookups.append(jid)
         return avatarLookup(jid, knownID)
@@ -227,12 +378,66 @@ final class FakePort: XmppPort {
         publishedAvatarID
     }
     func removeAvatar() async throws {}
-    func fetchMood(of jid: BareJID) async throws -> UserMood? { nil }
+    func fetchSharedStatus(of _: BareJID) async throws -> SharedStatus {
+        let answer = sharedStatus
+        await sharedStatusFetches.wait()
+        return try answer.get()
+    }
+    func fetchOwnProfileDetails() async throws -> ProfileDetails? {
+        let answer = ownProfileDetails
+        await ownProfileDetailsFetches.wait()
+        return try answer.get()
+    }
+    func fetchOwnActivity() async throws -> UserActivity? { try ownActivity.get() }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
+    func publishActivity(_ activity: UserActivity) async throws {
+        publishedActivities.append(activity)
+        try sharedStatusPublishResult.get()
+    }
+    func retractActivity() async throws {
+        publishedActivities.append(nil)
+        try sharedStatusPublishResult.get()
+    }
+    func publishTune(_ tune: UserTune) async throws {
+        publishedTunes.append(tune)
+        try sharedStatusPublishResult.get()
+    }
+    func retractTune() async throws {
+        publishedTunes.append(nil)
+        try sharedStatusPublishResult.get()
+    }
+    func fetchProfileDetails(of jid: BareJID) async throws -> ProfileDetails? { profileDetails[jid] }
+    func publishProfileDetails(_ details: ProfileDetails) async throws {
+        publishedProfileDetails.append(details)
+        try profileDetailsPublishResult.get()
+    }
+    func fetchPresenceMode() async throws -> PresenceMode { try storedPresenceMode.get() }
+    func publishPresenceMode(_ mode: PresenceMode) async throws {
+        publishedPresenceModes.append(mode)
+        if holdsPresenceModePublishes {
+            await withCheckedContinuation { heldPresenceModeContinuations.append($0) }
+        }
+        try presenceModePublishResult.get()
+    }
+    func releasePresenceModePublishes() {
+        let held = heldPresenceModeContinuations
+        heldPresenceModeContinuations = []
+        held.forEach { $0.resume() }
+    }
     func requestUploadSlot(filename: String, size: Int, mediaType: String) async -> UploadSlot? { nil }
-    func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? { nil }
-    func disablePush(_ registration: PushRegistration) async -> Bool { true }
+    func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? {
+        pushRegistrationRequests.append(deviceToken)
+        return pushRegistrationResult
+    }
+    func enablePush(_ registration: PushRegistration) async -> Bool {
+        enabledPush.append(registration)
+        return true
+    }
+    func disablePush(_ registration: PushRegistration) async -> Bool {
+        disabledPush.append(registration)
+        return disablesPush
+    }
 
     var extensionCommandDiscovery: Result<[ExtensionCommand], PortError> = .success([])
     var extensionDiscoveryCount = 0
@@ -281,5 +486,25 @@ final class FakePort: XmppPort {
     ) async throws -> ExtensionCommandResult {
         submissions.append(ExtensionSubmission(command: command, sessionID: sessionID, values: values, action: action, room: room))
         return try submitResult.get()
+    }
+}
+
+/// Lets a test keep calls waiting, as a slow server would, until it
+/// releases them.
+@MainActor
+final class HeldCalls {
+    var isHolding = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    var count: Int { waiting.count }
+
+    func wait() async {
+        guard isHolding else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func release() {
+        let held = waiting
+        waiting = []
+        held.forEach { $0.resume() }
     }
 }

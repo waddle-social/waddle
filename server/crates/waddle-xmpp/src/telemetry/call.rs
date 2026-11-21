@@ -3,8 +3,80 @@
 //! one family is never emitted from divergent macro sites.
 
 use super::attributes::{
-    AdminOp, CallControlRateLimitedSurface, CallSetupFailureReason, SfuDenialReason,
+    AdminOp, CallControlRateLimitedSurface, CallSetupFailureReason, ClientCallEndReason,
+    ClientCallPlatform, ClientCallSetupOutcome, MessageKind, SfuDenialReason,
 };
+use waddle_xmpp_core::waddle_call_lifecycle::{
+    CallLifecycleKind, CallLifecycleReport, CallSetupOutcome,
+};
+
+/// Count a valid, permitted report from the client's own view of a call.
+/// `accepted` means media connected on the reporting device.
+pub fn record_call_client_report(report: &CallLifecycleReport) {
+    let platform = ClientCallPlatform::from(report.platform);
+    let setup_outcome = ClientCallSetupOutcome::from(report.setup_outcome);
+    add_call_client_setup(1, platform, setup_outcome);
+    add_call_client_kind(1, MessageKind::from(report.kind), setup_outcome);
+    if report.setup_outcome == CallSetupOutcome::Accepted {
+        add_call_client_end(1, platform, ClientCallEndReason::from(report.end_reason));
+    }
+}
+
+fn add_call_client_setup(
+    count: u64,
+    platform: ClientCallPlatform,
+    setup_outcome: ClientCallSetupOutcome,
+) {
+    crate::counter_add!(
+        "waddle.call.client.setup",
+        "1",
+        "Client-reported call setup outcomes by platform.",
+        count,
+        platform,
+        setup_outcome,
+    );
+}
+
+fn add_call_client_end(count: u64, platform: ClientCallPlatform, end_reason: ClientCallEndReason) {
+    crate::counter_add!(
+        "waddle.call.client.end",
+        "1",
+        "Client-reported ends of calls whose media connected on the reporting device.",
+        count,
+        platform,
+        end_reason,
+    );
+}
+
+fn add_call_client_kind(count: u64, kind: MessageKind, setup_outcome: ClientCallSetupOutcome) {
+    crate::counter_add!(
+        "waddle.call.client.kind",
+        "1",
+        "Client-reported call setup outcomes by conversation kind.",
+        count,
+        kind,
+        setup_outcome,
+    );
+}
+
+/// Export all closed client-report series at zero on a fresh server.
+pub(super) fn register_call_client_counters() {
+    for platform in ClientCallPlatform::ALL {
+        for setup_outcome in ClientCallSetupOutcome::ALL {
+            add_call_client_setup(0, platform, setup_outcome);
+        }
+        for end_reason in ClientCallEndReason::ALL {
+            add_call_client_end(0, platform, end_reason);
+        }
+    }
+    // Reuse the existing `kind` attribute vocabulary, restricted to the
+    // two conversation kinds that the report wire format admits.
+    for kind in CallLifecycleKind::ALL {
+        for setup_outcome in ClientCallSetupOutcome::ALL {
+            add_call_client_kind(0, MessageKind::from(kind), setup_outcome);
+        }
+    }
+}
 
 /// Count a minted LiveKit SFU token.
 pub fn increment_sfu_token_minted() {

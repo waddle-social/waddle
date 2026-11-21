@@ -11,6 +11,7 @@ use url::Url;
 
 mod boundary_convert;
 mod calendar;
+mod call_lifecycle;
 mod calls;
 mod community_admin;
 mod consistent_color;
@@ -29,13 +30,18 @@ mod ping;
 mod profile_verbs;
 mod push;
 mod room_admin;
+mod roster;
 mod safety_scores;
 mod send_outcome;
+mod social_feed;
 mod stanza;
 mod status_preference;
 mod sticker_verbs;
+mod stories;
 mod types;
 
+#[cfg(test)]
+mod call_lifecycle_tests;
 #[cfg(test)]
 mod calls_tests;
 #[cfg(test)]
@@ -63,14 +69,29 @@ mod push_tests;
 #[cfg(test)]
 mod room_admin_tests;
 #[cfg(test)]
+mod roster_tests;
+#[cfg(test)]
 mod safety_scores_tests;
+#[cfg(test)]
+mod social_feed_tests;
 #[cfg(test)]
 mod status_preference_tests;
 #[cfg(test)]
 mod sticker_verbs_tests;
+#[cfg(test)]
+mod stories_tests;
+#[cfg(test)]
+mod test_support;
 
 pub use calendar::{
-    WaddleCalendarDate, WaddleEvent, WaddleEventAttendee, WaddleEventParticipation,
+    expand_community_event, WaddleCalendarDate, WaddleEvent, WaddleEventAttendee,
+    WaddleEventOccurrence, WaddleEventOverride, WaddleEventParticipation, WaddleRecurrence,
+    WaddleRecurrenceEnd, WaddleRecurrenceFrequency, WaddleWeekday,
+};
+pub use call_lifecycle::{
+    WaddleCallDurationBucket, WaddleCallEndReason, WaddleCallLifecycleKind,
+    WaddleCallLifecycleReport, WaddleCallLifecycleReportOutcome, WaddleCallReconnectBucket,
+    WaddleCallSetupOutcome,
 };
 pub use community_admin::{
     WaddleAdminChannelAffiliationEntry, WaddleAdminChannelListEntry,
@@ -101,7 +122,12 @@ pub use room_admin::{
     WaddlePinPermission, WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry,
     WaddleUserSearchEntry,
 };
+pub use roster::WaddleRosterContact;
+pub use social_feed::{WaddleFeedEntry, WaddleFeedPost, WaddleFeedSource};
 pub use status_preference::{WaddleManualStatus, WaddleStatusPreference};
+pub use stories::{
+    WaddleStory, WaddleStoryPost, WaddleStoryReaction, WaddleStoryReactions, WaddleStoryRead,
+};
 pub use types::*;
 
 use convert::{dispatch_event, ends_session};
@@ -334,6 +360,16 @@ impl WaddleClient {
                 false
             }
         }
+    }
+
+    /// The account's bare JID, the item id and author this account
+    /// publishes under.
+    pub(crate) fn account_bare_jid(&self) -> Result<BareJid, WaddleError> {
+        self.config
+            .jid
+            .parse::<jid::Jid>()
+            .map(|jid| jid.to_bare())
+            .map_err(|_| WaddleError::InvalidJid)
     }
 
     /// Take a cheap [`ClientHandle`] clone under the mutex, dropping

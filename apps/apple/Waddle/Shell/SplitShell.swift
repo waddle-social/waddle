@@ -50,6 +50,12 @@ struct SplitShell: View {
                 )
             case .inbox:
                 InboxView(style: .sidebar)
+            case .feed:
+                FeedView()
+            case .events:
+                EventsView()
+            case .people:
+                PeopleView()
             }
         }
     }

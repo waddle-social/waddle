@@ -76,7 +76,8 @@ pub fn server_features() -> Vec<Feature> {
 /// namespace is covered by a custom test suite (per the CLAUDE.md
 /// "advertised feature must have testable behavior" rule) and a real
 /// handler — see [`crate::protocol::handlers::jingle`],
-/// [`crate::protocol::handlers::extdisco`], and the typed XEP
+/// [`crate::protocol::handlers::extdisco`],
+/// [`crate::protocol::handlers::call_lifecycle`], and the typed XEP
 /// modules under `crate::xep`.
 pub fn call_features() -> Vec<Feature> {
     // `Feature::muji()` (XEP-0272) is advertised once the Jingle
@@ -94,6 +95,7 @@ pub fn call_features() -> Vec<Feature> {
         Feature::jingle_message(),
         Feature::ext_disco(),
         Feature::waddle_livekit_transport(),
+        Feature::waddle_call_lifecycle(),
         Feature::muji(),
     ]
 }
@@ -127,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn call_features_returns_eight_canonical_namespaces() {
+    fn call_features_returns_nine_canonical_namespaces() {
         let features = call_features();
         let expected = [
             "urn:xmpp:jingle:1",
@@ -137,6 +139,7 @@ mod tests {
             "urn:xmpp:jingle-message:0",
             "urn:xmpp:extdisco:2",
             "urn:waddle:transports:livekit:0",
+            "urn:waddle:call-lifecycle:0",
             "urn:xmpp:jingle:muji:0",
         ];
         assert_eq!(features.len(), expected.len());

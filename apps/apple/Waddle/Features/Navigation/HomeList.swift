@@ -1,7 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// iPhone Home tab: rooms, group chats and recent direct messages.
+/// iPhone Home tab: the way into People, then rooms, group chats and
+/// recent direct messages.
 struct HomeList: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -20,6 +21,9 @@ struct HomeList: View {
                 SpacePickerMenu(spaces: session.directory.spaces, selection: $spaceID)
                     .padding(.horizontal, Theme.Spacing.m)
                     .navigationListRow(top: Theme.Spacing.s)
+            }
+            if !isSearching {
+                PeopleHomeRow()
             }
             ChannelListSection(channels: sections.channels, style: .phone, isSearching: isSearching)
             GroupChatListSection(groups: sections.groupDMs, style: .phone)

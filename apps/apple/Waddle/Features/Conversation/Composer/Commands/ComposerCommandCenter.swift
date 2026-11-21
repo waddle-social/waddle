@@ -19,10 +19,11 @@ final class ComposerCommandCenter {
 
     // MARK: - Presence
 
-    /// `/away`, `/active`, `/dnd`: keeps the current status message.
-    func setAvailability(_ availability: Availability, session: SessionCoordinator) async {
-        await session.setAvailability(availability, statusText: session.status.statusText)
-        let title = ProfileAvailabilityOption(availability).title
+    /// `/away`, `/active`, `/dnd`: picks the status on every device of the
+    /// account, like the picker in the profile.
+    func setPresenceMode(_ mode: PresenceMode, session: SessionCoordinator) async {
+        await session.setPresenceMode(mode)
+        let title = ProfileStatusChoice(mode).title
         notice = ComposerNotice(severity: .info, text: "Your status is now \(title).")
     }
 

@@ -33,6 +33,11 @@ public final class SessionCoordinator {
     public let deliveries: DeliveryStore
     public let pins: PinStore
     public let avatars: AvatarStore
+    /// The account's contact list; nil until it has been loaded once, so
+    /// "not known yet" is never shown as "no contacts".
+    public internal(set) var contacts: [Contact]?
+    /// Where the last lookup of the contact list stands.
+    public internal(set) var contactsLoad = ContactsLoad.idle
     public let history: HistoryStore
     @ObservationIgnored let inbox: InboxStore
     @ObservationIgnored let readCursors: ReadCursorStore
@@ -42,6 +47,12 @@ public final class SessionCoordinator {
     /// The Activity overview: unread rooms with their unread messages and
     /// threads.
     public let unreadOverview: UnreadOverviewStore
+    /// The community feed and stories.
+    public let community: CommunityStore
+    /// The account's sticker packs.
+    public let stickers: StickerStore
+    /// The community calendar.
+    public let events: EventsStore
     /// XEP-0050 extension commands, discovered once the session is ready.
     public internal(set) var extensionCommands: [ExtensionCommand] = []
 
@@ -56,6 +67,7 @@ public final class SessionCoordinator {
     @ObservationIgnored let port: any XmppPort
     @ObservationIgnored private let reconnectPolicy: ReconnectPolicy
     @ObservationIgnored private let handlesCalls: Bool
+    @ObservationIgnored private let callLifecycleOutbox: CallLifecycleOutbox?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored var foregroundProbeTask: Task<Void, Never>?
@@ -104,6 +116,25 @@ public final class SessionCoordinator {
     @ObservationIgnored var mdsPublishSupported: Bool?
     /// Rooms opened or created this session; rejoined after reconnects.
     @ObservationIgnored var onDemandRooms: Set<BareJID> = []
+    /// Destroyed rooms must not be recreated by a later join in this session.
+    @ObservationIgnored var destroyedRooms: Set<BareJID> = []
+    /// Rooms whose delete got no clear answer (timed out, cut off). They
+    /// may be gone, so they are not joined again this session.
+    @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
+    /// Rooms being deleted or left; not joined until the request settles.
+    @ObservationIgnored var departingRooms: Set<BareJID> = []
+    /// Rooms with a management action in flight; one at a time per room.
+    @ObservationIgnored var roomsBeingManaged: Set<BareJID> = []
+    /// Local changes replayed over topology requests that began before
+    /// them; emptied when no request is in flight.
+    @ObservationIgnored var directoryMutations: [DirectoryMutation] = []
+    @ObservationIgnored var directoryRefreshesInFlight = 0
+    /// The last join sent to each room that has one on its way.
+    @ObservationIgnored var joinTails: [BareJID: Task<Void, Never>] = [:]
+    /// The last notification-settings write per conversation, so they run in order.
+    @ObservationIgnored var notifyWriteTails: [ConversationID: Task<Void, Error>] = [:]
+    /// Fences room actions across session teardown, including suspended port calls.
+    @ObservationIgnored var roomManagementGeneration = 0
 
     @ObservationIgnored private let connectBudget: TimeInterval
     @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
@@ -117,6 +148,14 @@ public final class SessionCoordinator {
     @ObservationIgnored private var retryWhenConnectSettles = false
     @ObservationIgnored private var attempt = 0
     @ObservationIgnored var connectionEpoch = 0
+
+    /// The clock presence reads; tests set it.
+    @ObservationIgnored var now: () -> Date = Date.init
+    @ObservationIgnored var presenceModeSync = PresenceModeSync()
+    @ObservationIgnored var idleClock = IdleClock()
+    /// What the current stream was last told; nil on a fresh stream.
+    @ObservationIgnored var sentPresence: SentPresence?
+    @ObservationIgnored var profileEdits = ProfileEdits()
 
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
@@ -136,7 +175,11 @@ public final class SessionCoordinator {
         self.account = account
         self.port = port
         self.handlesCalls = handlesCalls
-        self.calls = CallStore(port: port, ownJID: { account.fullJID }, ownBareJID: account.jid, media: callMedia)
+        let callLifecycleOutbox = handlesCalls ? CallLifecycleOutbox(port: port) : nil
+        self.callLifecycleOutbox = callLifecycleOutbox
+        self.calls = CallStore(
+            port: port, ownJID: { account.fullJID }, ownBareJID: account.jid, media: callMedia,
+            report: { [weak callLifecycleOutbox] in callLifecycleOutbox?.submit($0) })
         self.outboxStore = outboxStore
         self.reconnectPolicy = reconnectPolicy
         self.connectBudget = connectBudget
@@ -155,6 +198,9 @@ public final class SessionCoordinator {
         self.readCursors = ReadCursorStore()
         self.threadHistory = ThreadHistoryStore()
         self.unreadOverview = UnreadOverviewStore()
+        self.community = CommunityStore()
+        self.stickers = StickerStore()
+        self.events = EventsStore(account: account.jid)
         avatars.fetch = { [port] jid, knownID in
             await port.fetchAvatar(of: jid, knownID: knownID)
         }
@@ -188,6 +234,8 @@ public final class SessionCoordinator {
     /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
         isStopped = true
+        roomManagementGeneration += 1
+        callLifecycleOutbox?.stop()
         reconnectTask?.cancel()
         reconnectTask = nil
         foregroundProbeTask?.cancel()
@@ -201,6 +249,9 @@ public final class SessionCoordinator {
         readyTask = nil
         connectWatchdog?.cancel()
         connectWatchdog = nil
+        resetPresenceMode()
+        contacts = nil
+        contactsLoad = .idle
         await stopCalls()
         await port.disconnect()
         eventTask?.cancel()
@@ -247,6 +298,7 @@ public final class SessionCoordinator {
     func resetStaleConnection() async {
         guard !isStopped, status.connection == .online, !isConnectResetting else { return }
         isConnectResetting = true
+        callLifecycleOutbox?.setOnline(false)
         foregroundProbeTask?.cancel()
         foregroundProbeTask = nil
         isSendReady = false
@@ -370,7 +422,16 @@ public final class SessionCoordinator {
         cancelInboxHydrate()
         threadHistory.clear()
         unreadOverview.reset()
+        community.reset()
+        stickers.reset()
+        events.reset()
         onDemandRooms.removeAll()
+        destroyedRooms.removeAll()
+        departingRooms.removeAll()
+        roomsBeingManaged.removeAll()
+        unconfirmedDeletions.removeAll()
+        joinTails.removeAll()
+        directoryMutations.removeAll()
         extensionCommands.removeAll()
         mentionSearches.clear()
     }
@@ -395,6 +456,7 @@ public final class SessionCoordinator {
             reconnectTask?.cancel()
             reconnectTask = nil
             status.connection = .online
+            callLifecycleOutbox?.setOnline(true)
             // Avatars may have changed while we were away; rows on screen
             // ask again.
             avatars.markAllStale()
@@ -403,6 +465,7 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = Task { [weak self] in await self?.sessionReady() }
         case .disconnected:
+            callLifecycleOutbox?.setOnline(false)
             // Like Android, the call slot survives stream loss and reconnects;
             // call sends can fail while offline, without new recovery semantics.
             // Every disconnect creates a fresh FFI driver; its old
@@ -420,6 +483,7 @@ public final class SessionCoordinator {
             // Messages may have been missed while offline: loaded pages are
             // no longer known to be current.
             history.markAllStale()
+            sentPresence = nil
             presence.clear()
             calls.groupPresence.clear()
             mdsPublishSupported = nil
@@ -427,7 +491,7 @@ public final class SessionCoordinator {
                 scheduleReconnect()
             }
         case let .call(event):
-            if handlesCalls, !isStopped { calls.handle(event) }
+            _ = receiveCall(event)
         case let .message(message):
             route(message)
         case let .presence(wirePresence):
@@ -456,9 +520,12 @@ public final class SessionCoordinator {
             messageRejected(stanzaID, from: from, to: to)
         case let .avatarChanged(jid, id):
             avatars.avatarChanged(jid, id: id)
+        case let .presenceModeChanged(mode):
+            presenceModePicked(elsewhere: mode)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
+            callLifecycleOutbox?.stop()
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil
@@ -470,9 +537,18 @@ public final class SessionCoordinator {
         }
     }
 
+    /// Stream arrivals follow the host's call-handling policy.
+    func receiveCall(_ event: CallEvent) -> Bool {
+        guard handlesCalls, !isStopped else { return false }
+        calls.handle(event)
+        return calls.state.isLive && calls.state.sid == event.sid
+    }
+
     /// The ready pipeline: presence, directory, joins, read state, queue.
     private func sessionReady() async {
-        await port.sendPresence(status.availability, status: status.statusText)
+        await refreshOwnPresence()
+        guard !Task.isCancelled else { return }
+        await syncPresenceModeOnConnect()
         guard !Task.isCancelled else { return }
         await refreshDirectory()
         guard !Task.isCancelled else { return }
@@ -489,6 +565,8 @@ public final class SessionCoordinator {
         guard !Task.isCancelled else { return }
         await drainPendingDisplayed()
         await reloadActiveConversation()
+        guard !Task.isCancelled else { return }
+        await refreshContacts()
         // Only a session that got all the way through resets the backoff,
         // so a stream that drops right after binding keeps backing off.
         guard !Task.isCancelled else { return }
@@ -669,9 +747,17 @@ public final class SessionCoordinator {
 /// Observable session-wide status the UI binds to.
 public struct SessionStatus: Equatable, Sendable {
     public var connection: ConnectionStatus = .signedOut
+    /// How the account's presence is decided; the same on every device.
+    public var presenceMode: PresenceMode = .automatic
+    /// What this device shows: the picked status, or what its idle time
+    /// says while the mode is automatic.
     public var availability: Availability = .available
     public var statusText: String?
     public var mood: UserMood?
+    public var activity: UserActivity?
+    public var tune: UserTune?
+    /// The account's own details, once loaded.
+    public var details: ProfileDetails?
 
     public init() {}
 }

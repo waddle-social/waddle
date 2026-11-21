@@ -30,6 +30,7 @@ public final class DirectoryStore {
     /// DMs, most recent first.
     public private(set) var directConversations: [DirectConversation] = []
     public private(set) var notifyModes: [ConversationID: NotifyMode] = [:]
+    private var showingMessagesInPush: Set<ConversationID> = []
     public private(set) var hasLoadedTopology = false
 
     @ObservationIgnored private var roomJIDs: Set<BareJID> = []
@@ -58,32 +59,54 @@ public final class DirectoryStore {
         }
     }
 
+    /// The stored mode, else the server's default for the kind: every
+    /// message in a 1:1 or group chat, mentions in a room.
     public func notifyMode(for conversation: ConversationID) -> NotifyMode {
-        notifyModes[conversation] ?? (conversation.isRoom ? .onMention : .always)
+        if let stored = notifyModes[conversation] { return stored }
+        let notifiesAll = !conversation.isRoom || groupDMs.contains { $0.roomJID == conversation.jid }
+        return notifiesAll ? .always : .onMention
+    }
+
+    /// Whether push notifications for the conversation show who wrote and
+    /// what. Off unless the account turned it on.
+    public func showsMessagesInPush(for conversation: ConversationID) -> Bool {
+        showingMessagesInPush.contains(conversation)
     }
 
     public func apply(_ topology: Topology) {
         spaces = topology.spaces
-        let sorted = topology.channels.sorted {
-            ($0.position, $0.name.lowercased()) < ($1.position, $1.name.lowercased())
-        }
+        let sorted = topology.channels.sorted(by: Self.listOrder)
         channels = sorted.filter { !$0.isGroupDM }
         groupDMs = sorted.filter(\.isGroupDM)
         roomJIDs = Set(topology.channels.map(\.roomJID))
         hasLoadedTopology = true
     }
 
-    /// Adds a room created or joined in this session before the next
-    /// topology refresh lists it.
+    private static func listOrder(_ first: Channel, _ second: Channel) -> Bool {
+        (first.position, first.name.lowercased()) < (second.position, second.name.lowercased())
+    }
+
+    /// Adds or replaces a room, ordered by position then name.
     public func upsert(_ channel: Channel) {
         roomJIDs.insert(channel.roomJID)
         if channel.isGroupDM {
             groupDMs.removeAll { $0.roomJID == channel.roomJID }
             groupDMs.append(channel)
+            groupDMs.sort(by: Self.listOrder)
         } else {
             channels.removeAll { $0.roomJID == channel.roomJID }
             channels.append(channel)
+            channels.sort(by: Self.listOrder)
         }
+    }
+
+    /// Removes a room and its notification preference.
+    public func remove(_ room: BareJID) {
+        channels.removeAll { $0.roomJID == room }
+        groupDMs.removeAll { $0.roomJID == room }
+        roomJIDs.remove(room)
+        notifyModes.removeValue(forKey: .room(room))
+        showingMessagesInPush.remove(.room(room))
     }
 
     /// Records 1:1 activity, moving the peer to the top of the DM list.
@@ -105,8 +128,22 @@ public final class DirectoryStore {
         notifyModes[conversation] = mode
     }
 
-    public func replaceNotifyModes(_ modes: [ConversationID: NotifyMode]) {
-        notifyModes = modes
+    /// The mode as the account stores it; `nil` is the kind's default.
+    public func setStoredNotifyMode(_ mode: NotifyMode?, for conversation: ConversationID) {
+        notifyModes[conversation] = mode
+    }
+
+    public func setShowsMessagesInPush(_ shows: Bool, for conversation: ConversationID) {
+        if shows {
+            showingMessagesInPush.insert(conversation)
+        } else {
+            showingMessagesInPush.remove(conversation)
+        }
+    }
+
+    public func replaceNotifySettings(_ settings: NotifySettings) {
+        notifyModes = settings.modes
+        showingMessagesInPush = settings.showingMessagesInPush
     }
 
     public func clear() {
@@ -115,6 +152,7 @@ public final class DirectoryStore {
         groupDMs = []
         directConversations = []
         notifyModes = [:]
+        showingMessagesInPush = []
         roomJIDs = []
         hasLoadedTopology = false
     }

@@ -289,7 +289,7 @@ either server release (see [Clients](#clients)).
       schema-version check reads it ([schema versions](authz-schema-versions.md)).
       Verify again that every definition reads empty.
 8. **Owner phase, restricted runtime only.** The owner phase of this
-   release's image must apply migrations 2002 to 2014 and grant the runtime
+   release's image must apply migrations 2003 to 2022 and grant the runtime
    role before any server of this release starts; servers of this release
    refuse a database whose ledger lacks them. Nothing in the chart sequences
    it for an upgrade; this step uses the chart's fresh-install path set up in
@@ -386,8 +386,8 @@ The production chart has no S2S port or setting. Confirm after step 9:
   `urn:waddle:s2s:0`; the web client therefore lists bookmarks of rooms on
   other servers under "Rooms on other servers — unavailable" and joins none.
   `server/capabilities.toml` shows only what W11's reviewed change added.
-- **Empty S2S tables.** The tables of migrations 2004, 2005, 2008 and 2010
-  to 2013 hold no row (`s2s_iq_correlations`, `s2s_iq_correlation_owners`,
+- **Empty S2S tables.** The tables of migrations 2005, 2006, 2009 and 2011
+  to 2014 hold no row (`s2s_iq_correlations`, `s2s_iq_correlation_owners`,
   `s2s_remote_room_occupancies`, `s2s_remote_room_verdicts`,
   `s2s_local_room_seats`, `s2s_pending_subscriptions`,
   `s2s_remote_pubsub_subscriptions`, `s2s_remote_offline_admissions`;
@@ -411,10 +411,10 @@ what a later rolling update has to respect.
 | Destination routing | A replica of the previous release answers IQs to other domains per namespace (`not-allowed` for ping, Carbons, session and discovery; other namespaces reach local handlers), archives a message to another domain and drops it silently. The decision is taken by the replica that holds the client's connection and leaves no stored state, so a client on another replica sees the other behaviour | No migration is needed; the behaviour converges when the last old replica is gone |
 | Relay between replicas | The ordered relay's envelope and its id `waddle.clustering.relay.deliver_ordered.v16` are unchanged. One message id is new, `waddle.clustering.relay.remote_room_request.v1`, sent only for stanzas from S2S streams: nothing sends it with S2S off, and a replica that predates it answers `UnknownMessage`, which the sender turns into a retryable error | A rolling update is safe for the relay in either order |
 | Host-grant writer and revocation fences | A binary from before the fences decides managed rooms from the legacy stores, holds no fence lease, and so is neither waited for by a revoke nor bound by it | No scope is enrolled until every serving replica runs this release, and no older replica joins while a scope is enrolled (G11, G24) |
-| Bound Space bookmark writes | Migration 2017 rejects legacy item writes to a bound node. The canonical writer commits each change with its notification version | Retire pre-2017 serving binaries and owner tools in the `Recreate` window before applying the migration |
-| Protected Space subscriptions and events | The protected SM payload uses typed subscription and bookmark descriptors. The cluster sends a versioned publication hint whose recipient rebuilds the event from the canonical store. | Complete the `Recreate` window before serving enrolled Spaces. Apply migrations 2018–2019 and rerun the owner phase to provision the preference table and sequence grant. Devices renew subscriptions explicitly and retain the returned ID for unsubscribe. |
-| Enrolled Space configuration and deletion | PostgreSQL fences legacy configuration writes. A deletion reserves the node address, removes its bookmarks and records delivery jobs for the subscribers it captured. Replicas exchange a typed deletion request for the exact owning socket binding. | Apply migrations 2020–2021 and rerun the owner phase in the `Recreate` window. Start only replicas that understand the deletion route and the protected SM deletion descriptor. |
-| Session endings of a retired account | A replica without migration 2014's lease is not seen by `waddle-server account retire`, ends nothing, and keeps the account's streams open | Every serving replica runs this release before an account is retired ([account retirement, step 3](account-retirement.md#procedure)) |
+| Bound Space bookmark writes | Migration 2018 rejects legacy item writes to a bound node. The canonical writer commits each change with its notification version | Retire serving binaries and owner tools from before the bookmark guard in the `Recreate` window before applying the migration |
+| Protected Space subscriptions and events | The protected SM payload uses typed subscription and bookmark descriptors. The cluster sends a versioned publication hint whose recipient rebuilds the event from the canonical store. | Complete the `Recreate` window before serving enrolled Spaces. Apply migrations 2019–2020 and rerun the owner phase to provision the preference table and sequence grant. Devices renew subscriptions explicitly and retain the returned ID for unsubscribe. |
+| Enrolled Space configuration and deletion | PostgreSQL fences legacy configuration writes. A deletion reserves the node address, removes its bookmarks and records delivery jobs for the subscribers it captured. Replicas exchange a typed deletion request for the exact owning socket binding. | Apply migrations 2021–2022 and rerun the owner phase in the `Recreate` window. Start only replicas that understand the deletion route and the protected SM deletion descriptor. |
+| Session endings of a retired account | A replica without migration 2015's lease is not seen by `waddle-server account retire`, ends nothing, and keeps the account's streams open | Every serving replica runs this release before an account is retired ([account retirement, step 3](account-retirement.md#procedure)) |
 | `[host_policy]` in the S2S snapshot | A binary that predates the table refuses a snapshot that holds it, `federate_new_rooms` included; the snapshot is not read while S2S is off | Before a snapshot uses the table, every replica runs this release; a rollback to an older binary removes the table first |
 | Web and native clients | A client older than the server sees the new refusals (see [What users see](#what-users-see-with-s2s-off)); a web client newer than the server, between the `chat` deployment and step 9, behaves as with S2S off | No client-side migration is needed; see [Clients](#clients) |
 
@@ -469,37 +469,38 @@ is no mixed-version period for this transition, because the codec cutover
 already stops every replica of the previous release
 ([schema versions, Rollout within #2047](authz-schema-versions.md#rollout-within-2047)).
 
-### PostgreSQL: migrations 2002 to 2014
+### PostgreSQL: migrations 2003 to 2022
 
 The migrations after the schema baseline (version 2000) are numbered without
-a gap. Migration 2001 (offline call notification candidates) is not part of
-this work: it reached `main`, whose image production runs, before this
-release, so a database a release from `main` served has applied it already.
-One that has not gets it in the same owner phase, before 2002. This release
-adds 2002 to 2014. The runner refuses a database that records a later version but not
-an earlier one, a version it does not know, and a version whose description
-or checksum differs from its own. There is no down migration.
+a gap. Main already includes migrations 2001 (offline call notification
+candidates) and 2002 (missed-call alert notifications). The owner phase
+preserves their ledger entries and applies migrations 2003 through 2022.
+A database from an older release also receives any missing notification
+migrations before 2003. The runner refuses unknown versions, gaps, and any
+description or checksum mismatch. Migrations are forward-only.
 
 | Version | Creates | Runtime role (restricted runtime) | With S2S off |
 | --- | --- | --- | --- |
-| 2002 | Host-grant authority: authority row, scope lifecycles, scopes, rooms, grants, operation journal | `SELECT` on the authority row, lifecycles and rooms; `SELECT, UPDATE` on scopes; `SELECT, INSERT, UPDATE` on grants; `SELECT, INSERT` on the journal | No scope; the authority row only |
-| 2003 | Restore incarnation: epoch, lineage binding, authority id, position acknowledgement, the `restored`, `reconstructed` and `fenced` states | Unchanged matrix | The first owner phase after it binds the authority to the database lineage and changes nothing else |
-| 2004 | `s2s_iq_correlations`, `s2s_iq_correlation_owners` | `SELECT, INSERT, DELETE`; `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2005 | `s2s_remote_room_occupancies`, `s2s_remote_room_verdicts` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2006 | `host_grant_fence_replicas`, `host_grant_fence_acks` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | Empty: no lease without an enrolled scope |
-| 2007 | `retired_account_jids` | `SELECT` only | Read at every startup, provisioning and session creation |
-| 2008 | `s2s_local_room_seats` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2009 | `channels.federated`, zero for every row | — | Every room is closed to other servers |
-| 2010 | `s2s_pending_subscriptions`, `s2s_remote_pubsub_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2011 | `s2s_remote_offline_admissions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2012 | `s2s_federated_spaces` | `SELECT, INSERT, UPDATE, DELETE` | Empty unless an owner turns a Space's `federated` setting on |
-| 2013 | `s2s_space_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
-| 2014 | `account_session_ending_replicas`, `account_session_ending_requests`, `account_session_ending_acks` | `SELECT, INSERT, UPDATE` on leases and acknowledgements; `SELECT` on requests | One lease row per serving process, renewed every 5 s |
-| 2017 | `host_grant_space_bookmark_versions` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | One committed version per enrolled Space room bookmark |
-| 2018 | `local_space_subscriptions` (PostgreSQL only) | `SELECT, INSERT, UPDATE, DELETE` | Empty until a served account subscribes |
-| 2019 | `local_space_notification_order` and preference and bookmark order columns (PostgreSQL only) | `USAGE` on the sequence | A renewed preference and a new publication establish their order |
-| 2020 | Bound Space configuration trigger and operation kind (PostgreSQL only) | Existing `pubsub_nodes` and journal privileges. The trigger permits a configuration update only through the canonical writer. | Active for every enrolled Space |
-| 2021 | Space deletion tombstones, captured audiences, subscriber jobs and exact local binding jobs (PostgreSQL only) | `SELECT, INSERT` on tombstones and audiences. `SELECT, INSERT, UPDATE` on subscriber and binding jobs. | Served subscribers can receive local deletion notices through their live resources |
+| 2003 | Host-grant authority: authority row, scope lifecycles, scopes, rooms, grants, operation journal | `SELECT` on the authority row, lifecycles and rooms; `SELECT, UPDATE` on scopes; `SELECT, INSERT, UPDATE` on grants; `SELECT, INSERT` on the journal | No scope; the authority row only |
+| 2004 | Restore incarnation: epoch, lineage binding, authority id, position acknowledgement, the `restored`, `reconstructed` and `fenced` states | Unchanged matrix | The first owner phase after it binds the authority to the database lineage and changes nothing else |
+| 2005 | `s2s_iq_correlations`, `s2s_iq_correlation_owners` | `SELECT, INSERT, DELETE`; `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2006 | `s2s_remote_room_occupancies`, `s2s_remote_room_verdicts` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2007 | `host_grant_fence_replicas`, `host_grant_fence_acks` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | Empty: no lease without an enrolled scope |
+| 2008 | `retired_account_jids` | `SELECT` only | Read at every startup, provisioning and session creation |
+| 2009 | `s2s_local_room_seats` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2010 | `channels.federated`, zero for every row | — | Every room is closed to other servers |
+| 2011 | `s2s_pending_subscriptions`, `s2s_remote_pubsub_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2012 | `s2s_remote_offline_admissions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2013 | `s2s_federated_spaces` | `SELECT, INSERT, UPDATE, DELETE` | Empty unless an owner turns a Space's `federated` setting on |
+| 2014 | `s2s_space_subscriptions` | `SELECT, INSERT, UPDATE, DELETE` | Empty |
+| 2015 | `account_session_ending_replicas`, `account_session_ending_requests`, `account_session_ending_acks` | `SELECT, INSERT, UPDATE` on leases and acknowledgements; `SELECT` on requests | One lease row per serving process, renewed every 5 s |
+| 2016 | Enrolled Space bindings, affiliations and operation changes (PostgreSQL only) | `SELECT` on bindings, `SELECT, INSERT, UPDATE` on affiliations, `SELECT, INSERT` on operation changes | Empty until a Space is bound |
+| 2017 | Grant-era columns on `s2s_space_subscriptions` | Existing subscription privileges | An enrolled subscription records its lifecycle, authority incarnation and grant generation |
+| 2018 | `host_grant_space_bookmark_versions` (PostgreSQL only) | `SELECT, INSERT, UPDATE` | One committed version per enrolled Space room bookmark |
+| 2019 | `local_space_subscriptions` (PostgreSQL only) | `SELECT, INSERT, UPDATE, DELETE` | Empty until a served account subscribes |
+| 2020 | `local_space_notification_order` and preference and bookmark order columns (PostgreSQL only) | `USAGE` on the sequence | A renewed preference and a new publication establish their order |
+| 2021 | Bound Space configuration trigger and operation kind (PostgreSQL only) | Existing `pubsub_nodes` and journal privileges. The trigger permits a configuration update only through the canonical writer. | Active for every enrolled Space |
+| 2022 | Space deletion tombstones, captured audiences, subscriber jobs and exact local binding jobs (PostgreSQL only) | `SELECT, INSERT` on tombstones and audiences. `SELECT, INSERT, UPDATE` on subscriber and binding jobs. | Served subscribers can receive local deletion notices through their live resources |
 
 A deletion job survives a worker restart. A local job retains its first
 eligible resource snapshot and tracks custody per binding. The worker can
@@ -509,7 +510,7 @@ A restored authority incarnation invalidates pending notices from the old
 incarnation. The tombstone keeps the deleted Space address reserved while
 the shared room scope remains active.
 
-On SQLite, 2002, 2003 and 2006 create nothing. A development or test
+On SQLite, 2003, 2004 and 2007 create nothing. A development or test
 database that a build from before the final numbering migrated records
 versions that now name other migrations, with other checksums, and every
 later startup refuses it: recreate it. No such database shipped.
@@ -523,7 +524,7 @@ information and changes nothing, and it must move to the restricted runtime
 before any scope is enrolled.
 
 `WADDLE_HOST_GRANT_RESTORE_EPOCH` is new and defaults to `0`, the value
-migration 2003 records. Leave it unset; the owner phase and every server
+migration 2004 records. Leave it unset; the owner phase and every server
 must read the same value ([restore runbook](authz-host-grant-restore.md#configuring-the-epoch)).
 
 ### Startup checks
@@ -540,7 +541,7 @@ release runs these at startup:
 | Retired-account ledger readable as the runtime role, before the first provisioning | Startup fails: `the runtime database role cannot read retired_account_jids ...` | Passes |
 | Host-grant enrolled set loaded (PostgreSQL) | Retried every second for up to 30 s, then the process exits: `the host-grant enrolled set could not be loaded; refusing to serve until it is` | Loaded; reloaded every 5 s |
 | Host-grant runtime privileges and restore fence | Never stops the replica. With no scope enrolled a failure is logged as information and retried; readiness stays ready | Readiness ready: with a verified attachment the `/readyz` body has no `host_grants` field, without one it says `"host_grants": "unmanaged"` (always the case under a schema-owning login) |
-| Session-ending lease kept (migration 2014) | Never stops the replica: warning `the session-ending lease could not be kept; retrying`, and the replica is missing from retirement reports until it succeeds | Lease renewed every 5 s |
+| Session-ending lease kept (migration 2015) | Never stops the replica: warning `the session-ending lease could not be kept; retrying`, and the replica is missing from retirement reports until it succeeds | Lease renewed every 5 s |
 | Revocation fence clock skew | Recorded only while the replica holds a fence lease, which needs an enrolled scope | Absent |
 
 ## What users see with S2S off
@@ -680,7 +681,7 @@ Prefer roll-forward. What a step changed decides how far back is possible:
 The limits:
 
 - **Migrations are forward-only.** The previous release refuses a ledger that
-  holds 2002 or later (or 2001, for a release from before it), so it cannot
+  holds 2003 or later, so it cannot
   start against the migrated database. No down migration exists. Going back
   means a PostgreSQL restore.
 - **The SpiceDB markers are a fence.** The previous release cannot start
@@ -703,11 +704,11 @@ Record each result in the evidence log.
 
 1. Both replicas run the published digest and `WADDLE_GIT_SHA` of the merge
    commit, and are ready.
-2. The migration ledger holds every version from 2001 to 2014:
+2. The migration ledger holds every version from 2001 to 2022:
 
    ```sh
    psql_primary -Atc "SELECT string_agg(version::text, ',' ORDER BY version) FROM _migrations WHERE version > 2000"
-   # 2001,2002,2003,2004,2005,2006,2007,2008,2009,2010,2011,2012,2013,2014
+   # 2001,2002,2003,2004,2005,2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022
    psql_primary -Atc "SELECT count(*) FROM host_grant_scopes"
    # 0
    ```

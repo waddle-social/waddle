@@ -34,6 +34,10 @@ pub const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:1";
 /// Atom namespace used for XEP-0472 feed item payloads.
 pub const NS_ATOM: &str = "http://www.w3.org/2005/Atom";
 
+/// Namespace of the Waddle `<source kind='…'/>` child the server adds
+/// to feed entries it writes on a member's behalf.
+pub const NS_WADDLE_FEED_SOURCE: &str = "urn:waddle:feed-source:0";
+
 /// PubSub node for social feed posts.
 pub const PUBSUB_NODE_FEED: &str = "urn:xmpp:pubsub-social-feed:1";
 

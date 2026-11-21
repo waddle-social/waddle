@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.client.ffi.WaddleActivity
 import social.waddle.client.ffi.WaddleAdhocAction
 import social.waddle.client.ffi.WaddleAdhocStatus
 import social.waddle.client.ffi.WaddleAdminChannelRef
@@ -35,6 +36,9 @@ import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleAvatarResult
 import social.waddle.client.ffi.WaddleBookmarkItem
+import social.waddle.client.ffi.WaddleCalendarDate
+import social.waddle.client.ffi.WaddleCallLifecycleReport
+import social.waddle.client.ffi.WaddleCallLifecycleReportOutcome
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
@@ -48,6 +52,8 @@ import social.waddle.client.ffi.WaddleExtensionCommand
 import social.waddle.client.ffi.WaddleExtensionCommandResult
 import social.waddle.client.ffi.WaddleExtensionFormField
 import social.waddle.client.ffi.WaddleExternalService
+import social.waddle.client.ffi.WaddleFeedEntry
+import social.waddle.client.ffi.WaddleFeedPost
 import social.waddle.client.ffi.WaddleGroupDmHistoryAccess
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleInboxMessageContent
@@ -72,6 +78,7 @@ import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleRoomMemberEntry
+import social.waddle.client.ffi.WaddleRosterContact
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
@@ -79,6 +86,10 @@ import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
 import social.waddle.client.ffi.WaddleStatusPreference
 import social.waddle.client.ffi.WaddleStickerPack
+import social.waddle.client.ffi.WaddleStory
+import social.waddle.client.ffi.WaddleStoryPost
+import social.waddle.client.ffi.WaddleStoryReactions
+import social.waddle.client.ffi.WaddleStoryRead
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleUploadSlot
@@ -806,6 +817,13 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
 
     override suspend fun publishStickerPack(pack: WaddleStickerPack): String = stickers.publish(pack)
 
+    /** Not used by Android yet: answers with the id an import keeps. */
+    override suspend fun importStickerPack(
+        ownerJid: String,
+        node: String?,
+        packId: String,
+    ): String = packId
+
     override suspend fun retractStickerPack(packId: String): Boolean = stickers.retract(packId)
 
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
@@ -858,12 +876,37 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
  * dispatcher. Cohesive verb families live in sliced-out fakes.
  */
 class FakeWaddleClient : FakeRoomAndAdminClient() {
+    /** Android sends no call lifecycle report; the verb only exists in the shared bindings. */
+    override suspend fun reportCallLifecycle(report: WaddleCallLifecycleReport): WaddleCallLifecycleReportOutcome =
+        WaddleCallLifecycleReportOutcome.UNSUPPORTED
+
+    /** Android has no feed or stories screen; the verbs only exist in the shared bindings. */
+    override suspend fun fetchFeed(communityJid: String, maxItems: UInt?): List<WaddleFeedEntry> = emptyList()
+    override suspend fun publishFeedPost(communityJid: String, post: WaddleFeedPost): WaddleFeedEntry =
+        WaddleFeedEntry(
+            id = "post-test", title = post.title, body = post.body, author = null,
+            publishedMs = null, link = post.link, source = null,
+        )
+    override suspend fun fetchStories(communityJid: String, maxItems: UInt?): List<WaddleStory> = emptyList()
+    override suspend fun publishStory(communityJid: String, post: WaddleStoryPost): WaddleStory =
+        WaddleStory(
+            id = "story-test", body = post.body, mediaUrl = post.mediaUrl, mediaType = post.mediaType,
+            author = null, postedMs = null, expiresMs = null,
+        )
+    override suspend fun fetchStoryReads(): List<WaddleStoryRead> = emptyList()
+    override suspend fun publishStoryReads(reads: List<WaddleStoryRead>) = Unit
+    override suspend fun fetchStoryReactions(communityJid: String, storyId: String): WaddleStoryReactions =
+        WaddleStoryReactions(reactions = emptyList(), mine = emptyList())
+    override suspend fun setStoryReactions(communityJid: String, storyId: String, emojis: List<String>) = Unit
     override suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent> = emptyList()
     override suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent = event
     override suspend fun retractCommunityEvent(communityJid: String, itemId: String) = Unit
     override suspend fun rsvpCommunityEvent(
         communityJid: String, uid: String, selfJid: String, status: WaddleEventParticipation,
     ) = Unit
+    override suspend fun cancelCommunityEventOccurrence(
+        communityJid: String, itemId: String, occurrence: WaddleCalendarDate,
+    ): WaddleEvent = throw UnsupportedOperationException("no event is stored in the fake")
     override suspend fun createEventRoom(name: String, privateRoom: Boolean): String =
         "event-test@conference.example.com"
     override suspend fun eventPlanningItems(roomJid: String): List<WaddlePlanningItem> = emptyList()
@@ -1302,6 +1345,19 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         return pepProfile
     }
 
+    override suspend fun fetchOwnActivity(): WaddleActivity? = pepProfile.activity
+
+    /** Canned roster served by [fetchRosterContacts]. */
+    @Volatile
+    var rosterContacts: List<WaddleRosterContact> = emptyList()
+
+    override suspend fun fetchRosterContacts(): List<WaddleRosterContact> = rosterContacts
+
+    override suspend fun fetchOwnVcard4(): WaddleVCard4? {
+        fetchVcard4Failure?.let { throw it }
+        return vcard4
+    }
+
     override suspend fun publishVcard4(vcard: WaddleVCard4) {
         profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishVcard4(vcard)
@@ -1390,6 +1446,10 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         presence.send(RecordedPresence(status, show, idleSince, joinRoomCalls.size, sendCalls.size))
 
     override suspend fun fetchStatusPreference(): WaddleStatusPreference = presence.fetchPreference()
+
+    override suspend fun publishStatusPreference(preference: WaddleStatusPreference) {
+        presence.storedPreference = preference
+    }
 
     /** Recorded (conversation, targetId, emojis) reaction sends. */
     val reactionCalls = CopyOnWriteArrayList<Triple<String, String, List<String>>>()

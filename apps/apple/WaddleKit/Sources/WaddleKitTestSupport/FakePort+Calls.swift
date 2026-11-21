@@ -38,6 +38,21 @@ enum CallSend: Hashable {
 }
 
 extension FakePort {
+    func reportCallLifecycle(_ report: CallLifecycleReport) async -> CallLifecycleReportResult {
+        callLifecycleReports.append(report)
+        let result = callLifecycleReportResult
+        if holdCallLifecycleReports {
+            await withCheckedContinuation { heldCallLifecycleReports.append($0) }
+        }
+        return result
+    }
+
+    func releaseCallLifecycleReports() {
+        let held = heldCallLifecycleReports
+        heldCallLifecycleReports = []
+        for continuation in held { continuation.resume() }
+    }
+
     func updateGroupCallPresence(_ presence: GroupCallPresenceUpdate, in room: BareJID, nick: String) async -> Bool {
         await recordCall(.groupPresence(room, nick, presence))
     }

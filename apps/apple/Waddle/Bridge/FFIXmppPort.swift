@@ -12,9 +12,6 @@ final class FFIXmppPort: XmppPort {
     let signals: FFISessionSignals
     /// XEP-0363 service, discovered once; rediscovered while unknown.
     let uploadService = FFILocked<BareJID?>(nil)
-    /// Last known Waddle rich-payload opt-in per conversation, repeated on
-    /// every XEP-0492 mode change so the merge never clears it.
-    let richPayloadOptIns = FFILocked<[ConversationID: Bool]>([:])
     private let continuation: AsyncStream<XmppEvent>.Continuation
 
     init(config: WaddleConfig) {
@@ -53,7 +50,8 @@ final class FFIXmppPort: XmppPort {
         }
     }
 
-    func sendPresence(_ availability: Availability, status: String?) async {
-        await client.sendPresence(status: status, show: availability.showValue, idleSince: nil)
+    func sendPresence(_ availability: Availability, status: String?, idleSince: Date?) async {
+        await client.sendPresence(
+            status: status, show: availability.showValue, idleSince: idleSince?.formatted(.iso8601))
     }
 }

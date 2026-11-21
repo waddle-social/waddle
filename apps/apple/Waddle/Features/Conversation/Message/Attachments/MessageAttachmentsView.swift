@@ -7,6 +7,8 @@ struct MessageAttachmentsView: View {
     let files: [SharedFile]
     let isSticker: Bool
     let openImage: (SharedFile) -> Void
+    /// Opens the pack a sticker is from; nil when it names none.
+    var openStickerPack: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.s - 2) {
@@ -30,7 +32,7 @@ struct MessageAttachmentsView: View {
     private func plainAttachment(_ file: SharedFile, kind: MessageAttachmentKind) -> some View {
         switch kind {
         case .image where isSticker:
-            MessageStickerView(file: file)
+            MessageStickerView(file: file, openPack: openStickerPack)
         case .image:
             MessageImageAttachment(file: file, open: openImage)
         default:
@@ -139,15 +141,29 @@ struct MessageImageAttachment: View {
     }
 }
 
-/// A sticker: the image alone, without chrome. GIF stickers play.
+/// A sticker: the image alone, without chrome. GIF stickers play. The
+/// row hides a sticker's text, so a picture that cannot be fetched is
+/// replaced by that text.
 struct MessageStickerView: View {
     let file: SharedFile
+    /// Opens the pack the sticker is from; nil when it names none.
+    var openPack: (() -> Void)?
 
     var body: some View {
-        sticker
-            .frame(width: 120, height: 120)
+        tappable
             .accessibilityLabel(Text(file.description ?? "Sticker"))
             .accessibilityAddTraits(.isImage)
+    }
+
+    @ViewBuilder
+    private var tappable: some View {
+        if let openPack {
+            Button(action: openPack) { sticker }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text("Shows the pack this sticker is from"))
+        } else {
+            sticker
+        }
     }
 
     @ViewBuilder
@@ -156,18 +172,34 @@ struct MessageStickerView: View {
             RemoteImageDataView(url: file.url) { phase in
                 switch phase {
                 case let .success(data):
-                    AnimatedImageView(data: data, maxPixelSize: 360)
-                case .empty, .failure:
-                    Color.clear
+                    AnimatedImageView(data: data, maxPixelSize: 360).frame(width: 120, height: 120)
+                case .empty:
+                    Color.clear.frame(width: 120, height: 120)
+                case .failure:
+                    unavailable
                 }
             }
         } else {
-            AsyncImage(url: file.url) { image in
-                image.resizable().scaledToFit()
-            } placeholder: {
-                Color.clear
+            AsyncImage(url: file.url) { phase in
+                switch phase {
+                case let .success(image):
+                    image.resizable().scaledToFit().frame(width: 120, height: 120)
+                case .empty:
+                    Color.clear.frame(width: 120, height: 120)
+                case .failure:
+                    unavailable
+                @unknown default:
+                    unavailable
+                }
             }
         }
+    }
+
+    /// What the sticker shows, in words, where its picture would be.
+    private var unavailable: some View {
+        Label(file.description ?? "Sticker", systemImage: "face.smiling")
+            .huddleText(Theme.Typography.body)
+            .foregroundStyle(Theme.Colors.fgMuted)
     }
 }
 

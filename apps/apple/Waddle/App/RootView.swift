@@ -86,7 +86,7 @@ private struct SignedInRoot: View {
             session.coordinator.sendsReadReceipts = sends
         }
         .onChange(of: session.coordinator.connection == .online, initial: true) { _, isOnline in
-            if isOnline {
+            if isOnline, app.preferences.receivesPush {
                 AppDelegate.registerForRemoteNotifications()
             }
         }

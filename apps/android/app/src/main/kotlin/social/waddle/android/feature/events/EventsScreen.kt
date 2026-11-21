@@ -203,6 +203,9 @@ private fun EventEditor(
                 end = parseEventDate(end),
                 attendees = event?.attendees.orEmpty(),
                 workspaceRoom = event?.workspaceRoom,
+                recurrence = event?.recurrence,
+                excluded = event?.excluded.orEmpty(),
+                overrides = event?.overrides.orEmpty(),
             )
             )
         }) { Text(stringResource(R.string.events_save)) }

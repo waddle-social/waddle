@@ -39,6 +39,10 @@ public enum SystemCallEnd: Hashable, Sendable {
 /// What to tell the system about the call slot.
 public enum SystemCallUpdate: Hashable, Sendable {
     case reportIncoming(SystemCall)
+    /// Re-report the same call for another push; ignore the report's answer.
+    case reportDuplicate(SystemCall)
+    /// Report a fresh call, then end it from the report's completion.
+    case reportDismissed(SystemCall, SystemCallEnd)
     case startOutgoing(SystemCall)
     /// The call was answered in the app, not on the system's screen.
     case answer(UUID)
@@ -48,6 +52,14 @@ public enum SystemCallUpdate: Hashable, Sendable {
     /// The microphone was muted or unmuted in the app.
     case setMuted(UUID, Bool)
     case end(UUID, SystemCallEnd)
+}
+
+/// Every VoIP push needs a system report, even when its call cannot ring.
+public struct PushedCall: Hashable, Sendable {
+    public enum Verdict: Hashable, Sendable { case awaiting, duplicate, dismissed }
+
+    public let verdict: Verdict
+    public let updates: [SystemCallUpdate]
 }
 
 /// Keeps the system's call screen in step with the call slot, telling it
@@ -67,15 +79,19 @@ public struct SystemCallTracker {
     private struct Managed {
         var call: SystemCall
         var isAnswerKnown = false
+        var isAnswerPending = false
         var progress = Progress.started
         /// What the system's screen shows for the microphone.
         var isMuted = false
+        var isAwaitingSlot = false
     }
 
     private let newID: () -> UUID
     private var managed: Managed?
     /// The slot's call that the system is not told about.
     private var unmanagedSid: String?
+    /// A refused or ended push may still be waiting for its proposal.
+    private var unmanagedIsAwaitingSlot = false
     /// The slot's call that ended on the system's side; the slot may hold
     /// it a moment longer while it is torn down.
     private var endedSid: String?
@@ -87,10 +103,56 @@ public struct SystemCallTracker {
     /// The system knows about the slot's call.
     public var isManaging: Bool { managed != nil }
     public var managedCall: SystemCall? { managed?.call }
+    public var isAwaitingSlot: Bool { managed?.isAwaitingSlot == true }
+
+    /// Reports a push before its proposal reaches the slot. A duplicate
+    /// uses the known id; a call that cannot ring gets a disposable one.
+    public mutating func pushed(
+        sid: String, conversation: BareJID, isVideo: Bool, isExpired: Bool, isFinished: Bool, state: CallState
+    ) -> PushedCall {
+        if let current = managed, current.call.sid == sid {
+            return PushedCall(verdict: .duplicate, updates: [.reportDuplicate(current.call)])
+        }
+        let call = SystemCall(id: newID(), sid: sid, direction: .incoming, conversation: .direct(conversation), isVideo: isVideo)
+        guard managed == nil, !state.isLive, !isExpired, !isFinished,
+            state.sid != sid, unmanagedSid != sid, endedSid != sid
+        else {
+            return PushedCall(verdict: .dismissed, updates: [.reportDismissed(call, .unanswered)])
+        }
+        managed = Managed(call: call, isAwaitingSlot: true)
+        return PushedCall(verdict: .awaiting, updates: [.reportIncoming(call)])
+    }
+
+    /// The push's deadline bounds only the wait for its proposal. An answer
+    /// already underway is bounded by the system answer action's deadline.
+    public mutating func pushExpired(sid: String) -> [SystemCallUpdate] {
+        if unmanagedIsAwaitingSlot, unmanagedSid == sid {
+            unmanagedSid = nil
+            unmanagedIsAwaitingSlot = false
+            if endedSid == sid { endedSid = nil }
+        }
+        guard let current = managed, current.isAwaitingSlot, current.call.sid == sid,
+            !current.isAnswerPending
+        else { return [] }
+        managed = nil
+        return [.end(current.call.id, .unanswered)]
+    }
+
+    /// A call waiting for a session cannot survive that session going away.
+    public mutating func sessionEnded() -> [SystemCallUpdate] {
+        if unmanagedIsAwaitingSlot {
+            if endedSid == unmanagedSid { endedSid = nil }
+            unmanagedSid = nil
+            unmanagedIsAwaitingSlot = false
+        }
+        guard let current = managed, current.isAwaitingSlot else { return [] }
+        managed = nil
+        return [.end(current.call.id, .failed)]
+    }
 
     public var audioOwner: SystemCallAudioOwner {
         if managed != nil { return .system }
-        return unmanagedSid != nil && unmanagedSid != endedSid ? .app : .nobody
+        return unmanagedSid != nil && !unmanagedIsAwaitingSlot && unmanagedSid != endedSid ? .app : .nobody
     }
 
     /// Our session id for the system's call, while it lasts.
@@ -98,11 +160,24 @@ public struct SystemCallTracker {
         managed?.call.id == id ? managed?.call.sid : nil
     }
 
+    /// The person answered on the system's screen; the proposal or online
+    /// connection may still be on its way. The answer action owns its deadline.
+    public mutating func systemAnswering(_ id: UUID) {
+        guard managed?.call.id == id else { return }
+        managed?.isAnswerPending = true
+    }
+
+    public mutating func systemAnswerFailed(_ id: UUID) {
+        guard managed?.call.id == id else { return }
+        managed?.isAnswerPending = false
+    }
+
     /// The system knows the call is answered: the person answered on its
     /// screen and the answer went out.
     public mutating func systemAnswered(_ id: UUID) {
         guard managed?.call.id == id else { return }
         managed?.isAnswerKnown = true
+        managed?.isAnswerPending = false
     }
 
     /// The person muted or unmuted on the system's screen, so it need not
@@ -117,6 +192,7 @@ public struct SystemCallTracker {
     /// is over even while the slot still holds it.
     public mutating func systemEnded(_ id: UUID) {
         guard let call = managed?.call, call.id == id else { return }
+        unmanagedIsAwaitingSlot = isAwaitingSlot
         managed = nil
         unmanagedSid = call.sid
         endedSid = call.sid
@@ -126,6 +202,7 @@ public struct SystemCallTracker {
     /// on as the app's alone.
     public mutating func systemRefused(_ id: UUID) {
         guard let call = managed?.call, call.id == id else { return }
+        unmanagedIsAwaitingSlot = isAwaitingSlot
         managed = nil
         unmanagedSid = call.sid
     }
@@ -137,13 +214,30 @@ public struct SystemCallTracker {
         var updates: [SystemCallUpdate] = []
         let live = state.isLive ? state.sid : nil
         carryOverReplacedSession(to: state)
+        if let current = managed, current.isAwaitingSlot {
+            if live == nil { return [] }
+            if live != current.call.sid {
+                updates.append(.end(current.call.id, .unanswered))
+                managed = nil
+            } else {
+                managed?.isAwaitingSlot = false
+                if state.isIncoming, isDoNotDisturb, !current.isAnswerPending {
+                    updates.append(.end(current.call.id, .unanswered))
+                    managed = nil
+                    unmanagedSid = current.call.sid
+                }
+            }
+        }
         if let current = managed, current.call.sid != live {
             updates.append(.end(current.call.id, Self.end(of: state, for: current.call)))
             managed = nil
         }
-        if unmanagedSid != live {
+        if unmanagedSid == live {
+            unmanagedIsAwaitingSlot = false
+        } else if live != nil || !unmanagedIsAwaitingSlot {
             unmanagedSid = nil
             endedSid = nil
+            unmanagedIsAwaitingSlot = false
         }
         guard let sid = live, unmanagedSid == nil else { return updates }
         if managed == nil {
@@ -166,7 +260,8 @@ public struct SystemCallTracker {
     /// one, which the slot accepts without asking. To the person, and so
     /// to the system, it is the same call under a new session id.
     private mutating func carryOverReplacedSession(to state: CallState) {
-        guard let current = managed, case .incoming(let next) = state, next.isAccepting, next.sid != current.call.sid,
+        guard let current = managed, !current.isAwaitingSlot,
+            case .incoming(let next) = state, next.isAccepting, next.sid != current.call.sid,
             current.call.conversation == .direct(next.from.bare),
             // Only an established call is replaced; one still ringing or
             // being placed is not.

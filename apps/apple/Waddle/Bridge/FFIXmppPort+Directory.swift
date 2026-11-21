@@ -30,6 +30,37 @@ extension FFIXmppPort {
         await client.leaveRoom(roomJid: room.description, nick: nick)
     }
 
+    func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings {
+        let config = try await mappingPortErrors { try await client.fetchRoomConfig(roomJid: room.description) }
+        return FFIInbound.roomSettings(config)
+    }
+
+    func updateRoomSettings(_ patch: RoomSettingsPatch, of room: BareJID) async throws {
+        try await mappingPortErrors {
+            try await client.submitRoomConfig(roomJid: room.description, patch: FFIOutbound.roomSettingsPatch(patch))
+        }
+    }
+
+    func destroyRoom(_ room: BareJID, reason: String?) async throws {
+        try await mappingPortErrors { try await client.destroyRoom(roomJid: room.description, reason: reason) }
+    }
+
+    func renameGroupDM(_ room: BareJID, name: String?) async throws {
+        try await mappingPortErrors { try await client.renameGroupDm(roomJid: room.description, name: name) }
+    }
+
+    /// Refusals arrive later as message errors on the event stream.
+    func inviteToGroupDM(_ room: BareJID, invitee: BareJID, history: GroupDMHistoryAccess) async throws {
+        try await mappingPortErrors {
+            try await client.inviteToGroupDm(
+                roomJid: room.description, inviteeJid: invitee.description, history: FFIOutbound.groupDMHistoryAccess(history))
+        }
+    }
+
+    func leaveGroupDM(_ room: BareJID) async throws {
+        try await mappingPortErrors { try await client.leaveGroupDm(roomJid: room.description) }
+    }
+
     /// One query per tier; a room commonly forbids some tiers to
     /// non-admins, so this throws only when every tier failed (or at once
     /// when there is no session).
@@ -75,6 +106,13 @@ extension FFIXmppPort {
 
     func kick(nick: String, from room: BareJID, reason: String?) async throws {
         try await mappingPortErrors { try await client.kickOccupant(roomJid: room.description, nick: nick, reason: reason) }
+    }
+
+    /// A contact whose address does not parse is skipped, not fatal.
+    func fetchContacts() async throws -> [Contact] {
+        try await mappingPortErrors { try await client.fetchRosterContacts() }.compactMap { contact in
+            FFIInbound.bareJID(contact.jid).map { Contact(jid: $0, name: contact.name) }
+        }
     }
 
     func searchUsers(_ query: String) async throws -> [UserSearchResult] {

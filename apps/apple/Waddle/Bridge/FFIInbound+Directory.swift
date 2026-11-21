@@ -2,6 +2,17 @@ import Foundation
 import WaddleKit
 
 extension FFIInbound {
+    static func roomSettings(_ config: WaddleRoomConfig) -> RoomSettings {
+        RoomSettings(name: config.name, summary: config.description, pinPermission: config.pinPermission.map(pinPermission))
+    }
+
+    static func pinPermission(_ permission: WaddlePinPermission) -> PinPermission {
+        switch permission {
+        case .adminsOnly: return .adminsOnly
+        case .anyone: return .anyone
+        }
+    }
+
     static func topology(_ topology: WaddleTopology) -> Topology {
         Topology(spaces: topology.spaces.map(space), channels: topology.channels.compactMap(channel))
     }
@@ -94,7 +105,34 @@ extension FFIInbound {
         return .published(id: result.id, image: image)
     }
 
-    static func mood(_ mood: WaddleMood) -> UserMood {
-        UserMood(value: mood.kind, text: mood.text)
+    static func sharedStatus(_ profile: WaddlePepProfile) -> SharedStatus {
+        SharedStatus(
+            mood: profile.mood.map { UserMood(value: $0.kind, text: $0.text) },
+            activity: profile.activity.map(activity),
+            tune: profile.tune.map {
+                UserTune(title: $0.title ?? "", artist: $0.artist ?? "", album: $0.source ?? "", link: $0.uri ?? "")
+            }
+        )
+    }
+
+    static func activity(_ activity: WaddleActivity) -> UserActivity {
+        UserActivity(general: activity.general, specific: activity.specific, text: activity.text)
+    }
+
+    static func profileDetails(_ vcard: WaddleVCard4) -> ProfileDetails {
+        ProfileDetails(
+            fullName: vcard.fullName ?? "", nickname: vcard.nickname ?? "", pronouns: vcard.pronouns ?? "",
+            bio: vcard.note ?? "", link: vcard.url ?? "", photoURI: vcard.photoUri
+        )
+    }
+
+    static func presenceMode(_ preference: WaddleStatusPreference) -> PresenceMode {
+        switch preference {
+        case .automatic: .automatic
+        case .manual(.available): .manual(.available)
+        case .manual(.chat): .manual(.chat)
+        case .manual(.away): .manual(.away)
+        case .manual(.dnd): .manual(.doNotDisturb)
+        }
     }
 }

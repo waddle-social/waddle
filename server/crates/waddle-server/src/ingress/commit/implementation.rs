@@ -1295,6 +1295,13 @@ pub(in crate::ingress::commit) fn retain_live_recipient_plan(
                 ExternalDirectEffect::NotificationActivity { owner, .. }
                 | ExternalDirectEffect::PushInboxUpdate { owner, .. },
             )) => owner != &recipient,
+            Effect::External(
+                effect @ ExternalEffect::Delivery(ExternalDeliveryEffect::NotificationCandidate {
+                    ..
+                }),
+            ) => recorded.iter().any(|intent| {
+                super::super::receipts::routing::direct_notification_receipt(effect, intent)
+            }),
             Effect::External(ExternalEffect::Delivery(
                 ExternalDeliveryEffect::QueueOfflineDelivery { row, .. },
             )) => row.recipient != recipient,

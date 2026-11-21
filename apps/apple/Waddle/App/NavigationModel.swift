@@ -7,6 +7,18 @@ enum Route: Hashable {
     case conversation(ConversationID)
     case thread(ConversationID, rootID: String)
     case details(ConversationID)
+    /// Everyone the account knows by address; pushed on the Home stack.
+    case people
+
+    /// The conversation the screen belongs to, if it belongs to one.
+    var conversation: ConversationID? {
+        switch self {
+        case let .conversation(conversation), let .thread(conversation, _), let .details(conversation):
+            return conversation
+        case .people:
+            return nil
+        }
+    }
 }
 
 /// Sheets presented over the shell.
@@ -36,6 +48,7 @@ enum PhoneTab: Hashable {
     case home
     case directMessages
     case inbox
+    case feed
     case you
 }
 
@@ -45,6 +58,17 @@ enum SplitSection: Hashable {
     case home
     /// The unread overview.
     case inbox
+    /// The community feed and stories.
+    case feed
+    /// The community calendar.
+    case events
+    /// Everyone the account knows by address.
+    case people
+}
+
+/// A screen pushed inside the phone's Feed tab.
+enum FeedRoute: Hashable {
+    case events
 }
 
 /// Panels shown beside the conversation on iPad and Mac.
@@ -81,9 +105,25 @@ final class NavigationModel {
     var sheet: SheetRoute?
 
     var tab: PhoneTab = .home
-    var homePath: [Route] = []
+    var homePath: [Route] = [] {
+        didSet {
+            // People is pushed here on the phone and is a section of the
+            // split view. Keep the two in step, so an iPad that widens
+            // while showing People still shows it, and one that left
+            // People on the phone does not come back to it.
+            let showsPeople = homePath.last == .people
+            if showsPeople, splitSection != .people || selection != nil {
+                selection = nil
+                splitSection = .people
+            } else if !showsPeople, splitSection == .people, selection == nil, oldValue.last == .people {
+                splitSection = .home
+            }
+        }
+    }
     var directPath: [Route] = []
     var inboxPath: [Route] = []
+    /// The phone has no Events tab: Events opens from the Feed.
+    var feedPath: [FeedRoute] = []
 
     /// Quick switcher (⌘K) visibility.
     var isQuickSwitcherPresented = false
@@ -104,7 +144,8 @@ final class NavigationModel {
         }
     }
 
-    /// Leaves the conversation on iPad and Mac for Home or Inbox.
+    /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed,
+    /// Events or People.
     func show(_ section: SplitSection) {
         selection = nil
         inspector = nil
@@ -118,7 +159,38 @@ final class NavigationModel {
         case .inbox:
             tab = .inbox
             inboxPath = []
+        case .feed:
+            tab = .feed
+            feedPath = []
+        case .events:
+            tab = .feed
+            feedPath = [.events]
+        case .people:
+            tab = .home
+            homePath = [.people]
         }
+    }
+
+    /// Moves away from a conversation that no longer exists, after it was
+    /// deleted or left: iPad and Mac select nothing and close the
+    /// inspector; each phone stack returns to the screen it was opened from.
+    func close(_ conversation: ConversationID) {
+        if selection == conversation {
+            selection = nil
+            inspector = nil
+        }
+        if case let .search(searched) = sheet, searched == conversation {
+            sheet = nil
+        }
+        homePath = Self.path(homePath, without: conversation)
+        directPath = Self.path(directPath, without: conversation)
+        inboxPath = Self.path(inboxPath, without: conversation)
+    }
+
+    /// `path` up to the first screen that belongs to `conversation`.
+    private static func path(_ path: [Route], without conversation: ConversationID) -> [Route] {
+        guard let index = path.firstIndex(where: { $0.conversation == conversation }) else { return path }
+        return Array(path[..<index])
     }
 
     /// Scrolls the conversation already on screen to `messageID`. Used from
@@ -138,7 +210,7 @@ final class NavigationModel {
         case .home: homePath.append(.thread(conversation, rootID: rootID))
         case .directMessages: directPath.append(.thread(conversation, rootID: rootID))
         case .inbox: inboxPath.append(.thread(conversation, rootID: rootID))
-        case .you: break
+        case .feed, .you: break
         }
     }
 
@@ -155,7 +227,7 @@ final class NavigationModel {
         case .home: homePath.append(.details(conversation))
         case .directMessages: directPath.append(.details(conversation))
         case .inbox: inboxPath.append(.details(conversation))
-        case .you: break
+        case .feed, .you: break
         }
     }
 }

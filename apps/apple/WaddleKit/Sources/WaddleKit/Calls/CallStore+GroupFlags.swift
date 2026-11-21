@@ -47,7 +47,7 @@ extension CallStore {
             // Snapshot both flags inside the queue, after the exact slot check.
             let hand = isHandRaised
             let muted = isSelfMuteAdvertised
-            let sent = await port.updateGroupCallPresence(
+            let sent = await sendGroupPresence(
                 .init(state: .active(video: current.media.video), isHandRaised: hand, isMuted: muted),
                 in: current.room, nick: current.nick)
             // Bookkeeping belongs to the call that sent: a send that returns

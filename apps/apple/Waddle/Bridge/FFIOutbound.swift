@@ -4,6 +4,32 @@ import WaddleKit
 /// Pure WaddleKit → FFI conversions. Offsets that do not fit the FFI's
 /// `u32` are dropped rather than wrapped.
 enum FFIOutbound {
+    static func statusPreference(_ mode: PresenceMode) -> WaddleStatusPreference {
+        switch mode {
+        case .automatic: .automatic
+        case .manual(.available): .manual(status: .available)
+        case .manual(.chat): .manual(status: .chat)
+        case .manual(.away): .manual(status: .away)
+        case .manual(.doNotDisturb): .manual(status: .dnd)
+        }
+    }
+
+    /// An empty field is left off the wire.
+    static func tune(_ tune: UserTune) -> WaddleTune {
+        WaddleTune(
+            artist: tune.artist.nilIfEmpty, title: tune.title.nilIfEmpty, source: tune.album.nilIfEmpty,
+            track: nil, uri: tune.link.nilIfEmpty, lengthSeconds: nil, rating: nil
+        )
+    }
+
+    static func vcard(_ details: ProfileDetails) -> WaddleVCard4 {
+        WaddleVCard4(
+            fullName: details.fullName.nilIfEmpty, nickname: details.nickname.nilIfEmpty,
+            pronouns: details.pronouns.nilIfEmpty, note: details.bio.nilIfEmpty,
+            url: details.link.nilIfEmpty, photoUri: details.photoURI
+        )
+    }
+
     /// `stanzaID` is stamped as the stanza `@id` and XEP-0359
     /// `<origin-id/>`; for a send it must be the client id the local
     /// echo is keyed by.
@@ -20,7 +46,7 @@ enum FFIOutbound {
             linkPreviewToken: nil,
             requestDisplayedMarker: options.requestDisplayedMarker,
             mucPm: false,
-            sticker: nil,
+            sticker: options.sticker.map { WaddleStickerRef(packId: $0.packID, packJid: nil, packNode: nil) },
             mentionDirectory: options.mentionDirectory.map(mentionDirectory)
         )
     }
@@ -81,10 +107,19 @@ enum FFIOutbound {
             width: file.width.flatMap { UInt32(exactly: $0) },
             height: file.height.flatMap { UInt32(exactly: $0) },
             desc: file.description,
-            hashes: [],
-            disposition: disposition(forMediaType: file.mediaType),
+            hashes: fileHashes(file.digests),
+            disposition: file.disposition == .inline ? "inline" : disposition(forMediaType: file.mediaType),
             encrypted: file.encrypted.map(encryptedFile)
         )
+    }
+
+    /// XEP-0300 digests of the file itself. XEP-0448 requires one for an
+    /// encrypted file. The core sends SHA-256 only and refuses a message
+    /// that names another algorithm, so others are left out.
+    static func fileHashes(_ digests: FileDigests) -> [WaddleStickerHash] {
+        digests.xep0300
+            .filter { $0.algorithm == HashAlgorithm.sha256.rawValue }
+            .map { WaddleStickerHash(algo: $0.algorithm, valueB64: $0.base64) }
     }
 
     /// XEP-0446 disposition inferred from the media type: media a client
@@ -107,4 +142,8 @@ enum FFIOutbound {
             sources: source.sources.map(\.absoluteString)
         )
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

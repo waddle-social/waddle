@@ -16,6 +16,9 @@ mod offline;
 #[cfg(test)]
 pub(crate) use offline::{fail_before_offline_settlement, retry_before_offline_settlement};
 
+#[path = "execute_notification.rs"]
+mod notification;
+
 #[path = "execute_projection.rs"]
 mod projection;
 
@@ -61,7 +64,10 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
             | ExternalDirectEffect::LinkPreviewRefs { .. }
             | ExternalDirectEffect::ClearLinkPreviewRefs { .. },
         ) => true,
-        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { .. }) => true,
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::QueueOfflineDelivery { .. }
+            | ExternalDeliveryEffect::NotificationCandidate { .. },
+        ) => true,
         ExternalEffect::Room(
             ExternalRoomEffect::ArchiveAfterPin { .. }
             | ExternalRoomEffect::NotificationCandidate { .. },
@@ -166,6 +172,9 @@ pub(super) async fn execute_with_uow(
         ExternalEffect::Delivery(
             delivery @ ExternalDeliveryEffect::QueueOfflineDelivery { .. },
         ) => Some(offline::execute(uow, decision, index, delivery, deps).await),
+        ExternalEffect::Delivery(
+            delivery @ ExternalDeliveryEffect::NotificationCandidate { .. },
+        ) => Some(notification::execute(uow, decision, index, delivery).await),
         ExternalEffect::Room(room @ ExternalRoomEffect::ArchiveAfterPin { .. }) => {
             Some(archive::execute(uow, decision, index, room).await)
         }

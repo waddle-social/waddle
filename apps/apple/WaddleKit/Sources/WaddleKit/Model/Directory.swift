@@ -64,6 +64,13 @@ public struct Channel: Hashable, Sendable, Identifiable {
     }
 
     public var conversation: ConversationID { .room(roomJID) }
+
+    /// The same room with a different name and summary.
+    public func with(name: String, summary: String?) -> Channel {
+        Channel(
+            roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM)
+    }
 }
 
 /// The discovered directory of spaces and rooms.
@@ -211,6 +218,19 @@ public enum NotifyMode: Hashable, Sendable, CaseIterable {
     case always
     case onMention
     case never
+}
+
+/// The notification settings the account stores per conversation.
+public struct NotifySettings: Hashable, Sendable {
+    /// Only conversations with an explicit mode.
+    public var modes: [ConversationID: NotifyMode]
+    /// Conversations whose push notifications show who wrote and what.
+    public var showingMessagesInPush: Set<ConversationID>
+
+    public init(modes: [ConversationID: NotifyMode] = [:], showingMessagesInPush: Set<ConversationID> = []) {
+        self.modes = modes
+        self.showingMessagesInPush = showingMessagesInPush
+    }
 }
 
 /// A XEP-0313 page.

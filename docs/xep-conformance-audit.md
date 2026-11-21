@@ -127,6 +127,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0508 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0513 | Explicit Mentions                                    | urn:xmpp:mentions:0                |  Y  |  Y   |   Y   | unaudited  | Plus `#channel` profile |
 | —    | (Waddle) Threads view                                | urn:waddle:threads:0               |  Y  |  Y   |   Y   | fixed      | Waddle-namespaced (no XEP equivalent — Fluux made the same call for their custom conversation list). Server reads `inbox_entries WHERE thread_id != ''`; chat client renders a two-section view (Unread / Following). PR #671. |
+| —    | (Waddle) Call lifecycle reports                      | urn:waddle:call-lifecycle:0        |  Y  |  Y   |   Y   | fixed      | Closed-set client operational reports; counted and acknowledged without call-state changes. Dedicated `xep_waddle_call_lifecycle` and `calls_e2e_ws` coverage. |
 
 ## Currently identified gaps (preliminary, pre-deep-audit)
 
@@ -147,6 +148,40 @@ Decision pending: check what consumers (clients, tests) read this advert before 
 Tracked separately from XEPs because they are intentionally Waddle-specific
 and not derived from any XEP. Each entry must justify why no XEP shape
 applies and what the wire commitment is.
+
+### `urn:waddle:call-lifecycle:0`
+
+- **Carrier**: IQ-set with `<report xmlns='urn:waddle:call-lifecycle:0'/>`,
+  addressed to the reporting client's own server domain or with no `to`.
+- **Args**: all six attributes are required: `kind` (`dm` | `muc`),
+  `setup-outcome` (`proposed` | `accepted` | `declined` | `timeout` | `failed`),
+  `end-reason` (`hangup` | `peer-left` | `error` | `reconnect-exhausted`),
+  `duration` (`none` | `under-1m` | `1m-10m` | `10m-60m` | `over-60m`),
+  `reconnects` (`none` | `once` | `multiple`), and `platform`
+  (`ios` | `macos` | `android` | `web`). `accepted` means the call's media
+  session connected on the reporting device. Missing attributes or unknown
+  values of known attributes yield `bad-request`; unknown extra attributes
+  and child elements are ignored for forward compatibility. There is no
+  timestamp on the wire.
+- **Result**: empty IQ-result after counting; IQ-get yields `bad-request`,
+  and a foreign `to` reaching the handler yields `service-unavailable`.
+  The server is stateless and does not deduplicate: each client sends each
+  report at most once and never retries. Reports only produce counters,
+  a structured log and an acknowledgement; they do not affect routing,
+  call state or other stanzas.
+- **ACL**: a bound authenticated session is required (`not-authorized`
+  otherwise). A separate per-bare-JID sliding window permits 12 reports
+  per 10 minutes; excess reports yield `policy-violation` with error type
+  `cancel` and do not increment the client lifecycle counters.
+- **Advert**: `Feature::waddle_call_lifecycle()` in `call_features()` only
+  when call handlers are configured, never in the base `server_features()`.
+- **Why a Waddle namespace?** No XEP carries a client's own view of a call.
+  Jingle and XEP-0353 reasons are signalling the peer sees; they cannot say
+  that media connected on this device.
+- **Tests**: `server/crates/waddle-xmpp/tests/xep_waddle_call_lifecycle.rs`
+  covers replies, rate limits and exported counters; core inline tests
+  cover the typed wire shape, and `calls_e2e_ws` covers discovery and
+  report acknowledgement over WebSocket.
 
 ### `urn:waddle:admin:users:list:0` — Admin V1 Users panel
 

@@ -766,6 +766,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
         8,
         2,
         &mut cursor,
+        &mut crate::notification_outbox::UnansweredCallScan::default(),
     )
     .await;
     assert!(!notification_marker(&fixture, &recovery.row.id).await);
@@ -784,6 +785,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
         8,
         2,
         &mut cursor,
+        &mut crate::notification_outbox::UnansweredCallScan::default(),
     )
     .await;
     assert!(
@@ -804,6 +806,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
         8,
         2,
         &mut cursor,
+        &mut crate::notification_outbox::UnansweredCallScan::default(),
     )
     .await;
     let mut newer = Vec::new();
@@ -824,6 +827,7 @@ async fn pending_notification_janitor_pages_past_contradictions(fixture: Ingress
             8,
             2,
             &mut cursor,
+            &mut crate::notification_outbox::UnansweredCallScan::default(),
         )
         .await;
     }
@@ -882,4 +886,89 @@ async fn postgres_pending_notification_janitor_fair_finite_laps() {
     if let Some(fixture) = IngressFixture::postgres("pendingfair").await {
         pending_notification_janitor_pages_past_contradictions(fixture).await;
     }
+}
+
+#[tokio::test]
+async fn missed_call_preparation_uses_original_receipt_after_delayed_recovery() {
+    use super::prepare_notification_candidate_for_message;
+    use crate::notification_outbox::{
+        NotificationCall, NotificationCandidate, NotificationClass, NotificationMessageHints,
+    };
+    use crate::server::routes::interpret::effects::delivery::PreparedOfflineNotification;
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::jingle::SessionId;
+    use xmpp_parsers::message::{Message, MessageType};
+
+    let fixture = IngressFixture::sqlite().await;
+    let state =
+        crate::server::routes::websocket::tests::create_test_websocket_state_with_durable_ingress(
+            &fixture,
+        )
+        .await;
+    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
+    let sender = "romeo@example.com/phone"
+        .parse::<jid::Jid>()
+        .expect("sender");
+    let sid = SessionId("delayed-missed-call".to_owned());
+    let receipt = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let call = NotificationCandidate::call_with_hints(
+        recipient.clone(),
+        sender.clone(),
+        StanzaId::new("original-call", recipient.clone().into()),
+        NotificationCall {
+            session_id: sid.clone(),
+            video: true,
+        },
+        NotificationMessageHints::none(),
+    )
+    .expect("invitation");
+    state
+        .deps
+        .protocol
+        .notification_outbox
+        .insert_candidate(&call)
+        .await
+        .expect("invitation row");
+    fixture
+        .execute(
+            "UPDATE notification_candidates SET created_at_ms = ? WHERE class = 'call'",
+            crate::db_params![(receipt - chrono::Duration::seconds(30)).timestamp_millis()],
+        )
+        .await;
+    let mut retract = Message::new(Some(recipient.clone().into()));
+    retract.from = Some(sender.clone());
+    retract.type_ = MessageType::Chat;
+    retract
+        .payloads
+        .push(waddle_xmpp::xep::xep0353::build_retract(sid).into());
+    let stamp = StanzaId::new("delayed-retract", recipient.clone().into());
+    let prepared = prepare_notification_candidate_for_message(
+        &state,
+        &recipient,
+        &sender.to_bare(),
+        &sender,
+        &stamp,
+        &retract,
+        receipt,
+    )
+    .await;
+    let PreparedOfflineNotification::Prepared(candidate) = prepared else {
+        panic!("originally eligible retract must survive delayed recovery");
+    };
+    assert_eq!(candidate.class(), NotificationClass::MissedCall);
+    assert!(matches!(
+        prepare_notification_candidate_for_message(
+            &state,
+            &recipient,
+            &sender.to_bare(),
+            &sender,
+            &stamp,
+            &retract,
+            receipt + chrono::Duration::seconds(31),
+        )
+        .await,
+        PreparedOfflineNotification::Suppressed
+    ));
+    drop(state);
+    fixture.close().await;
 }

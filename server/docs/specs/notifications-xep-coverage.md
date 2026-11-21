@@ -18,8 +18,8 @@ The pipeline shape (kept here for reference):
 inbound stanza
     │
     ▼
-T0 emit — insert_offline_delivery_notification_candidate  (DM)
-         insert_groupchat_notification_candidate           (MUC)
+T0 emit — prepare_notification_candidate_for_message  (headless DM; live/detached calls and missed calls)
+         insert_groupchat_notification_candidate      (MUC)
     │
     │ (typed evaluator `evaluate_push_gate_at_dispatch` runs here:
     │  blocking, XEP-0492, XEP-0334, XEP-0513 noping, XEP-0513
@@ -48,6 +48,78 @@ push_publish_jobs  (durable row, Push Service queue; provider
                    fanout in #528/#529/#530)
 ```
 
+## Missed-call alerts (issue #2514)
+
+An archived plain XEP-0353 `<retract/>` creates class `missed_call` with reason
+`call_retracted`, including connected, detached and headless recipients. The
+pure envelope classifier records its session ID. The receipt-time eligibility
+check additionally requires an unquarantined `call` candidate for the same
+recipient, caller bare JID and session ID, created within the 60 seconds before
+the retract's original server receipt time. Another resource of the same caller
+can cancel; another account cannot. Already outboxed or suppressed invitations
+still qualify. Recovery uses that original receipt time, never its execution
+time or a sender-supplied delay. Tie-break retracts and malformed retracts do
+not trigger missed-call alerts. Other bodyless JMI signals remain suppressed.
+
+Migration 2002 widens the class/reason CHECKs and makes
+`(recipient_bare_jid, conversation_jid, call_sid)` unique for `missed_call`.
+Repeated retracts, including distinct stanza IDs, share one candidate and retain
+canonical notification custody. Missed calls store a typed SID without video or
+a `<call/>` push-context child.
+
+On timed notification sweeps, an invitation with no archived outcome after 55
+seconds (the 45-second ring duration plus a 10-second grace period) creates
+reason `call_unanswered`. The timer queries the callee's personal MAM archive
+with the caller as the peer, starting 60 seconds before the invitation. Any
+matching `proceed`, legacy `accept`, `reject`, `finish` or `retract` from either
+party counts as an outcome, including tie-break and reason children. Retract
+eligibility checks the same evidence but counts only callee-authored outcomes,
+so the triggering retract cannot suppress itself. Query errors and incomplete
+200-message pages fail closed and create no alert.
+
+Every sweep scans the invitations created in the last five minutes, so one
+whose candidate is written late (deferred insert, recovery) is still found.
+Pending and recently outboxed invitations use the existing partial indices,
+and the sweep reads every due page in `(created_at_ms, recipient, conversation,
+stanza id)` order, so calls that need no alert cannot hold later ones back
+whatever the batch size. Each process remembers the calls it has settled and
+does not read the archive for them again; a call it could not settle is read
+again by the next sweep. For the timer a plain
+caller retract is not an outcome: either the retract path already wrote the
+missed-call row, or it lost the race with the invitation and the timer alerts.
+Timer candidates use the invitation's identity and have no
+ingress lineage. Timer and retract alerts share the existing per-call unique
+index, so either ordering produces at most one missed-call row. This adds no
+schema or migration.
+
+Missed calls use direct-conversation policy and count as mentions: mute applies
+at T0, DND and blocking are checked at T1, and blocking is checked again at
+publish, as for invitations. They read the real
+conversation unread count at publish, including zero, without changing it or
+being dropped solely for zero unread. They use the ordinary drain and do not
+wake or join call-only drains. Unexecuted live missed-call candidate receipts
+are discarded after the same 60-second maintenance grace as live invitations.
+
+APNs ordinary alert nodes receive `WADDLE_PUSH_MISSED_CALL`, the current badge,
+sound and conversation thread ID; VoIP nodes do not receive it. Web Push uses
+`class: "missed_call"` with ordinary DM TTL/urgency and a separate topic so a
+pending message push cannot replace the missed-call alert. FCM devices record
+not-applicable until Android supports the class, without sending a silent data
+message. Push text is the fixed phrase “Missed call” and names nobody.
+
+Accepted limits: an outcome that is not archived cannot be used as evidence;
+an answer or decline crossing the evidence read and insert can still alert.
+A retract planned before the proposal's candidate commits can miss immediate
+eligibility; the unanswered timer then alerts at 55 seconds, because a plain
+caller retract is not an outcome for the timer. The
+ordinary back-to-back same-stream case is covered. Invitations older than
+five minutes, for example after a long outage, are not revisited.
+
+Before deployment, separate client changes must add Apple's
+`WADDLE_PUSH_MISSED_CALL` string and conversation tap route, and the web service
+worker's “Missed call” title. Migration 2002 also requires the owner Job at zero
+replicas following `docs/runbooks/restricted-runtime-cutover.md`.
+
 ## Locations
 
 - `groupchat_inbox.rs` = `crates/waddle-server/src/server/routes/interpret/groupchat_inbox.rs` (T0 groupchat classifier + its `#[cfg(test)] mod tests`)
@@ -67,8 +139,17 @@ push_publish_jobs  (durable row, Push Service queue; provider
 |---|---|---|
 | Offline DM produces a durable XEP-0357 push | XEP-0160 (offline storage), XEP-0313 (MAM), XEP-0359 (stable stanza id), XEP-0357 (`<publish>` payload + `urn:xmpp:push:summary` form + `message-count`) | `xep0357_offline_dm_emits_durable_summary_pubsub_publish_job` (`tests/xep0357_push_service_ws.rs`) — full WS-level pipeline; `xep0357_payload_uses_summary_form_and_waddle_context_only` (`notification_outbox.rs`) — payload shape |
 | Offline call invitation becomes class `call`, reason `offline_call` | XEP-0353 raw top-level `<propose>` with nonempty session id, an audio or video RTP description and no body; XEP-0334 store hint; XEP-0357 routing context | `direct_intrinsics_classify_only_bodyless_audio_or_video_propose_as_call` (`tests/notification_outbox/calls.rs`); raw-recognizer tests in `crates/waddle-xmpp/tests/xep0353_jingle_message.rs` cover audio and audio+video descriptions |
-| Recognized bodyless call signals stay deliverable without generic alerts | XEP-0353 top-level `retract`, `proceed`, `reject`, `finish`, `ringing` or legacy `accept` with no top-level JMI `propose`; XEP-0160 pending delivery and MAM retained | `offline_call_signals_preserve_pending_delivery_without_generic_alerts` (`tests/notification_outbox/calls.rs`); predicate unit tests and `tests/xep0353_jingle_message.rs` |
-| Calls honor mute, DND and blocking while passing on-mention | XEP-0492 (`never`, `on-mention`), XEP-0191, Waddle DND | `calls_respect_never_dnd_blocking_and_pass_on_mention` (`tests/notification_outbox/calls.rs`) |
+| Connected and detached recipients get exactly one call candidate, without pending delivery | Like headless delivery, the live path requires an archived XEP-0353 audio/video proposal (XEP-0334 store hint) in the recipient archive with this stanza id; a recipient archive stamp alone is insufficient; XEP-0198 detached bare/full-JID routing; XEP-0191 blocking; XEP-0492 never; XEP-0359 origin-id replay | `tests/xep0353_live_push_ws.rs` covers connected, detached-only, mixed connected/detached, two connected resources, detached full JID, blocked/self/muted, headless, no-store, no-media/retract and origin-id retry. Negative cases wait for a positive control, and positive cases also count candidate effects before deduplication. Persisted reason remains `offline_call` for every session state. |
+| Ringing pushes are limited per caller bare JID and recipient account | Push-only admission: 3 `call` candidates per 60 seconds and 10 per hour; soft across concurrent sessions/replicas | `tests/xep0353_live_push_ws.rs` covers fourth-invitation delivery, retry identity, retract eligibility, headless pending delivery and caller isolation; `notification_outbox::enqueue::tests` covers window boundaries and counted rows. |
+| Caller cancellation produces exactly one missed-call candidate for connected, detached and headless recipients | XEP-0353 plain retract, XEP-0334 store hint, XEP-0313 recipient archive, XEP-0198 detached routing, XEP-0359 canonical identity | `connected_recipient_gets_one_missed_call_candidate`, `detached_recipient_gets_one_missed_call_candidate`, `headless_recipient_gets_one_missed_call_candidate`, `propose_immediately_followed_by_retract_on_one_stream_gets_missed_call` (`tests/xep0353_live_push_ws.rs`); positives count raw candidate effects before deduplication |
+| Missed-call eligibility rejects forged, old, glare and muted/blocked cancellations | XEP-0353 session and tie-break semantics, receipt-time 60-second window, XEP-0492 mute, XEP-0191 blocking | `retract_without_prior_call_candidate_gets_no_missed_call`, `different_account_cannot_retract_another_call_for_a_missed_call_alert`, `tie_break_retract_gets_no_missed_call`, `retract_more_than_sixty_seconds_after_call_candidate_gets_no_missed_call`, `muted_conversation_gets_no_missed_call_even_with_prior_call_candidate`, `caller_blocked_after_proposal_gets_no_missed_call` (`tests/xep0353_live_push_ws.rs`) |
+| Another caller resource can cancel; a repeated retract retains one alert and settles its receipt | XEP-0353 caller bare-JID identity; canonical ingress ancestry and SID uniqueness | `retract_from_another_caller_resource_gets_one_missed_call`, `second_distinct_retract_is_duplicate_and_its_canonical_receipt_settles` (`tests/xep0353_live_push_ws.rs`) |
+| Unanswered invitations produce exactly one lineage-free missed-call candidate after 55 seconds | XEP-0353 session identity, XEP-0313 callee personal archive, existing missed-call uniqueness | `unanswered_call_yields_exactly_one_lineage_free_missed_call` (`tests/xep0353_live_push_ws.rs`) drives the production sweep with an explicit clock; scan and persistence tests in `tests/notification_outbox/` cover both index branches, bounds, quarantine, duplicates and pruning |
+| Callee outcomes, including another device and glare rejection, suppress unanswered alerts | XEP-0353 top-level `proceed`, `accept`, `reject`, `finish`, `retract`; permissive child handling; XEP-0313 outgoing and incoming peer queries | `callee_proceed_prevents_unanswered_missed_call`, `callee_reject_prevents_unanswered_missed_call`, `callee_tie_break_reject_prevents_unanswered_missed_call`, `answer_from_second_callee_device_prevents_unanswered_missed_call` (`tests/xep0353_live_push_ws.rs`); recognizer tests in `crates/waddle-xmpp/tests/xep0353_jingle_message.rs` |
+| Timer and retract share one alert, while a prior callee rejection and mute suppress both paths | XEP-0353 author-filtered MAM evidence, SID uniqueness, XEP-0492 T0 mute | `timer_then_retract_retains_exactly_one_missed_call`, `retract_then_timer_retains_exactly_one_missed_call`, `retract_after_callee_reject_creates_no_missed_call` (`tests/xep0353_live_push_ws.rs`); `muted_conversation_has_no_timer_candidate`, `plain_caller_retract_without_a_missed_call_row_leaves_the_alert_to_the_timer` (`tests/notification_outbox/calls.rs`) |
+| Lost live call candidate obligations expire cleanly | Canonical ingress custody and fixed 45-second call expiry; 60-second maintenance grace | `sqlite_expired_live_call_candidate_settles_without_late_push_or_unrecoverable_metric` (`ingress/maintenance_tests.rs`); executor replay and restamp tests in `ingress/execute_notification_tests.rs` and `ingress/restamp/tests.rs` |
+| Other bodyless call signals stay deliverable without generic alerts | XEP-0353 top-level `proceed`, `reject`, `finish`, `ringing` or legacy `accept`, and retracts without an eligible prior invitation; XEP-0160 pending delivery and MAM retained | `offline_call_signals_preserve_pending_delivery_without_generic_alerts` (`tests/notification_outbox/calls.rs`); predicate unit tests and `tests/xep0353_jingle_message.rs` |
+| Calls honor mute, DND and blocking while passing on-mention | XEP-0492 (`never`, `on-mention`), XEP-0191, Waddle DND | `calls_and_missed_calls_respect_never_dnd_blocking_and_pass_on_mention` (`tests/notification_outbox/calls.rs`) |
 | Latest call replaces queued call context; DM stays separate | XEP-0353 session identity; XEP-0357 coalescing and fixed receipt-based deadline | `latest_call_replaces_context_without_merging_with_dm_and_uses_receipt_expiry` (`tests/notification_outbox/calls.rs`) |
 | Zero unread does not suppress an invitation | XEP-0353 call signals have no inbox projection | `unread_zero_does_not_suppress_call_job` (`tests/notification_outbox/publish.rs`); existing DM unread-zero test retains suppression |
 | Offline call reaches PushKit; ordinary DM reaches alert token | XEP-0353 + XEP-0357, canonical offline ingress and APNs routing | `offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_token` (`tests/xep0357_push_service_apns.rs`) |
@@ -93,7 +174,14 @@ push_publish_jobs  (durable row, Push Service queue; provider
 | §295 IQ form + canonical error envelope | XEP-0513 §295 + §303 | `xep0513_permissions_form_matches_spec_shape` + `xep0513_permissions_form_omits_channel_when_not_advertised` (`crates/waddle-xmpp/tests/xep0513_mentions.rs`); `mentions_permissions_iq_get_returns_303_form` + `mentions_permissions_iq_set_returns_forbidden` + `mentions_permissions_iq_full_jid_target_returns_bad_request_with_query_echo` + `mentions_permissions_iq_service_jid_target_returns_bad_request_with_query_echo` + `mentions_permissions_iq_get_returns_form_for_never_instantiated_room` (`tests/xep0513_mentions_ws.rs`) |
 | Durable rows survive process restart | Pipeline-wide durability invariant (no specific XEP — Waddle's own contract) | `push_pipeline_durable_rows_survive_server_restart` (`tests/notifications_restart_durability_ws.rs`) |
 | Push payload privacy default — no body, no sender in payload | XEP-0357 §"Privacy Considerations" | `xep0357_payload_uses_summary_form_and_waddle_context_only` (`notification_outbox.rs`) explicitly asserts `last-message-body` / `last-message-sender` fields are ABSENT |
+| APNs alert content follows the summary — generic banner by default; sender and body only when the summary carries them (the recipient opted the conversation in) | XEP-0357 §"Privacy Considerations"; `urn:waddle:push:rich:0` opt-in | `xep0357_apns_payload_is_minimal_when_the_summary_has_no_sender_or_body` + `xep0357_apns_alert_carries_the_sender_and_body_of_an_opted_in_summary` + `xep0357_apns_alert_stays_generic_when_the_summary_sender_is_not_a_jid` (`tests/xep0357_push_service_apns.rs`); size fallback in `push::apns::payload` unit tests |
 | Sender self-notification always suppressed | Pipeline-wide invariant (rejected at `NotificationCandidate::direct_message` constructor) | `self_directed_dm_candidate_is_rejected_at_constructor`; `self_directed_dm_inserts_no_candidate_row` (`notification_outbox.rs`) |
+
+During a rolling update, an older binary cannot settle a live DM candidate
+intent without a pending row; a newer binary's maintenance settles the expired
+obligation. After a full rollback to a binary without this change, ingress rows
+with recorded but unexecuted live candidate obligations stay non-terminal and
+raise the non-terminal backlog alert.
 
 ## Pipeline observability (counter ↔ pipeline boundary)
 
@@ -101,7 +189,7 @@ push_publish_jobs  (durable row, Push Service queue; provider
 |---|---|---|
 | `waddle_push_candidate_created_total` | `insert_candidate` → Inserted arm | `prometheus.rs` HELP text |
 | `waddle_push_candidate_coalesced_total` | `insert_candidate` → Duplicate arm (PRIMARY KEY hit) | `prometheus.rs` HELP text |
-| `xmpp.push.suppressed{reason=…}` (OTel; Mimir alias `waddle_push_suppressed_total`) | T0 / T1 typed-evaluator Suppressed arm | `telemetry/attributes.rs::PushSuppressReason`; lockstep with `SuppressedReason::as_db_value` |
+| `xmpp.push.suppressed{reason=…}` (OTel; Mimir alias `waddle_push_suppressed_total`) | T0 / T1 typed-evaluator Suppressed arm | `telemetry/attributes.rs::PushSuppressReason`; persisted labels match `SuppressedReason::as_db_value`, with explicit metric-only admission reasons |
 | `waddle_push_outbox_published_total` | `drain_due_outbox_jobs` → Published outcome | `prometheus.rs` HELP text |
 | `waddle_push_outbox_retry_scheduled_total` | `drain_due_outbox_jobs` → RetryScheduled outcome (transient failure backoff) | `prometheus.rs` HELP text |
 | `waddle_push_outbox_dead_lettered_total` | `drain_due_outbox_jobs` → Failed outcome (permanent failure → terminal `failed` status) | `prometheus.rs` HELP text |
@@ -140,12 +228,23 @@ both wakes and timer ticks. Stored `Notify` permits retain wakes received during
 sweep. Wakes are process-local. Another replica may claim the row first, and timers
 provide a fallback for recovery, retries and ambiguous queue acceptance.
 
-Bodyless messages with a top-level JMI `retract`, `proceed`, `reject`, `finish`,
-`ringing` or legacy `accept` and no top-level JMI `propose` use the existing
-suppressed result and produce no notification candidate or candidate activity preview.
-XEP-0160 pending storage, the `OfflineDelivery` marker and MAM storage are
-preserved. Messages with a body, with a proposal, or with only unknown JMI
-children follow normal notification policy.
+Ringing pushes allow at most 3 `call` notification candidates per caller bare JID
+and recipient account in 60 seconds, and 10 in an hour. This is a soft limit
+across concurrent sessions/replicas. All existing `call` rows count, including
+later-suppressed, outboxed and quarantined rows. This affects push only: invitations
+remain routed, archived, delivered to connected devices and retained for offline
+delivery. A rate-limited invitation has no candidate and yields no missed-call
+alert. A resent invitation (same origin-id) is planned under a
+fresh archive id, so it counts its own first candidate and may be suppressed;
+that first candidate and its push stand. Suppression emits the metric-only `waddle_call_rate_limit` reason; no
+migration, schema change or new stored suppression value is needed.
+
+A plain JMI retract with an eligible prior call candidate produces the
+missed-call alert described above. Other bodyless messages with a top-level JMI
+`proceed`, `reject`, `finish`, `ringing` or legacy `accept`, and ineligible or
+tie-break retracts, use the existing suppressed result and produce no
+notification candidate or candidate activity preview. XEP-0160 pending storage,
+the `OfflineDelivery` marker and MAM storage are preserved.
 
 `provider` is one of `web_push`, `apns`, `fcm`. Network failures, timeouts and local preflight rejections carry no provider answer and are not counted here; they surface as `retry_scheduled` / `dead_lettered` on `waddle.push.pipeline`. The family is not zero-registered: a pod with no push registrations has nothing to report. The alert *"provider keeps returning errors"* is `rate(waddle.push.provider{stage="provider_rejected"})` per `provider`.
 

@@ -6,15 +6,34 @@ import Security
 enum CredentialStore {
     private static let service = "social.waddle.session"
 
+    enum SessionIDRead: Equatable {
+        case stored(String)
+        case missing
+        case unavailable
+    }
+
     static func sessionID(for server: URL) -> String? {
+        guard case let .stored(value) = readSessionID(for: server) else { return nil }
+        return value
+    }
+
+    static func readSessionID(for server: URL) -> SessionIDRead {
         var query = baseQuery(for: server)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data
-        else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return sessionIDRead(status: status, data: result as? Data)
+    }
+
+    /// After a reboot, AfterFirstUnlock items exist but cannot be read yet.
+    /// Only a missing item is evidence that the person is signed out.
+    static func sessionIDRead(status: OSStatus, data: Data?) -> SessionIDRead {
+        if status == errSecItemNotFound { return .missing }
+        guard status == errSecSuccess, let data,
+              let value = String(data: data, encoding: .utf8), !value.isEmpty
+        else { return .unavailable }
+        return .stored(value)
     }
 
     static func save(_ sessionID: String, for server: URL) {

@@ -4,6 +4,9 @@ use super::sealed;
 use super::IngressEffectKind;
 use super::KeyValue;
 use super::StanzaErrorCondition;
+use waddle_xmpp_core::waddle_call_lifecycle::{
+    CallClientPlatform, CallEndReason, CallLifecycleKind, CallSetupOutcome,
+};
 
 /// A typed metric attribute: a static key and a value drawn from a
 /// closed enum. Sealed — only the allowlist in this module implements
@@ -143,6 +146,152 @@ impl MetricAttribute for MessageKind {
             Self::Dm => "dm",
             Self::Muc => "muc",
             Self::MucPm => "muc_pm",
+        }
+    }
+}
+
+impl From<CallLifecycleKind> for MessageKind {
+    fn from(kind: CallLifecycleKind) -> Self {
+        match kind {
+            CallLifecycleKind::Dm => Self::Dm,
+            CallLifecycleKind::Muc => Self::Muc,
+        }
+    }
+}
+
+/// `platform` — the reporting client's platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCallPlatform {
+    Ios,
+    Macos,
+    Android,
+    Web,
+}
+
+impl ClientCallPlatform {
+    /// Every allowed reporting platform.
+    pub const ALL: [Self; 4] = [Self::Ios, Self::Macos, Self::Android, Self::Web];
+}
+
+impl From<CallClientPlatform> for ClientCallPlatform {
+    fn from(platform: CallClientPlatform) -> Self {
+        match platform {
+            CallClientPlatform::Ios => Self::Ios,
+            CallClientPlatform::Macos => Self::Macos,
+            CallClientPlatform::Android => Self::Android,
+            CallClientPlatform::Web => Self::Web,
+        }
+    }
+}
+
+impl sealed::Sealed for ClientCallPlatform {}
+impl MetricAttribute for ClientCallPlatform {
+    fn key(&self) -> &'static str {
+        "platform"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ios => "ios",
+            Self::Macos => "macos",
+            Self::Android => "android",
+            Self::Web => "web",
+        }
+    }
+}
+
+/// `setup_outcome` — whether media connected on the reporting device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCallSetupOutcome {
+    Proposed,
+    Accepted,
+    Declined,
+    Timeout,
+    Failed,
+}
+
+impl ClientCallSetupOutcome {
+    /// Every allowed client setup outcome.
+    pub const ALL: [Self; 5] = [
+        Self::Proposed,
+        Self::Accepted,
+        Self::Declined,
+        Self::Timeout,
+        Self::Failed,
+    ];
+}
+
+impl From<CallSetupOutcome> for ClientCallSetupOutcome {
+    fn from(outcome: CallSetupOutcome) -> Self {
+        match outcome {
+            CallSetupOutcome::Proposed => Self::Proposed,
+            CallSetupOutcome::Accepted => Self::Accepted,
+            CallSetupOutcome::Declined => Self::Declined,
+            CallSetupOutcome::Timeout => Self::Timeout,
+            CallSetupOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl sealed::Sealed for ClientCallSetupOutcome {}
+impl MetricAttribute for ClientCallSetupOutcome {
+    fn key(&self) -> &'static str {
+        "setup_outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::Timeout => "timeout",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// `end_reason` — why a call ended on the reporting device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCallEndReason {
+    Hangup,
+    PeerLeft,
+    Error,
+    ReconnectExhausted,
+}
+
+impl ClientCallEndReason {
+    /// Every allowed client end reason.
+    pub const ALL: [Self; 4] = [
+        Self::Hangup,
+        Self::PeerLeft,
+        Self::Error,
+        Self::ReconnectExhausted,
+    ];
+}
+
+impl From<CallEndReason> for ClientCallEndReason {
+    fn from(reason: CallEndReason) -> Self {
+        match reason {
+            CallEndReason::Hangup => Self::Hangup,
+            CallEndReason::PeerLeft => Self::PeerLeft,
+            CallEndReason::Error => Self::Error,
+            CallEndReason::ReconnectExhausted => Self::ReconnectExhausted,
+        }
+    }
+}
+
+impl sealed::Sealed for ClientCallEndReason {}
+impl MetricAttribute for ClientCallEndReason {
+    fn key(&self) -> &'static str {
+        "end_reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Hangup => "hangup",
+            Self::PeerLeft => "peer_left",
+            Self::Error => "error",
+            Self::ReconnectExhausted => "reconnect_exhausted",
         }
     }
 }
@@ -449,7 +598,8 @@ impl MetricAttribute for SmResumeOutcome {
 /// `reason` — why an XEP-0357 push notification was suppressed.
 ///
 /// This is the metric-facing closed set. `waddle-server` converts its
-/// persisted `SuppressedReason` audit value into this enum before emitting,
+/// persisted `SuppressedReason` audit value into this enum before emitting.
+/// Admission gates without a candidate row use metric-only variants directly,
 /// so metric labels never cross the crate boundary as strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushSuppressReason {
@@ -483,11 +633,13 @@ pub enum PushSuppressReason {
     PolicyRetriesExhausted,
     /// The message is an XEP-0444 reaction-only notification.
     Xep0444Reaction,
+    /// Call push admission exceeded the caller/account limit; no audit row exists.
+    WaddleCallRateLimit,
 }
 
 impl PushSuppressReason {
     /// Every allowed value, in stable legacy-renderer order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Xep0357Self,
         Self::Xep0357NoRegistration,
         Self::Xep0357RegistrationDisabled,
@@ -503,10 +655,11 @@ impl PushSuppressReason {
         Self::UnreadZeroAtPublish,
         Self::PolicyRetriesExhausted,
         Self::Xep0444Reaction,
+        Self::WaddleCallRateLimit,
     ];
 
     /// Every allowed label value, in stable legacy-renderer order.
-    pub const VALUES: [&'static str; 15] = [
+    pub const VALUES: [&str; 16] = [
         Self::Xep0357Self.as_str(),
         Self::Xep0357NoRegistration.as_str(),
         Self::Xep0357RegistrationDisabled.as_str(),
@@ -522,6 +675,7 @@ impl PushSuppressReason {
         Self::UnreadZeroAtPublish.as_str(),
         Self::PolicyRetriesExhausted.as_str(),
         Self::Xep0444Reaction.as_str(),
+        Self::WaddleCallRateLimit.as_str(),
     ];
 
     /// The byte-stable legacy label value.
@@ -543,6 +697,7 @@ impl PushSuppressReason {
             Self::UnreadZeroAtPublish => "unread_zero_at_publish",
             Self::PolicyRetriesExhausted => "policy_retries_exhausted",
             Self::Xep0444Reaction => "xep0444_reaction",
+            Self::WaddleCallRateLimit => "waddle_call_rate_limit",
         }
     }
 }
@@ -1646,6 +1801,7 @@ pub enum CallControlRateLimitedSurface {
     Terminate,
     MujiAction,
     Turn,
+    LifecycleReport,
 }
 
 impl sealed::Sealed for CallControlRateLimitedSurface {}
@@ -1658,6 +1814,7 @@ impl MetricAttribute for CallControlRateLimitedSurface {
             Self::Terminate => "terminate",
             Self::MujiAction => "muji_action",
             Self::Turn => "turn",
+            Self::LifecycleReport => "lifecycle_report",
         }
     }
 }

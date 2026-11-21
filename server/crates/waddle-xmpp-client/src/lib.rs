@@ -6,6 +6,8 @@
 pub mod admin_commands;
 pub mod avatar;
 pub mod bootstrap;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub mod call_lifecycle;
 pub mod caps;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod client;
@@ -34,6 +36,8 @@ pub mod runtime;
 pub mod state;
 pub mod status_preference;
 pub mod stickers;
+pub mod story_reactions;
+pub mod story_reads;
 pub mod stream_management;
 pub mod transport;
 #[cfg(feature = "wasm")]
@@ -50,6 +54,8 @@ pub use bootstrap::{
     SaslFailureCondition, SaslPayload, SmInlineResume, SmStreamId, StreamFeatures,
     StreamResumption, NS_BIND, NS_CLIENT, NS_SASL, NS_SASL2, NS_SESSION, NS_SM, NS_STREAMS,
 };
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub use call_lifecycle::CallLifecycleExt;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use client::{ClientDriver, ClientHandle, XmppClient};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

@@ -667,13 +667,17 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events(
 ): Int
@@ -682,6 +686,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_community_event(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rsvp_community_event(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_report_call_lifecycle(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
 ): Int
@@ -849,6 +855,10 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_ser
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_activity(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_vcard4(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
@@ -897,15 +907,37 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_roster_contacts(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_feed_post(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_status_preference(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_import_sticker_pack(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reads(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story_reads(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
 ): Int
@@ -940,6 +972,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(`ptr`:
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(`ptr`: Long,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_cancel_community_event_occurrence(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,`occurrence`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_community_events(`ptr`: Long,`communityJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_community_event(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`event`: RustBuffer.ByValue,
@@ -947,6 +981,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_commun
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_community_event(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rsvp_community_event(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`uid`: RustBuffer.ByValue,`selfJid`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_report_call_lifecycle(`ptr`: Long,`report`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external_services(`ptr`: Long,
 ): Long
@@ -1114,6 +1150,10 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_ping_server(`p
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_avatar(`ptr`: Long,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_activity(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_vcard4(`ptr`: Long,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_pep_profile(`ptr`: Long,`jid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_vcard4(`ptr`: Long,`jid`: RustBuffer.ByValue,
@@ -1162,18 +1202,42 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affil
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`patch`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_roster_contacts(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_feed(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`maxItems`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_feed_post(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`post`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_status_preference(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_status_preference(`ptr`: Long,`preference`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_packs(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_import_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_sticker_pack(`ptr`: Long,`pack`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_sticker_pack(`ptr`: Long,`packId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`maxItems`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`storyId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reads(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`post`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story_reads(`ptr`: Long,`reads`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`storyId`: RustBuffer.ByValue,`emojis`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
 ): Unit
+external fun uniffi_waddle_xmpp_client_ffi_fn_func_expand_community_event(`event`: RustBuffer.ByValue,`fromMs`: Long,`toMs`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Double
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_parse_jid(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1297,6 +1361,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event() != 53397) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1309,16 +1376,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 62037) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence() != 61272) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 23102) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events() != 57706) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_community_event() != 60125) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_community_event() != 52707) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rsvp_community_event() != 18201) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_report_call_lifecycle() != 21140) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {
@@ -1570,6 +1643,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_activity() != 10876) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_own_vcard4() != 59774) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile() != 55127) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1642,7 +1721,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_roster_contacts() != 38928) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed() != 30404) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_feed_post() != 24875) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference() != 15536) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_status_preference() != 46235) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {
@@ -1651,10 +1742,31 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs() != 18633) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_import_sticker_pack() != 51887) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack() != 16031) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack() != 30329) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories() != 30988) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions() != 10812) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reads() != 37503) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story() != 21939) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story_reads() != 61647) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions() != 32798) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
@@ -2261,16 +2373,34 @@ public interface WaddleClientInterface {
 
     suspend fun `disconnect`()
 
+    /**
+     * Cancels the one occurrence of a repeating event that starts at
+     * `occurrence` (its `recurrence_id`), keeping the rest of the series.
+     */
+    suspend fun `cancelCommunityEventOccurrence`(`communityJid`: kotlin.String, `itemId`: kotlin.String, `occurrence`: WaddleCalendarDate): WaddleEvent
+
+    /**
+     * Every event of the community, each with the RSVPs it has received.
+     */
     suspend fun `fetchCommunityEvents`(`communityJid`: kotlin.String): List<WaddleEvent>
 
     /**
-     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     * Empty id creates. An update replaces the recurrence with the one given
+     * and keeps the RSVPs. Cancelled and changed occurrences are kept too,
+     * unless the start moves or the event stops repeating: they are named
+     * by the start they had.
      */
     suspend fun `publishCommunityEvent`(`communityJid`: kotlin.String, `event`: WaddleEvent): WaddleEvent
 
     suspend fun `retractCommunityEvent`(`communityJid`: kotlin.String, `itemId`: kotlin.String)
 
     suspend fun `rsvpCommunityEvent`(`communityJid`: kotlin.String, `uid`: kotlin.String, `selfJid`: kotlin.String, `status`: WaddleEventParticipation)
+
+    /**
+     * Submit one report, with a bounded wait and no retry on any outcome.
+     * The caller must invoke this at most once for each report, even after failure.
+     */
+    suspend fun `reportCallLifecycle`(`report`: WaddleCallLifecycleReport): WaddleCallLifecycleReportOutcome
 
     /**
      * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
@@ -2826,6 +2956,26 @@ public interface WaddleClientInterface {
     suspend fun `disableAvatar`()
 
     /**
+     * XEP-0108: the activity the account publishes now, from its own
+     * PEP node. `Ok(None)` only when there is confirmed to be none;
+     * unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+     * (not connected, timeout, any stanza error but `item-not-found`)
+     * is an error. The node is account-wide and another device may be
+     * using it to show a call, so a caller checks this before it
+     * publishes or retracts.
+     */
+    suspend fun `fetchOwnActivity`(): WaddleActivity?
+
+    /**
+     * XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+     * when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+     * a lookup that fails (not connected, timeout, any stanza error but
+     * `item-not-found`) is an error. Publishing replaces the whole
+     * vCard, so an editor must not open empty on a failed lookup.
+     */
+    suspend fun `fetchOwnVcard4`(): WaddleVCard4?
+
+    /**
      * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
      * `fetch_user_pep_profile` parity): each node is queried with a
      * XEP-0060 items request, and per-node failures (absent node,
@@ -3015,12 +3165,42 @@ public interface WaddleClientInterface {
     suspend fun `submitRoomConfig`(`roomJid`: kotlin.String, `patch`: WaddleRoomConfigPatch)
 
     /**
+     * RFC 6121 §2.1.3: fetch the account's roster (wasm
+     * `list_roster_contacts` parity). An account with no contacts
+     * answers an empty list; a lookup that fails or cannot be read is
+     * an error.
+     */
+    suspend fun `fetchRosterContacts`(): List<WaddleRosterContact>
+
+    /**
+     * XEP-0472: fetch the newest entries of the community feed on
+     * `community_jid` (the `community.<domain>` service), newest
+     * first. `max_items: None` leaves the page size to the server.
+     */
+    suspend fun `fetchFeed`(`communityJid`: kotlin.String, `maxItems`: kotlin.UInt?): List<WaddleFeedEntry>
+
+    /**
+     * XEP-0472: post to the community feed and return the entry as
+     * published, so the caller can show it without fetching again. A
+     * member the server does not let post gets the `forbidden` stanza
+     * error.
+     */
+    suspend fun `publishFeedPost`(`communityJid`: kotlin.String, `post`: WaddleFeedPost): WaddleFeedEntry
+
+    /**
      * The account's stored presence mode from its own
      * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
      * stored. Errors (not connected, timeout, other stanza errors) let
      * the caller keep what it knew.
      */
     suspend fun `fetchStatusPreference`(): WaddleStatusPreference
+
+    /**
+     * Store `preference` as the account's presence mode, for every
+     * device of the account to adopt. A reset is stored as `Automatic`,
+     * never removed. `Ok` means the server accepted it.
+     */
+    suspend fun `publishStatusPreference`(`preference`: WaddleStatusPreference)
 
     /**
      * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
@@ -3042,6 +3222,16 @@ public interface WaddleClientInterface {
     suspend fun `fetchStickerPacks`(`ownerJid`: kotlin.String?): List<WaddleStickerPack>
 
     /**
+     * XEP-0449 §import: copy another user's pack to the account's own
+     * PEP node. The pack is fetched from `owner_jid` (`node: None` is
+     * their PEP `urn:xmpp:stickers:0` node) and published again as it
+     * is, under the same id, which is returned. A pack that is gone
+     * fails with `item-not-found`; one its author marked
+     * `<restricted/>` with `InvalidArgument`.
+     */
+    suspend fun `importStickerPack`(`ownerJid`: kotlin.String, `node`: kotlin.String?, `packId`: kotlin.String): kotlin.String
+
+    /**
      * XEP-0449: publish (create or update/import) a sticker pack on
      * the account's own PEP node. The pubsub item id is recomputed
      * from the pack content per §"Sticker pack hash calculation" —
@@ -3059,6 +3249,43 @@ public interface WaddleClientInterface {
      * carrying the diagnostic).
      */
     suspend fun `retractStickerPack`(`packId`: kotlin.String): kotlin.Boolean
+
+    /**
+     * XEP-0501: fetch the stories on `community_jid` (the
+     * `community.<domain>` service). Expired stories are included.
+     */
+    suspend fun `fetchStories`(`communityJid`: kotlin.String, `maxItems`: kotlin.UInt?): List<WaddleStory>
+
+    /**
+     * XEP-0470: fetch the reaction counts on one story and which
+     * emoji this account reacted with.
+     */
+    suspend fun `fetchStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String): WaddleStoryReactions
+
+    /**
+     * Fetch which stories this account has seen, from its private
+     * read-state item. Empty before the first story was read.
+     */
+    suspend fun `fetchStoryReads`(): List<WaddleStoryRead>
+
+    /**
+     * XEP-0501: post a story and return it as published, so the
+     * caller can show it without fetching again.
+     */
+    suspend fun `publishStory`(`communityJid`: kotlin.String, `post`: WaddleStoryPost): WaddleStory
+
+    /**
+     * Replace this account's read state with `reads`. The item holds
+     * the whole state, so pass every story still worth remembering.
+     */
+    suspend fun `publishStoryReads`(`reads`: List<WaddleStoryRead>)
+
+    /**
+     * XEP-0470: make `emojis` this account's reactions to one story,
+     * replacing the ones it had; an empty list removes them. At most
+     * 12 reactions, each a single emoji.
+     */
+    suspend fun `setStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String, `emojis`: List<kotlin.String>)
 
     companion object
 }
@@ -3210,6 +3437,34 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     }
 
 
+    /**
+     * Cancels the one occurrence of a repeating event that starts at
+     * `occurrence` (its `recurrence_id`), keeping the rest of the series.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `cancelCommunityEventOccurrence`(`communityJid`: kotlin.String, `itemId`: kotlin.String, `occurrence`: WaddleCalendarDate) : WaddleEvent {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_cancel_community_event_occurrence(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterString.lower(`itemId`),FfiConverterTypeWaddleCalendarDate.lower(`occurrence`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleEvent.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Every event of the community, each with the RSVPs it has received.
+     */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `fetchCommunityEvents`(`communityJid`: kotlin.String) : List<WaddleEvent> {
@@ -3232,7 +3487,10 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * Empty id creates; updates preserve recurrence, overrides and attendees.
+     * Empty id creates. An update replaces the recurrence with the one given
+     * and keeps the RSVPs. Cancelled and changed occurrences are kept too,
+     * unless the start moves or the event stops repeating: they are named
+     * by the start they had.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3295,6 +3553,30 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
         // Error FFI converter
         WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Submit one report, with a bounded wait and no retry on any outcome.
+     * The caller must invoke this at most once for each report, even after failure.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `reportCallLifecycle`(`report`: WaddleCallLifecycleReport) : WaddleCallLifecycleReportOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_report_call_lifecycle(
+                uniffiHandle,
+                FfiConverterTypeWaddleCallLifecycleReport.lower(`report`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleCallLifecycleReportOutcome.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -5405,6 +5687,64 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * XEP-0108: the activity the account publishes now, from its own
+     * PEP node. `Ok(None)` only when there is confirmed to be none;
+     * unlike [`Self::fetch_user_pep_profile`], a lookup that fails
+     * (not connected, timeout, any stanza error but `item-not-found`)
+     * is an error. The node is account-wide and another device may be
+     * using it to show a call, so a caller checks this before it
+     * publishes or retracts.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchOwnActivity`() : WaddleActivity? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_activity(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddleActivity.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0292: the account's own vCard4, for editing. `Ok(None)` only
+     * when there is confirmed to be none; unlike [`Self::fetch_vcard4`],
+     * a lookup that fails (not connected, timeout, any stanza error but
+     * `item-not-found`) is an error. Publishing replaces the whole
+     * vCard, so an editor must not open empty on a failed lookup.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchOwnVcard4`() : WaddleVCard4? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_own_vcard4(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddleVCard4.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
      * `fetch_user_pep_profile` parity): each node is queried with a
      * XEP-0060 items request, and per-node failures (absent node,
@@ -6056,6 +6396,86 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * RFC 6121 §2.1.3: fetch the account's roster (wasm
+     * `list_roster_contacts` parity). An account with no contacts
+     * answers an empty list; a lookup that fails or cannot be read is
+     * an error.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchRosterContacts`() : List<WaddleRosterContact> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_roster_contacts(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleRosterContact.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0472: fetch the newest entries of the community feed on
+     * `community_jid` (the `community.<domain>` service), newest
+     * first. `max_items: None` leaves the page size to the server.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchFeed`(`communityJid`: kotlin.String, `maxItems`: kotlin.UInt?) : List<WaddleFeedEntry> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_feed(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterOptionalUInt.lower(`maxItems`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleFeedEntry.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0472: post to the community feed and return the entry as
+     * published, so the caller can show it without fetching again. A
+     * member the server does not let post gets the `forbidden` stanza
+     * error.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishFeedPost`(`communityJid`: kotlin.String, `post`: WaddleFeedPost) : WaddleFeedEntry {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_feed_post(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterTypeWaddleFeedPost.lower(`post`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleFeedEntry.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * The account's stored presence mode from its own
      * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
      * stored. Errors (not connected, timeout, other stanza errors) let
@@ -6076,6 +6496,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeWaddleStatusPreference.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Store `preference` as the account's presence mode, for every
+     * device of the account to adopt. A reset is stored as `Automatic`,
+     * never removed. `Ok` means the server accepted it.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishStatusPreference`(`preference`: WaddleStatusPreference) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_status_preference(
+                uniffiHandle,
+                FfiConverterTypeWaddleStatusPreference.lower(`preference`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
@@ -6140,6 +6587,35 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * XEP-0449 §import: copy another user's pack to the account's own
+     * PEP node. The pack is fetched from `owner_jid` (`node: None` is
+     * their PEP `urn:xmpp:stickers:0` node) and published again as it
+     * is, under the same id, which is returned. A pack that is gone
+     * fails with `item-not-found`; one its author marked
+     * `<restricted/>` with `InvalidArgument`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `importStickerPack`(`ownerJid`: kotlin.String, `node`: kotlin.String?, `packId`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_import_sticker_pack(
+                uniffiHandle,
+                FfiConverterString.lower(`ownerJid`),FfiConverterOptionalString.lower(`node`),FfiConverterString.lower(`packId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * XEP-0449: publish (create or update/import) a sticker pack on
      * the account's own PEP node. The pubsub item id is recomputed
      * from the pack content per §"Sticker pack hash calculation" —
@@ -6191,6 +6667,159 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0501: fetch the stories on `community_jid` (the
+     * `community.<domain>` service). Expired stories are included.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchStories`(`communityJid`: kotlin.String, `maxItems`: kotlin.UInt?) : List<WaddleStory> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterOptionalUInt.lower(`maxItems`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleStory.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0470: fetch the reaction counts on one story and which
+     * emoji this account reacted with.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String) : WaddleStoryReactions {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterString.lower(`storyId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleStoryReactions.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Fetch which stories this account has seen, from its private
+     * read-state item. Empty before the first story was read.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchStoryReads`() : List<WaddleStoryRead> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reads(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleStoryRead.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0501: post a story and return it as published, so the
+     * caller can show it without fetching again.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishStory`(`communityJid`: kotlin.String, `post`: WaddleStoryPost) : WaddleStory {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterTypeWaddleStoryPost.lower(`post`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleStory.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Replace this account's read state with `reads`. The item holds
+     * the whole state, so pass every story still worth remembering.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishStoryReads`(`reads`: List<WaddleStoryRead>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story_reads(
+                uniffiHandle,
+                FfiConverterSequenceTypeWaddleStoryRead.lower(`reads`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0470: make `emojis` this account's reactions to one story,
+     * replacing the ones it had; an empty list removes them. At most
+     * 12 reactions, each a single emoji.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String, `emojis`: List<kotlin.String>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(
+                uniffiHandle,
+                FfiConverterString.lower(`communityJid`),FfiConverterString.lower(`storyId`),FfiConverterSequenceString.lower(`emojis`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 
@@ -7635,6 +8264,12 @@ data class WaddleArchivedMessage (
     var `isSticker`: kotlin.Boolean
     ,
     /**
+     * XEP-0449: the pack the sticker is from, when its marker names
+     * one. `pack_jid: None` means the sender's own PEP node.
+     */
+    var `stickerPack`: WaddleStickerRef?
+    ,
+    /**
      * Carries XEP-0045 `muc#user`: a room private message or a room
      * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
      */
@@ -7722,6 +8357,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeWaddleStickerRef.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadAnchor.read(buf),
@@ -7769,6 +8405,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
             FfiConverterOptionalString.allocationSize(value.`forumTitle`) +
             FfiConverterBoolean.allocationSize(value.`isSticker`) +
+            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`stickerPack`) +
             FfiConverterBoolean.allocationSize(value.`mucUser`) +
             FfiConverterOptionalString.allocationSize(value.`authorRealJid`) +
             FfiConverterOptionalTypeWaddleCallThreadAnchor.allocationSize(value.`callThread`) +
@@ -7815,6 +8452,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
             FfiConverterOptionalString.write(value.`forumTitle`, buf)
             FfiConverterBoolean.write(value.`isSticker`, buf)
+            FfiConverterOptionalTypeWaddleStickerRef.write(value.`stickerPack`, buf)
             FfiConverterBoolean.write(value.`mucUser`, buf)
             FfiConverterOptionalString.write(value.`authorRealJid`, buf)
             FfiConverterOptionalTypeWaddleCallThreadAnchor.write(value.`callThread`, buf)
@@ -8066,6 +8704,59 @@ public object FfiConverterTypeWaddleCallEvent: FfiConverterRustBuffer<WaddleCall
             FfiConverterOptionalString.write(value.`to`, buf)
             FfiConverterString.write(value.`sid`, buf)
             FfiConverterTypeWaddleCallEventKind.write(value.`kind`, buf)
+    }
+}
+
+
+
+data class WaddleCallLifecycleReport (
+    var `kind`: WaddleCallLifecycleKind
+    ,
+    var `setupOutcome`: WaddleCallSetupOutcome
+    ,
+    var `endReason`: WaddleCallEndReason
+    ,
+    var `duration`: WaddleCallDurationBucket
+    ,
+    var `reconnects`: WaddleCallReconnectBucket
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallLifecycleReport: FfiConverterRustBuffer<WaddleCallLifecycleReport> {
+    override fun read(buf: ByteBuffer): WaddleCallLifecycleReport {
+        return WaddleCallLifecycleReport(
+            FfiConverterTypeWaddleCallLifecycleKind.read(buf),
+            FfiConverterTypeWaddleCallSetupOutcome.read(buf),
+            FfiConverterTypeWaddleCallEndReason.read(buf),
+            FfiConverterTypeWaddleCallDurationBucket.read(buf),
+            FfiConverterTypeWaddleCallReconnectBucket.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleCallLifecycleReport) = (
+            FfiConverterTypeWaddleCallLifecycleKind.allocationSize(value.`kind`) +
+            FfiConverterTypeWaddleCallSetupOutcome.allocationSize(value.`setupOutcome`) +
+            FfiConverterTypeWaddleCallEndReason.allocationSize(value.`endReason`) +
+            FfiConverterTypeWaddleCallDurationBucket.allocationSize(value.`duration`) +
+            FfiConverterTypeWaddleCallReconnectBucket.allocationSize(value.`reconnects`)
+    )
+
+    override fun write(value: WaddleCallLifecycleReport, buf: ByteBuffer) {
+            FfiConverterTypeWaddleCallLifecycleKind.write(value.`kind`, buf)
+            FfiConverterTypeWaddleCallSetupOutcome.write(value.`setupOutcome`, buf)
+            FfiConverterTypeWaddleCallEndReason.write(value.`endReason`, buf)
+            FfiConverterTypeWaddleCallDurationBucket.write(value.`duration`, buf)
+            FfiConverterTypeWaddleCallReconnectBucket.write(value.`reconnects`, buf)
     }
 }
 
@@ -8565,7 +9256,23 @@ data class WaddleEvent (
     ,
     var `end`: WaddleCalendarDate?
     ,
+    /**
+     * Each account's latest RSVP. Publishing does not change them.
+     */
     var `attendees`: List<WaddleEventAttendee>
+    ,
+    var `recurrence`: WaddleRecurrence?
+    ,
+    /**
+     * Starts of the cancelled occurrences. Publishing does not change them;
+     * `cancel_community_event_occurrence` adds one.
+     */
+    var `excluded`: List<WaddleCalendarDate>
+    ,
+    /**
+     * Occurrences changed on their own. Publishing does not change them.
+     */
+    var `overrides`: List<WaddleEventOverride>
 
 ){
 
@@ -8592,6 +9299,9 @@ public object FfiConverterTypeWaddleEvent: FfiConverterRustBuffer<WaddleEvent> {
             FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
             FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
             FfiConverterSequenceTypeWaddleEventAttendee.read(buf),
+            FfiConverterOptionalTypeWaddleRecurrence.read(buf),
+            FfiConverterSequenceTypeWaddleCalendarDate.read(buf),
+            FfiConverterSequenceTypeWaddleEventOverride.read(buf),
         )
     }
 
@@ -8605,7 +9315,10 @@ public object FfiConverterTypeWaddleEvent: FfiConverterRustBuffer<WaddleEvent> {
             FfiConverterOptionalString.allocationSize(value.`workspaceRoom`) +
             FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`start`) +
             FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`end`) +
-            FfiConverterSequenceTypeWaddleEventAttendee.allocationSize(value.`attendees`)
+            FfiConverterSequenceTypeWaddleEventAttendee.allocationSize(value.`attendees`) +
+            FfiConverterOptionalTypeWaddleRecurrence.allocationSize(value.`recurrence`) +
+            FfiConverterSequenceTypeWaddleCalendarDate.allocationSize(value.`excluded`) +
+            FfiConverterSequenceTypeWaddleEventOverride.allocationSize(value.`overrides`)
     )
 
     override fun write(value: WaddleEvent, buf: ByteBuffer) {
@@ -8619,6 +9332,9 @@ public object FfiConverterTypeWaddleEvent: FfiConverterRustBuffer<WaddleEvent> {
             FfiConverterOptionalTypeWaddleCalendarDate.write(value.`start`, buf)
             FfiConverterOptionalTypeWaddleCalendarDate.write(value.`end`, buf)
             FfiConverterSequenceTypeWaddleEventAttendee.write(value.`attendees`, buf)
+            FfiConverterOptionalTypeWaddleRecurrence.write(value.`recurrence`, buf)
+            FfiConverterSequenceTypeWaddleCalendarDate.write(value.`excluded`, buf)
+            FfiConverterSequenceTypeWaddleEventOverride.write(value.`overrides`, buf)
     }
 }
 
@@ -8657,6 +9373,136 @@ public object FfiConverterTypeWaddleEventAttendee: FfiConverterRustBuffer<Waddle
     override fun write(value: WaddleEventAttendee, buf: ByteBuffer) {
             FfiConverterString.write(value.`uri`, buf)
             FfiConverterTypeWaddleEventParticipation.write(value.`status`, buf)
+    }
+}
+
+
+
+/**
+ * One occurrence of an event, as `expand_community_event` works it out.
+ */
+data class WaddleEventOccurrence (
+    /**
+     * The start the recurrence gives the occurrence: the value to cancel it
+     * by. `None` when the event does not repeat.
+     */
+    var `recurrenceId`: WaddleCalendarDate?
+    ,
+    var `start`: WaddleCalendarDate
+    ,
+    var `end`: WaddleCalendarDate?
+    ,
+    var `summary`: kotlin.String
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `location`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleEventOccurrence: FfiConverterRustBuffer<WaddleEventOccurrence> {
+    override fun read(buf: ByteBuffer): WaddleEventOccurrence {
+        return WaddleEventOccurrence(
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+            FfiConverterTypeWaddleCalendarDate.read(buf),
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleEventOccurrence) = (
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`recurrenceId`) +
+            FfiConverterTypeWaddleCalendarDate.allocationSize(value.`start`) +
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`end`) +
+            FfiConverterString.allocationSize(value.`summary`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`location`)
+    )
+
+    override fun write(value: WaddleEventOccurrence, buf: ByteBuffer) {
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`recurrenceId`, buf)
+            FfiConverterTypeWaddleCalendarDate.write(value.`start`, buf)
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`end`, buf)
+            FfiConverterString.write(value.`summary`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`location`, buf)
+    }
+}
+
+
+
+/**
+ * One occurrence of a repeating event that was changed on its own.
+ * A missing field means the occurrence keeps the event's value.
+ */
+data class WaddleEventOverride (
+    /**
+     * The start the occurrence would have had.
+     */
+    var `recurrenceId`: WaddleCalendarDate
+    ,
+    var `summary`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `location`: kotlin.String?
+    ,
+    var `start`: WaddleCalendarDate?
+    ,
+    var `end`: WaddleCalendarDate?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleEventOverride: FfiConverterRustBuffer<WaddleEventOverride> {
+    override fun read(buf: ByteBuffer): WaddleEventOverride {
+        return WaddleEventOverride(
+            FfiConverterTypeWaddleCalendarDate.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+            FfiConverterOptionalTypeWaddleCalendarDate.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleEventOverride) = (
+            FfiConverterTypeWaddleCalendarDate.allocationSize(value.`recurrenceId`) +
+            FfiConverterOptionalString.allocationSize(value.`summary`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`location`) +
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`start`) +
+            FfiConverterOptionalTypeWaddleCalendarDate.allocationSize(value.`end`)
+    )
+
+    override fun write(value: WaddleEventOverride, buf: ByteBuffer) {
+            FfiConverterTypeWaddleCalendarDate.write(value.`recurrenceId`, buf)
+            FfiConverterOptionalString.write(value.`summary`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`location`, buf)
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`start`, buf)
+            FfiConverterOptionalTypeWaddleCalendarDate.write(value.`end`, buf)
     }
 }
 
@@ -9167,6 +10013,127 @@ public object FfiConverterTypeWaddleFallbackRange: FfiConverterRustBuffer<Waddle
     override fun write(value: WaddleFallbackRange, buf: ByteBuffer) {
             FfiConverterUInt.write(value.`start`, buf)
             FfiConverterUInt.write(value.`end`, buf)
+    }
+}
+
+
+
+/**
+ * One entry of the community feed.
+ */
+data class WaddleFeedEntry (
+    /**
+     * Pubsub item id.
+     */
+    var `id`: kotlin.String
+    ,
+    var `title`: kotlin.String?
+    ,
+    var `body`: kotlin.String
+    ,
+    /**
+     * Bare JID of the author, as stamped by the server.
+     */
+    var `author`: kotlin.String?
+    ,
+    /**
+     * Publication time, milliseconds since the Unix epoch.
+     */
+    var `publishedMs`: kotlin.Long?
+    ,
+    var `link`: kotlin.String?
+    ,
+    var `source`: WaddleFeedSource?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleFeedEntry: FfiConverterRustBuffer<WaddleFeedEntry> {
+    override fun read(buf: ByteBuffer): WaddleFeedEntry {
+        return WaddleFeedEntry(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeWaddleFeedSource.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleFeedEntry) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterOptionalString.allocationSize(value.`author`) +
+            FfiConverterOptionalLong.allocationSize(value.`publishedMs`) +
+            FfiConverterOptionalString.allocationSize(value.`link`) +
+            FfiConverterOptionalTypeWaddleFeedSource.allocationSize(value.`source`)
+    )
+
+    override fun write(value: WaddleFeedEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterString.write(value.`body`, buf)
+            FfiConverterOptionalString.write(value.`author`, buf)
+            FfiConverterOptionalLong.write(value.`publishedMs`, buf)
+            FfiConverterOptionalString.write(value.`link`, buf)
+            FfiConverterOptionalTypeWaddleFeedSource.write(value.`source`, buf)
+    }
+}
+
+
+
+/**
+ * A new feed post. The server stamps the author.
+ */
+data class WaddleFeedPost (
+    var `title`: kotlin.String?
+    ,
+    var `body`: kotlin.String
+    ,
+    var `link`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleFeedPost: FfiConverterRustBuffer<WaddleFeedPost> {
+    override fun read(buf: ByteBuffer): WaddleFeedPost {
+        return WaddleFeedPost(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleFeedPost) = (
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterOptionalString.allocationSize(value.`link`)
+    )
+
+    override fun write(value: WaddleFeedPost, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterString.write(value.`body`, buf)
+            FfiConverterOptionalString.write(value.`link`, buf)
     }
 }
 
@@ -10217,6 +11184,12 @@ data class WaddleMessage (
     var `isSticker`: kotlin.Boolean
     ,
     /**
+     * XEP-0449: the pack the sticker is from, when its marker names
+     * one. `pack_jid: None` means the sender's own PEP node.
+     */
+    var `stickerPack`: WaddleStickerRef?
+    ,
+    /**
      * XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
      * pipeline output), one entry per previewed URL.
      */
@@ -10336,6 +11309,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeWaddleStickerRef.read(buf),
             FfiConverterSequenceTypeWaddleLinkPreview.read(buf),
             FfiConverterOptionalTypeWaddlePinEvent.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadEnded.read(buf),
@@ -10386,6 +11360,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
             FfiConverterOptionalString.allocationSize(value.`forumTitle`) +
             FfiConverterBoolean.allocationSize(value.`isSticker`) +
+            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`stickerPack`) +
             FfiConverterSequenceTypeWaddleLinkPreview.allocationSize(value.`linkPreviews`) +
             FfiConverterOptionalTypeWaddlePinEvent.allocationSize(value.`pinEvent`) +
             FfiConverterOptionalTypeWaddleCallThreadEnded.allocationSize(value.`callThreadEnded`) +
@@ -10435,6 +11410,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
             FfiConverterOptionalString.write(value.`forumTitle`, buf)
             FfiConverterBoolean.write(value.`isSticker`, buf)
+            FfiConverterOptionalTypeWaddleStickerRef.write(value.`stickerPack`, buf)
             FfiConverterSequenceTypeWaddleLinkPreview.write(value.`linkPreviews`, buf)
             FfiConverterOptionalTypeWaddlePinEvent.write(value.`pinEvent`, buf)
             FfiConverterOptionalTypeWaddleCallThreadEnded.write(value.`callThreadEnded`, buf)
@@ -11267,6 +12243,71 @@ public object FfiConverterTypeWaddlePresenceHat: FfiConverterRustBuffer<WaddlePr
 
 
 /**
+ * How an event repeats. Occurrences are worked out by the caller, in UTC.
+ */
+data class WaddleRecurrence (
+    var `frequency`: WaddleRecurrenceFrequency
+    ,
+    /**
+     * Every `interval` days, weeks, months or years; at least 1.
+     */
+    var `interval`: kotlin.UInt
+    ,
+    /**
+     * Empty means the weekday of the event's start.
+     */
+    var `weekdays`: List<WaddleWeekday>
+    ,
+    /**
+     * 1 to 31, or -1 to -31 counted from the end of the month.
+     */
+    var `monthDays`: List<kotlin.Int>
+    ,
+    var `end`: WaddleRecurrenceEnd
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRecurrence: FfiConverterRustBuffer<WaddleRecurrence> {
+    override fun read(buf: ByteBuffer): WaddleRecurrence {
+        return WaddleRecurrence(
+            FfiConverterTypeWaddleRecurrenceFrequency.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeWaddleWeekday.read(buf),
+            FfiConverterSequenceInt.read(buf),
+            FfiConverterTypeWaddleRecurrenceEnd.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRecurrence) = (
+            FfiConverterTypeWaddleRecurrenceFrequency.allocationSize(value.`frequency`) +
+            FfiConverterUInt.allocationSize(value.`interval`) +
+            FfiConverterSequenceTypeWaddleWeekday.allocationSize(value.`weekdays`) +
+            FfiConverterSequenceInt.allocationSize(value.`monthDays`) +
+            FfiConverterTypeWaddleRecurrenceEnd.allocationSize(value.`end`)
+    )
+
+    override fun write(value: WaddleRecurrence, buf: ByteBuffer) {
+            FfiConverterTypeWaddleRecurrenceFrequency.write(value.`frequency`, buf)
+            FfiConverterUInt.write(value.`interval`, buf)
+            FfiConverterSequenceTypeWaddleWeekday.write(value.`weekdays`, buf)
+            FfiConverterSequenceInt.write(value.`monthDays`, buf)
+            FfiConverterTypeWaddleRecurrenceEnd.write(value.`end`, buf)
+    }
+}
+
+
+
+/**
  * XEP-0372 `<reference/>`. `begin`/`end` are body offsets; `(0, 0)`
  * is the "no body position" sentinel used by anchor-only references.
  */
@@ -11665,6 +12706,48 @@ public object FfiConverterTypeWaddleRoomMemberEntry: FfiConverterRustBuffer<Wadd
             FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
             FfiConverterOptionalString.write(value.`nick`, buf)
             FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+/**
+ * One contact on the account's roster: its bare JID and the name the
+ * account saved for it, when it saved one.
+ */
+data class WaddleRosterContact (
+    var `jid`: kotlin.String
+    ,
+    var `name`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRosterContact: FfiConverterRustBuffer<WaddleRosterContact> {
+    override fun read(buf: ByteBuffer): WaddleRosterContact {
+        return WaddleRosterContact(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRosterContact) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterOptionalString.allocationSize(value.`name`)
+    )
+
+    override fun write(value: WaddleRosterContact, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
     }
 }
 
@@ -12249,10 +13332,10 @@ public object FfiConverterTypeWaddleStickerPack: FfiConverterRustBuffer<WaddleSt
 
 
 /**
- * Reference to the source pack of an outbound sticker send
- * (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
- * `pack_node` locate packs hosted outside the sender's own PEP
- * `urn:xmpp:stickers:0` node.
+ * Reference to the source pack of a sticker, on an outbound send or a
+ * received message (XEP-0449 §"Sending a sticker from a sticker
+ * pack"). `pack_jid` / `pack_node` locate packs hosted outside the
+ * sender's own PEP `urn:xmpp:stickers:0` node.
  */
 data class WaddleStickerRef (
     var `packId`: kotlin.String
@@ -12292,6 +13375,266 @@ public object FfiConverterTypeWaddleStickerRef: FfiConverterRustBuffer<WaddleSti
             FfiConverterString.write(value.`packId`, buf)
             FfiConverterOptionalString.write(value.`packJid`, buf)
             FfiConverterOptionalString.write(value.`packNode`, buf)
+    }
+}
+
+
+
+/**
+ * One story. The caller decides whether it is still active by
+ * comparing `expires_ms` with the clock.
+ */
+data class WaddleStory (
+    /**
+     * Pubsub item id.
+     */
+    var `id`: kotlin.String
+    ,
+    var `body`: kotlin.String?
+    ,
+    var `mediaUrl`: kotlin.String
+    ,
+    var `mediaType`: kotlin.String?
+    ,
+    /**
+     * Bare JID of the author, as stamped by the server.
+     */
+    var `author`: kotlin.String?
+    ,
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    var `postedMs`: kotlin.Long?
+    ,
+    /**
+     * Milliseconds since the Unix epoch; `None` never expires.
+     */
+    var `expiresMs`: kotlin.Long?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStory: FfiConverterRustBuffer<WaddleStory> {
+    override fun read(buf: ByteBuffer): WaddleStory {
+        return WaddleStory(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStory) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterOptionalString.allocationSize(value.`body`) +
+            FfiConverterString.allocationSize(value.`mediaUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`mediaType`) +
+            FfiConverterOptionalString.allocationSize(value.`author`) +
+            FfiConverterOptionalLong.allocationSize(value.`postedMs`) +
+            FfiConverterOptionalLong.allocationSize(value.`expiresMs`)
+    )
+
+    override fun write(value: WaddleStory, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterOptionalString.write(value.`body`, buf)
+            FfiConverterString.write(value.`mediaUrl`, buf)
+            FfiConverterOptionalString.write(value.`mediaType`, buf)
+            FfiConverterOptionalString.write(value.`author`, buf)
+            FfiConverterOptionalLong.write(value.`postedMs`, buf)
+            FfiConverterOptionalLong.write(value.`expiresMs`, buf)
+    }
+}
+
+
+
+/**
+ * A new story. `expiry_hours: None` is a day; less than an hour is an
+ * hour.
+ */
+data class WaddleStoryPost (
+    var `body`: kotlin.String?
+    ,
+    var `mediaUrl`: kotlin.String
+    ,
+    var `mediaType`: kotlin.String?
+    ,
+    var `expiryHours`: kotlin.UInt?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStoryPost: FfiConverterRustBuffer<WaddleStoryPost> {
+    override fun read(buf: ByteBuffer): WaddleStoryPost {
+        return WaddleStoryPost(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStoryPost) = (
+            FfiConverterOptionalString.allocationSize(value.`body`) +
+            FfiConverterString.allocationSize(value.`mediaUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`mediaType`) +
+            FfiConverterOptionalUInt.allocationSize(value.`expiryHours`)
+    )
+
+    override fun write(value: WaddleStoryPost, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`body`, buf)
+            FfiConverterString.write(value.`mediaUrl`, buf)
+            FfiConverterOptionalString.write(value.`mediaType`, buf)
+            FfiConverterOptionalUInt.write(value.`expiryHours`, buf)
+    }
+}
+
+
+
+/**
+ * How many members reacted to a story with one emoji.
+ */
+data class WaddleStoryReaction (
+    var `emoji`: kotlin.String
+    ,
+    var `count`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStoryReaction: FfiConverterRustBuffer<WaddleStoryReaction> {
+    override fun read(buf: ByteBuffer): WaddleStoryReaction {
+        return WaddleStoryReaction(
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStoryReaction) = (
+            FfiConverterString.allocationSize(value.`emoji`) +
+            FfiConverterUInt.allocationSize(value.`count`)
+    )
+
+    override fun write(value: WaddleStoryReaction, buf: ByteBuffer) {
+            FfiConverterString.write(value.`emoji`, buf)
+            FfiConverterUInt.write(value.`count`, buf)
+    }
+}
+
+
+
+/**
+ * The reactions on one story.
+ */
+data class WaddleStoryReactions (
+    var `reactions`: List<WaddleStoryReaction>
+    ,
+    /**
+     * The emoji this account reacted with.
+     */
+    var `mine`: List<kotlin.String>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStoryReactions: FfiConverterRustBuffer<WaddleStoryReactions> {
+    override fun read(buf: ByteBuffer): WaddleStoryReactions {
+        return WaddleStoryReactions(
+            FfiConverterSequenceTypeWaddleStoryReaction.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStoryReactions) = (
+            FfiConverterSequenceTypeWaddleStoryReaction.allocationSize(value.`reactions`) +
+            FfiConverterSequenceString.allocationSize(value.`mine`)
+    )
+
+    override fun write(value: WaddleStoryReactions, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleStoryReaction.write(value.`reactions`, buf)
+            FfiConverterSequenceString.write(value.`mine`, buf)
+    }
+}
+
+
+
+/**
+ * One story the account has seen.
+ */
+data class WaddleStoryRead (
+    var `storyId`: kotlin.String
+    ,
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    var `readAtMs`: kotlin.Long
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStoryRead: FfiConverterRustBuffer<WaddleStoryRead> {
+    override fun read(buf: ByteBuffer): WaddleStoryRead {
+        return WaddleStoryRead(
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStoryRead) = (
+            FfiConverterString.allocationSize(value.`storyId`) +
+            FfiConverterLong.allocationSize(value.`readAtMs`)
+    )
+
+    override fun write(value: WaddleStoryRead, buf: ByteBuffer) {
+            FfiConverterString.write(value.`storyId`, buf)
+            FfiConverterLong.write(value.`readAtMs`, buf)
     }
 }
 
@@ -12838,6 +14181,79 @@ public object FfiConverterTypeWaddleCalendarDate : FfiConverterRustBuffer<Waddle
 
 
 
+
+enum class WaddleCallDurationBucket {
+
+    NONE,
+    UNDER_ONE_MINUTE,
+    ONE_TO_TEN_MINUTES,
+    TEN_TO_SIXTY_MINUTES,
+    OVER_SIXTY_MINUTES;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallDurationBucket: FfiConverterRustBuffer<WaddleCallDurationBucket> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallDurationBucket.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallDurationBucket) = 4UL
+
+    override fun write(value: WaddleCallDurationBucket, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallEndReason {
+
+    HANGUP,
+    PEER_LEFT,
+    ERROR,
+    RECONNECT_EXHAUSTED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallEndReason: FfiConverterRustBuffer<WaddleCallEndReason> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallEndReason.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallEndReason) = 4UL
+
+    override fun write(value: WaddleCallEndReason, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * Variants of an inbound A/V call event. Matches the wire shapes
  * `messaging::call::CallEventKind` already parses for the wasm
@@ -13130,6 +14546,111 @@ public object FfiConverterTypeWaddleCallEventKind : FfiConverterRustBuffer<Waddl
 
 
 
+
+enum class WaddleCallLifecycleKind {
+
+    DM,
+    MUC;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallLifecycleKind: FfiConverterRustBuffer<WaddleCallLifecycleKind> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallLifecycleKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallLifecycleKind) = 4UL
+
+    override fun write(value: WaddleCallLifecycleKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallLifecycleReportOutcome {
+
+    ACCEPTED,
+    UNSUPPORTED,
+    RATE_LIMITED,
+    FAILED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallLifecycleReportOutcome: FfiConverterRustBuffer<WaddleCallLifecycleReportOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallLifecycleReportOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallLifecycleReportOutcome) = 4UL
+
+    override fun write(value: WaddleCallLifecycleReportOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallReconnectBucket {
+
+    NONE,
+    ONCE,
+    MULTIPLE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallReconnectBucket: FfiConverterRustBuffer<WaddleCallReconnectBucket> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallReconnectBucket.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallReconnectBucket) = 4UL
+
+    override fun write(value: WaddleCallReconnectBucket, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * Typed outcome of `send_call_session_terminate_with_outcome`.
  * Mirrors the wasm client's three-way classification so the app can
@@ -13176,6 +14697,43 @@ public object FfiConverterTypeWaddleCallSessionTerminateOutcome: FfiConverterRus
     override fun allocationSize(value: WaddleCallSessionTerminateOutcome) = 4UL
 
     override fun write(value: WaddleCallSessionTerminateOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WaddleCallSetupOutcome {
+
+    PROPOSED,
+    ACCEPTED,
+    DECLINED,
+    TIMEOUT,
+    FAILED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallSetupOutcome: FfiConverterRustBuffer<WaddleCallSetupOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallSetupOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallSetupOutcome) = 4UL
+
+    override fun write(value: WaddleCallSetupOutcome, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -14163,6 +15721,52 @@ public object FfiConverterTypeWaddleExternalServiceType: FfiConverterRustBuffer<
 
 
 /**
+ * What a server-written feed entry reports. Entries a member posted
+ * carry no source.
+ */
+
+enum class WaddleFeedSource {
+
+    MOOD,
+    ACTIVITY,
+    TUNE,
+    AVATAR,
+    PROFILE,
+    EVENT_REPLY,
+    /**
+     * A kind this client does not know yet.
+     */
+    OTHER;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleFeedSource: FfiConverterRustBuffer<WaddleFeedSource> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleFeedSource.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleFeedSource) = 4UL
+
+    override fun write(value: WaddleFeedSource, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * Waddle forum post classification: `Topic` (thread + body + subject)
  * or `Reply` (thread + body). Wire values outside these two are
  * dropped to `None` at the conversion boundary.
@@ -15132,6 +16736,145 @@ public object FfiConverterTypeWaddlePushVapidLookup : FfiConverterRustBuffer<Wad
 
 
 
+sealed class WaddleRecurrenceEnd {
+
+    object Never : WaddleRecurrenceEnd()
+
+
+    /**
+     * The series has this many occurrences, cancelled ones included.
+     */
+    data class Count(
+        val `count`: kotlin.UInt) : WaddleRecurrenceEnd()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * The last occurrence starts at or before this instant.
+     */
+    data class Until(
+        val `timestampMs`: kotlin.Long) : WaddleRecurrenceEnd()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRecurrenceEnd : FfiConverterRustBuffer<WaddleRecurrenceEnd>{
+    override fun read(buf: ByteBuffer): WaddleRecurrenceEnd {
+        return when(buf.getInt()) {
+            1 -> WaddleRecurrenceEnd.Never
+            2 -> WaddleRecurrenceEnd.Count(
+                FfiConverterUInt.read(buf),
+                )
+            3 -> WaddleRecurrenceEnd.Until(
+                FfiConverterLong.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleRecurrenceEnd) = when(value) {
+        is WaddleRecurrenceEnd.Never -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleRecurrenceEnd.Count -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterUInt.allocationSize(value.`count`)
+            )
+        }
+        is WaddleRecurrenceEnd.Until -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterLong.allocationSize(value.`timestampMs`)
+            )
+        }
+    }
+
+    override fun write(value: WaddleRecurrenceEnd, buf: ByteBuffer) {
+        when(value) {
+            is WaddleRecurrenceEnd.Never -> {
+                buf.putInt(1)
+                Unit
+            }
+            is WaddleRecurrenceEnd.Count -> {
+                buf.putInt(2)
+                FfiConverterUInt.write(value.`count`, buf)
+                Unit
+            }
+            is WaddleRecurrenceEnd.Until -> {
+                buf.putInt(3)
+                FfiConverterLong.write(value.`timestampMs`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class WaddleRecurrenceFrequency {
+
+    DAILY,
+    WEEKLY,
+    MONTHLY,
+    YEARLY;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRecurrenceFrequency: FfiConverterRustBuffer<WaddleRecurrenceFrequency> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleRecurrenceFrequency.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleRecurrenceFrequency) = 4UL
+
+    override fun write(value: WaddleRecurrenceFrequency, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
  * values explicitly so extension references survive the boundary
@@ -15855,6 +17598,45 @@ public object FfiConverterTypeWaddleStatusPreference : FfiConverterRustBuffer<Wa
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class WaddleWeekday {
+
+    SUNDAY,
+    MONDAY,
+    TUESDAY,
+    WEDNESDAY,
+    THURSDAY,
+    FRIDAY,
+    SATURDAY;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleWeekday: FfiConverterRustBuffer<WaddleWeekday> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleWeekday.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleWeekday) = 4UL
+
+    override fun write(value: WaddleWeekday, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -16758,6 +18540,38 @@ public object FfiConverterOptionalTypeWaddlePinPreview: FfiConverterRustBuffer<W
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleRecurrence: FfiConverterRustBuffer<WaddleRecurrence?> {
+    override fun read(buf: ByteBuffer): WaddleRecurrence? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleRecurrence.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleRecurrence?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleRecurrence.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleRecurrence?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleRecurrence.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleRegisterDeviceResult: FfiConverterRustBuffer<WaddleRegisterDeviceResult?> {
     override fun read(buf: ByteBuffer): WaddleRegisterDeviceResult? {
         if (buf.get().toInt() == 0) {
@@ -17238,6 +19052,38 @@ public object FfiConverterOptionalTypeWaddleExternalServiceTransport: FfiConvert
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleFeedSource: FfiConverterRustBuffer<WaddleFeedSource?> {
+    override fun read(buf: ByteBuffer): WaddleFeedSource? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleFeedSource.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleFeedSource?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleFeedSource.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleFeedSource?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleFeedSource.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleForumPostKind: FfiConverterRustBuffer<WaddleForumPostKind?> {
     override fun read(buf: ByteBuffer): WaddleForumPostKind? {
         if (buf.get().toInt() == 0) {
@@ -17576,6 +19422,34 @@ public object FfiConverterSequenceUShort: FfiConverterRustBuffer<List<kotlin.USh
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterUShort.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceInt: FfiConverterRustBuffer<List<kotlin.Int>> {
+    override fun read(buf: ByteBuffer): List<kotlin.Int> {
+        val len = buf.getInt()
+        return List<kotlin.Int>(len) {
+            FfiConverterInt.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.Int>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterInt.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.Int>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterInt.write(it, buf)
         }
     }
 }
@@ -17978,6 +19852,62 @@ public object FfiConverterSequenceTypeWaddleEventAttendee: FfiConverterRustBuffe
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleEventOccurrence: FfiConverterRustBuffer<List<WaddleEventOccurrence>> {
+    override fun read(buf: ByteBuffer): List<WaddleEventOccurrence> {
+        val len = buf.getInt()
+        return List<WaddleEventOccurrence>(len) {
+            FfiConverterTypeWaddleEventOccurrence.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleEventOccurrence>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleEventOccurrence.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleEventOccurrence>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleEventOccurrence.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleEventOverride: FfiConverterRustBuffer<List<WaddleEventOverride>> {
+    override fun read(buf: ByteBuffer): List<WaddleEventOverride> {
+        val len = buf.getInt()
+        return List<WaddleEventOverride>(len) {
+            FfiConverterTypeWaddleEventOverride.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleEventOverride>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleEventOverride.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleEventOverride>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleEventOverride.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleExtensionCommand: FfiConverterRustBuffer<List<WaddleExtensionCommand>> {
     override fun read(buf: ByteBuffer): List<WaddleExtensionCommand> {
         val len = buf.getInt()
@@ -18136,6 +20066,34 @@ public object FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuf
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleExternalService.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleFeedEntry: FfiConverterRustBuffer<List<WaddleFeedEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleFeedEntry> {
+        val len = buf.getInt()
+        return List<WaddleFeedEntry>(len) {
+            FfiConverterTypeWaddleFeedEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleFeedEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleFeedEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleFeedEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleFeedEntry.write(it, buf)
         }
     }
 }
@@ -18510,6 +20468,34 @@ public object FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRustBuf
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleRosterContact: FfiConverterRustBuffer<List<WaddleRosterContact>> {
+    override fun read(buf: ByteBuffer): List<WaddleRosterContact> {
+        val len = buf.getInt()
+        return List<WaddleRosterContact>(len) {
+            FfiConverterTypeWaddleRosterContact.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleRosterContact>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleRosterContact.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleRosterContact>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleRosterContact.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleSafetyScore: FfiConverterRustBuffer<List<WaddleSafetyScore>> {
     override fun read(buf: ByteBuffer): List<WaddleSafetyScore> {
         val len = buf.getInt()
@@ -18678,6 +20664,90 @@ public object FfiConverterSequenceTypeWaddleStickerPack: FfiConverterRustBuffer<
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleStory: FfiConverterRustBuffer<List<WaddleStory>> {
+    override fun read(buf: ByteBuffer): List<WaddleStory> {
+        val len = buf.getInt()
+        return List<WaddleStory>(len) {
+            FfiConverterTypeWaddleStory.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleStory>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleStory.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleStory>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleStory.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleStoryReaction: FfiConverterRustBuffer<List<WaddleStoryReaction>> {
+    override fun read(buf: ByteBuffer): List<WaddleStoryReaction> {
+        val len = buf.getInt()
+        return List<WaddleStoryReaction>(len) {
+            FfiConverterTypeWaddleStoryReaction.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleStoryReaction>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleStoryReaction.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleStoryReaction>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleStoryReaction.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleStoryRead: FfiConverterRustBuffer<List<WaddleStoryRead>> {
+    override fun read(buf: ByteBuffer): List<WaddleStoryRead> {
+        val len = buf.getInt()
+        return List<WaddleStoryRead>(len) {
+            FfiConverterTypeWaddleStoryRead.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleStoryRead>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleStoryRead.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleStoryRead>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleStoryRead.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleUploadHeader: FfiConverterRustBuffer<List<WaddleUploadHeader>> {
     override fun read(buf: ByteBuffer): List<WaddleUploadHeader> {
         val len = buf.getInt()
@@ -18758,6 +20828,62 @@ public object FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer<
 
 
 
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleCalendarDate: FfiConverterRustBuffer<List<WaddleCalendarDate>> {
+    override fun read(buf: ByteBuffer): List<WaddleCalendarDate> {
+        val len = buf.getInt()
+        return List<WaddleCalendarDate>(len) {
+            FfiConverterTypeWaddleCalendarDate.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleCalendarDate>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleCalendarDate.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleCalendarDate>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleCalendarDate.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer<List<WaddleWeekday>> {
+    override fun read(buf: ByteBuffer): List<WaddleWeekday> {
+        val len = buf.getInt()
+        return List<WaddleWeekday>(len) {
+            FfiConverterTypeWaddleWeekday.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleWeekday>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleWeekday.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleWeekday>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleWeekday.write(it, buf)
+        }
+    }
+}
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -18781,6 +20907,23 @@ public typealias FfiConverterTypeStanzaId = FfiConverterString
 
 
 
+
+
+        /**
+         * The occurrences of `event` that overlap `from_ms..to_ms`, earliest first.
+         * Recurrences are walked in UTC, the same on every client. An all-day
+         * occurrence sits at midnight UTC of its date, so a caller showing another
+         * time zone should ask for a day more on each side.
+         */
+    @Throws(WaddleException::class) fun `expandCommunityEvent`(`event`: WaddleEvent, `fromMs`: kotlin.Long, `toMs`: kotlin.Long): List<WaddleEventOccurrence> {
+            return FfiConverterSequenceTypeWaddleEventOccurrence.lift(
+    uniffiRustCallWithError(WaddleException) { _status ->
+    UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_func_expand_community_event(
+
+        FfiConverterTypeWaddleEvent.lower(`event`),FfiConverterLong.lower(`fromMs`),FfiConverterLong.lower(`toMs`),_status)
+}
+    )
+    }
 
 
         /**

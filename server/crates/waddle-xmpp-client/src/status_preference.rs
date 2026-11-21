@@ -1,11 +1,12 @@
-//! Cross-device manual-status sync, receive side (ADR-010 decision 5).
+//! Cross-device manual-status sync (ADR-010 decision 5).
 //!
 //! The user's picked presence mode lives as one PEP item (`id = current`)
 //! on their own account in the Waddle-custom
 //! `urn:waddle:status-preference:0` node (XEP-0223 private storage). A
 //! resource reads it with an items request on ready and follows the
 //! XEP-0163 `+notify` event (advertised in [`crate::caps`]) when another
-//! resource of the same account publishes a new pick.
+//! resource of the same account publishes a new pick. A pick made on
+//! this resource is published over the same item.
 //!
 //! Both paths accept only the account's own PEP service (XEP-0223
 //! §Security Considerations, CVE-2023-28686): a contact must not be able
@@ -36,6 +37,36 @@ pub fn build_status_preference_fetch_iq(iq_id: &str) -> Element {
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
+        .append(pubsub)
+        .build()
+}
+
+/// XEP-0060 §7.1 publish of `preference` over the single `current` item.
+/// A reset is published as Automatic rather than retracted, so it reaches
+/// the account's other resources as a value. No `<publish-options/>`:
+/// the server pins the node owner-only as a well-known node.
+#[must_use]
+pub fn build_status_preference_publish_iq(iq_id: &str, preference: &StatusPreference) -> Element {
+    let item = Element::builder("item", NS_PUBSUB)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            PEP_ITEM_WADDLE_STATUS_PREFERENCE,
+        )
+        .append(preference.build_element())
+        .build();
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            PEP_NODE_WADDLE_STATUS_PREFERENCE,
+        )
+        .append(item)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(publish)
+        .build();
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
         .append(pubsub)
         .build()
