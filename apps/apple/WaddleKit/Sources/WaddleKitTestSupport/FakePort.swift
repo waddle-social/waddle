@@ -111,6 +111,8 @@ final class FakePort: XmppPort {
     var publishedAvatarID = "own1"
     var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
     var sharedStatus: Result<SharedStatus, PortError> = .success(SharedStatus())
+    /// What a strict lookup of the account's own activity answers.
+    var ownActivity: Result<UserActivity?, PortError> = .success(nil)
     /// Every activity and tune offered for publishing; nil is a retraction.
     var publishedActivities: [UserActivity?] = []
     var publishedTunes: [UserTune?] = []
@@ -368,7 +370,8 @@ final class FakePort: XmppPort {
         publishedAvatarID
     }
     func removeAvatar() async throws {}
-    func fetchSharedStatus(of jid: BareJID) async throws -> SharedStatus { try sharedStatus.get() }
+    func fetchSharedStatus(of _: BareJID) async throws -> SharedStatus { try sharedStatus.get() }
+    func fetchOwnActivity() async throws -> UserActivity? { try ownActivity.get() }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
     func publishActivity(_ activity: UserActivity) async throws {

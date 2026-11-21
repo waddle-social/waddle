@@ -42,9 +42,10 @@ extension SessionCoordinator {
     /// The account has one activity, and a device in a call uses it to show
     /// the call (ADR-010). What is published is looked up first, and while
     /// it shows a call it is left alone: writing over it would end the "in
-    /// a call" mark for everyone.
+    /// a call" mark for everyone. A lookup that fails throws, so nothing
+    /// is written while what is published is unknown.
     public func setActivity(_ activity: UserActivity?) async throws {
-        if let published = try? await port.fetchSharedStatus(of: account.jid).activity, published.showsACall {
+        if let published = try await port.fetchOwnActivity(), published.showsACall {
             status.activity = published
             throw PortError.rejected
         }

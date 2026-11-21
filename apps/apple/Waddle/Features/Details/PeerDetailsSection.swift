@@ -49,7 +49,11 @@ extension View {
         task(id: jid) {
             details.wrappedValue = nil
             guard let jid else { return }
-            details.wrappedValue = await session.details(of: jid)
+            // A lookup for the person shown before can still answer after
+            // this one; cancelling does not stop it.
+            let loaded = await session.details(of: jid)
+            guard !Task.isCancelled else { return }
+            details.wrappedValue = loaded
         }
     }
 }

@@ -40,6 +40,10 @@ extension FFIXmppPort {
         try await mappingPortErrors { try await client.retractMood() }
     }
 
+    func fetchOwnActivity() async throws -> UserActivity? {
+        try await mappingPortErrors { try await client.fetchOwnActivity() }.map(FFIInbound.activity)
+    }
+
     func publishActivity(_ activity: UserActivity) async throws {
         try await mappingPortErrors {
             try await client.publishActivity(general: activity.general, specific: activity.specific, text: activity.text)

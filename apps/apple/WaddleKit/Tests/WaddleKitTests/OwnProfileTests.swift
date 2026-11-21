@@ -75,7 +75,7 @@ struct OwnProfileTests {
     @Test func anActivityIsNotWrittenOverACallOnAnotherDevice() async {
         let (coordinator, port) = session()
         let call = UserActivity(general: "talking", specific: "on_the_phone")
-        port.sharedStatus = .success(SharedStatus(activity: call))
+        port.ownActivity = .success(call)
 
         await #expect(throws: PortError.rejected) { try await coordinator.setActivity(coding) }
         await #expect(throws: PortError.rejected) { try await coordinator.setActivity(nil) }
@@ -84,10 +84,23 @@ struct OwnProfileTests {
         #expect(coordinator.status.activity == call)
     }
 
+    /// A lookup that fails does not say the activity is free: a call on
+    /// another device may be behind it.
+    @Test func anActivityIsNotWrittenWhileWhatIsPublishedIsUnknown() async {
+        let (coordinator, port) = session()
+        port.ownActivity = .failure(.timeout)
+
+        await #expect(throws: PortError.timeout) { try await coordinator.setActivity(coding) }
+        await #expect(throws: PortError.timeout) { try await coordinator.setActivity(nil) }
+
+        #expect(port.publishedActivities.isEmpty)
+        #expect(coordinator.status.activity == nil)
+    }
+
     /// Talking to someone in the room is an ordinary activity, not a call.
     @Test func anActivityThatIsNotACallCanBeReplaced() async throws {
         let (coordinator, port) = session()
-        port.sharedStatus = .success(SharedStatus(activity: UserActivity(general: "talking", specific: "in_real_life")))
+        port.ownActivity = .success(UserActivity(general: "talking", specific: "in_real_life"))
 
         try await coordinator.setActivity(coding)
 

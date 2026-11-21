@@ -108,11 +108,15 @@ extension FFIInbound {
     static func sharedStatus(_ profile: WaddlePepProfile) -> SharedStatus {
         SharedStatus(
             mood: profile.mood.map { UserMood(value: $0.kind, text: $0.text) },
-            activity: profile.activity.map { UserActivity(general: $0.general, specific: $0.specific, text: $0.text) },
+            activity: profile.activity.map(activity),
             tune: profile.tune.map {
                 UserTune(title: $0.title ?? "", artist: $0.artist ?? "", album: $0.source ?? "", link: $0.uri ?? "")
             }
         )
+    }
+
+    static func activity(_ activity: WaddleActivity) -> UserActivity {
+        UserActivity(general: activity.general, specific: activity.specific, text: activity.text)
     }
 
     static func profileDetails(_ vcard: WaddleVCard4) -> ProfileDetails {

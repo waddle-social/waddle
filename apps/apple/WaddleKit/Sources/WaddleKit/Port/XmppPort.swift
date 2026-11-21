@@ -140,6 +140,9 @@ public protocol ProfilePort: AnyObject, Sendable {
     func fetchSharedStatus(of jid: BareJID) async throws -> SharedStatus
     func publishMood(_ mood: UserMood) async throws
     func retractMood() async throws
+    /// The activity the account publishes now; nil only when there is
+    /// confirmed to be none. A lookup that fails throws.
+    func fetchOwnActivity() async throws -> UserActivity?
     func publishActivity(_ activity: UserActivity) async throws
     func retractActivity() async throws
     func publishTune(_ tune: UserTune) async throws
