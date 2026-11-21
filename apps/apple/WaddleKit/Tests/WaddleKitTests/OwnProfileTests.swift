@@ -84,6 +84,21 @@ struct OwnProfileTests {
         #expect(coordinator.status.activity == call)
     }
 
+    /// The profile stays open through a call on another device; when the
+    /// call ends, the activity can be set again without reopening it.
+    @Test func theActivityIsFreeAgainOnceTheCallOnAnotherDeviceEnds() async {
+        let (coordinator, port) = session()
+        coordinator.status.activity = UserActivity(general: "talking", specific: "on_the_phone")
+        port.ownActivity = .failure(.timeout)
+        await coordinator.refreshOwnActivity()
+        #expect(coordinator.status.activity?.showsACall == true)
+
+        port.ownActivity = .success(nil)
+        await coordinator.refreshOwnActivity()
+
+        #expect(coordinator.status.activity == nil)
+    }
+
     /// A lookup that fails does not say the activity is free: a call on
     /// another device may be behind it.
     @Test func anActivityIsNotWrittenWhileWhatIsPublishedIsUnknown() async {

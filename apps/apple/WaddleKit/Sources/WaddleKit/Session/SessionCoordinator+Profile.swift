@@ -57,6 +57,16 @@ extension SessionCoordinator {
         status.activity = activity
     }
 
+    /// Looks up the activity the account publishes now. A failed lookup
+    /// leaves what is shown.
+    public func refreshOwnActivity() async {
+        do {
+            status.activity = try await port.fetchOwnActivity()
+        } catch {
+            // Unknown: keep showing what was last known.
+        }
+    }
+
     /// XEP-0118 tune; nil retracts it. A tune with nothing in it means
     /// "stopped" on the wire (§3.2), so it is refused rather than published.
     public func setTune(_ tune: UserTune?) async throws {

@@ -26,6 +26,7 @@ struct ProfileSharingSection: View {
                     title: "In a call",
                     detail: "Shown while you're in a call on another device."
                 )
+                .task { await watchForTheCallToEnd() }
             } else {
                 NavigationLink {
                     ProfileActivityEditor(current: session.status.activity)
@@ -48,6 +49,22 @@ struct ProfileSharingSection: View {
                     detail: session.status.tune.map(ProfileTuneSummary.detail) ?? "Say what you're listening to."
                 )
             }
+        }
+    }
+}
+
+private extension ProfileSharingSection {
+    static let callCheckInterval: Duration = .seconds(10)
+
+    /// Nothing tells this device when another one leaves its call, so
+    /// while the row says "In a call" the activity is looked up again every
+    /// few seconds. The row, and this task with it, goes away once the
+    /// activity no longer shows a call.
+    func watchForTheCallToEnd() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: Self.callCheckInterval)
+            guard !Task.isCancelled else { return }
+            await session.refreshOwnActivity()
         }
     }
 }
