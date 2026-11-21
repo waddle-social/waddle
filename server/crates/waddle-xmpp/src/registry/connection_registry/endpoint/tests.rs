@@ -1,6 +1,7 @@
 use super::{
     mpsc, Arc, BindingAdmissionState, BindingOutboundEndpoint, BindingRef, EndpointEnqueueOutcome,
-    EndpointEnqueueRejection, LocalConnectionBindingId, OutboundStanza, SocketOutboundEndpoint,
+    EndpointEnqueueRejection, LocalConnectionBindingId, OutboundStanza, ProtectedSpaceOutbound,
+    SocketOutboundEndpoint,
 };
 use crate::ingress::MessageKey;
 use crate::mam::ArchiveOrdinal;
@@ -688,16 +689,16 @@ async fn protected_lane_is_bounded_and_prevents_nonempty_binding_handback() {
     ).unwrap();
 
     assert_eq!(
-        endpoint.try_send_protected_space(frame.clone()),
+        endpoint.try_send_protected_space(ProtectedSpaceOutbound::Bookmark(frame.clone())),
         ProtectedSpaceEventEnqueue::Enqueued
     );
     assert_eq!(
-        endpoint.try_send_protected_space(frame.clone()),
+        endpoint.try_send_protected_space(ProtectedSpaceOutbound::Bookmark(frame.clone())),
         ProtectedSpaceEventEnqueue::Full
     );
     assert!(endpoint.seal(owner, &binding_ref));
     assert_eq!(
-        endpoint.try_send_protected_space(frame.clone()),
+        endpoint.try_send_protected_space(ProtectedSpaceOutbound::Bookmark(frame.clone())),
         ProtectedSpaceEventEnqueue::Unavailable
     );
     assert!(endpoint
@@ -718,7 +719,7 @@ async fn protected_lane_is_bounded_and_prevents_nonempty_binding_handback() {
     );
     drop(receiver);
     assert_eq!(
-        rebound.try_send_protected_space(frame),
+        rebound.try_send_protected_space(ProtectedSpaceOutbound::Bookmark(frame)),
         ProtectedSpaceEventEnqueue::Unavailable
     );
 }
