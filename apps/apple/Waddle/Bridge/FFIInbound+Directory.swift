@@ -33,7 +33,8 @@ extension FFIInbound {
             position: Int(channel.position),
             spaceID: channel.spaceId.isEmpty ? nil : channel.spaceId,
             autojoin: channel.autojoin,
-            isGroupDM: channel.isGroupDm
+            isGroupDM: channel.isGroupDm,
+            membersOnly: channel.membersOnly
         )
     }
 

@@ -1021,6 +1021,7 @@ mod bookmark_merge {
             autojoin: true,
             bookmark_name: None,
             is_group_dm: false,
+            members_only: None,
         }
     }
 

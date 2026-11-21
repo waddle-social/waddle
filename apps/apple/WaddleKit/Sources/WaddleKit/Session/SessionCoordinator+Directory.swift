@@ -122,6 +122,13 @@ extension SessionCoordinator {
         }
     }
 
+    /// Mutes the conversation or restores its default mode when unmuting.
+    public func toggleNotifyMute(for conversation: ConversationID) async throws {
+        let next: NotifyMode = directory.notifyMode(for: conversation) == .never
+            ? directory.defaultNotifyMode(for: conversation) : .never
+        try await setNotifyMode(next, for: conversation)
+    }
+
     /// Whether push notifications for a conversation show who wrote and
     /// what, on every device of the account. Optimistic, rolled back if
     /// the server rejects it.

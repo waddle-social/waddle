@@ -59,12 +59,17 @@ public final class DirectoryStore {
         }
     }
 
-    /// The stored mode, else the server's default for the kind: every
-    /// message in a 1:1 or group chat, mentions in a room.
+    /// The stored mode, or the default for the conversation.
     public func notifyMode(for conversation: ConversationID) -> NotifyMode {
-        if let stored = notifyModes[conversation] { return stored }
-        let notifiesAll = !conversation.isRoom || groupDMs.contains { $0.roomJID == conversation.jid }
-        return notifiesAll ? .always : .onMention
+        notifyModes[conversation] ?? defaultNotifyMode(for: conversation)
+    }
+
+    /// Every message in a 1:1, group chat or members-only room.
+    /// Rooms whose access is open or unknown default to mentions.
+    func defaultNotifyMode(for conversation: ConversationID) -> NotifyMode {
+        guard conversation.isRoom else { return .always }
+        guard let channel = channel(for: conversation.jid) else { return .onMention }
+        return channel.isGroupDM || channel.membersOnly == true ? .always : .onMention
     }
 
     /// Whether push notifications for the conversation show who wrote and

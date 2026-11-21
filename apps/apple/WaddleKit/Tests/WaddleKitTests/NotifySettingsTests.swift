@@ -6,12 +6,41 @@ import Testing
 @MainActor
 @Suite("Notification settings")
 struct NotifySettingsTests {
-    private func online() -> (SessionCoordinator, FakePort) {
+    private func online(membersOnly: Bool? = nil) -> (SessionCoordinator, FakePort) {
         let port = FakePort()
         let coordinator = SessionCoordinator(account: me, port: port)
         coordinator.status.connection = .online
-        coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", membersOnly: membersOnly),
+        ]))
         return (coordinator, port)
+    }
+
+    @Test func aMembersOnlyRoomDefaultsToEveryMessage() {
+        let (coordinator, _) = online(membersOnly: true)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
+    }
+
+    @Test func anOpenRoomDefaultsToMentions() {
+        let (coordinator, _) = online(membersOnly: false)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .onMention)
+    }
+
+    @Test func aRoomDefaultsToMentionsUntilDiscoveryReportsMembersOnly() {
+        let (coordinator, _) = online()
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .onMention)
+
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", membersOnly: true),
+        ]))
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
+    }
+
+    @Test func aStoredModeOverridesTheMembersOnlyRoomDefault() async {
+        let (coordinator, port) = online(membersOnly: true)
+        port.notifySettings = NotifySettings(modes: [roomConversation: .onMention])
+        await coordinator.loadNotifyModes()
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .onMention)
     }
 
     @Test func showingMessagesInPushKeepsTheConversationsMode() async throws {
@@ -21,6 +50,24 @@ struct NotifySettingsTests {
         #expect(port.notifySettingsWrites == [
             .init(conversation: roomConversation, mode: .onMention, showsMessagesInPush: true),
         ])
+    }
+
+    @Test func showingMessagesInPushKeepsTheMembersOnlyRoomDefault() async throws {
+        let (coordinator, port) = online(membersOnly: true)
+        try await coordinator.setShowsMessagesInPush(true, for: roomConversation)
+        #expect(port.notifySettingsWrites == [
+            .init(conversation: roomConversation, mode: .always, showsMessagesInPush: true),
+        ])
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
+    }
+
+    @Test func unmutingRestoresTheMembersOnlyRoomDefault() async throws {
+        let (coordinator, port) = online(membersOnly: true)
+        try await coordinator.toggleNotifyMute(for: roomConversation)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
+        try await coordinator.toggleNotifyMute(for: roomConversation)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
+        #expect(port.notifySettingsWrites.map(\.mode) == [.never, .always])
     }
 
     /// The opt-in is stored with a mode, so it must not turn a group

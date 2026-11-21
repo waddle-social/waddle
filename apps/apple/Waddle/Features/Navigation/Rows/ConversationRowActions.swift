@@ -49,15 +49,16 @@ struct ConversationRowActions: ViewModifier {
     }
 
     private var muteButton: some View {
-        let current = session.directory.notifyMode(for: conversation)
-        let next = NotifyModeLabels.toggledMute(current, isRoom: conversation.isRoom)
+        let isMuted = session.directory.notifyMode(for: conversation) == .never
         return Button {
-            NotifyModeSetter.set(next, for: conversation, in: session)
+            let session = self.session
+            let conversation = self.conversation
+            Task { try? await session.toggleNotifyMute(for: conversation) }
         } label: {
-            if next == .never {
-                Label("Mute", systemImage: "bell.slash")
-            } else {
+            if isMuted {
                 Label("Unmute", systemImage: "bell")
+            } else {
+                Label("Mute", systemImage: "bell.slash")
             }
         }
     }

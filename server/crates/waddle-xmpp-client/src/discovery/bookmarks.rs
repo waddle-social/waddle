@@ -12,6 +12,7 @@
 use jid::BareJid;
 
 use crate::push::CommandDriver;
+use crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY;
 use crate::xep::xep0402::{build_fetch_bookmarks_iq, parse_bookmarks_response, BookmarkItem};
 
 use super::ids::next_id;
@@ -177,6 +178,7 @@ pub(super) fn bookmark_only_channel(
         autojoin: bookmark.autojoin,
         bookmark_name: bookmark.name.clone(),
         is_group_dm: info.has_feature(WADDLE_GROUP_DM_FEATURE_NS),
+        members_only: Some(info.has_feature(FEATURE_MUC_MEMBERS_ONLY)),
     })
 }
 

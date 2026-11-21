@@ -717,6 +717,9 @@ pub struct WaddleChannel {
     /// autojoin room but surfaced on the DM list, never the channel
     /// list.
     pub is_group_dm: bool,
+    /// Whether room discovery advertised a members-only room. `None`
+    /// means room discovery information was unavailable.
+    pub members_only: Option<bool>,
 }
 
 #[derive(uniffi::Record, Clone)]

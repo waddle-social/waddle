@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
+use crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY;
 
 use super::iq::{
     build_disco_info_iq, build_disco_items_iq, build_pubsub_items_iq, build_upload_slot_iq,
@@ -320,6 +321,7 @@ impl DiscoveryExt for ClientHandle {
                         .filter(|description| !description.trim().is_empty())
                         .map(str::to_string);
                     channel.is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
+                    channel.members_only = Some(info.has_feature(FEATURE_MUC_MEMBERS_ONLY));
                 }
                 channel
             })
@@ -453,6 +455,7 @@ impl DiscoveryExt for ClientHandle {
                         let mut channel_type = DiscoveredChannelType::Text;
                         let mut description = None;
                         let mut is_group_dm = false;
+                        let mut members_only = None;
                         if let Ok(info) = self.discover_info(&room.jid, None).await {
                             if let Some(parsed_type) = info
                                 .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
@@ -468,6 +471,7 @@ impl DiscoveryExt for ClientHandle {
                                 .filter(|description| !description.trim().is_empty())
                                 .map(str::to_string);
                             is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
+                            members_only = Some(info.has_feature(FEATURE_MUC_MEMBERS_ONLY));
                         }
                         let name = room
                             .name
@@ -493,6 +497,7 @@ impl DiscoveryExt for ClientHandle {
                             autojoin: true,
                             bookmark_name: None,
                             is_group_dm,
+                            members_only,
                         }
                     }
                 })

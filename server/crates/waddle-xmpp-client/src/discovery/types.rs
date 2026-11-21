@@ -236,6 +236,9 @@ pub struct DiscoveredChannel {
     /// autojoin room (their live messages must flow) but belong on
     /// the DM surface, not the channel list.
     pub is_group_dm: bool,
+    /// Whether the room advertises XEP-0045's members-only feature. `None`
+    /// means room discovery information was unavailable.
+    pub members_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
