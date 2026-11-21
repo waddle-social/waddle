@@ -106,7 +106,7 @@ pub(super) async fn authorize_protected_payload(
     payload: SmReplayPayload,
     recipient: &jid::FullJid,
     grants: &HostGrantGate,
-    attempt: Option<&crate::permissions::host_grant::SpaceDeletionAttempt>,
+    attempt: Option<&crate::permissions::host_grant::SpaceDeletionBindingAttempt>,
 ) -> Option<ResponseFrame> {
     let mut grant = grants
         .refresh_local_space_reply(&payload, recipient)

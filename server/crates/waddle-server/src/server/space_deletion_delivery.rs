@@ -35,17 +35,6 @@ impl DeliveryRoute {
             Self::Remote(_) => SpaceDeletionDeliveryKind::Remote,
         }
     }
-
-    async fn offer(
-        &self,
-        grants: &HostGrantGate,
-        attempt: &SpaceDeletionAttempt,
-    ) -> Option<SpaceDeletionAttemptOutcome> {
-        match self {
-            Self::Local(state) => local_space_deletion::offer(state, attempt).await,
-            Self::Remote(router) => offer_remote_attempt(grants, router, attempt).await,
-        }
-    }
 }
 
 pub(super) fn spawn(
@@ -129,9 +118,21 @@ async fn settle_attempt(
     route: &DeliveryRoute,
     attempt: SpaceDeletionAttempt,
 ) {
-    let Ok(Some(outcome)) =
-        tokio::time::timeout(COMPLETION_DEADLINE, route.offer(grants, &attempt)).await
-    else {
+    let router = match route {
+        DeliveryRoute::Local(state) => {
+            let result = tokio::time::timeout(
+                COMPLETION_DEADLINE,
+                local_space_deletion::deliver(state, store, &attempt),
+            )
+            .await;
+            if let Ok(Err(error)) = result {
+                warn!(%error, "could not deliver Space deletion to local resources");
+            }
+            return;
+        }
+        DeliveryRoute::Remote(router) => router,
+    };
+    let Some(outcome) = offer_remote_attempt(grants, router, &attempt).await else {
         // The persisted phase settles when an unobserved attempt expires.
         return;
     };

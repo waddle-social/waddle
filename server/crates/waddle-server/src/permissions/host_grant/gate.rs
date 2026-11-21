@@ -59,7 +59,7 @@ use super::fence::{FenceTicket, ReplicaFence};
 use super::issuance::IssuanceBasis;
 use super::model::{
     GrantOperationId, GrantSubject, OperationRecord, ScopeKey, SpaceBookmarkVersion,
-    SpaceDeletionAttempt, SpaceDeletionDeliveryKind,
+    SpaceDeletionAttempt, SpaceDeletionBindingAttempt, SpaceDeletionDeliveryKind,
 };
 use super::policy::HostGrantAction;
 use super::principal::{
@@ -146,7 +146,7 @@ enum LocalSpaceReplyAuthority {
 struct LocalDeletionDelivery {
     fence: FenceTicket,
     store: HostGrantStore,
-    attempt: Option<SpaceDeletionAttempt>,
+    attempt: Option<SpaceDeletionBindingAttempt>,
 }
 
 impl std::fmt::Debug for LocalDeletionDelivery {
@@ -189,16 +189,17 @@ impl LocalSpaceReplyGrant {
             && bookmark_item_has_payload(&payload.as_ref().to_element())
     }
 
-    pub(crate) fn bind_deletion_attempt(&mut self, attempt: SpaceDeletionAttempt) -> bool {
+    pub(crate) fn bind_deletion_attempt(&mut self, attempt: SpaceDeletionBindingAttempt) -> bool {
         let LocalSpaceReplyAuthority::Deleted(deletion) = &mut self.authority else {
             return false;
         };
-        if attempt.kind != SpaceDeletionDeliveryKind::Local
-            || attempt.subject.jid() != &self.replay.recipient().to_bare()
+        if attempt.parent.kind != SpaceDeletionDeliveryKind::Local
+            || attempt.parent.subject.jid() != &self.replay.recipient().to_bare()
+            || &attempt.target.resource != self.replay.recipient()
             || HostGrantGate::local_space_deletion_event(
-                &attempt.key,
+                &attempt.parent.key,
                 self.replay.recipient(),
-                &attempt.record,
+                &attempt.parent.record,
             )
             .as_ref()
                 != Some(&self.replay)
@@ -226,7 +227,7 @@ impl LocalSpaceReplyGrant {
                 if let Some(attempt) = &deletion.attempt {
                     return deletion
                         .store
-                        .hold_space_deletion_staging(attempt)
+                        .hold_local_space_deletion_binding_staging(attempt)
                         .await
                         .ok()?;
                 }

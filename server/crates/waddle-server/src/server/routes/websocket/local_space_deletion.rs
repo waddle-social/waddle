@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures::{stream, StreamExt};
 use jid::{FullJid, Jid};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -12,8 +13,9 @@ use xmpp_parsers::message::Id;
 
 use super::{transport_xml::stanza_to_xml, WebSocketState};
 use crate::permissions::host_grant::{
-    GrantOperationId, GrantSubject, HostGrantGate, ScopeKey, SpaceDeletionAttempt,
-    SpaceDeletionAttemptOutcome, SpaceDeletionDeliveryKind,
+    GrantOperationId, GrantSubject, HostGrantError, HostGrantGate, HostGrantStore, ScopeKey,
+    SpaceDeletionAttempt, SpaceDeletionAttemptOutcome, SpaceDeletionBinding,
+    SpaceDeletionBindingAttempt,
 };
 
 const SOCKET_COMPLETION_BOUND: Duration = Duration::from_secs(8);
@@ -38,34 +40,70 @@ impl LocalSpaceDeletionTarget {
     }
 }
 
-/// A missing observation leaves settlement to the persistent staging phase.
-pub(crate) async fn offer(
+/// Process the frozen set of live bindings for an account's deletion notice.
+pub(crate) async fn deliver(
     state: &WebSocketState,
+    store: &HostGrantStore,
     attempt: &SpaceDeletionAttempt,
-) -> Option<SpaceDeletionAttemptOutcome> {
-    use SpaceDeletionAttemptOutcome::{Ambiguous, Custody, Refused, Retry};
-
-    if attempt.kind != SpaceDeletionDeliveryKind::Local {
-        return Some(Refused);
+) -> Result<(), HostGrantError> {
+    if !store.local_space_deletion_bindings_frozen(attempt).await? {
+        let targets = match state
+            .deps
+            .app_state
+            .account_authority()
+            .headline_bindings(attempt.subject.jid())
+            .await
+        {
+            Ok(targets) => targets
+                .into_iter()
+                .map(|(resource, binding)| SpaceDeletionBinding { resource, binding })
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                store
+                    .finish_space_deletion_attempt(attempt, SpaceDeletionAttemptOutcome::Retry)
+                    .await?;
+                return Ok(());
+            }
+        };
+        if !store
+            .freeze_local_space_deletion_bindings(attempt, &targets)
+            .await?
+        {
+            return Ok(());
+        }
     }
-    let account = attempt.subject.jid();
-    let selection = state
-        .deps
-        .app_state
-        .account_authority()
-        .headline_binding(account, None)
+    let bindings = store
+        .claim_local_space_deletion_bindings(attempt, 32)
+        .await?;
+    stream::iter(bindings)
+        .for_each_concurrent(8, |binding| async move {
+            if let Some(outcome) = offer_binding(state, &binding).await {
+                if let Err(error) = store
+                    .finish_local_space_deletion_binding_attempt(&binding, outcome)
+                    .await
+                {
+                    tracing::warn!(%error, "could not settle Space deletion for a socket");
+                }
+            }
+        })
         .await;
-    let (resource, binding) = match selection {
-        Ok(Some(selection)) => selection,
-        Ok(None) => return Some(Refused),
-        Err(_) => return Some(Retry),
-    };
+    store.settle_local_space_deletion_parent(attempt).await?;
+    Ok(())
+}
+
+/// Missing observations settle according to the persisted child staging phase.
+async fn offer_binding(
+    state: &WebSocketState,
+    attempt: &SpaceDeletionBindingAttempt,
+) -> Option<SpaceDeletionAttemptOutcome> {
+    use SpaceDeletionAttemptOutcome::{Ambiguous, Custody, Retry};
+
     let target = LocalSpaceDeletionTarget {
-        service: attempt.key.service().clone(),
-        node: attempt.key.node().to_owned(),
-        operation: attempt.record.operation.as_uuid(),
-        resource,
-        binding,
+        service: attempt.parent.key.service().clone(),
+        node: attempt.parent.key.node().to_owned(),
+        operation: attempt.parent.record.operation.as_uuid(),
+        resource: attempt.target.resource.clone(),
+        binding: attempt.target.binding.clone(),
         token: attempt.token,
     };
     #[cfg(feature = "clustering")]
@@ -114,7 +152,13 @@ pub(crate) async fn offer_on_socket(
     // Another handoff may already own staging. An absent leased token says
     // nothing about the outcome of this attempt.
     let attempt = store
-        .load_local_space_deletion_attempt(&key, operation, &subject, target.token)
+        .load_local_space_deletion_binding_attempt(
+            &key,
+            operation,
+            &target.resource,
+            &target.binding,
+            target.token,
+        )
         .await
         .ok()??;
     let selection = state
@@ -127,7 +171,7 @@ pub(crate) async fn offer_on_socket(
         return retry;
     }
     let Some(descriptor) =
-        HostGrantGate::local_space_deletion_event(&key, &target.resource, &attempt.record)
+        HostGrantGate::local_space_deletion_event(&key, &target.resource, &attempt.parent.record)
     else {
         return retry;
     };

@@ -357,11 +357,45 @@ async fn exercise(exercise: Exercise) {
                     .build(),
             )
         };
-        send_stanza(
-            &mut subscriber,
-            Element::builder("presence", "jabber:client").build(),
+        let mut second_resource = WsXmppClient::connect_and_auth(
+            &a.ws_url(),
+            DOMAIN,
+            "alice",
+            "alice-password",
+            "space-second-resource",
         )
-        .await;
+        .await
+        .expect("subscriber's other resource on node A");
+        let mut negative_resource = WsXmppClient::connect_and_auth(
+            &b.ws_url(),
+            DOMAIN,
+            "alice",
+            "alice-password",
+            "space-negative-resource",
+        )
+        .await
+        .expect("subscriber's negative-priority resource");
+        let available = |priority| {
+            Element::builder("presence", "jabber:client")
+                .append(
+                    Element::builder("priority", "jabber:client")
+                        .append(priority)
+                        .build(),
+                )
+                .build()
+        };
+        for (client, priority) in [
+            (&mut subscriber, "5"),
+            (&mut second_resource, "1"),
+            (&mut negative_resource, "-1"),
+        ] {
+            send_stanza(client, available(priority)).await;
+            let barrier = round_trip(client, delete_request("member-delete-barrier")).await;
+            assert!(
+                is_error(&barrier, DefinedCondition::Forbidden),
+                "{barrier:?}"
+            );
+        }
         let denied = round_trip(&mut subscriber, delete_request("member-delete")).await;
         assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
         let accepted = round_trip(&mut owner, delete_request("owner-delete")).await;
@@ -369,18 +403,29 @@ async fn exercise(exercise: Exercise) {
             is_result(&accepted) && result_payload(&accepted).is_none(),
             "{accepted:?}"
         );
-        let wire = subscriber
-            .recv_matching_within(Duration::from_secs(20), |wire| {
-                wire.parse::<Element>().is_ok_and(|message| {
-                    message
-                        .get_child("event", NS_PUBSUB_EVENT)
-                        .and_then(|event| event.get_child("delete", NS_PUBSUB_EVENT))
-                        .is_some_and(|delete| delete.attr("node") == Some(node))
-                })
+        let deletion_for_node = |wire: &str| {
+            wire.parse::<Element>().is_ok_and(|message| {
+                message
+                    .get_child("event", NS_PUBSUB_EVENT)
+                    .and_then(|event| event.get_child("delete", NS_PUBSUB_EVENT))
+                    .is_some_and(|delete| delete.attr("node") == Some(node))
             })
+        };
+        let wire = subscriber
+            .recv_matching_within(Duration::from_secs(20), deletion_for_node)
             .await
             .expect("node B delivers node A's deletion to the subscribed socket");
+        let second_wire = second_resource
+            .recv_matching_within(Duration::from_secs(20), deletion_for_node)
+            .await
+            .expect("node A delivers the same notice to the other eligible resource");
         let notice: Element = wire.parse().expect("deletion notice");
+        assert_eq!(
+            notice,
+            second_wire
+                .parse::<Element>()
+                .expect("second deletion notice")
+        );
         let id = notice.attr("id").expect("stable deletion notice ID");
         let operation = uuid::Uuid::parse_str(id).expect("deletion operation ID");
         assert_eq!(operation.simple().to_string(), id);
@@ -423,6 +468,21 @@ async fn exercise(exercise: Exercise) {
         .await
         .expect("socket receipt settles the exact deletion job");
         readback.close().await;
+        assert!(
+            negative_resource
+                .recv_matching_within(Duration::from_millis(500), deletion_for_node)
+                .await
+                .is_err(),
+            "negative-priority resource received a deletion notice"
+        );
+        second_resource
+            .close()
+            .await
+            .expect("close second resource");
+        negative_resource
+            .close()
+            .await
+            .expect("close negative-priority resource");
 
         let items = get(
             "deleted-space-items",
@@ -436,7 +496,7 @@ async fn exercise(exercise: Exercise) {
                 .build(),
         );
         let gone = round_trip(&mut subscriber, items).await;
-        assert!(is_error(&gone, DefinedCondition::ItemNotFound), "{gone:?}");
+        assert!(is_error(&gone, DefinedCondition::Forbidden), "{gone:?}");
     }
 
     subscriber.close().await.expect("close subscriber");

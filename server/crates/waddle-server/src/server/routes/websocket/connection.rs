@@ -1520,7 +1520,17 @@ impl LiveSocketState {
                         }
                         let gate = &state.deps.app_state.host_grants;
                         let attempt = if let Some((token, _)) = &deletion {
-                            load_local_deletion_attempt(gate, &payload, recipient, *token).await
+                            let Some(binding) = conn.binding_ref.as_ref() else {
+                                return ControlFlow::Continue(());
+                            };
+                            let Some(attempt) = load_local_deletion_attempt(
+                                gate, &payload, recipient, binding, *token,
+                            )
+                            .await
+                            else {
+                                return ControlFlow::Continue(());
+                            };
+                            Some(attempt)
                         } else {
                             None
                         };
@@ -1541,7 +1551,7 @@ impl LiveSocketState {
                         if deletion.is_some() {
                             let began = match (gate.store(), attempt.as_ref()) {
                                 (Some(store), Some(attempt)) => store
-                                    .begin_space_deletion_staging(attempt)
+                                    .begin_local_space_deletion_binding_staging(attempt)
                                     .await
                                     .unwrap_or(false),
                                 _ => false,
@@ -6016,9 +6026,10 @@ async fn load_local_deletion_attempt(
     gate: &crate::permissions::host_grant::HostGrantGate,
     payload: &waddle_xmpp::stream_management::persistence::SmReplayPayload,
     recipient: &jid::FullJid,
+    binding: &waddle_xmpp::ownership::BindingRef,
     token: uuid::Uuid,
-) -> Option<crate::permissions::host_grant::SpaceDeletionAttempt> {
-    use crate::permissions::host_grant::{GrantOperationId, GrantSubject, ScopeKey};
+) -> Option<crate::permissions::host_grant::SpaceDeletionBindingAttempt> {
+    use crate::permissions::host_grant::{GrantOperationId, ScopeKey};
 
     let descriptor = payload.protected_space_reply()?;
     if descriptor.recipient() != recipient {
@@ -6026,9 +6037,8 @@ async fn load_local_deletion_attempt(
     }
     let operation = GrantOperationId::from_uuid(descriptor.deletion_operation()?);
     let key = ScopeKey::new(descriptor.service().clone(), descriptor.node()).ok()?;
-    let subject = GrantSubject::new(recipient.to_bare()).ok()?;
     gate.store()?
-        .load_local_space_deletion_attempt(&key, operation, &subject, token)
+        .load_local_space_deletion_binding_attempt(&key, operation, recipient, binding, token)
         .await
         .ok()?
 }
