@@ -49,8 +49,8 @@ schema.#Project & {
 			// target directory 10 GB smaller (docs/ci-performance.md).
 			env: _nativeRustEnv & {
 				CARGO_INCREMENTAL: "0"
-				// Bound concurrent test-binary builds on the Namespace runner.
-				CARGO_BUILD_JOBS: "2"
+				// One large lib-test compile can use most of the runner’s 16 GB.
+				CARGO_BUILD_JOBS: "1"
 			}
 			hermetic: sandbox: "dir"
 		}
