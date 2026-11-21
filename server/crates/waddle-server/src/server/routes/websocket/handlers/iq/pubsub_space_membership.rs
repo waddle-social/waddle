@@ -20,6 +20,65 @@ use super::{build_pubsub_error, build_pubsub_success, PubSubError, Session, WebS
 
 const RECONCILE_DEADLINE: Duration = Duration::from_secs(5);
 
+pub(super) async fn list_space_membership(
+    iq: &Iq,
+    state: &WebSocketState,
+    requester: Option<&jid::FullJid>,
+    session: Option<&Session>,
+) -> Option<crate::server::routes::websocket::frame::ResponseFrame> {
+    use crate::server::routes::websocket::frame::ResponseFrame;
+    use waddle_xmpp::pubsub::build_pubsub_affiliations_result;
+
+    let Iq::Get { payload, to, .. } = iq else {
+        return None;
+    };
+    let service = state.deps.service_domains.spaces.as_str();
+    if !payload.is("pubsub", NS_PUBSUB_OWNER) || to.as_ref()?.as_str() != service {
+        return None;
+    }
+    let node = payload
+        .get_child("affiliations", NS_PUBSUB_OWNER)?
+        .attr("node")?;
+    let error = |error| {
+        Some(ResponseFrame::from(super::iq_to_xml(build_pubsub_error(
+            iq, error,
+        ))))
+    };
+    let gate = &state.deps.app_state.host_grants;
+    match gate.space_enrolled(node).await {
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(_) => return error(PubSubError::InternalServerError),
+    }
+    let Some(requester) = requester else {
+        return error(PubSubError::Forbidden);
+    };
+    if session.is_none_or(|session| session.user_jid != requester.to_bare().as_str()) {
+        return error(PubSubError::Forbidden);
+    }
+    let Some(key) = service
+        .parse()
+        .ok()
+        .and_then(|service| ScopeKey::new(service, node).ok())
+    else {
+        return error(PubSubError::BadRequest);
+    };
+    let Some((grant, listing)) = gate
+        .local_space_affiliations_reply(&key, requester, iq)
+        .await
+    else {
+        return error(PubSubError::Forbidden);
+    };
+    let mut reply = build_pubsub_affiliations_result(iq, node, &listing.rows);
+    if let Iq::Result { to, .. } = &mut reply {
+        *to = Some(requester.clone().into());
+    }
+    match ResponseFrame::protected_space_frame(super::iq_to_xml(reply), grant) {
+        Ok(frame) => Some(frame),
+        Err(_) => error(PubSubError::InternalServerError),
+    }
+}
+
 pub(super) async fn set_space_membership(
     iq: &Iq,
     state: &WebSocketState,

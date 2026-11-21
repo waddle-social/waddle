@@ -25,7 +25,10 @@ use waddle_xmpp::pubsub::Affiliation;
 use super::enrolled::EnrolledSet;
 use super::error::HostGrantError;
 use super::issuance::IssuanceBasis;
-use super::model::{GrantGeneration, GrantSubject, RoomAffiliation, ScopeKey, ScopeLifecycleId};
+use super::model::{
+    GrantGeneration, GrantSubject, RoomAffiliation, ScopeKey, ScopeLifecycleId,
+    HOST_GRANT_SCOPE_MAX_GRANT_ROWS,
+};
 use super::policy::{grant_allows, honoured_affiliation, HostGrantAction};
 use super::principal::{PrincipalEvidence, PrincipalPolicy};
 use super::restore::AuthorityBinding;
@@ -45,6 +48,14 @@ pub(super) struct SpaceStanding {
     pub issuance_basis: IssuanceBasis,
 }
 
+/// The effective affiliations and exact scope generation read for the owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceAffiliationListing {
+    pub lifecycle: ScopeLifecycleId,
+    pub generation: GrantGeneration,
+    pub rows: Vec<(BareJid, Affiliation)>,
+}
+
 impl HostGrantStore {
     pub(super) async fn space_standing(
         &self,
@@ -53,60 +64,137 @@ impl HostGrantStore {
         attached: &AuthorityBinding,
     ) -> Result<Option<SpaceStanding>, HostGrantError> {
         let mut tx = self.begin_interactive_read().await?;
-        if load_binding(&mut tx, "host_grant_authority").await? != *attached {
-            return Err(HostGrantError::IncarnationChanged);
-        }
-        let mut rows = tx.query(
-            "SELECT b.lifecycle_id, b.federated, g.affiliation, g.effective_affiliation, g.issuance_basis, g.changed_generation \
-             FROM host_grant_space_bindings b \
-             JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id \
-             JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node \
-             JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id \
-             WHERE b.service_jid = ? AND b.space_node = ? AND g.subject_jid = ? \
-             AND b.authority_incarnation = ? AND l.retired_at_ms IS NULL \
-             AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)",
-            crate::db_params![
-                key.service().as_str(), key.node(), subject.as_str(),
-                attached.incarnation.to_storage(), waddle_xmpp::xep::xep0503::NS_SPACES
-            ],
-        ).await?;
-        let Some(row) = rows.next().await? else {
-            drop(rows);
-            tx.rollback().await?;
+        let standing = space_standing_in_tx(&mut tx, key, subject, attached).await?;
+        tx.rollback().await?;
+        Ok(standing)
+    }
+
+    /// List the Space affiliations for an authenticated served account.
+    /// The caller must fence the eventual response at the returned generation.
+    pub async fn space_affiliations(
+        &self,
+        key: &ScopeKey,
+        owner: &GrantSubject,
+        attached: &AuthorityBinding,
+    ) -> Result<Option<SpaceAffiliationListing>, HostGrantError> {
+        let mut tx = self.begin_interactive_read().await?;
+        let Some(standing) = space_standing_in_tx(&mut tx, key, owner, attached).await? else {
             return Ok(None);
         };
-        let lifecycle = ScopeLifecycleId::from_storage(&row.get::<String>(0)?)
-            .ok_or(corrupt("Space lifecycle"))?;
-        let federated = row.get(1)?;
-        let recorded = row
-            .get::<String>(2)?
-            .parse()
-            .map_err(|_| corrupt("Space affiliation"))?;
-        let effective = row
-            .get::<String>(3)?
-            .parse()
-            .map_err(|_| corrupt("effective Space affiliation"))?;
-        let issuance_basis = IssuanceBasis::from_storage(&row.get::<String>(4)?)
-            .ok_or(corrupt("Space issuance basis"))?;
-        let affiliation_generation = GrantGeneration::new(row.get::<i64>(5)?)
-            .ok_or(corrupt("Space affiliation generation"))?;
+        if standing.recorded != Affiliation::Owner
+            || standing.effective != Affiliation::Owner
+            || standing.issuance_basis != IssuanceBasis::Local
+        {
+            return Ok(None);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT subject_jid, affiliation, effective_affiliation, changed_generation
+               FROM host_grant_space_affiliations WHERE lifecycle_id = ?
+              ORDER BY subject_jid LIMIT ?",
+                crate::db_params![
+                    standing.lifecycle.to_storage(),
+                    i64::try_from(HOST_GRANT_SCOPE_MAX_GRANT_ROWS + 1)
+                        .expect("bounded Space grants"),
+                ],
+            )
+            .await?;
+        let mut affiliations = Vec::new();
+        let mut rows_seen = 0;
+        while let Some(row) = rows.next().await? {
+            rows_seen += 1;
+            if rows_seen > HOST_GRANT_SCOPE_MAX_GRANT_ROWS {
+                return Err(corrupt("Space affiliation count"));
+            }
+            let subject = GrantSubject::from_storage(&row.get::<String>(0)?)
+                .ok_or(corrupt("Space affiliation subject"))?;
+            let recorded = row
+                .get::<String>(1)?
+                .parse::<Affiliation>()
+                .map_err(|_| corrupt("Space affiliation"))?;
+            let effective = row
+                .get::<String>(2)?
+                .parse::<Affiliation>()
+                .map_err(|_| corrupt("effective Space affiliation"))?;
+            GrantGeneration::new(row.get::<i64>(3)?)
+                .filter(|generation| *generation <= standing.generation)
+                .ok_or(corrupt("Space affiliation generation"))?;
+            let current = if recorded == Affiliation::Outcast {
+                Affiliation::Outcast
+            } else {
+                effective
+            };
+            if current != Affiliation::None {
+                affiliations.push((subject.jid().clone(), current));
+            }
+        }
         drop(rows);
-        let scope = load_scope(&mut tx, lifecycle, false)
-            .await?
-            .ok_or(corrupt("Space scope"))?;
         tx.rollback().await?;
-        Ok(
-            scope_admits(&scope, attached.incarnation).then_some(SpaceStanding {
-                lifecycle,
-                generation: scope.generation,
-                affiliation_generation,
-                federated,
-                recorded,
-                effective,
-                issuance_basis,
-            }),
-        )
+        Ok(Some(SpaceAffiliationListing {
+            lifecycle: standing.lifecycle,
+            generation: standing.generation,
+            rows: affiliations,
+        }))
     }
+}
+
+async fn space_standing_in_tx(
+    tx: &mut Transaction<'_>,
+    key: &ScopeKey,
+    subject: &GrantSubject,
+    attached: &AuthorityBinding,
+) -> Result<Option<SpaceStanding>, HostGrantError> {
+    if load_binding(tx, "host_grant_authority").await? != *attached {
+        return Err(HostGrantError::IncarnationChanged);
+    }
+    let mut rows = tx.query(
+        "SELECT b.lifecycle_id, b.federated, g.affiliation, g.effective_affiliation, g.issuance_basis, g.changed_generation \
+         FROM host_grant_space_bindings b \
+         JOIN host_grant_scope_lifecycles l ON l.lifecycle_id = b.lifecycle_id \
+         JOIN pubsub_nodes p ON p.owner_jid = b.service_jid AND p.node_name = b.space_node \
+         JOIN host_grant_space_affiliations g ON g.lifecycle_id = b.lifecycle_id \
+         WHERE b.service_jid = ? AND b.space_node = ? AND g.subject_jid = ? \
+         AND b.authority_incarnation = ? AND l.retired_at_ms IS NULL \
+         AND p.access_model = b.access_model AND (p.node_type IS NULL OR p.node_type = ?)",
+        crate::db_params![
+            key.service().as_str(), key.node(), subject.as_str(),
+            attached.incarnation.to_storage(), waddle_xmpp::xep::xep0503::NS_SPACES
+        ],
+    ).await?;
+    let Some(row) = rows.next().await? else {
+        drop(rows);
+        return Ok(None);
+    };
+    let lifecycle =
+        ScopeLifecycleId::from_storage(&row.get::<String>(0)?).ok_or(corrupt("Space lifecycle"))?;
+    let federated = row.get(1)?;
+    let recorded = row
+        .get::<String>(2)?
+        .parse()
+        .map_err(|_| corrupt("Space affiliation"))?;
+    let effective = row
+        .get::<String>(3)?
+        .parse()
+        .map_err(|_| corrupt("effective Space affiliation"))?;
+    let issuance_basis = IssuanceBasis::from_storage(&row.get::<String>(4)?)
+        .ok_or(corrupt("Space issuance basis"))?;
+    let affiliation_generation =
+        GrantGeneration::new(row.get::<i64>(5)?).ok_or(corrupt("Space affiliation generation"))?;
+    drop(rows);
+    let scope = load_scope(tx, lifecycle, false)
+        .await?
+        .ok_or(corrupt("Space scope"))?;
+    Ok(
+        scope_admits(&scope, attached.incarnation).then_some(SpaceStanding {
+            lifecycle,
+            generation: scope.generation,
+            affiliation_generation,
+            federated,
+            recorded,
+            effective,
+            issuance_basis,
+        }),
+    )
 }
 
 /// How a room is named when its binding is looked up.

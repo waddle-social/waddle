@@ -449,6 +449,18 @@ pub async fn handle_iq_with_conn_state(
             return ResponseBatch::from_frames(vec![reply]);
         }
     }
+    if payload_ns == waddle_xmpp::pubsub::NS_PUBSUB_OWNER {
+        if let Some(reply) = super::pubsub_space_membership::list_space_membership(
+            &iq,
+            state,
+            phase.bound_jid(),
+            authenticated_session,
+        )
+        .await
+        {
+            return ResponseBatch::from_frames(vec![reply]);
+        }
+    }
     let pubsub_response = handle_pubsub_iq(handler_ctx, state, phase, authenticated_session).await;
     if !pubsub_response.is_empty() {
         return super::protected_space_contents::guard_legacy_replies(

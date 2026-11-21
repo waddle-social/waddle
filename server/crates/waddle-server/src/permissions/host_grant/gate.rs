@@ -263,7 +263,7 @@ enum RemoteSpaceEffect {
         key: ScopeKey,
         recipient: BareJid,
         subscribed_with: AuthenticationStrength,
-        subscriptions: SpaceSubscriptions,
+        subscriptions: Box<SpaceSubscriptions>,
         bookmark_version: Option<super::SpaceBookmarkVersion>,
     },
 }
@@ -941,11 +941,29 @@ impl HostGrantGate {
             )
         {
             ProtectedSpaceReplyKind::PubSubItems
+        } else if payload.is("pubsub", waddle_xmpp::pubsub::NS_PUBSUB_OWNER)
+            && payload.attrs().is_empty()
+            && payload.text().trim().is_empty()
+            && payload.children().count() == 1
+            && payload.children().next().is_some_and(|affiliations| {
+                affiliations.is("affiliations", waddle_xmpp::pubsub::NS_PUBSUB_OWNER)
+                    && affiliations.attr("node") == Some(key.node())
+                    && affiliations.attrs().len() == 1
+                    && affiliations.children().next().is_none()
+                    && affiliations.text().trim().is_empty()
+            })
+        {
+            ProtectedSpaceReplyKind::OwnerAffiliations
         } else {
             return None;
         };
         let subject = GrantSubject::new(requester.to_bare()).ok()?;
         let grant = self.space_read_local(key, &subject).await?;
+        if kind == ProtectedSpaceReplyKind::OwnerAffiliations
+            && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
+        {
+            return None;
+        }
         let replay = ProtectedSpaceReplyDescriptor::new(
             key.service().clone(),
             key.node().to_owned(),
@@ -962,6 +980,33 @@ impl HostGrantGate {
             replay,
             preference: None,
         })
+    }
+
+    pub(crate) async fn local_space_affiliations_reply(
+        &self,
+        key: &ScopeKey,
+        requester: &FullJid,
+        request: &Iq,
+    ) -> Option<(LocalSpaceReplyGrant, super::SpaceAffiliationListing)> {
+        let reply = self.space_reply_local(key, requester, request).await?;
+        if reply.replay.kind() != ProtectedSpaceReplyKind::OwnerAffiliations {
+            return None;
+        }
+        let subject = GrantSubject::new(requester.to_bare()).ok()?;
+        let attachment = self.attachment()?;
+        let listing = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            self.store
+                .as_ref()?
+                .space_affiliations(key, &subject, attachment.binding()),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        (listing.lifecycle.as_uuid() == reply.replay.lifecycle()
+            && listing.generation.value() == reply.replay.generation()
+            && attachment.binding().incarnation.as_uuid() == reply.replay.incarnation())
+        .then_some((reply, listing))
     }
 
     pub(crate) async fn local_space_subscribe_reply(
@@ -1119,6 +1164,11 @@ impl HostGrantGate {
         {
             return None;
         }
+        if replay.kind() == ProtectedSpaceReplyKind::OwnerAffiliations
+            && grant.admit(|affiliation| affiliation == Affiliation::Owner) != Some(true)
+        {
+            return None;
+        }
         for expected in replay.room_dependencies() {
             let (current, room) = self
                 .local_space_room_dependency(expected.room(), subject.jid(), replay.incarnation())
@@ -1257,7 +1307,9 @@ impl HostGrantGate {
             key: key.clone(),
             recipient: subscription.account.clone(),
             subscribed_with: subscription.evidence.strength(),
-            subscriptions: SpaceSubscriptions::new(self.store.as_ref()?.database().clone()),
+            subscriptions: Box::new(SpaceSubscriptions::new(
+                self.store.as_ref()?.database().clone(),
+            )),
             bookmark_version: None,
         });
         Some(grant)

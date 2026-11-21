@@ -108,7 +108,7 @@ pub(crate) use gate::{LocalSpaceReplyGrant, UnmanagedSpaceReplyGuard};
 #[derive(Clone, Debug)]
 pub(crate) enum SpaceReplyAuthority {
     Managed(std::sync::Arc<LocalSpaceReplyGrant>),
-    Unmanaged(UnmanagedSpaceReplyGuard),
+    Unmanaged(std::sync::Arc<UnmanagedSpaceReplyGuard>),
 }
 
 impl SpaceReplyAuthority {
@@ -162,7 +162,7 @@ pub use runtime_attach::{
     verification_retried, GateReadiness, GateState, HostGrantAttachment, HostGrantAttachmentGate,
     ReplicaFailure, INCOMPLETE_READINESS_GRACE, MAX_INCOMPLETE_PASSES, REVERIFY_INTERVAL,
 };
-pub use standing::{RoomBinding, RoomGrants, RoomLookup};
+pub use standing::{RoomBinding, RoomGrants, RoomLookup, SpaceAffiliationListing};
 pub(crate) use store::SPACE_BOOKMARK_RESTORE_LOCK;
 #[cfg(feature = "test-support")]
 pub use store::{with_host_grant_commit_fault, HostGrantCommitFault};

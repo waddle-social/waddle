@@ -1362,6 +1362,21 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
             })
             .collect(),
     };
+    use waddle_xmpp::pubsub::Affiliation;
+    let attached = fixture
+        .store
+        .authority_binding()
+        .await
+        .expect("current authority binding");
+    let owner = subject(OWNER);
+    let owner_only = vec![(owner.jid().clone(), Affiliation::Owner)];
+    let unrelated_key = ScopeKey::new(key.service().clone(), "another-node").expect("Space key");
+    assert!(fixture
+        .store
+        .space_affiliations(&unrelated_key, &owner, &attached)
+        .await
+        .expect("owner cannot list an unrelated Space")
+        .is_none());
     let changed = fixture
         .store
         .set_space_affiliations(
@@ -1377,6 +1392,15 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         generation: changed.record().generation,
     };
 
+    let pending = fixture
+        .store
+        .space_affiliations(&key, &owner, &attached)
+        .await
+        .expect("read pending affiliations")
+        .expect("canonical owner");
+    assert_eq!(pending.lifecycle, lifecycle);
+    assert_eq!(pending.generation, era.generation);
+    assert_eq!(pending.rows, owner_only, "pending increases are not listed");
     let subscriptions = LocalSpaceSubscriptions::new(fixture.ingress.db.clone());
     assert!(subscriptions
         .record(&key, &subject(PEER), &served(), era)
@@ -1384,6 +1408,29 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         .expect("read pending member")
         .is_none());
     fixture.activate_current(&fixture.scope).await;
+    assert!(fixture
+        .store
+        .space_affiliations(&key, &subject(PEER), &attached)
+        .await
+        .expect("member cannot list affiliation rows")
+        .is_none());
+    let active = fixture
+        .store
+        .space_affiliations(&key, &owner, &attached)
+        .await
+        .expect("read effective affiliations")
+        .expect("canonical owner");
+    assert_eq!(
+        active.rows,
+        [
+            (subject(PEER).jid().clone(), Affiliation::Member),
+            (
+                subject("alice@peer.test").jid().clone(),
+                Affiliation::Member
+            ),
+            (owner.jid().clone(), Affiliation::Owner),
+        ]
+    );
     assert!(subscriptions
         .record(&key, &subject("alice@peer.test"), &served(), era)
         .await
@@ -1533,6 +1580,17 @@ async fn local_space_preferences_track_only_the_current_local_grant_era() {
         )
         .await
         .expect("revoke membership");
+    let after_revoke = fixture
+        .store
+        .space_affiliations(&key, &owner, &attached)
+        .await
+        .expect("read current affiliations after revocation")
+        .expect("canonical owner");
+    assert_eq!(after_revoke.generation, revoked.record().generation);
+    assert_eq!(
+        after_revoke.rows, owner_only,
+        "none tombstones are not listed"
+    );
     assert!(subscriptions
         .hold_delivery(&key, &local, &replacement.versions[0])
         .await

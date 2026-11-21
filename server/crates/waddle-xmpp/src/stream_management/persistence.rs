@@ -434,8 +434,60 @@ fn matches_protected_space_reply(
             ProtectedSpaceReplyKind::Subscribe => {
                 matches_protected_subscription(element, descriptor)
             }
+            ProtectedSpaceReplyKind::OwnerAffiliations => {
+                matches_protected_owner_affiliations(element, descriptor)
+            }
             ProtectedSpaceReplyKind::BookmarkEvent => false,
         }
+}
+
+fn matches_protected_owner_affiliations(
+    element: &minidom::Element,
+    descriptor: &ProtectedSpaceReplyDescriptor,
+) -> bool {
+    use crate::pubsub::NS_PUBSUB_OWNER;
+
+    // Match the enrolled scope's canonical grant-row limit.
+    const MAX_AFFILIATIONS: usize = 200;
+
+    if element.attrs().len() != 4 || !element.text().trim().is_empty() {
+        return false;
+    }
+    let Some(affiliations) = element
+        .get_child("pubsub", NS_PUBSUB_OWNER)
+        .filter(|pubsub| {
+            pubsub.attrs().is_empty()
+                && pubsub.children().count() == 1
+                && pubsub.text().trim().is_empty()
+        })
+        .and_then(|pubsub| pubsub.get_child("affiliations", NS_PUBSUB_OWNER))
+        .filter(|affiliations| {
+            affiliations.attrs().len() == 1
+                && affiliations.attr("node") == Some(descriptor.node())
+                && affiliations.text().trim().is_empty()
+        })
+    else {
+        return false;
+    };
+    let mut subjects = HashSet::new();
+    affiliations.children().enumerate().all(|(index, row)| {
+        let Some(jid) = row.attr("jid") else {
+            return false;
+        };
+        index < MAX_AFFILIATIONS
+            && row.is("affiliation", NS_PUBSUB_OWNER)
+            && row.attrs().len() == 2
+            && row.children().next().is_none()
+            && row.text().trim().is_empty()
+            && matches!(
+                row.attr("affiliation"),
+                Some("owner" | "publisher" | "publish-only" | "member" | "outcast")
+            )
+            && jid
+                .parse::<jid::BareJid>()
+                .is_ok_and(|bare| bare.as_str() == jid)
+            && subjects.insert(jid)
+    })
 }
 
 /// A protected headline names one versioned bookmark mutation and no other data.
@@ -2050,6 +2102,57 @@ mod protected_space_reply_storage_tests {
             1,
         )
         .expect("reply descriptor")
+    }
+
+    #[test]
+    fn owner_affiliations_round_trip_strict_owner_payload() {
+        let descriptor = descriptor().with_kind(ProtectedSpaceReplyKind::OwnerAffiliations);
+        let wire = "<iq xmlns='jabber:client' type='result' from='spaces.example.test' to='alice@example.test/dev' id='disco-1'><pubsub xmlns='http://jabber.org/protocol/pubsub#owner'><affiliations node='docs'><affiliation jid='alice@example.test' affiliation='owner'/><affiliation jid='blocked@example.test' affiliation='outcast'/></affiliations></pubsub></iq>";
+        let payload =
+            SmReplayPayload::from_protected_space_reply(wire.to_owned(), descriptor.clone())
+                .expect("owner affiliations");
+        let stored = payload.to_storage().into_owned();
+        assert!(SmReplayPayload::from_wire(stored.clone()).is_err());
+        let restored =
+            SmReplayPayload::from_storage(stored).expect("owner affiliations in storage");
+        assert_eq!(restored.wire(), wire);
+        assert_eq!(restored.protected_space_reply(), Some(&descriptor));
+
+        for (current, replacement) in [
+            ("pubsub#owner", "pubsub"),
+            ("node='docs'", "node='other'"),
+            ("affiliation='outcast'", "affiliation='none'"),
+            ("blocked@example.test", "alice@example.test"),
+            ("blocked@example.test", "blocked@example.test/device"),
+            ("blocked@example.test", "Blocked@EXAMPLE.TEST"),
+            (
+                "affiliation='outcast'/>",
+                "affiliation='outcast'><extra/></affiliation>",
+            ),
+            (
+                "affiliation='outcast'/>",
+                "affiliation='outcast' extra='yes'/>",
+            ),
+        ] {
+            assert!(
+                SmReplayPayload::from_protected_space_reply(
+                    wire.replace(current, replacement),
+                    descriptor.clone()
+                )
+                .is_err(),
+                "accepted {replacement}"
+            );
+        }
+        let excessive_rows = (0..201)
+            .map(|index| {
+                format!("<affiliation jid='member{index}@example.test' affiliation='member'/>")
+            })
+            .collect::<String>();
+        let excessive = wire.replace(
+            "<affiliation jid='blocked@example.test' affiliation='outcast'/>",
+            &excessive_rows,
+        );
+        assert!(SmReplayPayload::from_protected_space_reply(excessive, descriptor).is_err());
     }
 
     #[test]
