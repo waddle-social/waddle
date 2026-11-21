@@ -1003,9 +1003,9 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
     let unsupported = round_trip(
         &mut owner,
         set(
-            "space-reject-mixed",
+            "space-reject-publisher",
             service.as_str(),
-            affiliations(&[(PEER, "member"), (CAROL, "publisher")]),
+            affiliations(&[(CAROL, "publisher")]),
         ),
     )
     .await;
@@ -1055,14 +1055,7 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         }
     }
     let list_affiliations = |id| get(id, service.as_str(), affiliations(&[]));
-    let assert_affiliations = |reply: Iq, expected: &[(&str, &str)]| {
-        let Iq::Result {
-            payload: Some(payload),
-            ..
-        } = reply
-        else {
-            panic!("Space owner affiliation query returned {reply:?}");
-        };
+    let assert_affiliation_payload = |payload: Element, expected: &[(&str, &str)]| {
         assert!(payload.is("pubsub", NS_PUBSUB_OWNER), "{payload:?}");
         let rows = payload
             .get_child("affiliations", NS_PUBSUB_OWNER)
@@ -1081,9 +1074,61 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         actual.sort_unstable();
         assert_eq!(actual, expected);
     };
+    let assert_affiliations = |reply: Iq, expected: &[(&str, &str)]| {
+        let Iq::Result {
+            payload: Some(payload),
+            ..
+        } = reply
+        else {
+            panic!("Space owner affiliation query returned {reply:?}");
+        };
+        assert_affiliation_payload(payload, expected);
+    };
+    let mixed = round_trip(
+        &mut owner,
+        set(
+            "space-affiliations-partial",
+            service.as_str(),
+            affiliations(&[(CAROL, "member"), (OWNER, "none")]),
+        ),
+    )
+    .await;
+    let Iq::Error {
+        payload: Some(refused),
+        error,
+        ..
+    } = mixed
+    else {
+        panic!("partial affiliation change returned {mixed:?}");
+    };
+    assert_eq!(
+        (error.type_, error.defined_condition),
+        (ErrorType::Modify, DefinedCondition::NotAcceptable)
+    );
+    assert_affiliation_payload(refused, &[(OWNER, "owner")]);
+    let active = [(PEER, "member"), (CAROL, "member"), (OWNER, "owner")];
     assert_affiliations(
         round_trip(&mut owner, list_affiliations("space-affiliations-active")).await,
-        &[(PEER, "member"), (OWNER, "owner")],
+        &active,
+    );
+    let generation = live.fixture.generation().await;
+    let duplicate = round_trip(
+        &mut owner,
+        set(
+            "space-affiliations-duplicate",
+            service.as_str(),
+            affiliations(&[(CAROL, "none"), (CAROL, "outcast")]),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&duplicate, DefinedCondition::BadRequest),
+        "{duplicate:?}"
+    );
+    assert_eq!(live.fixture.generation().await, generation);
+    assert_affiliations(
+        round_trip(&mut owner, list_affiliations("space-affiliations-intact")).await,
+        &active,
     );
     let denied = round_trip(
         &mut member,
@@ -1210,7 +1255,7 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         .is_none());
     assert_affiliations(
         round_trip(&mut owner, list_affiliations("space-affiliations-revoked")).await,
-        &[(OWNER, "owner")],
+        &[(CAROL, "member"), (OWNER, "owner")],
     );
     let mut member = authenticate_unbound(&second.url, "alice").await;
     let registry = &second.state.deps.protocol.connection_registry;
