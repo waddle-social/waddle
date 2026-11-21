@@ -1054,6 +1054,43 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
             return;
         }
     }
+    let list_affiliations = |id| get(id, service.as_str(), affiliations(&[]));
+    let assert_affiliations = |reply: Iq, expected: &[(&str, &str)]| {
+        let Iq::Result {
+            payload: Some(payload),
+            ..
+        } = reply
+        else {
+            panic!("Space owner affiliation query returned {reply:?}");
+        };
+        assert!(payload.is("pubsub", NS_PUBSUB_OWNER), "{payload:?}");
+        let rows = payload
+            .get_child("affiliations", NS_PUBSUB_OWNER)
+            .expect("owner affiliations");
+        assert_eq!(rows.attr("node"), Some(node));
+        let mut actual: Vec<_> = rows
+            .children()
+            .map(|row| {
+                assert!(row.is("affiliation", NS_PUBSUB_OWNER), "{row:?}");
+                (
+                    row.attr("jid").expect("affiliation jid"),
+                    row.attr("affiliation").expect("affiliation value"),
+                )
+            })
+            .collect();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+    };
+    assert_affiliations(
+        round_trip(&mut owner, list_affiliations("space-affiliations-active")).await,
+        &[(PEER, "member"), (OWNER, "owner")],
+    );
+    let denied = round_trip(
+        &mut member,
+        list_affiliations("space-affiliations-member-denied"),
+    )
+    .await;
+    assert!(is_error(&denied, DefinedCondition::Forbidden), "{denied:?}");
     protected_space_contents::assert_canonical_space_children(
         &live,
         &authority,
@@ -1171,6 +1208,10 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         .space_read_local(&key, &subject(PEER))
         .await
         .is_none());
+    assert_affiliations(
+        round_trip(&mut owner, list_affiliations("space-affiliations-revoked")).await,
+        &[(OWNER, "owner")],
+    );
     let mut member = authenticate_unbound(&second.url, "alice").await;
     let registry = &second.state.deps.protocol.connection_registry;
     // The stale resume must return its original handled count without
