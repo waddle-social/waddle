@@ -105,14 +105,16 @@ struct CommunityTests {
         #expect(store.activeStories(at: now).map(\.id) == ["new", "forever", "old"])
     }
 
-    @Test func aStoryIsAVideoByItsTypeOrElseItsFileName() {
+    @Test func aStorysKindIsItsDeclaredTypeOrElseItsFileName() {
         let clip = URL(string: "https://upload.waddle.test/story-1.webm")!
-        #expect(Story(id: "a", media: picture, mediaType: "video/mp4").isVideo)
-        #expect(!Story(id: "b", media: clip, mediaType: "image/jpeg").isVideo)
-        #expect(Story(id: "c", media: clip).isVideo)
-        #expect(Story(id: "c", media: clip).isWebM)
-        #expect(Story(id: "d", media: picture, mediaType: "video/webm").isWebM)
-        #expect(!Story(id: "e", media: picture, mediaType: "image/jpeg").isVideo)
+        let movie = URL(string: "https://upload.waddle.test/story-2.mov")!
+        #expect(Story(id: "a", media: picture, mediaType: "video/mp4").kind == .video)
+        #expect(Story(id: "b", media: clip, mediaType: "image/jpeg").kind == .picture)
+        #expect(Story(id: "c", media: clip).kind == .webM)
+        #expect(Story(id: "d", media: picture, mediaType: "video/webm").kind == .webM)
+        #expect(Story(id: "e", media: picture, mediaType: "image/jpeg").kind == .picture)
+        #expect(Story(id: "f", media: movie).kind == .video)
+        #expect(Story(id: "g", media: picture).kind == .picture)
     }
 
     @Test func theFeedIsNewestFirstWhateverOrderTheServerUses() async {
@@ -438,6 +440,33 @@ struct CommunityTests {
 
     @Test func anEmptyPostIsNotADraft() {
         #expect(FeedPostDraft(body: " \n ") == nil)
+        #expect(FeedPostDraft(body: " ", link: "https://rink.example") == nil)
+    }
+
+    @Test func aPostCarriesItsLinkToTheServerAndTheFeed() async throws {
+        let (coordinator, port) = online()
+        let link = URL(string: "https://rink.example/today")
+
+        try await coordinator.postToFeed(#require(FeedPostDraft(body: "Ice report", link: " rink.example/today ")))
+
+        #expect(port.community.posts.map(\.link) == [link])
+        #expect(coordinator.community.posts.map(\.link) == [link])
+    }
+
+    @Test func aLinkIsOptionalButMustBeAWebAddress() {
+        #expect(FeedPostDraft(body: "hi", link: "  ")?.link == nil)
+        #expect(FeedPostDraft(body: "hi", link: "  ") != nil)
+        #expect(FeedPostDraft(body: "hi", link: "http://rink.example")?.link == URL(string: "http://rink.example"))
+        #expect(FeedPostDraft.link(from: " ") == .none)
+        #expect(FeedPostDraft.link(from: "rink.example/ice") == .web(URL(string: "https://rink.example/ice")!))
+        for refused in [
+            "ftp://rink.example/ice", "javascript:alert(1)", "the rink",
+            "mailto:a@b.c", "me@example.com", "https://me:secret@rink.example",
+            "localhost:8080", "https://rink", "https://rink.example." + String(repeating: "a", count: 2048),
+        ] {
+            #expect(FeedPostDraft.link(from: refused) == .invalid, "\(refused)")
+            #expect(FeedPostDraft(body: "hi", link: refused) == nil, "\(refused)")
+        }
     }
 
     @Test func myNewStoryIsShownAndAlreadySeen() async throws {

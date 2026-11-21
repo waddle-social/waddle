@@ -50,7 +50,9 @@ extension FakePort {
         community.posts.append(draft)
         await community.hold("publishFeedPost")
         try community.postResult.get()
-        return FeedPost(id: "post-\(community.posts.count)", body: draft.body, author: me.jid, publishedAt: date(500))
+        return FeedPost(
+            id: "post-\(community.posts.count)", body: draft.body, author: me.jid, publishedAt: date(500), link: draft.link
+        )
     }
 
     func fetchStories(max _: Int?) async throws -> [Story] {

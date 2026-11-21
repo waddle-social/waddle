@@ -42,15 +42,48 @@ public struct FeedPost: Hashable, Sendable, Identifiable {
     }
 }
 
-/// A feed post being written.
+/// A feed post being written, with an optional link.
 public struct FeedPostDraft: Hashable, Sendable {
-    public let body: String
+    /// What was typed for a post's link.
+    public enum LinkInput: Hashable, Sendable {
+        /// Nothing, or only spaces.
+        case none
+        case web(URL)
+        case invalid
+    }
 
-    /// Trims the text; nil when nothing is left to post.
-    public init?(body: String) {
+    /// Longer addresses are refused, as browsers and servers commonly do.
+    public static let linkLimit = 2048
+
+    public let body: String
+    public let link: URL?
+
+    /// Trims the text; nil when nothing is left to post, or when `link`
+    /// is filled in but is not a web address.
+    public init?(body: String, link: String = "") {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return nil }
         self.body = body
+        switch Self.link(from: link) {
+        case .none: self.link = nil
+        case let .web(url): self.link = url
+        case .invalid: return nil
+        }
+    }
+
+    /// An http(s) address with a dotted host and no user or password,
+    /// `https://` assumed when no scheme is typed. Stricter than a link in
+    /// a message: a post is read by the whole community, so
+    /// `me@example.com` must not become `https://me@example.com`.
+    public static func link(from text: String) -> LinkInput {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return .none }
+        guard text.count <= linkLimit,
+              let url = ComposerInsertion.linkURL(from: text),
+              url.user == nil, url.password == nil,
+              let host = url.host(), host.contains("."), !host.hasPrefix("."), !host.hasSuffix(".")
+        else { return .invalid }
+        return .web(url)
     }
 }
 
@@ -83,16 +116,26 @@ public struct Story: Hashable, Sendable, Identifiable {
         self.expiresAt = expiresAt
     }
 
-    /// By the declared type, or by the file's extension when the author's
-    /// client declared none.
-    public var isVideo: Bool {
-        if let mediaType { return mediaType.lowercased().hasPrefix("video/") }
-        return ["mp4", "m4v", "mov", "webm"].contains(media.pathExtension.lowercased())
+    /// What a story shows.
+    public enum Kind: Hashable, Sendable {
+        case picture
+        case video
+        /// WebM, which browsers record and Apple's players do not decode.
+        case webM
     }
 
-    /// WebM, which browsers record and Apple's players do not decode.
-    public var isWebM: Bool {
-        mediaType?.lowercased() == "video/webm" || media.pathExtension.lowercased() == "webm"
+    /// By the declared type, or by the file's extension when the author's
+    /// client declared none.
+    public var kind: Kind {
+        if let type = mediaType?.lowercased() {
+            if type == "video/webm" { return .webM }
+            return type.hasPrefix("video/") ? .video : .picture
+        }
+        switch media.pathExtension.lowercased() {
+        case "webm": return .webM
+        case "mp4", "m4v", "mov": return .video
+        default: return .picture
+        }
     }
 
     public func isActive(at now: Date) -> Bool {
