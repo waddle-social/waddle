@@ -99,6 +99,9 @@ public protocol ReadStatePort: AnyObject, Sendable {
 
 /// Spaces, rooms, members and users.
 public protocol DirectoryPort: AnyObject, Sendable {
+    /// The account's contact list. An account with none answers an empty
+    /// list; a lookup that fails throws.
+    func fetchContacts() async throws -> [Contact]
     func discoverTopology() async -> Result<Topology, PortError>
     func joinRoom(_ room: BareJID, nick: String) async
     func leaveRoom(_ room: BareJID, nick: String) async

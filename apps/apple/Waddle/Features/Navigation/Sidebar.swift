@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// iPad and Mac sidebar: the community, search, Home and Inbox, then
+/// iPad and Mac sidebar: the community, search, Home, Inbox and People, then
 /// rooms, group chats and direct messages, with the account at the foot.
 ///
 /// The sidebar is the dark sea in both themes, so everything in it is
@@ -75,6 +75,13 @@ struct Sidebar: View {
             isSelected: isShowing(.events)
         ) {
             navigation.show(.events)
+        }
+        SidebarDestinationRow(
+            title: "People",
+            symbol: "person.2",
+            isSelected: isShowing(.people)
+        ) {
+            navigation.show(.people)
         }
     }
 

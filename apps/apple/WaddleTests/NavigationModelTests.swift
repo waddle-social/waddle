@@ -18,6 +18,52 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.inspector, .thread(rootID: "root-1"))
     }
 
+    /// People is pushed on the phone's Home stack, so an iPad that shrinks
+    /// to compact width while showing People still shows People.
+    func testShowingPeopleLeavesTheConversationAndPushesItOnHome() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+
+        navigation.show(.people)
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .people)
+        XCTAssertEqual(navigation.tab, .home)
+        XCTAssertEqual(navigation.homePath, [.people])
+    }
+
+    /// The phone opens People by pushing it on Home. An iPad that widens
+    /// then must show People, not the conversation it showed before.
+    func testPushingPeopleOnHomeShowsItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+
+        navigation.homePath = [.people]
+
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .people)
+    }
+
+    func testGoingBackFromPeopleOnThePhoneLeavesItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.homePath = [.people]
+
+        navigation.homePath = []
+
+        XCTAssertEqual(navigation.splitSection, .home)
+    }
+
+    /// Opening a room replaces People on the Home stack; the stack and
+    /// its path never disagree.
+    func testOpeningARoomFromPeopleReplacesItOnTheHomeStack() {
+        let navigation = NavigationModel()
+        navigation.show(.people)
+
+        navigation.open(lobby)
+
+        XCTAssertEqual(navigation.homePath, [.conversation(lobby)])
+    }
+
     func testSelectingAnotherConversationClosesTheThread() {
         let navigation = NavigationModel()
         navigation.open(lobby)
@@ -148,5 +194,14 @@ final class NavigationModelTests: XCTestCase {
         navigation.close(lobby)
 
         XCTAssertNil(navigation.sheet)
+    }
+
+    /// The contact list is asked for at the end of connecting, so an
+    /// account that is online with no lookup started yet is loading.
+    func testPeopleSaysLoadingNotOfflineOnceConnected() {
+        XCTAssertEqual(PeopleLoadNotice(load: .idle, isOnline: true), .loading)
+        XCTAssertEqual(PeopleLoadNotice(load: .idle, isOnline: false), .offline)
+        XCTAssertEqual(PeopleLoadNotice(load: .loading, isOnline: true), .loading)
+        XCTAssertEqual(PeopleLoadNotice(load: .failed, isOnline: true), .failed)
     }
 }

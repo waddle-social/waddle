@@ -7,11 +7,16 @@ enum Route: Hashable {
     case conversation(ConversationID)
     case thread(ConversationID, rootID: String)
     case details(ConversationID)
+    /// Everyone the account knows by address; pushed on the Home stack.
+    case people
 
-    var conversation: ConversationID {
+    /// The conversation the screen belongs to, if it belongs to one.
+    var conversation: ConversationID? {
         switch self {
         case let .conversation(conversation), let .thread(conversation, _), let .details(conversation):
             return conversation
+        case .people:
+            return nil
         }
     }
 }
@@ -57,6 +62,8 @@ enum SplitSection: Hashable {
     case feed
     /// The community calendar.
     case events
+    /// Everyone the account knows by address.
+    case people
 }
 
 /// A screen pushed inside the phone's Feed tab.
@@ -98,7 +105,21 @@ final class NavigationModel {
     var sheet: SheetRoute?
 
     var tab: PhoneTab = .home
-    var homePath: [Route] = []
+    var homePath: [Route] = [] {
+        didSet {
+            // People is pushed here on the phone and is a section of the
+            // split view. Keep the two in step, so an iPad that widens
+            // while showing People still shows it, and one that left
+            // People on the phone does not come back to it.
+            let showsPeople = homePath.last == .people
+            if showsPeople, splitSection != .people || selection != nil {
+                selection = nil
+                splitSection = .people
+            } else if !showsPeople, splitSection == .people, selection == nil, oldValue.last == .people {
+                splitSection = .home
+            }
+        }
+    }
     var directPath: [Route] = []
     var inboxPath: [Route] = []
     /// The phone has no Events tab: Events opens from the Feed.
@@ -123,8 +144,8 @@ final class NavigationModel {
         }
     }
 
-    /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed or
-    /// Events.
+    /// Leaves the conversation on iPad and Mac for Home, Inbox, the Feed,
+    /// Events or People.
     func show(_ section: SplitSection) {
         selection = nil
         inspector = nil
@@ -144,6 +165,9 @@ final class NavigationModel {
         case .events:
             tab = .feed
             feedPath = [.events]
+        case .people:
+            tab = .home
+            homePath = [.people]
         }
     }
 
