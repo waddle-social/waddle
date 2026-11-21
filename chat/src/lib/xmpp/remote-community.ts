@@ -96,6 +96,11 @@ export interface RemoteSpaceContent {
 
 export type SpaceSubscriptionState = "subscribed" | "pending" | "unconfigured";
 
+interface SpaceSubscription {
+  state: SpaceSubscriptionState;
+  id: string | null;
+}
+
 type DiscoInfo = {
   identities: Array<{ category: string; type: string; name: string | null }>;
   features: Set<string>;
@@ -311,14 +316,14 @@ export async function fetchSpaceContent(xmpp: RawIqClient, serviceJid: string, n
   return parseSpaceContent(await remoteIq(xmpp, xml, id, serviceJid, node));
 }
 
-/** The subscription state a `<subscribe/>` result reports. */
-export function parseSubscriptionState(doc: Document | Element): SpaceSubscriptionState {
+/** The state and optional ID a `<subscribe/>` result reports. */
+export function parseSpaceSubscription(doc: Document | Element): SpaceSubscription {
   const subscription = firstElementNS(doc, NS_PUBSUB, "subscription");
   const state = subscription?.getAttribute("subscription");
-  if (state === "pending" || state === "unconfigured") return state;
-  // XEP-0060 §6.1.2 has a successful result name the subscription; a
-  // result that names none still reports success.
-  return "subscribed";
+  return {
+    state: state === "pending" || state === "unconfigured" ? state : "subscribed",
+    id: subscription?.getAttribute("subid") || null,
+  };
 }
 
 /**
@@ -330,7 +335,7 @@ export async function subscribeToSpace(
   serviceJid: string,
   node: string,
   ownBareJid: string,
-): Promise<SpaceSubscriptionState> {
+): Promise<SpaceSubscription> {
   const id = crypto.randomUUID();
   const xml = buildIqXml({
     type: "set",
@@ -338,7 +343,7 @@ export async function subscribeToSpace(
     to: serviceJid,
     payload: { name: "pubsub", ns: NS_PUBSUB, children: [{ name: "subscribe", attrs: { node, jid: ownBareJid } }] },
   });
-  return parseSubscriptionState(await remoteIq(xmpp, xml, id, serviceJid, node));
+  return parseSpaceSubscription(await remoteIq(xmpp, xml, id, serviceJid, node));
 }
 
 /**
@@ -351,13 +356,14 @@ export async function unsubscribeFromSpace(
   serviceJid: string,
   node: string,
   ownBareJid: string,
+  subscriptionId?: string | null,
 ): Promise<void> {
   const id = crypto.randomUUID();
   const xml = buildIqXml({
     type: "set",
     id,
     to: serviceJid,
-    payload: { name: "pubsub", ns: NS_PUBSUB, children: [{ name: "unsubscribe", attrs: { node, jid: ownBareJid } }] },
+    payload: { name: "pubsub", ns: NS_PUBSUB, children: [{ name: "unsubscribe", attrs: { node, jid: ownBareJid, subid: subscriptionId || undefined } }] },
   });
   try {
     await remoteIq(xmpp, xml, id, serviceJid, node);

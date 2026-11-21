@@ -197,9 +197,9 @@ describe("unfollows kept on this device", () => {
   test("are stored per account and survive a reload", () => {
     const storage = memoryStorage();
     const first = localSpaceUnfollowIntentStore("Alice@home.test", storage);
-    first.save([{ serviceJid: "spaces.a.test", node: "main", remoteDone: false, preferenceDone: true }]);
+    first.save([{ serviceJid: "spaces.a.test", node: "main", subscriptionId: "sub-1", remoteDone: false, preferenceDone: true }]);
     const again = localSpaceUnfollowIntentStore("alice@home.test", storage);
-    expect(again.load()).toEqual([{ serviceJid: "spaces.a.test", node: "main", remoteDone: false, preferenceDone: true }]);
+    expect(again.load()).toEqual([{ serviceJid: "spaces.a.test", node: "main", subscriptionId: "sub-1", remoteDone: false, preferenceDone: true }]);
     expect(localSpaceUnfollowIntentStore("bob@home.test", storage).load()).toEqual([]);
     again.save([]);
     expect(storage.values.size).toBe(0);
@@ -216,14 +216,14 @@ describe("unfollows kept on this device", () => {
 });
 
 describe("telling whether an entry changed since this device saw it", () => {
-  test("each write's revision is published and read back", async () => {
+  test("each write's revision and subscription ID are published and read back", async () => {
     await withXml(async () => {
-      const xml = buildPutJoinedSpaceIq("p1", { serviceJid: "spaces.a.test", node: "main", follow: true, revision: "r-1" });
-      expect(xml).toContain(`<space xmlns="${NODE}" service="spaces.a.test" node="main" follow="true" rev="r-1">`);
+      const xml = buildPutJoinedSpaceIq("p1", { serviceJid: "spaces.a.test", node: "main", follow: true, subscriptionId: "sub-1", revision: "r-1" });
+      expect(xml).toContain(`<space xmlns="${NODE}" service="spaces.a.test" node="main" follow="true" subid="sub-1" rev="r-1">`);
       const doc = new DOMParser().parseFromString(itemsXml([
-        { id: "xmpp:spaces.a.test?;node=main", space: 'service="spaces.a.test" node="main" follow="true" rev="r-1"' },
+        { id: "xmpp:spaces.a.test?;node=main", space: 'service="spaces.a.test" node="main" follow="true" subid="sub-1" rev="r-1"' },
       ]), "text/xml");
-      expect(parseJoinedSpaceItems(doc)).toEqual([{ serviceJid: "spaces.a.test", node: "main", follow: true, revision: "r-1" }]);
+      expect(parseJoinedSpaceItems(doc)).toEqual([{ serviceJid: "spaces.a.test", node: "main", follow: true, subscriptionId: "sub-1", revision: "r-1" }]);
     });
   });
 

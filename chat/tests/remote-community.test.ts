@@ -5,7 +5,7 @@ import {
   parseDirectoryItems,
   parseDiscoInfo,
   parseSpaceContent,
-  parseSubscriptionState,
+  parseSpaceSubscription,
   roomDescriptionFromInfo,
   spaceDescriptionFromInfo,
   subscribeToSpace,
@@ -188,11 +188,11 @@ describe("Space content (D4: images are never fetched)", () => {
 });
 
 describe("following a Space", () => {
-  test("a subscription result reports its state", async () => {
+  test("a subscription result reports its state and optional ID", async () => {
     await withFakeDomParser(async () => {
-      expect(parseSubscriptionState(parse(`<iq type="result"><pubsub xmlns="${NS_PUBSUB}"><subscription node="eng" jid="alice@home.test" subscription="pending"/></pubsub></iq>`)))
-        .toBe("pending");
-      expect(parseSubscriptionState(parse('<iq type="result"/>'))).toBe("subscribed");
+      expect(parseSpaceSubscription(parse(`<iq type="result"><pubsub xmlns="${NS_PUBSUB}"><subscription node="eng" jid="alice@home.test" subscription="pending" subid="host-token"/></pubsub></iq>`)))
+        .toEqual({ state: "pending", id: "host-token" });
+      expect(parseSpaceSubscription(parse('<iq type="result"/>'))).toEqual({ state: "subscribed", id: null });
     });
   });
 
@@ -200,7 +200,7 @@ describe("following a Space", () => {
     await withXml(async () => {
       const sent: string[] = [];
       const xmpp = { async send_raw_iq(xml: string) { sent.push(xml); return '<iq type="result"/>'; } };
-      expect(await subscribeToSpace(xmpp, "spaces.remote.test", "eng", "alice@home.test")).toBe("subscribed");
+      expect(await subscribeToSpace(xmpp, "spaces.remote.test", "eng", "alice@home.test")).toEqual({ state: "subscribed", id: null });
       expect(sent[0]).toContain('<subscribe node="eng" jid="alice@home.test">');
     });
   });

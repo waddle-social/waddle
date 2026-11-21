@@ -81,6 +81,7 @@ export interface RemoteSpaceEntry {
   /** The user wants the Space's updates. */
   following: boolean;
   subscription: SpaceSubscriptionState | null;
+  subscriptionId: string | null;
   content: RemoteSpaceContent | null;
   status: RemoteStatus;
   note: string | null;
@@ -309,6 +310,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
         listed: false,
         following: false,
         subscription: null,
+        subscriptionId: null,
         content: null,
         status: { state: "idle" },
         note: null,
@@ -780,7 +782,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     const action = nextSpaceAction(key);
     const current = () => spaceActions.get(key) === action;
     updateSpace(preference, { status: { state: "working" }, note: null, ...(name ? { name } : {}) });
-    let subscription: SpaceSubscriptionState;
+    let subscription: Awaited<ReturnType<typeof subscribeToSpace>>;
     let context: ReturnType<typeof requireXmpp>;
     try {
       context = requireXmpp();
@@ -794,7 +796,12 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     if (!current()) return;
     // Following again replaces any unfollow this device still meant to finish.
     setIntent(key, null);
-    updateSpace(preference, { following: true, subscription, status: { state: "ready" } });
+    updateSpace(preference, {
+      following: true,
+      subscription: subscription.state,
+      subscriptionId: subscription.id,
+      status: { state: "ready" },
+    });
     try {
       const entryName = name ?? findSpace(key)?.name ?? undefined;
       const revision = crypto.randomUUID();
@@ -803,6 +810,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
         node,
         ...(entryName ? { name: entryName } : {}),
         follow: true,
+        ...(subscription.id ? { subscriptionId: subscription.id } : {}),
         revision,
       });
       listRevisions.set(key, revision);
@@ -846,7 +854,8 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     }
     if (!entry || !entry.follow) return { kind: "done", ...(entry?.revision ? { revision: entry.revision } : {}) };
     const revision = crypto.randomUUID();
-    await joinedSpaces.put({ ...entry, follow: false, revision });
+    const { subscriptionId: _subscriptionId, ...unfollowed } = entry;
+    await joinedSpaces.put({ ...unfollowed, follow: false, revision });
     listRevisions.set(key, revision);
     return { kind: "done", revision };
   }
@@ -875,7 +884,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     }
     let remoteFailure: RemoteFailure | null = null;
     try {
-      await unsubscribeFromSpace(context.xmpp, space.serviceJid, space.node, context.own);
+      await unsubscribeFromSpace(context.xmpp, space.serviceJid, space.node, context.own, space.subscriptionId);
     } catch (error) {
       remoteFailure = classifyRemoteError(error);
       if (remoteFailure.kind !== "outage" && remoteFailure.kind !== "denial") {
@@ -893,13 +902,14 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
       serviceJid: space.serviceJid,
       node: space.node,
       remoteDone: remoteFailure === null || unsubscribeSettled(remoteFailure),
+      ...(space.subscriptionId ? { subscriptionId: space.subscriptionId } : {}),
       preferenceDone: false,
       ...(!revisionKnown ? { seenRevisionPending: true } : seenRevision ? { seenRevision } : {}),
     };
     setIntent(key, intent);
     // Unfollowed here whatever the host answered; what is left to finish
     // is said in the note, not as a failure of the Space.
-    updateSpace(space, { following: false, subscription: null, status: { state: "ready" } });
+    updateSpace(space, { following: false, subscription: null, subscriptionId: null, status: { state: "ready" } });
     let note: string | null = remoteFailure
       ? remoteFailure.kind === "outage"
         ? "You no longer follow this Space here. Its server could not be told yet; Waddle tells it again at your next sign-in."
@@ -976,11 +986,19 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
     const unfollowed = new Set(current.map(joinedSpaceKey));
     for (const preference of preferences) {
       const key = joinedSpaceKey(preference);
+      const existing = findSpace(key);
+      const following = preference.follow && !unfollowed.has(key);
+      const sameRevision = existing && listRevisions.get(key) === preference.revision;
+      const subscriptionId = sameRevision && (existing.subscription || existing.subscriptionId)
+        ? existing.subscriptionId
+        : preference.subscriptionId ?? null;
       listRevisions.set(key, preference.revision);
       updateSpace(preference, {
-        name: findSpace(key)?.name ?? preference.name ?? null,
+        name: existing?.name ?? preference.name ?? null,
         listed: true,
-        following: preference.follow && !unfollowed.has(key),
+        following,
+        subscription: following && sameRevision ? existing.subscription : null,
+        subscriptionId: following ? subscriptionId : null,
       });
     }
     return current;
@@ -1039,15 +1057,23 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
   async function renewSubscription(preference: Pick<JoinedSpacePreference, "serviceJid" | "node">): Promise<void> {
     const key = joinedSpaceKey(preference);
     const startedGeneration = generation;
-    if (!findSpace(key)?.following) return;
+    const startedAction = spaceActions.get(key);
+    const current = () => startedGeneration === generation
+      && startedAction === spaceActions.get(key)
+      && findSpace(key)?.following;
+    if (!current()) return;
     try {
       const { xmpp, own } = requireXmpp();
       const subscription = await subscribeToSpace(xmpp, preference.serviceJid, preference.node, own);
-      if (startedGeneration !== generation) return;
+      if (!current()) return;
       resetRetries(`space:${key}`);
-      updateSpace(preference, { subscription, status: { state: "ready" } }, { existingOnly: true });
+      updateSpace(preference, {
+        subscription: subscription.state,
+        subscriptionId: subscription.id,
+        status: { state: "ready" },
+      }, { existingOnly: true });
     } catch (error) {
-      if (startedGeneration !== generation || !findSpace(key)) return;
+      if (!current()) return;
       updateSpace(preference, {
         subscription: null,
         status: failedStatus(`space:${key}`, classifyRemoteError(error), () => void renewSubscription(preference)),
@@ -1090,7 +1116,7 @@ export function useRemoteCommunities(deps: RemoteCommunitiesDeps) {
       }
       if (!next.remoteDone) {
         try {
-          await unsubscribeFromSpace(xmpp, intent.serviceJid, intent.node, own);
+          await unsubscribeFromSpace(xmpp, intent.serviceJid, intent.node, own, intent.subscriptionId);
           next = { ...next, remoteDone: true };
         } catch (error) {
           if (unsubscribeSettled(classifyRemoteError(error))) next = { ...next, remoteDone: true };

@@ -86,6 +86,7 @@ function fakeClient(options: {
   failRequests?: { match: string; error: Error };
   /** Joins wait until released. */
   holdJoins?: boolean;
+  subscriptionId?: string;
   /** XEP-0402 items already stored, by item id: the `<conference/>` each holds. */
   storedBookmarks?: Record<string, string>;
 } = {}) {
@@ -124,6 +125,9 @@ function fakeClient(options: {
           identities: [{ category: "pubsub", type: "leaf" }],
           fields: { FORM_TYPE: "http://jabber.org/protocol/pubsub#meta-data", "pubsub#type": "urn:xmpp:spaces:0", "pubsub#title": "Engineering" },
         });
+      }
+      if (xml.includes("<subscribe ") && options.subscriptionId) {
+        return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><subscription subscription="subscribed" subid="${options.subscriptionId}"/></pubsub></iq>`;
       }
       if (xml.includes("<items ")) {
         return '<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="eng"></items></pubsub></iq>';
@@ -404,6 +408,28 @@ describe("following, unfollowing and forgetting Spaces", () => {
     });
   });
 
+  test("the host ID follows the restored Space and is sent on unfollow", async () => {
+    await withXml(async () => {
+      const first = setup({ subscriptionId: "initial-id" });
+      await first.remote.followSpace("spaces.remote.test", "eng");
+      expect(first.remote.spaces.value[0]?.subscriptionId).toBe("initial-id");
+      expect(first.memory.state.preferences[0]?.subscriptionId).toBe("initial-id");
+
+      const restored = setup({ subscriptionId: "renewed-id" }, first.memory.state.preferences);
+      await restored.remote.load();
+      await settle();
+      restored.timer.runNext();
+      await settle();
+      const space = restored.remote.spaces.value[0]!;
+      expect(space.subscriptionId).toBe("renewed-id");
+      await restored.remote.load();
+      expect(restored.remote.spaces.value[0]?.subscriptionId).toBe("renewed-id");
+      await restored.remote.unsubscribeSpace(space.key);
+      expect(restored.fake.sent.some((xml) => xml.includes('<unsubscribe node="eng" jid="alice@home.test" subid="renewed-id">'))).toBe(true);
+      expect(restored.memory.state.preferences[0]?.subscriptionId).toBeUndefined();
+    });
+  });
+
   test("a refused subscription writes no list entry", async () => {
     await withXml(async () => {
       const { remote, fake, memory } = setup();
@@ -570,6 +596,26 @@ describe("unfollowing when the host cannot confirm it", () => {
       expect(memory.state.preferences).toEqual([]);
       // The unsubscribe still waits to be told to the host.
       expect(intents.state.intents).toMatchObject([{ remoteDone: false }]);
+    });
+  });
+
+  test("the retry of an unconfirmed unfollow keeps the original host ID", async () => {
+    await withXml(async () => {
+      const first = setup(
+        { failRequests: { match: "<unsubscribe ", error: stanzaError("remote-server-timeout", "wait") } },
+        [{ serviceJid: "spaces.remote.test", node: "eng", follow: true, subscriptionId: "pending-id" }],
+      );
+      await first.remote.load();
+      await first.remote.unsubscribeSpace(first.remote.spaces.value[0]!.key);
+      expect(first.intents.state.intents[0]?.subscriptionId).toBe("pending-id");
+
+      const restored = setup({ intents: first.intents.state.intents }, first.memory.state.preferences);
+      await restored.remote.load();
+      await settle();
+      restored.timer.runNext();
+      await settle();
+      expect(restored.fake.sent.some((xml) => xml.includes('<unsubscribe node="eng" jid="alice@home.test" subid="pending-id">'))).toBe(true);
+      expect(restored.intents.state.intents).toEqual([]);
     });
   });
 
