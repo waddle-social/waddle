@@ -141,6 +141,40 @@ struct AdminSpacesTests {
         #expect(port.admin.spaceWrites == [.delete(node: "design")])
     }
 
+    /// Joining a room the server deleted could make it again.
+    @Test func roomsOfADeletedSpaceAreNotRejoinedBecauseTheyWereOpened() async throws {
+        let (coordinator, _) = online()
+        let critique = bare("critique@rooms.waddle.test")
+        let lounge = bare("lounge@rooms.waddle.test")
+        coordinator.directory.upsert(Channel(roomJID: critique, name: "critique", spaceID: "design"))
+        coordinator.directory.upsert(Channel(roomJID: lounge, name: "lounge", spaceID: "ops"))
+        coordinator.onDemandRooms = [critique, lounge]
+
+        try await coordinator.deleteAdminSpace(design)
+
+        #expect(coordinator.onDemandRooms == [lounge])
+    }
+
+    /// A page asked for before a change does not know of it.
+    @Test func anAnswerAskedForBeforeAChangeIsNotShownOverIt() async {
+        let (coordinator, port) = online()
+        port.admin.users[.init()] = .success(AdminPage(
+            rows: [AdminUser(jid: ada.jid, displayName: nil, isOwner: false)], nextCursor: nil
+        ))
+        let list = coordinator.adminUsersList()
+        await list.load()
+        port.admin.usersFetches.isHolding = true
+        let refresh = Task { await list.reload() }
+        await eventually { port.admin.usersFetches.count == 1 }
+
+        list.remove(ada.jid)
+        port.admin.usersFetches.release()
+        await refresh.value
+
+        #expect(list.rows.isEmpty)
+        #expect(!list.isLoading)
+    }
+
     @Test func aChangeTheServerRefusesIsThrown() async throws {
         let (coordinator, port) = online()
         port.admin.writeFailure = .rejected

@@ -19,6 +19,8 @@ struct AdminView: View {
     @State private var spaces: AdminList<AdminSpace>?
     @State private var query = ""
     @State private var sheet: AdminSpaceSheet.Subject?
+    /// Lists not asked for since the connection last came back.
+    @State private var stale: Set<AdminSection> = []
 
     init(section: AdminSection = .users) {
         _section = State(initialValue: section)
@@ -41,12 +43,15 @@ struct AdminView: View {
             case .users:
                 let list = users ?? session.adminUsersList()
                 users = list
-                await search(list)
+                await search(list, in: .users)
             case .spaces:
                 let list = spaces ?? session.adminSpacesList()
                 spaces = list
-                await search(list)
+                await search(list, in: .spaces)
             }
+        }
+        .onChange(of: session.connection == .online) { _, isOnline in
+            if isOnline { stale = [.users, .spaces] }
         }
         .toolbar {
             if section == .spaces {
@@ -123,15 +128,17 @@ struct AdminView: View {
 
     /// Asks `list` for the text typed, after a pause in typing; an empty
     /// field asks at once. A list that already answers the text is left
-    /// as it is, pages and all, when its section is shown again.
-    private func search<Row>(_ list: AdminList<Row>) async {
+    /// as it is, pages and all, when its section is shown again, unless
+    /// the connection came back since it was asked.
+    private func search<Row>(_ list: AdminList<Row>, in section: AdminSection) async {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if list.hasLoaded, list.failure == nil, list.query == text { return }
+        if list.hasLoaded, list.failure == nil, list.query == text, !stale.contains(section) { return }
         if !text.isEmpty {
             try? await Task.sleep(for: .milliseconds(250))
         }
         guard !Task.isCancelled else { return }
         await list.load(matching: query)
+        if !Task.isCancelled { stale.remove(section) }
     }
 
     /// What the list on screen answers: asked again when the list or the

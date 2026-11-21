@@ -53,9 +53,15 @@ extension SessionCoordinator {
         try await whileOnline { try await port.updateAdminSpace(space, to: draft) }
     }
 
-    /// Deletes the space and every room in it.
+    /// Deletes the space and the rooms that belong to it. Its rooms are
+    /// no longer rejoined just because they were opened: joining a room
+    /// the server deleted could make it again. One that outlived the
+    /// space is still joined while the directory lists it.
     public func deleteAdminSpace(_ space: AdminSpace) async throws {
         try await whileOnline { try await port.deleteAdminSpace(space) }
+        for channel in directory.channels(in: space.node) {
+            onDemandRooms.remove(channel.roomJID)
+        }
     }
 
     /// Answers with the member and the role the server gave them.

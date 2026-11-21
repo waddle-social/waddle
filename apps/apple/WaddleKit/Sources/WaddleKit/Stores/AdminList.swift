@@ -94,13 +94,23 @@ public final class AdminList<Row: Identifiable & Sendable> {
 
     /// Shows a row as the server now holds it, where it was.
     public func replace(_ row: Row) {
+        dropAnswersOnTheirWay()
         guard let index = rows.firstIndex(where: { $0.id == row.id }) else { return }
         rows[index] = row
     }
 
     /// Takes out a row the server no longer has.
     public func remove(_ id: Row.ID) {
+        dropAnswersOnTheirWay()
         rows.removeAll { $0.id == id }
+    }
+
+    /// A page asked for before a change may not know of it, so its answer
+    /// is dropped rather than shown over the change.
+    private func dropAnswersOnTheirWay() {
+        serial += 1
+        isLoading = false
+        isLoadingMore = false
     }
 
     private static func attempt(_ fetch: () async throws -> AdminPage<Row>) async -> Result<AdminPage<Row>, PortError> {
