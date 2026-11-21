@@ -1,0 +1,5 @@
+[toolchain]
+# Kept in step with server/rust-toolchain.toml (docs/rust-toolchain-bump.md).
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
