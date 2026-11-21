@@ -42,6 +42,23 @@ struct OwnProfileTests {
         #expect(coordinator.status.activity == coding)
     }
 
+    /// The editors are usable while the profile is still loading. What is
+    /// saved then is newer than what the load brings back.
+    @Test func anActivitySavedWhileTheProfileLoadsIsNotReplacedByTheOlderOne() async throws {
+        let (coordinator, port) = session()
+        port.sharedStatus = .success(SharedStatus(mood: UserMood(value: "happy", text: nil)))
+        port.holdsSharedStatusFetches = true
+        let load = Task { await coordinator.loadOwnSharedStatus() }
+        await eventually { port.heldSharedStatusFetches == 1 }
+
+        try await coordinator.setActivity(coding)
+        port.releaseSharedStatusFetches()
+        await load.value
+
+        #expect(coordinator.status.activity == coding)
+        #expect(coordinator.status.mood == UserMood(value: "happy", text: nil))
+    }
+
     @Test func anActivityIsPublishedAndShown() async throws {
         let (coordinator, port) = session()
 
@@ -156,7 +173,7 @@ struct OwnProfileTests {
     @Test func ownDetailsAreLoadedFromTheAccount() async throws {
         let (coordinator, port) = session()
         let stored = ProfileDetails(fullName: "Ada Lovelace", pronouns: "she/her")
-        port.profileDetails[me.jid] = stored
+        port.ownProfileDetails = .success(stored)
 
         let loaded = try await coordinator.loadOwnDetails()
 
@@ -168,6 +185,17 @@ struct OwnProfileTests {
         let (coordinator, _) = session()
 
         #expect(try await coordinator.loadOwnDetails() == ProfileDetails())
+    }
+
+    /// Saving replaces every field, so details that could not be read must
+    /// not come back as empty ones ready to be saved.
+    @Test func detailsThatCouldNotBeLookedUpAreNotLoadedAsEmpty() async {
+        let (coordinator, port) = session()
+        port.ownProfileDetails = .failure(.rejected)
+
+        await #expect(throws: PortError.rejected) { try await coordinator.loadOwnDetails() }
+
+        #expect(coordinator.status.details == nil)
     }
 
     @Test func savedDetailsAreTrimmedAndShown() async throws {
@@ -186,7 +214,7 @@ struct OwnProfileTests {
     /// picture; editing the text must not drop it.
     @Test func savingKeepsThePictureAddress() async throws {
         let (coordinator, port) = session()
-        port.profileDetails[me.jid] = ProfileDetails(fullName: "Ada", photoURI: "https://files.example/ada.png")
+        port.ownProfileDetails = .success(ProfileDetails(fullName: "Ada", photoURI: "https://files.example/ada.png"))
         var details = try await coordinator.loadOwnDetails()
         details.fullName = "Ada Lovelace"
 

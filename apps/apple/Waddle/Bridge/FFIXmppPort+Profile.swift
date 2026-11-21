@@ -62,6 +62,10 @@ extension FFIXmppPort {
         try await mappingPortErrors { try await client.retractTune() }
     }
 
+    func fetchOwnProfileDetails() async throws -> ProfileDetails? {
+        try await mappingPortErrors { try await client.fetchOwnVcard4() }.map(FFIInbound.profileDetails)
+    }
+
     func fetchProfileDetails(of jid: BareJID) async throws -> ProfileDetails? {
         try await mappingPortErrors { try await client.fetchVcard4(jid: jid.description) }.map(FFIInbound.profileDetails)
     }

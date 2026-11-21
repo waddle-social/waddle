@@ -147,7 +147,10 @@ public protocol ProfilePort: AnyObject, Sendable {
     func retractActivity() async throws
     func publishTune(_ tune: UserTune) async throws
     func retractTune() async throws
-    /// nil when `jid` has published no details.
+    /// The account's own details; nil only when there are confirmed to be
+    /// none. A lookup that fails throws.
+    func fetchOwnProfileDetails() async throws -> ProfileDetails?
+    /// nil when `jid` has published no details, or they could not be read.
     func fetchProfileDetails(of jid: BareJID) async throws -> ProfileDetails?
     func publishProfileDetails(_ details: ProfileDetails) async throws
     /// The account's stored presence mode; automatic when none is stored.

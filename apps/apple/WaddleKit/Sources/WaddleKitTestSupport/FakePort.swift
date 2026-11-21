@@ -117,6 +117,13 @@ final class FakePort: XmppPort {
     var publishedActivities: [UserActivity?] = []
     var publishedTunes: [UserTune?] = []
     var sharedStatusPublishResult: Result<Void, PortError> = .success(())
+    /// A held lookup answers with what was set when it began.
+    var holdsSharedStatusFetches = false
+    private var heldSharedStatusContinuations: [CheckedContinuation<Void, Never>] = []
+    var heldSharedStatusFetches: Int { heldSharedStatusContinuations.count }
+    /// What a strict lookup of the account's own details answers.
+    var ownProfileDetails: Result<ProfileDetails?, PortError> = .success(nil)
+    /// Other people's details.
     var profileDetails: [BareJID: ProfileDetails] = [:]
     var publishedProfileDetails: [ProfileDetails] = []
     var profileDetailsPublishResult: Result<Void, PortError> = .success(())
@@ -370,7 +377,19 @@ final class FakePort: XmppPort {
         publishedAvatarID
     }
     func removeAvatar() async throws {}
-    func fetchSharedStatus(of _: BareJID) async throws -> SharedStatus { try sharedStatus.get() }
+    func fetchSharedStatus(of _: BareJID) async throws -> SharedStatus {
+        let answer = sharedStatus
+        if holdsSharedStatusFetches {
+            await withCheckedContinuation { heldSharedStatusContinuations.append($0) }
+        }
+        return try answer.get()
+    }
+    func releaseSharedStatusFetches() {
+        let held = heldSharedStatusContinuations
+        heldSharedStatusContinuations = []
+        held.forEach { $0.resume() }
+    }
+    func fetchOwnProfileDetails() async throws -> ProfileDetails? { try ownProfileDetails.get() }
     func fetchOwnActivity() async throws -> UserActivity? { try ownActivity.get() }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
