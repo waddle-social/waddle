@@ -50,22 +50,37 @@ extension View {
     ///
     /// Nothing tells this device when someone's mood, activity or tune
     /// changes, so it is looked up when the person is shown. DM details can
-    /// stay open through a whole call, so while the answer shows a call it
-    /// is looked up again every few seconds, until the call has ended.
-    func peerSharedStatus(of jid: BareJID?, session: SessionCoordinator, into status: Binding<SharedStatus?>) -> some View {
-        task(id: jid) {
+    /// stay open through a whole call, so for as long as "In a call" is
+    /// shown it is looked up again every few seconds. A repeat lookup that
+    /// fails leaves what is shown.
+    func peerSharedStatus(
+        of jid: BareJID?, isOnline: Bool, session: SessionCoordinator, into status: Binding<SharedStatus?>
+    ) -> some View {
+        let showsACall = status.wrappedValue?.shown(isOnline: isOnline).activity?.showsACall == true
+        return task(id: jid) {
             status.wrappedValue = nil
             guard let jid else { return }
-            while true {
-                // A lookup for the person shown before can still answer
-                // after this one; cancelling does not stop it.
+            // A lookup for the person shown before can still answer after
+            // this one; cancelling does not stop it.
+            let loaded = await session.sharedStatus(of: jid)
+            guard !Task.isCancelled else { return }
+            status.wrappedValue = loaded
+        }
+        .task(id: PeerCallWatch(jid: jid, showsACall: showsACall)) {
+            guard showsACall, let jid else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: ProfileSharingSection.callCheckInterval)
+                guard !Task.isCancelled else { return }
                 let loaded = await session.sharedStatus(of: jid)
                 guard !Task.isCancelled else { return }
-                status.wrappedValue = loaded
-                guard loaded?.activity?.showsACall == true else { return }
-                try? await Task.sleep(for: .seconds(10))
-                guard !Task.isCancelled else { return }
+                if let loaded { status.wrappedValue = loaded }
             }
         }
     }
+}
+
+/// Whose call is being watched, and whether one is shown at all.
+private struct PeerCallWatch: Hashable {
+    let jid: BareJID?
+    let showsACall: Bool
 }
