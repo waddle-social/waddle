@@ -214,14 +214,19 @@ public protocol EventsPort: AnyObject, Sendable {
     @MainActor func occurrences(of event: CommunityEvent, in range: Range<Date>) -> [EventOccurrence]
 }
 
-/// The account's own XEP-0449 sticker packs.
+/// XEP-0449 sticker packs: the account's own, and one of anyone's by
+/// where it is.
 public protocol StickerPort: AnyObject, Sendable {
     /// Every pack the account has published; none is an empty list.
     func fetchStickerPacks() async throws -> [StickerPack]
-    /// One of the account's packs, or nil when it is not there.
-    func fetchStickerPack(id: String) async throws -> StickerPack?
+    /// The pack at `location`, or nil when it is not there.
+    func fetchStickerPack(at location: StickerPackLocation) async throws -> StickerPack?
     /// Publishes a pack and answers with the id its content gives it.
     func publishStickerPack(_ draft: StickerPackDraft) async throws -> String
+    /// Publishes the pack at `location` again on the account's own
+    /// packs, as it is, and answers with its id there. A pack its author
+    /// restricted is refused.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String
     /// Removing a pack that is already gone succeeds.
     func retractStickerPack(_ packID: String) async throws
 }

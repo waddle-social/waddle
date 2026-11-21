@@ -271,7 +271,10 @@ private struct MessageRowBody: View {
             MessageAttachmentsView(
                 files: item.message.sharedFiles,
                 isSticker: item.message.isSticker,
-                openImage: openImage
+                openImage: openImage,
+                openStickerPack: session.stickerPackLocation(of: item).map { pack in
+                    { actions.showStickerPack(pack) }
+                }
             )
         }
         ForEach(item.message.linkPreviews, id: \.url) { preview in

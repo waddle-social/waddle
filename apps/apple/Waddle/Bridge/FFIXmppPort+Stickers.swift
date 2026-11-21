@@ -10,16 +10,28 @@ extension FFIXmppPort {
         }.map(FFIInbound.stickerPack)
     }
 
-    func fetchStickerPack(id: String) async throws -> StickerPack? {
-        guard let owner = account else { throw PortError.invalidRequest }
-        return try await mappingPortErrors {
-            try await client.fetchStickerPack(ownerJid: owner.description, node: nil, packId: id)
+    func fetchStickerPack(at location: StickerPackLocation) async throws -> StickerPack? {
+        try await mappingPortErrors {
+            try await client.fetchStickerPack(
+                ownerJid: location.owner.description, node: location.node, packId: location.packID
+            )
         }.map(FFIInbound.stickerPack)
     }
 
     func publishStickerPack(_ draft: StickerPackDraft) async throws -> String {
         try await mappingPortErrors {
             try await client.publishStickerPack(pack: FFIOutbound.stickerPack(draft))
+        }
+    }
+
+    /// The core fetches the pack and publishes the same item again,
+    /// under the same id: names in every language and anything else the
+    /// app does not show are copied too.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String {
+        try await mappingPortErrors {
+            try await client.importStickerPack(
+                ownerJid: location.owner.description, node: location.node, packId: location.packID
+            )
         }
     }
 
@@ -37,8 +49,20 @@ extension FFIInbound {
             id: pack.id,
             name: pack.name,
             summary: pack.summary,
+            isRestricted: pack.restricted,
             stickers: pack.stickers.compactMap(sticker)
         )
+    }
+
+    /// The pack a received sticker names. Nil when it says where the
+    /// pack is with an address that does not parse.
+    static func stickerReference(_ reference: WaddleStickerRef) -> StickerReference? {
+        var owner: BareJID?
+        if let raw = reference.packJid {
+            guard let parsed = bareJID(raw) else { return nil }
+            owner = parsed
+        }
+        return StickerReference(packID: reference.packId, owner: owner, node: reference.packNode)
     }
 
     /// Nil when none of the sticker's sources is a web address.

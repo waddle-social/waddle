@@ -59,12 +59,15 @@ public struct StickerPack: Hashable, Sendable, Identifiable {
     public let id: String
     public let name: String?
     public let summary: String?
+    /// The author asked that others neither use nor copy the pack.
+    public let isRestricted: Bool
     public let stickers: [Sticker]
 
-    public init(id: String, name: String? = nil, summary: String? = nil, stickers: [Sticker]) {
+    public init(id: String, name: String? = nil, summary: String? = nil, isRestricted: Bool = false, stickers: [Sticker]) {
         self.id = id
         self.name = name
         self.summary = summary
+        self.isRestricted = isRestricted
         self.stickers = stickers
     }
 
@@ -75,14 +78,35 @@ public struct StickerPack: Hashable, Sendable, Identifiable {
     }
 }
 
-/// The pack a sent sticker is from (XEP-0449 `<sticker pack='…'/>`), on
-/// the sender's own account.
+/// The pack a sticker message names (XEP-0449 `<sticker pack='…'/>`).
+/// Without an owner the pack is one of the sender's own; `owner` and
+/// `node` say where it is when it is kept somewhere else.
 public struct StickerReference: Hashable, Sendable, Codable {
     public let packID: String
+    public let owner: BareJID?
+    public let node: String?
 
-    public init(packID: String) {
+    public init(packID: String, owner: BareJID? = nil, node: String? = nil) {
+        self.packID = packID
+        self.owner = owner
+        self.node = node
+    }
+}
+
+/// Where a sticker pack can be fetched: whose it is, and its id. `node`
+/// is nil for the usual place, the owner's own sticker packs.
+public struct StickerPackLocation: Hashable, Sendable, Identifiable {
+    public let owner: BareJID
+    public let node: String?
+    public let packID: String
+
+    public init(owner: BareJID, node: String? = nil, packID: String) {
+        self.owner = owner
+        self.node = node
         self.packID = packID
     }
+
+    public var id: Self { self }
 }
 
 /// A sticker pack about to be published; its stickers' pictures are

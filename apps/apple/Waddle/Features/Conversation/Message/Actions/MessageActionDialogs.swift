@@ -2,8 +2,8 @@ import SwiftUI
 import WaddleKit
 
 /// Confirmations and prompts the message actions need: delete, moderator
-/// removal with a reason, the reaction picker and safety-score sheets, and
-/// failures.
+/// removal with a reason, the reaction picker, safety-score and sticker
+/// pack sheets, and failures.
 struct MessageActionDialogs: ViewModifier {
     @Environment(SessionCoordinator.self) private var session
     @Bindable var actions: MessageActionModel
@@ -41,6 +41,11 @@ struct MessageActionDialogs: ViewModifier {
             }
             .sheet(item: $actions.safetyScoresTarget) { item in
                 MessageSafetyScoresSheet(item: item)
+                    .carryingCallDock()
+                    .environment(session)
+            }
+            .sheet(item: $actions.stickerPackTarget) { location in
+                StickerPackSheet(location: location)
                     .carryingCallDock()
                     .environment(session)
             }

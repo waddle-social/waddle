@@ -51,6 +51,13 @@ struct MessageContextMenu: View {
                     Label("Copy text", systemImage: "doc.on.doc")
                 }
             }
+            if let pack = session.stickerPackLocation(of: item), item.tombstone == nil {
+                Button {
+                    actions.showStickerPack(pack)
+                } label: {
+                    Label("View sticker pack", systemImage: "face.smiling")
+                }
+            }
             if item.conversation.isRoom {
                 pinButton
             }
@@ -148,6 +155,9 @@ struct MessageAccessibilityActions: ViewModifier {
             Button("\(authorName), open profile", action: openProfile)
             if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
                 Button("Show \(row.title.lowercased()) content signal") { actions.showSafetyScores(for: item) }
+            }
+            if let pack = session.stickerPackLocation(of: item), item.tombstone == nil {
+                Button("View sticker pack") { actions.showStickerPack(pack) }
             }
             if let file = item.message.sharedFiles.first, file.encrypted == nil {
                 Button("Open attachment") {

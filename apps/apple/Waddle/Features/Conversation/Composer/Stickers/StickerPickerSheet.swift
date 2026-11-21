@@ -129,7 +129,7 @@ struct StickerPackPage: View {
     let onPick: (Sticker, StickerPack) -> Void
     let onRemove: (StickerPack) -> Void
 
-    private let columns = [GridItem(.adaptive(minimum: StickerCell.side), spacing: Theme.Spacing.xs)]
+    private let columns = [GridItem(.adaptive(minimum: StickerTile.side), spacing: Theme.Spacing.xs)]
 
     var body: some View {
         ScrollView {
@@ -205,15 +205,9 @@ struct StickerCell: View {
     let samplePicture: Image?
     let onPick: () -> Void
 
-    static let side: CGFloat = 76
-
     var body: some View {
         Button(action: onPick) {
-            picture
-                .padding(Theme.Spacing.xs)
-                .frame(maxWidth: .infinity)
-                .frame(height: Self.side)
-                .huddleSurface(.card, radius: Theme.Radius.medium)
+            StickerTile(sticker: sticker, samplePicture: samplePicture)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -221,6 +215,23 @@ struct StickerCell: View {
         .accessibilityAddTraits(.isImage)
         .accessibilityHint(Text("Sends this sticker"))
         .help(sticker.text)
+    }
+}
+
+/// A sticker's picture on a small card, as the picker and a pack's page
+/// lay stickers out.
+struct StickerTile: View {
+    let sticker: Sticker
+    let samplePicture: Image?
+
+    static let side: CGFloat = 76
+
+    var body: some View {
+        picture
+            .padding(Theme.Spacing.xs)
+            .frame(maxWidth: .infinity)
+            .frame(height: Self.side)
+            .huddleSurface(.card, radius: Theme.Radius.medium)
     }
 
     @ViewBuilder

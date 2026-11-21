@@ -13,6 +13,11 @@ final class FakeStickers {
     var packRequests = 0
     var published: [StickerPackDraft] = []
     var retracted: [String] = []
+    /// Packs kept somewhere other than the account's own packs.
+    var packsElsewhere: [StickerPackLocation: Result<StickerPack, PortError>] = [:]
+    var packLookups: [StickerPackLocation] = []
+    var copied: [StickerPackLocation] = []
+    var copyResult: Result<Void, PortError> = .success(())
 
     /// The packs fetch waits for `releasePackFetch()` before answering
     /// with the packs it saw when it was asked.
@@ -50,12 +55,28 @@ extension FakePort {
         return try answer.get()
     }
 
-    /// A published pack reads back as it was sent.
-    func fetchStickerPack(id: String) async throws -> StickerPack? {
+    /// One of the account's own packs reads back as it was published;
+    /// anyone else's comes from `packsElsewhere`.
+    func fetchStickerPack(at location: StickerPackLocation) async throws -> StickerPack? {
+        guard location.owner == me.jid, location.node == nil else {
+            stickers.packLookups.append(location)
+            return try stickers.packsElsewhere[location]?.get()
+        }
+        let id = location.packID
+        if let copy = stickers.copied.last(where: { $0.packID == id }), let pack = try stickers.packsElsewhere[copy]?.get() {
+            return pack
+        }
         guard id == stickers.publishedID, let draft = stickers.published.last else {
             return try stickers.packs.get().first { $0.id == id }
         }
         return StickerPack(id: id, name: draft.name, summary: draft.summary, stickers: draft.stickers)
+    }
+
+    /// A copy keeps the id it had, and reads back as the pack it was.
+    func copyStickerPack(from location: StickerPackLocation) async throws -> String {
+        try stickers.copyResult.get()
+        stickers.copied.append(location)
+        return location.packID
     }
 
     func publishStickerPack(_ draft: StickerPackDraft) async throws -> String {

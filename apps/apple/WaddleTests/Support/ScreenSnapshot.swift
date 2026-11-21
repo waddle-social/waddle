@@ -92,9 +92,7 @@ private func renderScreen<V: View>(
     window.appearance = NSAppearance(named: theme == .night ? .darkAqua : .aqua)
     window.contentViewController = NSHostingController(rootView: view.frame(width: size.width, height: size.height))
     window.setContentSize(size)
-    // Off any screen: the window lays out and draws without being shown.
-    window.setFrameOrigin(CGPoint(x: -20_000, y: -20_000))
-    window.orderFrontRegardless()
+    placeOffScreen(window)
     defer { window.close() }
     try await Task.sleep(for: settleTime)
     if capturesSheet {
@@ -113,6 +111,32 @@ private func renderScreen<V: View>(
         return try capture(window.attachedSheet)
     }
     return try capture(window)
+}
+
+/// Puts the window off any screen, so it lays out and draws without being
+/// shown, and beside the sharpest display. A window off screen is drawn at
+/// the scale of the display nearest to it; beside a 1x monitor its text
+/// would be drawn at 1x and scaled up, which no 2x golden matches.
+@MainActor
+private func placeOffScreen(_ window: NSWindow) {
+    let far: CGFloat = 20_000
+    let fallback = CGPoint(x: -far, y: -far)
+    window.setFrameOrigin(fallback)
+    window.orderFrontRegardless()
+    guard let sharpest = NSScreen.screens.max(by: { $0.backingScaleFactor < $1.backingScaleFactor }) else { return }
+    let frame = sharpest.frame
+    let besideSharpest = [
+        CGPoint(x: frame.midX, y: frame.minY - far),
+        CGPoint(x: frame.maxX + far, y: frame.midY),
+        CGPoint(x: frame.minX - far, y: frame.midY),
+        CGPoint(x: frame.midX, y: frame.maxY + far),
+    ]
+    for origin in besideSharpest where window.backingScaleFactor != sharpest.backingScaleFactor {
+        window.setFrameOrigin(origin)
+    }
+    if window.backingScaleFactor != sharpest.backingScaleFactor {
+        window.setFrameOrigin(fallback)
+    }
 }
 
 /// The window's frame view at 2x.
