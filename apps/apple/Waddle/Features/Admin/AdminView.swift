@@ -5,6 +5,7 @@ import WaddleKit
 enum AdminSection: Hashable {
     case users
     case spaces
+    case rooms
 }
 
 /// The admin console, for community owners: everyone with an account on
@@ -18,7 +19,9 @@ struct AdminView: View {
     @State private var users: AdminList<AdminUser>?
     @State private var spaces: AdminList<AdminSpace>?
     @State private var query = ""
+    @State private var rooms: AdminList<AdminRoom>?
     @State private var sheet: AdminSpaceSheet.Subject?
+    @State private var roomSheet: AdminRoomSheet.Subject?
     /// Lists not asked for since the connection last came back.
     @State private var stale: Set<AdminSection> = []
 
@@ -31,13 +34,14 @@ struct AdminView: View {
             HuddleSegmentedControl(selection: shownSection, segments: [
                 .init(value: .users, title: "Users"),
                 .init(value: .spaces, title: "Spaces"),
+                .init(value: .rooms, title: "Rooms"),
             ])
             .padding(.vertical, Theme.Spacing.s)
             panel
         }
         .background(Theme.Colors.bg)
         .navigationTitle("Admin")
-        .searchable(text: $query, prompt: section == .users ? "Search users" : "Search spaces")
+        .searchable(text: $query, prompt: searchPrompt)
         .task(id: Search(section: section, query: query, isOnline: session.connection == .online)) {
             switch section {
             case .users:
@@ -48,10 +52,14 @@ struct AdminView: View {
                 let list = spaces ?? session.adminSpacesList()
                 spaces = list
                 await search(list, in: .spaces)
+            case .rooms:
+                let list = rooms ?? session.adminRoomsList()
+                rooms = list
+                await search(list, in: .rooms)
             }
         }
         .onChange(of: session.connection == .online) { _, isOnline in
-            if isOnline { stale = [.users, .spaces] }
+            if isOnline { stale = [.users, .spaces, .rooms] }
         }
         .toolbar {
             if section == .spaces {
@@ -65,6 +73,17 @@ struct AdminView: View {
                     .help("New space")
                 }
             }
+            if section == .rooms {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        roomSheet = .new
+                    } label: {
+                        Label("New room", systemImage: "plus")
+                    }
+                    .disabled(rooms == nil)
+                    .help("New room")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task { await reload() }
@@ -75,11 +94,25 @@ struct AdminView: View {
                 .help("Refresh")
             }
         }
+        .sheet(item: $roomSheet) { subject in
+            if let rooms {
+                AdminRoomSheet(subject: subject, rooms: rooms)
+                    .carryingCallDock()
+            }
+        }
         .sheet(item: $sheet) { subject in
             if let spaces {
                 AdminSpaceSheet(subject: subject, spaces: spaces)
                     .carryingCallDock()
             }
+        }
+    }
+
+    private var searchPrompt: String {
+        switch section {
+        case .users: "Search users"
+        case .spaces: "Search spaces"
+        case .rooms: "Search rooms"
         }
     }
 
@@ -95,6 +128,12 @@ struct AdminView: View {
         case .spaces:
             if let spaces {
                 AdminSpacesPanel(spaces: spaces) { sheet = .space($0) }
+            } else {
+                Theme.Colors.bg
+            }
+        case .rooms:
+            if let rooms {
+                AdminRoomsPanel(rooms: rooms) { roomSheet = .room($0) }
             } else {
                 Theme.Colors.bg
             }
@@ -116,6 +155,7 @@ struct AdminView: View {
         switch section {
         case .users: users?.isLoading ?? true
         case .spaces: spaces?.isLoading ?? true
+        case .rooms: rooms?.isLoading ?? true
         }
     }
 
@@ -123,6 +163,7 @@ struct AdminView: View {
         switch section {
         case .users: await users?.reload()
         case .spaces: await spaces?.reload()
+        case .rooms: await rooms?.reload()
         }
     }
 
@@ -253,6 +294,18 @@ struct AdminListCopy {
         noMatches: { "No one's name or address starts with “\($0)”." },
         emptyTitle: "No users yet",
         emptyMessage: "People show up here once they have an account."
+    )
+
+    static let rooms = AdminListCopy(
+        title: "Rooms",
+        caption: "Every room in this community.",
+        symbol: "number",
+        loadingTitle: "Loading rooms",
+        offlineMessage: "Rooms show up here when you're connected.",
+        failedTitle: "Rooms didn't load",
+        noMatches: { "No room's name starts with “\($0)”." },
+        emptyTitle: "No rooms yet",
+        emptyMessage: "Make one to get people talking."
     )
 
     static let spaces = AdminListCopy(

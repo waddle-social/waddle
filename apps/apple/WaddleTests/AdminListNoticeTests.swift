@@ -77,3 +77,37 @@ final class AdminSpaceCopyTests: XCTestCase {
         )
     }
 }
+
+/// How the console words a room.
+final class AdminRoomCopyTests: XCTestCase {
+    private func room(kind: AdminRoomKind, isListed: Bool, isMembersOnly: Bool) -> AdminRoom {
+        AdminRoom(
+            jid: bare("lounge@rooms.waddle.test"), name: "Lounge", description: nil, kind: kind,
+            isListed: isListed, isMembersOnly: isMembersOnly, presentCount: 0, memberCount: 0
+        )
+    }
+
+    func testCountsSayOneOrManyMembers() {
+        XCTAssertEqual(AdminRoomCopy.counts(present: 4, members: 9), "4 here · 9 members")
+        XCTAssertEqual(AdminRoomCopy.counts(present: 0, members: 1), "0 here · 1 member")
+    }
+
+    /// A text room anyone can find and join needs no tags.
+    func testOnlyWhatIsUnusualAboutARoomIsTagged() {
+        XCTAssertEqual(AdminRoomCopy.tags(for: room(kind: .text, isListed: true, isMembersOnly: false)), [])
+        XCTAssertEqual(
+            AdminRoomCopy.tags(for: room(kind: .announcement, isListed: false, isMembersOnly: true)),
+            ["Announcements", "Hidden", "Members only"]
+        )
+        XCTAssertEqual(
+            AdminRoomCopy.tags(for: room(kind: .other("group_dm"), isListed: true, isMembersOnly: true)),
+            ["Group chat", "Members only"]
+        )
+    }
+
+    func testRolesAreNamedWithoutProtocolWords() {
+        XCTAssertEqual(AdminRoomCopy.title(RoomAffiliation.outcast), "Banned")
+        XCTAssertEqual(AdminRoomCopy.title(RoomAffiliation.none), "No role")
+        XCTAssertEqual(AdminRoomCopy.title(AdminRoomKind.other("stage")), "Other")
+    }
+}

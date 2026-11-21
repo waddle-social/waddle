@@ -214,35 +214,18 @@ struct AdminSpaceSheet: View {
         }
     }
 
-    @ViewBuilder
     private func membersRows(_ members: AdminList<AdminSpaceMember>) -> some View {
-        if members.failure != nil {
-            LabeledContent(members.rows.isEmpty ? "Members didn't load." : "Couldn't refresh the members.") {
-                Button("Try again") { Task { await members.reload() } }
-                    .disabled(members.isLoading)
-            }
-        } else if members.rows.isEmpty {
-            Text(members.hasLoaded ? "No members yet." : "Loading members…")
-                .foregroundStyle(Theme.Colors.fgMuted)
-        }
-        ForEach(members.rows) { member in
-            AdminSpaceMemberRow(member: member, isChanging: changing.contains(member.jid)) { role in
-                if role == .none {
-                    pendingRemoval = member
-                } else {
-                    setRole(role, of: member)
-                }
-            }
-        }
-        if members.hasMore {
-            Button(members.isLoadingMore ? "Loading…" : "Load more") {
-                Task { await members.loadMore() }
-            }
-            .disabled(members.isLoadingMore)
-        }
-        if members.moreFailure != nil {
-            Text("Couldn't load more. Try again.")
-                .foregroundStyle(Theme.Colors.fgMuted)
+        AdminSheetList(list: members, noun: "members", emptyText: "No members yet.") { member in
+            AdminRoleRow(
+                address: member.jid.description,
+                role: member.role,
+                choices: [AdminSpaceRole.owner, .admin, .member],
+                title: AdminSpaceCopy.title,
+                removeTitle: "Remove from space",
+                isChanging: changing.contains(member.jid),
+                choose: { setRole($0, of: member) },
+                remove: { pendingRemoval = member }
+            )
         }
     }
 
@@ -307,37 +290,6 @@ struct AdminSpaceSheet: View {
                 deleteError = ActionErrorCopy.message(for: error, fallback: "Couldn't delete the space. Try again.")
             }
             isBusy = false
-        }
-    }
-}
-
-/// Someone in the space, and a menu to change their role or remove them.
-private struct AdminSpaceMemberRow: View {
-    let member: AdminSpaceMember
-    let isChanging: Bool
-    let choose: (AdminSpaceRole) -> Void
-
-    var body: some View {
-        LabeledContent {
-            Menu(AdminSpaceCopy.title(member.role)) {
-                ForEach([AdminSpaceRole.owner, .admin, .member], id: \.self) { role in
-                    Toggle(AdminSpaceCopy.title(role), isOn: Binding {
-                        member.role == role
-                    } set: { _ in
-                        choose(role)
-                    })
-                }
-                Divider()
-                Button("Remove from space", role: .destructive) { choose(.none) }
-            }
-            .fixedSize()
-            .disabled(isChanging)
-            .accessibilityLabel(Text("Role of \(member.jid.description)"))
-            .accessibilityValue(Text(AdminSpaceCopy.title(member.role)))
-        } label: {
-            Text(member.jid.description)
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
     }
 }

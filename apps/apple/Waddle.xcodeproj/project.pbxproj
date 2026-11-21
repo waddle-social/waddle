@@ -87,6 +87,7 @@
 		23CF32735FF502BC40185751 /* FFIXmppPort+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A3A86F1E3EAD9B4C5A4D0A /* FFIXmppPort+Calls.swift */; };
 		23ED4F145ABFF06B9266B8D5 /* Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B26415DB685F9A4CBE7FBB1 /* Sidebar.swift */; };
 		23FFF61C63530EADF8DEBA86 /* PeopleList+Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4FAD78B88531EBF7368AC3A /* PeopleList+Session.swift */; };
+		2402C0D7978E7CA9AADD28F0 /* AdminRoomsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B19D4A6EDAD11A50B031A347 /* AdminRoomsPanel.swift */; };
 		245003CFC33DE220AA6DE188 /* FFIInbound+Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E693082B761CBC48B8E7AE /* FFIInbound+Notify.swift */; };
 		24530FC828EB809EBE5CE724 /* GroupCallDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F81E3CC3C092710A1D9AF8F1 /* GroupCallDockView.swift */; };
 		24B2F26796B4062AE83C2E17 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CE875138305109C7CCC4E1 /* AppState.swift */; };
@@ -131,6 +132,7 @@
 		32E1AE53B5B835EF28107EB6 /* FFIInbound.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9295908F61E540E4185F41C3 /* FFIInbound.swift */; };
 		32E6736A09BD2B4207FDD485 /* ComposerAttachmentIntake.swift in Sources */ = {isa = PBXBuildFile; fileRef = B63D13CA78302D5917C8EAD8 /* ComposerAttachmentIntake.swift */; };
 		3377BA2A33F22965155FF970 /* OutboundBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202B94DA013CDD78783E5B8B /* OutboundBridgeTests.swift */; };
+		33A802453496543B15D66C36 /* AdminRoomSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 455C82774C67753D8BFC905B /* AdminRoomSheet.swift */; };
 		33B530AB2C99CFC75FCA8DDF /* MessageRowHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76ACA60CC9A88E920924472E /* MessageRowHeader.swift */; };
 		34584E0FB63C7B23B895B6B9 /* AnimatedImageRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86500C54A13B8720EADEB1D7 /* AnimatedImageRepresentable.swift */; };
 		345B9F6E8328AA9E3AAC87D1 /* MemberRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24FC01964BF3C9A444AC8C8C /* MemberRows.swift */; };
@@ -434,6 +436,7 @@
 		A11359C8F42776D8A130CD28 /* FFISessionSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */; };
 		A22D7A36B18491D6B260E5FB /* ComposerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */; };
 		A2620853BF416FBBB95E4A34 /* SidebarAccountBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ACF126A87B69DBEE632B1E1 /* SidebarAccountBar.swift */; };
+		A277D5F8D557882415EEED37 /* AdminRoomSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 455C82774C67753D8BFC905B /* AdminRoomSheet.swift */; };
 		A2CBF5707721E3FC3B922289 /* EncryptedAttachmentModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */; };
 		A2E330E99263C2025436BD8D /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3BBDDB0DC99803D3EEC777E /* EmojiCatalog.swift */; };
 		A335913BA0D6A8244A0C5D46 /* PushRegistrationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23FF35670E13DC9446E3D547 /* PushRegistrationStoreTests.swift */; };
@@ -503,6 +506,7 @@
 		BD6A9531804E7A5A344BF0DC /* ConversationTimelineList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */; };
 		BD924BBCA116548EEA79D0AD /* RoomManagementSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC9686E713C0F3912EE63F29 /* RoomManagementSnapshotTests.swift */; };
 		BDDE170AD7E6B9B0E66B41F0 /* AnimatedImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77EF83062F6AD53EB3E0377 /* AnimatedImageView.swift */; };
+		BDEDDFDCC2BC72E4DAFC1FAD /* AdminRoleRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */; };
 		BFB4853E10B1D17713725387 /* FFIXmppPort+ReadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D13CF6890362A3E5A3EE80 /* FFIXmppPort+ReadState.swift */; };
 		C01877A2E48B0C4A03892717 /* ProfileStatusSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A699C3988283081BA15B97DD /* ProfileStatusSection.swift */; };
 		C05ED8BD121D90686CA6D6A8 /* Fixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F693E2124F7171597B578129 /* Fixtures.swift */; };
@@ -586,6 +590,7 @@
 		DE21C84C1350FC446AC673F5 /* EventsCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */; };
 		DF7AF11C2336FC3AB2EC332B /* ComposerActionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD3F6D9690B73F6F961B6B3A /* ComposerActionRow.swift */; };
 		DFA7DE3704EC28F288DA07D9 /* EventsMonthCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E7E39EA47A416B372A8FED /* EventsMonthCard.swift */; };
+		E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */; };
 		E09527622E3752A1BE3E40F8 /* NewChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C3E2364E067CC95BB2F1DA /* NewChannelSheet.swift */; };
 		E2251A92756F306038DB1872 /* WaddleCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F3BC43606C47023AC920E8 /* WaddleCommands.swift */; };
 		E2B059E77108F5B554615800 /* SettingsAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520AC6A7D5F8E34A0A5EF018 /* SettingsAppVersion.swift */; };
@@ -604,6 +609,7 @@
 		E68A5B8CCDE1DAEDBBD98259 /* InboxFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59E50FF8B354FCD1CB6CF95E /* InboxFeed.swift */; };
 		E6A4E192A6FEABE94AC3B5C4 /* PushRegistrationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23FF35670E13DC9446E3D547 /* PushRegistrationStoreTests.swift */; };
 		E6F035620B04948CE18CF1D0 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
+		E72073D5F451308DED24420D /* AdminRoomsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B19D4A6EDAD11A50B031A347 /* AdminRoomsPanel.swift */; };
 		E739B9FECB2AC7745DB88294 /* ComposerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */; };
 		E744C6724CAAEF1C80F86C6B /* AtkinsonHyperlegibleNext.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 3BE9DD9529CAE359ABA29C06 /* AtkinsonHyperlegibleNext.ttf */; };
 		E765D1B6E15B4F845C710C2F /* RoomSettingsEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F369DB872C487E705FA53810 /* RoomSettingsEditor.swift */; };
@@ -764,6 +770,7 @@
 		424F4321DD2A384763B772FD /* ConversationToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationToolbar.swift; sourceTree = "<group>"; };
 		433E995F4C4BBEEC367DF685 /* RoomHeaderSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomHeaderSection.swift; sourceTree = "<group>"; };
 		45389C112F24924C4ADC88C3 /* RecipientInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipientInput.swift; sourceTree = "<group>"; };
+		455C82774C67753D8BFC905B /* AdminRoomSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoomSheet.swift; sourceTree = "<group>"; };
 		463B2FA03157B7332CE180CB /* PinnedMessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedMessagesView.swift; sourceTree = "<group>"; };
 		48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCard.swift; sourceTree = "<group>"; };
 		49C114E8607FE4BC5DC460FB /* ComposerAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAttachment.swift; sourceTree = "<group>"; };
@@ -890,6 +897,7 @@
 		B0BADFB9DF0EC716C5BF2841 /* Waddle-iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Waddle-iOS.entitlements"; sourceTree = "<group>"; };
 		B0DC7EF989C84CD50FE8B750 /* NavigationSectionHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSectionHeader.swift; sourceTree = "<group>"; };
 		B16D87BBE11A6EE95142654E /* AuthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthModels.swift; sourceTree = "<group>"; };
+		B19D4A6EDAD11A50B031A347 /* AdminRoomsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoomsPanel.swift; sourceTree = "<group>"; };
 		B1D952887EECEFA51A65C496 /* ProfileActivityCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileActivityCatalog.swift; sourceTree = "<group>"; };
 		B1E7E39EA47A416B372A8FED /* EventsMonthCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsMonthCard.swift; sourceTree = "<group>"; };
 		B2D65F17C5B0112B7B7FF405 /* NewMessageSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheet.swift; sourceTree = "<group>"; };
@@ -938,6 +946,7 @@
 		CD3F6D9690B73F6F961B6B3A /* ComposerActionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerActionRow.swift; sourceTree = "<group>"; };
 		CF317440D44D33577F844A73 /* FFIEventListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIEventListener.swift; sourceTree = "<group>"; };
 		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoleRow.swift; sourceTree = "<group>"; };
 		CFDFEB1DCF16FE1667D8DFC4 /* InboxRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxRows.swift; sourceTree = "<group>"; };
 		D02EE5D57B1FEEC55787AAE6 /* RenameGroupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenameGroupSheet.swift; sourceTree = "<group>"; };
 		D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Directory.swift"; sourceTree = "<group>"; };
@@ -1358,6 +1367,9 @@
 		57010325BE4CB572D63BE4DA /* Admin */ = {
 			isa = PBXGroup;
 			children = (
+				CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */,
+				455C82774C67753D8BFC905B /* AdminRoomSheet.swift */,
+				B19D4A6EDAD11A50B031A347 /* AdminRoomsPanel.swift */,
 				B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */,
 				B6AFF17E8FC8EA2F9D17F520 /* AdminSpacesPanel.swift */,
 				05A4701A3A1BB24DC5BDC9BF /* AdminView.swift */,
@@ -2131,6 +2143,9 @@
 			files = (
 				1F366FF69DD8074B6316F8CA /* AccountSignOutButton.swift in Sources */,
 				95A048455B91E894F7E470A0 /* AddPeopleSheet.swift in Sources */,
+				E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */,
+				A277D5F8D557882415EEED37 /* AdminRoomSheet.swift in Sources */,
+				2402C0D7978E7CA9AADD28F0 /* AdminRoomsPanel.swift in Sources */,
 				3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */,
 				F9D7172E6F902D398A70E8F5 /* AdminSpacesPanel.swift in Sources */,
 				802554785F689417C3ED30DC /* AdminView.swift in Sources */,
@@ -2459,6 +2474,9 @@
 			files = (
 				2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */,
 				050ABC1E2E9DE9D7A16AB906 /* AddPeopleSheet.swift in Sources */,
+				BDEDDFDCC2BC72E4DAFC1FAD /* AdminRoleRow.swift in Sources */,
+				33A802453496543B15D66C36 /* AdminRoomSheet.swift in Sources */,
+				E72073D5F451308DED24420D /* AdminRoomsPanel.swift in Sources */,
 				3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */,
 				89EA73B177B879F10E234AF1 /* AdminSpacesPanel.swift in Sources */,
 				353717E9E3E485089D172673 /* AdminView.swift in Sources */,

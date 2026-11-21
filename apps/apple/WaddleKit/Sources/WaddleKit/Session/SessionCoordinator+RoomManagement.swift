@@ -23,6 +23,12 @@ extension SessionCoordinator {
         try await giveUp(room, forGood: true) { try await port.destroyRoom(room, reason: nil) }
     }
 
+    /// Deletes a room from the admin console, with the same care: the
+    /// owner of the community need not be in the room or hold a role in it.
+    public func deleteAdminRoom(_ room: AdminRoom) async throws {
+        try await giveUp(room.jid, forGood: true) { try await port.deleteAdminRoom(room.jid) }
+    }
+
     /// Renames a group DM; whitespace-only names clear it. Throws `PortError` on failure.
     public func renameGroupDM(_ room: BareJID, to name: String) async throws {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
