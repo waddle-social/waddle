@@ -103,8 +103,9 @@ enum StoryClip {
     private static func isCutShort(_ output: URL, comparedWith source: AVURLAsset) async throws -> Bool {
         let whole = try await source.load(.duration).seconds
         let written = try await AVURLAsset(url: output).load(.duration).seconds
-        // A frame's worth of difference is rounding, not a cut.
-        return written < whole - max(0.1, whole * 0.02)
+        // A few frames of difference is rounding, not a cut, however long
+        // the clip is.
+        return written < whole - 0.1
     }
 
     private static func codecs(of type: AVMediaType, in asset: AVURLAsset) async throws -> [FourCharCode] {
