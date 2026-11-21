@@ -28,14 +28,14 @@ use waddle_xmpp::telemetry::attributes::{S2sOutcome, S2sResource, S2sTransport};
 use super::admission::ConnectionAdmission;
 use super::capacity::{Capacity, InboundSlot, OutboundSlot};
 use super::endpoints::{ConfiguredEndpoints, EndpointResolver, Endpoints, ResolveError};
-use super::outbox::{self, TransmitError};
+use super::outbox::{self, SpaceTransmission, TransmitError};
 use super::peer_stream::{StreamDirection, VerifiedPeerStream};
 use super::registry::{Activity, DialRefusal, DialSlot, DialStart, Registry};
 use super::session::{is_peer_failure, EstablishedSender, Role, Session, SessionStart};
 use super::sink::{RefuseAllStanzas, StanzaSink};
 use super::telemetry;
 use super::transport::Transport;
-use crate::permissions::host_grant::ManagedSpaceGrant;
+use crate::permissions::host_grant::{ManagedSpaceGrant, RemoteSpaceDeletionGrant};
 use crate::s2s::config::{AdmissionRefusal, S2sConfig, STREAM_CODEC_LIMITS};
 use crate::s2s::verify::{OutboundTransport, VerifierWorkers};
 
@@ -426,7 +426,32 @@ impl S2sHandle {
         if !grant.permits_remote_effect(&stanza, stream.strength()) {
             return Err(TransmitError::AuthorizationExpired);
         }
-        outbox::transmit(&self.shared.registry, stream, stanza, Some(grant)).await
+        outbox::transmit(
+            &self.shared.registry,
+            stream,
+            stanza,
+            Some(SpaceTransmission::Active(grant)),
+        )
+        .await
+    }
+
+    /// Transfer a durable deletion notice to its exact verified peer stream.
+    pub(crate) async fn transmit_space_deletion(
+        &self,
+        stream: &VerifiedPeerStream,
+        stanza: minidom::Element,
+        grant: Arc<RemoteSpaceDeletionGrant>,
+    ) -> Result<(), TransmitError> {
+        if !grant.permits_stream(&stanza, stream) {
+            return Err(TransmitError::DeletionRefused);
+        }
+        outbox::transmit(
+            &self.shared.registry,
+            stream,
+            stanza,
+            Some(SpaceTransmission::Deletion(grant)),
+        )
+        .await
     }
 
     /// Every established stream.

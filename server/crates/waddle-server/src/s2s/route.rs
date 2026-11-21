@@ -80,7 +80,9 @@ pub use principal::{CarriedPrincipal, PrincipalError, RemotePrincipal};
 pub use reach::{
     reach, InboundReach, LocalTarget, Reachable, Refusal, RoomOperation, SpaceOperation,
 };
-pub use router::{is_unanswered_message, RouterLimits, RouterOptions, S2sRouter};
+pub use router::{
+    is_unanswered_message, RouterLimits, RouterOptions, S2sRouter, SpaceDeletionCompletion,
+};
 pub use seats::{
     Deferred, Holding, JoinAnswer, Seat, SeatIndex, SeatInsert, SeatLimits, SeatStore,
     SeatStoreError, SqlSeatStore, MAX_SEAT_ADDRESS_BYTES,

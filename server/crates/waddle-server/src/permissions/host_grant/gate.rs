@@ -59,6 +59,7 @@ use super::fence::{FenceTicket, ReplicaFence};
 use super::issuance::IssuanceBasis;
 use super::model::{
     GrantOperationId, GrantSubject, OperationRecord, ScopeKey, SpaceBookmarkVersion,
+    SpaceDeletionAttempt, SpaceDeletionDeliveryKind,
 };
 use super::policy::HostGrantAction;
 use super::principal::{
@@ -72,7 +73,7 @@ use super::store::HostGrantStore;
 use crate::db::local_space_subscriptions::{LocalSpaceSubscription, LocalSpaceSubscriptions};
 use crate::db::s2s_spaces::{SpaceSubscription, SpaceSubscriptionGrant, SpaceSubscriptions};
 use crate::db::Database;
-use crate::s2s::conn::AuthenticationStrength;
+use crate::s2s::conn::{AuthenticationStrength, StreamDirection, VerifiedPeerStream};
 use crate::s2s::route::RemotePrincipal;
 
 /// At most one warning a minute that a managed room was refused on a replica
@@ -202,11 +203,12 @@ impl LocalSpaceReplyGrant {
                 let operation = GrantOperationId::from_uuid(self.replay.deletion_operation()?);
                 return deletion
                     .store
-                    .hold_local_space_deletion_recipient(
+                    .hold_space_deletion_recipient(
                         &key,
                         operation,
                         &subject,
                         deletion.fence.generation(),
+                        SpaceDeletionDeliveryKind::Local,
                     )
                     .await
                     .ok()?;
@@ -256,6 +258,82 @@ impl LocalSpaceReplyGrant {
             grant.require_room(decision);
         }
         Some(self)
+    }
+}
+
+/// A durable notice attempt for the exact saved remote Space subscriber.
+pub struct RemoteSpaceDeletionGrant {
+    store: HostGrantStore,
+    fence: FenceTicket,
+    attempt: SpaceDeletionAttempt,
+    subscription: SpaceSubscription,
+    principals: PrincipalPolicy,
+}
+
+impl std::fmt::Debug for RemoteSpaceDeletionGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteSpaceDeletionGrant")
+            .field("operation", &self.attempt.record.operation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RemoteSpaceDeletionGrant {
+    pub(crate) fn permits_stream(
+        &self,
+        stanza: &minidom::Element,
+        stream: &VerifiedPeerStream,
+    ) -> bool {
+        let key = &self.attempt.key;
+        let recipient = &self.subscription.account;
+        let saved = self.subscription.evidence;
+        if stream.direction() != StreamDirection::Outbound
+            || stream.local().as_str() != key.service().domain().as_str()
+            || stream.remote().as_str() != recipient.domain().as_str()
+            || (saved.strength() == AuthenticationStrength::Pkix
+                && stream.strength() != AuthenticationStrength::Pkix)
+            || saved
+                .trust_profile()
+                .is_some_and(|profile| stream.trust_profile() != Some(profile))
+        {
+            return false;
+        }
+        let evidence = PrincipalEvidence::Stream(StreamEvidence::recorded(
+            stream.strength(),
+            stream.trust_profile(),
+        ));
+        let witness = self.principals.witness(recipient, &evidence);
+        matches!(witness, PrincipalWitness::Remote(_))
+            && witness.grants_honoured()
+            && waddle_xmpp_core::pubsub::stanzas::matches_pubsub_delete_event(
+                stanza,
+                key.service().as_str(),
+                recipient.as_str(),
+                key.node(),
+                &self.attempt.record.operation.as_uuid().simple().to_string(),
+            )
+    }
+
+    pub(crate) async fn admit_remote<R>(&self, effect: impl FnOnce() -> R) -> Option<R> {
+        let hold = tokio::time::timeout(ROOM_READ_DEADLINE, async {
+            if !self
+                .store
+                .begin_space_deletion_staging(&self.attempt)
+                .await
+                .ok()?
+            {
+                return None;
+            }
+            self.store
+                .hold_space_deletion_staging(&self.attempt)
+                .await
+                .ok()?
+        })
+        .await
+        .ok()??;
+        let result = self.fence.admit(effect);
+        drop(hold);
+        result
     }
 }
 
@@ -1442,6 +1520,44 @@ impl HostGrantGate {
         )
         .ok()?;
         Some((dependency, decision))
+    }
+
+    pub(crate) async fn remote_space_deletion_event(
+        &self,
+        attempt: &SpaceDeletionAttempt,
+    ) -> Option<RemoteSpaceDeletionGrant> {
+        if attempt.kind != SpaceDeletionDeliveryKind::Remote {
+            return None;
+        }
+        let attachment = self.attachment()?;
+        if attachment.binding().incarnation != attempt.record.authority_incarnation {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let fence = self.fence.as_ref()?;
+        let registration = fence.begin_decision().await?;
+        let (record, generation, subscription) = tokio::time::timeout(
+            ROOM_READ_DEADLINE,
+            store.load_remote_space_deletion_recipient(
+                &attempt.key,
+                attempt.record.operation,
+                &attempt.subject,
+            ),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        if record != attempt.record || &subscription.account != attempt.subject.jid() {
+            return None;
+        }
+        let ticket = fence.ticket(registration, record.lifecycle, generation);
+        ticket.is_current().then(|| RemoteSpaceDeletionGrant {
+            store: store.clone(),
+            fence: ticket,
+            attempt: attempt.clone(),
+            subscription,
+            principals: attachment.principals().clone(),
+        })
     }
 
     /// Authorize a read for the account carried by the authenticated S2S stream.
