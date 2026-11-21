@@ -6,6 +6,7 @@ use crate::pubsub::SubId;
 use jid::{BareJid, FullJid};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 const HEADER: &[u8; 4] = b"SPR\x01";
@@ -30,7 +31,11 @@ pub const MAX_PROTECTED_SPACE_REPLY_BYTES: usize = FIXED_BYTES
 /// Identify one subscriber's deletion notification across transport retries.
 pub fn space_deletion_notice_id(operation: Uuid, subscriber: &BareJid) -> String {
     let subscriber_digest = Sha256::digest(subscriber.as_str().as_bytes());
-    format!("{}-{subscriber_digest:x}", operation.simple())
+    let mut id = format!("{}-", operation.simple());
+    for byte in subscriber_digest {
+        write!(id, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    id
 }
 
 /// Exact XMPP stanza payload admitted by the stored Space decision.
