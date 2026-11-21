@@ -37,6 +37,7 @@ pub enum ProtectedSpaceReplyKind {
     OwnerAffiliations,
     OwnerAffiliationRefusals,
     OwnerConfiguration,
+    DeleteEvent,
 }
 
 /// Identity of the original access decision, without a replica lease.
@@ -253,6 +254,15 @@ impl ProtectedSpaceReplyDescriptor {
         self.bookmark_event.as_ref()
     }
 
+    /// Identify the deletion by its canonical stanza ID.
+    pub fn deletion_operation(&self) -> Option<Uuid> {
+        if self.kind != ProtectedSpaceReplyKind::DeleteEvent {
+            return None;
+        }
+        let operation = Uuid::parse_str(&self.id).ok()?;
+        (operation.simple().to_string() == self.id).then_some(operation)
+    }
+
     pub fn service(&self) -> &BareJid {
         &self.service
     }
@@ -321,6 +331,10 @@ impl ProtectedSpaceReplyDescriptor {
                 bytes.extend_from_slice(TYPED_HEADER);
                 bytes.push(7);
             }
+            ProtectedSpaceReplyKind::DeleteEvent => {
+                bytes.extend_from_slice(TYPED_HEADER);
+                bytes.push(8);
+            }
         }
         for field in fields {
             // The constructor limits every field below u32::MAX.
@@ -372,6 +386,7 @@ impl ProtectedSpaceReplyDescriptor {
                 Some((5, rest)) => (rest, ProtectedSpaceReplyKind::OwnerAffiliations),
                 Some((6, rest)) => (rest, ProtectedSpaceReplyKind::OwnerAffiliationRefusals),
                 Some((7, rest)) => (rest, ProtectedSpaceReplyKind::OwnerConfiguration),
+                Some((8, rest)) => (rest, ProtectedSpaceReplyKind::DeleteEvent),
                 _ => return Err(ProtectedSpaceReplyCodecError),
             }
         };
@@ -432,7 +447,10 @@ impl ProtectedSpaceReplyDescriptor {
             descriptor =
                 descriptor.with_bookmark_event(SubId::from_raw(subid), operation, room, present)?;
         }
-        if !input.is_empty() {
+        if !input.is_empty()
+            || (kind == ProtectedSpaceReplyKind::DeleteEvent
+                && descriptor.deletion_operation().is_none())
+        {
             return Err(ProtectedSpaceReplyCodecError);
         }
         Ok(descriptor)
