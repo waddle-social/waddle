@@ -371,6 +371,7 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("host_grant_space_deletions", READ_INSERT),
     ("host_grant_space_deletion_audience", READ_INSERT),
     ("host_grant_space_deletion_jobs", READ_INSERT_UPDATE),
+    ("host_grant_space_deletion_bindings", READ_INSERT_UPDATE),
     ("host_grant_space_bookmark_versions", READ_INSERT_UPDATE),
     ("local_space_subscriptions", READ_WRITE),
     // The revocation fence: a replica inserts its lease and renews it, and

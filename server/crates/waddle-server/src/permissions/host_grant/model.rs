@@ -566,6 +566,21 @@ pub struct SpaceDeletionAttempt {
     pub lease_until_ms: i64,
 }
 
+/// An exact, presence-eligible binding in a local subscriber's snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceDeletionBinding {
+    pub resource: jid::FullJid,
+    pub binding: waddle_xmpp::ownership::BindingRef,
+}
+
+/// One socket's independent attempt under the local subscriber lease.
+#[derive(Clone, Debug)]
+pub struct SpaceDeletionBindingAttempt {
+    pub parent: SpaceDeletionAttempt,
+    pub target: SpaceDeletionBinding,
+    pub token: Uuid,
+}
+
 /// One attempt's evidence at the transport custody boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpaceDeletionAttemptOutcome {

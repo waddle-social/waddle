@@ -2,10 +2,11 @@ use super::{corrupt, decode_operation, read_space_deletion_header, HostGrantStor
 use crate::db::Transaction;
 use crate::ingress_substrate::set_local_transaction_timeouts;
 use crate::permissions::host_grant::{
-    GrantOperationId, GrantSubject, HostGrantError, ScopeKey, SpaceDeletionAttempt,
-    SpaceDeletionAttemptOutcome, SpaceDeletionDeliveryKind, HOST_GRANT_POLICY_VERSION,
-    SPACE_BOOKMARK_RESTORE_LOCK,
+    GrantSubject, HostGrantError, ScopeKey, SpaceDeletionAttempt, SpaceDeletionAttemptOutcome,
+    SpaceDeletionDeliveryKind, HOST_GRANT_POLICY_VERSION, SPACE_BOOKMARK_RESTORE_LOCK,
 };
+
+mod bindings;
 
 const MAX_ATTEMPTS: i32 = 16;
 const LEASE_MS: i64 = 30_000;
@@ -91,49 +92,14 @@ impl HostGrantStore {
         Ok(attempts)
     }
 
-    /// Recover the exact live local lease at its destination socket node.
-    pub async fn load_local_space_deletion_attempt(
-        &self,
-        key: &ScopeKey,
-        operation: GrantOperationId,
-        subject: &GrantSubject,
-        token: uuid::Uuid,
-    ) -> Result<Option<SpaceDeletionAttempt>, HostGrantError> {
-        let mut tx = self.begin_interactive_read().await?;
-        let Some((record, _, _)) =
-            read_space_deletion_header(&mut tx, key, operation, false).await?
-        else {
-            return Ok(None);
-        };
-        let mut rows = tx.query(
-            "SELECT attempts, lease_until_ms FROM host_grant_space_deletion_jobs
-              WHERE lifecycle_id = ? AND subject_jid = ? AND delivery_kind = 'local'
-                AND attempt_token = ?::uuid AND state = 'leased'
-                AND lease_until_ms > (EXTRACT(EPOCH FROM pg_catalog.statement_timestamp()) * 1000)::bigint",
-            crate::db_params![record.lifecycle.to_storage(), subject.as_str(), token.to_string()],
-        ).await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-        let attempt = SpaceDeletionAttempt {
-            key: key.clone(),
-            record,
-            subject: subject.clone(),
-            kind: SpaceDeletionDeliveryKind::Local,
-            token,
-            attempt: row.get(0)?,
-            lease_until_ms: row.get(1)?,
-        };
-        drop(rows);
-        tx.rollback().await?;
-        Ok(Some(attempt))
-    }
-
     /// Record that this attempt may reach transport before any staging starts.
     pub async fn begin_space_deletion_staging(
         &self,
         attempt: &SpaceDeletionAttempt,
     ) -> Result<bool, HostGrantError> {
+        if attempt.kind != SpaceDeletionDeliveryKind::Remote {
+            return Ok(false);
+        }
         let Some(mut tx) = self.lock_space_deletion_attempt(attempt).await? else {
             return Ok(false);
         };
@@ -157,6 +123,9 @@ impl HostGrantStore {
         &self,
         attempt: &SpaceDeletionAttempt,
     ) -> Result<Option<Transaction<'_>>, HostGrantError> {
+        if attempt.kind != SpaceDeletionDeliveryKind::Remote {
+            return Ok(None);
+        }
         let Some(mut tx) = self.lock_space_deletion_attempt(attempt).await? else {
             return Ok(None);
         };
@@ -225,7 +194,8 @@ impl HostGrantStore {
               FROM decision
              WHERE lifecycle_id = ? AND subject_jid = ? AND delivery_kind = ?
                AND attempt_token = ?::uuid AND lease_until_ms > decision.now_ms
-               AND (state = 'staging' OR (state = 'leased' AND ?::bigint <> 0))",
+               AND (state = 'staging' OR (state = 'leased' AND ?::bigint <> 0))
+               AND (delivery_kind = 'remote' OR (NOT local_snapshot_frozen AND decision.next IN ('pending', 'refused')))",
             crate::db_params![
                 state, MAX_ATTEMPTS, attempt.record.lifecycle.to_storage(), attempt.subject.as_str(),
                 attempt.kind.as_storage(), attempt.token.to_string(), can_be_leased
@@ -284,9 +254,26 @@ async fn sweep_unavailable(
                          OR o.authority_incarnation <> a.incarnation OR l.retired_at_ms IS NOT NULL)))
               ORDER BY j.due_at_ms, j.lifecycle_id, j.subject_jid
               LIMIT ? FOR UPDATE OF j SKIP LOCKED
+         ), terminal_children AS (
+             UPDATE host_grant_space_deletion_bindings b SET
+                    state = CASE WHEN b.state = 'staging' THEN 'ambiguous' ELSE 'refused' END,
+                    parent_token = NULL, attempt_token = NULL
+               FROM selected
+              WHERE b.lifecycle_id = selected.lifecycle_id AND b.subject_jid = selected.subject_jid
+                AND selected.delivery_kind = 'local' AND b.state IN ('pending', 'leased', 'staging')
          )
          UPDATE host_grant_space_deletion_jobs j
-            SET state = CASE WHEN j.state = 'staging' THEN 'ambiguous' ELSE 'refused' END,
+            SET state = CASE
+                  WHEN j.state = 'staging' THEN 'ambiguous'
+                  WHEN j.delivery_kind = 'local' AND EXISTS (
+                       SELECT 1 FROM host_grant_space_deletion_bindings b
+                        WHERE b.lifecycle_id = j.lifecycle_id AND b.subject_jid = j.subject_jid
+                          AND b.state = 'custody') THEN 'custody'
+                  WHEN j.delivery_kind = 'local' AND EXISTS (
+                       SELECT 1 FROM host_grant_space_deletion_bindings b
+                        WHERE b.lifecycle_id = j.lifecycle_id AND b.subject_jid = j.subject_jid
+                          AND b.state IN ('ambiguous', 'staging')) THEN 'ambiguous'
+                  ELSE 'refused' END,
                 attempt_token = NULL, lease_until_ms = NULL
            FROM selected
           WHERE (j.lifecycle_id, j.subject_jid, j.delivery_kind) =
