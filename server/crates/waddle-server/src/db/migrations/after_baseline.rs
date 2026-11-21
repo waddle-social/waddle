@@ -74,6 +74,7 @@ pub const HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION: i64 = 2017;
 pub const LOCAL_SPACE_SUBSCRIPTIONS_VERSION: i64 = 2018;
 pub const LOCAL_SPACE_NOTIFICATION_ORDER_VERSION: i64 = 2019;
 pub const HOST_GRANT_SPACE_CONFIGURATION_VERSION: i64 = 2020;
+pub const HOST_GRANT_SPACE_DELETIONS_VERSION: i64 = 2021;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -264,6 +265,16 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2020_host_grant_space_configuration.postgres.sql"
             ),
         },
+        Migration {
+            version: HOST_GRANT_SPACE_DELETIONS_VERSION,
+            description: "host grant Space deletions".to_owned(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2021_host_grant_space_deletions.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2021_host_grant_space_deletions.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -383,12 +394,12 @@ mod tests {
         HOST_GRANT_AUTHORITY_VERSION, HOST_GRANT_RESTORE_INCARNATION_VERSION,
         HOST_GRANT_REVOCATION_FENCE_VERSION, HOST_GRANT_SPACES_VERSION,
         HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION, HOST_GRANT_SPACE_CONFIGURATION_VERSION,
-        LOCAL_SPACE_NOTIFICATION_ORDER_VERSION, LOCAL_SPACE_SUBSCRIPTIONS_VERSION,
-        OFFLINE_CALL_NOTIFICATIONS_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
-        S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION, S2S_IQ_CORRELATIONS_VERSION,
-        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
-        S2S_REMOTE_ROOMS_VERSION, S2S_SPACE_SUBSCRIPTIONS_VERSION,
-        S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
+        HOST_GRANT_SPACE_DELETIONS_VERSION, LOCAL_SPACE_NOTIFICATION_ORDER_VERSION,
+        LOCAL_SPACE_SUBSCRIPTIONS_VERSION, OFFLINE_CALL_NOTIFICATIONS_VERSION,
+        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION,
+        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
+        S2S_SPACE_SUBSCRIPTIONS_VERSION, S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
     };
 
     #[test]
@@ -425,6 +436,7 @@ mod tests {
                 LOCAL_SPACE_SUBSCRIPTIONS_VERSION,
                 LOCAL_SPACE_NOTIFICATION_ORDER_VERSION,
                 HOST_GRANT_SPACE_CONFIGURATION_VERSION,
+                HOST_GRANT_SPACE_DELETIONS_VERSION,
             ]
         );
     }

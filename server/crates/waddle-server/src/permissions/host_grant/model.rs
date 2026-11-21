@@ -496,6 +496,30 @@ impl ConfigureSpace {
     }
 }
 
+/// Delete the bound Space while retaining its address and managed room scope.
+#[derive(Clone, Debug)]
+pub struct DeleteSpace {
+    pub operation: GrantOperationId,
+    pub key: ScopeKey,
+    pub lifecycle: ScopeLifecycleId,
+    pub expected_incarnation: AuthorityIncarnation,
+    pub expected_generation: GrantGeneration,
+    pub initiator: GrantSubject,
+}
+
+impl DeleteSpace {
+    pub(super) fn fingerprint(&self) -> String {
+        let mut fingerprint = Fingerprint::new("waddle:host-grant:delete-space:v1");
+        fingerprint.text(self.key.service().as_str());
+        fingerprint.text(self.key.node());
+        fingerprint.text(&self.lifecycle.to_storage());
+        fingerprint.text(&self.expected_incarnation.to_storage());
+        fingerprint.number(self.expected_generation.value());
+        fingerprint.text(self.initiator.as_str());
+        fingerprint.finish()
+    }
+}
+
 /// Set one subject's affiliation in one managed room.
 #[derive(Clone, Debug)]
 pub struct SetAffiliation {
@@ -529,6 +553,7 @@ pub enum OperationKind {
     BindSpace,
     SetSpaceAffiliations,
     ConfigureSpace,
+    DeleteSpace,
     Retire,
     /// The scope had no working generation left for the command and was
     /// closed instead.
@@ -555,6 +580,7 @@ impl OperationKind {
             Self::BindSpace => "bind_space",
             Self::SetSpaceAffiliations => "set_space_affiliations",
             Self::ConfigureSpace => "configure_space",
+            Self::DeleteSpace => "delete_space",
             Self::Retire => "retire",
             Self::Exhaust => "exhaust",
             Self::Restore => "restore",
@@ -571,6 +597,7 @@ impl OperationKind {
             Self::BindSpace,
             Self::SetSpaceAffiliations,
             Self::ConfigureSpace,
+            Self::DeleteSpace,
             Self::Retire,
             Self::Exhaust,
             Self::Restore,

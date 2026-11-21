@@ -120,6 +120,7 @@ const AUTHORITY_RELATIONS: [&str; 10] = [
     "host_grant_space_bindings",
     "host_grant_space_affiliations",
     "host_grant_space_operation_changes",
+    "host_grant_space_deletions",
 ];
 
 // Live tests share one SpiceDB with the other `spicedb-live` binaries, which
@@ -683,11 +684,11 @@ fn reconstruction_lowers_only_and_records_subjects_only_the_projection_held() {
 }
 
 #[tokio::test]
-async fn configure_space_records_exact_policy_change_once() {
+async fn configure_and_delete_space_preserves_room_scope() {
     use waddle_server::db::local_space_subscriptions::LocalSpaceSubscriptions;
     use waddle_server::db::s2s_spaces::SpaceSubscriptionGrant;
     use waddle_server::permissions::host_grant::{
-        ConfigureSpace, SpaceBookmarkAction, SpaceBookmarkChange,
+        ConfigureSpace, DeleteSpace, SpaceBookmarkAction, SpaceBookmarkChange,
     };
 
     let Some(fixture) = GrantFixture::active("hg_configure_space").await else {
@@ -907,6 +908,56 @@ async fn configure_space_records_exact_policy_change_once() {
         .rollback()
         .await
         .expect("release delivery lock");
+
+    let deletion = DeleteSpace {
+        operation: GrantOperationId::generate(),
+        key: command.key.clone(),
+        lifecycle,
+        expected_incarnation: command.expected_incarnation,
+        expected_generation: record.generation,
+        initiator: subject(OWNER),
+    };
+    let MutationReceipt::Recorded(deleted) = fixture
+        .store
+        .delete_space(&deletion, &fixture.policy)
+        .await
+        .expect("delete the enrolled Space")
+    else {
+        panic!("first delete records its tombstone");
+    };
+    assert_eq!(deleted.kind, OperationKind::DeleteSpace);
+    assert_eq!(
+        fixture
+            .store
+            .delete_space(&deletion, &fixture.policy)
+            .await
+            .expect("retry delete"),
+        MutationReceipt::Replayed(deleted.clone()),
+    );
+    assert_eq!(
+        fixture.activate_current(&fixture.scope).await,
+        Activation::Activated
+    );
+    let scope = fixture.state(&fixture.scope).await;
+    assert_eq!(scope.admission, AdmissionState::Active);
+    assert_eq!(scope.projected_generation, Some(deleted.generation));
+    let (bound, items) = sqlx::query_as::<_, (bool, i64)>(
+        "SELECT EXISTS (SELECT 1 FROM host_grant_space_bindings WHERE lifecycle_id = $1),
+                (SELECT count(*) FROM pubsub_items WHERE owner_jid = $2 AND node_name = $3)",
+    )
+    .bind(lifecycle.to_storage())
+    .bind(deletion.key.service().as_str())
+    .bind(deletion.key.node())
+    .fetch_one(&pool)
+    .await
+    .expect("check the reserved node was emptied");
+    assert!(bound);
+    assert_eq!(items, 0);
+    assert!(subscriptions
+        .hold_delivery(&deletion.key, &preference, version, false)
+        .await
+        .expect("check tombstoned delivery")
+        .is_none());
 }
 
 #[tokio::test]
@@ -3047,6 +3098,7 @@ async fn a_corrected_runtime_role_attaches_without_a_restart() {
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON host_grants TO {role}"),
         format!(
@@ -3323,6 +3375,7 @@ async fn the_runtime_role_reads_the_position_and_cannot_declare_a_restore() {
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON local_space_subscriptions TO {role}"),
         format!("GRANT USAGE ON SEQUENCE local_space_notification_order TO {role}"),
         format!("GRANT SELECT, INSERT ON host_grant_space_operation_changes TO {role}"),
+        format!("GRANT SELECT, INSERT ON host_grant_space_deletions TO {role}"),
         format!("GRANT SELECT, UPDATE ON host_grant_scopes TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE ON host_grants TO {role}"),
         format!(
