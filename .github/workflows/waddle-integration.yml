@@ -34,6 +34,7 @@ jobs:
       waddle_colony_pullrequest: "${{ steps.plan.outputs.waddle_colony_pullrequest }}"
       waddle_design_pullrequest: "${{ steps.plan.outputs.waddle_design_pullrequest }}"
       waddle_linux_pullrequest: "${{ steps.plan.outputs.waddle_linux_pullrequest }}"
+      waddle_operator_pullrequest: "${{ steps.plan.outputs.waddle_operator_pullrequest }}"
       waddle_server_authzidcodec: "${{ steps.plan.outputs.waddle_server_authzidcodec }}"
       waddle_server_federationgrantfencepullrequest: "${{ steps.plan.outputs.waddle_server_federationgrantfencepullrequest }}"
       waddle_server_namespacerustchecks: "${{ steps.plan.outputs.waddle_server_namespacerustchecks }}"
@@ -326,6 +327,41 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_linux_pullrequest == 'true' }}"
+  waddle_operator_pullrequest__waddle-operator-pullrequest:
+    permissions:
+      contents: read
+    name: waddle-operator-pullRequest / waddle-operator-pullRequest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "set -euo pipefail\ncuenv_version=\"0.76.1\"\nif [ \"$cuenv_version\" != \"0.76.1\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.76.1\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
+      - name: "Run pipeline: pullRequest"
+        run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$WADDLE_CI_HEAD_SHA\"\ngit cat-file -e \"${WADDLE_CI_BASE_SHA}^{commit}\"\ngit merge-base --is-ancestor \"$WADDLE_CI_BASE_SHA\" \"$WADDLE_CI_HEAD_SHA\"\ngit -c diff.renames=false diff --no-renames --name-only -z \"$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA\" > /dev/null\nWADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py\npython3 scripts/integration-ci-project.py --path operator --pipeline pullRequest --run"
+        env:
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
+          WADDLE_CI_HEAD_SHA: "${{ github.sha }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_operator_pullrequest == 'true' }}"
   waddle_server_authzidcodec__checkauthzidcodec:
     permissions:
       contents: read
@@ -773,6 +809,7 @@ jobs:
       - waddle_colony_pullrequest__waddle-colony-pullrequest
       - waddle_design_pullrequest__waddle-design-pullrequest
       - waddle_linux_pullrequest__waddle-linux-pullrequest
+      - waddle_operator_pullrequest__waddle-operator-pullrequest
       - waddle_server_authzidcodec__checkauthzidcodec
       - waddle_server_federationgrantfencepullrequest__federationgrantfenceproof
       - waddle_server_namespacerustchecks__test
