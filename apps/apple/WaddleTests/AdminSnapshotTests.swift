@@ -115,9 +115,11 @@ final class AdminSnapshotTests: XCTestCase {
         kind: .text, access: AdminRoomAccess(isListed: true, isMembersOnly: false), presentCount: 4, memberCount: 9
     )
 
-    /// A plain room, a hidden announcements room and a forum.
+    /// A plain room, a hidden announcements room and a forum, with every
+    /// space to narrow them to.
     func testRooms() async throws {
         let sample = SampleSession()
+        sample.port.admin.spaces[.init()] = .success(AdminPage(rows: [Self.design], nextCursor: nil))
         sample.port.admin.rooms[.init()] = .success(AdminPage(
             rows: [
                 Self.lounge,
