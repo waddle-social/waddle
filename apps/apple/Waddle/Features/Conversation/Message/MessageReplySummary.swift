@@ -34,6 +34,14 @@ enum MessageReplySummary {
     }
 }
 
+/// Copy for the link under a reply that has a sub-thread.
+enum MessageSubThreadText {
+    /// "2 replies in sub-thread".
+    static func count(_ count: Int) -> String {
+        "\(MessageThreadCardText.count(count)) in sub-thread"
+    }
+}
+
 /// Copy for the attached reply card under a thread root.
 enum MessageThreadCardText {
     static func count(_ count: Int) -> String {

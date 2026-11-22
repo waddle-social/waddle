@@ -114,6 +114,7 @@ private struct MessageRowContent: View {
             for: item,
             authorName: author.name,
             thread: entry.thread,
+            isSubThread: actions.isThread,
             time: item.sentAt.formatted(date: .omitted, time: .shortened)
         )))
         .modifier(MessageAccessibilityActions(
@@ -147,8 +148,8 @@ private struct MessageRowContent: View {
         return session.presence.occupant(named: nick, in: item.conversation.jid)
     }
 
-    /// Touch only, and never inside the thread view, where threads do
-    /// not nest.
+    /// Touch only, and never inside the thread view, where a reply's
+    /// sub-thread opens from its own link.
     private var opensThreadOnTap: Bool {
         #if os(iOS)
         return showsThreadChip && entry.replyCount > 0
@@ -201,8 +202,10 @@ private struct MessageRowContent: View {
         return isHovering ? Color.secondary.opacity(0.07) : Color.clear
     }
 
+    /// The row's thread from the feed; inside a thread, a reply's
+    /// sub-thread.
     private func openThread() {
-        guard let root = item.threadRootID else { return }
+        guard let root = item.threadTarget(inside: actions.thread) else { return }
         navigation.openThread(root, in: item.conversation, usesInspector: placement.usesInspector)
     }
 
@@ -285,8 +288,12 @@ private struct MessageRowBody: View {
         if !item.reactions.isEmpty {
             MessageReactionsBar(item: item)
         }
-        if showsThreadChip, let thread = entry.thread, thread.replyCount > 0 {
-            MessageThreadCard(summary: thread, action: openThread)
+        if let thread = entry.thread, thread.replyCount > 0 {
+            if actions.isThread {
+                MessageSubThreadLink(count: thread.replyCount, action: openThread)
+            } else if showsThreadChip {
+                MessageThreadCard(summary: thread, action: openThread)
+            }
         }
     }
 }

@@ -13,8 +13,9 @@ struct TimelineFeedEntry: Identifiable, Hashable {
     let unreadDivider: TimelineUnreadDivider.Edge?
     /// First row of an author run: shows the avatar and name header.
     let startsGroup: Bool
-    /// XEP-0201 replies in the thread rooted at this row: count, faces
-    /// and the newest loaded reply. Nil when it has none.
+    /// XEP-0201 replies in the thread rooted at this row, its sub-threads'
+    /// included: count, faces and the newest loaded reply. Inside a thread
+    /// view, a reply's sub-thread. Nil when it has none.
     let thread: ThreadSummary?
     /// The XEP-0461 parent, when it is loaded.
     let replyParent: TimelineItem?

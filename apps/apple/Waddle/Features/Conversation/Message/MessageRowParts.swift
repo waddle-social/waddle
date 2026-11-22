@@ -189,6 +189,31 @@ struct MessageThreadCard: View {
     }
 }
 
+/// Under a reply inside a thread: "2 replies in sub-thread", which opens
+/// the sub-thread rooted at that reply.
+struct MessageSubThreadLink: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(MessageSubThreadText.count(count), systemImage: "arrow.turn.down.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(minHeight: Self.minHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("Opens the sub-thread"))
+    }
+
+    #if os(iOS)
+    private static let minHeight = Theme.Size.minHitTarget
+    #else
+    private static let minHeight = WaddleTokens.ControlHeight.xs
+    #endif
+}
+
 /// Raised card surface with a hairline border, and the design system's
 /// hover and press tints.
 private struct MessageThreadCardStyle: ButtonStyle {

@@ -39,7 +39,7 @@ struct MessageContextMenu: View {
                 Label("Reply", systemImage: "arrowshape.turn.up.left")
             }
             .disabled(!canTarget)
-            if !actions.isThread, item.threadRootID != nil {
+            if item.threadTarget(inside: actions.thread) != nil {
                 Button(action: openThread) {
                     Label("Reply in thread", systemImage: "bubble.left.and.bubble.right")
                 }
@@ -150,7 +150,7 @@ struct MessageAccessibilityActions: ViewModifier {
                 Button("Add reaction") { actions.pickReaction(for: item) }
             }
             if replyCount > 0 {
-                Button("Open thread", action: openThread)
+                Button(actions.isThread ? "Open sub-thread" : "Open thread", action: openThread)
             }
             Button("\(authorName), open profile", action: openProfile)
             if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {

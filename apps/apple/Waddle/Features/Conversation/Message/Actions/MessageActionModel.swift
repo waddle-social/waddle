@@ -9,8 +9,10 @@ import WaddleKit
 final class MessageActionModel {
     let conversation: ConversationID
     let composer: ComposerModel
-    /// Rows inside a thread do not offer "Reply in thread".
-    let isThread: Bool
+    /// The thread these rows are in, or nil for the main feed. Inside a
+    /// thread "Reply in thread" opens a reply's sub-thread.
+    let thread: String?
+    var isThread: Bool { thread != nil }
 
     var pendingDeletion: TimelineItem?
     var pendingRemoval: TimelineItem?
@@ -31,10 +33,10 @@ final class MessageActionModel {
 
     @ObservationIgnored private var highlightTask: Task<Void, Never>?
 
-    init(conversation: ConversationID, composer: ComposerModel, isThread: Bool) {
+    init(conversation: ConversationID, composer: ComposerModel, thread: String?) {
         self.conversation = conversation
         self.composer = composer
-        self.isThread = isThread
+        self.thread = thread
     }
 
     func reply(to item: TimelineItem) {

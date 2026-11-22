@@ -237,6 +237,34 @@ final class NavigationModel {
         }
     }
 
+    /// Leaves the sub-thread `rootID` for `parentID`, the thread it hangs
+    /// off. The inspector shows the parent in its place. On the phone the
+    /// stack goes back when the parent is the screen below, else the
+    /// parent replaces the sub-thread (opened from the Inbox, say).
+    func openParentThread(_ parentID: String, of rootID: String, in conversation: ConversationID, usesInspector: Bool) {
+        if usesInspector {
+            inspector = .thread(rootID: parentID)
+            return
+        }
+        let leave = { (path: [Route]) in Self.path(path, leaving: rootID, for: parentID, in: conversation) }
+        switch tab {
+        case .home: homePath = leave(homePath)
+        case .directMessages: directPath = leave(directPath)
+        case .inbox: inboxPath = leave(inboxPath)
+        case .feed, .you: break
+        }
+    }
+
+    private static func path(_ path: [Route], leaving rootID: String, for parentID: String, in conversation: ConversationID) -> [Route] {
+        guard path.last == .thread(conversation, rootID: rootID) else { return path }
+        var path = path
+        path.removeLast()
+        if path.last != .thread(conversation, rootID: parentID) {
+            path.append(.thread(conversation, rootID: parentID))
+        }
+        return path
+    }
+
     func showProfile(_ profile: PeerProfileRoute) {
         sheet = .peer(profile)
     }

@@ -64,6 +64,43 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.homePath, [.conversation(lobby)])
     }
 
+    // MARK: - Sub-threads
+
+    func testASubThreadReplacesItsParentInTheInspectorAndBack() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+        navigation.openThread("root-1", in: lobby, usesInspector: true)
+
+        navigation.openThread("reply-1", in: lobby, usesInspector: true)
+        XCTAssertEqual(navigation.inspector, .thread(rootID: "reply-1"))
+
+        navigation.openParentThread("root-1", of: "reply-1", in: lobby, usesInspector: true)
+        XCTAssertEqual(navigation.inspector, .thread(rootID: "root-1"))
+    }
+
+    func testBackFromASubThreadOnThePhonePopsToItsParent() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+        navigation.openThread("root-1", in: lobby, usesInspector: false)
+        navigation.openThread("reply-1", in: lobby, usesInspector: false)
+        XCTAssertEqual(navigation.homePath, [.conversation(lobby), .thread(lobby, rootID: "root-1"), .thread(lobby, rootID: "reply-1")])
+
+        navigation.openParentThread("root-1", of: "reply-1", in: lobby, usesInspector: false)
+
+        XCTAssertEqual(navigation.homePath, [.conversation(lobby), .thread(lobby, rootID: "root-1")])
+    }
+
+    /// Opened straight from the Inbox, a sub-thread has no parent below it.
+    func testBackFromASubThreadOpenedFromTheInboxShowsItsParentInItsPlace() {
+        let navigation = NavigationModel()
+        navigation.tab = .inbox
+        navigation.inboxPath = [.thread(lobby, rootID: "reply-1")]
+
+        navigation.openParentThread("root-1", of: "reply-1", in: lobby, usesInspector: false)
+
+        XCTAssertEqual(navigation.inboxPath, [.thread(lobby, rootID: "root-1")])
+    }
+
     func testSelectingAnotherConversationClosesTheThread() {
         let navigation = NavigationModel()
         navigation.open(lobby)
