@@ -32,6 +32,41 @@ extension SampleSession {
         }
     }
 
+    /// A 1:1 with theo: a short exchange with a reply and a file, then
+    /// theo typing.
+    func seedTheo() {
+        let theo = Self.theo
+        let ours = Self.ana.jid.with(resource: "mac")!
+        let theirs = theo.with(resource: "phone")!
+        let exchange: [(from: JID, to: JID, id: String, body: String, age: TimeInterval)] = [
+            (theirs, ours, "d1", "Morning! Did the identity drafts land in design-critique?", 1500),
+            (ours, theirs, "d2", "They did. The waddling typing dots are my favourite part.", 1380),
+            (theirs, ours, "d3", "Same. I'll review the rest after lunch.", 1320),
+        ]
+        for entry in exchange {
+            coordinator.timelines.ingest(WireMessage(
+                source: .live,
+                type: .chat,
+                from: entry.from,
+                to: entry.to,
+                identity: MessageIdentity(messageID: entry.id, originID: entry.id, stanzaID: nil, stanzaIDs: []),
+                timestamp: date(-entry.age),
+                body: entry.body
+            ))
+        }
+        var reply = WireMessage(
+            source: .live,
+            type: .chat,
+            from: ours,
+            to: theirs,
+            identity: MessageIdentity(messageID: "d4", originID: "d4", stanzaID: nil, stanzaIDs: []),
+            timestamp: date(-60),
+            body: "Sounds good. No rush."
+        )
+        reply.reply = WireMessage.ReplyTarget(id: "d3", author: theirs, fallback: nil)
+        coordinator.timelines.ingest(reply)
+    }
+
     private func roomMessage(_ body: String?, in room: BareJID, from nick: String, id: String, age: TimeInterval) -> WireMessage {
         WireMessage(
             source: .live,

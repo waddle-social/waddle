@@ -14,11 +14,26 @@ final class ConversationScreenSnapshotTests: XCTestCase {
         sample.navigation.homePath = [.conversation(.room(SampleSession.general))]
         try await assertScreenSnapshot(of: sample.host(PhoneShell()), size: .phone)
     }
+
+    func testPhoneDirect() async throws {
+        let sample = SampleSession()
+        sample.seedTheo()
+        sample.navigation.tab = .directMessages
+        sample.navigation.directPath = [.conversation(.direct(SampleSession.theo))]
+        try await assertScreenSnapshot(of: sample.host(PhoneShell()), size: .phone)
+    }
     #else
     func testSplitRoom() async throws {
         let sample = SampleSession()
         sample.seedGeneral()
         sample.navigation.selection = .room(SampleSession.general)
+        try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .desktop)
+    }
+
+    func testSplitDirect() async throws {
+        let sample = SampleSession()
+        sample.seedTheo()
+        sample.navigation.selection = .direct(SampleSession.theo)
         try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .desktop)
     }
     #endif
