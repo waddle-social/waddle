@@ -33,7 +33,8 @@ pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
     DiscoveredChannel, DiscoveredChannelType, DiscoveredComponentServices, DiscoveredSpace,
     DiscoveredTopology, MucAdminAffiliationItem, RoomBot, RosterResult, SpaceNode, UploadSlot,
-    UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
+    UserBookmark, UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult,
+    WaddleInboxMarkRead,
 };
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

@@ -3,6 +3,7 @@
 //! Binding crates deserialize their own boundary options and call these
 //! helpers; the XMPP fetch/merge/publish/retract semantics live here.
 
+use crate::discovery::UserBookmark;
 use crate::error::ClientError;
 use crate::pep::NS_BOOKMARKS;
 use crate::pep::NS_PUBSUB;
@@ -99,6 +100,8 @@ pub enum SetDmNotificationModeOutcome {
 /// A room with no bookmark yet gets one with `autojoin` on: the user is
 /// using the room, and an own bookmark with `autojoin` off and
 /// notifications off means they left it (see [`set_room_membership`]).
+/// For the same reason muting turns `autojoin` on in a bookmark that has
+/// it off and is not a left one; a left room stays left.
 ///
 /// # Errors
 ///
@@ -115,7 +118,14 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
         options.name,
         "set_room_notification_mode.publish",
         |existing| BookmarkChange {
-            autojoin: existing.is_none_or(|item| item.autojoin),
+            autojoin: existing.is_none_or(|item| {
+                // Choosing a mode never leaves a room. A bookmark that
+                // is not a left one can still have autojoin off (they
+                // used to be created that way); muting it as it is
+                // would give the left shape.
+                item.autojoin
+                    || (mode == NotifyMode::Never && !UserBookmark::from_item(item).has_left())
+            }),
             mode,
             rich_payload,
         },
@@ -726,6 +736,68 @@ mod tests {
             published_conference(&sent[1]).attr("autojoin"),
             Some("true")
         );
+    }
+
+    fn bookmark_with_mode(room_jid: &BareJid, autojoin: bool, mode: NotifyMode) -> BookmarkItem {
+        let extensions = merge_notify_into_extensions(None, mode, RichPushSummary::OptOut);
+        BookmarkItem {
+            jid: room_jid.clone(),
+            name: None,
+            autojoin,
+            nick: None,
+            password: None,
+            extensions: extensions.children().cloned().collect(),
+        }
+    }
+
+    fn publish_mode(existing: BookmarkItem, mode: NotifyMode) -> Element {
+        let room_jid = existing.jid.clone();
+        let driver = MockDriver::new(vec![Ok(bookmarks_response(vec![existing])), Ok(ok_iq())]);
+        block_on(set_room_notification_mode(
+            &driver,
+            SetRoomNotificationMode {
+                room_jid,
+                name: None,
+                mode,
+                rich_payload_opt_in: false,
+            },
+        ))
+        .unwrap();
+        let sent = driver.sent.borrow();
+        published_conference(&sent[1]).clone()
+    }
+
+    #[test]
+    fn muting_a_room_whose_bookmark_has_autojoin_off_does_not_leave_it() {
+        // Bookmarks written only to store a notification mode used to have
+        // autojoin off. Muting one must not produce the left shape
+        // (autojoin off with notifications off).
+        let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
+        let legacy = bookmark_with_mode(&room_jid, false, NotifyMode::OnMention);
+
+        let conference = publish_mode(legacy, NotifyMode::Never);
+
+        assert_eq!(conference.attr("autojoin"), Some("true"));
+    }
+
+    #[test]
+    fn another_mode_on_a_bookmark_with_autojoin_off_keeps_autojoin_off() {
+        let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
+        let legacy = bookmark_with_mode(&room_jid, false, NotifyMode::OnMention);
+
+        let conference = publish_mode(legacy, NotifyMode::Always);
+
+        assert_eq!(conference.attr("autojoin"), None);
+    }
+
+    #[test]
+    fn muting_a_left_room_again_keeps_it_left() {
+        let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
+        let left = bookmark_with_mode(&room_jid, false, NotifyMode::Never);
+
+        let conference = publish_mode(left, NotifyMode::Never);
+
+        assert_eq!(conference.attr("autojoin"), None);
     }
 
     #[test]
