@@ -101,7 +101,10 @@ pub enum SetDmNotificationModeOutcome {
 /// using the room, and an own bookmark with `autojoin` off and
 /// notifications off means they left it (see [`set_room_membership`]).
 /// For the same reason muting turns `autojoin` on in a bookmark that has
-/// it off and is not a left one; a left room stays left.
+/// it off and is not a left one. A left room stays left: its mode stays
+/// `never` whatever is asked for, only the rich push opt-in is stored,
+/// and the returned item carries what the bookmark now holds. Rejoin
+/// with [`set_room_membership`] to change its mode.
 ///
 /// # Errors
 ///
@@ -117,17 +120,20 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
         options.room_jid,
         options.name,
         "set_room_notification_mode.publish",
-        |existing| BookmarkChange {
-            autojoin: existing.is_none_or(|item| {
-                // Choosing a mode never leaves a room. A bookmark that
-                // is not a left one can still have autojoin off (they
-                // used to be created that way); muting it as it is
-                // would give the left shape.
-                item.autojoin
-                    || (mode == NotifyMode::Never && !UserBookmark::from_item(item).has_left())
-            }),
-            mode,
-            rich_payload,
+        |existing| {
+            let has_left = existing.is_some_and(|item| UserBookmark::from_item(item).has_left());
+            BookmarkChange {
+                // Choosing a mode neither leaves a room nor rejoins it.
+                // A bookmark that is not a left one can still have
+                // autojoin off (they used to be created that way);
+                // muting it as it is would give the left shape.
+                autojoin: existing
+                    .is_none_or(|item| item.autojoin || (mode == NotifyMode::Never && !has_left)),
+                // A left room keeps its notifications off, or it would
+                // stop being one. The returned item says so.
+                mode: if has_left { NotifyMode::Never } else { mode },
+                rich_payload,
+            }
         },
     )
     .await?;
@@ -788,6 +794,53 @@ mod tests {
         let conference = publish_mode(legacy, NotifyMode::Always);
 
         assert_eq!(conference.attr("autojoin"), None);
+    }
+
+    #[test]
+    fn a_notification_mode_does_not_undo_a_leave() {
+        // The bookmark is the one leaving publishes, not a hand-built one.
+        let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
+        let driver = MockDriver::new(vec![Ok(bookmarks_response(Vec::new())), Ok(ok_iq())]);
+        let SetRoomMembershipOutcome::Ok { item: left } = block_on(set_room_membership(
+            &driver,
+            SetRoomMembership {
+                room_jid: room_jid.clone(),
+                name: None,
+                membership: RoomMembership::Left,
+            },
+        ))
+        .unwrap() else {
+            panic!("expected ok outcome");
+        };
+        assert!(UserBookmark::from_item(&left).has_left());
+
+        for mode in [NotifyMode::Always, NotifyMode::OnMention] {
+            let driver = MockDriver::new(vec![
+                Ok(bookmarks_response(vec![left.clone()])),
+                Ok(ok_iq()),
+            ]);
+            let outcome = block_on(set_room_notification_mode(
+                &driver,
+                SetRoomNotificationMode {
+                    room_jid: room_jid.clone(),
+                    name: None,
+                    mode,
+                    rich_payload_opt_in: true,
+                },
+            ))
+            .unwrap();
+
+            // The caller is told what was stored, which is still a leave.
+            let SetRoomNotificationModeOutcome::Ok { item } = outcome else {
+                panic!("expected ok outcome");
+            };
+            assert!(UserBookmark::from_item(&item).has_left());
+            let surfaced = surface_bookmark_notify(&item.extensions);
+            assert_eq!(surfaced.fallback_mode, Some(NotifyMode::Never));
+            assert!(surfaced.rich_payload_opt_in);
+            let sent = driver.sent.borrow();
+            assert_eq!(published_conference(&sent[1]).attr("autojoin"), None);
+        }
     }
 
     #[test]
