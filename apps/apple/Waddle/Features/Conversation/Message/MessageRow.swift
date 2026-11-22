@@ -139,7 +139,7 @@ private struct MessageRowContent: View {
             opensThreadOnActivate: opensThreadOnTap,
             authorName: author.name,
             openThread: openThread,
-            hasSubThreadLink: actions.isThread && entry.replyCount > 0,
+            hasSubThreadLink: entry.replyCount > 0 && item.threadTarget(inside: actions.thread) != nil,
             openProfile: { openProfile(author) },
             openImage: openImage
         ))

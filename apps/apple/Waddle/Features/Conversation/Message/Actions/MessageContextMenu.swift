@@ -123,7 +123,8 @@ struct MessageAccessibilityActions: ViewModifier {
     let opensThreadOnActivate: Bool
     let authorName: String
     let openThread: () -> Void
-    /// A reply in a thread view whose sub-thread has messages.
+    /// A row with a thread of its own to open: a post with replies in the
+    /// feed, or a reply in a thread view whose sub-thread has messages.
     let hasSubThreadLink: Bool
     let openProfile: () -> Void
     let openImage: (SharedFile) -> Void
@@ -152,8 +153,9 @@ struct MessageAccessibilityActions: ViewModifier {
             ForEach(spoken, id: \.self) { action in
                 Button(action.accessibilityLabel) { perform(action) }
             }
-            // A deleted reply has no actions but keeps its sub-thread.
-            if item.tombstone != nil, opensThreadOnActivate || hasSubThreadLink {
+            // A deleted message has no actions but keeps its thread, on
+            // every platform and in the feed as well as inside a thread.
+            if item.tombstone != nil, hasSubThreadLink {
                 Button("Open thread", action: openThread)
             }
             Button("\(authorName), open profile", action: openProfile)

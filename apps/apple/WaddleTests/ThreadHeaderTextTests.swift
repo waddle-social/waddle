@@ -27,8 +27,9 @@ final class ThreadHeaderTextTests: XCTestCase {
     func testEveryPart() {
         let parts = ThreadHeaderText.parts(header(startedBy: "priya", lastActivity: now.addingTimeInterval(-13 * 60)), now: now)
         XCTAssertEqual(parts.lead, ["Started by priya", "4 replies"])
-        // The words follow the device's language; in English "13 min ago".
-        XCTAssertTrue(parts.activity?.hasPrefix("active 13 min") == true, "\(parts.activity ?? "nil")")
+        // The unit's wording follows the device's language and region
+        // ("13 min. ago", "13m ago"); the number does not.
+        XCTAssertTrue(parts.activity?.hasPrefix("active 13") == true, "\(parts.activity ?? "nil")")
     }
 
     /// A reply stamped a little ahead of this device's clock.
