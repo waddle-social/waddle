@@ -187,6 +187,10 @@ private func renderScreen<V: View>(
 
     let format = UIGraphicsImageRendererFormat()
     format.scale = 2
+    // 8-bit sRGB, as the goldens are stored. The automatic range can
+    // render glass in extended colour, which then never matches the PNG
+    // read back from disk.
+    format.preferredRange = .standard
     return UIGraphicsImageRenderer(size: size, format: format).image { _ in
         window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
     }
