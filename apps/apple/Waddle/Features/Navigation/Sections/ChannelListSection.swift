@@ -19,6 +19,11 @@ struct ChannelListSection: View {
         ForEach(channels) { channel in
             ChannelNavigationRow(channel: channel, style: style)
         }
+        if !session.directory.leftRooms.isEmpty && !isSearching {
+            NavigationEmptyAction(title: "Rooms you left", symbol: "arrow.uturn.backward") {
+                navigation.sheet = .leftRooms
+            }
+        }
     }
 
     @ViewBuilder

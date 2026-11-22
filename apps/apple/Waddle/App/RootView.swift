@@ -121,6 +121,8 @@ private struct SheetHost: View {
             NewMessageSheet()
         case .newChannel:
             NewChannelSheet()
+        case .leftRooms:
+            LeftRoomsSheet()
         case .profile:
             NavigationStack { ProfileView() }
         case .settings:

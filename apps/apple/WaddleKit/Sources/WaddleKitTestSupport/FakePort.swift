@@ -37,6 +37,16 @@ final class FakePort: XmppPort {
         let mode: NotifyMode
         let showsMessagesInPush: Bool
     }
+    struct MembershipWrite: Equatable {
+        let room: BareJID
+        let membership: RoomMembership
+        let name: String?
+    }
+    /// Membership records the server accepted.
+    var membershipWrites: [MembershipWrite] = []
+    var membershipWriteResult: Result<Void, PortError> = .success(())
+    /// Rooms a leave presence was sent to.
+    var left: [BareJID] = []
     var notifySettingsWrites: [NotifySettingsWrite] = []
     var notifySettingsWriteResult: Result<Void, PortError> = .success(())
     /// Results for the next writes, in order, before `notifySettingsWriteResult`.
@@ -336,7 +346,15 @@ final class FakePort: XmppPort {
         joined.append(room)
     }
 
-    func leaveRoom(_ room: BareJID, nick: String) async {}
+    func leaveRoom(_ room: BareJID, nick: String) async {
+        left.append(room)
+    }
+
+    func setRoomMembership(_ membership: RoomMembership, of room: BareJID, name: String?) async throws {
+        await holdDirectoryVerb("setRoomMembership")
+        try membershipWriteResult.get()
+        membershipWrites.append(.init(room: room, membership: membership, name: name))
+    }
     func listMembers(of room: BareJID) async throws -> [RoomMember] { [] }
     func listRoomBots(in room: BareJID) async throws -> [RoomBot] {
         roomBotRequests.append(room)
@@ -362,6 +380,7 @@ final class FakePort: XmppPort {
 
     func setNotifyMode(_ mode: NotifyMode, showsMessagesInPush: Bool, for conversation: ConversationID) async throws {
         notifySettingsWrites.append(.init(conversation: conversation, mode: mode, showsMessagesInPush: showsMessagesInPush))
+        await holdDirectoryVerb("setNotifyMode")
         let result = notifySettingsWriteResults.isEmpty ? notifySettingsWriteResult : notifySettingsWriteResults.removeFirst()
         try result.get()
         notifySettings.modes[conversation] = mode

@@ -12,6 +12,14 @@ public enum PortError: Error, Equatable, Sendable {
     case failed
 }
 
+/// Whether the account is in a room, as recorded for all its devices.
+public enum RoomMembership: Hashable, Sendable {
+    /// Left: no device joins the room, and it sends no notifications.
+    case left
+    /// In the room, with `notifyMode` as its notification mode.
+    case joined(notifyMode: NotifyMode)
+}
+
 /// Outcome of a message send.
 public enum SendOutcome: Equatable, Sendable {
     /// Written to the stream under this client stanza id.
@@ -105,6 +113,9 @@ public protocol DirectoryPort: AnyObject, Sendable {
     func discoverTopology() async -> Result<Topology, PortError>
     func joinRoom(_ room: BareJID, nick: String) async
     func leaveRoom(_ room: BareJID, nick: String) async
+    /// Records on the account that it left or rejoined the room, for all
+    /// its devices. Sends nothing to the room itself.
+    func setRoomMembership(_ membership: RoomMembership, of room: BareJID, name: String?) async throws
     /// Fetches the room settings offered by the server.
     func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings
     /// Updates only the fields included in the patch.

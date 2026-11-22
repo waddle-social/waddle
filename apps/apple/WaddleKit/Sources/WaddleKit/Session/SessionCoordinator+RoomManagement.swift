@@ -20,13 +20,13 @@ extension SessionCoordinator {
     /// is left first, and stays left if the server refuses. Throws
     /// `PortError` on failure.
     public func deleteRoom(_ room: BareJID) async throws {
-        try await giveUp(room, forGood: true) { try await port.destroyRoom(room, reason: nil) }
+        try await giveUp(room, .destroyed) { try await port.destroyRoom(room, reason: nil) }
     }
 
     /// Deletes a room from the admin console, with the same care: the
     /// owner of the community need not be in the room or hold a role in it.
     public func deleteAdminRoom(_ room: AdminRoom) async throws {
-        try await giveUp(room.jid, forGood: true) { try await port.deleteAdminRoom(room.jid) }
+        try await giveUp(room.jid, .destroyed) { try await port.deleteAdminRoom(room.jid) }
     }
 
     /// Renames a group DM; whitespace-only names clear it. Throws `PortError` on failure.
@@ -49,7 +49,46 @@ extension SessionCoordinator {
     /// first, and stays left if the server refuses. Throws `PortError` on
     /// failure.
     public func leaveGroupDM(_ room: BareJID) async throws {
-        try await giveUp(room, forGood: false) { try await port.leaveGroupDM(room) }
+        try await giveUp(room, .forgotten) { try await port.leaveGroupDM(room) }
+    }
+
+    /// Leaves a room on every device of the account, until it rejoins:
+    /// the account records that it left, with the room's notifications
+    /// off, and this session leaves the room. The room stays known, among
+    /// the rooms the account left, and the account keeps its role there.
+    /// A huddle there is left first. Throws `PortError` on failure.
+    public func leaveRoom(_ room: BareJID) async throws {
+        guard let channel = directory.channel(for: room), !channel.isGroupDM else { throw PortError.invalidRequest }
+        let nick = presence.selfNicks[room] ?? account.nick
+        try await giveUp(room, .left) {
+            try await afterEarlierBookmarkWrites(to: .room(room)) { [port] in
+                try await port.setRoomMembership(.left, of: room, name: channel.name)
+            }
+            await port.leaveRoom(room, nick: nick)
+        }
+    }
+
+    /// Rejoins a room the account left, with the room's default
+    /// notifications. The rooms are looked up first: joining a room that
+    /// was deleted meanwhile would create it. Throws `RoomRejoinError`
+    /// when the room is gone, `PortError` otherwise.
+    public func rejoinRoom(_ room: BareJID) async throws {
+        guard !isStopped, status.connection == .online else { throw PortError.notConnected }
+        guard await refreshDirectory(joiningOnlyNewRooms: true) else { throw PortError.failed }
+        guard let channel = directory.channel(for: room), !isFenced(room) else { throw RoomRejoinError.roomIsGone }
+        // Rejoined on another device meanwhile: the lookup joined it.
+        guard channel.hasLeft else { return }
+        try await managing(room) { generation in
+            let mode = directory.defaultNotifyMode(for: .room(room))
+            try await afterEarlierBookmarkWrites(to: .room(room)) { [port] in
+                try await port.setRoomMembership(.joined(notifyMode: mode), of: room, name: channel.name)
+            }
+            guard isCurrent(generation) else { return }
+            upsertChannel(channel.with(hasLeft: false))
+            directory.setNotifyMode(mode, for: .room(room))
+            silenceLeftRooms()
+            await ensureJoined(room)
+        }
     }
 
     /// Runs one management action on `room`. A second action on the same
@@ -75,8 +114,9 @@ extension SessionCoordinator {
     /// of ours may reach the room once the request is sent: joins already
     /// on their way and the huddle's leave go first, and the room is fenced
     /// from joins and sealed from huddle presence until the request
-    /// settles. `forGood` keeps both for the rest of the session.
-    private func giveUp(_ room: BareJID, forGood: Bool, with request: () async throws -> Void) async throws {
+    /// settles. A destroyed room keeps both for the rest of the session.
+    private func giveUp(_ room: BareJID, _ exit: RoomExit, with request: () async throws -> Void) async throws {
+        let forGood = exit == .destroyed
         try await managing(room) { generation in
             departingRooms.insert(room)
             defer {
@@ -121,8 +161,14 @@ extension SessionCoordinator {
             } else {
                 calls.sealedGroupRooms.remove(room)
             }
-            directory.remove(room)
-            directoryMutations.append(.remove(room))
+            if exit == .left, let channel = directory.channel(for: room) {
+                upsertChannel(channel.with(hasLeft: true))
+                directory.setNotifyMode(.never, for: .room(room))
+                silenceLeftRooms()
+            } else {
+                directory.remove(room)
+                directoryMutations.append(.remove(room))
+            }
             onDemandRooms.remove(room)
             presence.markLeft(room)
             unread.clearRoom(room)
@@ -156,6 +202,22 @@ extension SessionCoordinator {
         guard let channel = directory.channel(for: room) else { return }
         upsertChannel(channel.with(name: name ?? channel.name, summary: summary ?? channel.summary))
     }
+}
+
+/// How a room is given up.
+private enum RoomExit {
+    /// Deleted for everyone.
+    case destroyed
+    /// Left for good (a group DM): forgotten here.
+    case forgotten
+    /// Left until the account rejoins: kept among the rooms it left.
+    case left
+}
+
+/// Why a room could not be rejoined.
+public enum RoomRejoinError: Error, Equatable, Sendable {
+    /// The room no longer exists.
+    case roomIsGone
 }
 
 /// A successful local directory change made while discovery may be suspended.

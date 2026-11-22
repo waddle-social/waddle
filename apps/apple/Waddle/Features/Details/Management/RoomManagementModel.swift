@@ -39,7 +39,7 @@ final class RoomManagementModel {
         case .editSettings: sheet = .editRoom
         case .renameGroup: sheet = .renameGroup
         case .inviteToGroup: sheet = .addPeople
-        case .delete, .leaveGroup: pendingExit = action
+        case .delete, .leaveGroup, .leaveRoom: pendingExit = action
         }
     }
 
@@ -51,6 +51,7 @@ final class RoomManagementModel {
         switch action {
         case .delete: request = { try await session.deleteRoom(self.room) }
         case .leaveGroup: request = { try await session.leaveGroupDM(self.room) }
+        case .leaveRoom: request = { try await session.leaveRoom(self.room) }
         case .editSettings, .renameGroup, .inviteToGroup: return
         }
         pendingExit = nil

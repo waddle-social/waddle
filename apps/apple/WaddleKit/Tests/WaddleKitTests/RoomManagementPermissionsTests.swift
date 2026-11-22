@@ -6,15 +6,21 @@ struct RoomManagementPermissionsTests {
     @Test func missingChannelOffersNothing() {
         #expect(RoomManagementPermissions.actions(for: nil, occupant: nil) == [])
     }
-    @Test func normalRoomRequiresExactlyOwnerAffiliation() {
+    @Test func anyoneCanLeaveARoomAndOnlyItsOwnerCanEditOrDeleteIt() {
         let channel = Channel(roomJID: BareJID(localpart: "general", domain: "muc.waddle.test")!, name: "General")
         let rows: [(RoomAffiliation?, [RoomManagementAction])] = [
-            (.owner, [.editSettings, .delete]), (.admin, []), (.member, []),
-            (RoomAffiliation.none, []), (.outcast, []), (nil, []),
+            (.owner, [.editSettings, .leaveRoom, .delete]), (.admin, [.leaveRoom]), (.member, [.leaveRoom]),
+            (RoomAffiliation.none, [.leaveRoom]), (.outcast, [.leaveRoom]), (nil, [.leaveRoom]),
         ]
         for (affiliation, expected) in rows {
             #expect(RoomManagementPermissions.actions(for: channel, occupant: occupant(affiliation)) == expected)
         }
+    }
+
+    @Test func aRoomTheAccountLeftOffersNothing() {
+        let channel = Channel(
+            roomJID: BareJID(localpart: "general", domain: "muc.waddle.test")!, name: "General", hasLeft: true)
+        #expect(RoomManagementPermissions.actions(for: channel, occupant: occupant(.owner)) == [])
     }
 
     @Test func groupMembersCanRenameAndInviteAndEveryoneCanLeave() {

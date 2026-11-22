@@ -53,6 +53,59 @@ final class RoomManagementModelTests: XCTestCase {
         ))
     }
 
+    func testLeavingARoomMovesNavigationOffItAndListsItAsLeft() async {
+        let sample = SampleSession()
+        sample.navigation.open(.room(SampleSession.design))
+        let model = RoomManagementModel(room: SampleSession.design)
+        model.select(.leaveRoom)
+        XCTAssertEqual(model.pendingExit, .leaveRoom)
+
+        await model.exit(.leaveRoom, using: sample.coordinator, navigation: sample.navigation)
+
+        XCTAssertEqual(sample.port.membershipWrites.map(\.membership), [.left])
+        XCTAssertNil(sample.navigation.selection)
+        XCTAssertEqual(sample.coordinator.directory.leftRooms.map(\.roomJID), [SampleSession.design])
+        XCTAssertNil(model.exitFailure)
+    }
+
+    func testLeavingARoomSaysItCanBeJoinedAgain() {
+        let leave = RoomExitConfirmation(.leaveRoom, name: "design")
+        XCTAssertEqual(leave?.title, "Leave “design”?")
+        XCTAssertEqual(
+            leave?.message,
+            "You'll stop getting its messages on all your devices. You can join again from Rooms you left."
+        )
+        XCTAssertEqual(leave?.confirmTitle, "Leave room")
+    }
+
+    func testJoiningALeftRoomOpensIt() async throws {
+        let sample = SampleSession()
+        try await sample.coordinator.leaveRoom(SampleSession.design)
+        sample.port.topology = Topology(
+            spaces: [], channels: sample.coordinator.directory.channels + sample.coordinator.directory.leftRooms)
+        let model = LeftRoomsModel()
+
+        let joined = await model.join(SampleSession.design, using: sample.coordinator, navigation: sample.navigation)
+
+        XCTAssertTrue(joined)
+        XCTAssertEqual(sample.navigation.selection, .room(SampleSession.design))
+        XCTAssertTrue(sample.coordinator.directory.leftRooms.isEmpty)
+        XCTAssertNil(model.failure)
+    }
+
+    func testJoiningARoomThatIsGoneSaysSo() async throws {
+        let sample = SampleSession()
+        try await sample.coordinator.leaveRoom(SampleSession.design)
+        sample.port.topology = .empty
+        let model = LeftRoomsModel()
+
+        let joined = await model.join(SampleSession.design, using: sample.coordinator, navigation: sample.navigation)
+
+        XCTAssertFalse(joined)
+        XCTAssertEqual(model.failure, "That room no longer exists.")
+        XCTAssertNil(sample.navigation.selection)
+    }
+
     func testConfirmationsNameTheConversation() {
         let delete = RoomExitConfirmation(.delete, name: "design")
         XCTAssertEqual(delete?.title, "Delete “design”?")

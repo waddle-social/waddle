@@ -25,6 +25,7 @@ enum Route: Hashable {
 enum SheetRoute: Identifiable, Hashable {
     case newMessage
     case newChannel
+    case leftRooms
     case profile
     case settings
     case search(ConversationID)

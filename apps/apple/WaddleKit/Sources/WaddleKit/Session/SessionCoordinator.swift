@@ -408,6 +408,7 @@ public final class SessionCoordinator {
         roomBots.clear()
         typing.clear()
         unread.clearAll()
+        unread.silence([])
         deliveries.clear()
         pins.clear()
         avatars.clear()
