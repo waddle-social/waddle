@@ -1013,6 +1013,7 @@ mod tests {
             position,
             space_id: "default".into(),
             autojoin: true,
+            has_left: false,
             bookmark_name: None,
             is_group_dm: group_dm,
             members_only: None,
@@ -1136,6 +1137,7 @@ mod tests {
                 channel("dm-ann-bob", 0, true),
                 channel("general", 1, false),
             ],
+            bookmarks_loaded: true,
         });
         let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
         assert_eq!(names, ["general", "random"]);

@@ -849,6 +849,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_us
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_membership(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server(
@@ -1143,6 +1145,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_bookm
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_bookmarks(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_dm_notification_mode(`ptr`: Long,`dmJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_membership(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`membership`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notification_mode(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
 ): Long
@@ -1634,7 +1638,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode() != 30190) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_membership() != 58882) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 9598) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server() != 33996) {
@@ -2934,10 +2941,21 @@ public interface WaddleClientInterface {
     suspend fun `setDmNotificationMode`(`dmJid`: kotlin.String, `mode`: WaddleNotifyMode, `richPayloadOptIn`: kotlin.Boolean): WaddleSetDmNotificationModeOutcome
 
     /**
+     * Leave or rejoin a room for every client of the account, by
+     * publishing the user's XEP-0402 bookmark for it: `autojoin` off
+     * and notifications off when leaving (XEP-0402 §4), `autojoin` on
+     * and the given notification mode when rejoining. Everything else
+     * on the bookmark is kept. This does not send room presence; pair
+     * it with `leave_room` or `join_room`.
+     */
+    suspend fun `setRoomMembership`(`roomJid`: kotlin.String, `membership`: WaddleRoomMembership, `name`: kotlin.String?): WaddleSetRoomMembershipOutcome
+
+    /**
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
-     * (creating one with `autojoin=false` when absent, so the call
-     * never changes join behavior). Foreign `<advanced/>` children
+     * (creating one with `autojoin=true` when absent: an own bookmark
+     * with `autojoin` off and notifications off means the user left
+     * the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -5606,10 +5624,40 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * Leave or rejoin a room for every client of the account, by
+     * publishing the user's XEP-0402 bookmark for it: `autojoin` off
+     * and notifications off when leaving (XEP-0402 §4), `autojoin` on
+     * and the given notification mode when rejoining. Everything else
+     * on the bookmark is kept. This does not send room presence; pair
+     * it with `leave_room` or `join_room`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setRoomMembership`(`roomJid`: kotlin.String, `membership`: WaddleRoomMembership, `name`: kotlin.String?) : WaddleSetRoomMembershipOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_membership(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterTypeWaddleRoomMembership.lower(`membership`),FfiConverterOptionalString.lower(`name`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleSetRoomMembershipOutcome.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
-     * (creating one with `autojoin=false` when absent, so the call
-     * never changes join behavior). Foreign `<advanced/>` children
+     * (creating one with `autojoin=true` when absent: an own bookmark
+     * with `autojoin` off and notifications off means the user left
+     * the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -8937,6 +8985,14 @@ data class WaddleChannel (
     var `autojoin`: kotlin.Boolean
     ,
     /**
+     * The user left the room: their own XEP-0402 bookmark for it has
+     * `autojoin` off and notifications off, as `set_room_membership`
+     * publishes. `false` when they have no bookmark, or when it could
+     * not be read (see [`WaddleTopology::bookmarks_loaded`]).
+     */
+    var `hasLeft`: kotlin.Boolean = false
+    ,
+    /**
      * `<conference name='…'>` from the user's XEP-0402 bookmark,
      * when present.
      */
@@ -8978,6 +9034,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterInt.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
@@ -8993,6 +9050,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterInt.allocationSize(value.`position`) +
             FfiConverterString.allocationSize(value.`spaceId`) +
             FfiConverterBoolean.allocationSize(value.`autojoin`) +
+            FfiConverterBoolean.allocationSize(value.`hasLeft`) +
             FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
             FfiConverterBoolean.allocationSize(value.`isGroupDm`) +
             FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
@@ -9007,6 +9065,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterInt.write(value.`position`, buf)
             FfiConverterString.write(value.`spaceId`, buf)
             FfiConverterBoolean.write(value.`autojoin`, buf)
+            FfiConverterBoolean.write(value.`hasLeft`, buf)
             FfiConverterOptionalString.write(value.`bookmarkName`, buf)
             FfiConverterBoolean.write(value.`isGroupDm`, buf)
             FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
@@ -13694,6 +13753,12 @@ data class WaddleTopology (
     var `spaces`: List<WaddleSpace>
     ,
     var `channels`: List<WaddleChannel>
+    ,
+    /**
+     * Whether the user's own XEP-0402 bookmarks were read. When
+     * `false`, no channel's `has_left` says which rooms the user left.
+     */
+    var `bookmarksLoaded`: kotlin.Boolean = true
 
 ){
 
@@ -13712,17 +13777,20 @@ public object FfiConverterTypeWaddleTopology: FfiConverterRustBuffer<WaddleTopol
         return WaddleTopology(
             FfiConverterSequenceTypeWaddleSpace.read(buf),
             FfiConverterSequenceTypeWaddleChannel.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleTopology) = (
             FfiConverterSequenceTypeWaddleSpace.allocationSize(value.`spaces`) +
-            FfiConverterSequenceTypeWaddleChannel.allocationSize(value.`channels`)
+            FfiConverterSequenceTypeWaddleChannel.allocationSize(value.`channels`) +
+            FfiConverterBoolean.allocationSize(value.`bookmarksLoaded`)
     )
 
     override fun write(value: WaddleTopology, buf: ByteBuffer) {
             FfiConverterSequenceTypeWaddleSpace.write(value.`spaces`, buf)
             FfiConverterSequenceTypeWaddleChannel.write(value.`channels`, buf)
+            FfiConverterBoolean.write(value.`bookmarksLoaded`, buf)
     }
 }
 
@@ -16977,6 +17045,90 @@ public object FfiConverterTypeWaddleReferenceType : FfiConverterRustBuffer<Waddl
 
 
 /**
+ * Whether the user is in a room, as their own XEP-0402 bookmark
+ * records it for every client of the account.
+ */
+sealed class WaddleRoomMembership {
+
+    /**
+     * Left: `autojoin` off and notifications off.
+     */
+    object Left : WaddleRoomMembership()
+
+
+    /**
+     * In the room: `autojoin` on, with `notify_mode` as its
+     * notification mode.
+     */
+    data class Joined(
+        val `notifyMode`: social.waddle.client.ffi.WaddleNotifyMode) : WaddleRoomMembership()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRoomMembership : FfiConverterRustBuffer<WaddleRoomMembership>{
+    override fun read(buf: ByteBuffer): WaddleRoomMembership {
+        return when(buf.getInt()) {
+            1 -> WaddleRoomMembership.Left
+            2 -> WaddleRoomMembership.Joined(
+                FfiConverterTypeWaddleNotifyMode.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleRoomMembership) = when(value) {
+        is WaddleRoomMembership.Left -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleRoomMembership.Joined -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleNotifyMode.allocationSize(value.`notifyMode`)
+            )
+        }
+    }
+
+    override fun write(value: WaddleRoomMembership, buf: ByteBuffer) {
+        when(value) {
+            is WaddleRoomMembership.Left -> {
+                buf.putInt(1)
+                Unit
+            }
+            is WaddleRoomMembership.Joined -> {
+                buf.putInt(2)
+                FfiConverterTypeWaddleNotifyMode.write(value.`notifyMode`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
  * Judgment categories. Unknown wire categories never reach this enum:
  * the parser skips them.
  */
@@ -17338,6 +17490,106 @@ public object FfiConverterTypeWaddleSetDmNotificationModeOutcome : FfiConverterR
             }
             is WaddleSetDmNotificationModeOutcome.Error -> {
                 buf.putInt(4)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * Typed outcome of [`WaddleClient::set_room_membership`]. Mirrors
+ * [`WaddleSetRoomNotificationModeOutcome`].
+ */
+sealed class WaddleSetRoomMembershipOutcome {
+
+    /**
+     * The bookmark was published. Carries the surfaced item.
+     */
+    data class Ok(
+        val `item`: social.waddle.client.ffi.WaddleBookmarkItem) : WaddleSetRoomMembershipOutcome()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * XEP-0060 `precondition-not-met` on the publish.
+     */
+    object NodeConfigMismatch : WaddleSetRoomMembershipOutcome()
+
+
+    /**
+     * Any other stanza-level error (condition stays on the Rust side).
+     */
+    object Error : WaddleSetRoomMembershipOutcome()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSetRoomMembershipOutcome : FfiConverterRustBuffer<WaddleSetRoomMembershipOutcome>{
+    override fun read(buf: ByteBuffer): WaddleSetRoomMembershipOutcome {
+        return when(buf.getInt()) {
+            1 -> WaddleSetRoomMembershipOutcome.Ok(
+                FfiConverterTypeWaddleBookmarkItem.read(buf),
+                )
+            2 -> WaddleSetRoomMembershipOutcome.NodeConfigMismatch
+            3 -> WaddleSetRoomMembershipOutcome.Error
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleSetRoomMembershipOutcome) = when(value) {
+        is WaddleSetRoomMembershipOutcome.Ok -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleBookmarkItem.allocationSize(value.`item`)
+            )
+        }
+        is WaddleSetRoomMembershipOutcome.NodeConfigMismatch -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleSetRoomMembershipOutcome.Error -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddleSetRoomMembershipOutcome, buf: ByteBuffer) {
+        when(value) {
+            is WaddleSetRoomMembershipOutcome.Ok -> {
+                buf.putInt(1)
+                FfiConverterTypeWaddleBookmarkItem.write(value.`item`, buf)
+                Unit
+            }
+            is WaddleSetRoomMembershipOutcome.NodeConfigMismatch -> {
+                buf.putInt(2)
+                Unit
+            }
+            is WaddleSetRoomMembershipOutcome.Error -> {
+                buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

@@ -78,10 +78,12 @@ import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleRoomMemberEntry
+import social.waddle.client.ffi.WaddleRoomMembership
 import social.waddle.client.ffi.WaddleRosterContact
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSetRoomMembershipOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
 import social.waddle.client.ffi.WaddleStatusPreference
@@ -1519,6 +1521,13 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         mode: WaddleNotifyMode,
         richPayloadOptIn: Boolean,
     ): WaddleSetDmNotificationModeOutcome = notify.setDmMode(dmJid, mode, richPayloadOptIn)
+
+    /** Android has no leave-a-room flow yet; nothing calls this. */
+    override suspend fun setRoomMembership(
+        roomJid: String,
+        membership: WaddleRoomMembership,
+        name: String?,
+    ): WaddleSetRoomMembershipOutcome = WaddleSetRoomMembershipOutcome.Error
 
     /** Extension-command verbs, sliced out into [FakeExtensionCommandVerbs]. */
     val extensionCommands = FakeExtensionCommandVerbs()

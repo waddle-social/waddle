@@ -221,7 +221,8 @@ impl WaddleClient {
     /// Set the per-chat XEP-0492 notification mode for one room by
     /// merging into the user's XEP-0402 bookmark for that room. If no
     /// bookmark exists yet for `room_jid`, one is created with
-    /// `autojoin=false` so this call doesn't change join behavior.
+    /// `autojoin=true`: an own bookmark with `autojoin` off and
+    /// notifications off means the user left the room.
     ///
     /// Semantics:
     /// * Fetch existing PEP bookmarks (XEP-0402 §2). A missing PEP
