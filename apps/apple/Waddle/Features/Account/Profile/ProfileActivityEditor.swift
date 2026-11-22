@@ -21,8 +21,10 @@ struct ProfileActivityEditor: View {
 
     var body: some View {
         Form {
-            Section("What are you doing?") {
+            Section {
                 ProfileChoiceGrid(choices: ProfileActivityCatalog.choices(including: current?.general), selection: $general)
+            } header: {
+                FormSectionHeader("What are you doing?")
             }
             Section {
                 if !specifics.isEmpty {
@@ -34,20 +36,18 @@ struct ProfileActivityEditor: View {
                     }
                 }
                 TextField("Note", text: $note, prompt: Text("Add a note (optional)"))
+                    .huddleText(Theme.Typography.body)
                     .submitLabel(.done)
                     .onSubmit(publish)
             } footer: {
-                Text("Your activity is shared with your contacts.")
+                FormSectionFooter("Your activity is shared with your contacts.")
             }
             ProfileSaveError(save: save)
             if current != nil {
-                Section {
-                    Button("Clear activity", role: .destructive, action: clear)
-                        .disabled(save.isSaving)
-                }
+                ProfileClearButton(title: "Clear activity", save: save, action: clear)
             }
         }
-        .formStyle(.grouped)
+        .huddleForm()
         .navigationTitle("Activity")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)

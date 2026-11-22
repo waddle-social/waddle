@@ -44,7 +44,7 @@ struct RoomMembersView: View {
                     MemberCardRow(room: room, card: card, model: model)
                 }
                 if !bots.isEmpty {
-                    DetailsSectionHeader("Bots")
+                    FormSectionHeader("Bots")
                         .padding(.top, Theme.Spacing.l)
                         .padding(.bottom, Theme.Spacing.xxs)
                         .accessibilityAddTraits(.isHeader)

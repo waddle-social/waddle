@@ -11,26 +11,30 @@ struct ProfileAvatarControls: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-            HStack(spacing: Theme.Spacing.m) {
+            // Android `profile`: a pill under the header.
+            HStack(spacing: Theme.Spacing.s) {
                 PhotosPicker(selection: $pickedItem, matching: .images) {
-                    Label(hasAvatar ? "Change photo" : "Add photo", systemImage: "photo.on.rectangle")
+                    Label(hasAvatar ? "Change avatar" : "Add avatar", systemImage: "camera")
                 }
+                .buttonStyle(.huddle(size: .small))
                 if hasAvatar {
-                    Button("Remove photo", role: .destructive, action: remove)
+                    Button("Remove avatar", role: .destructive, action: remove)
+                        .buttonStyle(.huddle(.danger, size: .small))
                 }
-                Spacer(minLength: 0)
                 if isWorking {
                     ProgressView()
                         .controlSize(.small)
-                        .accessibilityLabel(Text("Updating photo"))
+                        .accessibilityLabel(Text("Updating avatar"))
                 }
             }
-            .buttonStyle(.borderless)
+            .frame(maxWidth: .infinity)
             .disabled(isWorking)
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.dangerText)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
             }
         }
         .onChange(of: pickedItem) { _, item in

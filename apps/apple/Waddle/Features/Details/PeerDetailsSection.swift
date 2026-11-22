@@ -29,7 +29,7 @@ struct PeerDetailsSection: View {
                 PeerDetailRow(title: "Link", value: details.link)
             }
         } header: {
-            DetailsSectionHeader("About")
+            FormSectionHeader("About")
         }
     }
 }

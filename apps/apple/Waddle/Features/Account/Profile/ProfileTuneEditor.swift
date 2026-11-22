@@ -17,24 +17,24 @@ struct ProfileTuneEditor: View {
     var body: some View {
         Form {
             Section {
-                TextField("Title", text: $tune.title)
-                TextField("Artist", text: $tune.artist)
-                TextField("Album", text: $tune.album)
-                ProfileLinkField(text: $tune.link)
+                Group {
+                    TextField("Title", text: $tune.title)
+                    TextField("Artist", text: $tune.artist)
+                    TextField("Album", text: $tune.album)
+                    ProfileLinkField(text: $tune.link)
+                }
+                .huddleText(Theme.Typography.body)
             } header: {
-                Text("What are you listening to?")
+                FormSectionHeader("What are you listening to?")
             } footer: {
-                Text(footer)
+                FormSectionFooter(footer)
             }
             ProfileSaveError(save: save)
             if current != nil {
-                Section {
-                    Button("Stop sharing", role: .destructive, action: clear)
-                        .disabled(save.isSaving)
-                }
+                ProfileClearButton(title: "Stop sharing", save: save, action: clear)
             }
         }
-        .formStyle(.grouped)
+        .huddleForm()
         .navigationTitle("Listening to")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)

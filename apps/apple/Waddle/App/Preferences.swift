@@ -15,9 +15,21 @@ final class Preferences {
 
         var title: String {
             switch self {
-            case .system: return "Match system"
+            case .system: return "System"
             case .light: return "Daylight"
             case .dark: return "Night"
+            }
+        }
+
+        /// As Settings lists them (web `settings`): System, Night, Daylight.
+        static let settingsOrder: [Appearance] = [.system, .dark, .light]
+
+        /// Android `settings` segment glyphs.
+        var symbol: String {
+            switch self {
+            case .system: return "circle.lefthalf.filled"
+            case .light: return "sun.max"
+            case .dark: return "moon"
             }
         }
 

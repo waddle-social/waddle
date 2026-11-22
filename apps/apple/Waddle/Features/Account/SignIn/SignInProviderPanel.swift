@@ -1,30 +1,54 @@
 import SwiftUI
 
-/// Provider buttons, or loading / failure states while they arrive.
+/// A button per provider, the first the primary one, under "Sign in
+/// with" (web) or "Sign in to your Waddle server" (Android); or loading
+/// and failure states while they arrive.
 struct SignInProviderPanel: View {
     @Environment(AppState.self) private var app
     @Environment(\.openURL) private var openURL
     @State private var pendingProvider: AuthProvider.ID?
+    /// Nil while they load.
+    let providers: [AuthProvider]?
+    let errorMessage: String?
+    let layout: SignInLayout
 
     var body: some View {
-        VStack(spacing: Theme.Spacing.m) {
-            if app.isLoadingProviders {
-                ProgressView("Loading sign-in options")
-                    .padding(.vertical, Theme.Spacing.l)
-            } else if app.providers.isEmpty {
-                SignInProvidersUnavailable(message: app.errorMessage) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.m) {
+            if let providers, !providers.isEmpty {
+                switch layout {
+                case .card where providers.count > 1:
+                    FormSectionHeader("Sign in with")
+                case .column:
+                    Text("Sign in to your Waddle server")
+                        .huddleText(Theme.Typography.label)
+                        .foregroundStyle(Theme.Colors.fgMuted)
+                        .frame(maxWidth: .infinity)
+                case .card:
+                    EmptyView()
+                }
+                ForEach(providers) { provider in
+                    providerButton(provider, title: layout.buttonTitle(for: provider, isOnly: providers.count == 1),
+                                   isPrimary: provider.id == providers.first?.id)
+                }
+                SignInErrorText(message: errorMessage)
+            } else if providers == nil {
+                HStack(spacing: Theme.Spacing.s) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading sign-in options")
+                        .huddleText(Theme.Typography.body)
+                        .foregroundStyle(Theme.Colors.fgMuted)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Theme.Spacing.l)
+            } else {
+                SignInProvidersUnavailable(message: errorMessage) {
                     Task { await app.retryProviders() }
                 }
-            } else {
-                ForEach(app.providers) { provider in
-                    providerButton(provider)
-                }
-                SignInErrorText(message: app.errorMessage)
             }
         }
     }
 
-    private func providerButton(_ provider: AuthProvider) -> some View {
+    private func providerButton(_ provider: AuthProvider, title: String, isPrimary: Bool) -> some View {
         Button {
             begin(with: provider)
         } label: {
@@ -32,12 +56,11 @@ struct SignInProviderPanel: View {
                 if pendingProvider == provider.id {
                     ProgressView().controlSize(.small)
                 }
-                Text("Continue with \(provider.title)")
-                    .fontWeight(.semibold)
+                Text(title)
             }
             .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.huddle(.primary, size: .large))
+        .buttonStyle(.huddle(isPrimary ? .primary : .secondary, size: .large))
         .disabled(pendingProvider != nil)
     }
 
@@ -58,40 +81,41 @@ private struct SignInProvidersUnavailable: View {
     let retry: () -> Void
 
     var body: some View {
-        VStack(spacing: Theme.Spacing.m) {
+        VStack(spacing: Theme.Spacing.s) {
             if let message {
-                Label("Can't reach the server", systemImage: "wifi.exclamationmark")
-                    .font(.headline)
+                Text("Can't reach the server")
+                    .huddleText(Theme.Typography.subtitle)
+                    .foregroundStyle(Theme.Colors.fg)
                 Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.dangerText)
             } else {
-                Label("No sign-in options", systemImage: "person.crop.circle.badge.questionmark")
-                    .font(.headline)
-                Text("This server doesn't offer a way to sign in from this app.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                Text("No sign-in options")
+                    .huddleText(Theme.Typography.subtitle)
+                    .foregroundStyle(Theme.Colors.fg)
+                Text("This server doesn't offer a way to sign in from this app. Try another server.")
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
-            Button("Retry", action: retry)
-                .buttonStyle(.bordered)
-                .controlSize(.large)
+            Button("Try again", action: retry)
+                .buttonStyle(.huddle())
+                .padding(.top, Theme.Spacing.xs)
         }
+        .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
         .padding(.vertical, Theme.Spacing.m)
     }
 }
 
-/// Red footnote for `AppState.errorMessage`.
+/// A sign-in failure, in danger text.
 struct SignInErrorText: View {
     let message: String?
 
     var body: some View {
         if let message, !message.isEmpty {
             Label(message, systemImage: "exclamationmark.triangle.fill")
-                .font(.footnote)
-                .foregroundStyle(.red)
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.dangerText)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel(Text("Error: \(message)"))

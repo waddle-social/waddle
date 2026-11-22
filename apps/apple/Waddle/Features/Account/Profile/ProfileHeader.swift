@@ -1,24 +1,24 @@
 import SwiftUI
 import WaddleKit
 
-/// Avatar, nickname, bare JID and current presence.
+/// Avatar with presence, name, address and status (Android `profile`).
 struct ProfileHeader: View {
     @Environment(SessionCoordinator.self) private var session
 
     var body: some View {
         VStack(spacing: Theme.Spacing.s) {
-            JIDAvatar(jid: session.account.jid, name: session.account.nick, size: 72)
-                .overlay(alignment: .bottomTrailing) {
-                    PresenceDot(availability: shownAvailability, size: 18)
-                        .offset(x: 4, y: 4)
-                }
-                .padding(.bottom, Theme.Spacing.xs)
+            PeerPresenceAvatar(
+                jid: session.account.jid, name: session.account.nick,
+                availability: shownAvailability, size: Theme.Size.profileAvatar
+            )
+            .padding(.bottom, Theme.Spacing.xs)
             Text(session.account.nick)
-                .font(.title2.weight(.semibold))
+                .huddleText(Theme.Typography.title)
+                .foregroundStyle(Theme.Colors.fg)
                 .multilineTextAlignment(.center)
             Text(session.account.jid.description)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .textSelection(.enabled)
                 .multilineTextAlignment(.center)
             ProfilePresenceSummary(availability: shownAvailability, statusText: session.status.statusText)
@@ -40,8 +40,8 @@ private struct ProfilePresenceSummary: View {
 
     var body: some View {
         Text(summary)
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+            .huddleText(Theme.Typography.label)
+            .foregroundStyle(Theme.Colors.fgMuted)
             .multilineTextAlignment(.center)
             .lineLimit(2)
     }

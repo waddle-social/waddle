@@ -26,12 +26,12 @@ struct DirectDetailsForm: View {
             }
             NotificationModeSection(conversation: .direct(peer))
             Section {
-                DetailsActionButton(title: "Search in conversation", symbol: "magnifyingglass") {
+                FormActionButton(title: "Search in conversation", symbol: "magnifyingglass") {
                     navigation.sheet = .search(.direct(peer))
                 }
             }
         }
-        .detailsForm()
+        .huddleForm()
         .peerDetails(of: peer, session: session, into: $details)
         .peerSharedStatus(
             of: peer, isOnline: presence?.availability.isOnline ?? false, session: session, into: $shared
@@ -156,7 +156,7 @@ struct PeerProfileSheet: View {
                     PeerDetailsSection(details: details)
                 }
             }
-            .detailsForm()
+            .huddleForm()
             .peerDetails(of: profile.jid, session: session, into: $details)
             .peerSharedStatus(
                 of: profile.jid, isOnline: presence.availability.isOnline, session: session, into: $shared

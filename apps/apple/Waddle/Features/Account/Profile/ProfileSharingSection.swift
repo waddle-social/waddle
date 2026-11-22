@@ -8,7 +8,7 @@ struct ProfileSharingSection: View {
     @Environment(SessionCoordinator.self) private var session
 
     var body: some View {
-        Section("Sharing") {
+        Section {
             NavigationLink {
                 ProfileMoodEditor(current: session.status.mood)
             } label: {
@@ -49,6 +49,8 @@ struct ProfileSharingSection: View {
                     detail: session.status.tune.map(ProfileTuneSummary.detail) ?? "Say what you're listening to."
                 )
             }
+        } header: {
+            FormSectionHeader("Sharing")
         }
     }
 }

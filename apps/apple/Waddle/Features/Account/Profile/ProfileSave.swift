@@ -33,9 +33,23 @@ struct ProfileSaveError: View {
         if let message = save.errorMessage {
             Section {
                 Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.dangerText)
             }
+        }
+    }
+}
+
+/// Clears what an editor shares (mood, activity, tune), in danger text.
+struct ProfileClearButton: View {
+    let title: String
+    let save: ProfileSave
+    let action: () -> Void
+
+    var body: some View {
+        Section {
+            FormActionButton(title: title, symbol: "xmark.circle", isDestructive: true, action: action)
+                .disabled(save.isSaving)
         }
     }
 }

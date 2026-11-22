@@ -11,27 +11,30 @@ struct SignInAuthorizingPanel: View {
     @Environment(AppState.self) private var app
     @Environment(\.openURL) private var openURL
     let authorization: DeviceAuthorization
+    let errorMessage: String?
 
     var body: some View {
         VStack(spacing: Theme.Spacing.l) {
             Text("Finish signing in")
-                .font(.title2.weight(.semibold))
+                .huddleText(Theme.Typography.title)
+                .foregroundStyle(Theme.Colors.fg)
             SignInUserCode(code: authorization.userCode)
-            Text("Approve this sign-in in your browser. This page updates automatically.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Text("Approve this sign-in in your browser. This page updates on its own.")
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: Theme.Spacing.s) {
                 ProgressView().controlSize(.small)
                 Text("Waiting for approval")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
             .accessibilityElement(children: .combine)
             actions
-            SignInErrorText(message: app.errorMessage)
+            SignInErrorText(message: errorMessage)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private var actions: some View {
@@ -49,8 +52,7 @@ struct SignInAuthorizingPanel: View {
             Button("Cancel", role: .cancel) {
                 app.cancelSignIn()
             }
-            .buttonStyle(.borderless)
-            .controlSize(.large)
+            .buttonStyle(.huddle(size: .large))
         }
     }
 }
@@ -62,12 +64,10 @@ private struct SignInUserCode: View {
 
     var body: some View {
         VStack(spacing: Theme.Spacing.s) {
-            Text("Your code")
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.secondary)
+            FormSectionHeader("Your code")
             Text(code)
-                .font(.system(.largeTitle, design: .monospaced).weight(.semibold))
-                .kerning(2)
+                .huddleText(Theme.AppTypography.signInCode)
+                .foregroundStyle(Theme.Colors.fg)
                 .textSelection(.enabled)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
@@ -77,14 +77,13 @@ private struct SignInUserCode: View {
             } label: {
                 Label(copyCount > 0 ? "Copied" : "Copy code", systemImage: copyCount > 0 ? "checkmark" : "doc.on.doc")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(.huddle(size: .small))
             .sensoryFeedback(.success, trigger: copyCount)
         }
         .padding(Theme.Spacing.l)
         .frame(maxWidth: .infinity)
         .background(
-            Color.secondary.opacity(0.1),
+            Theme.Colors.surface2,
             in: RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
         )
     }
