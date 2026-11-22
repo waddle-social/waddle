@@ -84,7 +84,12 @@ extension SessionCoordinator {
     /// when the room is gone, `PortError` otherwise.
     public func rejoinRoom(_ room: BareJID) async throws {
         guard !isStopped, status.connection == .online else { throw PortError.notConnected }
-        guard await refreshDirectory(joiningOnlyNewRooms: true) else { throw PortError.failed }
+        guard let lookup = await refreshDirectory(joiningOnlyNewRooms: true) else { throw PortError.failed }
+        guard lookup.rooms.contains(room) else {
+            // A left room is kept through a lookup that could not read
+            // the bookmarks, so only one that could says the room is gone.
+            throw lookup.readOwnBookmarks ? RoomRejoinError.roomIsGone : PortError.failed
+        }
         guard let channel = directory.channel(for: room), !isFenced(room) else { throw RoomRejoinError.roomIsGone }
         // Rejoined on another device meanwhile: the lookup joined it.
         guard channel.hasLeft else { return }
@@ -110,10 +115,28 @@ extension SessionCoordinator {
         guard !isStopped, status.connection == .online else { throw PortError.notConnected }
         guard roomsBeingManaged.insert(room).inserted else { throw PortError.failed }
         let generation = roomManagementGeneration
-        defer {
-            if generation == roomManagementGeneration { roomsBeingManaged.remove(room) }
+        let outcome: Result<Void, Error>
+        do {
+            try await action(generation)
+            outcome = .success(())
+        } catch {
+            outcome = .failure(error)
         }
-        try await action(generation)
+        if generation == roomManagementGeneration { roomsBeingManaged.remove(room) }
+        // A leave on another device found meanwhile waited for this.
+        if isCurrent(generation) { await departIfLeft(room) }
+        try outcome.get()
+    }
+
+    /// Leaves `room` when the account left it on another device and this
+    /// session is still in it, with the care of a leave made here: a
+    /// huddle there is left first and none can start meanwhile. While the
+    /// room is being managed nothing is sent; `managing` asks again when
+    /// that settles.
+    func departIfLeft(_ room: BareJID) async {
+        guard directory.hasLeft(room), presence.joinedRooms.contains(room) else { return }
+        let nick = presence.selfNicks[room] ?? account.nick
+        try? await giveUp(room, .left) { await port.leaveRoom(room, nick: nick) }
     }
 
     /// Deletes or leaves `room` with `request`, then forgets it.

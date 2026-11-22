@@ -347,6 +347,7 @@ final class FakePort: XmppPort {
     }
 
     func leaveRoom(_ room: BareJID, nick: String) async {
+        await holdDirectoryVerb("leaveRoom")
         leavePresences.append(room)
     }
 

@@ -247,7 +247,7 @@ struct LeaveRoomTests {
         #expect(coordinator.presence.joinedRooms.contains(room))
     }
 
-    @Test func aNotificationChangeWaitingBehindALeaveIsDropped() async throws {
+    @Test func aNotificationChangeWaitingBehindALeaveFailsAndIsUndone() async throws {
         // Stored after the leave it would turn the left room's notifications on.
         let (coordinator, port) = online()
         port.heldDirectoryVerbs = ["setRoomMembership"]
@@ -259,10 +259,86 @@ struct LeaveRoomTests {
         port.heldDirectoryVerbs = []
         port.releaseDirectoryRequests()
         try await leave.value
-        try await change.value
+        await #expect(throws: PortError.invalidRequest) { try await change.value }
 
         #expect(port.notifySettingsWrites.isEmpty)
         #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
+    }
+
+    @Test func notificationSettingsOfALeftRoomCannotBeChanged() async throws {
+        // Its details can still be open when another device leaves it.
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+        coordinator.directory.setNotifyMode(.never, for: roomConversation)
+
+        await #expect(throws: PortError.invalidRequest) {
+            try await coordinator.setNotifyMode(.always, for: roomConversation)
+        }
+        await #expect(throws: PortError.invalidRequest) {
+            try await coordinator.setShowsMessagesInPush(true, for: roomConversation)
+        }
+
+        #expect(port.notifySettingsWrites.isEmpty)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
+        #expect(!coordinator.directory.showsMessagesInPush(for: roomConversation))
+    }
+
+    @Test func rejoiningNeedsTheRoomFoundAfreshWhenBookmarksCannotBeRead() async throws {
+        // A left room is kept through a lookup that could not read the
+        // bookmarks, so being known proves nothing: the room may be gone,
+        // and joining it would create it.
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+        port.topology = Topology(spaces: [], channels: [], ownBookmarksLoaded: false)
+
+        await #expect(throws: PortError.failed) { try await coordinator.rejoinRoom(room) }
+
+        #expect(port.membershipWrites.isEmpty)
+        #expect(port.joined.isEmpty)
+        #expect(coordinator.directory.leftRooms.map(\.roomJID) == [room])
+    }
+
+    @Test func aRoomLeftElsewhereWhileBeingEditedIsLeftOnceTheEditSettles() async throws {
+        let (coordinator, port) = online()
+        enter(coordinator)
+        port.heldDirectoryVerbs = ["updateRoomSettings"]
+        let edit = Task { try await coordinator.updateRoom(room, with: RoomSettingsPatch(name: "renamed")) }
+        while port.heldDirectoryRequests.isEmpty { await Task.yield() }
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true)])
+
+        await coordinator.refreshDirectory(joiningOnlyNewRooms: true)
+        #expect(port.leavePresences.isEmpty)
+
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        try await edit.value
+
+        #expect(port.leavePresences == [room])
+        #expect(!coordinator.presence.joinedRooms.contains(room))
+        #expect(coordinator.directory.leftRooms.map(\.name) == ["renamed"])
+    }
+
+    @Test func noHuddleStartsWhileARoomLeftElsewhereIsBeingLeft() async throws {
+        let (coordinator, port) = online()
+        enter(coordinator)
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true)])
+        port.heldDirectoryVerbs = ["leaveRoom"]
+        let refresh = Task { await coordinator.refreshDirectory(joiningOnlyNewRooms: true) }
+        while port.heldDirectoryRequests.isEmpty { await Task.yield() }
+
+        // Still an occupant: the leave presence is on its way.
+        #expect(coordinator.presence.joinedRooms.contains(room))
+        #expect(coordinator.isFenced(room))
+        #expect(!coordinator.canJoinGroupCall(in: room))
+
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        await refresh.value
+        #expect(!coordinator.canJoinGroupCall(in: room))
+    }
+
+    @Test func noHuddleStartsInALeftRoom() {
+        let (coordinator, _) = online([general.with(hasLeft: true)])
+        enter(coordinator)
+        #expect(!coordinator.canJoinGroupCall(in: room))
     }
 
     @Test func groupChatsAreNeverListedAsLeft() {

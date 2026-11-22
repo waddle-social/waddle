@@ -27,9 +27,10 @@ extension SessionCoordinator {
     /// already in alone: joining again makes the server send everyone in
     /// each of them once more.
     ///
-    /// Returns whether the directory was looked up afresh.
+    /// Returns what the lookup found, or nil when it failed or a newer
+    /// connection made it stale.
     @discardableResult
-    func refreshDirectory(joiningOnlyNewRooms: Bool = false) async -> Bool {
+    func refreshDirectory(joiningOnlyNewRooms: Bool = false) async -> DirectoryLookup? {
         let mutationStart = directoryMutations.count
         directoryRefreshesInFlight += 1
         defer {
@@ -42,10 +43,11 @@ extension SessionCoordinator {
         // meanwhile) must not overwrite the directory with its answer.
         // Neither must a look asked for elsewhere, whose task a reconnect
         // does not cancel.
-        guard !Task.isCancelled, epoch == connectionEpoch else { return false }
-        var readOwnBookmarks = false
+        guard !Task.isCancelled, epoch == connectionEpoch else { return nil }
+        var lookup: DirectoryLookup?
         if case let .success(topology) = result {
-            readOwnBookmarks = topology.ownBookmarksLoaded
+            lookup = DirectoryLookup(
+                rooms: Set(topology.channels.map(\.roomJID)), readOwnBookmarks: topology.ownBookmarksLoaded)
             directory.apply(topology)
             // A room that outlived its space is listed again.
             roomsOfDeletedSpaces.subtract(topology.channels.map(\.roomJID))
@@ -66,7 +68,7 @@ extension SessionCoordinator {
         silenceLeftRooms()
         // After the local changes above: a rejoin made here while the
         // lookup was on its way must not be answered with a leave.
-        if readOwnBookmarks { await leaveRoomsLeftOnAnotherDevice() }
+        if lookup?.readOwnBookmarks == true { await leaveRoomsLeftOnAnotherDevice() }
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
             .map(\.roomJID)
@@ -93,8 +95,7 @@ extension SessionCoordinator {
                 addNext()
             }
         }
-        if case .success = result { return true }
-        return false
+        return lookup
     }
 
     /// Counts nothing for the rooms the account left.
@@ -105,12 +106,8 @@ extension SessionCoordinator {
     /// Leaves the rooms this session is in that the account has left on
     /// another device (XEP-0402 §4).
     private func leaveRoomsLeftOnAnotherDevice() async {
-        for room in directory.leftRooms.map(\.roomJID)
-        where presence.joinedRooms.contains(room) && !roomsBeingManaged.contains(room) {
-            if calls.groupSlotHolds(room) { await calls.hangUp() }
-            await port.leaveRoom(room, nick: presence.selfNicks[room] ?? account.nick)
-            onDemandRooms.remove(room)
-            presence.markLeft(room)
+        for room in directory.leftRooms.map(\.roomJID) {
+            await departIfLeft(room)
         }
     }
 
@@ -150,6 +147,7 @@ extension SessionCoordinator {
     /// XEP-0492 notification mode for a conversation. Optimistic, rolled
     /// back if the server rejects it.
     public func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {
+        try refuseSettings(ofLeft: conversation)
         let previous = directory.notifyMode(for: conversation)
         directory.setNotifyMode(mode, for: conversation)
         try await storeNotifySettings(for: conversation, changing: .mode(mode)) {
@@ -168,11 +166,18 @@ extension SessionCoordinator {
     /// what, on every device of the account. Optimistic, rolled back if
     /// the server rejects it.
     public func setShowsMessagesInPush(_ shows: Bool, for conversation: ConversationID) async throws {
+        try refuseSettings(ofLeft: conversation)
         let previous = directory.showsMessagesInPush(for: conversation)
         directory.setShowsMessagesInPush(shows, for: conversation)
         try await storeNotifySettings(for: conversation, changing: .showsMessagesInPush(shows)) {
             self.directory.setShowsMessagesInPush(previous, for: conversation)
         }
+    }
+
+    /// A room the account left keeps its notifications off until it is
+    /// joined again, so its settings take no change.
+    private func refuseSettings(ofLeft conversation: ConversationID) throws {
+        if conversation.isRoom, directory.hasLeft(conversation.jid) { throw PortError.invalidRequest }
     }
 
     private enum NotifySetting {
@@ -193,8 +198,15 @@ extension SessionCoordinator {
         rollback: @escaping @MainActor () -> Void
     ) async throws {
         try await afterEarlierBookmarkWrites(to: conversation) { [self] in
-            // Left meanwhile: its notifications stay off.
-            guard !(conversation.isRoom && directory.hasLeft(conversation.jid)) else { return }
+            do {
+                // Left while this waited its turn: nothing is stored, and
+                // the value shown goes back.
+                try refuseSettings(ofLeft: conversation)
+            } catch {
+                rollback()
+                directory.setNotifyMode(.never, for: conversation)
+                throw error
+            }
             do {
                 let stored = try await port.fetchNotifySettings()
                 // The new value is applied again: a write that ran in
@@ -334,6 +346,15 @@ extension SessionCoordinator {
     public func selfOccupant(in room: BareJID) -> Occupant? {
         presence.occupant(named: presence.selfNicks[room] ?? account.nick, in: room)
     }
+}
+
+/// What a look at the directory found.
+struct DirectoryLookup {
+    /// The rooms it listed.
+    let rooms: Set<BareJID>
+    /// False when the account's bookmarks could not be read: then the
+    /// rooms it left are those known from before, not found afresh.
+    let readOwnBookmarks: Bool
 }
 
 /// Derives a room localpart from a display name: lowercase ASCII letters,
