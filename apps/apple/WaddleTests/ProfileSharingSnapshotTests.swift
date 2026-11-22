@@ -27,12 +27,12 @@ final class ProfileSharingSnapshotTests: XCTestCase {
         sample.coordinator.status.mood = UserMood(value: "happy", text: nil)
         sample.coordinator.status.activity = coding
         sample.coordinator.status.tune = UserTune(title: "Heroes", artist: "David Bowie", album: "\"Heroes\"")
-        let view = NavigationStack { Form { ProfileSharingSection() }.formStyle(.grouped) }
+        let view = NavigationStack { Form { ProfileSharingSection() }.huddleForm() }
         try await assertScreenSnapshot(of: sample.host(view), size: CGSize(width: Self.width, height: 320))
     }
 
     func testSharingNothing() async throws {
-        let view = NavigationStack { Form { ProfileSharingSection() }.formStyle(.grouped) }
+        let view = NavigationStack { Form { ProfileSharingSection() }.huddleForm() }
         try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 320))
     }
 
@@ -49,7 +49,7 @@ final class ProfileSharingSnapshotTests: XCTestCase {
     func testACallOnAnotherDeviceOwnsTheActivity() async throws {
         let sample = SampleSession()
         sample.coordinator.status.activity = UserActivity(general: "talking", specific: "on_video_phone")
-        let view = NavigationStack { Form { ProfileSharingSection() }.formStyle(.grouped) }
+        let view = NavigationStack { Form { ProfileSharingSection() }.huddleForm() }
         try await assertScreenSnapshot(of: sample.host(view), size: CGSize(width: Self.width, height: 320))
     }
 
@@ -58,7 +58,7 @@ final class ProfileSharingSnapshotTests: XCTestCase {
             fullName: "Ada Lovelace", nickname: "ada", pronouns: "she/her",
             bio: "Mathematician. Writing notes on the Analytical Engine.", link: "https://ada.example"
         )
-        let view = Form { PeerDetailsSection(details: details) }.formStyle(.grouped)
+        let view = Form { PeerDetailsSection(details: details) }.huddleForm()
         try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 320))
     }
 
@@ -68,13 +68,13 @@ final class ProfileSharingSnapshotTests: XCTestCase {
             activity: coding,
             tune: UserTune(title: "Heroes", artist: "David Bowie", album: "\"Heroes\"")
         )
-        let view = Form { PeerSharingSection(status: shared, isOnline: true) }.formStyle(.grouped)
+        let view = Form { PeerSharingSection(status: shared, isOnline: true) }.huddleForm()
         try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 320))
     }
 
     func testSomeoneElseInACall() async throws {
         let shared = SharedStatus(activity: UserActivity(general: "talking", specific: "on_video_phone"))
-        let view = Form { PeerSharingSection(status: shared, isOnline: true) }.formStyle(.grouped)
+        let view = Form { PeerSharingSection(status: shared, isOnline: true) }.huddleForm()
         try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.width, height: 160))
     }
 }

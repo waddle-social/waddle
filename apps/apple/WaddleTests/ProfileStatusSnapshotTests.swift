@@ -35,7 +35,7 @@ final class ProfileStatusSnapshotTests: XCTestCase {
         sample.coordinator.status.presenceMode = mode
         sample.coordinator.status.availability = shown
         let view = Form { ProfileStatusSection() }
-            .formStyle(.grouped)
+            .huddleForm()
         try await assertScreenSnapshot(of: sample.host(view), size: Self.size, testName: testName, line: line)
     }
 }

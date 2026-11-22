@@ -55,7 +55,7 @@ final class PushControlsSnapshotTests: XCTestCase {
                 notificationPermissionGranted: true
             )
         }
-        .formStyle(.grouped)
+        .huddleForm()
         try await assertScreenSnapshot(of: view, size: Self.settings, testName: testName, line: line)
     }
 }
