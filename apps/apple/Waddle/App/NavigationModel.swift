@@ -132,12 +132,14 @@ final class NavigationModel {
             // phone and are sections of the split view. Keep the two in
             // step, so an iPad that widens while showing one still shows
             // it, and one that left it on the phone does not come back to it.
+            // `close(_:)` reassigns the path unchanged: that is no move.
+            guard homePath != oldValue else { return }
             if let shown = homePath.last?.section {
                 if splitSection != shown || selection != nil {
                     selection = nil
                     splitSection = shown
                 }
-            } else if let left = oldValue.last?.section, splitSection == left, selection == nil {
+            } else if let left = oldValue.last?.section, splitSection == left {
                 splitSection = .home
             }
         }

@@ -237,6 +237,33 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.splitSection, .feed)
     }
 
+    /// The split view keeps Feed on the phone's Home stack while a DM is
+    /// open; leaving a room elsewhere must not swap the DM for the Feed.
+    func testLeavingARoomKeepsTheOpenDirectMessageOverTheFeed() {
+        let navigation = NavigationModel()
+        let theo = ConversationID.direct(BareJID(parsing: "theo@waddle.test")!)
+        navigation.show(.feed)
+        navigation.open(theo)
+
+        navigation.closeLeftRooms([lobby.jid])
+
+        XCTAssertEqual(navigation.selection, theo)
+    }
+
+    /// A notification opened a DM on the phone, then Feed was popped from
+    /// Home: closing the DM later must not bring the Feed back.
+    func testFeedLeftOnThePhoneWhileADirectMessageIsOpenStaysLeft() {
+        let navigation = NavigationModel()
+        let theo = ConversationID.direct(BareJID(parsing: "theo@waddle.test")!)
+        navigation.homePath = [.feed]
+        navigation.open(theo)
+
+        navigation.homePath = []
+        navigation.close(theo)
+
+        XCTAssertEqual(navigation.splitSection, .home)
+    }
+
     func testGoingBackFromTheFeedOnThePhoneLeavesItInTheSplitViewToo() {
         let navigation = NavigationModel()
         navigation.homePath = [.feed]
