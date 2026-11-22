@@ -11,7 +11,7 @@ struct PeerSharingSection: View {
 
     var body: some View {
         if let shown = status?.shown(isOnline: isOnline), !shown.isEmpty {
-            Section("Right now") {
+            Section {
                 if let mood = shown.mood {
                     ProfileSharingLabel(
                         emoji: ProfileMoodCatalog.emoji(for: mood.value), symbol: "face.smiling",
@@ -34,6 +34,8 @@ struct PeerSharingSection: View {
                         title: ProfileTuneSummary.title(tune), detail: ProfileTuneSummary.detail(tune)
                     )
                 }
+            } header: {
+                DetailsSectionHeader("Right now")
             }
         }
     }

@@ -42,6 +42,9 @@ struct PeerProfileRoute: Hashable {
     let jid: BareJID?
     let room: BareJID?
     let nick: String?
+    /// Their affiliation in a room they are not in now, from its member
+    /// list; while they are in it, their occupant says.
+    var affiliation: RoomAffiliation?
 }
 
 /// The phone tab bar.

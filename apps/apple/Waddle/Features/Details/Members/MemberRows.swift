@@ -1,159 +1,145 @@
 import SwiftUI
 import WaddleKit
 
-/// A present occupant with moderation actions in its context menu.
-struct OccupantMemberRow: View {
+/// One person on the member list: avatar with presence, name, role line
+/// and where they are. Opens their profile; the context menu holds the
+/// moderation actions.
+struct MemberCardRow: View {
+    @Environment(NavigationModel.self) private var navigation
     let room: BareJID
-    let occupant: Occupant
+    let card: MemberCard
     let model: RoomMembersModel
 
     var body: some View {
-        MemberRowLabel(
-            name: occupant.nick,
-            avatarJID: occupant.realJID,
-            availability: occupant.availability,
-            status: occupant.status,
-            hats: occupant.hats,
-            affiliation: occupant.affiliation,
-            isAbsent: false
-        )
+        Button {
+            navigation.showProfile(PeerProfileRoute(
+                name: card.name,
+                jid: card.jid,
+                room: card.isHere ? room : nil,
+                nick: card.isHere ? card.nick : nil,
+                affiliation: card.isHere ? nil : card.affiliation
+            ))
+        } label: {
+            MemberCardLabel(name: card.name, avatarJID: card.jid, availability: card.shownAvailability) {
+                MemberRoleLine(affiliation: card.affiliation, hats: card.hats)
+                Text(MemberLabels.place(card.place))
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .lineLimit(1)
+            }
+        }
+        .buttonStyle(MemberCardButtonStyle())
+        .accessibilityHint(Text("Opens their profile"))
         .memberActions(
-            MemberSubject(nick: occupant.nick, jid: occupant.realJID, affiliation: occupant.affiliation, isPresent: true),
+            MemberSubject(nick: card.nick, jid: card.jid, affiliation: card.affiliation, isPresent: card.isHere),
             room: room,
             model: model
         )
     }
 }
 
-/// An affiliated member who is not in the room, shown offline.
-struct AbsentMemberRow: View {
-    let room: BareJID
-    let member: RoomMember
-    let model: RoomMembersModel
-
-    var body: some View {
-        MemberRowLabel(
-            name: MemberRoster.displayName(of: member),
-            avatarJID: member.jid,
-            availability: .offline,
-            status: nil,
-            hats: [],
-            affiliation: member.affiliation,
-            isAbsent: true
-        )
-        .memberActions(
-            MemberSubject(nick: member.nick, jid: member.jid, affiliation: member.affiliation, isPresent: false),
-            room: room,
-            model: model
-        )
-    }
-}
-
-/// A bot the room's server declares: its name, no presence and no actions.
-struct BotMemberRow: View {
+/// A bot the room's server declares: its name and "Bot", no presence and
+/// no actions.
+struct BotCardRow: View {
     let bot: RoomBot
 
     var body: some View {
-        MemberRowLabel(
-            name: bot.displayName,
-            avatarJID: bot.jid,
-            availability: .offline,
-            status: nil,
-            hats: [],
-            affiliation: .none,
-            isAbsent: false,
-            showsPresence: false
-        )
+        MemberCardLabel(name: bot.displayName, avatarJID: bot.jid, availability: nil) {
+            Text("Bot")
+                .huddleText(Theme.Typography.eyebrow)
+                .foregroundStyle(Theme.Colors.successText)
+        }
+        .memberCardSurface()
     }
 }
 
-/// Avatar with presence, nick, hats, status and affiliation badge.
-struct MemberRowLabel: View {
+/// Avatar, name, then the lines under it.
+private struct MemberCardLabel<Lines: View>: View {
     let name: String
     let avatarJID: BareJID?
-    let availability: Availability
-    let status: String?
-    let hats: [Hat]
-    let affiliation: RoomAffiliation
-    let isAbsent: Bool
-    /// False for a bot, which has no availability to show.
-    var showsPresence = true
+    /// Nil hides the presence dot: a bot, or someone who is not around.
+    let availability: Availability?
+    @ViewBuilder let lines: Lines
 
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
-            avatar
-                .overlay(alignment: .bottomTrailing) {
-                    if showsPresence {
-                        PresenceDot(availability: availability, size: 10)
-                            .offset(x: 3, y: 3)
-                    }
-                }
+            PeerPresenceAvatar(jid: avatarJID, name: name, availability: availability, size: Theme.Size.memberAvatar)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                HStack(spacing: Theme.Spacing.xs) {
-                    Text(name)
-                        .lineLimit(1)
-                    ForEach(hats.prefix(2), id: \.uri) { hat in
-                        HatChip(hat: hat)
-                    }
-                }
-                if let secondary = secondaryLine {
-                    Text(secondary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                Text(name)
+                    .huddleText(Theme.Typography.author)
+                    .foregroundStyle(Theme.Colors.fg)
+                    .lineLimit(1)
+                lines
             }
-            Spacer(minLength: Theme.Spacing.s)
-            if let badge = MemberLabels.badge(affiliation) {
-                AffiliationBadge(text: badge)
-            }
+            Spacer(minLength: 0)
         }
-        .opacity(isAbsent ? 0.65 : 1)
         .accessibilityElement(children: .combine)
     }
 
-    @ViewBuilder
-    private var avatar: some View {
-        if let avatarJID {
-            JIDAvatar(jid: avatarJID, name: name, size: Theme.Size.rowAvatar)
-        } else {
-            AvatarView(name: name, size: Theme.Size.rowAvatar)
+}
+
+/// Affiliation and up to two hats in their colours (Android `RoleLine`):
+/// owner in gold, admin and hats in action, banned in danger, the rest
+/// muted.
+struct MemberRoleLine: View {
+    let affiliation: RoomAffiliation
+    let hats: [Hat]
+
+    var body: some View {
+        let titles = hats.filter { $0.uri != Hat.botURI }.prefix(2).map(\.title)
+        HStack(spacing: Theme.Spacing.xs) {
+            Text(MemberLabels.role(affiliation))
+                .foregroundStyle(tone)
+            ForEach(titles, id: \.self) { title in
+                Text(title)
+                    .foregroundStyle(Theme.Colors.actionText)
+            }
         }
+        .huddleText(Theme.Typography.eyebrow)
+        .lineLimit(1)
     }
 
-    private var secondaryLine: String? {
-        if let status = status?.trimmingCharacters(in: .whitespacesAndNewlines), !status.isEmpty {
-            return status
+    private var tone: Color {
+        switch affiliation {
+        case .owner: return Theme.Colors.goldText
+        case .admin: return Theme.Colors.actionText
+        case .outcast: return Theme.Colors.dangerText
+        case .member, .none: return Theme.Colors.fgMuted
         }
-        return isAbsent ? "Offline" : nil
     }
 }
 
-/// XEP-0317 hat title in the hat's consistent color.
-struct HatChip: View {
-    let hat: Hat
-
-    var body: some View {
-        Text(hat.title)
-            .font(.caption2.weight(.medium))
-            .lineLimit(1)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .foregroundStyle(Color.consistent(for: hat.uri))
-            .background(Capsule().fill(Color.consistent(for: hat.uri).opacity(0.15)))
+private struct MemberCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        MemberCardButtonBody(configuration: configuration)
     }
 }
 
-/// Owner / Admin / Member badge.
-struct AffiliationBadge: View {
-    let text: String
+/// The card with the press tint, and the hover tint under a pointer.
+private struct MemberCardButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    @State private var isHovered = false
 
     var body: some View {
-        Text(text)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().strokeBorder(Color.secondary.opacity(0.4), lineWidth: 1))
+        configuration.label
+            .memberCardSurface(tint: tint)
+            .onHover { isHovered = $0 }
+    }
+
+    private var tint: Color {
+        if configuration.isPressed { return Theme.State.press }
+        return isHovered ? Theme.State.hover : .clear
+    }
+}
+
+private extension View {
+    func memberCardSurface(tint: Color = .clear) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+        return padding(.horizontal, Theme.Spacing.l)
+            .padding(.vertical, Theme.Spacing.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .huddleSurface(.card, in: shape)
+            .overlay(shape.fill(tint))
+            .contentShape(shape)
     }
 }

@@ -34,7 +34,7 @@ struct AddPeopleSheet: View {
                     }
                 }
             }
-            .formStyle(.grouped)
+            .detailsForm()
             .disabled(model.isAdding)
             .navigationTitle("Add people")
             #if os(iOS)
@@ -76,7 +76,7 @@ struct AddPeopleSheet: View {
             .pickerStyle(.inline)
             .labelsHidden()
         } header: {
-            Text("What they can see")
+            DetailsSectionHeader("What they can see")
         } footer: {
             Text("Earlier messages are only shared if you can see all of them yourself. If not, they see messages from now on.")
         }

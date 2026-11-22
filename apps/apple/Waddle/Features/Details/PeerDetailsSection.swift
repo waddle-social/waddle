@@ -7,23 +7,29 @@ struct PeerDetailsSection: View {
     let details: ProfileDetails
 
     var body: some View {
-        Section("About") {
+        Section {
             PeerDetailRow(title: "Name", value: details.fullName)
             PeerDetailRow(title: "Nickname", value: details.nickname)
             PeerDetailRow(title: "Pronouns", value: details.pronouns)
             if !details.bio.isEmpty {
                 Text(details.bio)
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fg)
                     .textSelection(.enabled)
             }
             if let link = details.webLink {
                 Link(destination: link) {
                     Label(details.link, systemImage: "link")
+                        .huddleText(Theme.Typography.body)
+                        .foregroundStyle(Theme.Colors.actionText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             } else {
                 PeerDetailRow(title: "Link", value: details.link)
             }
+        } header: {
+            DetailsSectionHeader("About")
         }
     }
 }
@@ -34,10 +40,15 @@ private struct PeerDetailRow: View {
 
     var body: some View {
         if !value.isEmpty {
-            LabeledContent(title) {
+            LabeledContent {
                 Text(value)
+                    .foregroundStyle(Theme.Colors.fg)
                     .textSelection(.enabled)
+            } label: {
+                Text(title)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
+            .huddleText(Theme.Typography.body)
         }
     }
 }

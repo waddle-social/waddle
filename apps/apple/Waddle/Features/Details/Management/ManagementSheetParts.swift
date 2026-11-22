@@ -41,6 +41,7 @@ struct ManagementErrorLabel: View {
 
     var body: some View {
         Label(message, systemImage: "exclamationmark.triangle")
+            .huddleText(Theme.Typography.body)
             .foregroundStyle(Theme.Colors.dangerText)
     }
 }

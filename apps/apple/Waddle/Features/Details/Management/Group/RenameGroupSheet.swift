@@ -29,7 +29,7 @@ struct RenameGroupSheet: View {
                     }
                 }
             }
-            .formStyle(.grouped)
+            .detailsForm()
             .disabled(editor.isSaving)
             .navigationTitle("Rename group chat")
             #if os(iOS)

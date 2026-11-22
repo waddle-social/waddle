@@ -120,23 +120,25 @@ enum MemberPermissions {
 
 /// Role and affiliation copy.
 enum MemberLabels {
-    static func groupTitle(_ role: RoomRole) -> String {
-        switch role {
-        case .moderator: return "Moderators"
-        case .participant: return "Participants"
-        case .visitor: return "Visitors"
-        case .none: return "Others"
-        }
-    }
-
-    /// Badge text; nil for users without an affiliation.
-    static func badge(_ affiliation: RoomAffiliation) -> String? {
+    /// The role word (Android `affiliationLabel`).
+    static func role(_ affiliation: RoomAffiliation) -> String {
         switch affiliation {
         case .owner: return "Owner"
         case .admin: return "Admin"
         case .member: return "Member"
         case .outcast: return "Banned"
-        case .none: return nil
+        case .none: return "Guest"
+        }
+    }
+
+    /// Where someone is, in words.
+    static func place(_ place: MemberCard.Place) -> String {
+        switch place {
+        case .here: return "Here now"
+        case .hereAway: return "Here · away"
+        case .hereBusy: return "Here · do not disturb"
+        case .elsewhere: return "Around, not in this room"
+        case .notHere: return "Not here right now"
         }
     }
 }

@@ -18,22 +18,25 @@ struct NotificationModeSection: View {
                     Text(NotifyModeLabels.title(mode)).tag(mode)
                 }
             } label: {
-                Label("Notify me about", systemImage: NotifyModeLabels.symbol(current))
+                DetailsRowLabel(title: "Notify me about", symbol: NotifyModeLabels.symbol(current))
             }
             .pickerStyle(.menu)
             Toggle(isOn: showsMessagesBinding) {
-                Label("Show messages in notifications", systemImage: "text.bubble")
+                DetailsRowLabel(title: "Show messages in notifications", symbol: "text.bubble")
             }
+            .toggleStyle(.huddle)
         } header: {
-            Text("Notifications")
+            DetailsSectionHeader("Notifications")
         } footer: {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text(Self.showsMessagesFooter)
+                    .foregroundStyle(Theme.Colors.fgMuted)
                 if let errorMessage {
                     Text(errorMessage)
                         .foregroundStyle(Theme.Colors.dangerText)
                 }
             }
+            .huddleText(Theme.Typography.caption)
         }
     }
 

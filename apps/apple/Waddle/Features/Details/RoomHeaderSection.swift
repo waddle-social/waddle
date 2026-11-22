@@ -11,21 +11,22 @@ struct RoomHeaderSection: View {
             VStack(spacing: Theme.Spacing.s) {
                 RoomSymbolTile(
                     symbol: channel.map { ChannelSymbol.name(for: $0) } ?? "number",
-                    size: 64
+                    size: Theme.Size.emptyMark
                 )
                 Text(title)
-                    .font(.title2.weight(.bold))
+                    .huddleText(Theme.Typography.title)
+                    .foregroundStyle(Theme.Colors.fg)
                     .multilineTextAlignment(.center)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.subheadline.monospaced())
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.code)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                         .textSelection(.enabled)
                 }
                 if let summary {
                     Text(summary)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.body)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
                 }

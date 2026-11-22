@@ -22,10 +22,6 @@ private func botPresence(_ nick: String, jid botJID: BareJID?, kind: WirePresenc
     )
 }
 
-private func person(_ nick: String, role: RoomRole = .participant, hats: [Hat] = [], realJID: BareJID? = nil) -> Occupant {
-    Occupant(nick: nick, availability: .available, status: nil, affiliation: .member, role: role, realJID: realJID, hats: hats)
-}
-
 @MainActor
 @Suite("Declared room bots")
 struct RoomBotTests {
@@ -171,36 +167,6 @@ struct RoomBotTests {
     }
 
     // MARK: Roster
-
-    @Test func hattedMomentaryOccupantIsNotListedAsAPerson() {
-        let bot = person("helper", hats: [Hat(uri: Hat.botURI, title: "Bot")])
-        let vip = person("dana", hats: [Hat(uri: "urn:waddle:hats:vip", title: "VIP")])
-        let groups = MemberRoster.grouped([bot, vip, person("alice", role: .moderator)])
-        #expect(groups.map(\.role) == [.moderator, .participant])
-        #expect(groups.flatMap(\.occupants).map(\.nick) == ["alice", "dana"])
-    }
-
-    @Test func rosterGroupsByRoleAndSortsByNick() {
-        let groups = MemberRoster.grouped([
-            person("zoe"), person("Bea"), person("vic", role: .visitor), person("mod", role: .moderator),
-        ])
-        #expect(groups.map(\.role) == [.moderator, .participant, .visitor])
-        #expect(groups[1].occupants.map(\.nick) == ["Bea", "zoe"])
-    }
-
-    @Test func absentMembersAreAffiliatedPeopleNotInTheRoom() {
-        let members = [
-            RoomMember(jid: bob, nick: "bob", affiliation: .member),
-            RoomMember(jid: carol, nick: nil, affiliation: .owner),
-            RoomMember(jid: bare("dave@waddle.test"), nick: "Reserved", affiliation: .member),
-            RoomMember(jid: bare("erin@waddle.test"), nick: nil, affiliation: .outcast),
-            RoomMember(jid: bare("fay@waddle.test"), nick: nil, affiliation: .admin),
-        ]
-        // Bob is here by real JID, Dave by his reserved nick; outcasts are not members.
-        let present = [person("bobby", realJID: bob), person("reserved")]
-        let absent = MemberRoster.absent(members, present: present)
-        #expect(absent.map(\.jid) == [carol, bare("fay@waddle.test")])
-    }
 
     @Test func affiliationChangesUpdateALoadedList() {
         let members = [RoomMember(jid: bob, nick: "bob", affiliation: .member)]

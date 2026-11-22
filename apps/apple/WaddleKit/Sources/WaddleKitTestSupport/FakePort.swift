@@ -78,6 +78,8 @@ final class FakePort: XmppPort {
     var chatStates: [(ChatState, ConversationID)] = []
     var joined: [BareJID] = []
     var roomBots: [BareJID: [RoomBot]] = [:]
+    /// What `listMembers(of:)` answers, per room.
+    var roomMembers: [BareJID: [RoomMember]] = [:]
     var roomBotRequests: [BareJID] = []
     var failsRoomBots = false
     var userSearchResults: [String: [UserSearchResult]] = [:]
@@ -356,7 +358,7 @@ final class FakePort: XmppPort {
         try membershipWriteResult.get()
         membershipWrites.append(.init(room: room, membership: membership, name: name))
     }
-    func listMembers(of room: BareJID) async throws -> [RoomMember] { [] }
+    func listMembers(of room: BareJID) async throws -> [RoomMember] { roomMembers[room] ?? [] }
     func listRoomBots(in room: BareJID) async throws -> [RoomBot] {
         roomBotRequests.append(room)
         if failsRoomBots { throw PortError.failed }

@@ -26,14 +26,12 @@ struct DirectDetailsForm: View {
             }
             NotificationModeSection(conversation: .direct(peer))
             Section {
-                Button {
+                DetailsActionButton(title: "Search in conversation", symbol: "magnifyingglass") {
                     navigation.sheet = .search(.direct(peer))
-                } label: {
-                    Label("Search in conversation", systemImage: "magnifyingglass")
                 }
             }
         }
-        .formStyle(.grouped)
+        .detailsForm()
         .peerDetails(of: peer, session: session, into: $details)
         .peerSharedStatus(
             of: peer, isOnline: presence?.availability.isOnline ?? false, session: session, into: $shared
@@ -66,36 +64,38 @@ struct PeerHeader: View {
     let availability: Availability
     let status: String?
     let idleSince: Date?
-
-    private static let avatarSize: CGFloat = 88
+    /// Their role in the room the profile was opened from.
+    var role: MemberRoleLine?
 
     var body: some View {
         VStack(spacing: Theme.Spacing.s) {
             avatar
             Text(name)
-                .font(.title2.weight(.bold))
+                .huddleText(Theme.Typography.title)
+                .foregroundStyle(Theme.Colors.fg)
                 .multilineTextAlignment(.center)
             if let jid {
                 Text(jid.description)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
                     .textSelection(.enabled)
             }
-            HStack(spacing: Theme.Spacing.xs) {
-                PresenceDot(availability: availability, size: 8)
-                Text(AvailabilityTitle.title(availability))
-                    .font(.subheadline)
+            if let role {
+                role
             }
+            Text(AvailabilityTitle.title(availability))
+                .huddleText(Theme.Typography.label)
+                .foregroundStyle(Theme.Colors.fgMuted)
             if let statusText {
                 Text(statusText)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fg)
                     .multilineTextAlignment(.center)
             }
             if let idleSince, availability.isOnline {
                 Text("Last active \(idleSince.formatted(.relative(presentation: .named)))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
         }
         .frame(maxWidth: .infinity)
@@ -103,17 +103,8 @@ struct PeerHeader: View {
         .accessibilityElement(children: .combine)
     }
 
-    @ViewBuilder
     private var avatar: some View {
-        if let jid {
-            PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Self.avatarSize)
-        } else {
-            AvatarView(name: name, size: Self.avatarSize)
-                .overlay(alignment: .bottomTrailing) {
-                    PresenceDot(availability: availability, size: Self.avatarSize * 0.3)
-                        .offset(x: Self.avatarSize * 0.075, y: Self.avatarSize * 0.075)
-                }
-        }
+        PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Theme.Size.profileAvatar)
     }
 
     private var statusText: String? {
@@ -144,27 +135,28 @@ struct PeerProfileSheet: View {
                         jid: profile.jid,
                         availability: presence.availability,
                         status: presence.status,
-                        idleSince: presence.idleSince
+                        idleSince: presence.idleSince,
+                        role: roomRole
                     )
+                    if let peer = messageablePeer {
+                        // Android `conversation_author_profile`: the one
+                        // action, a pill under the header.
+                        Button {
+                            message(peer)
+                        } label: {
+                            Label("Message", systemImage: "bubble.left")
+                        }
+                        .buttonStyle(.huddle(.primary))
+                        .frame(maxWidth: .infinity)
+                        .accessibilityHint(Text("Opens your direct conversation"))
+                    }
                 }
                 PeerSharingSection(status: shared, isOnline: presence.availability.isOnline)
                 if let details {
                     PeerDetailsSection(details: details)
                 }
-                if let peer = messageablePeer {
-                    Section {
-                        Button {
-                            message(peer)
-                        } label: {
-                            Label("Message", systemImage: "bubble.left")
-                                .frame(maxWidth: .infinity, minHeight: Theme.Size.minHitTarget, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .accessibilityHint(Text("Opens your direct conversation"))
-                    }
-                }
             }
-            .formStyle(.grouped)
+            .detailsForm()
             .peerDetails(of: profile.jid, session: session, into: $details)
             .peerSharedStatus(
                 of: profile.jid, isOnline: presence.availability.isOnline, session: session, into: $shared
@@ -182,6 +174,15 @@ struct PeerProfileSheet: View {
         #if os(macOS)
         .frame(minWidth: 360, minHeight: 380)
         #endif
+    }
+
+    /// Their role in the room the profile was opened from: their
+    /// occupant's while they are in it, else the member list's.
+    private var roomRole: MemberRoleLine? {
+        if let occupant = PeerProfilePresence.occupant(of: profile, session: session) {
+            return MemberRoleLine(affiliation: occupant.affiliation, hats: occupant.hats)
+        }
+        return profile.affiliation.map { MemberRoleLine(affiliation: $0, hats: []) }
     }
 
     /// A real JID that is not our own account; anonymous room occupants
@@ -217,14 +218,23 @@ enum PeerProfilePresence {
                 idleSince: nil
             )
         }
-        if let room = profile.room, let nick = profile.nick,
-           let occupant = session.presence.occupant(named: nick, in: room),
-           profile.jid == nil || occupant.realJID == nil || occupant.realJID == profile.jid {
+        if let occupant = occupant(of: profile, session: session) {
             return Resolved(availability: occupant.availability, status: occupant.status, idleSince: nil)
         }
         if let jid = profile.jid, let contact = session.presence.contacts[jid] {
             return Resolved(availability: contact.availability, status: contact.status, idleSince: contact.idleSince)
         }
         return Resolved(availability: .offline, status: nil, idleSince: nil)
+    }
+
+    /// The room occupant the profile was opened from, only while its nick
+    /// still belongs to the same person: someone who takes a freed nick
+    /// is not them.
+    @MainActor
+    static func occupant(of profile: PeerProfileRoute, session: SessionCoordinator) -> Occupant? {
+        guard let room = profile.room, let nick = profile.nick,
+              let occupant = session.presence.occupant(named: nick, in: room) else { return nil }
+        guard let jid = profile.jid, let realJID = occupant.realJID else { return occupant }
+        return realJID == jid ? occupant : nil
     }
 }
