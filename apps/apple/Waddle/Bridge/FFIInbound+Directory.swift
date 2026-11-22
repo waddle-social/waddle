@@ -38,7 +38,7 @@ extension FFIInbound {
             isGroupDM: channel.isGroupDm,
             membersOnly: channel.membersOnly,
             // A group chat is left for good, with its own request.
-            hasLeft: channel.userAutojoin == false && !channel.isGroupDm
+            hasLeft: channel.hasLeft && !channel.isGroupDm
         )
     }
 

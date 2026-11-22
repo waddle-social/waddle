@@ -46,7 +46,7 @@ final class FakePort: XmppPort {
     var membershipWrites: [MembershipWrite] = []
     var membershipWriteResult: Result<Void, PortError> = .success(())
     /// Rooms a leave presence was sent to.
-    var left: [BareJID] = []
+    var leavePresences: [BareJID] = []
     var notifySettingsWrites: [NotifySettingsWrite] = []
     var notifySettingsWriteResult: Result<Void, PortError> = .success(())
     /// Results for the next writes, in order, before `notifySettingsWriteResult`.
@@ -347,7 +347,7 @@ final class FakePort: XmppPort {
     }
 
     func leaveRoom(_ room: BareJID, nick: String) async {
-        left.append(room)
+        leavePresences.append(room)
     }
 
     func setRoomMembership(_ membership: RoomMembership, of room: BareJID, name: String?) async throws {

@@ -60,11 +60,21 @@ extension SessionCoordinator {
     public func leaveRoom(_ room: BareJID) async throws {
         guard let channel = directory.channel(for: room), !channel.isGroupDM else { throw PortError.invalidRequest }
         let nick = presence.selfNicks[room] ?? account.nick
-        try await giveUp(room, .left) {
-            try await afterEarlierBookmarkWrites(to: .room(room)) { [port] in
-                try await port.setRoomMembership(.left, of: room, name: channel.name)
+        do {
+            try await giveUp(room, .left) {
+                try await afterEarlierBookmarkWrites(to: .room(room)) { [self] in
+                    try await port.setRoomMembership(.left, of: room, name: channel.name)
+                    // Marked before the next write to the bookmark gets
+                    // its turn, so that one sees the room as left.
+                    if let recorded = directory.channel(for: room) { markChannel(recorded, left: true) }
+                }
+                await port.leaveRoom(room, nick: nick)
             }
-            await port.leaveRoom(room, nick: nick)
+        } catch PortError.timeout {
+            // The account may have recorded it all the same. Looking the
+            // rooms up tells, and leaves the room if it did.
+            await refreshDirectory(joiningOnlyNewRooms: true)
+            guard directory.hasLeft(room) else { throw PortError.timeout }
         }
     }
 
@@ -84,9 +94,8 @@ extension SessionCoordinator {
                 try await port.setRoomMembership(.joined(notifyMode: mode), of: room, name: channel.name)
             }
             guard isCurrent(generation) else { return }
-            upsertChannel(channel.with(hasLeft: false))
+            markChannel(channel, left: false)
             directory.setNotifyMode(mode, for: .room(room))
-            silenceLeftRooms()
             await ensureJoined(room)
         }
     }
@@ -161,10 +170,8 @@ extension SessionCoordinator {
             } else {
                 calls.sealedGroupRooms.remove(room)
             }
-            if exit == .left, let channel = directory.channel(for: room) {
-                upsertChannel(channel.with(hasLeft: true))
+            if exit == .left {
                 directory.setNotifyMode(.never, for: .room(room))
-                silenceLeftRooms()
             } else {
                 directory.remove(room)
                 directoryMutations.append(.remove(room))
@@ -198,6 +205,13 @@ extension SessionCoordinator {
         directoryMutations.append(.upsert(channel))
     }
 
+    /// Records a leave or rejoin, also for topology requests in flight.
+    private func markChannel(_ channel: Channel, left: Bool) {
+        directory.upsert(channel.with(hasLeft: left))
+        directoryMutations.append(.setLeft(channel.roomJID, left))
+        silenceLeftRooms()
+    }
+
     private func updateChannel(_ room: BareJID, name: String?, summary: String? = nil) {
         guard let channel = directory.channel(for: room) else { return }
         upsertChannel(channel.with(name: name ?? channel.name, summary: summary ?? channel.summary))
@@ -224,4 +238,6 @@ public enum RoomRejoinError: Error, Equatable, Sendable {
 enum DirectoryMutation {
     case upsert(Channel)
     case remove(BareJID)
+    /// The account left or rejoined the room here.
+    case setLeft(BareJID, Bool)
 }

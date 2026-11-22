@@ -101,8 +101,16 @@ public final class DirectoryStore {
         }.sorted(by: Self.listOrder)
         groupDMs = sorted.filter(\.isGroupDM)
         channels = sorted.filter { !$0.isGroupDM && !$0.hasLeft }
-        leftRooms = sorted.filter { !$0.isGroupDM && $0.hasLeft }
-        roomJIDs = Set(topology.channels.map(\.roomJID))
+        var left = sorted.filter { !$0.isGroupDM && $0.hasLeft }
+        if !topology.ownBookmarksLoaded {
+            // A left room that no space lists is known only from the
+            // bookmarks, so this lookup could not have found it.
+            let listed = Set(topology.channels.map(\.roomJID))
+            left += leftRooms.filter { !listed.contains($0.roomJID) }
+            left.sort(by: Self.listOrder)
+        }
+        leftRooms = left
+        roomJIDs = Set(topology.channels.map(\.roomJID)).union(leftRooms.map(\.roomJID))
         hasLoadedTopology = true
     }
 

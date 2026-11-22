@@ -37,7 +37,7 @@ struct LeaveRoomTests {
         try await coordinator.leaveRoom(room)
 
         #expect(port.membershipWrites == [.init(room: room, membership: .left, name: "general")])
-        #expect(port.left == [room])
+        #expect(port.leavePresences == [room])
         #expect(coordinator.directory.channels.isEmpty)
         #expect(coordinator.directory.leftRooms.map(\.roomJID) == [room])
         #expect(coordinator.directory.title(for: roomConversation) == "general")
@@ -53,7 +53,7 @@ struct LeaveRoomTests {
 
         await #expect(throws: PortError.rejected) { try await coordinator.leaveRoom(room) }
 
-        #expect(port.left.isEmpty)
+        #expect(port.leavePresences.isEmpty)
         #expect(coordinator.directory.channels.map(\.roomJID) == [room])
         #expect(coordinator.directory.leftRooms.isEmpty)
         #expect(coordinator.presence.joinedRooms.contains(room))
@@ -147,7 +147,7 @@ struct LeaveRoomTests {
 
         await coordinator.refreshDirectory(joiningOnlyNewRooms: true)
 
-        #expect(port.left == [room])
+        #expect(port.leavePresences == [room])
         #expect(!coordinator.presence.joinedRooms.contains(room))
         #expect(coordinator.unread.count(for: roomConversation) == 0)
         #expect(coordinator.directory.leftRooms.map(\.roomJID) == [room])
@@ -170,7 +170,7 @@ struct LeaveRoomTests {
 
         await coordinator.refreshDirectory(joiningOnlyNewRooms: true)
 
-        #expect(port.left.isEmpty)
+        #expect(port.leavePresences.isEmpty)
         #expect(coordinator.directory.channels.map(\.roomJID) == [room])
     }
 
@@ -190,6 +190,79 @@ struct LeaveRoomTests {
         try await mute.value
         try await leave.value
         #expect(port.membershipWrites.map(\.membership) == [.left])
+    }
+
+    @Test func leftRoomsKnownOnlyFromBookmarksStayLeftWhenBookmarksCannotBeRead() async throws {
+        // Such a room is not in a lookup that could not read the bookmarks.
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+        port.topology = Topology(spaces: [], channels: [], ownBookmarksLoaded: false)
+
+        await coordinator.refreshDirectory()
+        coordinator.handle(.inboxPush(inboxRow(unread: 4)))
+
+        #expect(coordinator.directory.leftRooms.map(\.roomJID) == [room])
+        #expect(coordinator.unread.total == 0)
+        #expect(port.joined.isEmpty)
+    }
+
+    @Test func aRenameSavedDuringALookupDoesNotBringALeftRoomBack() async throws {
+        // The lookup finds the room left on another device; the rename
+        // made here meanwhile knows nothing of that.
+        let (coordinator, port) = online()
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true)])
+        port.holdsTopology = true
+        let refresh = Task { await coordinator.refreshDirectory(joiningOnlyNewRooms: true) }
+        while port.topologyRequests == 0 { await Task.yield() }
+
+        try await coordinator.updateRoom(room, with: RoomSettingsPatch(name: "renamed"))
+        port.releaseTopology()
+        await refresh.value
+
+        #expect(coordinator.directory.channels.isEmpty)
+        #expect(coordinator.directory.leftRooms.map(\.name) == ["renamed"])
+        #expect(port.joined.isEmpty)
+    }
+
+    @Test func aLeaveThatTimedOutButWasRecordedCountsAsLeft() async throws {
+        let (coordinator, port) = online()
+        enter(coordinator)
+        port.membershipWriteResult = .failure(.timeout)
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true)])
+
+        try await coordinator.leaveRoom(room)
+
+        #expect(coordinator.directory.leftRooms.map(\.roomJID) == [room])
+        #expect(port.leavePresences == [room])
+        #expect(!coordinator.presence.joinedRooms.contains(room))
+    }
+
+    @Test func aLeaveThatTimedOutAndWasNotRecordedFails() async throws {
+        let (coordinator, port) = online()
+        enter(coordinator)
+        port.membershipWriteResult = .failure(.timeout)
+
+        await #expect(throws: PortError.timeout) { try await coordinator.leaveRoom(room) }
+
+        #expect(coordinator.directory.channels.map(\.roomJID) == [room])
+        #expect(coordinator.presence.joinedRooms.contains(room))
+    }
+
+    @Test func aNotificationChangeWaitingBehindALeaveIsDropped() async throws {
+        // Stored after the leave it would turn the left room's notifications on.
+        let (coordinator, port) = online()
+        port.heldDirectoryVerbs = ["setRoomMembership"]
+        let leave = Task { try await coordinator.leaveRoom(room) }
+        while port.heldDirectoryRequests.isEmpty { await Task.yield() }
+        let change = Task { try await coordinator.setNotifyMode(.always, for: roomConversation) }
+        for _ in 0..<20 { await Task.yield() }
+
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        try await leave.value
+        try await change.value
+
+        #expect(port.notifySettingsWrites.isEmpty)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
     }
 
     @Test func groupChatsAreNeverListedAsLeft() {

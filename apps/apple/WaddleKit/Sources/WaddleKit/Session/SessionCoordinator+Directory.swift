@@ -52,10 +52,13 @@ extension SessionCoordinator {
             for mutation in directoryMutations.dropFirst(mutationStart) {
                 switch mutation {
                 case .upsert(let channel):
-                    // Queued local edits may carry an older discovery flag.
-                    let membersOnly = directory.channel(for: channel.roomJID)?.membersOnly
-                    directory.upsert(channel.withKnownMembersOnly(membersOnly))
+                    // Queued local edits may carry older discovery flags.
+                    let found = directory.channel(for: channel.roomJID)
+                    directory.upsert(channel.with(hasLeft: found?.hasLeft ?? channel.hasLeft)
+                        .withKnownMembersOnly(found?.membersOnly))
                 case .remove(let room): directory.remove(room)
+                case let .setLeft(room, hasLeft):
+                    if let found = directory.channel(for: room) { directory.upsert(found.with(hasLeft: hasLeft)) }
                 }
             }
         }
@@ -190,6 +193,8 @@ extension SessionCoordinator {
         rollback: @escaping @MainActor () -> Void
     ) async throws {
         try await afterEarlierBookmarkWrites(to: conversation) { [self] in
+            // Left meanwhile: its notifications stay off.
+            guard !(conversation.isRoom && directory.hasLeft(conversation.jid)) else { return }
             do {
                 let stored = try await port.fetchNotifySettings()
                 // The new value is applied again: a write that ran in
