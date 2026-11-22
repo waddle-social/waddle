@@ -4,10 +4,10 @@ import WaddleKit
 /// The message text: paragraphs with XEP-0394 styling, XEP-0372 mention
 /// highlights and detected links; quotes with a leading bar; code blocks
 /// in monospace. A XEP-0245 `/me` body renders as an action line,
-/// "* Author action". Selectable on iOS. Not on a Mac: there selectable
-/// text takes the secondary click for its own Cut/Copy/Paste menu, so a
-/// right-click on the words never reached the row's menu (react, reply,
-/// reply in thread); "Copy text" in that menu copies the message.
+/// "* Author action". Selectable when `isSelectable`: always on iOS, on a
+/// Mac only after "Select text", since there selectable text takes the
+/// secondary click for its own Cut/Copy/Paste menu and a right-click on
+/// the words would never reach the row's menu.
 struct MessageRichBody: View {
     let item: TimelineItem
     let account: AccountIdentity
@@ -15,6 +15,7 @@ struct MessageRichBody: View {
     let showsEditedMark: Bool
     /// The name the row header shows, used for `/me` action lines.
     let authorName: String
+    let isSelectable: Bool
 
     var body: some View {
         let hidden = MeAction.hiddenScalarCount(ofBody: item.body)
@@ -28,9 +29,7 @@ struct MessageRichBody: View {
                 blockView(block, isLast: index == blocks.count - 1)
             }
         }
-        #if os(iOS)
-        .textSelection(.enabled)
-        #endif
+        .modifier(MessageTextSelection(isEnabled: isSelectable))
     }
 
     @ViewBuilder
@@ -110,5 +109,17 @@ enum RichTextAttributes {
             piece.inlinePresentationIntent = intent
         }
         return piece
+    }
+}
+
+private struct MessageTextSelection: ViewModifier {
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.textSelection(.enabled)
+        } else {
+            content.textSelection(.disabled)
+        }
     }
 }

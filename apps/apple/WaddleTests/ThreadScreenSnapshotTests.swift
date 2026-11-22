@@ -28,16 +28,18 @@ final class ThreadScreenSnapshotTests: XCTestCase {
         let sample = SampleSession()
         sample.seedThreadWithSubThread()
         let row = try XCTUnwrap(sample.coordinator.timelines.timeline(for: .room(SampleSession.releaseTrain)).item(withID: "reply-1"))
-        let screen = Self.thread("root").environment(\.messageToolbarRow, row.presentationID)
-        try await assertScreenSnapshot(of: sample.host(screen), size: Self.size)
+        try await assertScreenSnapshot(of: sample.host(Self.thread("root", toolbarRow: row.presentationID)), size: Self.size)
     }
 
-    private static func thread(_ rootID: String) -> some View {
+    private static func thread(_ rootID: String, toolbarRow: String? = nil) -> some View {
         NavigationStack {
-            ThreadScreen(conversation: .room(SampleSession.releaseTrain), rootID: rootID)
+            // The seeded messages are 11 to 15 minutes old at this time.
+            ThreadScreen(conversation: .room(SampleSession.releaseTrain), rootID: rootID, clock: date(0), toolbarRow: toolbarRow)
         }
-        // The seeded messages are 11 to 15 minutes old at this time.
-        .environment(\.threadHeaderNow, date(0))
+        #if os(macOS)
+        // Where a Mac shows a thread.
+        .environment(\.isInInspector, true)
+        #endif
     }
 
     #if os(macOS)

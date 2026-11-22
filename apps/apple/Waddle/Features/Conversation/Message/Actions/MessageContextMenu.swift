@@ -1,49 +1,36 @@
 import SwiftUI
 import WaddleKit
 
-/// Row context menu: quick reactions, reply, thread, copy, pin, safety
-/// scores, edit, delete and moderator removal. Actions that target the message on the
-/// wire are disabled until it has an id others know (a local echo not yet
-/// reflected has none). Dependencies are passed in rather than read from
-/// the environment, which menu content does not reliably inherit.
+/// Row context menu: the row's actions from `MessageActions` (quick
+/// reactions, add reaction, reply, the thread, pin, select text on a Mac,
+/// edit, delete), with copy text, the sticker pack, safety scores and
+/// moderator removal between them. Dependencies are passed in rather than
+/// read from the environment, which menu content does not reliably
+/// inherit.
 struct MessageContextMenu: View {
     let item: TimelineItem
+    let available: [MessageAction]
     let session: SessionCoordinator
     let actions: MessageActionModel
-    let openThread: () -> Void
-
-    private var canTarget: Bool { item.actionTargetID != nil }
+    let perform: (MessageAction) -> Void
 
     var body: some View {
         if item.tombstone == nil {
-            if canTarget {
+            let reactions = available.filter { if case .react = $0 { true } else { false } }
+            if !reactions.isEmpty {
                 ControlGroup {
-                    ForEach(Theme.quickReactions, id: \.self) { emoji in
+                    ForEach(reactions, id: \.self) { action in
                         Button {
-                            actions.react(emoji, to: item, session: session)
+                            perform(action)
                         } label: {
-                            Text(emoji)
+                            if case let .react(emoji) = action { Text(emoji) }
                         }
+                        .accessibilityLabel(Text(action.accessibilityLabel))
                     }
                 }
                 .controlGroupStyle(.palette)
-                Button {
-                    actions.pickReaction(for: item)
-                } label: {
-                    Label("Add reaction…", systemImage: "face.smiling")
-                }
             }
-            Button {
-                actions.reply(to: item)
-            } label: {
-                Label("Reply", systemImage: "arrowshape.turn.up.left")
-            }
-            .disabled(!canTarget)
-            if item.threadTarget(inside: actions.thread) != nil {
-                Button(action: openThread) {
-                    Label("Reply in thread", systemImage: "bubble.left.and.bubble.right")
-                }
-            }
+            items([.addReaction, .reply, .startThread, .openThread])
             if let text = MessageContent.visibleBody(of: item) {
                 Button {
                     MessagePasteboard.copy(text)
@@ -51,16 +38,14 @@ struct MessageContextMenu: View {
                     Label("Copy text", systemImage: "doc.on.doc")
                 }
             }
-            if let pack = session.stickerPackLocation(of: item), item.tombstone == nil {
+            if let pack = session.stickerPackLocation(of: item) {
                 Button {
                     actions.showStickerPack(pack)
                 } label: {
                     Label("View sticker pack", systemImage: "face.smiling")
                 }
             }
-            if item.conversation.isRoom {
-                pinButton
-            }
+            items([.pin, .unpin])
             if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
                 Button {
                     actions.showSafetyScores(for: item)
@@ -68,51 +53,56 @@ struct MessageContextMenu: View {
                     Label(MessageSafetyScoresButton.title + "…", systemImage: MessageSafetyScoreStyle.symbol(for: row.category))
                 }
             }
-            ownActions
+            #if os(macOS)
+            items([.selectText])
+            #endif
+            if available.contains(where: \.isOwn) {
+                Divider()
+                items([.edit, .delete])
+            }
             moderatorActions
         }
         Text(item.sentAt.formatted(date: .abbreviated, time: .shortened))
     }
 
-    private var pinButton: some View {
-        let pinned = session.isPinned(item)
-        return Button {
-            actions.setPinned(!pinned, item, session: session)
-        } label: {
-            Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-        }
-        .disabled(!canTarget)
-    }
-
+    /// The available ones of `wanted`, in the model's order.
     @ViewBuilder
-    private var ownActions: some View {
-        if item.isMine {
-            Divider()
-            Button {
-                actions.edit(item)
+    private func items(_ wanted: [MessageAction]) -> some View {
+        ForEach(available.filter(wanted.contains), id: \.self) { action in
+            Button(role: action == .delete ? .destructive : nil) {
+                perform(action)
             } label: {
-                Label("Edit", systemImage: "pencil")
+                Label(action.title, systemImage: action.symbol)
             }
-            .disabled(item.correctionTargetID == nil || item.isLocalEcho || item.message.isSticker)
-            Button(role: .destructive) {
-                actions.requestDeletion(of: item)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-            .disabled(item.retractionTargetID == nil)
         }
     }
 
     @ViewBuilder
     private var moderatorActions: some View {
-        if !item.isMine, session.canModerate(in: item.conversation) {
+        if !item.isMine, item.actionTargetID != nil, session.canModerate(in: item.conversation) {
             Divider()
             Button(role: .destructive) {
                 actions.requestRemoval(of: item)
             } label: {
                 Label("Remove message", systemImage: "shield.lefthalf.filled")
             }
-            .disabled(!canTarget)
+        }
+    }
+}
+
+extension MessageAction {
+    /// The SF Symbol the toolbar and the menu show.
+    var symbol: String {
+        switch self {
+        case .react: "face.smiling"
+        case .addReaction: "face.smiling"
+        case .reply: "arrowshape.turn.up.left"
+        case .startThread, .openThread: "bubble.left.and.bubble.right"
+        case .pin: "pin"
+        case .unpin: "pin.slash"
+        case .selectText: "character.cursor.ibeam"
+        case .edit: "pencil"
+        case .delete: "trash"
         }
     }
 }
@@ -126,10 +116,15 @@ struct MessageAccessibilityActions: ViewModifier {
     @Environment(MessageActionModel.self) private var actions
     @Environment(\.openURL) private var openURL
     let item: TimelineItem
-    let replyCount: Int
+    /// The row's actions; VoiceOver gets every one but the quick
+    /// reactions and select text.
+    let available: [MessageAction]
+    let perform: (MessageAction) -> Void
     let opensThreadOnActivate: Bool
     let authorName: String
     let openThread: () -> Void
+    /// A reply in a thread view whose sub-thread has messages.
+    let hasSubThreadLink: Bool
     let openProfile: () -> Void
     let openImage: (SharedFile) -> Void
 
@@ -143,14 +138,23 @@ struct MessageAccessibilityActions: ViewModifier {
         }
     }
 
+    private var spoken: [MessageAction] {
+        available.filter { action in
+            switch action {
+            case .react, .selectText: false
+            default: true
+            }
+        }
+    }
+
     private func customActions(_ content: Content) -> some View {
         content.accessibilityActions {
-            if item.tombstone == nil, item.actionTargetID != nil {
-                Button("Reply") { actions.reply(to: item) }
-                Button("Add reaction") { actions.pickReaction(for: item) }
+            ForEach(spoken, id: \.self) { action in
+                Button(action.accessibilityLabel) { perform(action) }
             }
-            if replyCount > 0 {
-                Button(actions.isThread ? "Open sub-thread" : "Open thread", action: openThread)
+            // A deleted reply has no actions but keeps its sub-thread.
+            if item.tombstone != nil, opensThreadOnActivate || hasSubThreadLink {
+                Button("Open thread", action: openThread)
             }
             Button("\(authorName), open profile", action: openProfile)
             if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
@@ -172,14 +176,6 @@ struct MessageAccessibilityActions: ViewModifier {
             }
             if let preview = item.message.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }
-            }
-            if item.isMine, item.tombstone == nil {
-                if item.correctionTargetID != nil, !item.isLocalEcho, !item.message.isSticker {
-                    Button("Edit") { actions.edit(item) }
-                }
-                if item.retractionTargetID != nil {
-                    Button("Delete") { actions.requestDeletion(of: item) }
-                }
             }
             if session.deliveries.state(of: item.id) == .failed {
                 Button("Retry sending") { Task { await session.retry(clientID: item.id) } }

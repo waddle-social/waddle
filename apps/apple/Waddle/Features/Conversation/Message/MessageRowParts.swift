@@ -152,6 +152,7 @@ struct MessageThreadCard: View {
                 HStack(spacing: Theme.Spacing.s - 2) {
                     if !summary.faces.isEmpty {
                         MessageThreadFaces(faces: summary.faces, overflow: summary.otherParticipantCount)
+                            .environment(\.huddleGround, Theme.Colors.surface2)
                     }
                     Text(MessageThreadCardText.count(summary.replyCount))
                         .font(.caption.weight(.semibold))
@@ -298,12 +299,12 @@ private struct MessageThreadElbow: Shape {
 }
 
 /// Overlapping thread participants, then "+N": on the reply card and in
-/// the thread header. `ring` is the ground the faces cut into.
+/// the thread header. Each face cuts into the ground it sits on.
 struct MessageThreadFaces: View {
+    @Environment(\.huddleGround) private var ground
     let faces: [ThreadSummary.Participant]
     let overflow: Int
     var size: CGFloat = 18
-    var ring = Color.secondaryBackground
 
     var body: some View {
         HStack(spacing: -size * 0.3) {
@@ -311,14 +312,14 @@ struct MessageThreadFaces: View {
                 avatar(face)
                     .overlay(
                         RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                            .strokeBorder(ring, lineWidth: 1.5)
+                            .strokeBorder(ground, lineWidth: 1.5)
                     )
                     .zIndex(Double(faces.count - index))
             }
             if overflow > 0 {
                 Text("+\(overflow)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.tag)
+                    .foregroundStyle(Theme.Colors.fgMuted)
                     .padding(.leading, size * 0.3 + 2)
             }
         }

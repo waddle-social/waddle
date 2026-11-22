@@ -27,8 +27,9 @@ private struct MessageRowContent: View {
     @Environment(NavigationModel.self) private var navigation
     @Environment(MessageActionModel.self) private var actions
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The pointer is over the row (iPad with a pointer too; touch never
+    /// hovers). The row's only hover state.
     @State private var isHovering = false
-    @Environment(\.messageToolbarRow) private var toolbarRow
     @State private var imagePreviewFile: SharedFile?
     @State private var isImagePreviewPresented = false
     private var placement = ConversationInspectorPlacement()
@@ -53,6 +54,7 @@ private struct MessageRowContent: View {
             authorJID: authorJID,
             isBot: authorJID.map { session.roomBots.isDeclared($0, in: item.conversation.jid) } ?? false
         )
+        let available = MessageActions.available(for: item, in: actionContext)
         HStack(alignment: .top, spacing: isCompact ? Theme.Spacing.s : Theme.Spacing.m) {
             gutter(author: author)
                 .frame(width: avatarSize, alignment: .trailing)
@@ -95,15 +97,8 @@ private struct MessageRowContent: View {
         .padding(.top, topPadding)
         .padding(.bottom, Theme.Spacing.xxs)
         .background(background)
-        // Floats over the row above, as on web, so it never moves the
-        // layout; it stays while the pointer is on it.
         .overlay(alignment: .topTrailing) {
-            if showsToolbar {
-                MessageHoverToolbar(actions: toolbarActions, perform: perform)
-                    .onHover { actions.hoverToolbar(of: item.presentationID, $0) }
-                    .padding(.trailing, Theme.Spacing.l)
-                    .offset(y: -Theme.Spacing.l)
-            }
+            MessageRowToolbar(item: item, context: actionContext, isRowHovered: isHovering, perform: perform)
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.presentationID)
         .contentShape(Rectangle())
@@ -118,10 +113,16 @@ private struct MessageRowContent: View {
         #endif
         .onHover { inside in
             isHovering = inside
-            actions.hoverRow(item.presentationID, inside)
+            if !inside {
+                actions.endTextSelection(of: item.presentationID)
+            }
+        }
+        .onDisappear {
+            actions.releaseToolbar(of: item.presentationID)
+            actions.endTextSelection(of: item.presentationID)
         }
         .contextMenu {
-            MessageContextMenu(item: item, session: session, actions: actions, openThread: openThread)
+            MessageContextMenu(item: item, available: available, session: session, actions: actions, perform: perform)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(MessageAccessibilityText.label(
@@ -133,10 +134,12 @@ private struct MessageRowContent: View {
         )))
         .modifier(MessageAccessibilityActions(
             item: item,
-            replyCount: entry.replyCount,
+            available: available,
+            perform: perform,
             opensThreadOnActivate: opensThreadOnTap,
             authorName: author.name,
             openThread: openThread,
+            hasSubThreadLink: actions.isThread && entry.replyCount > 0,
             openProfile: { openProfile(author) },
             openImage: openImage
         ))
@@ -157,33 +160,17 @@ private struct MessageRowContent: View {
         #endif
     }
 
-    /// While the pointer is over the row or its toolbar (iPad with a
-    /// pointer too; touch never hovers).
-    private var showsToolbar: Bool {
-        actions.showsToolbar(for: item.presentationID) || toolbarRow == item.presentationID
-    }
-
-    private var toolbarActions: [MessageToolbarAction] {
-        MessageToolbar.actions(
-            for: item,
-            inThread: actions.thread,
+    private var actionContext: MessageActionContext {
+        MessageActionContext(
+            thread: actions.thread,
             replyCount: entry.replyCount,
             isPinned: session.isPinned(item),
-            quickReactions: MessageHoverToolbar.quickReactions
+            pinning: session.pinAccess(in: item.conversation)
         )
     }
 
-    /// The context menu's actions, run the same way.
-    private func perform(_ action: MessageToolbarAction) {
-        switch action {
-        case let .react(emoji): actions.react(emoji, to: item, session: session)
-        case .addReaction: actions.pickReaction(for: item)
-        case .reply: actions.reply(to: item)
-        case .thread: openThread()
-        case let .pin(isPinned): actions.setPinned(!isPinned, item, session: session)
-        case .edit: actions.edit(item)
-        case .delete: actions.requestDeletion(of: item)
-        }
+    private func perform(_ action: MessageAction) {
+        actions.perform(action, on: item, session: session, openThread: openThread)
     }
 
     private var occupant: Occupant? {
@@ -306,6 +293,16 @@ private struct MessageRowBody: View {
         }
     }
 
+    /// Always on iOS. On a Mac selectable words would take the right-click
+    /// for the text's own menu, so only the row chosen with "Select text".
+    private var isSelectable: Bool {
+        #if os(iOS)
+        true
+        #else
+        actions.selectableRow == item.presentationID
+        #endif
+    }
+
     @ViewBuilder
     private var content: some View {
         if MessageContent.visibleBody(of: item) != nil {
@@ -316,7 +313,8 @@ private struct MessageRowBody: View {
                     item: item,
                     account: session.account,
                     showsEditedMark: item.isEdited && !entry.startsGroup,
-                    authorName: authorName
+                    authorName: authorName,
+                    isSelectable: isSelectable
                 )
             }
         }

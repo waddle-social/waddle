@@ -31,11 +31,13 @@ final class MessageActionModel {
     /// Incremented to ask the composer to take focus.
     private(set) var focusRequest = 0
 
-    /// The row under the pointer, and the row whose hover toolbar the
-    /// pointer is on. The toolbar floats over the row above its own, so
-    /// while it is hovered it keeps its row's toolbar up and no other.
-    private(set) var hoveredRow: String?
-    private(set) var toolbarHoverRow: String?
+    /// The row whose hover toolbar the pointer is on. That toolbar floats
+    /// over the row above its own, so while it is held no other row shows
+    /// one. Released when the pointer leaves it or the row goes away.
+    private(set) var heldToolbarRow: String?
+    /// On a Mac, the row whose words are selectable ("Select text") until
+    /// the pointer leaves it or another row is chosen.
+    private(set) var selectableRow: String?
 
     @ObservationIgnored private var highlightTask: Task<Void, Never>?
 
@@ -45,25 +47,45 @@ final class MessageActionModel {
         self.thread = thread
     }
 
-    func hoverRow(_ id: String, _ isInside: Bool) {
-        if isInside {
-            hoveredRow = id
-        } else if hoveredRow == id {
-            hoveredRow = nil
+    func holdToolbar(of row: String) {
+        heldToolbarRow = row
+    }
+
+    func releaseToolbar(of row: String) {
+        if heldToolbarRow == row {
+            heldToolbarRow = nil
         }
     }
 
-    func hoverToolbar(of id: String, _ isInside: Bool) {
-        if isInside {
-            toolbarHoverRow = id
-        } else if toolbarHoverRow == id {
-            toolbarHoverRow = nil
+    /// `row` shows its toolbar while held, else while hovered and no other
+    /// row's is held.
+    func showsToolbar(of row: String, isRowHovered: Bool) -> Bool {
+        guard let heldToolbarRow else { return isRowHovered }
+        return heldToolbarRow == row
+    }
+
+    func selectText(of row: String) {
+        selectableRow = row
+    }
+
+    func endTextSelection(of row: String) {
+        if selectableRow == row {
+            selectableRow = nil
         }
     }
 
-    func showsToolbar(for id: String) -> Bool {
-        if let toolbarHoverRow { return toolbarHoverRow == id }
-        return hoveredRow == id
+    /// Runs a row action from the toolbar, the menu or VoiceOver.
+    func perform(_ action: MessageAction, on item: TimelineItem, session: SessionCoordinator, openThread: () -> Void) {
+        switch action {
+        case let .react(emoji): react(emoji, to: item, session: session)
+        case .addReaction: pickReaction(for: item)
+        case .reply: reply(to: item)
+        case .startThread, .openThread: openThread()
+        case .pin, .unpin: setPinned(action == .pin, item, session: session)
+        case .selectText: selectText(of: item.presentationID)
+        case .edit: edit(item)
+        case .delete: requestDeletion(of: item)
+        }
     }
 
     func reply(to item: TimelineItem) {

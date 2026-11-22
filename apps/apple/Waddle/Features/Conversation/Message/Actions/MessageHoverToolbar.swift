@@ -1,26 +1,65 @@
 import SwiftUI
 import WaddleKit
 
-extension EnvironmentValues {
-    /// The row (by presentation id) whose hover toolbar shows without a
-    /// pointer over it, for snapshots.
-    @Entry var messageToolbarRow: String?
-}
-
-/// The toolbar that floats at a message row's top trailing corner while
-/// the pointer is over the row (web `MessageHoverToolbar`): quick
-/// reactions, add reaction, reply, thread, pin, then edit and delete for
-/// one's own message. What it offers comes from `MessageToolbar`.
-struct MessageHoverToolbar: View {
-    /// Web's five quick reactions.
-    static var quickReactions: [String] { Array(Theme.quickReactions.prefix(5)) }
-
-    let actions: [MessageToolbarAction]
-    let perform: (MessageToolbarAction) -> Void
-    @ScaledMetric(relativeTo: .body) private var glyphSize: CGFloat = 13
+/// A message row's hover toolbar where it floats: over the row's top
+/// trailing corner, reaching up over the row above as on web, so it never
+/// moves the layout. The only view that reads the shared hover state, so
+/// a pointer crossing redraws two rows' toolbars, not every row.
+struct MessageRowToolbar: View {
+    @Environment(MessageActionModel.self) private var actions
+    let item: TimelineItem
+    let context: MessageActionContext
+    let isRowHovered: Bool
+    let perform: (MessageAction) -> Void
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.xxs) {
+        let row = item.presentationID
+        if actions.showsToolbar(of: row, isRowHovered: isRowHovered) {
+            GeometryReader { geometry in
+                let buttons = MessageActions.toolbar(
+                    for: item,
+                    in: context,
+                    isBeingEdited: actions.composer.editing?.presentationID == row,
+                    maxButtons: MessageHoverToolbar.buttonsFitting(geometry.size.width - 2 * Theme.Spacing.l)
+                )
+                if !buttons.isEmpty {
+                    MessageHoverToolbar(actions: buttons, perform: perform)
+                        .onHover { inside in
+                            if inside {
+                                actions.holdToolbar(of: row)
+                            } else {
+                                actions.releaseToolbar(of: row)
+                            }
+                        }
+                        .onDisappear { actions.releaseToolbar(of: row) }
+                        .padding(.trailing, Theme.Spacing.l)
+                        .offset(y: -Theme.Spacing.l)
+                        .frame(maxWidth: .infinity, alignment: .topTrailing)
+                }
+            }
+        }
+    }
+}
+
+/// The toolbar (web `MessageHoverToolbar`): quick reactions, add
+/// reaction, reply, the thread, pin, then edit and delete for one's own
+/// message, each with its tooltip.
+struct MessageHoverToolbar: View {
+    let actions: [MessageAction]
+    let perform: (MessageAction) -> Void
+
+    private static let spacing = Theme.Spacing.xxs
+
+    /// How many buttons fit in `width`, the divider before one's own
+    /// actions included.
+    static func buttonsFitting(_ width: CGFloat) -> Int {
+        let side = HuddleToolbarButtonStyle.side
+        let usable = width - 2 * spacing - 2 * WaddleTokens.BorderWidth.hair - (side / 4)
+        return max(0, Int((usable + spacing) / (side + spacing)))
+    }
+
+    var body: some View {
+        HStack(spacing: Self.spacing) {
             ForEach(Array(actions.enumerated()), id: \.element) { index, action in
                 if action.isOwn, index > 0, !actions[index - 1].isOwn {
                     Rectangle()
@@ -32,89 +71,18 @@ struct MessageHoverToolbar: View {
                 Button {
                     perform(action)
                 } label: {
-                    glyph(action)
+                    if case let .react(emoji) = action {
+                        Text(emoji).huddleText(Theme.Typography.body)
+                    } else {
+                        Image(systemName: action.symbol).huddleText(Theme.Typography.label)
+                    }
                 }
-                .buttonStyle(MessageToolbarButtonStyle(isDanger: action == .delete))
-                .help(Self.title(action))
-                .accessibilityLabel(Text(Self.accessibilityLabel(action)))
+                .buttonStyle(HuddleToolbarButtonStyle(isDanger: action == .delete))
+                .help(action.title)
+                .accessibilityLabel(Text(action.accessibilityLabel))
             }
         }
-        .padding(Theme.Spacing.xxs)
+        .padding(Self.spacing)
         .huddleSurface(.raised, radius: Theme.Radius.medium)
-    }
-
-    @ViewBuilder
-    private func glyph(_ action: MessageToolbarAction) -> some View {
-        if case let .react(emoji) = action {
-            Text(emoji).huddleText(Theme.Typography.body)
-        } else {
-            Image(systemName: Self.symbol(action))
-                .font(.system(size: glyphSize, weight: .semibold))
-        }
-    }
-
-    static func symbol(_ action: MessageToolbarAction) -> String {
-        switch action {
-        case .react: ""
-        case .addReaction: "face.smiling"
-        case .reply: "arrowshape.turn.up.left"
-        case .thread: "bubble.left.and.bubble.right"
-        case let .pin(isPinned): isPinned ? "pin.slash" : "pin"
-        case .edit: "pencil"
-        case .delete: "trash"
-        }
-    }
-
-    /// The tooltip, as on web.
-    static func title(_ action: MessageToolbarAction) -> String {
-        switch action {
-        case let .react(emoji): "React with \(emoji)"
-        case .addReaction: "Add reaction"
-        case .reply: "Reply"
-        case let .thread(opens): opens ? "Open thread" : "Reply in thread"
-        case let .pin(isPinned): isPinned ? "Unpin message" : "Pin message"
-        case .edit: "Edit message"
-        case .delete: "Delete message"
-        }
-    }
-
-    static func accessibilityLabel(_ action: MessageToolbarAction) -> String {
-        switch action {
-        case let .react(emoji): "React to message with \(emoji)"
-        case .reply: "Reply to message"
-        default: title(action)
-        }
-    }
-}
-
-private extension MessageToolbarAction {
-    var isOwn: Bool { self == .edit || self == .delete }
-}
-
-/// A 28pt glyph button: a tint on hover and press, red for delete.
-private struct MessageToolbarButtonStyle: ButtonStyle {
-    let isDanger: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        MessageToolbarButton(configuration: configuration, isDanger: isDanger)
-    }
-}
-
-private struct MessageToolbarButton: View {
-    let configuration: ButtonStyleConfiguration
-    let isDanger: Bool
-    @State private var isHovering = false
-
-    var body: some View {
-        let active = isHovering || configuration.isPressed
-        configuration.label
-            .foregroundStyle(isDanger && active ? Theme.Colors.dangerText : Theme.Colors.fgMuted)
-            .frame(width: WaddleTokens.ControlHeight.xs, height: WaddleTokens.ControlHeight.xs)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                    .fill(active ? (isDanger ? Theme.Colors.dangerSubtle : Theme.Colors.surface2) : .clear)
-            )
-            .contentShape(Rectangle())
-            .onHover { isHovering = $0 }
     }
 }

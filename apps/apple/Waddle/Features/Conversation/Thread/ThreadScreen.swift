@@ -9,10 +9,16 @@ struct ThreadScreen: View {
     @Environment(SessionCoordinator.self) private var session
     let conversation: ConversationID
     let rootID: String
+    /// A fixed clock, for snapshots; the app follows the real one.
+    var clock: Date?
+    /// A row whose hover toolbar shows without a pointer, for snapshots.
+    var toolbarRow: String?
 
-    init(conversation: ConversationID, rootID: String) {
+    init(conversation: ConversationID, rootID: String, clock: Date? = nil, toolbarRow: String? = nil) {
         self.conversation = conversation
         self.rootID = rootID
+        self.clock = clock
+        self.toolbarRow = toolbarRow
     }
 
     var body: some View {
@@ -23,7 +29,9 @@ struct ThreadScreen: View {
                 account: session.account.jid,
                 conversation: conversation,
                 thread: rootID
-            ))
+            )),
+            clock: clock,
+            toolbarRow: toolbarRow
         )
         .id(rootID)
     }
@@ -34,18 +42,25 @@ private struct ThreadContent: View {
     @Environment(AppState.self) private var app
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// In the iPad or Mac inspector rather than pushed on a stack.
+    @Environment(\.isInInspector) private var isInInspector
     @State private var actions: MessageActionModel
-    private var placement = ConversationInspectorPlacement()
 
     let conversation: ConversationID
     let rootID: String
     let composer: ComposerModel
+    let clock: Date?
 
-    init(conversation: ConversationID, rootID: String, composer: ComposerModel) {
+    init(conversation: ConversationID, rootID: String, composer: ComposerModel, clock: Date?, toolbarRow: String?) {
         self.conversation = conversation
         self.rootID = rootID
         self.composer = composer
-        _actions = State(initialValue: MessageActionModel(conversation: conversation, composer: composer, thread: rootID))
+        self.clock = clock
+        let actions = MessageActionModel(conversation: conversation, composer: composer, thread: rootID)
+        if let toolbarRow {
+            actions.holdToolbar(of: toolbarRow)
+        }
+        _actions = State(initialValue: actions)
     }
 
     var body: some View {
@@ -106,7 +121,9 @@ private struct ThreadContent: View {
                 }
                 .frame(maxWidth: Theme.Size.readableWidth)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, Theme.Spacing.s)
+                // Room above the first row for its hover toolbar.
+                .padding(.top, Theme.Spacing.l)
+                .padding(.bottom, Theme.Spacing.s)
             }
             .defaultScrollAnchor(newestFirst ? UnitPoint.top : UnitPoint.bottom)
             .scrollDismissesKeyboard(.interactively)
@@ -129,8 +146,19 @@ private struct ThreadContent: View {
             VStack(spacing: 0) {
                 ThreadHeaderView(
                     header: header,
-                    open: { navigation.openEnclosingThread($0, from: rootID, in: conversation, usesInspector: placement.usesInspector) },
-                    close: placement.usesInspector ? { navigation.inspector = nil } : nil
+                    clock: clock,
+                    // On a phone stack whose Back already goes to the
+                    // parent, the header needs no second way there.
+                    showsBack: isInInspector || navigation.threadBelow(rootID, in: conversation) != header.parent?.threadID,
+                    open: { thread in
+                        navigation.openEnclosingThread(
+                            thread,
+                            along: header.breadcrumb.map(\.threadID),
+                            in: conversation,
+                            usesInspector: isInInspector
+                        )
+                    },
+                    close: isInInspector ? { navigation.inspector = nil } : nil
                 )
                 if app.preferences.messageOrder.isNewestFirst {
                     replyComposer(isSubThread: header.isSubThread)
@@ -142,7 +170,7 @@ private struct ThreadContent: View {
                 replyComposer(isSubThread: header.isSubThread)
             }
         }
-        .modifier(ThreadNavigationChrome(isInspector: placement.usesInspector, isSubThread: header.isSubThread))
+        .modifier(ThreadNavigationChrome(isInspector: isInInspector, isSubThread: header.isSubThread))
         .environment(actions)
         .modifier(MessageActionDialogs(actions: actions))
         .task(id: roomThread) {

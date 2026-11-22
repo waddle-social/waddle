@@ -55,6 +55,15 @@ extension SessionCoordinator {
         }
     }
 
+    /// Whether the account may pin messages in `conversation`.
+    public func pinAccess(in conversation: ConversationID) -> PinAccess {
+        guard conversation.isRoom else { return .denied }
+        switch selfOccupant(in: conversation.jid)?.affiliation {
+        case .owner, .admin: return .allowed
+        default: return .unknown
+        }
+    }
+
     /// `message` with its sub-thread's parent filled in when it has none
     /// and the parent is known.
     func withThreadParent(_ message: OutboundMessage) -> OutboundMessage {

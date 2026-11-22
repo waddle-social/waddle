@@ -53,6 +53,7 @@ struct ThreadHeaderTests {
         #expect(header.otherParticipantCount == 0)
         #expect(header.breadcrumb.map(\.threadID) == ["root"])
         #expect(!header.isSubThread)
+        #expect(header.parent == nil)
     }
 
     @Test func aSubThreadsBreadcrumbRunsFromTheTopThread() {
@@ -75,6 +76,7 @@ struct ThreadHeaderTests {
         #expect(header.startedBy == "mika")
         #expect(header.isSubThread)
         #expect(header.breadcrumb.map(\.threadID) == ["root", "r2"])
+        #expect(header.parent?.threadID == "root")
         #expect(header.lastActivity == date(4))
     }
 
@@ -106,20 +108,5 @@ struct ThreadHeaderTests {
         let header = ThreadHeader(root: nil, replies: replies, replyCount: 5, breadcrumb: [])
         #expect(header.faces.map(\.name) == ["e", "d", "c", "b"])
         #expect(header.otherParticipantCount == 1)
-    }
-
-    @Test func recencyReadsLikeWebs() {
-        let now = date(1_000_000)
-        func label(_ secondsAgo: TimeInterval) -> String? {
-            ThreadHeader.activity(since: now.addingTimeInterval(-secondsAgo), now: now)
-        }
-        #expect(label(10) == "just now")
-        #expect(label(70) == "1 min ago")
-        #expect(label(30 * 60) == "30 min ago")
-        #expect(label(90 * 60) == "1 hour ago")
-        #expect(label(5 * 3600) == "5 hours ago")
-        #expect(label(30 * 3600) == "yesterday")
-        #expect(label(4 * 86400) == "4 days ago")
-        #expect(label(-60) == nil)
     }
 }

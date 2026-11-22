@@ -74,7 +74,7 @@ final class NavigationModelTests: XCTestCase {
         navigation.openThread("reply-1", in: lobby, usesInspector: true)
         XCTAssertEqual(navigation.inspector, .thread(rootID: "reply-1"))
 
-        navigation.openEnclosingThread("root-1", from: "reply-1", in: lobby, usesInspector: true)
+        navigation.openEnclosingThread("root-1", along: ["root-1", "reply-1"], in: lobby, usesInspector: true)
         XCTAssertEqual(navigation.inspector, .thread(rootID: "root-1"))
     }
 
@@ -85,7 +85,7 @@ final class NavigationModelTests: XCTestCase {
         navigation.openThread("reply-1", in: lobby, usesInspector: false)
         XCTAssertEqual(navigation.homePath, [.conversation(lobby), .thread(lobby, rootID: "root-1"), .thread(lobby, rootID: "reply-1")])
 
-        navigation.openEnclosingThread("root-1", from: "reply-1", in: lobby, usesInspector: false)
+        navigation.openEnclosingThread("root-1", along: ["root-1", "reply-1"], in: lobby, usesInspector: false)
 
         XCTAssertEqual(navigation.homePath, [.conversation(lobby), .thread(lobby, rootID: "root-1")])
     }
@@ -98,9 +98,36 @@ final class NavigationModelTests: XCTestCase {
         navigation.openThread("reply-1", in: lobby, usesInspector: false)
         navigation.openThread("reply-2", in: lobby, usesInspector: false)
 
-        navigation.openEnclosingThread("root-1", from: "reply-2", in: lobby, usesInspector: false)
+        navigation.openEnclosingThread("root-1", along: ["root-1", "reply-1", "reply-2"], in: lobby, usesInspector: false)
 
         XCTAssertEqual(navigation.homePath, [.conversation(lobby), .thread(lobby, rootID: "root-1")])
+    }
+
+    /// Back never goes from a thread to one of its sub-threads: going up
+    /// to a grandparent that is not on the stack drops the sub-threads
+    /// above it.
+    func testGoingUpToAThreadOffTheStackDropsItsSubThreads() {
+        let navigation = NavigationModel()
+        navigation.tab = .inbox
+        navigation.inboxPath = [.thread(lobby, rootID: "reply-1"), .thread(lobby, rootID: "reply-2")]
+
+        navigation.openEnclosingThread("root-1", along: ["root-1", "reply-1", "reply-2"], in: lobby, usesInspector: false)
+
+        XCTAssertEqual(navigation.inboxPath, [.thread(lobby, rootID: "root-1")])
+    }
+
+    func testTheThreadBelowASubThreadIsKnown() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+        navigation.openThread("root-1", in: lobby, usesInspector: false)
+        navigation.openThread("reply-1", in: lobby, usesInspector: false)
+
+        XCTAssertEqual(navigation.threadBelow("reply-1", in: lobby), "root-1")
+        XCTAssertNil(navigation.threadBelow("root-1", in: lobby))
+
+        navigation.tab = .inbox
+        navigation.inboxPath = [.thread(lobby, rootID: "reply-1")]
+        XCTAssertNil(navigation.threadBelow("reply-1", in: lobby))
     }
 
     /// Opened straight from the Inbox, a sub-thread has no parent below it.
@@ -109,7 +136,7 @@ final class NavigationModelTests: XCTestCase {
         navigation.tab = .inbox
         navigation.inboxPath = [.thread(lobby, rootID: "reply-1")]
 
-        navigation.openEnclosingThread("root-1", from: "reply-1", in: lobby, usesInspector: false)
+        navigation.openEnclosingThread("root-1", along: ["root-1", "reply-1"], in: lobby, usesInspector: false)
 
         XCTAssertEqual(navigation.inboxPath, [.thread(lobby, rootID: "root-1")])
     }

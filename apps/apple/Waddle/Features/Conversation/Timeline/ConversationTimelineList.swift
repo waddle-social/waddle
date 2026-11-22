@@ -72,7 +72,9 @@ private struct TimelineScroller: View {
                 .scrollTargetLayout()
                 .frame(maxWidth: Theme.Size.readableWidth)
                 .frame(maxWidth: .infinity)
-                .padding(newestFirst ? .top : .bottom, Theme.Spacing.s)
+                // Newest first, the top row's hover toolbar needs room
+                // above it.
+                .padding(newestFirst ? .top : .bottom, newestFirst ? Theme.Spacing.l : Theme.Spacing.s)
             }
             .defaultScrollAnchor(newestFirst ? UnitPoint.top : UnitPoint.bottom)
             .scrollDismissesKeyboard(.interactively)

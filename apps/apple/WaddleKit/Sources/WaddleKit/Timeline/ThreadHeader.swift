@@ -13,8 +13,8 @@ public struct ThreadCrumb: Hashable, Sendable {
 }
 
 /// What the thread screen's header shows, as web's thread panel header
-/// does: the thread's first message as its title, "Started by <name> ·
-/// N replies · active <when>", the participants' faces, and for a
+/// does: the thread's first message as its title, who started it, the
+/// reply count, when it last moved, the participants' faces, and for a
 /// sub-thread the breadcrumb of threads it hangs under.
 public struct ThreadHeader: Equatable, Sendable {
     /// Faces shown before the overflow count, as on web.
@@ -37,6 +37,11 @@ public struct ThreadHeader: Equatable, Sendable {
     /// A sub-thread shows its breadcrumb instead of a plain title.
     public var isSubThread: Bool { breadcrumb.count > 1 }
 
+    /// The thread a sub-thread hangs off.
+    public var parent: ThreadCrumb? {
+        breadcrumb.count > 1 ? breadcrumb[breadcrumb.count - 2] : nil
+    }
+
     /// `replies` are the thread's direct replies, oldest first, which give
     /// the faces and recency as on web; `replyCount` is the rolled-up
     /// count shown under the root.
@@ -49,21 +54,5 @@ public struct ThreadHeader: Equatable, Sendable {
         faces = everyone.faces
         otherParticipantCount = everyone.otherParticipantCount
         self.breadcrumb = breadcrumb
-    }
-
-    /// Web's "active …" wording: "just now", "N min ago", "N hours ago",
-    /// "yesterday", "N days ago". Nil for a time after `now`.
-    public static func activity(since date: Date, now: Date) -> String? {
-        let seconds = now.timeIntervalSince(date)
-        guard seconds >= 0 else { return nil }
-        if seconds < 45 { return "just now" }
-        let minutes = Int(seconds / 60)
-        if minutes < 2 { return "1 min ago" }
-        if minutes < 60 { return "\(minutes) min ago" }
-        let hours = minutes / 60
-        if hours < 2 { return "1 hour ago" }
-        if hours < 24 { return "\(hours) hours ago" }
-        let days = hours / 24
-        return days < 2 ? "yesterday" : "\(days) days ago"
     }
 }
