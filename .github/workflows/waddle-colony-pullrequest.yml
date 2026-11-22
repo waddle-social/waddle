@@ -108,6 +108,7 @@ jobs:
         case "$cuenv_platform" in
           Darwin-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | shasum -a 256 -c - ;;
           Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
+          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
         chmod 0755 "$cuenv_download"
         if [ "$("$cuenv_download" --version)" != "cuenv 0.76.1" ]; then
