@@ -216,6 +216,20 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         message.thread ?? actionTargetID
     }
 
+    /// The thread this row is a reply in; nil for a row of the main feed.
+    public var containingThreadID: String? {
+        isFeedVisible ? nil : message.thread
+    }
+
+    /// The thread "Reply in thread" opens from this row. In the main feed
+    /// (`openThread` nil) that is `threadRootID`. Inside the thread
+    /// `openThread`, a reply starts or joins the sub-thread rooted at it;
+    /// any other row (the thread's own root) offers none.
+    public func threadTarget(inside openThread: String?) -> String? {
+        guard let openThread else { return threadRootID }
+        return containingThreadID == openThread ? actionTargetID : nil
+    }
+
     /// Author JID for a XEP-0461 reply: the occupant JID in a room, the
     /// bare JID in 1:1.
     public var replyAuthor: JID? {

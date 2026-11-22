@@ -2,10 +2,17 @@ import Foundation
 import Observation
 
 /// One room thread as fetched with the Waddle MAM thread filter: its root
-/// (the filter includes it) and its replies, oldest first.
+/// (the filter includes it) and its replies, oldest first. The filter
+/// matches the thread id only, so a page holds no sub-thread messages;
+/// should one arrive, it stays out of `replies`.
 public struct ThreadHistory: Equatable, Sendable {
     public var root: TimelineItem?
     public var replies: [TimelineItem]
+
+    /// The thread a sub-thread hangs off: the one its root is a reply in.
+    public var parent: String? {
+        root?.containingThreadID
+    }
 
     public init(root: TimelineItem?, replies: [TimelineItem]) {
         self.root = root
