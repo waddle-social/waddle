@@ -401,6 +401,22 @@ struct LeaveRoomTests {
         #expect(port.notifySettings.modes[roomConversation] == .never)
     }
 
+    @Test func settingsOfSeveralRejoinedRoomsAreReadTogetherAndDoNotHoldUpJoins() async throws {
+        let other = Channel(roomJID: bare("random@muc.waddle.test"), name: "random")
+        let (coordinator, port) = online([general.with(hasLeft: true), other.with(hasLeft: true)])
+        port.topology = Topology(spaces: [], channels: [general, other])
+        port.heldDirectoryVerbs = ["fetchNotifySettings"]
+        let refresh = Task { await coordinator.refreshDirectory() }
+        while port.heldDirectoryRequests.count < 2 { await Task.yield() }
+
+        // Both reads are out at once, and the rooms are joined already.
+        #expect(Set(port.joined) == [room, other.roomJID])
+
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        await refresh.value
+    }
+
     @Test func groupChatsAreNeverListedAsLeft() {
         let (coordinator, _) = online([Channel(roomJID: room, name: "group", isGroupDM: true, hasLeft: true)])
         #expect(coordinator.directory.leftRooms.isEmpty)

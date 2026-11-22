@@ -69,10 +69,10 @@ extension SessionCoordinator {
         silenceLeftRooms()
         // After the local changes above: a rejoin made here while the
         // lookup was on its way must not be answered with a leave.
+        var rejoinedElsewhere: [BareJID] = []
         if lookup?.readOwnBookmarks == true {
             await leaveRoomsLeftOnAnotherDevice()
-            await loadNotifySettings(ofRejoined: leftBefore.filter { directory.isRoom($0) && !directory.hasLeft($0) })
-            guard !Task.isCancelled, epoch == connectionEpoch else { return nil }
+            rejoinedElsewhere = leftBefore.filter { directory.isRoom($0) && !directory.hasLeft($0) }
         }
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
@@ -100,6 +100,8 @@ extension SessionCoordinator {
                 addNext()
             }
         }
+        // Last, so no join waits for it.
+        await loadNotifySettings(ofRejoined: rejoinedElsewhere)
         return lookup
     }
 
@@ -147,17 +149,21 @@ extension SessionCoordinator {
     /// on another device. They were off while the rooms were left, and
     /// nothing else reads them again before the next connect. Each read
     /// takes its turn among the writes to that room's settings, so a
-    /// change made here meanwhile is stored after it and stands.
+    /// change made here meanwhile is stored after it and stands. The
+    /// rooms are read side by side, not one after another.
     private func loadNotifySettings(ofRejoined rooms: [BareJID]) async {
-        for conversation in rooms.map(ConversationID.room) {
-            try? await afterEarlierBookmarkWrites(to: conversation) { [self] in
-                let settings = try await port.fetchNotifySettings()
-                guard !isStopped, !directory.hasLeft(conversation.jid) else { return }
-                directory.setStoredNotifyMode(settings.modes[conversation], for: conversation)
-                directory.setShowsMessagesInPush(
-                    settings.showingMessagesInPush.contains(conversation), for: conversation)
+        let reads = rooms.map(ConversationID.room).map { conversation in
+            Task { @MainActor [self] in
+                try? await afterEarlierBookmarkWrites(to: conversation) { [self] in
+                    let settings = try await port.fetchNotifySettings()
+                    guard !isStopped, !directory.hasLeft(conversation.jid) else { return }
+                    directory.setStoredNotifyMode(settings.modes[conversation], for: conversation)
+                    directory.setShowsMessagesInPush(
+                        settings.showingMessagesInPush.contains(conversation), for: conversation)
+                }
             }
         }
+        for read in reads { await read.value }
     }
 
     func loadNotifyModes() async {
