@@ -32,7 +32,7 @@ struct MessageActionDialogs: ViewModifier {
                     actions.pendingRemoval = nil
                 }
             } message: {
-                Text("The message will be removed for everyone in the channel.")
+                Text("The message will be removed for everyone in the room.")
             }
             .sheet(item: $actions.reactionTarget) { item in
                 MessageReactionPickerSheet(item: item, actions: actions)

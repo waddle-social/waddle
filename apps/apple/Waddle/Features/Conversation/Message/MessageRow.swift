@@ -228,7 +228,7 @@ private struct MessageRowContent: View {
             .overlay(shape.fill(stateTint))
             .overlay(alignment: .leading) {
                 if mentionsMe {
-                    Theme.Colors.gold.frame(width: 3)
+                    Theme.Colors.gold.frame(width: Theme.Size.rail)
                 }
             }
             .clipShape(shape)

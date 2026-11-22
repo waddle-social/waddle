@@ -16,7 +16,7 @@ struct ConversationHeaderText: Hashable {
     var emptyTitle: String { isChannel ? "This is the start of \(title)" : "Say hi to \(name)" }
 
     var emptyMessage: String {
-        isChannel ? "Messages sent here are visible to everyone in the channel." : "Messages you send appear here."
+        isChannel ? "Messages sent here are visible to everyone in the room." : "Messages you send appear here."
     }
 
     var searchPrompt: String { "Search \(title)" }

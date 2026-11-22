@@ -49,8 +49,7 @@ struct MessageRoleBadgeView: View {
 
     var body: some View {
         Text(badge.title)
-            .font(HuddleFonts.swiftUIFont(.body, size: 10, weight: 700))
-            .tracking(0.6)
+            .huddleText(Theme.Typography.badge)
             .textCase(.uppercase)
             .lineLimit(1)
             .foregroundStyle(tint)

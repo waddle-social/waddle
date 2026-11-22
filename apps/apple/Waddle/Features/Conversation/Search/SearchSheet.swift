@@ -121,7 +121,7 @@ struct ConversationSearchResultRow: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(item.authorName)
                     .huddleText(Theme.Typography.label)
-                    .foregroundStyle(Color.consistent(for: item.conversation.isRoom ? item.authorName : item.authorKey))
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                 Spacer(minLength: Theme.Spacing.s)
                 Text(item.sentAt.formatted(date: .abbreviated, time: .shortened))

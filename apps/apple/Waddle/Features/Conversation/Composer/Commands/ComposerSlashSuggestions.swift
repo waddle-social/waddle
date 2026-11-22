@@ -29,7 +29,7 @@ struct ComposerSlashSuggestions: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .strokeBorder(Theme.Colors.borderSoft, lineWidth: 1)
+                .strokeBorder(Theme.Colors.borderSoft, lineWidth: WaddleTokens.BorderWidth.hair)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Command suggestions"))
@@ -47,12 +47,7 @@ struct ComposerSlashSuggestions: View {
                         .huddleText(Theme.Typography.label)
                         .lineLimit(1)
                     if isBuiltin(candidate) {
-                        Text("Built-in")
-                            .huddleText(Theme.Typography.badge)
-                            .foregroundStyle(Theme.Colors.fgMuted)
-                            .padding(.horizontal, WaddleTokens.Spacing.s1Half)
-                            .padding(.vertical, Theme.Spacing.xxs)
-                            .background(Capsule().fill(Theme.Colors.surface2))
+                        HuddleTag("Built-in")
                     }
                 }
                 Text(candidate.description)

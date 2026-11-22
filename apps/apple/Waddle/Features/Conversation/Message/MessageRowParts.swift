@@ -13,7 +13,7 @@ struct MessageReplyPreview: View {
         Button(action: onTap) {
             HStack(spacing: WaddleTokens.Spacing.s1Half) {
                 Image(systemName: "arrowshape.turn.up.left.fill")
-                    .font(.system(size: 10, weight: .semibold))
+                    .huddleText(Theme.Typography.badge)
                     .foregroundStyle(Theme.Colors.actionText)
                     .accessibilityHidden(true)
                 Text(MessageReplySummary.author(parent: parent, target: target, isRoom: isRoom))
@@ -45,7 +45,7 @@ private struct MessageReplyChipSurface: View {
         shape
             .fill(Theme.Colors.surface2)
             .overlay(alignment: .leading) {
-                Theme.Colors.actionText.frame(width: 3)
+                Theme.Colors.actionText.frame(width: Theme.Size.rail)
             }
             .clipShape(shape)
     }
@@ -191,9 +191,10 @@ struct MessageThreadCard: View {
     }
 
     private func latestLine(_ latest: ThreadSummary.LatestReply) -> Text {
-        let snippet = Text(MessageThreadCardText.snippet(latest.snippet))
-        guard MessageThreadCardText.showsAuthor(latest) else { return snippet }
-        return Text("\(MessageThreadCardText.author(latest)): ").fontWeight(.bold).foregroundColor(Theme.Colors.fg) + snippet
+        let snippet = MessageThreadCardText.snippet(latest.snippet)
+        guard MessageThreadCardText.showsAuthor(latest) else { return Text(snippet) }
+        let author = Text("\(MessageThreadCardText.author(latest)):").fontWeight(.bold).foregroundStyle(Theme.Colors.fg)
+        return Text("\(author) \(snippet)")
     }
 }
 
@@ -254,7 +255,7 @@ struct MessageThreadFaces: View {
     var size: CGFloat = 20
 
     var body: some View {
-        HStack(spacing: -WaddleTokens.Spacing.s2Half) {
+        HStack(spacing: -WaddleTokens.Spacing.s1Half) {
             ForEach(Array(faces.enumerated()), id: \.offset) { index, face in
                 avatar(face)
                     .padding(2)
@@ -264,7 +265,7 @@ struct MessageThreadFaces: View {
             }
             if overflow > 0 {
                 Text("+\(overflow)")
-                    .font(HuddleFonts.swiftUIFont(.body, size: 10, weight: 700))
+                    .huddleText(Theme.Typography.tag)
                     .monospacedDigit()
                     .foregroundStyle(Theme.Colors.fgMuted)
                     .padding(.horizontal, Theme.Spacing.xs)

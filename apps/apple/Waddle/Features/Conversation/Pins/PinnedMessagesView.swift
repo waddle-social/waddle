@@ -29,7 +29,7 @@ struct PinnedMessagesView: View {
         if !conversation.isRoom {
             EmptyStateView(
                 title: "No pinned messages",
-                message: "Pinning is available in channels and group conversations.",
+                message: "Pinning is available in rooms and group chats.",
                 symbol: "pin.slash"
             )
         } else if pins.isEmpty {
@@ -82,7 +82,7 @@ private struct PinnedMessageRow: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(author)
                     .huddleText(Theme.Typography.label)
-                    .foregroundStyle(Color.consistent(for: colorKey))
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                 Spacer(minLength: Theme.Spacing.s)
                 if let pinnedAt = pin.pinnedAt {

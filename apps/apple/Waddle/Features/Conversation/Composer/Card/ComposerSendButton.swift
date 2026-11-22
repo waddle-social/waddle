@@ -7,11 +7,12 @@ struct ComposerSendButton: View {
     let isEditing: Bool
     let isEnabled: Bool
     let action: () -> Void
+    @ScaledMetric(relativeTo: .body) private var glyph = ComposerMetrics.iconSize
 
     var body: some View {
         Button(action: action) {
             Image(systemName: isEditing ? "checkmark" : "paperplane.fill")
-                .font(.system(size: ComposerMetrics.iconSize, weight: .semibold))
+                .font(.system(size: glyph, weight: .semibold))
                 .foregroundStyle(isEnabled ? Theme.Colors.actionFg : Theme.Colors.fgSoft)
                 .frame(width: ComposerMetrics.button, height: ComposerMetrics.button)
                 .background(

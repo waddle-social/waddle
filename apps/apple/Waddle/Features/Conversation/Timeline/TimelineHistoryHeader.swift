@@ -56,7 +56,7 @@ struct TimelineHistoryHeader: View {
                 .huddleText(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.fgMuted)
         }
-        .padding(.horizontal, Theme.Spacing.l)
+        .padding(.horizontal, Theme.Spacing.xl)
         .padding(.top, Theme.Spacing.xl)
         .padding(.bottom, Theme.Spacing.m)
         .accessibilityElement(children: .combine)
@@ -114,7 +114,7 @@ private struct TimelineDivider<Label: View>: View {
                 .fixedSize()
             line
         }
-        .padding(.horizontal, Theme.Spacing.l)
+        .padding(.horizontal, Theme.Spacing.xl)
         .padding(.vertical, Theme.Spacing.s)
     }
 

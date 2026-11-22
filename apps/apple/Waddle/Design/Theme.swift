@@ -56,6 +56,11 @@ enum Theme {
         static let mediaMaxWidth: CGFloat = 360
         /// Readable line length for the conversation column.
         static let readableWidth: CGFloat = 820
+        /// The accent rail on a row's or chip's leading edge (web's 3px
+        /// inset rails: a mention, a reply quote, a block quote).
+        static let rail: CGFloat = 3
+        /// The large mark of an empty conversation.
+        static let emptyMark: CGFloat = 64
         /// Smallest tap target (Human Interface Guidelines).
         static let minHitTarget = WaddleTokens.ControlHeight.touch
     }

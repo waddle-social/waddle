@@ -6,8 +6,7 @@ import Foundation
 /// messages the styleguide's room and DM frames use.
 extension SampleSession {
     /// #general as the Web `room` frame shows it: grouped messages with
-    /// reactions, an unread mention with a thread, and an edited message
-    /// of our own.
+    /// reactions, a message that mentions us, and one of our own.
     func seedGeneral() {
         let general = Self.general
         let messages: [WireMessage] = [

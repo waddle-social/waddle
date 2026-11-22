@@ -46,7 +46,7 @@ struct MessageRichBody: View {
             HStack(alignment: .top, spacing: Theme.Spacing.s) {
                 Capsule()
                     .fill(Theme.Colors.border)
-                    .frame(width: 3)
+                    .frame(width: Theme.Size.rail)
                 Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark, scale: scale))
                     .huddleText(Theme.Typography.message)
                     .foregroundStyle(Theme.Colors.fgMuted)
@@ -89,27 +89,35 @@ enum RichTextAttributes {
     private static func styled(_ segment: RichSegment, scale: CGFloat) -> AttributedString {
         var piece = AttributedString(segment.text)
         var intent: InlinePresentationIntent = []
-        let bold = Theme.Typography.message.weight(700).resolved(scale: scale).font
+        var isBold = false
+        var isCode = false
         for style in segment.styles {
             switch style {
             case .bold:
-                piece.font = bold
+                isBold = true
             case .italic:
                 intent.insert(.emphasized)
             case .strikethrough:
                 intent.insert(.strikethrough)
             case .code:
-                piece.font = Theme.Typography.code.resolved(scale: scale).font
+                isCode = true
                 piece.backgroundColor = Theme.Colors.surfaceCode
             case let .link(url):
                 piece.link = url
                 piece.foregroundColor = Theme.Colors.actionText
             case .mention:
-                // Every mention alike, as on web; the row marks ours.
-                piece.font = bold
+                // Every mention alike, as on web; the row marks ours. The
+                // text takes the action colour, as in the Penpot frames.
+                isBold = true
                 piece.foregroundColor = Theme.Colors.action
                 piece.backgroundColor = Theme.Colors.goldSubtle
             }
+        }
+        // One face for the run, whatever order its styles came in.
+        if isCode {
+            piece.font = Theme.Typography.code.weight(isBold ? 700 : 400).resolved(scale: scale).font
+        } else if isBold {
+            piece.font = Theme.Typography.message.weight(700).resolved(scale: scale).font
         }
         if !intent.isEmpty {
             piece.inlinePresentationIntent = intent

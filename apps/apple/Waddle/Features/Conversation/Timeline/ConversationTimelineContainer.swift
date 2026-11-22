@@ -74,13 +74,13 @@ struct ConversationEmptyState: View {
     private var mark: some View {
         if conversation.isRoom {
             Image(systemName: header.isChannel ? "number" : "person.2.fill")
-                .font(.system(size: WaddleTokens.FontSize.xxxl, weight: .semibold))
+                .huddleText(Theme.Typography.headline)
                 .foregroundStyle(Theme.Colors.actionText)
-                .frame(width: WaddleTokens.Spacing.s16, height: WaddleTokens.Spacing.s16)
+                .frame(width: Theme.Size.emptyMark, height: Theme.Size.emptyMark)
                 .background(Circle().fill(Theme.Colors.actionSubtle))
                 .accessibilityHidden(true)
         } else {
-            JIDAvatar(jid: conversation.jid, size: WaddleTokens.Spacing.s16)
+            JIDAvatar(jid: conversation.jid, size: Theme.Size.emptyMark)
         }
     }
 }

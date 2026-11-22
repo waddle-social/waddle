@@ -245,7 +245,7 @@ struct MessageFileCardLabel: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
             Image(systemName: symbol)
-                .font(.system(size: WaddleTokens.FontSize.lg, weight: .semibold))
+                .huddleText(Theme.Typography.subtitle)
                 .foregroundStyle(Theme.Colors.actionText)
                 .frame(width: WaddleTokens.ControlHeight.md, height: WaddleTokens.ControlHeight.md)
                 .background(

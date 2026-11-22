@@ -38,7 +38,7 @@ struct ComposerCard: View {
                     isEditing: model.isEditing,
                     showsMention: showsMention,
                     showsFormatting: $showsFormatting,
-                    collectsActions: isPhone,
+                    holdsExtraButtons: isCompact,
                     actions: actions
                 )
                 ComposerTextField(
@@ -53,8 +53,8 @@ struct ComposerCard: View {
                 )
                 .padding(.horizontal, Theme.Spacing.s)
                 .frame(minHeight: ComposerMetrics.button)
-                if !isPhone {
-                    ComposerActionRow(
+                if !isCompact {
+                    ComposerExtraButtons(
                         isEditing: model.isEditing,
                         showsMention: showsMention,
                         showsFormatting: $showsFormatting,
@@ -77,8 +77,9 @@ struct ComposerCard: View {
         .huddleAnimation(.settle, value: isFocused)
     }
 
-    /// A phone, or an iPad in a narrow column: one compact row.
-    private var isPhone: Bool {
+    /// A phone, or an iPad in a narrow column: the extra buttons move into
+    /// the `+` menu.
+    private var isCompact: Bool {
         #if os(iOS)
         sizeClass == .compact
         #else

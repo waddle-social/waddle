@@ -27,7 +27,6 @@ struct MessageReactionsBar: View {
             showsPicker = true
         } label: {
             Image(systemName: "face.smiling")
-                .font(.system(size: 14))
         }
         .buttonStyle(.huddleChip())
         .help("Add reaction")

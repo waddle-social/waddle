@@ -102,7 +102,7 @@ struct ComposerMentionSuggestions: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .strokeBorder(Theme.Colors.borderSoft, lineWidth: 1)
+                .strokeBorder(Theme.Colors.borderSoft, lineWidth: WaddleTokens.BorderWidth.hair)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Mention suggestions"))

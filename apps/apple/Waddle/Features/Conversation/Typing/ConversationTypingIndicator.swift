@@ -19,7 +19,7 @@ struct ConversationTypingIndicator: View {
                         .foregroundStyle(Theme.Colors.fgMuted)
                         .lineLimit(1)
                 }
-                .padding(.horizontal, Theme.Spacing.l + Theme.Spacing.s)
+                .padding(.horizontal, Theme.Spacing.xl)
                 .transition(.opacity)
                 .accessibilityElement(children: .combine)
             }

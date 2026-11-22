@@ -145,6 +145,7 @@
 		3528F4E5F94EDDF00FB864EE /* MessageReactionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BC10F0DACB50BE25CDB8647 /* MessageReactionsBar.swift */; };
 		353717E9E3E485089D172673 /* AdminView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05A4701A3A1BB24DC5BDC9BF /* AdminView.swift */; };
 		35C0B0CA74318539AE2C3664 /* DesignSystemSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */; };
+		3698902C5BEAEBC577DC9ED2 /* ComposerExtraButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CA1A7AD03017BC561B9267 /* ComposerExtraButtons.swift */; };
 		36E9C0282D19E679ACB15680 /* TimelineDayLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B981349099DC164D28D158 /* TimelineDayLabel.swift */; };
 		371C8128EA3B958841888C3E /* TimelineUnreadAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CB67A91AC8DCFCEC017F34E /* TimelineUnreadAnchor.swift */; };
 		38017566CDB55F105E0004AC /* ProfileAvatarEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E7D2EFE74CE0E7AA324637B /* ProfileAvatarEncoder.swift */; };
@@ -227,6 +228,7 @@
 		54D0C3FA4CCB166F8D35E511 /* TimelineFeedLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D6A2286FEDA8D46D8F81698 /* TimelineFeedLayout.swift */; };
 		5523BCDDBB5F3CE40B5A3B86 /* MessageAttachmentKind.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */; };
 		55652EB16569A153C8412189 /* MemberPermissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92341C99BBB49D538EC5376C /* MemberPermissions.swift */; };
+		55DBC890EE6A5185DA9F6B73 /* ComposerExtraButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CA1A7AD03017BC561B9267 /* ComposerExtraButtons.swift */; };
 		565A0EED96CE4A544C6BA0D1 /* PushTokenRegistrarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74D8F9F8580CF2FA58D4DC9A /* PushTokenRegistrarTests.swift */; };
 		575ED58ACEA4D11CBD6068B2 /* ComposerMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC997873DAE9A651374CF652 /* ComposerMetrics.swift */; };
 		577C86886BADE3833BC6AA25 /* DirectMessagesList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 801525ECEF92405EF6A54E00 /* DirectMessagesList.swift */; };
@@ -288,7 +290,6 @@
 		67AB5DB94D297BCE5C8EEC7A /* ComposerTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBE71705540136F76B531A9B /* ComposerTextField.swift */; };
 		67C6549885771E688B8C5C0D /* StoryComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FAB2DD62669F8525DDD3EBC /* StoryComposerTests.swift */; };
 		6805D8D692C48657C3C875CC /* ThreadHeaderTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8814A3DEAB39DF9D10327B8 /* ThreadHeaderTextTests.swift */; };
-		689EFDFF5C644FFA2C20F16F /* ComposerActionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD3F6D9690B73F6F961B6B3A /* ComposerActionRow.swift */; };
 		68B215A564BC09CC57DDC6FB /* StickerPackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE1700792B12197DDDE03183 /* StickerPackSheet.swift */; };
 		69956BB0E13E43081B5AFD38 /* TimelineUnreadAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CB67A91AC8DCFCEC017F34E /* TimelineUnreadAnchor.swift */; };
 		69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */; };
@@ -618,7 +619,6 @@
 		DDFE030CE9CE271D29687B06 /* TimelineHistoryHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DADAA8D894F156291483A5 /* TimelineHistoryHeader.swift */; };
 		DE0E50CA2F16941703651C5C /* SpacePickerMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F8A75B22608D596E64D64C1 /* SpacePickerMenu.swift */; };
 		DE21C84C1350FC446AC673F5 /* EventsCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */; };
-		DF7AF11C2336FC3AB2EC332B /* ComposerActionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD3F6D9690B73F6F961B6B3A /* ComposerActionRow.swift */; };
 		DFA7DE3704EC28F288DA07D9 /* EventsMonthCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E7E39EA47A416B372A8FED /* EventsMonthCard.swift */; };
 		E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */; };
 		E05876F9DDB418B292F5A62C /* MessageActionModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */; };
@@ -890,6 +890,7 @@
 		86482589F0CF5CF8E3CB9431 /* StickerSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickerSnapshotTests.swift; sourceTree = "<group>"; };
 		864B273BE4F9A184AE17B490 /* NavigationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationModel.swift; sourceTree = "<group>"; };
 		86500C54A13B8720EADEB1D7 /* AnimatedImageRepresentable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedImageRepresentable.swift; sourceTree = "<group>"; };
+		86CA1A7AD03017BC561B9267 /* ComposerExtraButtons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerExtraButtons.swift; sourceTree = "<group>"; };
 		873DE088C82F80C4996A2BE0 /* WaddleTests-iOS.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = "WaddleTests-iOS.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		883F76BB4172D356990947A1 /* FFIOutbound+Values.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIOutbound+Values.swift"; sourceTree = "<group>"; };
 		8AB1A681F60A49913FEC6A38 /* waddle_xmpp_clientFFI.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = waddle_xmpp_clientFFI.modulemap; sourceTree = "<group>"; };
@@ -993,7 +994,6 @@
 		CC9686E713C0F3912EE63F29 /* RoomManagementSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomManagementSnapshotTests.swift; sourceTree = "<group>"; };
 		CC997873DAE9A651374CF652 /* ComposerMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMetrics.swift; sourceTree = "<group>"; };
 		CCD57FC833D7E2D91021DE12 /* DecryptedFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecryptedFileStore.swift; sourceTree = "<group>"; };
-		CD3F6D9690B73F6F961B6B3A /* ComposerActionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerActionRow.swift; sourceTree = "<group>"; };
 		CF317440D44D33577F844A73 /* FFIEventListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIEventListener.swift; sourceTree = "<group>"; };
 		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoleRow.swift; sourceTree = "<group>"; };
@@ -1931,10 +1931,10 @@
 		EF06A6ABD6119F2F9E5A0FD9 /* Card */ = {
 			isa = PBXGroup;
 			children = (
-				CD3F6D9690B73F6F961B6B3A /* ComposerActionRow.swift */,
 				7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */,
 				48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */,
 				6B43F1415E0FF5F7685033CE /* ComposerEmojiButton.swift */,
+				86CA1A7AD03017BC561B9267 /* ComposerExtraButtons.swift */,
 				C9767D04DC6F058B0ECC1485 /* ComposerFormattingBar.swift */,
 				FC7A59F57E3733FDBC2338D9 /* ComposerIconButton.swift */,
 				CC997873DAE9A651374CF652 /* ComposerMetrics.swift */,
@@ -2241,7 +2241,6 @@
 				08C2C76EAE49D394F1159D6F /* ChannelNavigationRow.swift in Sources */,
 				30D6772BFD9898D26B973F4E /* CommunityCopy.swift in Sources */,
 				91C49D272ABEDDC691CE86C1 /* Components.swift in Sources */,
-				DF7AF11C2336FC3AB2EC332B /* ComposerActionRow.swift in Sources */,
 				00004A4AE3B99F8219410887 /* ComposerActions.swift in Sources */,
 				BCCD49FD13B4B0372E9FA8D7 /* ComposerAttachment.swift in Sources */,
 				AC45687386CC8468C6E84761 /* ComposerAttachmentIntake.swift in Sources */,
@@ -2252,6 +2251,7 @@
 				13D3EBD2038B05681C5E7703 /* ComposerCommandPresentations.swift in Sources */,
 				03E15C9728F1BC95ABB9365E /* ComposerControls.swift in Sources */,
 				72AC2A52622C83BCA72CBC1E /* ComposerEmojiButton.swift in Sources */,
+				3698902C5BEAEBC577DC9ED2 /* ComposerExtraButtons.swift in Sources */,
 				E9F3A741BB3E8EB346D79734 /* ComposerFormattingBar.swift in Sources */,
 				D752B816ABB92C682CEE176B /* ComposerIconButton.swift in Sources */,
 				4270F0EC6BAB7CAA1721928B /* ComposerMetrics.swift in Sources */,
@@ -2589,7 +2589,6 @@
 				AF7B332D1BA246B047307930 /* ChannelNavigationRow.swift in Sources */,
 				E5DD736D84E5F2C80FE2B75B /* CommunityCopy.swift in Sources */,
 				CB7DD7B71113C29CA61E8671 /* Components.swift in Sources */,
-				689EFDFF5C644FFA2C20F16F /* ComposerActionRow.swift in Sources */,
 				F4A7FB6D5EB66394DEBB4018 /* ComposerActions.swift in Sources */,
 				FC475A28440AF24D1E9848B7 /* ComposerAttachment.swift in Sources */,
 				32E6736A09BD2B4207FDD485 /* ComposerAttachmentIntake.swift in Sources */,
@@ -2600,6 +2599,7 @@
 				88006BA76FC05C795F23AB98 /* ComposerCommandPresentations.swift in Sources */,
 				B3A76D013BA338F37BC8709C /* ComposerControls.swift in Sources */,
 				526E665FAD488A3AD4B454AA /* ComposerEmojiButton.swift in Sources */,
+				55DBC890EE6A5185DA9F6B73 /* ComposerExtraButtons.swift in Sources */,
 				29D3F70D6FAB491E1365BB1A /* ComposerFormattingBar.swift in Sources */,
 				C89ADE60D19E22523838019E /* ComposerIconButton.swift in Sources */,
 				575ED58ACEA4D11CBD6068B2 /* ComposerMetrics.swift in Sources */,

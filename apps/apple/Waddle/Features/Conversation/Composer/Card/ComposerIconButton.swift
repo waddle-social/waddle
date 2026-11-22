@@ -25,10 +25,11 @@ struct ComposerIconLabel: View {
     let symbol: String
     var isOn = false
     @Environment(\.isEnabled) private var isEnabled
+    @ScaledMetric(relativeTo: .body) private var glyph = ComposerMetrics.iconSize
 
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: ComposerMetrics.iconSize, weight: .medium))
+            .font(.system(size: glyph, weight: .medium))
             .foregroundStyle(isOn ? Theme.Colors.fg : Theme.Colors.fgMuted)
             .opacity(isEnabled ? 1 : 0.5)
             .frame(width: ComposerMetrics.button, height: ComposerMetrics.button)

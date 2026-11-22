@@ -3,7 +3,7 @@ import SwiftUI
 /// The buttons after the text on a Mac or iPad (web composer): formatting,
 /// emoji, mention and commands. A phone has the keyboard's emoji key and
 /// keeps the rest in the `+` menu.
-struct ComposerActionRow: View {
+struct ComposerExtraButtons: View {
     let isEditing: Bool
     /// Rooms only: 1:1 conversations have nobody else to mention.
     let showsMention: Bool
