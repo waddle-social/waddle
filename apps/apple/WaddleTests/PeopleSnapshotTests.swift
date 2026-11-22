@@ -36,9 +36,10 @@ final class PeopleSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(view), size: Self.size)
     }
 
-    /// The row on the phone's Home that opens People.
-    func testHomeRowCountsPeopleHere() async throws {
-        let view = List { PeopleHomeRow() }.navigationListStyle()
-        try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.size.width, height: 120))
+    /// The rows at the top of the phone's Home: Calendar, People with how
+    /// many are here, and Feed.
+    func testHomeRowsOpenCalendarPeopleAndFeed() async throws {
+        let view = List { HomeLinkRows() }.navigationListStyle()
+        try await assertScreenSnapshot(of: SampleSession().host(view), size: CGSize(width: Self.size.width, height: 200))
     }
 }

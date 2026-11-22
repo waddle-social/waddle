@@ -7,16 +7,31 @@ enum Route: Hashable {
     case conversation(ConversationID)
     case thread(ConversationID, rootID: String)
     case details(ConversationID)
-    /// Everyone the account knows by address; pushed on the Home stack.
+    /// Everyone the account knows by address; pushed on the phone's Home.
     case people
+    /// The community calendar; pushed on the phone's Home.
+    case calendar
+    /// The community feed and stories; pushed on the phone's Home.
+    case feed
 
     /// The conversation the screen belongs to, if it belongs to one.
     var conversation: ConversationID? {
         switch self {
         case let .conversation(conversation), let .thread(conversation, _), let .details(conversation):
             return conversation
-        case .people:
+        case .people, .calendar, .feed:
             return nil
+        }
+    }
+
+    /// The split view's section for a screen the phone pushes on Home in
+    /// its place.
+    var section: SplitSection? {
+        switch self {
+        case .people: .people
+        case .calendar: .events
+        case .feed: .feed
+        case .conversation, .thread, .details: nil
         }
     }
 }
@@ -47,12 +62,12 @@ struct PeerProfileRoute: Hashable {
     var affiliation: RoomAffiliation?
 }
 
-/// The phone tab bar.
+/// The phone tab bar: Home, DMs, Inbox and You. People, the calendar
+/// and the feed open from rows on Home.
 enum PhoneTab: Hashable {
     case home
     case directMessages
     case inbox
-    case feed
     case you
 }
 
@@ -70,11 +85,6 @@ enum SplitSection: Hashable {
     case people
     /// The admin console, for community owners.
     case admin
-}
-
-/// A screen pushed inside the phone's Feed tab.
-enum FeedRoute: Hashable {
-    case events
 }
 
 /// A screen pushed inside the phone's You tab.
@@ -118,23 +128,22 @@ final class NavigationModel {
     var tab: PhoneTab = .home
     var homePath: [Route] = [] {
         didSet {
-            // People is pushed here on the phone and is a section of the
-            // split view. Keep the two in step, so an iPad that widens
-            // while showing People still shows it, and one that left
-            // People on the phone does not come back to it.
-            let showsPeople = homePath.last == .people
-            if showsPeople, splitSection != .people || selection != nil {
-                selection = nil
-                splitSection = .people
-            } else if !showsPeople, splitSection == .people, selection == nil, oldValue.last == .people {
+            // People, the calendar and the feed are pushed here on the
+            // phone and are sections of the split view. Keep the two in
+            // step, so an iPad that widens while showing one still shows
+            // it, and one that left it on the phone does not come back to it.
+            if let shown = homePath.last?.section {
+                if splitSection != shown || selection != nil {
+                    selection = nil
+                    splitSection = shown
+                }
+            } else if let left = oldValue.last?.section, splitSection == left, selection == nil {
                 splitSection = .home
             }
         }
     }
     var directPath: [Route] = []
     var inboxPath: [Route] = []
-    /// The phone has no Events tab: Events opens from the Feed.
-    var feedPath: [FeedRoute] = []
     /// The phone has no Admin tab: owners open the console from You. Kept
     /// in step with the split view, as People is on the Home stack.
     var youPath: [YouRoute] = [] {
@@ -144,7 +153,7 @@ final class NavigationModel {
                 selection = nil
                 splitSection = .admin
             } else if !showsAdmin, splitSection == .admin, selection == nil, oldValue.last == .admin {
-                splitSection = homePath.last == .people ? .people : .home
+                splitSection = homePath.last?.section ?? .home
             }
         }
     }
@@ -184,11 +193,11 @@ final class NavigationModel {
             tab = .inbox
             inboxPath = []
         case .feed:
-            tab = .feed
-            feedPath = []
+            tab = .home
+            homePath = [.feed]
         case .events:
-            tab = .feed
-            feedPath = [.events]
+            tab = .home
+            homePath = [.calendar]
         case .people:
             tab = .home
             homePath = [.people]
@@ -276,7 +285,7 @@ final class NavigationModel {
         case .home: path = homePath
         case .directMessages: path = directPath
         case .inbox: path = inboxPath
-        case .feed, .you: return nil
+        case .you: return nil
         }
         guard path.count >= 2, path.last == .thread(conversation, rootID: rootID),
               case let .thread(below, id) = path[path.count - 2], below == conversation
@@ -284,13 +293,13 @@ final class NavigationModel {
         return id
     }
 
-    /// The current phone tab's conversation stack; Feed and You have none.
+    /// The current phone tab's conversation stack; You has none.
     private func updateTabPath(_ update: (inout [Route]) -> Void) {
         switch tab {
         case .home: update(&homePath)
         case .directMessages: update(&directPath)
         case .inbox: update(&inboxPath)
-        case .feed, .you: break
+        case .you: break
         }
     }
 

@@ -195,7 +195,8 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.homePath, [])
     }
 
-    func testShowingTheFeedLeavesTheConversationAndFollowsOnThePhone() {
+    /// The phone has no Feed tab: Feed is pushed on Home, as People is.
+    func testShowingTheFeedLeavesTheConversationAndPushesItOnHome() {
         let navigation = NavigationModel()
         navigation.open(lobby)
         navigation.inspector = .details
@@ -205,10 +206,12 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertNil(navigation.selection)
         XCTAssertNil(navigation.inspector)
         XCTAssertEqual(navigation.splitSection, .feed)
-        XCTAssertEqual(navigation.tab, .feed)
+        XCTAssertEqual(navigation.tab, .home)
+        XCTAssertEqual(navigation.homePath, [.feed])
     }
 
-    func testShowingEventsLeavesTheConversationAndOpensThemFromThePhonesFeed() {
+    /// The calendar opens from its own row on the phone's Home.
+    func testShowingTheCalendarLeavesTheConversationAndPushesItOnHome() {
         let navigation = NavigationModel()
         navigation.open(lobby)
         navigation.inspector = .details
@@ -218,19 +221,29 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertNil(navigation.selection)
         XCTAssertNil(navigation.inspector)
         XCTAssertEqual(navigation.splitSection, .events)
-        XCTAssertEqual(navigation.tab, .feed)
-        XCTAssertEqual(navigation.feedPath, [.events])
+        XCTAssertEqual(navigation.tab, .home)
+        XCTAssertEqual(navigation.homePath, [.calendar])
     }
 
-    func testShowingTheFeedReturnsThePhonesFeedToItsRoot() {
+    func testPushingTheCalendarOrFeedOnHomeShowsItInTheSplitViewToo() {
         let navigation = NavigationModel()
-        navigation.show(.events)
+        navigation.open(lobby)
 
-        navigation.show(.feed)
+        navigation.homePath = [.calendar]
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .events)
 
+        navigation.homePath = [.feed]
         XCTAssertEqual(navigation.splitSection, .feed)
-        XCTAssertEqual(navigation.tab, .feed)
-        XCTAssertEqual(navigation.feedPath, [])
+    }
+
+    func testGoingBackFromTheFeedOnThePhoneLeavesItInTheSplitViewToo() {
+        let navigation = NavigationModel()
+        navigation.homePath = [.feed]
+
+        navigation.homePath = []
+
+        XCTAssertEqual(navigation.splitSection, .home)
     }
 
     func testShowingInboxReturnsThePhoneStackToItsRoot() {
@@ -338,5 +351,16 @@ final class NavigationModelTests: XCTestCase {
         navigation.youPath = []
 
         XCTAssertEqual(navigation.splitSection, .people)
+    }
+
+    /// The calendar stays pushed on Home while Admin is open on You.
+    func testGoingBackFromAdminReturnsToTheCalendarWhenHomeShowsIt() {
+        let navigation = NavigationModel()
+        navigation.homePath = [.calendar]
+        navigation.youPath = [.admin]
+
+        navigation.youPath = []
+
+        XCTAssertEqual(navigation.splitSection, .events)
     }
 }

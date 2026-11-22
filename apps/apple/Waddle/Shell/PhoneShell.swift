@@ -1,7 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// iPhone: Home, DMs, Inbox, Feed and You tabs, each with its own stack.
+/// iPhone: Home, DMs, Inbox and You tabs, each with its own stack.
+/// Calendar, People and Feed are pushed on Home.
 struct PhoneShell: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -32,17 +33,6 @@ struct PhoneShell: View {
             .tabItem { Label("Inbox", systemImage: "tray") }
             .badge(session.unreadOverviewRoomCount)
             .tag(PhoneTab.inbox)
-
-            NavigationStack(path: $navigation.feedPath) {
-                FeedView(opensEvents: true)
-                    .navigationDestination(for: FeedRoute.self) { route in
-                        switch route {
-                        case .events: EventsView()
-                        }
-                    }
-            }
-            .tabItem { Label("Feed", systemImage: "newspaper") }
-            .tag(PhoneTab.feed)
 
             NavigationStack(path: $navigation.youPath) {
                 ProfileView(opensAdmin: true)
@@ -76,6 +66,10 @@ extension View {
                 ConversationDetailsView(conversation: conversation)
             case .people:
                 PeopleView()
+            case .calendar:
+                EventsView()
+            case .feed:
+                FeedView()
             }
         }
     }
