@@ -22,7 +22,11 @@ struct RoomDetailsForm: View {
         Form {
             RoomHeaderSection(room: room, channel: channel)
             RoomManagementSection(actions: actions, onSelect: management.select)
-            NotificationModeSection(conversation: .room(room))
+            // Left on another device while this is open: its notifications
+            // stay off until it is joined again.
+            if channel?.hasLeft != true {
+                NotificationModeSection(conversation: .room(room))
+            }
             Section {
                 NavigationLink {
                     PinnedMessagesView(conversation: .room(room))

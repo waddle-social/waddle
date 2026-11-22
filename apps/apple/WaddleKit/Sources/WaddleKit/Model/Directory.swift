@@ -42,6 +42,11 @@ public struct Channel: Hashable, Sendable, Identifiable {
     public let spaceID: String?
     public let autojoin: Bool
     public let isGroupDM: Bool
+    /// The account left the room: no device joins it until the account
+    /// rejoins. Kept as the account's own bookmark with autojoin off
+    /// (XEP-0402), which is not what `autojoin` holds: that is also off
+    /// for rooms a space lists without joining them at sign-in.
+    public let hasLeft: Bool
     /// Whether room discovery advertised members-only access, or nil if unknown.
     public private(set) var membersOnly: Bool?
 
@@ -54,7 +59,8 @@ public struct Channel: Hashable, Sendable, Identifiable {
         spaceID: String? = nil,
         autojoin: Bool = true,
         isGroupDM: Bool = false,
-        membersOnly: Bool? = nil
+        membersOnly: Bool? = nil,
+        hasLeft: Bool = false
     ) {
         self.roomJID = roomJID
         self.name = name
@@ -65,6 +71,7 @@ public struct Channel: Hashable, Sendable, Identifiable {
         self.autojoin = autojoin
         self.isGroupDM = isGroupDM
         self.membersOnly = membersOnly
+        self.hasLeft = hasLeft
     }
 
     public var conversation: ConversationID { .room(roomJID) }
@@ -73,7 +80,14 @@ public struct Channel: Hashable, Sendable, Identifiable {
     public func with(name: String, summary: String?) -> Channel {
         Channel(
             roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
-            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly)
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly, hasLeft: hasLeft)
+    }
+
+    /// The same room, left or rejoined.
+    public func with(hasLeft: Bool) -> Channel {
+        Channel(
+            roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly, hasLeft: hasLeft)
     }
 
     func withKnownMembersOnly(_ value: Bool?) -> Channel {
@@ -87,10 +101,14 @@ public struct Channel: Hashable, Sendable, Identifiable {
 public struct Topology: Hashable, Sendable {
     public let spaces: [Space]
     public let channels: [Channel]
+    /// False when the account's own bookmarks could not be read: then no
+    /// channel's `hasLeft` is known, and each reads false.
+    public let ownBookmarksLoaded: Bool
 
-    public init(spaces: [Space], channels: [Channel]) {
+    public init(spaces: [Space], channels: [Channel], ownBookmarksLoaded: Bool = true) {
         self.spaces = spaces
         self.channels = channels
+        self.ownBookmarksLoaded = ownBookmarksLoaded
     }
 
     public static let empty = Topology(spaces: [], channels: [])

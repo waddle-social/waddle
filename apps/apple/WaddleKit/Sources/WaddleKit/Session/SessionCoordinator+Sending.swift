@@ -32,6 +32,9 @@ extension SessionCoordinator {
         preview: String,
         in conversation: ConversationID
     ) async -> String? {
+        // A room the account left takes nothing from this device until it
+        // is joined again; the room would refuse the message.
+        if conversation.isRoom, directory.hasLeft(conversation.jid) { return nil }
         noteActivity()
         var options = composed.options
         // A sticker's text is its pack's description, not something the

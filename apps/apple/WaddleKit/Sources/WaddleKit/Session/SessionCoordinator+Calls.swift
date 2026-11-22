@@ -33,6 +33,7 @@ public extension SessionCoordinator {
     func canJoinGroupCall(in room: BareJID) -> Bool {
         connection == .online && !isStopped && !calls.state.isLive
             && !isFenced(room)
+            && !directory.hasLeft(room)
             && presence.joinedRooms.contains(room)
     }
 

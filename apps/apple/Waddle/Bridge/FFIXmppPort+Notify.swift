@@ -24,6 +24,18 @@ extension FFIXmppPort {
         }
     }
 
+    func setRoomMembership(_ membership: RoomMembership, of room: BareJID, name: String?) async throws {
+        let ffiMembership: WaddleRoomMembership
+        switch membership {
+        case .left: ffiMembership = .left
+        case let .joined(notifyMode): ffiMembership = .joined(notifyMode: FFIOutbound.notifyMode(notifyMode))
+        }
+        let outcome = try await mappingPortErrors {
+            try await client.setRoomMembership(roomJid: room.description, membership: ffiMembership, name: name)
+        }
+        guard case .ok = outcome else { throw PortError.rejected }
+    }
+
     func fetchNotifySettings() async throws -> NotifySettings {
         async let rooms = mappingPortErrors { try await client.fetchUserBookmarks() }
         async let direct = mappingPortErrors { try await client.fetchDmBookmarks() }

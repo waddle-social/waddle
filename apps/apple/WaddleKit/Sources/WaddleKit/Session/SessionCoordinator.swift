@@ -408,6 +408,7 @@ public final class SessionCoordinator {
         roomBots.clear()
         typing.clear()
         unread.clearAll()
+        unread.silence([])
         deliveries.clear()
         pins.clear()
         avatars.clear()
@@ -508,6 +509,11 @@ public final class SessionCoordinator {
             route(message)
         case let .presence(wirePresence):
             let update = presence.apply(wirePresence)
+            if case let .joined(room) = update, directory.hasLeft(room) {
+                // A join sent before the room was found left on another
+                // device, and answered only now.
+                Task { await self.departIfLeft(room) }
+            }
             if handlesCalls, !isStopped {
                 switch update {
                 case .left(let room), .joinFailed(let room, _):

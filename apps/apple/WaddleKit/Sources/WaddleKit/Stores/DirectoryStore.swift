@@ -24,8 +24,10 @@ public struct DirectConversation: Hashable, Sendable, Identifiable {
 @Observable
 public final class DirectoryStore {
     public private(set) var spaces: [Space] = []
-    /// Space channels, ordered by position then name.
+    /// Space channels the account is in, ordered by position then name.
     public private(set) var channels: [Channel] = []
+    /// Rooms the account left, which it can rejoin. Never group DMs.
+    public private(set) var leftRooms: [Channel] = []
     public private(set) var groupDMs: [Channel] = []
     /// DMs, most recent first.
     public private(set) var directConversations: [DirectConversation] = []
@@ -43,6 +45,11 @@ public final class DirectoryStore {
 
     public func channel(for jid: BareJID) -> Channel? {
         channels.first { $0.roomJID == jid } ?? groupDMs.first { $0.roomJID == jid }
+            ?? leftRooms.first { $0.roomJID == jid }
+    }
+
+    public func hasLeft(_ room: BareJID) -> Bool {
+        leftRooms.contains { $0.roomJID == room }
     }
 
     public func channels(in spaceID: String?) -> [Channel] {
@@ -81,15 +88,29 @@ public final class DirectoryStore {
     public func apply(_ topology: Topology) {
         spaces = topology.spaces
         let previous = Dictionary(
-            (channels + groupDMs).map { ($0.roomJID, $0) },
+            (channels + groupDMs + leftRooms).map { ($0.roomJID, $0) },
             uniquingKeysWith: { first, _ in first }
         )
         let sorted = topology.channels.map { channel in
-            channel.withKnownMembersOnly(channel.membersOnly ?? previous[channel.roomJID]?.membersOnly)
+            let known = previous[channel.roomJID]
+            // Without the account's bookmarks nothing says which rooms it
+            // left, so what was known stands.
+            let hasLeft = topology.ownBookmarksLoaded ? channel.hasLeft : known?.hasLeft ?? false
+            return channel.with(hasLeft: hasLeft)
+                .withKnownMembersOnly(channel.membersOnly ?? known?.membersOnly)
         }.sorted(by: Self.listOrder)
-        channels = sorted.filter { !$0.isGroupDM }
         groupDMs = sorted.filter(\.isGroupDM)
-        roomJIDs = Set(topology.channels.map(\.roomJID))
+        channels = sorted.filter { !$0.isGroupDM && !$0.hasLeft }
+        var left = sorted.filter { !$0.isGroupDM && $0.hasLeft }
+        if !topology.ownBookmarksLoaded {
+            // A left room that no space lists is known only from the
+            // bookmarks, so this lookup could not have found it.
+            let listed = Set(topology.channels.map(\.roomJID))
+            left += leftRooms.filter { !listed.contains($0.roomJID) }
+            left.sort(by: Self.listOrder)
+        }
+        leftRooms = left
+        roomJIDs = Set(topology.channels.map(\.roomJID)).union(leftRooms.map(\.roomJID))
         hasLoadedTopology = true
     }
 
@@ -100,12 +121,16 @@ public final class DirectoryStore {
     /// Adds or replaces a room, ordered by position then name.
     public func upsert(_ channel: Channel) {
         roomJIDs.insert(channel.roomJID)
+        channels.removeAll { $0.roomJID == channel.roomJID }
+        groupDMs.removeAll { $0.roomJID == channel.roomJID }
+        leftRooms.removeAll { $0.roomJID == channel.roomJID }
         if channel.isGroupDM {
-            groupDMs.removeAll { $0.roomJID == channel.roomJID }
             groupDMs.append(channel)
             groupDMs.sort(by: Self.listOrder)
+        } else if channel.hasLeft {
+            leftRooms.append(channel)
+            leftRooms.sort(by: Self.listOrder)
         } else {
-            channels.removeAll { $0.roomJID == channel.roomJID }
             channels.append(channel)
             channels.sort(by: Self.listOrder)
         }
@@ -115,6 +140,7 @@ public final class DirectoryStore {
     public func remove(_ room: BareJID) {
         channels.removeAll { $0.roomJID == room }
         groupDMs.removeAll { $0.roomJID == room }
+        leftRooms.removeAll { $0.roomJID == room }
         roomJIDs.remove(room)
         notifyModes.removeValue(forKey: .room(room))
         showingMessagesInPush.remove(.room(room))
@@ -161,6 +187,7 @@ public final class DirectoryStore {
         spaces = []
         channels = []
         groupDMs = []
+        leftRooms = []
         directConversations = []
         notifyModes = [:]
         showingMessagesInPush = []

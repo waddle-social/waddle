@@ -566,6 +566,7 @@
 		CBB926C1611A6E72159AF93D /* RoomCallBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D647ED03AFE3A20784943F9 /* RoomCallBanner.swift */; };
 		CBE18297CAD973E2858BDE8B /* MessageAttachmentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5EB80193A96E8F2BC698C32 /* MessageAttachmentsView.swift */; };
 		CC22BF9FF672212EE348E689 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42C60CA405BA040310F11F0 /* CredentialStore.swift */; };
+		CCB902158DA83BF8EBFB2F55 /* LeftRoomsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A63C3BBFC87A3DDBF3CC24D /* LeftRoomsSheet.swift */; };
 		CCF01AFB15AA3CFD545B666D /* SettingsAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520AC6A7D5F8E34A0A5EF018 /* SettingsAppVersion.swift */; };
 		CE56C59079181ACB4E8161DE /* MessageActionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C3FC76B6AA85AAC8DF37039 /* MessageActionModel.swift */; };
 		CE6352C89708600165433F4D /* UserInputMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFE8DFECBE88CCBCBD9F5BDA /* UserInputMonitor.swift */; };
@@ -621,6 +622,7 @@
 		E2251A92756F306038DB1872 /* WaddleCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F3BC43606C47023AC920E8 /* WaddleCommands.swift */; };
 		E2B059E77108F5B554615800 /* SettingsAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520AC6A7D5F8E34A0A5EF018 /* SettingsAppVersion.swift */; };
 		E2C4285D8BD4B6DF81EDB605 /* ConversationHeaderText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0C820EA40536B55023B88C /* ConversationHeaderText.swift */; };
+		E3489578761F148FBD63DB24 /* LeftRoomsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A63C3BBFC87A3DDBF3CC24D /* LeftRoomsSheet.swift */; };
 		E39BF0B606B89ACA08E342C1 /* GifPickerGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = E417A2A5665077C9C97D173D /* GifPickerGrid.swift */; };
 		E3AE2E02479BB9ECA6C28702 /* StickerSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86482589F0CF5CF8E3CB9431 /* StickerSnapshotTests.swift */; };
 		E4142D4130E2A3F00DA44546 /* ConversationLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C1A66EF7C85EE90AD2B579 /* ConversationLabels.swift */; };
@@ -733,6 +735,7 @@
 		08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomDetailsForm.swift; sourceTree = "<group>"; };
 		097A7976BC4F84384A7159AB /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		098B60096BCF101EAAEE5F7F /* ConversationRowActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRowActions.swift; sourceTree = "<group>"; };
+		0A63C3BBFC87A3DDBF3CC24D /* LeftRoomsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeftRoomsSheet.swift; sourceTree = "<group>"; };
 		0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveKitCallMediaTests.swift; sourceTree = "<group>"; };
 		0CE4092CC362E23E8DD915E7 /* MentionCandidates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionCandidates.swift; sourceTree = "<group>"; };
 		0D647ED03AFE3A20784943F9 /* RoomCallBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomCallBanner.swift; sourceTree = "<group>"; };
@@ -1549,6 +1552,7 @@
 		7A527406C62B7D47A26B984E /* Sheets */ = {
 			isa = PBXGroup;
 			children = (
+				0A63C3BBFC87A3DDBF3CC24D /* LeftRoomsSheet.swift */,
 				A0C3E2364E067CC95BB2F1DA /* NewChannelSheet.swift */,
 				B2D65F17C5B0112B7B7FF405 /* NewMessageSheet.swift */,
 				FA12FBAA4F2C84CE671184D8 /* RecipientResultsSection.swift */,
@@ -2346,6 +2350,7 @@
 				4D9CC7EDE4F38A7AD0F9C9E8 /* InboxFeed.swift in Sources */,
 				85221B3DD2E3642577AF64E2 /* InboxRows.swift in Sources */,
 				7D6901D3604D40F229A5A5FE /* InboxView.swift in Sources */,
+				E3489578761F148FBD63DB24 /* LeftRoomsSheet.swift in Sources */,
 				F285A3B0C90E08845DB991B6 /* LiveKitCallMediaController.swift in Sources */,
 				3BF90258E14DB45EFDF789E3 /* ManagementSheetParts.swift in Sources */,
 				8E48B1656CF58F68F1AF0047 /* MeActionLine.swift in Sources */,
@@ -2691,6 +2696,7 @@
 				E68A5B8CCDE1DAEDBBD98259 /* InboxFeed.swift in Sources */,
 				F5835B9A761EFA3E995EE8A8 /* InboxRows.swift in Sources */,
 				BC91F3B709D0C72D81BC004C /* InboxView.swift in Sources */,
+				CCB902158DA83BF8EBFB2F55 /* LeftRoomsSheet.swift in Sources */,
 				7A2C5BD78E6B4170ACC647DE /* LiveKitCallMediaController.swift in Sources */,
 				F53553DFAD4C348869496C6B /* ManagementSheetParts.swift in Sources */,
 				B015B33E71B1EF7790E575F1 /* MeActionLine.swift in Sources */,

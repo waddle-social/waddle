@@ -18,8 +18,21 @@ public final class UnreadStore {
     public private(set) var threadCounts: [ThreadKey: Int] = [:]
     /// The thread on screen, whose badge the local read path owns.
     public private(set) var activeThread: ThreadKey?
+    /// Rooms the account left. The server still counts their messages for
+    /// a member; nothing is counted for them here.
+    private var silencedRooms: Set<BareJID> = []
 
     public init() {}
+
+    /// Replaces the rooms that count nothing, and forgets their counts.
+    public func silence(_ rooms: Set<BareJID>) {
+        silencedRooms = rooms
+        rooms.forEach(clearRoom)
+    }
+
+    private func isSilenced(_ conversation: ConversationID) -> Bool {
+        conversation.isRoom && silencedRooms.contains(conversation.jid)
+    }
 
     public func count(for conversation: ConversationID) -> Int {
         counts[conversation] ?? 0
@@ -49,7 +62,7 @@ public final class UnreadStore {
     }
 
     public func liveMessage(in conversation: ConversationID, isMine: Bool, mentionsMe: Bool) {
-        guard !isMine, conversation != activeConversation else { return }
+        guard !isMine, conversation != activeConversation, !isSilenced(conversation) else { return }
         counts[conversation, default: 0] += 1
         if mentionsMe {
             mentions.insert(conversation)
@@ -64,7 +77,7 @@ public final class UnreadStore {
     /// Absolute set from an authoritative source (inbox, read sync), unless
     /// the conversation is on screen.
     public func set(_ count: Int, for conversation: ConversationID) {
-        guard conversation != activeConversation else { return }
+        guard conversation != activeConversation, !isSilenced(conversation) else { return }
         if count <= 0 {
             clear(conversation)
         } else {
@@ -91,7 +104,7 @@ public final class UnreadStore {
 
     /// Absolute set from the server inbox, unless the thread is on screen.
     public func setThread(_ count: Int, for thread: ThreadKey) {
-        guard thread != activeThread else { return }
+        guard thread != activeThread, !silencedRooms.contains(thread.room) else { return }
         threadCounts[thread] = count > 0 ? count : nil
     }
 

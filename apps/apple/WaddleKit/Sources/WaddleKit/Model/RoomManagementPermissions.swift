@@ -5,6 +5,8 @@ public enum RoomManagementAction: Hashable, Sendable {
     case renameGroup
     case inviteToGroup
     case leaveGroup
+    /// Leave a room until the account rejoins it.
+    case leaveRoom
 }
 
 /// Room management actions allowed by the channel and our affiliation.
@@ -20,6 +22,7 @@ public enum RoomManagementPermissions {
                 return [.leaveGroup]
             }
         }
-        return occupant?.affiliation == .owner ? [.editSettings, .delete] : []
+        guard !channel.hasLeft else { return [] }
+        return occupant?.affiliation == .owner ? [.editSettings, .leaveRoom, .delete] : [.leaveRoom]
     }
 }

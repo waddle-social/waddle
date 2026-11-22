@@ -14,7 +14,9 @@ extension FFIInbound {
     }
 
     static func topology(_ topology: WaddleTopology) -> Topology {
-        Topology(spaces: topology.spaces.map(space), channels: topology.channels.compactMap(channel))
+        Topology(
+            spaces: topology.spaces.map(space), channels: topology.channels.compactMap(channel),
+            ownBookmarksLoaded: topology.bookmarksLoaded)
     }
 
     static func space(_ space: WaddleSpace) -> Space {
@@ -34,7 +36,9 @@ extension FFIInbound {
             spaceID: channel.spaceId.isEmpty ? nil : channel.spaceId,
             autojoin: channel.autojoin,
             isGroupDM: channel.isGroupDm,
-            membersOnly: channel.membersOnly
+            membersOnly: channel.membersOnly,
+            // A group chat is left for good, with its own request.
+            hasLeft: channel.hasLeft && !channel.isGroupDm
         )
     }
 

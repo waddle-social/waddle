@@ -38,6 +38,42 @@ final class RoomManagementSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(Self.details(.room(SampleSession.design))), size: Self.details)
     }
 
+    /// Anyone can leave; only the owner sees Edit and Delete.
+    func testDetailsForARoomMember() async throws {
+        let sample = SampleSession()
+        sample.coordinator.directory.upsert(Channel(
+            roomJID: SampleSession.design, name: "design",
+            summary: "Critique, drafts and the identity work.", position: 3, spaceID: "hq"
+        ))
+        sample.join(SampleSession.design, as: .member, role: .participant)
+        sample.occupy(SampleSession.design, nick: "Priya", jid: SampleSession.priya, affiliation: .owner)
+        try await assertScreenSnapshot(of: sample.host(Self.details(.room(SampleSession.design))), size: Self.details)
+    }
+
+    // MARK: - Rooms you left
+
+    func testRoomsYouLeft() async throws {
+        let sample = SampleSession()
+        sample.coordinator.directory.upsert(Channel(
+            roomJID: SampleSession.design, name: "design",
+            summary: "Critique, drafts and the identity work.", position: 3, spaceID: "hq", hasLeft: true
+        ))
+        sample.coordinator.directory.upsert(Channel(
+            roomJID: BareJID(parsing: "watercooler@rooms.waddle.test")!, name: "watercooler", position: 9, hasLeft: true
+        ))
+        try await assertScreenSnapshot(of: sample.host(LeftRoomsSheet()), size: Self.sheet, asSheet: true)
+    }
+
+    func testRoomsYouLeftAfterAJoinThatFailed() async throws {
+        let sample = SampleSession()
+        sample.coordinator.directory.upsert(Channel(
+            roomJID: SampleSession.design, name: "design", position: 3, spaceID: "hq", hasLeft: true
+        ))
+        let model = LeftRoomsModel()
+        model.failure = "That room no longer exists."
+        try await assertScreenSnapshot(of: sample.host(LeftRoomsSheet(model: model)), size: Self.sheet, asSheet: true)
+    }
+
     func testDetailsForAGroupChatMember() async throws {
         let sample = SampleSession()
         sample.coordinator.directory.upsert(Channel(roomJID: Self.group, name: "Weekend trip", position: 0, isGroupDM: true))
