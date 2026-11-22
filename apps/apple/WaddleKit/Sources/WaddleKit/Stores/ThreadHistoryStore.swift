@@ -2,7 +2,9 @@ import Foundation
 import Observation
 
 /// One room thread as fetched with the Waddle MAM thread filter: its root
-/// (the filter includes it) and its replies, oldest first.
+/// (the filter includes it) and its replies, oldest first. The filter
+/// matches the thread id only, so a page holds no sub-thread messages;
+/// should one arrive, it stays out of `replies`.
 public struct ThreadHistory: Equatable, Sendable {
     public var root: TimelineItem?
     public var replies: [TimelineItem]
@@ -65,6 +67,21 @@ public final class ThreadHistoryStore {
 
     public func history(for thread: ThreadKey) -> ThreadHistory? {
         histories[thread]
+    }
+
+    /// The root of `thread` as fetched: its own page's root, else a
+    /// fetched thread of the room with that root among its replies (a
+    /// sub-thread on a reply only a fetched page holds).
+    public func fetchedRoot(of thread: ThreadKey) -> TimelineItem? {
+        if let root = histories[thread]?.root {
+            return root
+        }
+        for (key, history) in histories where key.room == thread.room {
+            if let reply = history.replies.first(where: { $0.targetableIDs.contains(thread.threadID) }) {
+                return reply
+            }
+        }
+        return nil
     }
 
     func store(_ history: ThreadHistory, for thread: ThreadKey) {

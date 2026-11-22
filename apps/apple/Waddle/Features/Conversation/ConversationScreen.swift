@@ -45,7 +45,7 @@ private struct ConversationContent: View {
     init(conversation: ConversationID, composer: ComposerModel) {
         self.conversation = conversation
         self.composer = composer
-        _actions = State(initialValue: MessageActionModel(conversation: conversation, composer: composer, isThread: false))
+        _actions = State(initialValue: MessageActionModel(conversation: conversation, composer: composer, thread: nil))
     }
 
     var body: some View {

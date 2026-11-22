@@ -9,8 +9,10 @@ import WaddleKit
 final class MessageActionModel {
     let conversation: ConversationID
     let composer: ComposerModel
-    /// Rows inside a thread do not offer "Reply in thread".
-    let isThread: Bool
+    /// The thread these rows are in, or nil for the main feed. Inside a
+    /// thread "Reply in thread" opens a reply's sub-thread.
+    let thread: String?
+    var isThread: Bool { thread != nil }
 
     var pendingDeletion: TimelineItem?
     var pendingRemoval: TimelineItem?
@@ -29,12 +31,61 @@ final class MessageActionModel {
     /// Incremented to ask the composer to take focus.
     private(set) var focusRequest = 0
 
+    /// The row whose hover toolbar the pointer is on. That toolbar floats
+    /// over the row above its own, so while it is held no other row shows
+    /// one. Released when the pointer leaves it or the row goes away.
+    private(set) var heldToolbarRow: String?
+    /// On a Mac, the row whose words are selectable ("Select text") until
+    /// the pointer leaves it or another row is chosen.
+    private(set) var selectableRow: String?
+
     @ObservationIgnored private var highlightTask: Task<Void, Never>?
 
-    init(conversation: ConversationID, composer: ComposerModel, isThread: Bool) {
+    init(conversation: ConversationID, composer: ComposerModel, thread: String?) {
         self.conversation = conversation
         self.composer = composer
-        self.isThread = isThread
+        self.thread = thread
+    }
+
+    func holdToolbar(of row: String) {
+        heldToolbarRow = row
+    }
+
+    func releaseToolbar(of row: String) {
+        if heldToolbarRow == row {
+            heldToolbarRow = nil
+        }
+    }
+
+    /// `row` shows its toolbar while held, else while hovered and no other
+    /// row's is held.
+    func showsToolbar(of row: String, isRowHovered: Bool) -> Bool {
+        guard let heldToolbarRow else { return isRowHovered }
+        return heldToolbarRow == row
+    }
+
+    func selectText(of row: String) {
+        selectableRow = row
+    }
+
+    func endTextSelection(of row: String) {
+        if selectableRow == row {
+            selectableRow = nil
+        }
+    }
+
+    /// Runs a row action from the toolbar, the menu or VoiceOver.
+    func perform(_ action: MessageAction, on item: TimelineItem, session: SessionCoordinator, openThread: () -> Void) {
+        switch action {
+        case let .react(emoji): react(emoji, to: item, session: session)
+        case .addReaction: pickReaction(for: item)
+        case .reply: reply(to: item)
+        case .startThread, .openThread: openThread()
+        case .pin, .unpin: setPinned(action == .pin, item, session: session)
+        case .selectText: selectText(of: item.presentationID)
+        case .edit: edit(item)
+        case .delete: requestDeletion(of: item)
+        }
     }
 
     func reply(to item: TimelineItem) {

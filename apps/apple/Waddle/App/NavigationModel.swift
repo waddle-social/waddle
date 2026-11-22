@@ -229,10 +229,57 @@ final class NavigationModel {
             inspector = .thread(rootID: rootID)
             return
         }
+        updateTabPath { $0.append(.thread(conversation, rootID: rootID)) }
+    }
+
+    /// Goes from the thread at the end of `breadcrumb` (top-level thread
+    /// first) up to `threadID`, one of the threads it hangs under. The
+    /// inspector shows that thread in its place. On the phone the stack
+    /// goes back to it when it is on the stack; else the sub-threads on top
+    /// of the stack make way for it, so Back never leads from a thread
+    /// down into one of its sub-threads.
+    func openEnclosingThread(_ threadID: String, along breadcrumb: [String], in conversation: ConversationID, usesInspector: Bool) {
+        if usesInspector {
+            inspector = .thread(rootID: threadID)
+            return
+        }
+        updateTabPath { path in
+            guard let current = breadcrumb.last, path.last == .thread(conversation, rootID: current) else { return }
+            let target = Route.thread(conversation, rootID: threadID)
+            if let index = path.lastIndex(of: target) {
+                path.removeSubrange((index + 1)...)
+                return
+            }
+            let below = Set(breadcrumb.drop { $0 != threadID }.dropFirst())
+            while case let .thread(onTop, id)? = path.last, onTop == conversation, below.contains(id) {
+                path.removeLast()
+            }
+            path.append(target)
+        }
+    }
+
+    /// The thread right below `rootID` on the current phone stack, when
+    /// `rootID` is on top: where the navigation bar's Back goes.
+    func threadBelow(_ rootID: String, in conversation: ConversationID) -> String? {
+        let path: [Route]
         switch tab {
-        case .home: homePath.append(.thread(conversation, rootID: rootID))
-        case .directMessages: directPath.append(.thread(conversation, rootID: rootID))
-        case .inbox: inboxPath.append(.thread(conversation, rootID: rootID))
+        case .home: path = homePath
+        case .directMessages: path = directPath
+        case .inbox: path = inboxPath
+        case .feed, .you: return nil
+        }
+        guard path.count >= 2, path.last == .thread(conversation, rootID: rootID),
+              case let .thread(below, id) = path[path.count - 2], below == conversation
+        else { return nil }
+        return id
+    }
+
+    /// The current phone tab's conversation stack; Feed and You have none.
+    private func updateTabPath(_ update: (inout [Route]) -> Void) {
+        switch tab {
+        case .home: update(&homePath)
+        case .directMessages: update(&directPath)
+        case .inbox: update(&inboxPath)
         case .feed, .you: break
         }
     }
@@ -246,11 +293,6 @@ final class NavigationModel {
             inspector = inspector == .details ? nil : .details
             return
         }
-        switch tab {
-        case .home: homePath.append(.details(conversation))
-        case .directMessages: directPath.append(.details(conversation))
-        case .inbox: inboxPath.append(.details(conversation))
-        case .feed, .you: break
-        }
+        updateTabPath { $0.append(.details(conversation)) }
     }
 }

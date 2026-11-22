@@ -11,6 +11,8 @@ public final class ConversationTimeline {
 
     @ObservationIgnored private var indexByAnyID: [String: Int] = [:]
     @ObservationIgnored private var repliesByThread: [String: [Int]] = [:]
+    /// XEP-0201 sub-threads by the thread their root is a reply in.
+    @ObservationIgnored private var childThreads: [String: [String]] = [:]
 
     init(conversation: ConversationID) {
         self.conversation = conversation
@@ -38,21 +40,39 @@ public final class ConversationTimeline {
         (repliesByThread[threadID] ?? []).map { items[$0] }
     }
 
-    /// Number of thread replies under `item`.
-    public func replyCount(for item: TimelineItem) -> Int {
+    /// Every message in the thread rooted at `item` and in the sub-threads
+    /// under it, each once, oldest first.
+    public func threadDescendants(of item: TimelineItem) -> [TimelineItem] {
         var ids = item.targetableIDs
         ids.insert(item.id)
-        return ids.reduce(0) { $0 + (repliesByThread[$1]?.count ?? 0) }
+        var pending = Array(ids)
+        var seen = Set<String>()
+        var indices = Set<Int>()
+        while let thread = pending.popLast() {
+            guard seen.insert(thread).inserted else { continue }
+            indices.formUnion(repliesByThread[thread] ?? [])
+            pending.append(contentsOf: childThreads[thread] ?? [])
+        }
+        return indices.sorted().map { items[$0] }
+    }
+
+    /// Number of messages under `item`, its sub-threads' included.
+    public func replyCount(for item: TimelineItem) -> Int {
+        threadDescendants(of: item).count
     }
 
     /// Reply count, participants and newest reply of the thread rooted at
-    /// `item`, counted over the same ids as `replyCount(for:)`. Nil when
-    /// it has no loaded replies.
+    /// `item` and its sub-threads. Nil when it has no loaded replies.
     public func threadSummary(for item: TimelineItem) -> ThreadSummary? {
-        var ids = item.targetableIDs
-        ids.insert(item.id)
-        let indices = Set(ids.flatMap { repliesByThread[$0] ?? [] }).sorted()
-        return ThreadSummary.of(replies: indices.map { items[$0] })
+        ThreadSummary.of(replies: threadDescendants(of: item))
+    }
+
+    /// The thread a sub-thread hangs off: the thread its root is a reply
+    /// in, whether or not the sub-thread has messages yet. Nil for a
+    /// top-level thread, a thread whose root is not loaded, and a thread
+    /// whose parents loop back to it.
+    public func parentThread(of threadID: String) -> String? {
+        Self.parent(of: threadID, items: items, byID: indexByAnyID)
     }
 
     /// Newest content row, used for previews and recency.
@@ -96,5 +116,32 @@ public final class ConversationTimeline {
         }
         indexByAnyID = byID
         repliesByThread = replies
+        var children: [String: [String]] = [:]
+        for thread in replies.keys {
+            if let parent = Self.parent(of: thread, items: items, byID: byID) {
+                children[parent, default: []].append(thread)
+            }
+        }
+        childThreads = children
+    }
+
+    /// A thread's parent is the thread its root lives in, read from the
+    /// root itself: the `parent` a sender writes is not trusted, so a
+    /// claim cannot move messages under a thread they are not in. The root
+    /// must be named by an id others can target (in a room, the room's
+    /// stanza id). A thread whose parents loop back to it has none.
+    private static func parent(of thread: String, items: [TimelineItem], byID: [String: Int]) -> String? {
+        func link(_ thread: String) -> String? {
+            guard let index = byID[thread] else { return nil }
+            let root = items[index]
+            return root.targetableIDs.contains(thread) ? root.containingThreadID : nil
+        }
+        guard let parent = link(thread) else { return nil }
+        var seen: Set<String> = [thread]
+        var cursor: String? = parent
+        while let ancestor = cursor, seen.insert(ancestor).inserted {
+            cursor = link(ancestor)
+        }
+        return cursor == thread ? nil : parent
     }
 }

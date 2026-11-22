@@ -39,7 +39,7 @@ enum FFIOutbound {
             subject: nil,
             reply: options.reply.map(replyTarget),
             fallback: options.reply?.fallback.flatMap(fallbackRange),
-            thread: options.thread.map { WaddleThreadTarget(id: $0, parent: nil) },
+            thread: options.thread.map { WaddleThreadTarget(id: $0.id, parent: $0.parent) },
             markupSpans: options.markupSpans.compactMap(markupSpan),
             references: options.references.compactMap(reference),
             sharedFiles: options.sharedFiles.map(sharedFile),

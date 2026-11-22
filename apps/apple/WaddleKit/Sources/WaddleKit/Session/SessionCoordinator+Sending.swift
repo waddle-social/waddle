@@ -39,12 +39,12 @@ extension SessionCoordinator {
         if options.sticker == nil {
             options.mentionDirectory = mentionDirectory(for: conversation)
         }
-        let message = OutboundMessage(
+        let message = withThreadParent(OutboundMessage(
             clientID: Self.makeClientID(),
             conversation: conversation,
             body: composed.body,
             options: options
-        )
+        ))
         timelines.insertLocalEcho(localEcho(of: message), in: conversation)
         if conversation.kind == .direct {
             let action = MeAction.presentation(ofBody: preview, actor: account.jid.localpart ?? account.jid.domain)
@@ -97,7 +97,10 @@ extension SessionCoordinator {
                 Task { [weak self] in await self?.flushOutboundQueue() }
             }
         }
-        while canFlushOutboundQueue, let next = outboundQueue.first {
+        while canFlushOutboundQueue, var next = outboundQueue.first {
+            // A send whose sub-thread parent was not known yet takes it now.
+            next = withThreadParent(next)
+            outboundQueue[0] = next
             if resetBeforeRetryIDs.remove(next.clientID) != nil {
                 await resetStaleConnection()
                 return
@@ -289,7 +292,8 @@ extension SessionCoordinator {
             to: JID(bare: conversation.jid, resource: nil),
             identity: MessageIdentity(messageID: message.clientID, originID: message.clientID),
             body: message.body,
-            thread: message.options.thread,
+            thread: message.options.thread?.id,
+            parentThread: message.options.thread?.parent,
             reply: message.options.reply.map {
                 WireMessage.ReplyTarget(id: $0.targetID, author: $0.author, fallback: $0.fallback)
             },
@@ -338,9 +342,10 @@ extension SessionCoordinator {
     /// XEP-0308 correction of one of our own messages. The correction
     /// re-sends the whole message, as the XEP requires: the draft's text
     /// and mentions (markup and references are recomputed against the new
-    /// body) with the original's reply, thread and attachments. The draft's
-    /// own reply, thread and attachments are ignored. A sticker is not
-    /// text and cannot be corrected.
+    /// body) with the original's reply, thread and attachments; a
+    /// sub-thread's parent is the original's, else the one known now. The
+    /// draft's own reply, thread and attachments are ignored. A sticker is
+    /// not text and cannot be corrected.
     public func edit(_ item: TimelineItem, draft: Draft) async -> Bool {
         guard item.isMine,
               item.tombstone == nil,
@@ -351,6 +356,12 @@ extension SessionCoordinator {
         else { return false }
         var options = composed.options
         options.mentionDirectory = mentionDirectory(for: item.conversation)
+        if let thread = item.message.thread {
+            options.thread = ThreadTarget(
+                id: thread,
+                parent: item.message.parentThread ?? threadParent(of: thread, in: item.conversation)
+            )
+        }
         let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: options)
         guard case .sent = outcome else { return false }
         // A room reflects the correction, and may reject it (for example

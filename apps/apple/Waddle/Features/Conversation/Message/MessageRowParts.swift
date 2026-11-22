@@ -152,6 +152,7 @@ struct MessageThreadCard: View {
                 HStack(spacing: Theme.Spacing.s - 2) {
                     if !summary.faces.isEmpty {
                         MessageThreadFaces(faces: summary.faces, overflow: summary.otherParticipantCount)
+                            .environment(\.huddleGround, Theme.Colors.surface2)
                     }
                     Text(MessageThreadCardText.count(summary.replyCount))
                         .font(.caption.weight(.semibold))
@@ -186,6 +187,25 @@ struct MessageThreadCard: View {
         let snippet = Text(MessageThreadCardText.snippet(latest.snippet))
         guard MessageThreadCardText.showsAuthor(latest) else { return snippet }
         return Text("\(MessageThreadCardText.author(latest)): ").fontWeight(.semibold) + snippet
+    }
+}
+
+/// Under a reply inside a thread: "2 replies in sub-thread", which opens
+/// the sub-thread rooted at that reply.
+struct MessageSubThreadLink: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(MessageSubThreadText.count(count), systemImage: "arrow.turn.down.right")
+                .huddleText(Theme.Typography.caption.weight(600))
+                .foregroundStyle(Theme.Colors.actionText)
+                .padding(.vertical, Theme.Spacing.xxs)
+                .huddleTouchTarget()
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("Opens the sub-thread"))
     }
 }
 
@@ -278,28 +298,29 @@ private struct MessageThreadElbow: Shape {
     }
 }
 
-/// Up to three overlapping reply authors, then "+N".
-private struct MessageThreadFaces: View {
+/// Overlapping thread participants, then "+N": on the reply card and in
+/// the thread header. Each face cuts into the ground it sits on.
+struct MessageThreadFaces: View {
+    @Environment(\.huddleGround) private var ground
     let faces: [ThreadSummary.Participant]
     let overflow: Int
-
-    private static let size: CGFloat = 18
+    var size: CGFloat = 18
 
     var body: some View {
-        HStack(spacing: -Self.size * 0.3) {
+        HStack(spacing: -size * 0.3) {
             ForEach(Array(faces.enumerated()), id: \.offset) { index, face in
                 avatar(face)
                     .overlay(
-                        RoundedRectangle(cornerRadius: Self.size * 0.3, style: .continuous)
-                            .strokeBorder(Color.secondaryBackground, lineWidth: 1.5)
+                        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+                            .strokeBorder(ground, lineWidth: 1.5)
                     )
                     .zIndex(Double(faces.count - index))
             }
             if overflow > 0 {
                 Text("+\(overflow)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, Self.size * 0.3 + 2)
+                    .huddleText(Theme.Typography.tag)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .padding(.leading, size * 0.3 + 2)
             }
         }
         .accessibilityHidden(true)
@@ -308,9 +329,9 @@ private struct MessageThreadFaces: View {
     @ViewBuilder
     private func avatar(_ face: ThreadSummary.Participant) -> some View {
         if let jid = face.jid {
-            JIDAvatar(jid: jid, name: face.name, size: Self.size)
+            JIDAvatar(jid: jid, name: face.name, size: size)
         } else {
-            AvatarView(name: face.name, size: Self.size)
+            AvatarView(name: face.name, size: size)
         }
     }
 }

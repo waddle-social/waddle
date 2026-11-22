@@ -58,14 +58,15 @@ public struct ThreadSummary: Hashable, Sendable {
     public let replyCount: Int
     /// Nil when no reply is loaded although the count is known.
     public let latestReply: LatestReply?
-    /// Up to `maxFaces` distinct reply authors, newest reply first.
+    /// Up to `maxFaces` (3 unless asked otherwise) distinct reply
+    /// authors, newest reply first.
     public let faces: [Participant]
     /// Distinct reply authors beyond `faces`.
     public let otherParticipantCount: Int
 
     /// `replies` are the loaded replies, oldest first. `replyCount` is the
     /// known total; it never reads lower than the loaded replies.
-    public init(replyCount: Int, replies: [TimelineItem]) {
+    public init(replyCount: Int, replies: [TimelineItem], maxFaces: Int = Self.maxFaces) {
         self.replyCount = max(replyCount, replies.count)
         latestReply = replies.last.map { reply in
             LatestReply(
@@ -83,7 +84,7 @@ public struct ThreadSummary: Hashable, Sendable {
             guard !participant.name.isEmpty || participant.jid != nil, seen.insert(key).inserted else { continue }
             participants.append(participant)
         }
-        faces = Array(participants.prefix(Self.maxFaces))
+        faces = Array(participants.prefix(maxFaces))
         otherParticipantCount = participants.count - faces.count
     }
 

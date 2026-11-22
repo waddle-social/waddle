@@ -27,6 +27,8 @@ private struct MessageRowContent: View {
     @Environment(NavigationModel.self) private var navigation
     @Environment(MessageActionModel.self) private var actions
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The pointer is over the row (iPad with a pointer too; touch never
+    /// hovers). The row's only hover state.
     @State private var isHovering = false
     @State private var imagePreviewFile: SharedFile?
     @State private var isImagePreviewPresented = false
@@ -52,6 +54,7 @@ private struct MessageRowContent: View {
             authorJID: authorJID,
             isBot: authorJID.map { session.roomBots.isDeclared($0, in: item.conversation.jid) } ?? false
         )
+        let available = MessageActions.available(for: item, in: actionContext)
         HStack(alignment: .top, spacing: isCompact ? Theme.Spacing.s : Theme.Spacing.m) {
             gutter(author: author)
                 .frame(width: avatarSize, alignment: .trailing)
@@ -94,6 +97,9 @@ private struct MessageRowContent: View {
         .padding(.top, topPadding)
         .padding(.bottom, Theme.Spacing.xxs)
         .background(background)
+        .overlay(alignment: .topTrailing) {
+            MessageRowToolbar(item: item, context: actionContext, isRowHovered: isHovering, perform: perform)
+        }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.presentationID)
         .contentShape(Rectangle())
         #if os(iOS)
@@ -102,26 +108,38 @@ private struct MessageRowContent: View {
         // `gesture`, not `simultaneousGesture`, so a child control (link,
         // image, reaction, reply quote, link card, avatar, name, reply
         // card) takes its own tap alone; scrolls and the context menu's
-        // long press never end a tap. Mac keeps clicks for selecting text.
+        // long press never end a tap.
         .gesture(TapGesture().onEnded { openThread() }, including: opensThreadOnTap ? .all : .subviews)
         #endif
-        .onHover { isHovering = $0 }
+        .onHover { inside in
+            isHovering = inside
+            if !inside {
+                actions.endTextSelection(of: item.presentationID)
+            }
+        }
+        .onDisappear {
+            actions.releaseToolbar(of: item.presentationID)
+            actions.endTextSelection(of: item.presentationID)
+        }
         .contextMenu {
-            MessageContextMenu(item: item, session: session, actions: actions, openThread: openThread)
+            MessageContextMenu(item: item, available: available, session: session, actions: actions, perform: perform)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(MessageAccessibilityText.label(
             for: item,
             authorName: author.name,
             thread: entry.thread,
+            insideThread: actions.isThread,
             time: item.sentAt.formatted(date: .omitted, time: .shortened)
         )))
         .modifier(MessageAccessibilityActions(
             item: item,
-            replyCount: entry.replyCount,
+            available: available,
+            perform: perform,
             opensThreadOnActivate: opensThreadOnTap,
             authorName: author.name,
             openThread: openThread,
+            hasSubThreadLink: entry.replyCount > 0 && item.threadTarget(inside: actions.thread) != nil,
             openProfile: { openProfile(author) },
             openImage: openImage
         ))
@@ -142,13 +160,26 @@ private struct MessageRowContent: View {
         #endif
     }
 
+    private var actionContext: MessageActionContext {
+        MessageActionContext(
+            thread: actions.thread,
+            replyCount: entry.replyCount,
+            isPinned: session.isPinned(item),
+            pinning: session.pinAccess(in: item.conversation)
+        )
+    }
+
+    private func perform(_ action: MessageAction) {
+        actions.perform(action, on: item, session: session, openThread: openThread)
+    }
+
     private var occupant: Occupant? {
         guard item.conversation.isRoom, let nick = item.from?.resource else { return nil }
         return session.presence.occupant(named: nick, in: item.conversation.jid)
     }
 
-    /// Touch only, and never inside the thread view, where threads do
-    /// not nest.
+    /// Touch only, and never inside the thread view, where a reply's
+    /// sub-thread opens from its own link.
     private var opensThreadOnTap: Bool {
         #if os(iOS)
         return showsThreadChip && entry.replyCount > 0
@@ -201,8 +232,10 @@ private struct MessageRowContent: View {
         return isHovering ? Color.secondary.opacity(0.07) : Color.clear
     }
 
+    /// The row's thread from the feed; inside a thread, a reply's
+    /// sub-thread.
     private func openThread() {
-        guard let root = item.threadRootID else { return }
+        guard let root = item.threadTarget(inside: actions.thread) else { return }
         navigation.openThread(root, in: item.conversation, usesInspector: placement.usesInspector)
     }
 
@@ -236,7 +269,9 @@ private struct MessageRowBody: View {
     private var item: TimelineItem { entry.item }
 
     var body: some View {
-        if let target = item.message.reply {
+        // Inside a thread the quote only repeats the thread's own messages,
+        // most often its first one, on every reply.
+        if !actions.isThread, let target = item.message.reply {
             MessageReplyPreview(target: target, parent: entry.replyParent, isRoom: item.conversation.isRoom) {
                 if let parent = entry.replyParent {
                     actions.showMessage(parent.presentationID)
@@ -248,9 +283,24 @@ private struct MessageRowBody: View {
         } else {
             content
         }
+        // A deleted reply cannot start a sub-thread, but one it has stays
+        // reachable.
+        if actions.isThread, let thread = entry.thread, thread.replyCount > 0 {
+            MessageSubThreadLink(count: thread.replyCount, action: openThread)
+        }
         if item.isMine {
             MessageDeliveryView(item: item)
         }
+    }
+
+    /// Always on iOS. On a Mac selectable words would take the right-click
+    /// for the text's own menu, so only the row chosen with "Select text".
+    private var isSelectable: Bool {
+        #if os(iOS)
+        true
+        #else
+        actions.selectableRow == item.presentationID
+        #endif
     }
 
     @ViewBuilder
@@ -263,7 +313,8 @@ private struct MessageRowBody: View {
                     item: item,
                     account: session.account,
                     showsEditedMark: item.isEdited && !entry.startsGroup,
-                    authorName: authorName
+                    authorName: authorName,
+                    isSelectable: isSelectable
                 )
             }
         }
@@ -283,7 +334,7 @@ private struct MessageRowBody: View {
         if !item.reactions.isEmpty {
             MessageReactionsBar(item: item)
         }
-        if showsThreadChip, let thread = entry.thread, thread.replyCount > 0 {
+        if showsThreadChip, !actions.isThread, let thread = entry.thread, thread.replyCount > 0 {
             MessageThreadCard(summary: thread, action: openThread)
         }
     }

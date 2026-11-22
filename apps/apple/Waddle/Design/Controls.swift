@@ -410,3 +410,35 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
         }
     }
 }
+
+// MARK: - Toolbar button
+
+/// A 28pt glyph button for a floating toolbar (web `iconbtn` size sm): a
+/// tint on hover and press, red for a destructive one.
+struct HuddleToolbarButtonStyle: ButtonStyle {
+    static let side = WaddleTokens.ControlHeight.xs
+    var isDanger = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        HuddleToolbarButton(configuration: configuration, isDanger: isDanger)
+    }
+}
+
+private struct HuddleToolbarButton: View {
+    let configuration: ButtonStyleConfiguration
+    let isDanger: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        let active = isHovering || configuration.isPressed
+        configuration.label
+            .foregroundStyle(isDanger && active ? Theme.Colors.dangerText : Theme.Colors.fgMuted)
+            .frame(width: HuddleToolbarButtonStyle.side, height: HuddleToolbarButtonStyle.side)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                    .fill(active ? (isDanger ? Theme.Colors.dangerSubtle : Theme.Colors.surface2) : .clear)
+            )
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+    }
+}

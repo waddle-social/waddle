@@ -12,7 +12,8 @@ struct ConversationComposer: View {
     @Environment(AppState.self) private var app
     let model: ComposerModel
     let conversation: ConversationID
-    /// XEP-0201 thread replies go to, or nil for the main feed.
+    /// XEP-0201 thread replies go to, or nil for the main feed. A
+    /// sub-thread's parent is the session's to work out.
     let thread: String?
     let placeholder: String
 

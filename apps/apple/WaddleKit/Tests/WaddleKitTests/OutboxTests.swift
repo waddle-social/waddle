@@ -26,7 +26,7 @@ private func fullMessage() -> OutboundMessage {
     )
     let options = OutboundOptions(
         reply: .init(targetID: "s1", author: jid("general@muc.waddle.test/bob"), fallback: 0..<6),
-        thread: "t1",
+        thread: ThreadTarget(id: "t1", parent: "t0"),
         markupSpans: [
             MarkupSpan(kind: .bold, start: 0, end: 1),
             MarkupSpan(kind: .italic, start: 1, end: 2),
@@ -60,6 +60,18 @@ struct OutboxEncodingTests {
         let entry = PersistedOutbound(message: fullMessage(), createdAt: date(42), state: .failed)
         let data = try OutboxFile.encode([entry])
         #expect(OutboxFile.decode(data) == .success([entry]))
+    }
+
+    /// The thread's parent came later; an outbox saved before it, with the
+    /// thread id as a plain string, still loads.
+    @Test func entrySavedWithoutAThreadParentStillLoads() throws {
+        let options = OutboundOptions(thread: ThreadTarget(id: "t1"))
+        let message = OutboundMessage(clientID: "c1", conversation: roomConversation, body: "hi", options: options)
+        let entry = PersistedOutbound(message: message, createdAt: date(0), state: .pending)
+        let json = try #require(String(data: try OutboxFile.encode([entry]), encoding: .utf8))
+        #expect(json.contains(#""thread":"t1""#))
+        #expect(!json.contains("parentThread"))
+        #expect(OutboxFile.decode(Data(json.utf8)) == .success([entry]))
     }
 
     @Test func invalidJIDIsRejectedOnDecode() throws {

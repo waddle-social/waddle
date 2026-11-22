@@ -34,15 +34,27 @@ enum MessageReplySummary {
     }
 }
 
+/// Copy for the link under a reply that has a sub-thread.
+enum MessageSubThreadText {
+    /// "2 replies in sub-thread".
+    static func count(_ count: Int) -> String {
+        "\(MessageThreadCardText.count(count)) in sub-thread"
+    }
+}
+
 /// Copy for the attached reply card under a thread root.
 enum MessageThreadCardText {
     static func count(_ count: Int) -> String {
         count == 1 ? "1 reply" : "\(count) replies"
     }
 
-    /// "2 hr. ago", relative to now.
-    static func time(_ date: Date) -> String {
-        date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
+    /// "2 hr. ago", relative to `now`. A time a little ahead of this
+    /// device's clock reads "now".
+    static func time(_ date: Date, relativeTo now: Date = Date()) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: min(date, now), relativeTo: now)
     }
 
     static func author(_ latest: ThreadSummary.LatestReply) -> String {
@@ -89,7 +101,7 @@ enum MessageThreadCardText {
     /// The card's VoiceOver label, with a relative time; the card
     /// re-renders each minute.
     static func accessibilityLabel(_ thread: ThreadSummary) -> String {
-        "\(summary(thread, time: time)). Open thread"
+        "\(summary(thread, time: { time($0) })). Open thread"
     }
 
     /// The thread part of the row's VoiceOver label. The row is not

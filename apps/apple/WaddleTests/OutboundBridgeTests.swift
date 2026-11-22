@@ -74,6 +74,21 @@ final class OutboundBridgeTests: XCTestCase {
         XCTAssertNil(picture.encrypted)
     }
 
+    // MARK: - Threads
+
+    /// XEP-0201: a sub-thread message is `<thread parent='root'>r1</thread>`.
+    func testASubThreadSendNamesItsParent() {
+        let sent = FFIOutbound.sendOptions(OutboundOptions(thread: ThreadTarget(id: "r1", parent: "root")), stanzaID: "c1")
+
+        XCTAssertEqual(sent.thread, WaddleThreadTarget(id: "r1", parent: "root"))
+    }
+
+    func testATopLevelThreadSendHasNoParent() {
+        let sent = FFIOutbound.sendOptions(OutboundOptions(thread: ThreadTarget(id: "root")), stanzaID: "c1")
+
+        XCTAssertEqual(sent.thread, WaddleThreadTarget(id: "root", parent: nil))
+    }
+
     func testAnOrdinaryMessageIsNotASticker() {
         XCTAssertNil(FFIOutbound.sendOptions(OutboundOptions(), stanzaID: "c1").sticker)
     }
