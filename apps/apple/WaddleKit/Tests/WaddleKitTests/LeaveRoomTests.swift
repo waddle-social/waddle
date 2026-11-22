@@ -341,6 +341,45 @@ struct LeaveRoomTests {
         #expect(!coordinator.canJoinGroupCall(in: room))
     }
 
+    @Test func aJoinAnsweredAfterTheRoomWasFoundLeftIsFollowedByALeave() async throws {
+        // The join was sent before a lookup found the room left on another
+        // device; the room lets us in only afterwards.
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+
+        coordinator.handle(.presence(WirePresence(
+            from: jid("general@muc.waddle.test/alice"), kind: .available,
+            occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110]))))
+        for _ in 0..<200 where port.leavePresences.isEmpty { await Task.yield() }
+
+        #expect(port.leavePresences == [room])
+        #expect(!coordinator.presence.joinedRooms.contains(room))
+    }
+
+    @Test func aRoomRejoinedOnAnotherDeviceGetsItsNotificationSettingsBack() async throws {
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+        coordinator.directory.setNotifyMode(.never, for: roomConversation)
+        port.notifySettings = NotifySettings(modes: [roomConversation: .always], showingMessagesInPush: [roomConversation])
+        port.topology = Topology(spaces: [], channels: [general])
+
+        try await coordinator.rejoinRoom(room)
+
+        #expect(port.membershipWrites.isEmpty)
+        #expect(coordinator.directory.channels.map(\.roomJID) == [room])
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .always)
+        #expect(coordinator.directory.showsMessagesInPush(for: roomConversation))
+    }
+
+    @Test func aRoomRejoinedOnAnotherDeviceWithDefaultNotificationsIsNoLongerMuted() async throws {
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+        coordinator.directory.setNotifyMode(.never, for: roomConversation)
+        port.topology = Topology(spaces: [], channels: [general])
+
+        await coordinator.refreshDirectory()
+
+        #expect(coordinator.directory.notifyModes[roomConversation] == nil)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .onMention)
+    }
+
     @Test func groupChatsAreNeverListedAsLeft() {
         let (coordinator, _) = online([Channel(roomJID: room, name: "group", isGroupDM: true, hasLeft: true)])
         #expect(coordinator.directory.leftRooms.isEmpty)

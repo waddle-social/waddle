@@ -45,6 +45,7 @@ extension SessionCoordinator {
         // does not cancel.
         guard !Task.isCancelled, epoch == connectionEpoch else { return nil }
         var lookup: DirectoryLookup?
+        let leftBefore = directory.leftRooms.map(\.roomJID)
         if case let .success(topology) = result {
             lookup = DirectoryLookup(
                 rooms: Set(topology.channels.map(\.roomJID)), readOwnBookmarks: topology.ownBookmarksLoaded)
@@ -68,7 +69,11 @@ extension SessionCoordinator {
         silenceLeftRooms()
         // After the local changes above: a rejoin made here while the
         // lookup was on its way must not be answered with a leave.
-        if lookup?.readOwnBookmarks == true { await leaveRoomsLeftOnAnotherDevice() }
+        if lookup?.readOwnBookmarks == true {
+            await leaveRoomsLeftOnAnotherDevice()
+            await loadNotifySettings(ofRejoined: leftBefore.filter { directory.isRoom($0) && !directory.hasLeft($0) })
+            guard !Task.isCancelled, epoch == connectionEpoch else { return nil }
+        }
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
             .map(\.roomJID)
@@ -136,6 +141,18 @@ extension SessionCoordinator {
         joinTails[room] = task
         await task.value
         if joinTails[room] == task { joinTails[room] = nil }
+    }
+
+    /// Reads the notification settings of rooms the account joined again
+    /// on another device. They were off while the rooms were left, and
+    /// nothing else reads them again before the next connect.
+    private func loadNotifySettings(ofRejoined rooms: [BareJID]) async {
+        guard !rooms.isEmpty, let settings = try? await port.fetchNotifySettings() else { return }
+        guard !isStopped, !Task.isCancelled else { return }
+        for conversation in rooms.map(ConversationID.room) where !directory.hasLeft(conversation.jid) {
+            directory.setStoredNotifyMode(settings.modes[conversation], for: conversation)
+            directory.setShowsMessagesInPush(settings.showingMessagesInPush.contains(conversation), for: conversation)
+        }
     }
 
     func loadNotifyModes() async {
