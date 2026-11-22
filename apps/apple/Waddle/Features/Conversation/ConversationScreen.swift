@@ -21,6 +21,9 @@ struct ConversationScreen: View {
             ))
         )
         .id(conversation)
+        // The page ground: pushed on an iPhone stack or shown in the
+        // inspector, nothing else paints one behind the timeline.
+        .background(Theme.Colors.bg)
     }
 }
 
