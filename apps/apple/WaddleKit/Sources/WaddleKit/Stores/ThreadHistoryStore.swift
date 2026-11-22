@@ -72,7 +72,7 @@ public final class ThreadHistoryStore {
     /// The root of `thread` as fetched: its own page's root, else a
     /// fetched thread of the room with that root among its replies (a
     /// sub-thread on a reply only a fetched page holds).
-    func fetchedRoot(of thread: ThreadKey) -> TimelineItem? {
+    public func fetchedRoot(of thread: ThreadKey) -> TimelineItem? {
         if let root = histories[thread]?.root {
             return root
         }

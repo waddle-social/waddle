@@ -54,11 +54,18 @@ private struct ThreadContent: View {
         // filter, so a thread opened from Activity is complete even when
         // the room's loaded page does not reach back to it.
         let fetched = fetchedThread(rootID)
-        let root = ThreadLookup.root(rootID, in: timeline) ?? fetched?.root
+        // A sub-thread just started on a reply that only its parent's fetched
+        // page holds has no page of its own yet; that reply is its root.
+        let root = ThreadLookup.root(rootID, in: timeline)
+            ?? roomThread(rootID).flatMap { session.threadHistory.fetchedRoot(of: $0) }
         let replies = ThreadHistory.merged(live: timeline.threadReplies(threadID: rootID), fetched: fetched?.replies ?? [])
         // Under the root, as on the feed's card and on web: every message
         // in the thread, its sub-threads' included.
-        let replyCount = root.map { ThreadHistory.merged(live: timeline.threadDescendants(of: $0), fetched: replies).count }
+        // Merged with the fetched replies only: `replies` already holds the
+        // live ones, and a 1:1 merge does not match copies.
+        let replyCount = root.map {
+            ThreadHistory.merged(live: timeline.threadDescendants(of: $0), fetched: fetched?.replies ?? []).count
+        }
             ?? replies.count
         let parent = session.threadParent(of: rootID, in: conversation)
         // The social order shows the newest reply first and the root,
