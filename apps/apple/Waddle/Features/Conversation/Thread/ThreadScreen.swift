@@ -122,8 +122,6 @@ private struct ThreadContent: View {
                         missingRoot
                     }
                 }
-                .frame(maxWidth: Theme.Size.readableWidth)
-                .frame(maxWidth: .infinity)
                 // Room above the first row for its hover toolbar.
                 .padding(.top, Theme.Spacing.l)
                 .padding(.bottom, Theme.Spacing.s)

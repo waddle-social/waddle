@@ -202,4 +202,7 @@ extension CGSize {
     static let phone = CGSize(width: 393, height: 852)
     /// A Mac window, or an iPad in landscape.
     static let desktop = CGSize(width: 1100, height: 720)
+    /// A wide Mac window, where the conversation pane is wider than any
+    /// sensible line length.
+    static let wideDesktop = CGSize(width: 1680, height: 720)
 }

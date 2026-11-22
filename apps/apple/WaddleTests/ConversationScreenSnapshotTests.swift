@@ -30,6 +30,15 @@ final class ConversationScreenSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .desktop)
     }
 
+    /// The timeline fills the pane and starts at its leading edge, as on
+    /// the web, rather than sitting in a centred column.
+    func testSplitRoomWide() async throws {
+        let sample = SampleSession()
+        sample.seedGeneral()
+        sample.navigation.selection = .room(SampleSession.general)
+        try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .wideDesktop)
+    }
+
     func testSplitDirect() async throws {
         let sample = SampleSession()
         sample.seedTheo()

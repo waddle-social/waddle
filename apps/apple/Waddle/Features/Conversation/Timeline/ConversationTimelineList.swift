@@ -70,8 +70,6 @@ private struct TimelineScroller: View {
                     }
                 }
                 .scrollTargetLayout()
-                .frame(maxWidth: Theme.Size.readableWidth)
-                .frame(maxWidth: .infinity)
                 // Newest first, the top row's hover toolbar needs room
                 // above it.
                 .padding(newestFirst ? .top : .bottom, newestFirst ? Theme.Spacing.l : Theme.Spacing.s)
