@@ -75,6 +75,7 @@ struct SplitShell: View {
                     PinnedMessagesView(conversation: conversation)
                 }
             }
+            .environment(\.isInInspector, true)
         }
     }
 

@@ -56,7 +56,7 @@ private struct ThreadContent: View {
         let fetched = roomThread.flatMap { session.threadHistory.history(for: $0) }
         let root = ThreadLookup.root(rootID, in: timeline) ?? fetched?.root
         let replies = ThreadHistory.merged(live: timeline.threadReplies(threadID: rootID), fetched: fetched?.replies ?? [])
-        let parent = ThreadLookup.parent(of: rootID, in: timeline, fetched: fetched)
+        let parent = ThreadLookup.parent(of: rootID, in: timeline, fetched: roomThread.flatMap(session.threadHistory.parent(of:)))
         // The social order shows the newest reply first and the root,
         // the oldest message, last.
         let newestFirst = app.preferences.messageOrder.isNewestFirst
@@ -263,12 +263,13 @@ enum ThreadLookup {
     }
 
     /// The thread a sub-thread hangs off: the timeline's answer when it
-    /// has the sub-thread's root, else the fetched root's.
+    /// has the sub-thread's root, else `fetched`, what fetched thread
+    /// pages say.
     @MainActor
-    static func parent(of threadID: String, in timeline: ConversationTimeline, fetched: ThreadHistory?) -> String? {
+    static func parent(of threadID: String, in timeline: ConversationTimeline, fetched: String?) -> String? {
         if timeline.item(withID: threadID) != nil {
             return timeline.parentThread(of: threadID)
         }
-        return fetched?.parent
+        return fetched
     }
 }

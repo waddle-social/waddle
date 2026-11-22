@@ -187,6 +187,22 @@ struct SubThreadTests {
         #expect(history.replies.map(\.body) == ["r1"])
     }
 
+    /// A thread opened from the Inbox has replies the room has not
+    /// loaded; a sub-thread started on one still knows its parent before
+    /// its own page is fetched.
+    @Test func aFetchedThreadTellsWhereASubThreadOnItsReplyHangs() {
+        let page = ArchivePage(messages: [
+            message("root", from: "bob", id: "root", at: 1),
+            message("r1", id: "r1", at: 2, thread: "root"),
+        ], first: "root", isComplete: true)
+        let parentKey = ThreadKey(room: room, threadID: "root")
+        let store = ThreadHistoryStore()
+        store.store(ThreadHistory.build(from: page, thread: parentKey, account: me), for: parentKey)
+        #expect(store.parent(of: ThreadKey(room: room, threadID: "r1")) == "root")
+        #expect(store.parent(of: parentKey) == nil)
+        #expect(store.parent(of: ThreadKey(room: bare("other@muc.waddle.test"), threadID: "r1")) == nil)
+    }
+
     // MARK: Inbox
 
     @Test func anUnreadSubThreadListsItsOwnReplies() {

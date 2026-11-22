@@ -74,6 +74,21 @@ public final class ThreadHistoryStore {
         histories[thread]
     }
 
+    /// The thread `thread` hangs off, from what was fetched: its own
+    /// page's root, else a fetched thread of the room with that root among
+    /// its replies (a sub-thread just started on a fetched reply).
+    public func parent(of thread: ThreadKey) -> String? {
+        if let parent = histories[thread]?.parent {
+            return parent
+        }
+        for (key, history) in histories where key.room == thread.room {
+            if let reply = history.replies.first(where: { $0.targetableIDs.contains(thread.threadID) }) {
+                return reply.containingThreadID
+            }
+        }
+        return nil
+    }
+
     func store(_ history: ThreadHistory, for thread: ThreadKey) {
         histories[thread] = history
     }
