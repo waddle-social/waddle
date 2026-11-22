@@ -3,21 +3,27 @@ import SwiftUI
 import UIKit
 #endif
 
+/// System, Night or Daylight as preview tiles (web `settings`
+/// Appearance), and compact messages.
 struct SettingsAppearanceSection: View {
     @Bindable var preferences: Preferences
 
     var body: some View {
         Section {
-            Picker("Appearance", selection: $preferences.appearance) {
-                ForEach(Preferences.Appearance.allCases) { appearance in
-                    Text(appearance.title).tag(appearance)
-                }
+            SettingsTilePicker(
+                selection: $preferences.appearance,
+                // Web `settings` order.
+                options: [.system, .dark, .light],
+                label: "Appearance",
+                title: \.title
+            ) { appearance in
+                AppearancePreview(appearance: appearance)
             }
-            Toggle("Compact messages", isOn: $preferences.compactMessages)
+            FormToggle("Compact messages", isOn: $preferences.compactMessages)
         } header: {
-            Text("Appearance")
+            FormSectionHeader("Appearance")
         } footer: {
-            Text("Compact messages use smaller avatars and tighter spacing.")
+            FormSectionFooter("Compact messages use smaller avatars and tighter spacing.")
         }
     }
 }
@@ -29,9 +35,9 @@ struct SettingsMessageOrderSection: View {
         Section {
             SettingsMessageOrderPicker(selection: $preferences.messageOrder)
         } header: {
-            Text("Message Order")
+            FormSectionHeader("Message order")
         } footer: {
-            Text(footer)
+            FormSectionFooter(footer)
         }
     }
 
@@ -50,11 +56,11 @@ struct SettingsPrivacySection: View {
 
     var body: some View {
         Section {
-            Toggle("Send read receipts", isOn: $preferences.sendsReadReceipts)
+            FormToggle("Send read receipts", isOn: $preferences.sendsReadReceipts)
         } header: {
-            Text("Privacy")
+            FormSectionHeader("Privacy")
         } footer: {
-            Text("Others see when you've read their direct messages. Your devices still sync read state.")
+            FormSectionFooter("Others see when you've read their direct messages. Your devices still sync read state.")
         }
     }
 }
@@ -67,32 +73,30 @@ struct SettingsNotificationsSection: View {
 
     var body: some View {
         Section {
-            Toggle("Show message previews", isOn: $preferences.showsNotificationPreviews)
-            Toggle("Push notifications", isOn: $preferences.receivesPush)
+            FormToggle("Show message previews", isOn: $preferences.showsNotificationPreviews)
+            FormToggle("Push notifications", isOn: $preferences.receivesPush)
             if preferences.receivesPush {
-                LabeledContent("Push registration", value: pushRegistrationStatus.title)
+                FormValueRow(title: "Push registration", value: pushRegistrationStatus.title)
                 if case let .failed(message) = pushRegistrationStatus {
                     Text(message)
-                        .font(.footnote)
+                        .huddleText(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.dangerText)
                 }
             }
             if notificationPermissionGranted == false {
                 Label("Notifications are turned off in system settings.", systemImage: "bell.slash")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.warningText)
             }
-            Button {
+            FormActionButton(title: "System notification settings", symbol: "arrow.up.forward.app") {
                 if let url = Self.systemSettingsURL {
                     openURL(url)
                 }
-            } label: {
-                Label("System notification settings", systemImage: "arrow.up.forward.app")
             }
         } header: {
-            Text("Notifications")
+            FormSectionHeader("Notifications")
         } footer: {
-            Text(Self.footer(receivesPush: preferences.receivesPush))
+            FormSectionFooter(Self.footer(receivesPush: preferences.receivesPush))
         }
     }
 

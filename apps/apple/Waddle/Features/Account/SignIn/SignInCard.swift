@@ -1,24 +1,22 @@
 import SwiftUI
 
-/// The centered sign-in column: plain on iPhone, a floating card on iPad
-/// and Mac.
+/// The sign-in card (web `signin-many`): a bordered surface on iPad and
+/// Mac, the plain column on iPhone.
 struct SignInCard<Content: View>: View {
     @ViewBuilder let content: Content
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
 
-    private static var maxWidth: CGFloat { 420 }
-
     var body: some View {
-        let column = VStack(spacing: Theme.Spacing.xl) { content }
-            .frame(maxWidth: Self.maxWidth)
+        let column = VStack(alignment: .leading, spacing: Theme.Spacing.l) { content }
+            .frame(maxWidth: Theme.Size.signInColumn)
 
         if isCard {
             column
-                .padding(Theme.Spacing.xl * 1.5)
-                .huddleSurface(.dialog, radius: Theme.Radius.sheet)
-                .frame(maxWidth: Self.maxWidth + Theme.Spacing.xl * 3)
+                .padding(Theme.Spacing.l)
+                .huddleSurface(.card, radius: Theme.Radius.card)
+                .frame(maxWidth: Theme.Size.signInColumn + Theme.Spacing.l * 2)
         } else {
             column
         }

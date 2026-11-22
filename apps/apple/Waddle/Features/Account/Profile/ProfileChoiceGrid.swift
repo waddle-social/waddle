@@ -15,7 +15,7 @@ struct ProfileChoiceGrid: View {
     let choices: [ProfileChoice]
     @Binding var selection: String?
 
-    private let columns = [GridItem(.adaptive(minimum: 76), spacing: Theme.Spacing.s)]
+    private let columns = [GridItem(.adaptive(minimum: Theme.Size.choiceTile), spacing: Theme.Spacing.s)]
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: Theme.Spacing.s) {
@@ -39,13 +39,15 @@ private struct ProfileChoiceTile: View {
         Button(action: select) {
             VStack(spacing: Theme.Spacing.xs) {
                 Text(choice.emoji)
-                    .font(.title)
+                    .huddleText(Theme.Typography.headline)
                 Text(choice.title)
-                    .font(.caption)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(isSelected ? Theme.Colors.fg : Theme.Colors.fgMuted)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            .frame(maxWidth: .infinity, minHeight: 64)
+            .padding(.vertical, Theme.Spacing.s)
+            .frame(maxWidth: .infinity)
             .background(background)
             .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
         }
@@ -56,10 +58,10 @@ private struct ProfileChoiceTile: View {
 
     private var background: some View {
         RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-            .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
+            .fill(isSelected ? Theme.Colors.actionSubtle : Theme.Colors.surface2)
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                    .strokeBorder(isSelected ? Theme.Colors.action : Color.clear, lineWidth: WaddleTokens.BorderWidth.strong)
             )
     }
 }

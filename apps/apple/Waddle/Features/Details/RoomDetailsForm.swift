@@ -31,24 +31,24 @@ struct RoomDetailsForm: View {
                 NavigationLink {
                     RoomMembersView(room: room, model: model)
                 } label: {
-                    DetailsRowLabel(title: "Members", symbol: "person.2") {
+                    FormRowLabel(title: "Members", symbol: "person.2") {
                         Text("\(hereCount) here")
                     }
                 }
                 NavigationLink {
                     PinnedMessagesView(conversation: .room(room))
                 } label: {
-                    DetailsRowLabel(title: "Pinned messages", symbol: "pin") {
+                    FormRowLabel(title: "Pinned messages", symbol: "pin") {
                         Text("\(session.pins.pins(in: room).count)")
                     }
                 }
-                DetailsActionButton(title: "Search in conversation", symbol: "magnifyingglass") {
+                FormActionButton(title: "Search in conversation", symbol: "magnifyingglass") {
                     navigation.sheet = .search(.room(room))
                 }
             }
             RoomExitSection(actions: actions, exiting: management.exiting, onSelect: management.select)
         }
-        .detailsForm()
+        .huddleForm()
         .roomManagementDialogs(management, name: session.directory.title(for: .room(room)), groupMembers: groupMembers)
     }
 

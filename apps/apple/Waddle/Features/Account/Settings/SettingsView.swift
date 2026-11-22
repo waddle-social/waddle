@@ -55,7 +55,7 @@ private struct SettingsTabForm<Content: View>: View {
 
     var body: some View {
         Form { content }
-            .formStyle(.grouped)
+            .huddleForm()
             .frame(minHeight: 320)
     }
 }
@@ -79,7 +79,7 @@ private struct SettingsForm: View {
             SettingsAccountSection(app: app)
             SettingsAboutSection()
         }
-        .formStyle(.grouped)
+        .huddleForm()
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

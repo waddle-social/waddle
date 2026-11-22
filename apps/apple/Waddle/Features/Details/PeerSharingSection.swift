@@ -35,7 +35,7 @@ struct PeerSharingSection: View {
                     )
                 }
             } header: {
-                DetailsSectionHeader("Right now")
+                FormSectionHeader("Right now")
             }
         }
     }

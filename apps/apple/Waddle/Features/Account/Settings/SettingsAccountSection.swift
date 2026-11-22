@@ -1,24 +1,50 @@
 import SwiftUI
+import WaddleKit
 
-/// Server and account address, with sign out. Handles the signed-out Mac
-/// Settings window, where there is no session.
+/// Who is signed in (Android `settings` account card): avatar, name and
+/// address, the server, and sign out. Handles the signed-out Mac Settings
+/// window, where there is no session.
 struct SettingsAccountSection: View {
     let app: AppState
 
     var body: some View {
-        Section("Account") {
-            LabeledContent("Server", value: SignInServerLabel.text(for: app.server))
+        Section {
             if let session = app.session {
-                LabeledContent("Account") {
-                    Text(session.coordinator.account.jid.description)
-                        .textSelection(.enabled)
-                }
+                SettingsAccountRow(account: session.coordinator.account)
+            }
+            FormValueRow(title: "Server", value: SignInServerLabel.text(for: app.server))
+            if app.session != nil {
                 AccountSignOutButton()
             } else {
                 Text("You're not signed in.")
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+            }
+        } header: {
+            FormSectionHeader("Account")
+        }
+    }
+}
+
+/// Avatar, name and address of the signed-in account.
+private struct SettingsAccountRow: View {
+    let account: AccountIdentity
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.m) {
+            JIDAvatar(jid: account.jid, name: account.nick, size: Theme.Size.memberAvatar)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                Text(account.nick)
+                    .huddleText(Theme.Typography.author)
+                    .foregroundStyle(Theme.Colors.fg)
+                Text(account.jid.description)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .textSelection(.enabled)
             }
         }
+        .padding(.vertical, Theme.Spacing.xs)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -26,13 +52,15 @@ struct SettingsAboutSection: View {
     private static let website = URL(string: "https://waddle.social")
 
     var body: some View {
-        Section("About") {
-            LabeledContent("Version", value: SettingsAppVersion.current)
+        Section {
+            FormValueRow(title: "Version", value: SettingsAppVersion.current)
             if let website = Self.website {
                 Link(destination: website) {
-                    Label("Waddle website", systemImage: "globe")
+                    FormRowLabel(title: "Waddle website", symbol: "globe")
                 }
             }
+        } header: {
+            FormSectionHeader("About")
         }
     }
 }

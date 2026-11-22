@@ -90,7 +90,7 @@ struct EditRoomForm: View {
                     .labelsHidden()
                     .onSubmit(onSubmit)
             } header: {
-                DetailsSectionHeader("Name")
+                FormSectionHeader("Name")
             } footer: {
                 nameFooter
             }
@@ -99,7 +99,7 @@ struct EditRoomForm: View {
                     .labelsHidden()
                     .lineLimit(2...5)
             } header: {
-                DetailsSectionHeader("Description")
+                FormSectionHeader("Description")
             }
             if editor.settings?.pinPermission != nil {
                 Section {
@@ -110,7 +110,7 @@ struct EditRoomForm: View {
                     .pickerStyle(.inline)
                     .labelsHidden()
                 } header: {
-                    DetailsSectionHeader("Who can pin messages")
+                    FormSectionHeader("Who can pin messages")
                 }
             }
             if let error = editor.saveError {
@@ -119,7 +119,7 @@ struct EditRoomForm: View {
                 }
             }
         }
-        .detailsForm()
+        .huddleForm()
         .disabled(editor.isSaving)
     }
 

@@ -1,18 +1,53 @@
 import SwiftUI
 
-/// First-run and signed-out screen: pick a provider, then approve the
-/// device code (RFC 8628) in the browser.
+/// First-run and signed-out screen (web `signin-many`): pick a provider,
+/// then approve the device code (RFC 8628) in the browser.
 struct SignInView: View {
     @Environment(AppState.self) private var app
 
     init() {}
 
     var body: some View {
+        SignInScreen(
+            server: app.server,
+            stage: SignInScreen.Stage(app),
+            errorMessage: app.errorMessage
+        )
+    }
+}
+
+/// The sign-in screen for a given state, so it can be drawn without a
+/// server. Its buttons still act through `AppState`.
+struct SignInScreen: View {
+    enum Stage: Equatable {
+        case loadingProviders
+        case providers([AuthProvider])
+        case authorizing(DeviceAuthorization)
+
+        @MainActor
+        init(_ app: AppState) {
+            if case let .authorizing(authorization) = app.phase {
+                self = .authorizing(authorization)
+            } else if app.isLoadingProviders {
+                self = .loadingProviders
+            } else {
+                self = .providers(app.providers)
+            }
+        }
+    }
+
+    let server: URL
+    let stage: Stage
+    let errorMessage: String?
+
+    var body: some View {
         GeometryReader { proxy in
             ScrollView {
-                SignInCard {
+                VStack(spacing: Theme.Spacing.xl) {
                     SignInHeader()
-                    content
+                    SignInCard {
+                        content
+                    }
                 }
                 .padding(.horizontal, Theme.Spacing.xl)
                 .padding(.vertical, Theme.Spacing.xl * 2)
@@ -20,7 +55,7 @@ struct SignInView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .background { SignInBackdrop() }
+        .background(Theme.Colors.bg.ignoresSafeArea())
         #if os(macOS)
         .frame(minWidth: 480, minHeight: 560)
         #endif
@@ -28,43 +63,37 @@ struct SignInView: View {
 
     @ViewBuilder
     private var content: some View {
-        if case let .authorizing(authorization) = app.phase {
-            SignInAuthorizingPanel(authorization: authorization)
+        switch stage {
+        case let .authorizing(authorization):
+            SignInAuthorizingPanel(authorization: authorization, errorMessage: errorMessage)
                 .transition(.opacity)
-        } else {
-            SignInProviderPanel()
-                .transition(.opacity)
-            SignInServerRow()
+        case .loadingProviders:
+            SignInServerRow(server: server)
+            HuddleDivider()
+            SignInProviderPanel(providers: nil, errorMessage: errorMessage)
+        case let .providers(providers):
+            SignInServerRow(server: server)
+            HuddleDivider()
+            SignInProviderPanel(providers: providers, errorMessage: errorMessage)
         }
     }
 }
 
-/// Brand mark, name and tagline.
+/// Brand mark, "Sign in to Waddle" and the tagline.
 private struct SignInHeader: View {
     var body: some View {
-        VStack(spacing: Theme.Spacing.m) {
-            WaddleBrandMark(size: 72)
-            Text("Waddle")
-                .font(.system(.largeTitle, design: .rounded).weight(.bold))
-            Text("Chat and communities, built on open standards.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        VStack(spacing: Theme.Spacing.s) {
+            WaddleBrandMark(size: Theme.Size.signInMark)
+                .padding(.bottom, Theme.Spacing.xs)
+            Text("Sign in to Waddle")
+                .huddleText(Theme.Typography.headline)
+                .foregroundStyle(Theme.Colors.fg)
+                .accessibilityAddTraits(.isHeader)
+            Text("Rooms, discussions, and the people in them.")
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(Theme.Colors.fgMuted)
         }
+        .multilineTextAlignment(.center)
         .accessibilityElement(children: .combine)
-        .padding(.bottom, Theme.Spacing.s)
-    }
-}
-
-/// The sea behind the card: shallow water at the top, the page ground below.
-private struct SignInBackdrop: View {
-    var body: some View {
-        LinearGradient(
-            colors: [Theme.Colors.seaShallow, Color.primaryBackground],
-            startPoint: .top,
-            endPoint: .center
-        )
-        .background(Color.primaryBackground)
-        .ignoresSafeArea()
     }
 }

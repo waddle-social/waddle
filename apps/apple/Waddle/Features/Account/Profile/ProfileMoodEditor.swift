@@ -18,25 +18,27 @@ struct ProfileMoodEditor: View {
 
     var body: some View {
         Form {
-            Section("How are you feeling?") {
+            Section {
                 ProfileChoiceGrid(choices: ProfileMoodCatalog.options(including: current?.value), selection: $selection)
+            } header: {
+                FormSectionHeader("How are you feeling?")
             }
             Section {
                 TextField("Note", text: $note, prompt: Text("Add a note (optional)"))
                     .submitLabel(.done)
                     .onSubmit(publish)
             } footer: {
-                Text("Your mood is shared with your contacts.")
+                FormSectionFooter("Your mood is shared with your contacts.")
             }
             ProfileSaveError(save: save)
             if current != nil {
                 Section {
-                    Button("Clear mood", role: .destructive, action: clear)
+                    FormActionButton(title: "Clear mood", symbol: "xmark.circle", isDestructive: true, action: clear)
                         .disabled(save.isSaving)
                 }
             }
         }
-        .formStyle(.grouped)
+        .huddleForm()
         .navigationTitle("Mood")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)

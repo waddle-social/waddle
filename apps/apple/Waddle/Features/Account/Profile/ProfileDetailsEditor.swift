@@ -18,9 +18,10 @@ struct ProfileDetailsEditor: View {
                 ProfileSaveError(save: save)
             } else if loadFailed {
                 Section {
-                    Text("Your details could not be loaded.")
-                        .foregroundStyle(.secondary)
-                    Button("Try again") { Task { await load() } }
+                    Text("Your details didn't load.")
+                        .huddleText(Theme.Typography.body)
+                        .foregroundStyle(Theme.Colors.fgMuted)
+                    FormActionButton(title: "Try again", symbol: "arrow.clockwise") { Task { await load() } }
                 }
             } else {
                 Section {
@@ -29,7 +30,7 @@ struct ProfileDetailsEditor: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .huddleForm()
         .navigationTitle("Your details")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -73,15 +74,17 @@ private struct ProfileDetailsFields: View {
             TextField("Pronouns", text: $details.pronouns, prompt: Text("she/her, he/him, they/them…"))
                 .autocorrectionDisabled()
         }
-        Section("Bio") {
+        Section {
             TextField("Bio", text: $details.bio, prompt: Text("A few words about you"), axis: .vertical)
                 .lineLimit(3...8)
                 .labelsHidden()
+        } header: {
+            FormSectionHeader("Bio")
         }
         Section {
             ProfileLinkField(text: $details.link)
         } footer: {
-            Text(details.hasUsableLink
+            FormSectionFooter(details.hasUsableLink
                 ? "People see these details when they open your profile."
                 : "Use a full link, like https://example.org")
         }

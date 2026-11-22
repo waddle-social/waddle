@@ -33,8 +33,8 @@ struct ProfileSaveError: View {
         if let message = save.errorMessage {
             Section {
                 Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.dangerText)
             }
         }
     }

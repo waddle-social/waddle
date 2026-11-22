@@ -7,15 +7,11 @@ struct AccountSignOutButton: View {
     @State private var isSigningOut = false
 
     var body: some View {
-        Button(role: .destructive) {
+        FormActionButton(title: "Sign out", symbol: "rectangle.portrait.and.arrow.right", isDestructive: true) {
             isConfirming = true
-        } label: {
-            HStack {
-                Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
-                if isSigningOut {
-                    Spacer()
-                    ProgressView().controlSize(.small)
-                }
+        } trailing: {
+            if isSigningOut {
+                ProgressView().controlSize(.small)
             }
         }
         .disabled(isSigningOut)

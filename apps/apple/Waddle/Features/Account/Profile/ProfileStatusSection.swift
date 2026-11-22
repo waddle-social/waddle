@@ -22,15 +22,16 @@ struct ProfileStatusSection: View {
             .labelsHidden()
 
             TextField("Status message", text: $statusDraft, prompt: Text("What are you working on?"))
+                .huddleText(Theme.Typography.body)
                 .submitLabel(.done)
                 .onSubmit(saveStatusText)
                 .onAppear(perform: loadDraft)
                 .onDisappear(perform: saveStatusText)
                 .task(id: statusDraft) { await saveAfterPause() }
         } header: {
-            Text("Status")
+            FormSectionHeader("Status")
         } footer: {
-            Text(ProfileStatusChoice.footer)
+            FormSectionFooter(ProfileStatusChoice.footer)
         }
     }
 
@@ -80,6 +81,8 @@ private struct ProfileStatusChoiceLabel: View {
             PresenceDot(availability: choice.dot(automaticShows: automaticShows))
                 .accessibilityHidden(true)
             Text(choice.title)
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(Theme.Colors.fg)
         }
     }
 }

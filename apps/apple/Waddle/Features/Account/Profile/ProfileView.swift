@@ -30,7 +30,7 @@ struct ProfileView: View {
                 ProfileSettingsLink()
                 if opensAdmin, session.isCommunityOwner {
                     NavigationLink(value: YouRoute.admin) {
-                        Label("Admin", systemImage: "shield")
+                        FormRowLabel(title: "Admin", symbol: "shield")
                     }
                 }
             }
@@ -38,7 +38,7 @@ struct ProfileView: View {
                 AccountSignOutButton()
             }
         }
-        .formStyle(.grouped)
+        .huddleForm()
         .navigationTitle("Profile")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -71,11 +71,9 @@ private struct ProfileDetailsLink: View {
         NavigationLink {
             ProfileDetailsEditor()
         } label: {
-            LabeledContent {
+            FormRowLabel(title: "Your details", symbol: "person.text.rectangle") {
                 Text(summary)
                     .lineLimit(1)
-            } label: {
-                Label("Your details", systemImage: "person.text.rectangle")
             }
         }
     }
@@ -91,13 +89,14 @@ private struct ProfileSettingsLink: View {
     var body: some View {
         #if os(macOS)
         SettingsLink {
-            Label("Settings…", systemImage: "gearshape")
+            FormRowLabel(title: "Settings…", symbol: "gearshape")
         }
+        .buttonStyle(.plain)
         #else
         NavigationLink {
             SettingsView()
         } label: {
-            Label("Settings", systemImage: "gearshape")
+            FormRowLabel(title: "Settings", symbol: "gearshape")
         }
         #endif
     }

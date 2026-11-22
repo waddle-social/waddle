@@ -61,6 +61,17 @@ enum Theme {
         static let rail: CGFloat = 3
         /// The large mark of an empty conversation.
         static let emptyMark: CGFloat = 64
+        /// The brand mark over the sign-in card.
+        static let signInMark: CGFloat = 88
+        /// The sign-in column (web `signin-many` card, less its padding).
+        static let signInColumn: CGFloat = 360
+        /// A small dot for a live or reachable thing, such as the server
+        /// on sign-in.
+        static let liveDot: CGFloat = 8
+        /// The preview on a settings tile (Appearance, Message order).
+        static let settingsPreview: CGFloat = 64
+        /// The narrowest emoji tile in a mood or activity picker.
+        static let choiceTile: CGFloat = 76
         /// The person a profile or DM details is about.
         static let profileAvatar: CGFloat = 88
         /// A person on a room's member list (Android `AvatarSize.LG`).
@@ -69,9 +80,9 @@ enum Theme {
         static let rowGlyph: CGFloat = 20
         /// The emoji or glyph beside something someone shares.
         static let sharingGlyph: CGFloat = 32
-        /// A details or settings row: a touch target on iPhone, a control
+        /// A form row (details, settings, profile): a touch target on iPhone, a control
         /// on Mac.
-        static var detailsRow: CGFloat {
+        static var formRow: CGFloat {
             #if os(iOS)
             WaddleTokens.ControlHeight.touch
             #else
@@ -87,6 +98,12 @@ enum Theme {
     static let groupingWindow: TimeInterval = 5 * 60
 
     static let quickReactions = ["👍", "❤️", "😂", "🎉", "👀", "🙏"]
+}
+
+extension WaddleTokens.TextStyles {
+    /// The device code on sign-in: large monospaced digits, spaced so each
+    /// character reads on its own.
+    static let signInCode = HuddleTextStyle(font: .mono, size: 30, weight: 600, lineHeight: 1.2, letterSpacing: 0.08)
 }
 
 extension Color {

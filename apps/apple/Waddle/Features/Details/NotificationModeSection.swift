@@ -18,15 +18,15 @@ struct NotificationModeSection: View {
                     Text(NotifyModeLabels.title(mode)).tag(mode)
                 }
             } label: {
-                DetailsRowLabel(title: "Notify me about", symbol: NotifyModeLabels.symbol(current))
+                FormRowLabel(title: "Notify me about", symbol: NotifyModeLabels.symbol(current))
             }
             .pickerStyle(.menu)
             Toggle(isOn: showsMessagesBinding) {
-                DetailsRowLabel(title: "Show messages in notifications", symbol: "text.bubble")
+                FormRowLabel(title: "Show messages in notifications", symbol: "text.bubble")
             }
             .toggleStyle(.huddle)
         } header: {
-            DetailsSectionHeader("Notifications")
+            FormSectionHeader("Notifications")
         } footer: {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text(Self.showsMessagesFooter)

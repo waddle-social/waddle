@@ -12,7 +12,7 @@ struct RoomManagementSection: View {
         if !shown.isEmpty {
             Section {
                 ForEach(shown, id: \.self) { action in
-                    DetailsActionButton(title: action.title, symbol: action.symbol) {
+                    FormActionButton(title: action.title, symbol: action.symbol) {
                         onSelect(action)
                     }
                 }
@@ -34,7 +34,7 @@ struct RoomExitSection: View {
         if !shown.isEmpty {
             Section {
                 ForEach(shown, id: \.self) { action in
-                    DetailsActionButton(title: action.title, symbol: action.symbol, isDestructive: true) {
+                    FormActionButton(title: action.title, symbol: action.symbol, isDestructive: true) {
                         onSelect(action)
                     } trailing: {
                         if exiting == action {

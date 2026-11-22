@@ -1,44 +1,47 @@
 import SwiftUI
 
-/// The server this app signs in to, with an inline editor to change it.
+/// The server this app signs in to (web `signin-many` "Homeserver"), with
+/// an inline editor to change it.
 struct SignInServerRow: View {
-    @Environment(AppState.self) private var app
+    let server: URL
     @State private var isEditing = false
 
     var body: some View {
-        VStack(spacing: Theme.Spacing.s) {
-            Divider()
-            if isEditing {
-                SignInServerEditor(initial: app.server.absoluteString) {
-                    withAnimation { isEditing = false }
-                }
-            } else {
-                summary
+        if isEditing {
+            SignInServerEditor(initial: server.absoluteString) {
+                withAnimation { isEditing = false }
             }
+        } else {
+            summary
         }
-        .padding(.top, Theme.Spacing.s)
     }
 
     private var summary: some View {
-        HStack(spacing: Theme.Spacing.s) {
-            Image(systemName: "server.rack")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                Text("Server")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(SignInServerLabel.text(for: app.server))
-                    .font(.footnote.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        HStack(alignment: .top, spacing: Theme.Spacing.s) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+                FormSectionHeader("Homeserver")
+                HStack(spacing: Theme.Spacing.s) {
+                    Circle()
+                        .fill(Theme.Colors.live)
+                        .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
+                        .accessibilityHidden(true)
+                    Text(SignInServerLabel.text(for: server))
+                        .huddleText(Theme.Typography.code)
+                        .foregroundStyle(Theme.Colors.fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
             .accessibilityElement(children: .combine)
             Spacer(minLength: Theme.Spacing.s)
-            Button("Change") {
+            Button {
                 withAnimation { isEditing = true }
+            } label: {
+                Label("Edit", systemImage: "chevron.down")
+                    .labelStyle(.trailingIcon)
             }
-            .controlSize(.small)
+            .buttonStyle(.huddle(size: .small))
+            .accessibilityLabel(Text("Change server"))
             .accessibilityHint(Text("Sign in to a different Waddle server"))
         }
     }
@@ -58,28 +61,25 @@ private struct SignInServerEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-            Text("Server")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            FormSectionHeader("Homeserver")
             field
-            HStack {
-                Button("Cancel", action: close)
-                    .buttonStyle(.borderless)
+            HStack(spacing: Theme.Spacing.s) {
                 Spacer()
                 if isApplying {
                     ProgressView().controlSize(.small)
                 }
+                Button("Cancel", action: close)
+                    .buttonStyle(.huddle(size: .small))
                 Button("Use server", action: apply)
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.huddle(.primary, size: .small))
                     .disabled(!isValid || isApplying)
             }
-            .controlSize(.small)
         }
     }
 
     private var field: some View {
-        TextField("xmpp.example.com", text: $draft)
-            .textFieldStyle(.roundedBorder)
+        TextField("waddle.example.com", text: $draft)
+            .huddleField()
             .autocorrectionDisabled()
             #if os(iOS)
             .keyboardType(.URL)
