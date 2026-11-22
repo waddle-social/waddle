@@ -233,16 +233,12 @@ extension SessionCoordinator {
     ) async throws {
         try await afterEarlierBookmarkWrites(to: conversation) { [self] in
             do {
-                // Left while this waited its turn: nothing is stored, and
-                // the value shown goes back.
+                // Left while this waited its turn, or while the read
+                // below was out: nothing is stored. A mode stored now
+                // would take the room out of the rooms the account left.
                 try refuseSettings(ofLeft: conversation)
-            } catch {
-                rollback()
-                directory.setNotifyMode(.never, for: conversation)
-                throw error
-            }
-            do {
                 let stored = try await port.fetchNotifySettings()
+                try refuseSettings(ofLeft: conversation)
                 // The new value is applied again: a write that ran in
                 // between may have refreshed it away.
                 switch changed {
@@ -260,6 +256,9 @@ extension SessionCoordinator {
                     for: conversation)
             } catch {
                 rollback()
+                if conversation.isRoom, directory.hasLeft(conversation.jid) {
+                    directory.setNotifyMode(.never, for: conversation)
+                }
                 throw error
             }
         }

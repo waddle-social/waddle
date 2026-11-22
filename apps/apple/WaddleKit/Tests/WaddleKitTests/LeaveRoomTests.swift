@@ -441,6 +441,23 @@ struct LeaveRoomTests {
         #expect(port.joined.isEmpty)
     }
 
+    @Test func aNotificationChangeIsNotStoredOnceTheRoomIsFoundLeftElsewhere() async throws {
+        // Stored, it would take the room out of the rooms the account left.
+        let (coordinator, port) = online()
+        port.heldDirectoryVerbs = ["fetchNotifySettings"]
+        let change = Task { try await coordinator.setNotifyMode(.always, for: roomConversation) }
+        while port.heldDirectoryRequests.isEmpty { await Task.yield() }
+
+        port.heldDirectoryVerbs = []
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true)])
+        await coordinator.refreshDirectory(joiningOnlyNewRooms: true)
+        port.releaseDirectoryRequests()
+
+        await #expect(throws: PortError.invalidRequest) { try await change.value }
+        #expect(port.notifySettingsWrites.isEmpty)
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
+    }
+
     @Test func groupChatsAreNeverListedAsLeft() {
         let (coordinator, _) = online([Channel(roomJID: room, name: "group", isGroupDM: true, hasLeft: true)])
         #expect(coordinator.directory.leftRooms.isEmpty)
