@@ -56,8 +56,7 @@ private struct ThreadContent: View {
         let fetched = fetchedThread(rootID)
         // A sub-thread just started on a reply that only its parent's fetched
         // page holds has no page of its own yet; that reply is its root.
-        let root = ThreadLookup.root(rootID, in: timeline)
-            ?? roomThread(rootID).flatMap { session.threadHistory.fetchedRoot(of: $0) }
+        let root = session.threadRoot(of: rootID, in: conversation)
         let replies = ThreadHistory.merged(live: timeline.threadReplies(threadID: rootID), fetched: fetched?.replies ?? [])
         // Under the root, as on the feed's card and on web: every message
         // in the thread, its sub-threads' included.
@@ -67,7 +66,12 @@ private struct ThreadContent: View {
             ThreadHistory.merged(live: timeline.threadDescendants(of: $0), fetched: fetched?.replies ?? []).count
         }
             ?? replies.count
-        let parent = session.threadParent(of: rootID, in: conversation)
+        let header = ThreadHeader(
+            root: root,
+            replies: replies,
+            replyCount: replyCount,
+            breadcrumb: session.threadBreadcrumb(of: rootID, in: conversation)
+        )
         // The social order shows the newest reply first and the root,
         // the oldest message, last.
         let newestFirst = app.preferences.messageOrder.isNewestFirst
@@ -123,25 +127,22 @@ private struct ThreadContent: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
-                if let parent {
-                    ThreadParentBar(snippet: parentSnippet(parent, in: timeline)) {
-                        navigation.openParentThread(parent, of: rootID, in: conversation, usesInspector: placement.usesInspector)
-                    }
-                }
+                ThreadHeaderView(
+                    header: header,
+                    open: { navigation.openEnclosingThread($0, from: rootID, in: conversation, usesInspector: placement.usesInspector) },
+                    close: placement.usesInspector ? { navigation.inspector = nil } : nil
+                )
                 if app.preferences.messageOrder.isNewestFirst {
-                    replyComposer(isSubThread: parent != nil)
+                    replyComposer(isSubThread: header.isSubThread)
                 }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !app.preferences.messageOrder.isNewestFirst {
-                replyComposer(isSubThread: parent != nil)
+                replyComposer(isSubThread: header.isSubThread)
             }
         }
-        .navigationTitle(parent == nil ? "Thread" : "Sub-thread")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
+        .modifier(ThreadNavigationChrome(isInspector: placement.usesInspector, isSubThread: header.isSubThread))
         .environment(actions)
         .modifier(MessageActionDialogs(actions: actions))
         .task(id: roomThread) {
@@ -173,13 +174,6 @@ private struct ThreadContent: View {
         return ThreadSummary.of(replies: ThreadHistory.merged(live: timeline.threadDescendants(of: item), fetched: fetched))
     }
 
-    /// The parent thread's root as one line, when it is loaded.
-    private func parentSnippet(_ parent: String, in timeline: ConversationTimeline) -> String? {
-        guard let root = ThreadLookup.root(parent, in: timeline) ?? fetchedThread(parent)?.root else { return nil }
-        let snippet = MessageThreadCardText.snippet(ThreadSummary.snippet(of: root))
-        return snippet.isEmpty ? nil : snippet
-    }
-
     /// Room threads have their own inbox row and a MAM thread filter;
     /// direct-message threads have neither.
     private var roomThread: ThreadKey? {
@@ -203,38 +197,25 @@ private struct ThreadContent: View {
     }
 }
 
-/// "In thread: <the parent's first message>", above a sub-thread: where
-/// it hangs off, and the way back there.
-private struct ThreadParentBar: View {
-    let snippet: String?
-    let action: () -> Void
+/// The header is the screen's title in the inspector, where the bar is
+/// hidden and the header's own button closes it. Pushed on a phone, the
+/// navigation bar keeps its back button with a short title.
+private struct ThreadNavigationChrome: ViewModifier {
+    let isInspector: Bool
+    let isSubThread: Bool
 
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Spacing.xs) {
-                Image(systemName: "chevron.left")
-                    .huddleText(Theme.Typography.caption.weight(600))
-                    .foregroundStyle(Theme.Colors.actionText)
-                Text(title)
-                    .huddleText(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.fgSoft)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, Theme.Spacing.l)
-            .padding(.vertical, Theme.Spacing.s)
-            .huddleTouchTarget()
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if isInspector {
+            content.toolbar(.hidden, for: .navigationBar)
+        } else {
+            content
+                .navigationTitle(isSubThread ? "Sub-thread" : "Thread")
+                .navigationBarTitleDisplayMode(.inline)
         }
-        .buttonStyle(.plain)
-        .background(.bar)
-        .overlay(alignment: .bottom) { HuddleDivider() }
-        .accessibilityLabel(Text(title))
-        .accessibilityHint(Text("Goes back to that thread"))
-    }
-
-    private var title: String {
-        snippet.map { "In thread: \($0)" } ?? "In thread"
+        #else
+        content
+        #endif
     }
 }
 
@@ -255,18 +236,5 @@ private struct ThreadRepliesDivider: View {
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.vertical, Theme.Spacing.s)
         .accessibilityElement(children: .combine)
-    }
-}
-
-/// Finds a thread's root row: the row the thread id names (a thread
-/// started from a message uses its id), else the first feed row carrying
-/// that XEP-0201 thread.
-enum ThreadLookup {
-    @MainActor
-    static func root(_ threadID: String, in timeline: ConversationTimeline) -> TimelineItem? {
-        if let item = timeline.item(withID: threadID) {
-            return item
-        }
-        return timeline.items.first { $0.isFeedVisible && $0.message.thread == threadID }
     }
 }

@@ -31,12 +31,39 @@ final class MessageActionModel {
     /// Incremented to ask the composer to take focus.
     private(set) var focusRequest = 0
 
+    /// The row under the pointer, and the row whose hover toolbar the
+    /// pointer is on. The toolbar floats over the row above its own, so
+    /// while it is hovered it keeps its row's toolbar up and no other.
+    private(set) var hoveredRow: String?
+    private(set) var toolbarHoverRow: String?
+
     @ObservationIgnored private var highlightTask: Task<Void, Never>?
 
     init(conversation: ConversationID, composer: ComposerModel, thread: String?) {
         self.conversation = conversation
         self.composer = composer
         self.thread = thread
+    }
+
+    func hoverRow(_ id: String, _ isInside: Bool) {
+        if isInside {
+            hoveredRow = id
+        } else if hoveredRow == id {
+            hoveredRow = nil
+        }
+    }
+
+    func hoverToolbar(of id: String, _ isInside: Bool) {
+        if isInside {
+            toolbarHoverRow = id
+        } else if toolbarHoverRow == id {
+            toolbarHoverRow = nil
+        }
+    }
+
+    func showsToolbar(for id: String) -> Bool {
+        if let toolbarHoverRow { return toolbarHoverRow == id }
+        return hoveredRow == id
     }
 
     func reply(to item: TimelineItem) {

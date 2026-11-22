@@ -297,20 +297,21 @@ private struct MessageThreadElbow: Shape {
     }
 }
 
-/// Up to three overlapping reply authors, then "+N".
-private struct MessageThreadFaces: View {
+/// Overlapping thread participants, then "+N": on the reply card and in
+/// the thread header. `ring` is the ground the faces cut into.
+struct MessageThreadFaces: View {
     let faces: [ThreadSummary.Participant]
     let overflow: Int
-
-    private static let size: CGFloat = 18
+    var size: CGFloat = 18
+    var ring = Color.secondaryBackground
 
     var body: some View {
-        HStack(spacing: -Self.size * 0.3) {
+        HStack(spacing: -size * 0.3) {
             ForEach(Array(faces.enumerated()), id: \.offset) { index, face in
                 avatar(face)
                     .overlay(
-                        RoundedRectangle(cornerRadius: Self.size * 0.3, style: .continuous)
-                            .strokeBorder(Color.secondaryBackground, lineWidth: 1.5)
+                        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+                            .strokeBorder(ring, lineWidth: 1.5)
                     )
                     .zIndex(Double(faces.count - index))
             }
@@ -318,7 +319,7 @@ private struct MessageThreadFaces: View {
                 Text("+\(overflow)")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .padding(.leading, Self.size * 0.3 + 2)
+                    .padding(.leading, size * 0.3 + 2)
             }
         }
         .accessibilityHidden(true)
@@ -327,9 +328,9 @@ private struct MessageThreadFaces: View {
     @ViewBuilder
     private func avatar(_ face: ThreadSummary.Participant) -> some View {
         if let jid = face.jid {
-            JIDAvatar(jid: jid, name: face.name, size: Self.size)
+            JIDAvatar(jid: jid, name: face.name, size: size)
         } else {
-            AvatarView(name: face.name, size: Self.size)
+            AvatarView(name: face.name, size: size)
         }
     }
 }

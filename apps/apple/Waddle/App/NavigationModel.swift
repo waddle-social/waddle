@@ -232,20 +232,23 @@ final class NavigationModel {
         updateTabPath { $0.append(.thread(conversation, rootID: rootID)) }
     }
 
-    /// Leaves the sub-thread `rootID` for `parentID`, the thread it hangs
-    /// off. The inspector shows the parent in its place. On the phone the
-    /// stack goes back when the parent is the screen below, else the
-    /// parent replaces the sub-thread (opened from the Inbox, say).
-    func openParentThread(_ parentID: String, of rootID: String, in conversation: ConversationID, usesInspector: Bool) {
+    /// Leaves the sub-thread `rootID` for `threadID`, a thread it hangs
+    /// under (from the header's back button or breadcrumb). The inspector
+    /// shows that thread in its place. On the phone the stack goes back to
+    /// it when it is on the stack, else it replaces the sub-thread (opened
+    /// from the Inbox, say).
+    func openEnclosingThread(_ threadID: String, from rootID: String, in conversation: ConversationID, usesInspector: Bool) {
         if usesInspector {
-            inspector = .thread(rootID: parentID)
+            inspector = .thread(rootID: threadID)
             return
         }
         updateTabPath { path in
             guard path.last == .thread(conversation, rootID: rootID) else { return }
-            path.removeLast()
-            if path.last != .thread(conversation, rootID: parentID) {
-                path.append(.thread(conversation, rootID: parentID))
+            let target = Route.thread(conversation, rootID: threadID)
+            if let index = path.lastIndex(of: target) {
+                path.removeSubrange((index + 1)...)
+            } else {
+                path[path.count - 1] = target
             }
         }
     }

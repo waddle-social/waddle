@@ -4,7 +4,8 @@ import XCTest
 @testable import WaddleKit
 
 /// Night and Daylight goldens for the thread screen: a thread whose reply
-/// has a sub-thread, and that sub-thread open with its way back. Shown
+/// has a sub-thread, that sub-thread open with its breadcrumb, and a
+/// reply's hover toolbar. Shown
 /// as the inspector shows it on a Mac and as pushed on a phone. Compared on
 /// the OS the goldens were recorded on; see `assertScreenSnapshot`.
 @MainActor
@@ -21,10 +22,22 @@ final class ThreadScreenSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(Self.thread("reply-2")), size: Self.size)
     }
 
+    /// The pointer over Jo's reply: its toolbar, with "Reply in thread"
+    /// starting a sub-thread on it.
+    func testAReplysHoverToolbar() async throws {
+        let sample = SampleSession()
+        sample.seedThreadWithSubThread()
+        let row = try XCTUnwrap(sample.coordinator.timelines.timeline(for: .room(SampleSession.releaseTrain)).item(withID: "reply-1"))
+        let screen = Self.thread("root").environment(\.messageToolbarRow, row.presentationID)
+        try await assertScreenSnapshot(of: sample.host(screen), size: Self.size)
+    }
+
     private static func thread(_ rootID: String) -> some View {
         NavigationStack {
             ThreadScreen(conversation: .room(SampleSession.releaseTrain), rootID: rootID)
         }
+        // The seeded messages are 11 to 15 minutes old at this time.
+        .environment(\.threadHeaderNow, date(0))
     }
 
     #if os(macOS)

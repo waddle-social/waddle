@@ -28,6 +28,7 @@ private struct MessageRowContent: View {
     @Environment(MessageActionModel.self) private var actions
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
+    @Environment(\.messageToolbarRow) private var toolbarRow
     @State private var imagePreviewFile: SharedFile?
     @State private var isImagePreviewPresented = false
     private var placement = ConversationInspectorPlacement()
@@ -94,6 +95,16 @@ private struct MessageRowContent: View {
         .padding(.top, topPadding)
         .padding(.bottom, Theme.Spacing.xxs)
         .background(background)
+        // Floats over the row above, as on web, so it never moves the
+        // layout; it stays while the pointer is on it.
+        .overlay(alignment: .topTrailing) {
+            if showsToolbar {
+                MessageHoverToolbar(actions: toolbarActions, perform: perform)
+                    .onHover { actions.hoverToolbar(of: item.presentationID, $0) }
+                    .padding(.trailing, Theme.Spacing.l)
+                    .offset(y: -Theme.Spacing.l)
+            }
+        }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.presentationID)
         .contentShape(Rectangle())
         #if os(iOS)
@@ -102,10 +113,13 @@ private struct MessageRowContent: View {
         // `gesture`, not `simultaneousGesture`, so a child control (link,
         // image, reaction, reply quote, link card, avatar, name, reply
         // card) takes its own tap alone; scrolls and the context menu's
-        // long press never end a tap. Mac keeps clicks for selecting text.
+        // long press never end a tap.
         .gesture(TapGesture().onEnded { openThread() }, including: opensThreadOnTap ? .all : .subviews)
         #endif
-        .onHover { isHovering = $0 }
+        .onHover { inside in
+            isHovering = inside
+            actions.hoverRow(item.presentationID, inside)
+        }
         .contextMenu {
             MessageContextMenu(item: item, session: session, actions: actions, openThread: openThread)
         }
@@ -141,6 +155,35 @@ private struct MessageRowContent: View {
             }
         }
         #endif
+    }
+
+    /// While the pointer is over the row or its toolbar (iPad with a
+    /// pointer too; touch never hovers).
+    private var showsToolbar: Bool {
+        actions.showsToolbar(for: item.presentationID) || toolbarRow == item.presentationID
+    }
+
+    private var toolbarActions: [MessageToolbarAction] {
+        MessageToolbar.actions(
+            for: item,
+            inThread: actions.thread,
+            replyCount: entry.replyCount,
+            isPinned: session.isPinned(item),
+            quickReactions: MessageHoverToolbar.quickReactions
+        )
+    }
+
+    /// The context menu's actions, run the same way.
+    private func perform(_ action: MessageToolbarAction) {
+        switch action {
+        case let .react(emoji): actions.react(emoji, to: item, session: session)
+        case .addReaction: actions.pickReaction(for: item)
+        case .reply: actions.reply(to: item)
+        case .thread: openThread()
+        case let .pin(isPinned): actions.setPinned(!isPinned, item, session: session)
+        case .edit: actions.edit(item)
+        case .delete: actions.requestDeletion(of: item)
+        }
     }
 
     private var occupant: Occupant? {

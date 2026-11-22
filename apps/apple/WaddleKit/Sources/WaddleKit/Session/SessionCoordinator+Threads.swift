@@ -25,6 +25,36 @@ extension SessionCoordinator {
         return Self.claimedParent(of: threadID, in: messages)
     }
 
+    /// The first message of the thread `threadID`: the row the id names
+    /// (a thread started from a message uses its id) in the timeline or in
+    /// a fetched thread page, else the first feed row carrying that
+    /// XEP-0201 thread.
+    public func threadRoot(of threadID: String, in conversation: ConversationID) -> TimelineItem? {
+        let timeline = timelines.timeline(for: conversation)
+        if let root = timeline.item(withID: threadID) {
+            return root
+        }
+        if conversation.isRoom, let root = threadHistory.fetchedRoot(of: ThreadKey(room: conversation.jid, threadID: threadID)) {
+            return root
+        }
+        return timeline.items.first { $0.isFeedVisible && $0.message.thread == threadID }
+    }
+
+    /// The threads `threadID` hangs under, from the top-level one down to
+    /// it, each with its first message as a title.
+    public func threadBreadcrumb(of threadID: String, in conversation: ConversationID) -> [ThreadCrumb] {
+        var chain = [threadID]
+        var seen: Set = [threadID]
+        var cursor = threadParent(of: threadID, in: conversation)
+        while let parent = cursor, seen.insert(parent).inserted {
+            chain.insert(parent, at: 0)
+            cursor = threadParent(of: parent, in: conversation)
+        }
+        return chain.map { id in
+            ThreadCrumb(threadID: id, title: threadRoot(of: id, in: conversation).map(ThreadSummary.snippet(of:)))
+        }
+    }
+
     /// `message` with its sub-thread's parent filled in when it has none
     /// and the parent is known.
     func withThreadParent(_ message: OutboundMessage) -> OutboundMessage {
