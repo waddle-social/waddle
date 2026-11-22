@@ -219,8 +219,8 @@ private struct ThreadContent: View {
 
     private var missingRoot: some View {
         Label("The original message isn't loaded", systemImage: "text.bubble")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+            .huddleText(Theme.Typography.caption)
+            .foregroundStyle(Theme.Colors.fgMuted)
             .padding(Theme.Spacing.l)
     }
 }
@@ -254,11 +254,11 @@ private struct ThreadRepliesDivider: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
             Text(count == 1 ? "1 reply" : "\(count) replies")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.caption.weight(700))
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .fixedSize()
             Rectangle()
-                .fill(Color.secondary.opacity(0.2))
+                .fill(Theme.Colors.borderSoft)
                 .frame(height: 1)
         }
         .padding(.horizontal, Theme.Spacing.l)

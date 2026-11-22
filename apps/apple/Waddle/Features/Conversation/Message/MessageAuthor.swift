@@ -16,7 +16,7 @@ enum MessageRoleBadge: Hashable {
         case let .hat(title): return title
         case .owner: return "Owner"
         case .admin: return "Admin"
-        case .moderator: return "Moderator"
+        case .moderator: return "Mod"
         }
     }
 

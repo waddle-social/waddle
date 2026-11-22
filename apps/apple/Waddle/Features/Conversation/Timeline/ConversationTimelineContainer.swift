@@ -58,10 +58,11 @@ struct ConversationEmptyState: View {
         VStack(spacing: Theme.Spacing.m) {
             mark
             Text(header.emptyTitle)
-                .font(.title3.weight(.semibold))
+                .huddleText(Theme.Typography.title)
+                .foregroundStyle(Theme.Colors.fg)
             Text(header.emptyMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(Theme.Colors.fgMuted)
         }
         .multilineTextAlignment(.center)
         .padding(Theme.Spacing.xl)
@@ -73,13 +74,13 @@ struct ConversationEmptyState: View {
     private var mark: some View {
         if conversation.isRoom {
             Image(systemName: header.isChannel ? "number" : "person.2.fill")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 64, height: 64)
-                .background(Circle().fill(Color.accentColor.opacity(0.12)))
+                .font(.system(size: WaddleTokens.FontSize.xxxl, weight: .semibold))
+                .foregroundStyle(Theme.Colors.actionText)
+                .frame(width: WaddleTokens.Spacing.s16, height: WaddleTokens.Spacing.s16)
+                .background(Circle().fill(Theme.Colors.actionSubtle))
                 .accessibilityHidden(true)
         } else {
-            JIDAvatar(jid: conversation.jid, size: 64)
+            JIDAvatar(jid: conversation.jid, size: WaddleTokens.Spacing.s16)
         }
     }
 }
@@ -91,17 +92,17 @@ struct TimelineSkeleton: View {
     private let lineWidths: [CGFloat] = [180, 240, 120, 210, 160, 230]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.l + 2) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.l) {
             if !newestFirst {
                 Spacer(minLength: 0)
             }
             ForEach(lineWidths.indices, id: \.self) { index in
-                HStack(alignment: .top, spacing: Theme.Spacing.s + 2) {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                HStack(alignment: .top, spacing: Theme.Spacing.m) {
+                    Circle()
                         .frame(width: Theme.Size.avatar, height: Theme.Size.avatar)
-                    VStack(alignment: .leading, spacing: 6) {
-                        RoundedRectangle(cornerRadius: 4).frame(width: 90, height: 10)
-                        RoundedRectangle(cornerRadius: 4).frame(width: lineWidths[index], height: 10)
+                    VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s1Half) {
+                        Capsule().frame(width: 90, height: WaddleTokens.Spacing.s2Half)
+                        Capsule().frame(width: lineWidths[index], height: WaddleTokens.Spacing.s2Half)
                     }
                 }
             }
@@ -109,7 +110,7 @@ struct TimelineSkeleton: View {
                 Spacer(minLength: 0)
             }
         }
-        .foregroundStyle(Color.secondary.opacity(0.15))
+        .foregroundStyle(Theme.Colors.surface2)
         .padding(Theme.Spacing.l)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)

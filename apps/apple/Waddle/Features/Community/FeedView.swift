@@ -30,9 +30,9 @@ struct FeedView: View {
                     Button {
                         navigation.feedPath = [.events]
                     } label: {
-                        Label("Events", systemImage: "calendar")
+                        Label("Calendar", systemImage: "calendar")
                     }
-                    .help("Events")
+                    .help("Calendar")
                 }
             }
             ToolbarItem(placement: .primaryAction) {

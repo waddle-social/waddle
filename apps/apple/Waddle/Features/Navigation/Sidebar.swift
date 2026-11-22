@@ -64,14 +64,7 @@ struct Sidebar: View {
             navigation.show(.inbox)
         }
         SidebarDestinationRow(
-            title: "Feed",
-            symbol: "newspaper",
-            isSelected: isShowing(.feed)
-        ) {
-            navigation.show(.feed)
-        }
-        SidebarDestinationRow(
-            title: "Events",
+            title: "Calendar",
             symbol: "calendar",
             isSelected: isShowing(.events)
         ) {
@@ -83,6 +76,13 @@ struct Sidebar: View {
             isSelected: isShowing(.people)
         ) {
             navigation.show(.people)
+        }
+        SidebarDestinationRow(
+            title: "Feed",
+            symbol: "newspaper",
+            isSelected: isShowing(.feed)
+        ) {
+            navigation.show(.feed)
         }
         if session.isCommunityOwner {
             SidebarDestinationRow(

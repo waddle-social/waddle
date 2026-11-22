@@ -84,19 +84,11 @@ private struct MessageRowContent: View {
                 }
             }
         }
-        .overlayPreferenceValue(MessageThreadCardBoundsKey.self, alignment: .topLeading) { card in
-            MessageThreadRail(
-                card: card,
-                gutterX: avatarSize / 2,
-                // Under the avatar, or under the time the gutter shows on
-                // hover in a continued row.
-                top: entry.startsGroup ? avatarSize + Theme.Spacing.xs : Theme.Spacing.xl - Theme.Spacing.xs
-            )
-        }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.top, topPadding)
         .padding(.bottom, Theme.Spacing.xxs)
-        .background(background)
+        .background(rowSurface)
+        .padding(.horizontal, Theme.Spacing.s)
         .overlay(alignment: .topTrailing) {
             MessageRowToolbar(item: item, context: actionContext, isRowHovered: isHovering, perform: perform)
         }
@@ -215,21 +207,36 @@ private struct MessageRowContent: View {
                 }
         } else if isHovering {
             Text(item.sentAt.formatted(date: .omitted, time: .shortened))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.timestamp.sized(WaddleTokens.FontSize.xxs))
+                .monospacedDigit()
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-                .padding(.top, 2)
+                .padding(.top, Theme.Spacing.xxs)
         } else {
             Color.clear.frame(height: 1)
         }
     }
 
-    private var background: Color {
-        if actions.highlightedID == item.presentationID {
-            return Color.accentColor.opacity(0.14)
-        }
-        return isHovering ? Color.secondary.opacity(0.07) : Color.clear
+    /// The row's ground (web `wd-msg`): a mention of us in gold with a
+    /// rail on the leading edge, then the scroll target, then hover.
+    private var rowSurface: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+        let mentionsMe = session.mentionsMe(item)
+        return shape
+            .fill(mentionsMe ? Theme.Colors.goldSubtle : Color.clear)
+            .overlay(shape.fill(stateTint))
+            .overlay(alignment: .leading) {
+                if mentionsMe {
+                    Theme.Colors.gold.frame(width: 3)
+                }
+            }
+            .clipShape(shape)
+    }
+
+    private var stateTint: Color {
+        if actions.highlightedID == item.presentationID { return Theme.State.selected }
+        return isHovering ? Theme.State.hover : .clear
     }
 
     /// The row's thread from the feed; inside a thread, a reply's

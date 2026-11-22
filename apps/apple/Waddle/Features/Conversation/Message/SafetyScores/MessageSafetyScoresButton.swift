@@ -20,7 +20,7 @@ struct MessageSafetyScoresButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: MessageSafetyScoreStyle.symbol(for: row.category))
-                .font(.caption2)
+                .huddleText(Theme.Typography.caption.sized(WaddleTokens.FontSize.xxs))
                 .foregroundStyle(MessageSafetyScoreStyle.color(for: row.category, scheme: colorScheme))
                 .padding(Theme.Spacing.xs)
                 .contentShape(Rectangle())

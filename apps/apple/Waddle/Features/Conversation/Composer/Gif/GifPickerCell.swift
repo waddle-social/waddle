@@ -16,7 +16,7 @@ struct GifPickerCell: View {
                     AnimatedImageView(data: data, maxPixelSize: 240)
                 case .failure:
                     Image(systemName: "photo.badge.exclamationmark")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 case .empty:
                     ProgressView()
                         .controlSize(.small)
@@ -24,7 +24,7 @@ struct GifPickerCell: View {
             }
             .frame(maxWidth: .infinity)
             .frame(height: Self.height)
-            .background(Color.secondary.opacity(0.12))
+            .background(Theme.Colors.surface2)
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
             .contentShape(Rectangle())
         }

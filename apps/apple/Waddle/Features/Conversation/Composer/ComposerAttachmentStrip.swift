@@ -35,8 +35,8 @@ private struct ComposerAttachmentChip: View {
                 Button(action: onRemove) {
                     Image(systemName: "xmark.circle.fill")
                         .symbolRenderingMode(.palette)
-                        .foregroundStyle(Color.white, Color.black.opacity(0.6))
-                        .font(.body)
+                        .foregroundStyle(Color.white, Theme.Colors.scrim)
+                        .huddleText(Theme.Typography.body)
                 }
                 .buttonStyle(.plain)
                 .offset(x: 6, y: -6)
@@ -71,7 +71,7 @@ private struct ComposerAttachmentChip: View {
         case let .uploading(fraction):
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                    .fill(Color.black.opacity(0.35))
+                    .fill(Theme.Colors.scrim)
                 ProgressView(value: fraction)
                     .progressViewStyle(.circular)
                     .tint(Color.white)
@@ -81,10 +81,10 @@ private struct ComposerAttachmentChip: View {
         case let .failed(message):
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                    .fill(Color.black.opacity(0.45))
+                    .fill(Theme.Colors.scrim)
                 Button(action: onRetry) {
                     Label("Retry", systemImage: "arrow.clockwise")
-                        .font(.caption.weight(.semibold))
+                        .huddleText(Theme.Typography.caption.weight(700))
                         .foregroundStyle(Color.white)
                 }
                 .buttonStyle(.plain)

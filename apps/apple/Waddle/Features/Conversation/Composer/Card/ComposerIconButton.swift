@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// A borderless icon button in the composer card. `isOn` tints it for
-/// toggles such as the formatting bar.
+/// A borderless icon button in the composer (web `wd-iconbtn`). `isOn`
+/// marks toggles such as the formatting bar.
 struct ComposerIconButton: View {
     let symbol: String
     let label: String
@@ -12,7 +12,7 @@ struct ComposerIconButton: View {
         Button(action: action) {
             ComposerIconLabel(symbol: symbol, isOn: isOn)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerIconButtonStyle(isOn: isOn))
         .help(label)
         .accessibilityLabel(Text(label))
         .accessibilityAddTraits(isOn ? .isSelected : [])
@@ -20,20 +20,47 @@ struct ComposerIconButton: View {
 }
 
 /// The icon inside a composer button or menu label, sized to the platform
-/// touch target.
+/// target.
 struct ComposerIconLabel: View {
     let symbol: String
     var isOn = false
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Image(systemName: symbol)
             .font(.system(size: ComposerMetrics.iconSize, weight: .medium))
-            .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-            .frame(width: ComposerMetrics.touchTarget, height: ComposerMetrics.touchTarget)
+            .foregroundStyle(isOn ? Theme.Colors.fg : Theme.Colors.fgMuted)
+            .opacity(isEnabled ? 1 : 0.5)
+            .frame(width: ComposerMetrics.button, height: ComposerMetrics.button)
+            .contentShape(RoundedRectangle(cornerRadius: ComposerMetrics.buttonRadius, style: .continuous))
+    }
+}
+
+/// Hover, press and on tints behind a composer icon.
+struct ComposerIconButtonStyle: ButtonStyle {
+    var isOn = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        ComposerIconButtonBody(configuration: configuration, isOn: isOn)
+    }
+}
+
+private struct ComposerIconButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let isOn: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        configuration.label
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                    .fill(isOn ? Color.accentColor.opacity(0.12) : Color.clear)
+                RoundedRectangle(cornerRadius: ComposerMetrics.buttonRadius, style: .continuous)
+                    .fill(tint)
             )
-            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+    }
+
+    private var tint: Color {
+        if configuration.isPressed || isOn { return Theme.State.selected }
+        return isHovering ? Theme.State.hover : .clear
     }
 }

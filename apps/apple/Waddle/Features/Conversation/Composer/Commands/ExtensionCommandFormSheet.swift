@@ -28,13 +28,13 @@ private struct ExtensionCommandFormContent: View {
             if let instructions = stage.result.form?.instructions, !instructions.isEmpty {
                 Section {
                     Text(instructions)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
             }
             if stage.isPending, stage.result.form?.blockedField != nil {
                 Section {
                     Label(ExtensionCommandCopy.blockedFormMessage, systemImage: "lock")
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(Theme.Colors.warningText)
                 }
             }
             Section {
@@ -78,7 +78,7 @@ private struct ExtensionCommandFormContent: View {
                 }
                 if let error = center.formError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color.red)
+                        .foregroundStyle(Theme.Colors.dangerText)
                 }
             }
         }
@@ -94,9 +94,9 @@ private struct ExtensionCommandFormContent: View {
 
     private func color(for type: ExtensionCommandNoteType) -> Color {
         switch type {
-        case .info: return Color.primary
-        case .warn: return Color.orange
-        case .error: return Color.red
+        case .info: return Theme.Colors.fg
+        case .warn: return Theme.Colors.warningText
+        case .error: return Theme.Colors.dangerText
         }
     }
 }

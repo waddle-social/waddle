@@ -10,7 +10,7 @@ struct MessageReactionsBar: View {
 
     var body: some View {
         let canReact = item.actionTargetID != nil
-        ReactionFlowLayout(spacing: Theme.Spacing.xs + 2) {
+        ReactionFlowLayout(spacing: Theme.Spacing.xs) {
             ForEach(item.reactions) { reaction in
                 MessageReactionPill(reaction: reaction) {
                     actions.react(reaction.emoji, to: item, session: session)
@@ -27,14 +27,9 @@ struct MessageReactionsBar: View {
             showsPicker = true
         } label: {
             Image(systemName: "face.smiling")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, Theme.Spacing.s)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(Color.secondary.opacity(0.1)))
-                .contentShape(Capsule())
+                .font(.system(size: 14))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.huddleChip())
         .help("Add reaction")
         .accessibilityLabel(Text("Add reaction"))
         .popover(isPresented: $showsPicker) {
@@ -62,17 +57,10 @@ struct MessageReactionPill: View {
             HStack(spacing: Theme.Spacing.xs) {
                 Text(reaction.emoji)
                 Text("\(reaction.count)")
-                    .font(.caption.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(reaction.includesMine ? Color.accentColor : Color.secondary)
                     .contentTransition(.numericText(value: Double(reaction.count)))
             }
-            .padding(.horizontal, Theme.Spacing.s)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(reaction.includesMine ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.1)))
-            .overlay(Capsule().strokeBorder(reaction.includesMine ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1))
-            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.huddleChip(isSelected: reaction.includesMine))
         .animation(reduceMotion ? nil : .snappy(duration: 0.25), value: reaction.count)
         .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: reaction.includesMine)
         .sensoryFeedback(.impact(weight: .light), trigger: taps)

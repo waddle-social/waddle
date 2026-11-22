@@ -28,7 +28,7 @@ struct EventsView: View {
             content(at: clock ?? timeline.date)
         }
         .background(Theme.Colors.bg)
-        .navigationTitle("Events")
+        .navigationTitle("Calendar")
         .refreshable { await session.refreshEvents() }
         .task(id: session.connection == .online) {
             guard clock == nil, session.connection == .online, isStale else { return }

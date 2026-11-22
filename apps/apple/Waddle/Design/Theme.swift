@@ -8,6 +8,14 @@ enum Theme {
     /// Semantic colours; each follows the Night or Daylight appearance.
     typealias Colors = WaddleTokens.Colors
 
+    /// Interaction layers (web `state.*`): the foreground over whatever
+    /// ground the control sits on.
+    enum State {
+        static let hover = Colors.fg.opacity(0.06)
+        static let selected = Colors.fg.opacity(0.10)
+        static let press = Colors.fg.opacity(0.10)
+    }
+
     /// Text styles, applied with `.huddleText(_:)`.
     typealias Typography = WaddleTokens.TextStyles
 

@@ -18,18 +18,18 @@ struct ComposerSlashSuggestions: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(Text("\(candidate.usage), \(candidate.description)"))
                 if candidate != candidates.last {
-                    Divider().padding(.leading, 44)
+                    HuddleDivider().padding(.leading, Theme.Size.minHitTarget)
                 }
             }
         }
         .padding(.vertical, Theme.Spacing.xs)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .fill(Color.secondaryBackground)
+                .fill(Theme.Colors.surface2)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
+                .strokeBorder(Theme.Colors.borderSoft, lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Command suggestions"))
@@ -39,31 +39,31 @@ struct ComposerSlashSuggestions: View {
         HStack(spacing: Theme.Spacing.s) {
             Image(systemName: isBuiltin(candidate) ? "slash.circle" : "puzzlepiece.extension")
                 .frame(width: Theme.Size.smallAvatar, height: Theme.Size.smallAvatar)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Theme.Colors.actionText)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 HStack(spacing: Theme.Spacing.s) {
                     Text(candidate.usage)
-                        .font(.callout.weight(.medium))
+                        .huddleText(Theme.Typography.label)
                         .lineLimit(1)
                     if isBuiltin(candidate) {
                         Text("Built-in")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, Theme.Spacing.xs + 2)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            .huddleText(Theme.Typography.badge)
+                            .foregroundStyle(Theme.Colors.fgMuted)
+                            .padding(.horizontal, WaddleTokens.Spacing.s1Half)
+                            .padding(.vertical, Theme.Spacing.xxs)
+                            .background(Capsule().fill(Theme.Colors.surface2))
                     }
                 }
                 Text(candidate.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, Theme.Spacing.s + 2)
-        .padding(.vertical, Theme.Spacing.xs + 2)
+        .padding(.horizontal, WaddleTokens.Spacing.s2Half)
+        .padding(.vertical, WaddleTokens.Spacing.s1Half)
         .contentShape(Rectangle())
     }
 

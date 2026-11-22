@@ -13,30 +13,30 @@ struct ComposerNoticeLine: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("Running \(runningCommand)…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
-            .padding(.horizontal, Theme.Spacing.s + 2)
+            .padding(.horizontal, WaddleTokens.Spacing.s2Half)
             .accessibilityElement(children: .combine)
         } else if let notice {
             HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
                 Image(systemName: symbol(for: notice.severity))
                     .accessibilityHidden(true)
                 Text(notice.text)
-                    .font(.caption)
+                    .huddleText(Theme.Typography.caption)
                     .lineLimit(4)
-                    .foregroundStyle(notice.severity == .info ? Color.primary : color(for: notice.severity))
+                    .foregroundStyle(notice.severity == .info ? Theme.Colors.fg : color(for: notice.severity))
                 Spacer(minLength: Theme.Spacing.s)
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
-                        .font(.caption)
+                        .huddleText(Theme.Typography.caption)
                 }
                 .buttonStyle(.plain)
                 .help("Dismiss")
                 .accessibilityLabel(Text("Dismiss"))
             }
             .foregroundStyle(color(for: notice.severity))
-            .padding(.horizontal, Theme.Spacing.s + 2)
+            .padding(.horizontal, WaddleTokens.Spacing.s2Half)
         }
     }
 
@@ -50,9 +50,9 @@ struct ComposerNoticeLine: View {
 
     private func color(for severity: ComposerNotice.Severity) -> Color {
         switch severity {
-        case .info: return Color.secondary
-        case .warning: return Color.orange
-        case .error: return Color.red
+        case .info: return Theme.Colors.fgMuted
+        case .warning: return Theme.Colors.warningText
+        case .error: return Theme.Colors.dangerText
         }
     }
 }

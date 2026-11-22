@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// Author name in its XEP-0392 color, role badge, time and edited mark.
+/// Author name, role badge, time and edited mark (web `wd-msg__meta`).
 /// The name opens the author's profile. Its hit area grows sideways, up
 /// into the row's top padding (`topSlop`) and down only across the gap
 /// above the body (`bottomSlop`), so it never covers the body's controls.
@@ -13,10 +13,10 @@ struct MessageRowHeader: View {
     let openProfile: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s - 2) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
             Text(author.name)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.consistent(for: author.colorKey))
+                .huddleText(Theme.Typography.author)
+                .foregroundStyle(Theme.Colors.fg)
                 .lineLimit(1)
                 .authorProfileButton(
                     name: author.name,
@@ -29,38 +29,39 @@ struct MessageRowHeader: View {
                 MessageRoleBadgeView(badge: badge)
             }
             Text(item.sentAt.formatted(date: .omitted, time: .shortened))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.timestamp)
+                .monospacedDigit()
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .help(item.sentAt.formatted(date: .complete, time: .shortened))
             if item.isEdited, item.tombstone == nil {
-                Text("edited")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                Text("(edited)")
+                    .huddleText(Theme.Typography.timestamp)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
         }
     }
 }
 
-/// Small capsule for a bot, hat, owner, admin or moderator.
+/// Small caps label for a bot, hat, owner, admin or moderator (web
+/// message badge): no fill, toned by role.
 struct MessageRoleBadgeView: View {
     let badge: MessageRoleBadge
 
     var body: some View {
         Text(badge.title)
-            .font(.caption2.weight(.semibold))
+            .font(HuddleFonts.swiftUIFont(.body, size: 10, weight: 700))
+            .tracking(0.6)
+            .textCase(.uppercase)
             .lineLimit(1)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
             .foregroundStyle(tint)
-            .background(Capsule().fill(tint.opacity(0.14)))
     }
 
     private var tint: Color {
         switch badge {
-        case .owner: return .orange
-        case .admin: return .purple
-        case .moderator: return .blue
-        case .bot, .hat: return .teal
+        case .owner: return Theme.Colors.warningText
+        case .admin, .moderator: return Theme.Colors.actionText
+        case .bot: return Theme.Colors.successText
+        case .hat: return Theme.Colors.fgMuted
         }
     }
 }

@@ -42,21 +42,13 @@ struct ComposerTextField: View {
         .overlay(alignment: .topLeading) {
             if text.isEmpty {
                 Text(placeholder)
-                    .font(.body)
-                    .foregroundStyle(placeholderColor)
+                    .huddleText(Theme.Typography.message)
+                    .foregroundStyle(Theme.Colors.fgSoft)
                     .lineLimit(1)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
         }
-        .padding(.vertical, Theme.Spacing.xs + 2)
-    }
-
-    private var placeholderColor: Color {
-        #if os(iOS)
-        Color(uiColor: .placeholderText)
-        #else
-        Color(nsColor: .placeholderTextColor)
-        #endif
+        .padding(.vertical, Theme.Spacing.s)
     }
 }

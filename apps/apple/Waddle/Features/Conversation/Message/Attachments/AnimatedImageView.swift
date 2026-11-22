@@ -50,7 +50,7 @@ struct AnimatedImageView: View {
         case .failed:
             Image(systemName: "photo.badge.exclamationmark")
                 .font(.title2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

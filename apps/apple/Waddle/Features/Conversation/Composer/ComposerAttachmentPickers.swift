@@ -49,15 +49,15 @@ struct ComposerAttachmentPickers: ViewModifier {
 private struct ComposerDropHighlight: View {
     var body: some View {
         RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+            .strokeBorder(Theme.Colors.actionText, style: StrokeStyle(lineWidth: WaddleTokens.BorderWidth.strong, dash: [6, 4]))
             .background(
                 RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.1))
+                    .fill(Theme.Colors.actionSubtle)
             )
             .overlay {
                 Label("Drop to attach", systemImage: "paperclip")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .huddleText(Theme.Typography.label)
+                    .foregroundStyle(Theme.Colors.actionText)
             }
             .padding(Theme.Spacing.xs)
             .allowsHitTesting(false)

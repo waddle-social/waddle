@@ -24,9 +24,9 @@ struct TimelineRevealBanner: View {
                 Text("Couldn't find that message")
             }
         }
-        .font(.footnote.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, Theme.Spacing.m + 2)
+        .huddleText(Theme.Typography.caption.weight(700))
+        .foregroundStyle(Theme.Colors.fgMuted)
+        .padding(.horizontal, Theme.Spacing.m)
         .padding(.vertical, Theme.Spacing.s)
         .huddleSurface(.raised, in: Capsule())
         .padding(edge == .top ? .top : .bottom, Theme.Spacing.m)

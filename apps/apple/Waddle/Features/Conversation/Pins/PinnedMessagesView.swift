@@ -81,18 +81,18 @@ private struct PinnedMessageRow: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack(alignment: .firstTextBaseline) {
                 Text(author)
-                    .font(.subheadline.weight(.semibold))
+                    .huddleText(Theme.Typography.label)
                     .foregroundStyle(Color.consistent(for: colorKey))
                     .lineLimit(1)
                 Spacer(minLength: Theme.Spacing.s)
                 if let pinnedAt = pin.pinnedAt {
                     Text(pinnedAt.formatted(.relative(presentation: .named)))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
             }
             Text(pin.preview.text.isEmpty ? "Attachment" : pin.preview.text)
-                .font(.callout)
+                .huddleText(Theme.Typography.body)
                 .lineLimit(3)
         }
         .padding(.vertical, Theme.Spacing.xs)

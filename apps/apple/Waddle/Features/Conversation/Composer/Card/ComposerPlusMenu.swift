@@ -1,9 +1,14 @@
 import SwiftUI
 
-/// The filled `+` menu: attach a photo, file, GIF or sticker, paste (Mac), or
-/// browse slash commands.
+/// The `+` menu: attach a photo, file, GIF or sticker, paste (Mac), or
+/// browse slash commands. On a phone it also holds what a wider composer
+/// shows as buttons: formatting and mentions.
 struct ComposerPlusMenu: View {
     let isEditing: Bool
+    let showsMention: Bool
+    @Binding var showsFormatting: Bool
+    /// The phone's one-row composer has no room for the other buttons.
+    let collectsActions: Bool
     let actions: ComposerActions
 
     var body: some View {
@@ -29,20 +34,24 @@ struct ComposerPlusMenu: View {
             }
             #endif
             Divider()
+            if collectsActions {
+                Toggle(isOn: $showsFormatting) {
+                    Label("Formatting", systemImage: "textformat")
+                }
+                if showsMention {
+                    Button(action: actions.startMention) {
+                        Label("Mention someone", systemImage: "at")
+                    }
+                }
+            }
             Button(action: actions.startCommand) {
                 Label("Commands…", systemImage: "slash.circle")
             }
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: ComposerMetrics.iconSize - 2, weight: .bold))
-                .foregroundStyle(Color.primary)
-                .frame(width: ComposerMetrics.plusDiameter, height: ComposerMetrics.plusDiameter)
-                .background(Circle().fill(Color.secondary.opacity(0.18)))
-                .frame(width: ComposerMetrics.touchTarget, height: ComposerMetrics.touchTarget)
-                .contentShape(Rectangle())
+            ComposerIconLabel(symbol: "plus")
         }
         .menuStyle(.button)
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerIconButtonStyle())
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(isEditing)
