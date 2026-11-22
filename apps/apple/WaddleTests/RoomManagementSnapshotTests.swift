@@ -172,26 +172,3 @@ final class RoomManagementSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(AddPeopleSheet(model: model)), size: Self.sheet, asSheet: true)
     }
 }
-
-private extension SampleSession {
-    /// Our own occupant in `room`.
-    func join(_ room: BareJID, as affiliation: RoomAffiliation, role: RoomRole) {
-        occupy(room, nick: Self.ana.nick, jid: Self.ana.jid, affiliation: affiliation, role: role, isSelf: true)
-    }
-
-    func occupy(
-        _ room: BareJID, nick: String, jid: BareJID, affiliation: RoomAffiliation,
-        role: RoomRole = .participant, isSelf: Bool = false
-    ) {
-        _ = coordinator.presence.apply(WirePresence(
-            from: room.with(resource: nick)!,
-            kind: .available,
-            occupant: WirePresence.Occupant(
-                affiliation: affiliation,
-                role: role,
-                realJID: jid.with(resource: "phone"),
-                statusCodes: isSelf ? [110] : []
-            )
-        ))
-    }
-}
