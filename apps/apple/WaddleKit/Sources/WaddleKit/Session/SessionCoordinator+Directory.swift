@@ -69,10 +69,16 @@ extension SessionCoordinator {
         silenceLeftRooms()
         // After the local changes above: a rejoin made here while the
         // lookup was on its way must not be answered with a leave.
-        var rejoinedElsewhere: [BareJID] = []
+        var settingsReads: [Task<Void, Never>] = []
         if lookup?.readOwnBookmarks == true {
             await leaveRoomsLeftOnAnotherDevice()
-            rejoinedElsewhere = leftBefore.filter { directory.isRoom($0) && !directory.hasLeft($0) }
+            // The connection may have dropped during that wait. Then the
+            // new connection's lookup joins the rooms, not this one.
+            guard !Task.isCancelled, epoch == connectionEpoch else { return nil }
+            // Started before the joins: a rejoined room's messages should
+            // find its settings restored.
+            settingsReads = loadNotifySettings(
+                ofRejoined: leftBefore.filter { directory.isRoom($0) && !directory.hasLeft($0) })
         }
         let listed = (directory.channels + directory.groupDMs)
             .filter { $0.autojoin || $0.isGroupDM }
@@ -100,8 +106,7 @@ extension SessionCoordinator {
                 addNext()
             }
         }
-        // Last, so no join waits for it.
-        await loadNotifySettings(ofRejoined: rejoinedElsewhere)
+        for read in settingsReads { await read.value }
         return lookup
     }
 
@@ -145,15 +150,17 @@ extension SessionCoordinator {
         if joinTails[room] == task { joinTails[room] = nil }
     }
 
-    /// Reads the notification settings of rooms the account joined again
-    /// on another device. They were off while the rooms were left, and
-    /// nothing else reads them again before the next connect. Each read
+    /// Starts reading the notification settings of rooms the account
+    /// joined again on another device. They were off while the rooms were
+    /// left, and nothing else reads them again before the next connect.
+    /// Until its answer comes a room alerts as by default. Each read
     /// takes its turn among the writes to that room's settings, so a
     /// change made here meanwhile is stored after it and stands. The
     /// rooms are read side by side, not one after another.
-    private func loadNotifySettings(ofRejoined rooms: [BareJID]) async {
-        let reads = rooms.map(ConversationID.room).map { conversation in
-            Task { @MainActor [self] in
+    private func loadNotifySettings(ofRejoined rooms: [BareJID]) -> [Task<Void, Never>] {
+        rooms.map(ConversationID.room).map { conversation in
+            if notifyWriteTails[conversation] == nil { directory.setStoredNotifyMode(nil, for: conversation) }
+            return Task { @MainActor [self] in
                 try? await afterEarlierBookmarkWrites(to: conversation) { [self] in
                     let settings = try await port.fetchNotifySettings()
                     guard !isStopped, !directory.hasLeft(conversation.jid) else { return }
@@ -163,7 +170,6 @@ extension SessionCoordinator {
                 }
             }
         }
-        for read in reads { await read.value }
     }
 
     func loadNotifyModes() async {
@@ -377,7 +383,7 @@ extension SessionCoordinator {
 }
 
 /// What a look at the directory found.
-struct DirectoryLookup {
+struct DirectoryLookup: Equatable {
     /// The rooms it listed.
     let rooms: Set<BareJID>
     /// False when the account's bookmarks could not be read: then the

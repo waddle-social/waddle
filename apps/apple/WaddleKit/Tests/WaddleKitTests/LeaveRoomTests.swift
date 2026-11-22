@@ -401,20 +401,44 @@ struct LeaveRoomTests {
         #expect(port.notifySettings.modes[roomConversation] == .never)
     }
 
-    @Test func settingsOfSeveralRejoinedRoomsAreReadTogetherAndDoNotHoldUpJoins() async throws {
+    @Test func settingsOfSeveralRejoinedRoomsAreReadTogetherAlongsideTheJoins() async throws {
         let other = Channel(roomJID: bare("random@muc.waddle.test"), name: "random")
         let (coordinator, port) = online([general.with(hasLeft: true), other.with(hasLeft: true)])
+        coordinator.directory.setNotifyMode(.never, for: roomConversation)
         port.topology = Topology(spaces: [], channels: [general, other])
         port.heldDirectoryVerbs = ["fetchNotifySettings"]
         let refresh = Task { await coordinator.refreshDirectory() }
-        while port.heldDirectoryRequests.count < 2 { await Task.yield() }
 
-        // Both reads are out at once, and the rooms are joined already.
+        // Both reads go out at once, and the joins do not wait for them.
+        while port.heldDirectoryRequests.count < 2 || port.joined.count < 2 { await Task.yield() }
         #expect(Set(port.joined) == [room, other.roomJID])
+        // Until its settings arrive a rejoined room alerts as by default,
+        // not with the notifications-off of a left room.
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .onMention)
 
         port.heldDirectoryVerbs = []
         port.releaseDirectoryRequests()
         await refresh.value
+    }
+
+    @Test func aLookupOvertakenByAReconnectWhileLeavingARoomJoinsNothing() async throws {
+        // The new connection's own lookup joins the rooms; this one joining
+        // too would repeat every join.
+        let other = Channel(roomJID: bare("random@muc.waddle.test"), name: "random")
+        let (coordinator, port) = online([general, other])
+        enter(coordinator)
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true), other])
+        port.heldDirectoryVerbs = ["leaveRoom"]
+        let refresh = Task { await coordinator.refreshDirectory() }
+        while port.heldDirectoryRequests.isEmpty { await Task.yield() }
+
+        coordinator.connectionEpoch += 1
+        port.heldDirectoryVerbs = []
+        port.releaseDirectoryRequests()
+        let lookup = await refresh.value
+
+        #expect(lookup == nil)
+        #expect(port.joined.isEmpty)
     }
 
     @Test func groupChatsAreNeverListedAsLeft() {
