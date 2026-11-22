@@ -1,11 +1,30 @@
 import Foundation
 
+/// The XEP-0201 thread a message goes to: `<thread parent='…'>id</thread>`.
+public struct ThreadTarget: Hashable, Sendable {
+    public let id: String
+    /// The thread `id` hangs off, for a sub-thread.
+    public var parent: String?
+
+    public init(id: String, parent: String? = nil) {
+        self.id = id
+        self.parent = parent
+    }
+}
+
 /// Structured options a send carries beside its body.
 public struct OutboundOptions: Hashable, Sendable, Codable {
     public var reply: Reply?
-    public var thread: String?
-    /// XEP-0201 `parent`: the thread `thread` hangs off, for a sub-thread.
-    public var parentThread: String?
+    public var thread: ThreadTarget? {
+        get { threadID.map { ThreadTarget(id: $0, parent: parentThreadID) } }
+        set {
+            threadID = newValue?.id
+            parentThreadID = newValue?.parent
+        }
+    }
+    /// Kept flat, as the outbox has always saved the thread id.
+    private var threadID: String?
+    private var parentThreadID: String?
     public var markupSpans: [MarkupSpan]
     public var references: [Reference]
     public var sharedFiles: [SharedFile]
@@ -29,10 +48,16 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         }
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case reply
+        case threadID = "thread"
+        case parentThreadID = "parentThread"
+        case markupSpans, references, sharedFiles, requestDisplayedMarker, mentionDirectory, sticker
+    }
+
     public init(
         reply: Reply? = nil,
-        thread: String? = nil,
-        parentThread: String? = nil,
+        thread: ThreadTarget? = nil,
         markupSpans: [MarkupSpan] = [],
         references: [Reference] = [],
         sharedFiles: [SharedFile] = [],
@@ -41,8 +66,8 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         sticker: StickerReference? = nil
     ) {
         self.reply = reply
-        self.thread = thread
-        self.parentThread = parentThread
+        threadID = thread?.id
+        parentThreadID = thread?.parent
         self.markupSpans = markupSpans
         self.references = references
         self.sharedFiles = sharedFiles

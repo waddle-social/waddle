@@ -12,10 +12,9 @@ struct ConversationComposer: View {
     @Environment(AppState.self) private var app
     let model: ComposerModel
     let conversation: ConversationID
-    /// XEP-0201 thread replies go to, or nil for the main feed.
+    /// XEP-0201 thread replies go to, or nil for the main feed. A
+    /// sub-thread's parent is the session's to work out.
     let thread: String?
-    /// The thread `thread` hangs off when it is a sub-thread.
-    var parentThread: String? = nil
     let placeholder: String
 
     /// Whether the text field is being edited; the field keeps it in step
@@ -336,19 +335,19 @@ struct ConversationComposer: View {
     }
 
     private func sendDraft() {
-        guard let submission = model.takeSubmission(thread: thread, parentThread: parentThread) else { return }
+        guard let submission = model.takeSubmission(thread: thread) else { return }
         dispatch(submission)
     }
 
     /// A picked GIF is sent as a message whose body is its URL.
     private func sendGIF(_ item: GifSearchItem) {
         gifSearch = nil
-        dispatch(model.takeLinkSubmission(item.originalURL, thread: thread, parentThread: parentThread))
+        dispatch(model.takeLinkSubmission(item.originalURL, thread: thread))
     }
 
     private func sendSticker(_ sticker: Sticker, from pack: StickerPack) {
         showsStickers = false
-        dispatch(model.takeStickerSubmission(sticker, from: pack, thread: thread, parentThread: parentThread))
+        dispatch(model.takeStickerSubmission(sticker, from: pack, thread: thread))
     }
 
     private func dispatch(_ submission: ComposerSubmission) {

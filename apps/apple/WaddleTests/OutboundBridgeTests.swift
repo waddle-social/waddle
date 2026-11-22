@@ -78,13 +78,13 @@ final class OutboundBridgeTests: XCTestCase {
 
     /// XEP-0201: a sub-thread message is `<thread parent='root'>r1</thread>`.
     func testASubThreadSendNamesItsParent() {
-        let sent = FFIOutbound.sendOptions(OutboundOptions(thread: "r1", parentThread: "root"), stanzaID: "c1")
+        let sent = FFIOutbound.sendOptions(OutboundOptions(thread: ThreadTarget(id: "r1", parent: "root")), stanzaID: "c1")
 
         XCTAssertEqual(sent.thread, WaddleThreadTarget(id: "r1", parent: "root"))
     }
 
     func testATopLevelThreadSendHasNoParent() {
-        let sent = FFIOutbound.sendOptions(OutboundOptions(thread: "root"), stanzaID: "c1")
+        let sent = FFIOutbound.sendOptions(OutboundOptions(thread: ThreadTarget(id: "root")), stanzaID: "c1")
 
         XCTAssertEqual(sent.thread, WaddleThreadTarget(id: "root", parent: nil))
     }

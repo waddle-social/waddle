@@ -114,7 +114,7 @@ private struct MessageRowContent: View {
             for: item,
             authorName: author.name,
             thread: entry.thread,
-            isSubThread: actions.isThread,
+            insideThread: actions.isThread,
             time: item.sentAt.formatted(date: .omitted, time: .shortened)
         )))
         .modifier(MessageAccessibilityActions(
@@ -253,6 +253,11 @@ private struct MessageRowBody: View {
         } else {
             content
         }
+        // A deleted reply cannot start a sub-thread, but one it has stays
+        // reachable.
+        if actions.isThread, let thread = entry.thread, thread.replyCount > 0 {
+            MessageSubThreadLink(count: thread.replyCount, action: openThread)
+        }
         if item.isMine {
             MessageDeliveryView(item: item)
         }
@@ -288,12 +293,8 @@ private struct MessageRowBody: View {
         if !item.reactions.isEmpty {
             MessageReactionsBar(item: item)
         }
-        if let thread = entry.thread, thread.replyCount > 0 {
-            if actions.isThread {
-                MessageSubThreadLink(count: thread.replyCount, action: openThread)
-            } else if showsThreadChip {
-                MessageThreadCard(summary: thread, action: openThread)
-            }
+        if showsThreadChip, !actions.isThread, let thread = entry.thread, thread.replyCount > 0 {
+            MessageThreadCard(summary: thread, action: openThread)
         }
     }
 }

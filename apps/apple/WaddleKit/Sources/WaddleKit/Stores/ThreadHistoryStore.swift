@@ -9,11 +9,6 @@ public struct ThreadHistory: Equatable, Sendable {
     public var root: TimelineItem?
     public var replies: [TimelineItem]
 
-    /// The thread a sub-thread hangs off: the one its root is a reply in.
-    public var parent: String? {
-        root?.containingThreadID
-    }
-
     public init(root: TimelineItem?, replies: [TimelineItem]) {
         self.root = root
         self.replies = replies
@@ -74,16 +69,16 @@ public final class ThreadHistoryStore {
         histories[thread]
     }
 
-    /// The thread `thread` hangs off, from what was fetched: its own
-    /// page's root, else a fetched thread of the room with that root among
-    /// its replies (a sub-thread just started on a fetched reply).
-    public func parent(of thread: ThreadKey) -> String? {
-        if let parent = histories[thread]?.parent {
-            return parent
+    /// The root of `thread` as fetched: its own page's root, else a
+    /// fetched thread of the room with that root among its replies (a
+    /// sub-thread on a reply only a fetched page holds).
+    func fetchedRoot(of thread: ThreadKey) -> TimelineItem? {
+        if let root = histories[thread]?.root {
+            return root
         }
         for (key, history) in histories where key.room == thread.room {
             if let reply = history.replies.first(where: { $0.targetableIDs.contains(thread.threadID) }) {
-                return reply.containingThreadID
+                return reply
             }
         }
         return nil

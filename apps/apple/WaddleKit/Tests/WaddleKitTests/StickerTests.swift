@@ -85,7 +85,7 @@ struct StickerTests {
 
         #expect(composed.body == "> Coming?\n\n👋")
         #expect(composed.options.reply == OutboundOptions.Reply(targetID: "m1", author: jid("bob@waddle.test"), fallback: 0..<11))
-        #expect(composed.options.thread == "t1")
+        #expect(composed.options.thread == ThreadTarget(id: "t1"))
     }
 
     /// A sticker's description is its pack author's words, not something

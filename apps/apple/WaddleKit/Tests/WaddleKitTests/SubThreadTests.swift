@@ -171,7 +171,7 @@ struct SubThreadTests {
         ], first: "r1", isComplete: true)
         let history = ThreadHistory.build(from: page, thread: ThreadKey(room: room, threadID: "r1"), account: me)
         #expect(history.root?.body == "r1")
-        #expect(history.parent == "root")
+        #expect(history.root?.containingThreadID == "root")
         #expect(history.replies.map(\.body) == ["s1", "s2"])
     }
 
@@ -183,7 +183,7 @@ struct SubThreadTests {
         ], first: "root", isComplete: true)
         let history = ThreadHistory.build(from: page, thread: ThreadKey(room: room, threadID: "root"), account: me)
         #expect(history.root?.body == "root")
-        #expect(history.parent == nil)
+        #expect(history.root?.containingThreadID == nil)
         #expect(history.replies.map(\.body) == ["r1"])
     }
 
@@ -196,11 +196,11 @@ struct SubThreadTests {
             message("r1", id: "r1", at: 2, thread: "root"),
         ], first: "root", isComplete: true)
         let parentKey = ThreadKey(room: room, threadID: "root")
-        let store = ThreadHistoryStore()
-        store.store(ThreadHistory.build(from: page, thread: parentKey, account: me), for: parentKey)
-        #expect(store.parent(of: ThreadKey(room: room, threadID: "r1")) == "root")
-        #expect(store.parent(of: parentKey) == nil)
-        #expect(store.parent(of: ThreadKey(room: bare("other@muc.waddle.test"), threadID: "r1")) == nil)
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        coordinator.threadHistory.store(ThreadHistory.build(from: page, thread: parentKey, account: me), for: parentKey)
+        #expect(coordinator.threadParent(of: "r1", in: roomConversation) == "root")
+        #expect(coordinator.threadParent(of: "root", in: roomConversation) == nil)
+        #expect(coordinator.threadParent(of: "r1", in: .room(bare("other@muc.waddle.test"))) == nil)
     }
 
     // MARK: Inbox

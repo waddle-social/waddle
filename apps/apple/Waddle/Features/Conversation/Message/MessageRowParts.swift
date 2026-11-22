@@ -198,20 +198,14 @@ struct MessageSubThreadLink: View {
     var body: some View {
         Button(action: action) {
             Label(MessageSubThreadText.count(count), systemImage: "arrow.turn.down.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(minHeight: Self.minHeight)
-                .contentShape(Rectangle())
+                .huddleText(Theme.Typography.caption.weight(600))
+                .foregroundStyle(Theme.Colors.actionText)
+                .padding(.vertical, Theme.Spacing.xxs)
+                .huddleTouchTarget()
         }
         .buttonStyle(.plain)
         .accessibilityHint(Text("Opens the sub-thread"))
     }
-
-    #if os(iOS)
-    private static let minHeight = Theme.Size.minHitTarget
-    #else
-    private static let minHeight = WaddleTokens.ControlHeight.xs
-    #endif
 }
 
 /// Raised card surface with a hairline border, and the design system's

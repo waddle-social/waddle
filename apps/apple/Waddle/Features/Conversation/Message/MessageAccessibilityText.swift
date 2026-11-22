@@ -4,13 +4,13 @@ import WaddleKit
 /// The single VoiceOver label of a message row: author, time, content,
 /// then reactions and replies.
 enum MessageAccessibilityText {
-    /// `isSubThread`: the row is a reply inside a thread, and `thread`
-    /// summarises its sub-thread.
+    /// `insideThread`: the row is in a thread view, so `thread`
+    /// summarises the sub-thread rooted at it.
     static func label(
         for item: TimelineItem,
         authorName: String,
         thread: ThreadSummary?,
-        isSubThread: Bool = false,
+        insideThread: Bool = false,
         time: String
     ) -> String {
         var parts = [authorName, time]
@@ -23,7 +23,7 @@ enum MessageAccessibilityText {
             parts.append(reactionCount == 1 ? "1 reaction" : "\(reactionCount) reactions")
         }
         if let thread, thread.replyCount > 0 {
-            parts.append(isSubThread
+            parts.append(insideThread
                 ? MessageSubThreadText.count(thread.replyCount)
                 : MessageThreadCardText.rowSummary(thread))
         }

@@ -229,12 +229,7 @@ final class NavigationModel {
             inspector = .thread(rootID: rootID)
             return
         }
-        switch tab {
-        case .home: homePath.append(.thread(conversation, rootID: rootID))
-        case .directMessages: directPath.append(.thread(conversation, rootID: rootID))
-        case .inbox: inboxPath.append(.thread(conversation, rootID: rootID))
-        case .feed, .you: break
-        }
+        updateTabPath { $0.append(.thread(conversation, rootID: rootID)) }
     }
 
     /// Leaves the sub-thread `rootID` for `parentID`, the thread it hangs
@@ -246,23 +241,23 @@ final class NavigationModel {
             inspector = .thread(rootID: parentID)
             return
         }
-        let leave = { (path: [Route]) in Self.path(path, leaving: rootID, for: parentID, in: conversation) }
-        switch tab {
-        case .home: homePath = leave(homePath)
-        case .directMessages: directPath = leave(directPath)
-        case .inbox: inboxPath = leave(inboxPath)
-        case .feed, .you: break
+        updateTabPath { path in
+            guard path.last == .thread(conversation, rootID: rootID) else { return }
+            path.removeLast()
+            if path.last != .thread(conversation, rootID: parentID) {
+                path.append(.thread(conversation, rootID: parentID))
+            }
         }
     }
 
-    private static func path(_ path: [Route], leaving rootID: String, for parentID: String, in conversation: ConversationID) -> [Route] {
-        guard path.last == .thread(conversation, rootID: rootID) else { return path }
-        var path = path
-        path.removeLast()
-        if path.last != .thread(conversation, rootID: parentID) {
-            path.append(.thread(conversation, rootID: parentID))
+    /// The current phone tab's conversation stack; Feed and You have none.
+    private func updateTabPath(_ update: (inout [Route]) -> Void) {
+        switch tab {
+        case .home: update(&homePath)
+        case .directMessages: update(&directPath)
+        case .inbox: update(&inboxPath)
+        case .feed, .you: break
         }
-        return path
     }
 
     func showProfile(_ profile: PeerProfileRoute) {
@@ -274,11 +269,6 @@ final class NavigationModel {
             inspector = inspector == .details ? nil : .details
             return
         }
-        switch tab {
-        case .home: homePath.append(.details(conversation))
-        case .directMessages: directPath.append(.details(conversation))
-        case .inbox: inboxPath.append(.details(conversation))
-        case .feed, .you: break
-        }
+        updateTabPath { $0.append(.details(conversation)) }
     }
 }

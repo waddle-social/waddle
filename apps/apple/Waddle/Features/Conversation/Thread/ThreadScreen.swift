@@ -53,10 +53,14 @@ private struct ThreadContent: View {
         // A room thread also shows replies fetched with the MAM thread
         // filter, so a thread opened from Activity is complete even when
         // the room's loaded page does not reach back to it.
-        let fetched = roomThread.flatMap { session.threadHistory.history(for: $0) }
+        let fetched = fetchedThread(rootID)
         let root = ThreadLookup.root(rootID, in: timeline) ?? fetched?.root
         let replies = ThreadHistory.merged(live: timeline.threadReplies(threadID: rootID), fetched: fetched?.replies ?? [])
-        let parent = ThreadLookup.parent(of: rootID, in: timeline, fetched: roomThread.flatMap(session.threadHistory.parent(of:)))
+        // Under the root, as on the feed's card and on web: every message
+        // in the thread, its sub-threads' included.
+        let replyCount = root.map { ThreadHistory.merged(live: timeline.threadDescendants(of: $0), fetched: replies).count }
+            ?? replies.count
+        let parent = session.threadParent(of: rootID, in: conversation)
         // The social order shows the newest reply first and the root,
         // the oldest message, last.
         let newestFirst = app.preferences.messageOrder.isNewestFirst
@@ -77,12 +81,12 @@ private struct ThreadContent: View {
                     ForEach(entries) { entry in
                         let isRoot = entry.id == root?.presentationID
                         if isRoot, newestFirst {
-                            ThreadRepliesDivider(count: replies.count)
+                            ThreadRepliesDivider(count: replyCount)
                         }
                         MessageRow(entry: entry, showsThreadChip: false)
                             .id(entry.id)
                         if isRoot, !newestFirst {
-                            ThreadRepliesDivider(count: replies.count)
+                            ThreadRepliesDivider(count: replyCount)
                         }
                     }
                     if root == nil, newestFirst {
@@ -118,13 +122,13 @@ private struct ThreadContent: View {
                     }
                 }
                 if app.preferences.messageOrder.isNewestFirst {
-                    replyComposer(parent: parent)
+                    replyComposer(isSubThread: parent != nil)
                 }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !app.preferences.messageOrder.isNewestFirst {
-                replyComposer(parent: parent)
+                replyComposer(isSubThread: parent != nil)
             }
         }
         .navigationTitle(parent == nil ? "Thread" : "Sub-thread")
@@ -144,15 +148,13 @@ private struct ThreadContent: View {
         }
     }
 
-    /// A sub-thread's messages carry the thread it hangs off as their
-    /// XEP-0201 `parent`.
-    private func replyComposer(parent: String?) -> some View {
+    /// The session adds a sub-thread's XEP-0201 `parent` to each send.
+    private func replyComposer(isSubThread: Bool) -> some View {
         ConversationComposer(
             model: composer,
             conversation: conversation,
             thread: rootID,
-            parentThread: parent,
-            placeholder: "Reply in thread"
+            placeholder: isSubThread ? "Reply in sub-thread" : "Reply in thread"
         )
     }
 
@@ -160,18 +162,13 @@ private struct ThreadContent: View {
     /// fetched when that sub-thread was last open. Nil for the root.
     private func subThread(of item: TimelineItem, in timeline: ConversationTimeline) -> ThreadSummary? {
         guard let id = item.threadTarget(inside: rootID) else { return nil }
-        let fetched = conversation.isRoom
-            ? session.threadHistory.history(for: ThreadKey(room: conversation.jid, threadID: id))?.replies ?? []
-            : []
+        let fetched = fetchedThread(id)?.replies ?? []
         return ThreadSummary.of(replies: ThreadHistory.merged(live: timeline.threadDescendants(of: item), fetched: fetched))
     }
 
     /// The parent thread's root as one line, when it is loaded.
     private func parentSnippet(_ parent: String, in timeline: ConversationTimeline) -> String? {
-        let fetched = conversation.isRoom
-            ? session.threadHistory.history(for: ThreadKey(room: conversation.jid, threadID: parent))?.root
-            : nil
-        guard let root = ThreadLookup.root(parent, in: timeline) ?? fetched else { return nil }
+        guard let root = ThreadLookup.root(parent, in: timeline) ?? fetchedThread(parent)?.root else { return nil }
         let snippet = MessageThreadCardText.snippet(ThreadSummary.snippet(of: root))
         return snippet.isEmpty ? nil : snippet
     }
@@ -179,7 +176,16 @@ private struct ThreadContent: View {
     /// Room threads have their own inbox row and a MAM thread filter;
     /// direct-message threads have neither.
     private var roomThread: ThreadKey? {
-        conversation.isRoom ? ThreadKey(room: conversation.jid, threadID: rootID) : nil
+        roomThread(rootID)
+    }
+
+    private func roomThread(_ id: String) -> ThreadKey? {
+        conversation.isRoom ? ThreadKey(room: conversation.jid, threadID: id) : nil
+    }
+
+    /// What the MAM thread filter fetched for the room thread `id`.
+    private func fetchedThread(_ id: String) -> ThreadHistory? {
+        roomThread(id).flatMap { session.threadHistory.history(for: $0) }
     }
 
     private var missingRoot: some View {
@@ -200,34 +206,29 @@ private struct ThreadParentBar: View {
         Button(action: action) {
             HStack(spacing: Theme.Spacing.xs) {
                 Image(systemName: "chevron.left")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text(snippet.map { "In thread: \($0)" } ?? "In thread")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption.weight(600))
+                    .foregroundStyle(Theme.Colors.actionText)
+                Text(title)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgSoft)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, Theme.Spacing.l)
-            .frame(minHeight: Self.minHeight)
-            .contentShape(Rectangle())
+            .padding(.vertical, Theme.Spacing.s)
+            .huddleTouchTarget()
         }
         .buttonStyle(.plain)
         .background(.bar)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.Colors.borderSoft)
-                .frame(height: 1)
-        }
-        .accessibilityLabel(Text(snippet.map { "Back to thread: \($0)" } ?? "Back to thread"))
+        .overlay(alignment: .bottom) { HuddleDivider() }
+        .accessibilityLabel(Text(title))
+        .accessibilityHint(Text("Goes back to that thread"))
     }
 
-    #if os(iOS)
-    private static let minHeight = Theme.Size.minHitTarget
-    #else
-    private static let minHeight = WaddleTokens.ControlHeight.sm
-    #endif
+    private var title: String {
+        snippet.map { "In thread: \($0)" } ?? "In thread"
+    }
 }
 
 /// "3 replies" rule between the root and its replies.
@@ -260,16 +261,5 @@ enum ThreadLookup {
             return item
         }
         return timeline.items.first { $0.isFeedVisible && $0.message.thread == threadID }
-    }
-
-    /// The thread a sub-thread hangs off: the timeline's answer when it
-    /// has the sub-thread's root, else `fetched`, what fetched thread
-    /// pages say.
-    @MainActor
-    static func parent(of threadID: String, in timeline: ConversationTimeline, fetched: String?) -> String? {
-        if timeline.item(withID: threadID) != nil {
-            return timeline.parentThread(of: threadID)
-        }
-        return fetched
     }
 }

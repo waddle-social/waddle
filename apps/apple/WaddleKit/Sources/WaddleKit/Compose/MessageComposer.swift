@@ -31,8 +31,6 @@ public struct Draft: Hashable, Sendable {
     public var mentions: [MentionDraft]
     public var reply: ReplyContext?
     public var thread: String?
-    /// The thread `thread` hangs off, for a sub-thread (XEP-0201 `parent`).
-    public var parentThread: String?
     public var attachments: [SharedFile]
 
     public init(
@@ -40,14 +38,12 @@ public struct Draft: Hashable, Sendable {
         mentions: [MentionDraft] = [],
         reply: ReplyContext? = nil,
         thread: String? = nil,
-        parentThread: String? = nil,
         attachments: [SharedFile] = []
     ) {
         self.text = text
         self.mentions = mentions
         self.reply = reply
         self.thread = thread
-        self.parentThread = parentThread
         self.attachments = attachments
     }
 }
@@ -74,8 +70,7 @@ public enum MessageComposer {
         let offset = fallback?.upperBound ?? 0
         let options = OutboundOptions(
             reply: draft.reply.map { OutboundOptions.Reply(targetID: $0.targetID, author: $0.author, fallback: fallback) },
-            thread: draft.thread,
-            parentThread: draft.thread == nil ? nil : draft.parentThread,
+            thread: draft.thread.map { ThreadTarget(id: $0) },
             markupSpans: markdown.spans.map { MarkupSpan(kind: $0.kind, start: $0.start + offset, end: $0.end + offset) },
             references: markdown.mentions.map {
                 Reference(kind: .mention, uri: $0.target.uri, begin: $0.range.lowerBound + offset, end: $0.range.upperBound + offset)
@@ -93,15 +88,13 @@ public enum MessageComposer {
         _ sticker: Sticker,
         from pack: StickerPack,
         reply: ReplyContext? = nil,
-        thread: String? = nil,
-        parentThread: String? = nil
+        thread: String? = nil
     ) -> (body: String, options: OutboundOptions)? {
         guard let file = sticker.file else { return nil }
         let quote = reply.flatMap { ReplyFallback.quote(parentBody: $0.parentBody) }
         let options = OutboundOptions(
             reply: reply.map { OutboundOptions.Reply(targetID: $0.targetID, author: $0.author, fallback: quote?.range) },
-            thread: thread,
-            parentThread: thread == nil ? nil : parentThread,
+            thread: thread.map { ThreadTarget(id: $0) },
             sharedFiles: [file],
             requestDisplayedMarker: true,
             sticker: StickerReference(packID: pack.id)
