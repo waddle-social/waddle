@@ -90,23 +90,27 @@ struct EditRoomForm: View {
                     .labelsHidden()
                     .onSubmit(onSubmit)
             } header: {
-                Text("Name")
+                DetailsSectionHeader("Name")
             } footer: {
                 nameFooter
             }
-            Section("Description") {
+            Section {
                 TextField("Description", text: $editor.summary, prompt: Text("What is it about? (optional)"), axis: .vertical)
                     .labelsHidden()
                     .lineLimit(2...5)
+            } header: {
+                DetailsSectionHeader("Description")
             }
             if editor.settings?.pinPermission != nil {
-                Section("Who can pin messages") {
+                Section {
                     Picker("Who can pin messages", selection: $editor.pinPermission) {
                         Text("Admins only").tag(PinPermission?.some(.adminsOnly))
                         Text("Anyone").tag(PinPermission?.some(.anyone))
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()
+                } header: {
+                    DetailsSectionHeader("Who can pin messages")
                 }
             }
             if let error = editor.saveError {
@@ -115,7 +119,7 @@ struct EditRoomForm: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .detailsForm()
         .disabled(editor.isSaving)
     }
 

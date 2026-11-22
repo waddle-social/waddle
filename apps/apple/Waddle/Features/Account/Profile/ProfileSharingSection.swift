@@ -104,18 +104,20 @@ struct ProfileSharingLabel: View {
                     Text(emoji)
                 } else {
                     Image(systemName: symbol)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
             }
-            .font(.title2)
-            .frame(width: 32)
+            .huddleText(Theme.Typography.title)
+            .frame(width: Theme.Size.sharingGlyph)
             .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text(title)
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fg)
                 if let detail {
                     Text(detail)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                         .lineLimit(2)
                 }
             }

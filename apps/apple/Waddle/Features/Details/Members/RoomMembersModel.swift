@@ -2,13 +2,13 @@ import Foundation
 import Observation
 import WaddleKit
 
-/// Affiliation list loading and moderation for one room's details screen.
+/// Affiliation list loading and moderation for one room's member list.
 /// The room's bots come from `SessionCoordinator.roomBots`, not from here.
 @MainActor
 @Observable
 final class RoomMembersModel {
     let room: BareJID
-    /// XEP-0045 affiliation lists; nil until "Load all members".
+    /// XEP-0045 affiliation lists; nil until loaded.
     private(set) var members: [RoomMember]?
     private(set) var isLoading = false
     private(set) var loadError: String?
@@ -34,11 +34,6 @@ final class RoomMembersModel {
             loadError = ActionErrorCopy.message(for: error, fallback: "Couldn't load members. Try again.")
         }
         isLoading = false
-    }
-
-    /// Affiliated people not in the room, once loaded.
-    func absentMembers(present occupants: [Occupant]) -> [RoomMember]? {
-        members.map { MemberRoster.absent($0, present: occupants) }
     }
 
     /// Bans wait for confirmation; everything else runs now.

@@ -1,8 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// Room details: header, room or group chat actions, notifications, pins,
-/// search and members, then delete or leave.
+/// Room details (web `drawer-details`): header, room or group chat
+/// actions, notifications, members, pins and search, then delete or leave.
 struct RoomDetailsForm: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -29,48 +29,32 @@ struct RoomDetailsForm: View {
             }
             Section {
                 NavigationLink {
-                    PinnedMessagesView(conversation: .room(room))
+                    RoomMembersView(room: room, model: model)
                 } label: {
-                    LabeledContent {
-                        Text("\(session.pins.pins(in: room).count)")
-                            .monospacedDigit()
-                    } label: {
-                        Label("Pinned messages", systemImage: "pin")
+                    DetailsRowLabel(title: "Members", symbol: "person.2") {
+                        Text("\(hereCount) here")
                     }
                 }
-                Button {
-                    navigation.sheet = .search(.room(room))
+                NavigationLink {
+                    PinnedMessagesView(conversation: .room(room))
                 } label: {
-                    Label("Search in conversation", systemImage: "magnifyingglass")
+                    DetailsRowLabel(title: "Pinned messages", symbol: "pin") {
+                        Text("\(session.pins.pins(in: room).count)")
+                    }
+                }
+                DetailsActionButton(title: "Search in conversation", symbol: "magnifyingglass") {
+                    navigation.sheet = .search(.room(room))
                 }
             }
-            RoomMembersSections(room: room, model: model)
             RoomExitSection(actions: actions, exiting: management.exiting, onSelect: management.select)
         }
-        .formStyle(.grouped)
+        .detailsForm()
         .roomManagementDialogs(management, name: session.directory.title(for: .room(room)), groupMembers: groupMembers)
-        .confirmationDialog(
-            "Ban this person?",
-            isPresented: banBinding,
-            titleVisibility: .visible,
-            presenting: model.pendingBan
-        ) { _ in
-            Button("Ban", role: .destructive) {
-                model.confirmBan(using: session)
-            }
-            Button("Cancel", role: .cancel) {
-                model.pendingBan = nil
-            }
-        } message: { subject in
-            Text("\(subject.nick ?? subject.jid?.description ?? "They") will be removed and can't rejoin until the ban is lifted.")
-        }
-        .alert("Couldn't update member", isPresented: errorBinding) {
-            Button("OK", role: .cancel) {
-                model.actionError = nil
-            }
-        } message: {
-            Text(model.actionError ?? "")
-        }
+    }
+
+    /// People in the room now, bots aside.
+    private var hereCount: Int {
+        (session.presence.occupants[room] ?? [:]).values.filter { !$0.isBot }.count
     }
 
     /// Us, the people here and, once loaded, every member.
@@ -78,19 +62,5 @@ struct RoomDetailsForm: View {
         let present = (session.presence.occupants[room] ?? [:]).values.compactMap(\.realJID)
         let members = model.members?.map(\.jid) ?? []
         return Set(present + members + [session.account.jid])
-    }
-
-    private var banBinding: Binding<Bool> {
-        Binding(
-            get: { model.pendingBan != nil },
-            set: { if !$0 { model.pendingBan = nil } }
-        )
-    }
-
-    private var errorBinding: Binding<Bool> {
-        Binding(
-            get: { model.actionError != nil },
-            set: { if !$0 { model.actionError = nil } }
-        )
     }
 }

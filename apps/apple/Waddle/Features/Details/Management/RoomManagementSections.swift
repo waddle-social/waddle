@@ -12,10 +12,8 @@ struct RoomManagementSection: View {
         if !shown.isEmpty {
             Section {
                 ForEach(shown, id: \.self) { action in
-                    Button {
+                    DetailsActionButton(title: action.title, symbol: action.symbol) {
                         onSelect(action)
-                    } label: {
-                        Label(action.title, systemImage: action.symbol)
                     }
                 }
             }
@@ -36,18 +34,12 @@ struct RoomExitSection: View {
         if !shown.isEmpty {
             Section {
                 ForEach(shown, id: \.self) { action in
-                    Button(role: .destructive) {
+                    DetailsActionButton(title: action.title, symbol: action.symbol, isDestructive: true) {
                         onSelect(action)
-                    } label: {
-                        HStack(spacing: Theme.Spacing.s) {
-                            Label(action.title, systemImage: action.symbol)
-                                // The role alone leaves a Mac push button grey.
-                                .foregroundStyle(Theme.Colors.dangerText)
-                            if exiting == action {
-                                Spacer(minLength: 0)
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
+                    } trailing: {
+                        if exiting == action {
+                            ProgressView()
+                                .controlSize(.small)
                         }
                     }
                     .disabled(exiting != nil)

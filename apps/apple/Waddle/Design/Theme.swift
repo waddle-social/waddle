@@ -61,6 +61,21 @@ enum Theme {
         static let rail: CGFloat = 3
         /// The large mark of an empty conversation.
         static let emptyMark: CGFloat = 64
+        /// A person on a room's member list (Android `AvatarSize.LG`).
+        static let memberAvatar: CGFloat = 44
+        /// The glyph column of a details or settings row.
+        static let rowGlyph: CGFloat = 20
+        /// The emoji or glyph beside something someone shares.
+        static let sharingGlyph: CGFloat = 32
+        /// A details or settings row: a touch target on iPhone, a control
+        /// on Mac.
+        static var detailsRow: CGFloat {
+            #if os(iOS)
+            WaddleTokens.ControlHeight.touch
+            #else
+            WaddleTokens.ControlHeight.sm
+            #endif
+        }
         /// Smallest tap target (Human Interface Guidelines).
         static let minHitTarget = WaddleTokens.ControlHeight.touch
     }
