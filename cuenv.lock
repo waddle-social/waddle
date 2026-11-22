@@ -37,6 +37,12 @@ flake = "../.."
 digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
 lockfile = "infrastructure/waddle.cloud/../../flake.lock"
 
+[runtimes.operator]
+type = "nix"
+flake = ".."
+digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+lockfile = "operator/../flake.lock"
+
 [runtimes.server]
 type = "nix"
 flake = ".."

@@ -1,0 +1,1411 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: waddleservers.waddle.social
+spec:
+  group: waddle.social
+  names:
+    kind: WaddleServer
+    plural: waddleservers
+    shortNames:
+    - waddle
+    - ws
+    singular: waddleserver
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Current lifecycle state machine phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: Ready replicas over desired replicas
+      jsonPath: .status.readySummary
+      name: Ready
+      type: string
+    - description: Configured secret provisioning mode
+      jsonPath: .status.secretsMode
+      name: Secrets
+      type: string
+    - description: Observed Postgres dependency readiness
+      jsonPath: .status.dependencies.postgres.phase
+      name: Postgres
+      type: string
+    - description: Observed SpiceDB dependency readiness
+      jsonPath: .status.dependencies.spicedb.phase
+      name: SpiceDB
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Declarative deployment and lifecycle specification for a Waddle XMPP server.
+        properties:
+          spec:
+            description: Declarative specification for a `WaddleServer` deployment.
+            properties:
+              baseUrl:
+                description: Public base HTTP URL (`WADDLE_BASE_URL`).
+                type: string
+                x-kubernetes-validations:
+                - rule: size(self) > 0
+              clustering:
+                default:
+                  claimReleaseBudgetSeconds: 5
+                  enabled: false
+                  enrolledKeyCount: 0
+                  keypairHeadroom: 1
+                  listenAddrs:
+                  - /ip4/0.0.0.0/tcp/7900
+                  swarmPort: 7900
+                description: ADR-0017 horizontal clustering configuration.
+                properties:
+                  bootstrapPeers:
+                    description: Optional explicit bootstrap peers (`host:port`); empty uses the headless Service.
+                    items:
+                      type: string
+                    type: array
+                  claimReleaseBudgetSeconds:
+                    default: 5
+                    description: Claim-release drain budget in seconds (`WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS`).
+                    format: int64
+                    type: integer
+                  enabled:
+                    default: false
+                    description: Enable multi-replica clustering (`WADDLE_CLUSTERING_ENABLED`).
+                    type: boolean
+                  enrolledKeyCount:
+                    default: 0
+                    description: Number of enrolled Ed25519 keys in `WADDLE_CLUSTERING_KEYPAIR_POOL`.
+                    format: int32
+                    type: integer
+                  keypairHeadroom:
+                    default: 1
+                    description: Extra keypair headroom above `replicas + maxSurge` (default `1`).
+                    format: int32
+                    type: integer
+                  listenAddrs:
+                    default:
+                    - /ip4/0.0.0.0/tcp/7900
+                    description: libp2p listen multiaddrs (defaults to `["/ip4/0.0.0.0/tcp/7900"]`).
+                    items:
+                      type: string
+                    type: array
+                  swarmPort:
+                    default: 7900
+                    description: TCP port exposed for swarm traffic (default `7900`).
+                    format: uint16
+                    maximum: 65535.0
+                    minimum: 0.0
+                    type: integer
+                type: object
+              corsOrigins:
+                description: Allowed CORS origins (`WADDLE_CORS_ORIGINS`).
+                nullable: true
+                type: string
+              deployment:
+                default: {}
+                description: Stable deployment lineage UUID and optional one-shot action.
+                properties:
+                  lineageAction:
+                    description: Explicit one-shot lineage action (`"enroll"` or `"adopt=<uuid>[,<uuid>...]"`).
+                    nullable: true
+                    type: string
+                  uuid:
+                    description: Stable lower-case RFC-4122 UUID bound into `_lineage`. Required in ESO mode.
+                    nullable: true
+                    type: string
+                type: object
+              extraEnv:
+                additionalProperties:
+                  type: string
+                description: Additional non-sensitive environment variables placed in the server `ConfigMap`.
+                type: object
+              image:
+                default:
+                  pullPolicy: IfNotPresent
+                  repository: ghcr.io/waddle-social/waddle
+                  tag: main
+                description: Container image specification.
+                properties:
+                  digest:
+                    description: Optional immutable `sha256:...` digest.
+                    nullable: true
+                    type: string
+                  pullPolicy:
+                    default: IfNotPresent
+                    description: Container image pull policy.
+                    enum:
+                    - IfNotPresent
+                    - Always
+                    - Never
+                    type: string
+                  pullSecrets:
+                    description: Names of image pull secrets in the same namespace.
+                    items:
+                      type: string
+                    type: array
+                  repository:
+                    default: ghcr.io/waddle-social/waddle
+                    description: Container image repository (default `ghcr.io/waddle-social/waddle`).
+                    type: string
+                  tag:
+                    default: main
+                    description: Mutable image tag (ignored when `digest` is provided).
+                    type: string
+                type: object
+              ingress:
+                default:
+                  poolSize: 4
+                  retryAttempts: 5
+                description: Durable ingress authority transaction limits.
+                properties:
+                  poolSize:
+                    default: 4
+                    description: Ingress DB pool size (`1..=32`, default `4`).
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  retryAttempts:
+                    default: 5
+                    description: Ingress DB retry attempts (`1..=32`, default `5`).
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
+              mode:
+                default: HomeServer
+                description: Server runtime mode (`HomeServer` or `Standalone`).
+                enum:
+                - HomeServer
+                - Standalone
+                type: string
+              networkPolicy:
+                default:
+                  enabled: true
+                description: NetworkPolicy settings (applied when clustering is enabled).
+                properties:
+                  enabled:
+                    default: true
+                    description: Create a swarm NetworkPolicy when clustering is enabled (default `true`).
+                    type: boolean
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: Optional node selector labels applied to server pods.
+                type: object
+              pdb:
+                default:
+                  enabled: true
+                  maxUnavailable: 1
+                description: PodDisruptionBudget settings (applied when clustering is enabled).
+                properties:
+                  enabled:
+                    default: true
+                    description: Create a PodDisruptionBudget when clustering is enabled (default `true`).
+                    type: boolean
+                  maxUnavailable:
+                    default: 1
+                    description: Maximum unavailable pods (default `1`).
+                    format: int32
+                    type: integer
+                type: object
+              persistence:
+                default:
+                  accessModes:
+                  - ReadWriteOnce
+                  allowUnsafeRwoScale: false
+                  enabled: true
+                  mountPath: /var/lib/waddle
+                  size: 10Gi
+                  uploadSubPath: uploads
+                description: Persistent volume settings for `/var/lib/waddle`.
+                properties:
+                  accessModes:
+                    default:
+                    - ReadWriteOnce
+                    description: Requested PVC access modes.
+                    items:
+                      description: PVC access mode.
+                      enum:
+                      - ReadWriteOnce
+                      - ReadWriteMany
+                      - ReadOnlyMany
+                      type: string
+                    type: array
+                  allowUnsafeRwoScale:
+                    default: false
+                    description: Explicitly permit `RollingUpdate` or `replicas > 1` with `ReadWriteOnce`.
+                    type: boolean
+                  enabled:
+                    default: true
+                    description: Create or mount a PersistentVolumeClaim (`false` uses `emptyDir`).
+                    type: boolean
+                  existingClaim:
+                    description: Use an existing same-namespace PVC instead of creating one.
+                    nullable: true
+                    type: string
+                  mountPath:
+                    default: /var/lib/waddle
+                    description: Mount path inside the server container.
+                    type: string
+                  size:
+                    default: 10Gi
+                    description: Storage capacity request (e.g. `"10Gi"`).
+                    type: string
+                  storageClassName:
+                    description: StorageClass name for created PVCs.
+                    nullable: true
+                    type: string
+                  uploadSubPath:
+                    default: uploads
+                    description: Subdirectory beneath `mountPath` used for `WADDLE_UPLOAD_DIR`.
+                    type: string
+                type: object
+              podAnnotations:
+                additionalProperties:
+                  type: string
+                description: Optional annotations applied to server pods.
+                type: object
+              podAntiAffinity:
+                default:
+                  enabled: true
+                  topologyKey: kubernetes.io/hostname
+                  weight: 50
+                description: Pod anti-affinity settings.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enable preferred pod anti-affinity across nodes (default `true`).
+                    type: boolean
+                  topologyKey:
+                    default: kubernetes.io/hostname
+                    description: Topology key (default `kubernetes.io/hostname`).
+                    type: string
+                  weight:
+                    default: 50
+                    description: Scheduling preference weight (`1..=100`, default `50`).
+                    format: int32
+                    type: integer
+                type: object
+              podLabels:
+                additionalProperties:
+                  type: string
+                description: Optional extra labels applied to server pods.
+                type: object
+              postgres:
+                description: External PostgreSQL dependency (observed, never created by this operator).
+                properties:
+                  acquireTimeoutSecs:
+                    description: Optional SQLx pool connection acquire timeout in seconds (`1..=300`).
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  cnpg:
+                    description: CloudNativePG cluster source when `mode` is `CloudNativePg`.
+                    nullable: true
+                    properties:
+                      clusterName:
+                        description: Name of the `postgresql.cnpg.io/v1` `Cluster` resource in this namespace.
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                      passwordKey:
+                        default: password
+                        description: Key holding the password when the secret uses `kubernetes.io/basic-auth` format.
+                        type: string
+                      requireHealthy:
+                        default: true
+                        description: |-
+                          Require CNPG `Ready=True`, `readyInstances >= 1`, and a non-empty `currentPrimary`
+                          before moving out of `Pending`.
+                        type: boolean
+                      secretName:
+                        description: |-
+                          Optional override for the application credential `Secret`. When omitted,
+                          the operator reads `Cluster.spec.bootstrap.initdb.secret.name` or defaults
+                          to `<clusterName>-app`.
+                        nullable: true
+                        type: string
+                      uriKey:
+                        default: uri
+                        description: Key in the CNPG application secret holding the connection URI (`uri` by default).
+                        type: string
+                      usernameKey:
+                        default: username
+                        description: Key holding the username when the secret uses `kubernetes.io/basic-auth` format.
+                        type: string
+                    required:
+                    - clusterName
+                    type: object
+                  controlPlanePoolSize:
+                    default: 4
+                    description: Dedicated control-plane pool size (`WADDLE_DB_CONTROL_PLANE_POOL_SIZE`).
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  external:
+                    description: External PostgreSQL secret source when `mode` is `External`.
+                    nullable: true
+                    properties:
+                      secretName:
+                        description: Name of the same-namespace `Secret` containing the Postgres DSN.
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                      serviceName:
+                        description: Optional same-namespace Kubernetes `Service` whose ready endpoints are checked.
+                        nullable: true
+                        type: string
+                      uriKey:
+                        default: uri
+                        description: Key inside `secretName` holding the connection URI.
+                        type: string
+                    required:
+                    - secretName
+                    type: object
+                  mode:
+                    default: CloudNativePg
+                    description: Selects how the PostgreSQL endpoint and credentials are discovered.
+                    enum:
+                    - CloudNativePg
+                    - External
+                    type: string
+                  poolSize:
+                    default: 10
+                    description: Main/shared SQLx connection pool size (`WADDLE_DB_POOL_SIZE`).
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  restrictedRuntime:
+                    description: Restricted PostgreSQL runtime configuration matching `waddle-server` helm chart.
+                    nullable: true
+                    properties:
+                      caSecretKey:
+                        default: ca.crt
+                        description: Key inside `caSecretName` containing the PEM CA certificate.
+                        type: string
+                      caSecretName:
+                        default: ''
+                        description: Same-namespace Secret containing the PostgreSQL server CA certificate.
+                        type: string
+                      databaseHost:
+                        default: ''
+                        description: PostgreSQL primary read-write service host.
+                        type: string
+                      databaseName:
+                        default: ''
+                        description: PostgreSQL database name.
+                        type: string
+                      databasePort:
+                        default: 5432
+                        description: PostgreSQL port.
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                      enabled:
+                        default: false
+                        description: Enables restricted runtime wiring (`WADDLE_DB_RUNTIME_ATTESTATION`, CA mount, role env).
+                        type: boolean
+                      handoffConfigMapName:
+                        default: ''
+                        description: Same-namespace ConfigMap holding the `handoff.json` attestation document.
+                        type: string
+                      releaseGitSha:
+                        default: ''
+                        description: 40-character lower-case Git SHA matching the server release image (`WADDLE_GIT_SHA`).
+                        type: string
+                      roles:
+                        description: Role names shared with the server binary.
+                        properties:
+                          attestorDefinerRole:
+                            description: Attestor definer role.
+                            type: string
+                          attestorInstallerLogin:
+                            description: Attestor installer login.
+                            type: string
+                          attestorSchema:
+                            description: Attestor schema name.
+                            type: string
+                          migratorLogin:
+                            description: Login that ran the owner phase (`WADDLE_DB_MIGRATOR_LOGIN`).
+                            type: string
+                          runtimeLogin:
+                            description: Least-privilege runtime serving login.
+                            type: string
+                          schemaOwner:
+                            description: Schema owner role (`WADDLE_XMPP_MAM_SCHEMA_OWNER`).
+                            type: string
+                        required:
+                        - attestorDefinerRole
+                        - attestorInstallerLogin
+                        - attestorSchema
+                        - migratorLogin
+                        - runtimeLogin
+                        - schemaOwner
+                        type: object
+                      runtimeCredentialKey:
+                        default: password
+                        description: Key inside `runtimeCredentialSecret` holding the URL-safe password.
+                        type: string
+                      runtimeCredentialSecret:
+                        default: ''
+                        description: Same-namespace Secret containing the restricted runtime login password.
+                        type: string
+                      schema:
+                        default: public
+                        description: PostgreSQL application schema name (`WADDLE_XMPP_MAM_CLAIM_SCHEMA`).
+                        type: string
+                    required:
+                    - roles
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - rule: (self.mode == 'CloudNativePg' && has(self.cnpg) && !has(self.external)) || (self.mode == 'External' && has(self.external) && !has(self.cnpg))
+              probes:
+                default:
+                  liveness:
+                    failureThreshold: 3
+                    initialDelaySeconds: 15
+                    path: /health
+                    periodSeconds: 10
+                    timeoutSeconds: 2
+                  readiness:
+                    failureThreshold: 3
+                    initialDelaySeconds: 5
+                    path: /ready
+                    periodSeconds: 10
+                    timeoutSeconds: 2
+                description: Container liveness and readiness probe configuration.
+                properties:
+                  liveness:
+                    default:
+                      failureThreshold: 3
+                      initialDelaySeconds: 15
+                      path: /health
+                      periodSeconds: 10
+                      timeoutSeconds: 2
+                    description: Liveness probe (defaults to `/health`).
+                    properties:
+                      failureThreshold:
+                        description: Failures before marking unhealthy.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: Initial delay before first probe.
+                        format: int32
+                        type: integer
+                      path:
+                        description: HTTP probe path.
+                        type: string
+                      periodSeconds:
+                        description: Interval between probes.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: Probe timeout.
+                        format: int32
+                        type: integer
+                    required:
+                    - failureThreshold
+                    - initialDelaySeconds
+                    - path
+                    - periodSeconds
+                    - timeoutSeconds
+                    type: object
+                  readiness:
+                    default:
+                      failureThreshold: 3
+                      initialDelaySeconds: 5
+                      path: /ready
+                      periodSeconds: 10
+                      timeoutSeconds: 2
+                    description: Readiness probe (defaults to `/ready`).
+                    properties:
+                      failureThreshold:
+                        description: Failures before marking unhealthy.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: Initial delay before first probe.
+                        format: int32
+                        type: integer
+                      path:
+                        description: HTTP probe path.
+                        type: string
+                      periodSeconds:
+                        description: Interval between probes.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: Probe timeout.
+                        format: int32
+                        type: integer
+                    required:
+                    - failureThreshold
+                    - initialDelaySeconds
+                    - path
+                    - periodSeconds
+                    - timeoutSeconds
+                    type: object
+                type: object
+              replicas:
+                description: Desired replica count. Omit to allow an external HPA to manage replicas.
+                format: int32
+                nullable: true
+                type: integer
+              resources:
+                default:
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+                  requests:
+                    cpu: 100m
+                    memory: 256Mi
+                description: Compute resource requests and limits.
+                properties:
+                  limits:
+                    default:
+                      cpu: 500m
+                      memory: 512Mi
+                    description: Maximum resource limits.
+                    properties:
+                      cpu:
+                        description: CPU quantity string (e.g. `"100m"` or `"1"`).
+                        type: string
+                      memory:
+                        description: Memory quantity string (e.g. `"512Mi"` or `"4Gi"`).
+                        type: string
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                  requests:
+                    default:
+                      cpu: 100m
+                      memory: 256Mi
+                    description: Guaranteed resource requests.
+                    properties:
+                      cpu:
+                        description: CPU quantity string (e.g. `"100m"` or `"1"`).
+                        type: string
+                      memory:
+                        description: Memory quantity string (e.g. `"512Mi"` or `"4Gi"`).
+                        type: string
+                    required:
+                    - cpu
+                    - memory
+                    type: object
+                type: object
+              rustLog:
+                default: info
+                description: Rust `tracing` log filter (`RUST_LOG`).
+                type: string
+              s2s:
+                default:
+                  enabled: false
+                  port: 5269
+                  serviceType: NodePort
+                description: Server-to-server XMPP federation configuration.
+                properties:
+                  configMapName:
+                    description: Same-namespace ConfigMap holding `s2s.toml`, mounted at `/etc/waddle/s2s`.
+                    nullable: true
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enable S2S federation (`WADDLE_S2S_ENABLED`).
+                    type: boolean
+                  externalIps:
+                    description: Optional external IPs bound to the S2S Service.
+                    items:
+                      type: string
+                    type: array
+                  nodePort:
+                    description: Optional fixed NodePort when `serviceType` is `NodePort`.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  port:
+                    default: 5269
+                    description: S2S TCP port (default `5269`).
+                    format: int32
+                    type: integer
+                  serviceType:
+                    default: NodePort
+                    description: Kubernetes Service type for S2S traffic.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
+              s3:
+                description: Optional S3-compatible blob storage for uploads.
+                nullable: true
+                properties:
+                  bucket:
+                    description: Bucket name (`WADDLE_S3_BUCKET`).
+                    type: string
+                    x-kubernetes-validations:
+                    - rule: size(self) > 0
+                  endpoint:
+                    description: S3 endpoint URL (`WADDLE_S3_ENDPOINT`).
+                    type: string
+                    x-kubernetes-validations:
+                    - rule: size(self) > 0
+                required:
+                - bucket
+                - endpoint
+                type: object
+              secrets:
+                description: Runtime secret provisioning configuration (ESO or YOLO mode).
+                properties:
+                  externalSecrets:
+                    description: ESO configuration when `mode` is `ExternalSecrets`.
+                    nullable: true
+                    properties:
+                      apiVersion:
+                        default: Auto
+                        description: Preferred ESO API version (`Auto`, `V1`, `V1Beta1`).
+                        enum:
+                        - Auto
+                        - V1
+                        - V1Beta1
+                        type: string
+                      apnsSecretRef:
+                        description: Optional APNs `.p8` key file mount (kept out of `envFrom`).
+                        nullable: true
+                        properties:
+                          bundleId:
+                            description: Apple app bundle ID (`WADDLE_APNS_BUNDLE_ID`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          keyId:
+                            description: Apple Push key ID (`WADDLE_APNS_KEY_ID`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          secretKey:
+                            default: WADDLE_APNS_KEY_PEM
+                            description: Key inside `secretName` containing the PEM bytes (default `WADDLE_APNS_KEY_PEM`).
+                            type: string
+                          secretName:
+                            description: Same-namespace `Secret` containing the APNs `.p8` PEM private key.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          teamId:
+                            description: Apple Developer Team ID (`WADDLE_APNS_TEAM_ID`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                        required:
+                        - bundleId
+                        - keyId
+                        - secretName
+                        - teamId
+                        type: object
+                      clusteringKeypoolSecretName:
+                        description: Optional separate Secret holding `WADDLE_CLUSTERING_KEYPAIR_POOL`.
+                        nullable: true
+                        type: string
+                      externalSecretName:
+                        description: Name of a pre-existing `ExternalSecret` in the same namespace.
+                        nullable: true
+                        type: string
+                      extraSecretRefs:
+                        description: Additional same-namespace Secrets mounted via `envFrom`.
+                        items:
+                          type: string
+                        type: array
+                      managed:
+                        description: Operator-managed `ExternalSecret` definition.
+                        nullable: true
+                        properties:
+                          refreshInterval:
+                            default: 1h
+                            description: Sync refresh interval (Kubernetes duration string, default `"1h"`).
+                            type: string
+                          remoteRefs:
+                            description: Remote key mappings.
+                            properties:
+                              authProvidersJson:
+                                description: Optional remote ref for `WADDLE_AUTH_PROVIDERS_JSON`.
+                                nullable: true
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              clusteringKeypairPool:
+                                description: Optional remote ref for `WADDLE_CLUSTERING_KEYPAIR_POOL`.
+                                nullable: true
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              extraData:
+                                description: Arbitrary extra mappings included in the managed `ExternalSecret`.
+                                items:
+                                  description: Additional secret key mapping for an operator-managed `ExternalSecret`.
+                                  properties:
+                                    remoteRef:
+                                      description: Remote store reference.
+                                      properties:
+                                        key:
+                                          description: Remote secret key/path in the backing secret manager.
+                                          type: string
+                                          x-kubernetes-validations:
+                                          - rule: size(self) > 0
+                                        property:
+                                          description: Optional property/field inside a structured secret item.
+                                          nullable: true
+                                          type: string
+                                        version:
+                                          description: Optional version pin in the backing store.
+                                          nullable: true
+                                          type: string
+                                      required:
+                                      - key
+                                      type: object
+                                    secretKey:
+                                      description: Target key in the synced Kubernetes `Secret`.
+                                      type: string
+                                      x-kubernetes-validations:
+                                      - rule: size(self) > 0
+                                  required:
+                                  - remoteRef
+                                  - secretKey
+                                  type: object
+                                type: array
+                              occupantIdSecret:
+                                description: Remote ref for `WADDLE_OCCUPANT_ID_SECRET` (>= 32 bytes).
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              s3AccessKeyId:
+                                description: Optional remote ref for `WADDLE_S3_ACCESS_KEY_ID`.
+                                nullable: true
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              s3SecretAccessKey:
+                                description: Optional remote ref for `WADDLE_S3_SECRET_ACCESS_KEY`.
+                                nullable: true
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              sessionKey:
+                                description: Remote ref for `WADDLE_SESSION_KEY` (>= 32 bytes).
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              spicedbPresharedKey:
+                                description: Optional remote ref for `WADDLE_SPICEDB_PRESHARED_KEY`.
+                                nullable: true
+                                properties:
+                                  key:
+                                    description: Remote secret key/path in the backing secret manager.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - rule: size(self) > 0
+                                  property:
+                                    description: Optional property/field inside a structured secret item.
+                                    nullable: true
+                                    type: string
+                                  version:
+                                    description: Optional version pin in the backing store.
+                                    nullable: true
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                            required:
+                            - occupantIdSecret
+                            - sessionKey
+                            type: object
+                          secretStoreRef:
+                            description: ESO store reference (`SecretStore` or `ClusterSecretStore`).
+                            properties:
+                              kind:
+                                default: ClusterSecretStore
+                                description: Store resource kind (`SecretStore` or `ClusterSecretStore`).
+                                enum:
+                                - SecretStore
+                                - ClusterSecretStore
+                                type: string
+                              name:
+                                description: Store resource name.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                            required:
+                            - name
+                            type: object
+                          targetSecretName:
+                            description: Target `Secret` name created by ESO (defaults to `<waddleName>-runtime-secrets`).
+                            nullable: true
+                            type: string
+                        required:
+                        - remoteRefs
+                        - secretStoreRef
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - rule: (has(self.externalSecretName) && !has(self.managed)) || (!has(self.externalSecretName) && has(self.managed))
+                  mode:
+                    default: ExternalSecrets
+                    description: Secret provider mode (`ExternalSecrets` or `Yolo`). Immutable after creation.
+                    enum:
+                    - ExternalSecrets
+                    - Yolo
+                    type: string
+                    x-kubernetes-validations:
+                    - rule: self == oldSelf
+                  yolo:
+                    description: YOLO generator options when `mode` is `Yolo`.
+                    nullable: true
+                    properties:
+                      enrollLineage:
+                        default: true
+                        description: Emit `WADDLE_DB_LINEAGE_ACTION=enroll` (idempotent) for fresh single-node databases.
+                        type: boolean
+                      extraSecretRefs:
+                        description: Additional same-namespace Secrets mounted via `envFrom`.
+                        items:
+                          type: string
+                        type: array
+                      secretName:
+                        description: Optional custom Secret name (defaults to `<waddleName>-yolo-secrets`).
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - rule: (self.mode == 'ExternalSecrets' && has(self.externalSecrets) && !has(self.yolo)) || (self.mode == 'Yolo' && !has(self.externalSecrets))
+              serverOwnerLocalparts:
+                description: Localparts granted initial server owner privileges (`WADDLE_SERVER_OWNER_LOCALPARTS`).
+                items:
+                  type: string
+                type: array
+              service:
+                default:
+                  httpPort: 3000
+                  kind: ClusterIP
+                description: Primary HTTP/WebSocket Service settings.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Optional Service metadata annotations.
+                    type: object
+                  httpPort:
+                    default: 3000
+                    description: HTTP/WebSocket service port (default `3000`).
+                    format: int32
+                    type: integer
+                  kind:
+                    default: ClusterIP
+                    description: Kubernetes Service type.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
+              shutdown:
+                default:
+                  drainTimeoutSeconds: 30
+                  preStopSleepSeconds: 5
+                description: Ordered graceful shutdown timings.
+                properties:
+                  drainTimeoutSeconds:
+                    default: 30
+                    description: Server drain deadline in seconds (`WADDLE_DRAIN_TIMEOUT_SECS`, default `30`).
+                    format: int64
+                    type: integer
+                  preStopSleepSeconds:
+                    default: 5
+                    description: Native `lifecycle.preStop.sleep` duration in seconds (default `5`).
+                    format: int64
+                    type: integer
+                  terminationGracePeriodSeconds:
+                    description: Pod `terminationGracePeriodSeconds`. Computed from the shutdown floor when omitted.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              spicedb:
+                description: External SpiceDB dependency (observed, never created by this operator).
+                properties:
+                  external:
+                    description: Explicit endpoint configuration when `mode` is `External`.
+                    nullable: true
+                    properties:
+                      endpoint:
+                        description: Full gRPC URI for SpiceDB (e.g. `http://spicedb:50051` or `https://spicedb.internal:50051`).
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                      insecure:
+                        default: false
+                        description: Controls `WADDLE_SPICEDB_INSECURE`.
+                        type: boolean
+                      presharedKeySecretRef:
+                        description: Optional explicit Secret key reference for `WADDLE_SPICEDB_PRESHARED_KEY`.
+                        nullable: true
+                        properties:
+                          key:
+                            description: Key inside the `Secret` data map.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          name:
+                            description: Name of the Kubernetes `Secret` in the same namespace.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serviceName:
+                        description: Optional same-namespace Kubernetes `Service` whose ready endpoints are verified.
+                        nullable: true
+                        type: string
+                    required:
+                    - endpoint
+                    type: object
+                  mode:
+                    default: SpiceDbOperator
+                    description: Selects how the SpiceDB endpoint and readiness are discovered.
+                    enum:
+                    - SpiceDbOperator
+                    - External
+                    type: string
+                  operator:
+                    description: '`SpiceDBCluster` reference when `mode` is `SpiceDbOperator`.'
+                    nullable: true
+                    properties:
+                      clusterName:
+                        description: Name of the `authzed.com/v1alpha1` `SpiceDBCluster` resource in this namespace.
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                      insecure:
+                        description: |-
+                          Override `WADDLE_SPICEDB_INSECURE`. When unset, derived automatically from
+                          `SpiceDBCluster.spec.config.tlsSecretName` (`true` when absent, `false` when set).
+                        nullable: true
+                        type: boolean
+                      port:
+                        default: 50051
+                        description: gRPC port exposed by the SpiceDB Service (default `50051`).
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                      presharedKeySecretRef:
+                        description: |-
+                          Optional explicit Secret key override for `WADDLE_SPICEDB_PRESHARED_KEY`.
+                          In ESO mode, defaults to the ESO target secret (`WADDLE_SPICEDB_PRESHARED_KEY`).
+                          In YOLO mode, defaults to `SpiceDBCluster.spec.secretName` (`preshared_key`).
+                        nullable: true
+                        properties:
+                          key:
+                            description: Key inside the `Secret` data map.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          name:
+                            description: Name of the Kubernetes `Secret` in the same namespace.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                        required:
+                        - key
+                        - name
+                        type: object
+                      requireReady:
+                        default: true
+                        description: Require `SpiceDBCluster` healthy status and >= 1 ready endpoint before leaving `Pending`.
+                        type: boolean
+                      serviceName:
+                        description: Optional Service name override (defaults to `clusterName`).
+                        nullable: true
+                        type: string
+                    required:
+                    - clusterName
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - rule: (self.mode == 'SpiceDbOperator' && has(self.operator) && !has(self.external)) || (self.mode == 'External' && has(self.external) && !has(self.operator))
+              telemetry:
+                default: {}
+                description: OpenTelemetry tracing and metrics configuration.
+                properties:
+                  deploymentEnvironment:
+                    description: Deployment environment resource attribute (`deployment.environment=...`).
+                    nullable: true
+                    type: string
+                  otlpEndpoint:
+                    description: OTLP collector endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`).
+                    nullable: true
+                    type: string
+                  otlpProtocol:
+                    description: OTLP protocol (`OTEL_EXPORTER_OTLP_PROTOCOL`, e.g. `"grpc"`).
+                    nullable: true
+                    type: string
+                  serviceName:
+                    description: Logical service name (`OTEL_SERVICE_NAME`).
+                    nullable: true
+                    type: string
+                  serviceVersion:
+                    description: Service version (`OTEL_SERVICE_VERSION`).
+                    nullable: true
+                    type: string
+                  tracesSampler:
+                    description: OTel trace sampler (`OTEL_TRACES_SAMPLER`).
+                    nullable: true
+                    type: string
+                  tracesSamplerArg:
+                    description: OTel trace sampler argument (`OTEL_TRACES_SAMPLER_ARG`).
+                    nullable: true
+                    type: string
+                type: object
+              updateStrategy:
+                default: Recreate
+                description: Deployment rollout strategy (defaults to `Recreate` for RWO PVC safety).
+                enum:
+                - Recreate
+                - RollingUpdate
+                type: string
+              wsKeepalive:
+                default:
+                  intervalSecs: 45
+                  missLimit: 2
+                description: RFC 7395 WebSocket keepalive settings.
+                properties:
+                  intervalSecs:
+                    default: 45
+                    description: Ping interval in seconds (`1..=120`, default `45`).
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  missLimit:
+                    default: 2
+                    description: Consecutive missed pongs before closing (`1..=10`, default `2`).
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                type: object
+              xmpp:
+                description: XMPP endpoint and domain settings.
+                properties:
+                  domain:
+                    description: Canonical XMPP domain (`WADDLE_XMPP_DOMAIN`).
+                    type: string
+                    x-kubernetes-validations:
+                    - rule: size(self) > 0
+                  enabled:
+                    default: true
+                    description: Enable XMPP subsystem (`WADDLE_XMPP_ENABLED`).
+                    type: boolean
+                  nativeAuthEnabled:
+                    default: true
+                    description: Enable native SCRAM authentication (`WADDLE_NATIVE_AUTH_ENABLED`).
+                    type: boolean
+                  publicWebsocketUrl:
+                    description: Trusted public RFC 7395 WebSocket endpoint (`WADDLE_XMPP_PUBLIC_WEBSOCKET_URL`).
+                    nullable: true
+                    type: string
+                  registrationEnabled:
+                    default: false
+                    description: Enable in-band account registration (`WADDLE_REGISTRATION_ENABLED`).
+                    type: boolean
+                  tlsSecretName:
+                    description: Optional same-namespace TLS Secret (`tls.crt`, `tls.key`) mounted at `/etc/waddle/tls`.
+                    nullable: true
+                    type: string
+                required:
+                - domain
+                type: object
+            required:
+            - baseUrl
+            - postgres
+            - secrets
+            - spicedb
+            - xmpp
+            type: object
+            x-kubernetes-validations:
+            - rule: '!has(self.replicas) || self.replicas >= 0'
+            - rule: '!has(self.replicas) || self.replicas <= 1 || self.clustering.enabled'
+            - rule: self.secrets.mode != 'Yolo' || ((!has(self.replicas) || self.replicas <= 1) && !self.clustering.enabled)
+            - rule: '!self.clustering.enabled || has(self.s3) || self.persistence.accessModes.exists(m, m == ''ReadWriteMany'')'
+            - rule: '!self.clustering.enabled || (has(self.deployment) && has(self.deployment.uuid) && size(self.deployment.uuid) > 0)'
+            - rule: '!(self.updateStrategy == ''RollingUpdate'' && self.persistence.enabled && self.persistence.accessModes.exists(m, m == ''ReadWriteOnce'') && !self.persistence.allowUnsafeRwoScale)'
+          status:
+            description: Observed status subresource for `WaddleServer`.
+            nullable: true
+            properties:
+              conditions:
+                description: Standard Kubernetes status conditions keyed by `type`.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      type: integer
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dependencies:
+                default:
+                  postgres:
+                    phase: Missing
+                    reason: ''
+                  secrets:
+                    phase: Missing
+                    reason: ''
+                  spicedb:
+                    phase: Missing
+                    reason: ''
+                description: Summary of external dependency and secret health.
+                properties:
+                  postgres:
+                    description: Observed PostgreSQL cluster / secret state.
+                    properties:
+                      message:
+                        description: Optional human-readable diagnostic message (never contains secret values).
+                        nullable: true
+                        type: string
+                      phase:
+                        description: Coarse health classification.
+                        enum:
+                        - Missing
+                        - CrdNotInstalled
+                        - NotReady
+                        - Ready
+                        type: string
+                      reason:
+                        description: Short machine-readable reason.
+                        type: string
+                    required:
+                    - phase
+                    - reason
+                    type: object
+                  secrets:
+                    description: Observed runtime secrets readiness.
+                    properties:
+                      message:
+                        description: Optional human-readable diagnostic message (never contains secret values).
+                        nullable: true
+                        type: string
+                      phase:
+                        description: Coarse health classification.
+                        enum:
+                        - Missing
+                        - CrdNotInstalled
+                        - NotReady
+                        - Ready
+                        type: string
+                      reason:
+                        description: Short machine-readable reason.
+                        type: string
+                    required:
+                    - phase
+                    - reason
+                    type: object
+                  spicedb:
+                    description: Observed SpiceDB cluster / endpoint state.
+                    properties:
+                      message:
+                        description: Optional human-readable diagnostic message (never contains secret values).
+                        nullable: true
+                        type: string
+                      phase:
+                        description: Coarse health classification.
+                        enum:
+                        - Missing
+                        - CrdNotInstalled
+                        - NotReady
+                        - Ready
+                        type: string
+                      reason:
+                        description: Short machine-readable reason.
+                        type: string
+                    required:
+                    - phase
+                    - reason
+                    type: object
+                required:
+                - postgres
+                - secrets
+                - spicedb
+                type: object
+              deploymentUuid:
+                description: Resolved non-secret `WADDLE_DEPLOYMENT_UUID` bound to this deployment.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: Latest `.metadata.generation` processed by the controller.
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: Current state machine phase.
+                enum:
+                - Initializing
+                - Pending
+                - Provisioning
+                - Reconciling
+                - Ready
+                - Degraded
+                - Failed
+                - Terminating
+                type: string
+              readyReplicas:
+                description: Number of ready server pods.
+                format: int32
+                type: integer
+              readySummary:
+                description: Compact `ready/desired` summary for `kubectl get` printer output.
+                type: string
+              replicas:
+                description: Current status replica count (used by the `/scale` subresource).
+                format: int32
+                type: integer
+              secretsMode:
+                description: Strategy for providing runtime secrets to the Waddle server.
+                enum:
+                - ExternalSecrets
+                - Yolo
+                nullable: true
+                type: string
+              updatedReplicas:
+                description: Number of updated server pods.
+                format: int32
+                type: integer
+            required:
+            - phase
+            - readyReplicas
+            - readySummary
+            - replicas
+            - updatedReplicas
+            type: object
+        required:
+        - spec
+        title: WaddleServer
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

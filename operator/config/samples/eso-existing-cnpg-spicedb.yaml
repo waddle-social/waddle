@@ -1,0 +1,42 @@
+apiVersion: waddle.social/v1alpha1
+kind: WaddleServer
+metadata:
+  name: waddle
+  namespace: waddle
+spec:
+  replicas: 3
+  mode: HomeServer
+  baseUrl: https://chat.example.com
+  xmpp:
+    domain: chat.example.com
+    publicWebsocketUrl: wss://chat.example.com/xmpp-websocket
+    tlsSecretName: waddle-xmpp-tls
+  postgres:
+    mode: CloudNativePg
+    cnpg:
+      clusterName: waddle-postgres
+  spicedb:
+    mode: SpiceDbOperator
+    operator:
+      clusterName: spicedb
+      port: 50051
+  secrets:
+    mode: ExternalSecrets
+    externalSecrets:
+      externalSecretName: waddle-runtime-secrets
+      apiVersion: Auto
+      clusteringKeypoolSecretName: waddle-clustering-keypool
+  deployment:
+    uuid: 11111111-2222-4333-8444-555555555555
+  s3:
+    endpoint: https://s3.example.com
+    bucket: waddle-uploads
+  clustering:
+    enabled: true
+    enrolledKeyCount: 5
+    keypairHeadroom: 2
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteMany
+    size: 20Gi

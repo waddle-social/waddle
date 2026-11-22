@@ -1,0 +1,25 @@
+[package]
+name = "waddle-operator-crd"
+description = "Custom Resource Definition schema and spec validation for WaddleServer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["derive", "cel"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_yaml_ng.workspace = true

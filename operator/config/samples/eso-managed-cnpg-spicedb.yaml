@@ -1,0 +1,47 @@
+apiVersion: waddle.social/v1alpha1
+kind: WaddleServer
+metadata:
+  name: waddle-managed
+  namespace: waddle
+spec:
+  replicas: 1
+  mode: HomeServer
+  baseUrl: https://chat.example.com
+  xmpp:
+    domain: chat.example.com
+    publicWebsocketUrl: wss://chat.example.com/xmpp-websocket
+  postgres:
+    mode: CloudNativePg
+    cnpg:
+      clusterName: waddle-postgres
+  spicedb:
+    mode: SpiceDbOperator
+    operator:
+      clusterName: spicedb
+      port: 50051
+  secrets:
+    mode: ExternalSecrets
+    externalSecrets:
+      apiVersion: Auto
+      managed:
+        secretStoreRef:
+          kind: ClusterSecretStore
+          name: vault-backend
+        refreshInterval: 1h
+        remoteRefs:
+          sessionKey:
+            key: waddle/prod/runtime
+            property: session_key
+          occupantIdSecret:
+            key: waddle/prod/runtime
+            property: occupant_id_secret
+          spicedbPresharedKey:
+            key: waddle/prod/runtime
+            property: spicedb_preshared_key
+  deployment:
+    uuid: 22222222-3333-4444-8555-666666666666
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi

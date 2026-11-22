@@ -1,0 +1,36 @@
+//! Kubernetes controller, observers, and workload builders for `WaddleServer`.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+/// Resolved non-secret runtime bindings passed to manifest builders.
+pub mod bindings;
+/// Command-line flags and environment configuration for the operator binary.
+pub mod cli;
+/// Controller loop, watches, and single-resource reconciliation entrypoint.
+pub mod controller;
+/// Typed operator error definitions.
+pub mod error;
+/// Imperative command execution and diff-gated status persistence.
+pub mod executor;
+/// Third-party CRD capability discovery and health projections (CNPG, SpiceDB, ESO).
+pub mod external_crds;
+/// HTTP `/healthz`, `/readyz`, and `/metrics` server.
+pub mod health;
+/// Kubernetes Lease-based leader election.
+pub mod leader_election;
+/// Prometheus metrics registry for reconciliation and phase gauges.
+pub mod metrics;
+/// Cluster state observer converting API objects into a pure `ObservedWorld`.
+pub mod observer;
+/// Kubernetes workload manifest builders (Deployment, ConfigMap, Services, PDB, NetworkPolicy, Secrets).
+pub mod resources;
+/// Cryptographic generators, redacted secret wrappers, and keypool validators.
+pub mod yolo;
+
+pub use cli::{Cli, Command, LogFormat, RunArgs};
+pub use controller::{reconcile_single, run_controller, ControllerContext};
+pub use error::OperatorError;
+pub use health::HealthState;
+pub use metrics::OperatorMetrics;
+pub use observer::OperatorPolicy;

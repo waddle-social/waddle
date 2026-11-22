@@ -1,0 +1,42 @@
+[package]
+name = "waddle-operator"
+description = "Kubernetes operator for deploying Waddle servers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+futures.workspace = true
+hex.workspace = true
+http.workspace = true
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["client", "derive", "ring", "runtime", "rustls-tls"] }
+rand.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+waddle-operator-crd = { path = "../waddle-operator-crd" }
+waddle-operator-fsm = { path = "../waddle-operator-fsm" }
+zeroize.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
