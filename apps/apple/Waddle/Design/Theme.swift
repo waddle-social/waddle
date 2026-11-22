@@ -61,8 +61,6 @@ enum Theme {
         static let callStageAvatar: CGFloat = 72
         /// Max width for message media so it never spans a wide Mac window.
         static let mediaMaxWidth: CGFloat = 360
-        /// Readable line length for the conversation column.
-        static let readableWidth: CGFloat = 820
         /// The accent rail on a row's or chip's leading edge (web's 3px
         /// inset rails: a mention, a reply quote, a block quote).
         static let rail: CGFloat = 3
