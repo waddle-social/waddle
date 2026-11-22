@@ -1192,10 +1192,20 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func setDmNotificationMode(dmJid: String, mode: WaddleNotifyMode, richPayloadOptIn: Bool) async throws  -> WaddleSetDmNotificationModeOutcome
 
     /**
+     * Leave or rejoin a room for every client of the account, by
+     * publishing the user's XEP-0402 bookmark for it: `autojoin` off
+     * and notifications off when leaving (XEP-0402 §4), `autojoin` on
+     * and the given notification mode when rejoining. Everything else
+     * on the bookmark is kept. This does not send room presence; pair
+     * it with `leave_room` or `join_room`.
+     */
+    func setRoomMembership(roomJid: String, membership: WaddleRoomMembership, name: String?) async throws  -> WaddleSetRoomMembershipOutcome
+
+    /**
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
-     * (creating one with `autojoin=false` when absent, so the call
-     * never changes join behavior). Foreign `<advanced/>` children
+     * (creating one with `autojoin=true` when absent: an own bookmark
+     * with `autojoin` off means the user left the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -3536,10 +3546,35 @@ open func setDmNotificationMode(dmJid: String, mode: WaddleNotifyMode, richPaylo
 }
 
     /**
+     * Leave or rejoin a room for every client of the account, by
+     * publishing the user's XEP-0402 bookmark for it: `autojoin` off
+     * and notifications off when leaving (XEP-0402 §4), `autojoin` on
+     * and the given notification mode when rejoining. Everything else
+     * on the bookmark is kept. This does not send room presence; pair
+     * it with `leave_room` or `join_room`.
+     */
+open func setRoomMembership(roomJid: String, membership: WaddleRoomMembership, name: String?)async throws  -> WaddleSetRoomMembershipOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_membership(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterTypeWaddleRoomMembership_lower(membership),FfiConverterOptionString.lower(name)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleSetRoomMembershipOutcome_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
-     * (creating one with `autojoin=false` when absent, so the call
-     * never changes join behavior). Foreign `<advanced/>` children
+     * (creating one with `autojoin=true` when absent: an own bookmark
+     * with `autojoin` off means the user left the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -7283,6 +7318,13 @@ public struct WaddleChannel: Equatable, Hashable {
      */
     public var autojoin: Bool
     /**
+     * `autojoin` of the user's own XEP-0402 bookmark for the room, or
+     * `None` when they have none or it could not be read (see
+     * [`WaddleTopology::bookmarks_loaded`]). `Some(false)` means the
+     * user left the room.
+     */
+    public var userAutojoin: Bool?
+    /**
      * `<conference name='…'>` from the user's XEP-0402 bookmark,
      * when present.
      */
@@ -7308,6 +7350,12 @@ public struct WaddleChannel: Equatable, Hashable {
          * to `true` (web parity).
          */autojoin: Bool,
         /**
+         * `autojoin` of the user's own XEP-0402 bookmark for the room, or
+         * `None` when they have none or it could not be read (see
+         * [`WaddleTopology::bookmarks_loaded`]). `Some(false)` means the
+         * user left the room.
+         */userAutojoin: Bool? = nil,
+        /**
          * `<conference name='…'>` from the user's XEP-0402 bookmark,
          * when present.
          */bookmarkName: String?,
@@ -7328,6 +7376,7 @@ public struct WaddleChannel: Equatable, Hashable {
         self.position = position
         self.spaceId = spaceId
         self.autojoin = autojoin
+        self.userAutojoin = userAutojoin
         self.bookmarkName = bookmarkName
         self.isGroupDm = isGroupDm
         self.membersOnly = membersOnly
@@ -7357,6 +7406,7 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
                 position: FfiConverterInt32.read(from: &buf),
                 spaceId: FfiConverterString.read(from: &buf),
                 autojoin: FfiConverterBool.read(from: &buf),
+                userAutojoin: FfiConverterOptionBool.read(from: &buf),
                 bookmarkName: FfiConverterOptionString.read(from: &buf),
                 isGroupDm: FfiConverterBool.read(from: &buf),
                 membersOnly: FfiConverterOptionBool.read(from: &buf)
@@ -7372,6 +7422,7 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
         FfiConverterInt32.write(value.position, into: &buf)
         FfiConverterString.write(value.spaceId, into: &buf)
         FfiConverterBool.write(value.autojoin, into: &buf)
+        FfiConverterOptionBool.write(value.userAutojoin, into: &buf)
         FfiConverterOptionString.write(value.bookmarkName, into: &buf)
         FfiConverterBool.write(value.isGroupDm, into: &buf)
         FfiConverterOptionBool.write(value.membersOnly, into: &buf)
@@ -13484,12 +13535,24 @@ public func FfiConverterTypeWaddleThreadTarget_lower(_ value: WaddleThreadTarget
 public struct WaddleTopology: Equatable, Hashable {
     public var spaces: [WaddleSpace]
     public var channels: [WaddleChannel]
+    /**
+     * Whether the user's own XEP-0402 bookmarks were read. When
+     * `false`, no channel's `user_autojoin` says which rooms the user
+     * left.
+     */
+    public var bookmarksLoaded: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(spaces: [WaddleSpace], channels: [WaddleChannel]) {
+    public init(spaces: [WaddleSpace], channels: [WaddleChannel],
+        /**
+         * Whether the user's own XEP-0402 bookmarks were read. When
+         * `false`, no channel's `user_autojoin` says which rooms the user
+         * left.
+         */bookmarksLoaded: Bool = true) {
         self.spaces = spaces
         self.channels = channels
+        self.bookmarksLoaded = bookmarksLoaded
     }
 
 
@@ -13509,13 +13572,15 @@ public struct FfiConverterTypeWaddleTopology: FfiConverterRustBuffer {
         return
             try WaddleTopology(
                 spaces: FfiConverterSequenceTypeWaddleSpace.read(from: &buf),
-                channels: FfiConverterSequenceTypeWaddleChannel.read(from: &buf)
+                channels: FfiConverterSequenceTypeWaddleChannel.read(from: &buf),
+                bookmarksLoaded: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleTopology, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeWaddleSpace.write(value.spaces, into: &buf)
         FfiConverterSequenceTypeWaddleChannel.write(value.channels, into: &buf)
+        FfiConverterBool.write(value.bookmarksLoaded, into: &buf)
     }
 }
 
@@ -18121,6 +18186,87 @@ public func FfiConverterTypeWaddleReferenceType_lower(_ value: WaddleReferenceTy
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Whether the user is in a room, as their own XEP-0402 bookmark
+ * records it for every client of the account.
+ */
+
+public enum WaddleRoomMembership: Equatable, Hashable {
+
+    /**
+     * Left: `autojoin` off and notifications off.
+     */
+    case left
+    /**
+     * In the room: `autojoin` on, with `notify_mode` as its
+     * notification mode.
+     */
+    case joined(notifyMode: WaddleNotifyMode
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRoomMembership: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRoomMembership: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleRoomMembership
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoomMembership {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .left
+
+        case 2: return .joined(notifyMode: try FfiConverterTypeWaddleNotifyMode.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleRoomMembership, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .left:
+            writeInt(&buf, Int32(1))
+
+
+        case let .joined(notifyMode):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWaddleNotifyMode.write(notifyMode, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomMembership_lift(_ buf: RustBuffer) throws -> WaddleRoomMembership {
+    return try FfiConverterTypeWaddleRoomMembership.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomMembership_lower(_ value: WaddleRoomMembership) -> RustBuffer {
+    return FfiConverterTypeWaddleRoomMembership.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Judgment categories. Unknown wire categories never reach this enum:
  * the parser skips them.
  */
@@ -18587,6 +18733,96 @@ public func FfiConverterTypeWaddleSetDmNotificationModeOutcome_lift(_ buf: RustB
 #endif
 public func FfiConverterTypeWaddleSetDmNotificationModeOutcome_lower(_ value: WaddleSetDmNotificationModeOutcome) -> RustBuffer {
     return FfiConverterTypeWaddleSetDmNotificationModeOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Typed outcome of [`WaddleClient::set_room_membership`]. Mirrors
+ * [`WaddleSetRoomNotificationModeOutcome`].
+ */
+
+public enum WaddleSetRoomMembershipOutcome: Equatable, Hashable {
+
+    /**
+     * The bookmark was published. Carries the surfaced item.
+     */
+    case ok(item: WaddleBookmarkItem
+    )
+    /**
+     * XEP-0060 `precondition-not-met` on the publish.
+     */
+    case nodeConfigMismatch
+    /**
+     * Any other stanza-level error (condition stays on the Rust side).
+     */
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSetRoomMembershipOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSetRoomMembershipOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSetRoomMembershipOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSetRoomMembershipOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ok(item: try FfiConverterTypeWaddleBookmarkItem.read(from: &buf)
+        )
+
+        case 2: return .nodeConfigMismatch
+
+        case 3: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSetRoomMembershipOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .ok(item):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleBookmarkItem.write(item, into: &buf)
+
+
+        case .nodeConfigMismatch:
+            writeInt(&buf, Int32(2))
+
+
+        case .error:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSetRoomMembershipOutcome_lift(_ buf: RustBuffer) throws -> WaddleSetRoomMembershipOutcome {
+    return try FfiConverterTypeWaddleSetRoomMembershipOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSetRoomMembershipOutcome_lower(_ value: WaddleSetRoomMembershipOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleSetRoomMembershipOutcome.lower(value)
 }
 
 
@@ -22239,7 +22475,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode() != 30190) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_membership() != 58882) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 22204) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server() != 33996) {

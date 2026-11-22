@@ -406,6 +406,8 @@ impl DiscoveryExt for ClientHandle {
         let bookmarks_fut = super::bookmarks::fetch_user_bookmarks(self);
         let (mut spaces, muc_rooms_res, bookmarks) =
             tokio::join!(spaces_fut, muc_rooms_fut, bookmarks_fut);
+        let bookmarks_loaded = bookmarks.is_some();
+        let bookmarks = bookmarks.unwrap_or_default();
 
         // Hydrate channels across spaces concurrently while preserving space order.
         let space_ids: Vec<SpaceNode> = spaces.iter().map(|space| space.id.clone()).collect();
@@ -490,6 +492,7 @@ impl DiscoveryExt for ClientHandle {
                             // autojoin (web parity); the user's XEP-0402
                             // bookmark below can override this.
                             autojoin: true,
+                            user_autojoin: None,
                             bookmark_name: None,
                             is_group_dm,
                             members_only,
@@ -506,8 +509,8 @@ impl DiscoveryExt for ClientHandle {
         // (3) XEP-0402: the user's own-PEP bookmarks stamp
         // autojoin/name onto catalog rooms and append bookmark-only
         // rooms (kept only when disco#info confirms MUC). A failed
-        // bookmarks fetch yields an empty list, degrading to the
-        // catalog-only result (web parity).
+        // bookmarks fetch degrades to the catalog-only result (web
+        // parity) and is reported as `bookmarks_loaded: false`.
         let appended = super::bookmarks::merge_bookmarks_into_channels(
             self,
             &mut channels,
@@ -525,6 +528,10 @@ impl DiscoveryExt for ClientHandle {
             });
         }
 
-        Ok(DiscoveredTopology { spaces, channels })
+        Ok(DiscoveredTopology {
+            spaces,
+            channels,
+            bookmarks_loaded,
+        })
     }
 }

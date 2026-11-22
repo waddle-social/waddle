@@ -280,6 +280,7 @@ pub fn parse_space_channels_result(
                 position: position as i32,
                 space_id: space_id.clone(),
                 autojoin,
+                user_autojoin: None,
                 bookmark_name: None,
                 is_group_dm: false,
                 members_only: None,

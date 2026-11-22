@@ -1019,6 +1019,7 @@ mod bookmark_merge {
             position: 0,
             space_id: standalone(),
             autojoin: true,
+            user_autojoin: None,
             bookmark_name: None,
             is_group_dm: false,
             members_only: None,
@@ -1105,12 +1106,10 @@ mod bookmark_merge {
     }
 
     #[test]
-    fn failed_bookmarks_fetch_degrades_to_empty_list() {
-        // Web parity: the whole pubsub fetch sits in a bare
-        // `try/catch` — any failure means "no bookmarks", never a
-        // failed topology load.
+    fn absent_bookmarks_node_is_an_empty_list() {
+        // The node does not exist until the first publish.
         let driver = MockDriver::new(vec![Err(stanza_error())]);
-        assert!(block_on(fetch_user_bookmarks(&driver)).is_empty());
+        assert_eq!(block_on(fetch_user_bookmarks(&driver)), Some(Vec::new()));
     }
 
     #[test]
@@ -1119,7 +1118,7 @@ mod bookmark_merge {
             BOOKMARKS_NS,
             vec![bookmark("chat@muc.waddle.test", Some("Chat"), true)],
         ))]);
-        let items = block_on(fetch_user_bookmarks(&driver));
+        let items = block_on(fetch_user_bookmarks(&driver)).expect("bookmarks read");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].jid.to_string(), "chat@muc.waddle.test");
         // The fetch IQ must omit `to=` so the server routes it to the
@@ -1273,9 +1272,10 @@ mod room_discovery {
 
     use crate::client::ClientHandle;
     use crate::command::XmppCommand;
-    use crate::error::ClientResult;
+    use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
     use crate::state::SessionSnapshot;
 
+    use super::super::types::DiscoveredTopology;
     use super::super::DiscoveryExt;
     use super::bookmark_merge::{bookmark, bookmarks_response, disco_info_response, stanza_error};
     use super::{DiscoveredChannel, Element, SpaceNode, BOOKMARKS_NS, MUC_NS};
@@ -1386,5 +1386,95 @@ mod room_discovery {
                 ("bookmarked@muc.example.com", Some(true)),
             ]
         );
+    }
+    /// A deployment with two listed rooms, whose own-bookmarks query is
+    /// answered by `bookmarks`.
+    async fn discover_with_bookmarks(
+        bookmarks: fn() -> ClientResult<Element>,
+    ) -> DiscoveredTopology {
+        let (handle, driver) = mock_client(move |iq| {
+            let response = match iq.attr("to") {
+                Some("example.com" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                Some("muc.example.com") => r#"<iq xmlns='jabber:client' type='result'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='left@muc.example.com'/>
+                        <item jid='untouched@muc.example.com'/>
+                    </query>
+                </iq>"#,
+                None => return bookmarks(),
+                Some(_) => return Ok(disco_info_response(&[MUC_NS])),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+        topology
+    }
+
+    fn own_autojoin(topology: &DiscoveredTopology) -> Vec<(&str, Option<bool>)> {
+        topology
+            .channels
+            .iter()
+            .map(|room| (room.room_jid.as_str(), room.user_autojoin))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_reports_the_users_own_bookmark_apart_from_the_default() {
+        let topology = discover_with_bookmarks(|| {
+            Ok(bookmarks_response(
+                BOOKMARKS_NS,
+                vec![
+                    bookmark("left@muc.example.com", None, false),
+                    bookmark("elsewhere@muc.example.com", None, false),
+                ],
+            ))
+        })
+        .await;
+        assert!(topology.bookmarks_loaded);
+        assert_eq!(
+            own_autojoin(&topology),
+            [
+                ("left@muc.example.com", Some(false)),
+                ("untouched@muc.example.com", None),
+                ("elsewhere@muc.example.com", Some(false)),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_says_when_the_users_bookmarks_could_not_be_read() {
+        // Without this a room the user left would look like one they
+        // never bookmarked, and be joined again.
+        let topology = discover_with_bookmarks(|| {
+            Err(ClientError::StanzaError(StanzaError {
+                error_type: StanzaErrorType::Wait,
+                condition: "internal-server-error".to_string(),
+                text: None,
+                application_condition: None,
+            }))
+        })
+        .await;
+        assert!(!topology.bookmarks_loaded);
+        assert_eq!(
+            own_autojoin(&topology),
+            [
+                ("left@muc.example.com", None),
+                ("untouched@muc.example.com", None),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_account_that_never_bookmarked_anything_has_readable_bookmarks() {
+        // The node does not exist until the first publish.
+        let topology = discover_with_bookmarks(|| Err(stanza_error())).await;
+        assert!(topology.bookmarks_loaded);
     }
 }

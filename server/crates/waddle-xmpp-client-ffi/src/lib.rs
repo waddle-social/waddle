@@ -114,7 +114,8 @@ pub use group_dm::WaddleGroupDmHistoryAccess;
 pub use inbox_verbs::{WaddleInboxMessageContent, WaddleInboxReadFilter};
 pub use messaging_verbs::WaddleMessageAudience;
 pub use notify_settings::{
-    WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
+    WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleRoomMembership,
+    WaddleSetDmNotificationModeOutcome, WaddleSetRoomMembershipOutcome,
     WaddleSetRoomNotificationModeOutcome,
 };
 pub use profile_verbs::{WaddleActivity, WaddleMood, WaddlePepProfile, WaddleTune, WaddleVCard4};

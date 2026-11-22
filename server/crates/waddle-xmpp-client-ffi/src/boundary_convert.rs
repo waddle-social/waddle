@@ -11,6 +11,7 @@ pub(crate) fn empty_topology() -> WaddleTopology {
     WaddleTopology {
         spaces: Vec::new(),
         channels: Vec::new(),
+        bookmarks_loaded: false,
     }
 }
 
@@ -40,11 +41,13 @@ pub(crate) fn topology_to_ffi(
                 position: channel.position,
                 space_id: channel.space_id.as_str().to_string(),
                 autojoin: channel.autojoin,
+                user_autojoin: channel.user_autojoin,
                 bookmark_name: channel.bookmark_name,
                 is_group_dm: channel.is_group_dm,
                 members_only: channel.members_only,
             })
             .collect(),
+        bookmarks_loaded: topology.bookmarks_loaded,
     }
 }
 

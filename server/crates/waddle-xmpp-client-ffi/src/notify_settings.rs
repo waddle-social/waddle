@@ -18,9 +18,10 @@ use uuid::Uuid;
 
 use waddle_xmpp_client::error::STANZA_CONDITION_ITEM_NOT_FOUND;
 use waddle_xmpp_client::notification_settings::{
-    parse_dm_bookmark_payloads, set_dm_notification_mode, set_room_notification_mode,
-    SetDmNotificationMode, SetDmNotificationModeOutcome, SetRoomNotificationMode,
-    SetRoomNotificationModeOutcome,
+    parse_dm_bookmark_payloads, set_dm_notification_mode, set_room_membership,
+    set_room_notification_mode, RoomMembership, SetDmNotificationMode,
+    SetDmNotificationModeOutcome, SetRoomMembership, SetRoomMembershipOutcome,
+    SetRoomNotificationMode, SetRoomNotificationModeOutcome,
 };
 use waddle_xmpp_client::push::CommandDriver;
 use waddle_xmpp_client::xep::xep0402::{
@@ -140,6 +141,40 @@ pub enum WaddleSetRoomNotificationModeOutcome {
     Error,
 }
 
+/// Whether the user is in a room, as their own XEP-0402 bookmark
+/// records it for every client of the account.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleRoomMembership {
+    /// Left: `autojoin` off and notifications off.
+    Left,
+    /// In the room: `autojoin` on, with `notify_mode` as its
+    /// notification mode.
+    Joined { notify_mode: WaddleNotifyMode },
+}
+
+impl From<WaddleRoomMembership> for RoomMembership {
+    fn from(membership: WaddleRoomMembership) -> Self {
+        match membership {
+            WaddleRoomMembership::Left => Self::Left,
+            WaddleRoomMembership::Joined { notify_mode } => Self::Joined {
+                notify_mode: notify_mode.into(),
+            },
+        }
+    }
+}
+
+/// Typed outcome of [`WaddleClient::set_room_membership`]. Mirrors
+/// [`WaddleSetRoomNotificationModeOutcome`].
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum WaddleSetRoomMembershipOutcome {
+    /// The bookmark was published. Carries the surfaced item.
+    Ok { item: WaddleBookmarkItem },
+    /// XEP-0060 `precondition-not-met` on the publish.
+    NodeConfigMismatch,
+    /// Any other stanza-level error (condition stays on the Rust side).
+    Error,
+}
+
 /// Typed outcome of [`WaddleClient::set_dm_notification_mode`] (issue
 /// #720). Mirrors [`WaddleSetRoomNotificationModeOutcome`] with one
 /// extra variant: the DM node is sparse / override-only, so returning
@@ -244,6 +279,21 @@ pub(crate) fn room_outcome_to_ffi(
     }
 }
 
+/// Map the core membership outcome onto the FFI shape.
+pub(crate) fn membership_outcome_to_ffi(
+    outcome: SetRoomMembershipOutcome,
+) -> WaddleSetRoomMembershipOutcome {
+    match outcome {
+        SetRoomMembershipOutcome::Ok { item } => WaddleSetRoomMembershipOutcome::Ok {
+            item: bookmark_item_to_ffi(item),
+        },
+        SetRoomMembershipOutcome::NodeConfigMismatch => {
+            WaddleSetRoomMembershipOutcome::NodeConfigMismatch
+        }
+        _ => WaddleSetRoomMembershipOutcome::Error,
+    }
+}
+
 /// Map the core DM outcome onto the FFI shape.
 pub(crate) fn dm_outcome_to_ffi(
     outcome: SetDmNotificationModeOutcome,
@@ -334,8 +384,8 @@ impl WaddleClient {
 
     /// Set the per-chat XEP-0492 notification mode for one room by
     /// merging into the user's XEP-0402 bookmark for that room
-    /// (creating one with `autojoin=false` when absent, so the call
-    /// never changes join behavior). Foreign `<advanced/>` children
+    /// (creating one with `autojoin=true` when absent: an own bookmark
+    /// with `autojoin` off means the user left the room). Foreign `<advanced/>` children
     /// and identity-scoped siblings written by other clients are
     /// preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
     /// toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -359,6 +409,34 @@ impl WaddleClient {
         let driver = TimeoutCommandDriver { handle };
         match set_room_notification_mode(&driver, options).await {
             Ok(outcome) => Ok(room_outcome_to_ffi(outcome)),
+            Err(e) => Err(client_error_to_waddle(&e)),
+        }
+    }
+
+    /// Leave or rejoin a room for every client of the account, by
+    /// publishing the user's XEP-0402 bookmark for it: `autojoin` off
+    /// and notifications off when leaving (XEP-0402 §4), `autojoin` on
+    /// and the given notification mode when rejoining. Everything else
+    /// on the bookmark is kept. This does not send room presence; pair
+    /// it with `leave_room` or `join_room`.
+    pub async fn set_room_membership(
+        &self,
+        room_jid: String,
+        membership: WaddleRoomMembership,
+        name: Option<String>,
+    ) -> Result<WaddleSetRoomMembershipOutcome, WaddleError> {
+        let room_jid = parse_bookmark_target_jid(&room_jid)?;
+        let Some(handle) = self.clone_handle().await else {
+            return Err(WaddleError::NotConnected);
+        };
+        let options = SetRoomMembership {
+            room_jid,
+            name: normalize_bookmark_name(name),
+            membership: membership.into(),
+        };
+        let driver = TimeoutCommandDriver { handle };
+        match set_room_membership(&driver, options).await {
+            Ok(outcome) => Ok(membership_outcome_to_ffi(outcome)),
             Err(e) => Err(client_error_to_waddle(&e)),
         }
     }

@@ -710,6 +710,12 @@ pub struct WaddleChannel {
     /// user's own bookmark wins; non-bookmarked catalog rooms default
     /// to `true` (web parity).
     pub autojoin: bool,
+    /// `autojoin` of the user's own XEP-0402 bookmark for the room, or
+    /// `None` when they have none or it could not be read (see
+    /// [`WaddleTopology::bookmarks_loaded`]). `Some(false)` means the
+    /// user left the room.
+    #[uniffi(default = None)]
+    pub user_autojoin: Option<bool>,
     /// `<conference name='…'>` from the user's XEP-0402 bookmark,
     /// when present.
     pub bookmark_name: Option<String>,
@@ -726,6 +732,11 @@ pub struct WaddleChannel {
 pub struct WaddleTopology {
     pub spaces: Vec<WaddleSpace>,
     pub channels: Vec<WaddleChannel>,
+    /// Whether the user's own XEP-0402 bookmarks were read. When
+    /// `false`, no channel's `user_autojoin` says which rooms the user
+    /// left.
+    #[uniffi(default = true)]
+    pub bookmarks_loaded: bool,
 }
 
 /// XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.

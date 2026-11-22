@@ -11,6 +11,7 @@
 
 use jid::BareJid;
 
+use crate::error::{ClientError, STANZA_CONDITION_ITEM_NOT_FOUND};
 use crate::push::CommandDriver;
 use crate::xep::xep0402::{build_fetch_bookmarks_iq, parse_bookmarks_response, BookmarkItem};
 
@@ -20,15 +21,23 @@ use super::parsing::parse_disco_info_result;
 use super::types::{DiscoveredChannel, DiscoveredChannelType, SpaceNode};
 use super::{MUC_NS, STANDALONE_SPACE_ID, WADDLE_ROOM_METADATA_FORM_TYPE};
 
-/// Fetch the user's own-PEP XEP-0402 bookmarks. Any failure — stanza
-/// error, transport error, unparseable reply — yields an empty list so
-/// `discover_topology` degrades to the catalog-only result exactly
-/// like the web client's bare `try/catch` around the pubsub fetch.
-pub(super) async fn fetch_user_bookmarks<D: CommandDriver>(driver: &D) -> Vec<BookmarkItem> {
+/// Fetch the user's own-PEP XEP-0402 bookmarks. An account that never
+/// published one has no node, which is an empty list. Any other
+/// failure yields `None`: `discover_topology` then degrades to the
+/// catalog-only result, like the web client's bare `try/catch` around
+/// the pubsub fetch, and reports that the bookmarks were not read.
+pub(super) async fn fetch_user_bookmarks<D: CommandDriver>(
+    driver: &D,
+) -> Option<Vec<BookmarkItem>> {
     let fetch_iq = build_fetch_bookmarks_iq(&format!("bookmarks-{}", next_id()));
     match driver.send_iq(fetch_iq).await {
-        Ok(elem) => parse_bookmarks_response(&elem),
-        Err(_) => Vec::new(),
+        Ok(elem) => Some(parse_bookmarks_response(&elem)),
+        Err(ClientError::StanzaError(error))
+            if error.condition == STANZA_CONDITION_ITEM_NOT_FOUND =>
+        {
+            Some(Vec::new())
+        }
+        Err(_) => None,
     }
 }
 
@@ -126,6 +135,7 @@ async fn hydrate_bookmark_only_rooms<D: CommandDriver>(
 /// Stamp a bookmark's autojoin/name onto a catalog channel.
 pub(super) fn stamp_bookmark(channel: &mut DiscoveredChannel, bookmark: &BookmarkItem) {
     channel.autojoin = bookmark.autojoin;
+    channel.user_autojoin = Some(bookmark.autojoin);
     channel.bookmark_name = bookmark.name.clone();
 }
 
@@ -174,6 +184,7 @@ pub(super) fn bookmark_only_channel(
         position,
         space_id: standalone_space_id.clone(),
         autojoin: bookmark.autojoin,
+        user_autojoin: Some(bookmark.autojoin),
         bookmark_name: bookmark.name.clone(),
         is_group_dm,
         members_only,

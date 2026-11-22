@@ -15,19 +15,21 @@ use waddle_xmpp_client::error::{
     ClientError, StanzaError, StanzaErrorType, STANZA_CONDITION_ITEM_NOT_FOUND,
 };
 use waddle_xmpp_client::notification_settings::{
-    SetDmNotificationModeOutcome, SetRoomNotificationModeOutcome,
+    RoomMembership, SetDmNotificationModeOutcome, SetRoomMembershipOutcome,
+    SetRoomNotificationModeOutcome,
 };
 use waddle_xmpp_client::xep::xep0402::BookmarkItem;
 use waddle_xmpp_client::xep::xep0492::NotifyMode;
 
 use crate::notify_settings::{
     bookmark_item_to_ffi, bookmarks_from_fetch_result, dm_bookmarks_from_fetch_result,
-    dm_outcome_to_ffi, normalize_bookmark_name, parse_bookmark_target_jid,
-    parse_dm_bookmarks_response, room_outcome_to_ffi,
+    dm_outcome_to_ffi, membership_outcome_to_ffi, normalize_bookmark_name,
+    parse_bookmark_target_jid, parse_dm_bookmarks_response, room_outcome_to_ffi,
 };
 use crate::{
     WaddleClient, WaddleClientEvent, WaddleConfig, WaddleDmBookmarkItem, WaddleError,
-    WaddleEventListener, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
+    WaddleEventListener, WaddleNotifyMode, WaddleRoomMembership,
+    WaddleSetDmNotificationModeOutcome, WaddleSetRoomMembershipOutcome,
     WaddleSetRoomNotificationModeOutcome,
 };
 
@@ -470,5 +472,44 @@ async fn set_dm_notification_mode_requires_connection() {
             )
             .await,
         Err(WaddleError::NotConnected),
+    );
+}
+
+// ── Room membership (leave / rejoin) ────────────────────────────────────────
+
+#[test]
+fn membership_crosses_the_boundary_with_its_notify_mode() {
+    assert_eq!(
+        RoomMembership::from(WaddleRoomMembership::Left),
+        RoomMembership::Left
+    );
+    assert_eq!(
+        RoomMembership::from(WaddleRoomMembership::Joined {
+            notify_mode: WaddleNotifyMode::OnMention
+        }),
+        RoomMembership::Joined {
+            notify_mode: NotifyMode::OnMention
+        }
+    );
+}
+
+#[test]
+fn membership_outcome_carries_the_published_bookmark() {
+    let mut left = bookmark_with_extensions(
+        "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+            <notify xmlns='urn:xmpp:notification-settings:1'><never/></notify>\
+        </extensions>",
+    );
+    left.autojoin = false;
+    let outcome = membership_outcome_to_ffi(SetRoomMembershipOutcome::Ok { item: left });
+    let WaddleSetRoomMembershipOutcome::Ok { item } = outcome else {
+        panic!("expected ok outcome");
+    };
+    assert_eq!(item.jid, "room@muc.waddle.test");
+    assert!(!item.autojoin);
+    assert_eq!(item.notify_mode, Some(WaddleNotifyMode::Never));
+    assert_eq!(
+        membership_outcome_to_ffi(SetRoomMembershipOutcome::NodeConfigMismatch),
+        WaddleSetRoomMembershipOutcome::NodeConfigMismatch
     );
 }
