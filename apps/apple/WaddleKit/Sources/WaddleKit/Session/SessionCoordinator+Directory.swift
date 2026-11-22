@@ -145,13 +145,18 @@ extension SessionCoordinator {
 
     /// Reads the notification settings of rooms the account joined again
     /// on another device. They were off while the rooms were left, and
-    /// nothing else reads them again before the next connect.
+    /// nothing else reads them again before the next connect. Each read
+    /// takes its turn among the writes to that room's settings, so a
+    /// change made here meanwhile is stored after it and stands.
     private func loadNotifySettings(ofRejoined rooms: [BareJID]) async {
-        guard !rooms.isEmpty, let settings = try? await port.fetchNotifySettings() else { return }
-        guard !isStopped, !Task.isCancelled else { return }
-        for conversation in rooms.map(ConversationID.room) where !directory.hasLeft(conversation.jid) {
-            directory.setStoredNotifyMode(settings.modes[conversation], for: conversation)
-            directory.setShowsMessagesInPush(settings.showingMessagesInPush.contains(conversation), for: conversation)
+        for conversation in rooms.map(ConversationID.room) {
+            try? await afterEarlierBookmarkWrites(to: conversation) { [self] in
+                let settings = try await port.fetchNotifySettings()
+                guard !isStopped, !directory.hasLeft(conversation.jid) else { return }
+                directory.setStoredNotifyMode(settings.modes[conversation], for: conversation)
+                directory.setShowsMessagesInPush(
+                    settings.showingMessagesInPush.contains(conversation), for: conversation)
+            }
         }
     }
 

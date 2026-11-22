@@ -380,6 +380,27 @@ struct LeaveRoomTests {
         #expect(coordinator.directory.notifyMode(for: roomConversation) == .onMention)
     }
 
+    @Test func settingsReadForARejoinedRoomDoNotUndoAMuteMadeMeanwhile() async throws {
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+        coordinator.directory.setNotifyMode(.never, for: roomConversation)
+        port.topology = Topology(spaces: [], channels: [general])
+        port.heldDirectoryVerbs = ["fetchNotifySettings"]
+        let refresh = Task { await coordinator.refreshDirectory() }
+        while port.heldDirectoryRequests.isEmpty { await Task.yield() }
+
+        // The room is listed again, and the user mutes it before the
+        // settings asked for above have come back.
+        port.heldDirectoryVerbs = []
+        let mute = Task { try await coordinator.setNotifyMode(.never, for: roomConversation) }
+        for _ in 0..<50 { await Task.yield() }
+        port.releaseDirectoryRequests()
+        await refresh.value
+        try await mute.value
+
+        #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
+        #expect(port.notifySettings.modes[roomConversation] == .never)
+    }
+
     @Test func groupChatsAreNeverListedAsLeft() {
         let (coordinator, _) = online([Channel(roomJID: room, name: "group", isGroupDM: true, hasLeft: true)])
         #expect(coordinator.directory.leftRooms.isEmpty)

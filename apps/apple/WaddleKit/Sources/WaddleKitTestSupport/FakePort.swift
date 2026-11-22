@@ -393,7 +393,10 @@ final class FakePort: XmppPort {
     }
     func fetchNotifySettings() async throws -> NotifySettings {
         if failsNotifySettingsFetch { throw PortError.timeout }
-        return notifySettings
+        // A held answer is the one from when it was asked for.
+        let answer = notifySettings
+        await holdDirectoryVerb("fetchNotifySettings")
+        return answer
     }
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
         avatarLookups.append(jid)
