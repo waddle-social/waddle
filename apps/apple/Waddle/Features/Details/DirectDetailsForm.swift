@@ -179,8 +179,7 @@ struct PeerProfileSheet: View {
     /// Their role in the room the profile was opened from: their
     /// occupant's while they are in it, else the member list's.
     private var roomRole: MemberRoleLine? {
-        if let room = profile.room, let nick = profile.nick,
-           let occupant = session.presence.occupant(named: nick, in: room) {
+        if let occupant = PeerProfilePresence.occupant(of: profile, session: session) {
             return MemberRoleLine(affiliation: occupant.affiliation, hats: occupant.hats)
         }
         return profile.affiliation.map { MemberRoleLine(affiliation: $0, hats: []) }
@@ -219,14 +218,23 @@ enum PeerProfilePresence {
                 idleSince: nil
             )
         }
-        if let room = profile.room, let nick = profile.nick,
-           let occupant = session.presence.occupant(named: nick, in: room),
-           profile.jid == nil || occupant.realJID == nil || occupant.realJID == profile.jid {
+        if let occupant = occupant(of: profile, session: session) {
             return Resolved(availability: occupant.availability, status: occupant.status, idleSince: nil)
         }
         if let jid = profile.jid, let contact = session.presence.contacts[jid] {
             return Resolved(availability: contact.availability, status: contact.status, idleSince: contact.idleSince)
         }
         return Resolved(availability: .offline, status: nil, idleSince: nil)
+    }
+
+    /// The room occupant the profile was opened from, only while its nick
+    /// still belongs to the same person: someone who takes a freed nick
+    /// is not them.
+    @MainActor
+    static func occupant(of profile: PeerProfileRoute, session: SessionCoordinator) -> Occupant? {
+        guard let room = profile.room, let nick = profile.nick,
+              let occupant = session.presence.occupant(named: nick, in: room) else { return nil }
+        guard let jid = profile.jid, let realJID = occupant.realJID else { return occupant }
+        return realJID == jid ? occupant : nil
     }
 }
