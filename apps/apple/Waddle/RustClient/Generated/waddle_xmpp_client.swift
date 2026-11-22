@@ -1205,7 +1205,8 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
      * (creating one with `autojoin=true` when absent: an own bookmark
-     * with `autojoin` off means the user left the room). Foreign `<advanced/>` children
+     * with `autojoin` off and notifications off means the user left
+     * the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -3574,7 +3575,8 @@ open func setRoomMembership(roomJid: String, membership: WaddleRoomMembership, n
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
      * (creating one with `autojoin=true` when absent: an own bookmark
-     * with `autojoin` off means the user left the room). Foreign `<advanced/>` children
+     * with `autojoin` off and notifications off means the user left
+     * the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -7318,12 +7320,12 @@ public struct WaddleChannel: Equatable, Hashable {
      */
     public var autojoin: Bool
     /**
-     * `autojoin` of the user's own XEP-0402 bookmark for the room, or
-     * `None` when they have none or it could not be read (see
-     * [`WaddleTopology::bookmarks_loaded`]). `Some(false)` means the
-     * user left the room.
+     * The user left the room: their own XEP-0402 bookmark for it has
+     * `autojoin` off and notifications off, as `set_room_membership`
+     * publishes. `false` when they have no bookmark, or when it could
+     * not be read (see [`WaddleTopology::bookmarks_loaded`]).
      */
-    public var userAutojoin: Bool?
+    public var hasLeft: Bool
     /**
      * `<conference name='…'>` from the user's XEP-0402 bookmark,
      * when present.
@@ -7350,11 +7352,11 @@ public struct WaddleChannel: Equatable, Hashable {
          * to `true` (web parity).
          */autojoin: Bool,
         /**
-         * `autojoin` of the user's own XEP-0402 bookmark for the room, or
-         * `None` when they have none or it could not be read (see
-         * [`WaddleTopology::bookmarks_loaded`]). `Some(false)` means the
-         * user left the room.
-         */userAutojoin: Bool? = nil,
+         * The user left the room: their own XEP-0402 bookmark for it has
+         * `autojoin` off and notifications off, as `set_room_membership`
+         * publishes. `false` when they have no bookmark, or when it could
+         * not be read (see [`WaddleTopology::bookmarks_loaded`]).
+         */hasLeft: Bool = false,
         /**
          * `<conference name='…'>` from the user's XEP-0402 bookmark,
          * when present.
@@ -7376,7 +7378,7 @@ public struct WaddleChannel: Equatable, Hashable {
         self.position = position
         self.spaceId = spaceId
         self.autojoin = autojoin
-        self.userAutojoin = userAutojoin
+        self.hasLeft = hasLeft
         self.bookmarkName = bookmarkName
         self.isGroupDm = isGroupDm
         self.membersOnly = membersOnly
@@ -7406,7 +7408,7 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
                 position: FfiConverterInt32.read(from: &buf),
                 spaceId: FfiConverterString.read(from: &buf),
                 autojoin: FfiConverterBool.read(from: &buf),
-                userAutojoin: FfiConverterOptionBool.read(from: &buf),
+                hasLeft: FfiConverterBool.read(from: &buf),
                 bookmarkName: FfiConverterOptionString.read(from: &buf),
                 isGroupDm: FfiConverterBool.read(from: &buf),
                 membersOnly: FfiConverterOptionBool.read(from: &buf)
@@ -7422,7 +7424,7 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
         FfiConverterInt32.write(value.position, into: &buf)
         FfiConverterString.write(value.spaceId, into: &buf)
         FfiConverterBool.write(value.autojoin, into: &buf)
-        FfiConverterOptionBool.write(value.userAutojoin, into: &buf)
+        FfiConverterBool.write(value.hasLeft, into: &buf)
         FfiConverterOptionString.write(value.bookmarkName, into: &buf)
         FfiConverterBool.write(value.isGroupDm, into: &buf)
         FfiConverterOptionBool.write(value.membersOnly, into: &buf)
@@ -13537,8 +13539,7 @@ public struct WaddleTopology: Equatable, Hashable {
     public var channels: [WaddleChannel]
     /**
      * Whether the user's own XEP-0402 bookmarks were read. When
-     * `false`, no channel's `user_autojoin` says which rooms the user
-     * left.
+     * `false`, no channel's `has_left` says which rooms the user left.
      */
     public var bookmarksLoaded: Bool
 
@@ -13547,8 +13548,7 @@ public struct WaddleTopology: Equatable, Hashable {
     public init(spaces: [WaddleSpace], channels: [WaddleChannel],
         /**
          * Whether the user's own XEP-0402 bookmarks were read. When
-         * `false`, no channel's `user_autojoin` says which rooms the user
-         * left.
+         * `false`, no channel's `has_left` says which rooms the user left.
          */bookmarksLoaded: Bool = true) {
         self.spaces = spaces
         self.channels = channels
@@ -22478,7 +22478,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_membership() != 58882) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 22204) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 9598) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server() != 33996) {

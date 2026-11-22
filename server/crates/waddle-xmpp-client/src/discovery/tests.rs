@@ -1019,7 +1019,7 @@ mod bookmark_merge {
             position: 0,
             space_id: standalone(),
             autojoin: true,
-            user_autojoin: None,
+            user_bookmark: None,
             bookmark_name: None,
             is_group_dm: false,
             members_only: None,
@@ -1279,6 +1279,8 @@ mod room_discovery {
     use super::super::DiscoveryExt;
     use super::bookmark_merge::{bookmark, bookmarks_response, disco_info_response, stanza_error};
     use super::{DiscoveredChannel, Element, SpaceNode, BOOKMARKS_NS, MUC_NS};
+    use crate::xep::xep0402::BookmarkItem;
+    use crate::xep::xep0492::{merge_notify_into_extensions, NotifyMode, RichPushSummary};
 
     fn mock_client(
         mut reply: impl FnMut(&Element) -> ClientResult<Element> + Send + 'static,
@@ -1417,12 +1419,24 @@ mod room_discovery {
         topology
     }
 
-    fn own_autojoin(topology: &DiscoveredTopology) -> Vec<(&str, Option<bool>)> {
+    /// Per room: whether the user has a bookmark, and whether it says they left.
+    fn own_bookmarks(topology: &DiscoveredTopology) -> Vec<(&str, Option<bool>)> {
         topology
             .channels
             .iter()
-            .map(|room| (room.room_jid.as_str(), room.user_autojoin))
+            .map(|room| {
+                let left = room.user_bookmark.map(|bookmark| bookmark.has_left());
+                (room.room_jid.as_str(), left)
+            })
             .collect()
+    }
+
+    fn bookmark_with_mode(jid: &str, autojoin: bool, mode: NotifyMode) -> BookmarkItem {
+        let extensions = merge_notify_into_extensions(None, mode, RichPushSummary::OptOut);
+        BookmarkItem {
+            extensions: extensions.children().cloned().collect(),
+            ..bookmark(jid, None, autojoin)
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1431,18 +1445,43 @@ mod room_discovery {
             Ok(bookmarks_response(
                 BOOKMARKS_NS,
                 vec![
-                    bookmark("left@muc.example.com", None, false),
-                    bookmark("elsewhere@muc.example.com", None, false),
+                    bookmark_with_mode("left@muc.example.com", false, NotifyMode::Never),
+                    bookmark_with_mode("elsewhere@muc.example.com", false, NotifyMode::Never),
                 ],
             ))
         })
         .await;
         assert!(topology.bookmarks_loaded);
         assert_eq!(
-            own_autojoin(&topology),
+            own_bookmarks(&topology),
+            [
+                ("left@muc.example.com", Some(true)),
+                ("untouched@muc.example.com", None),
+                ("elsewhere@muc.example.com", Some(true)),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_room_is_left_only_with_autojoin_off_and_notifications_off() {
+        // Bookmarks written only to store a notification mode used to
+        // have autojoin off; a muted room that is joined has it on.
+        let topology = discover_with_bookmarks(|| {
+            Ok(bookmarks_response(
+                BOOKMARKS_NS,
+                vec![
+                    bookmark_with_mode("left@muc.example.com", false, NotifyMode::OnMention),
+                    bookmark_with_mode("untouched@muc.example.com", true, NotifyMode::Never),
+                    bookmark("elsewhere@muc.example.com", None, false),
+                ],
+            ))
+        })
+        .await;
+        assert_eq!(
+            own_bookmarks(&topology),
             [
                 ("left@muc.example.com", Some(false)),
-                ("untouched@muc.example.com", None),
+                ("untouched@muc.example.com", Some(false)),
                 ("elsewhere@muc.example.com", Some(false)),
             ]
         );
@@ -1463,7 +1502,7 @@ mod room_discovery {
         .await;
         assert!(!topology.bookmarks_loaded);
         assert_eq!(
-            own_autojoin(&topology),
+            own_bookmarks(&topology),
             [
                 ("left@muc.example.com", None),
                 ("untouched@muc.example.com", None),

@@ -18,7 +18,7 @@ use crate::xep::xep0402::{build_fetch_bookmarks_iq, parse_bookmarks_response, Bo
 use super::ids::next_id;
 use super::iq::build_disco_info_iq;
 use super::parsing::parse_disco_info_result;
-use super::types::{DiscoveredChannel, DiscoveredChannelType, SpaceNode};
+use super::types::{DiscoveredChannel, DiscoveredChannelType, SpaceNode, UserBookmark};
 use super::{MUC_NS, STANDALONE_SPACE_ID, WADDLE_ROOM_METADATA_FORM_TYPE};
 
 /// Fetch the user's own-PEP XEP-0402 bookmarks. An account that never
@@ -135,7 +135,7 @@ async fn hydrate_bookmark_only_rooms<D: CommandDriver>(
 /// Stamp a bookmark's autojoin/name onto a catalog channel.
 pub(super) fn stamp_bookmark(channel: &mut DiscoveredChannel, bookmark: &BookmarkItem) {
     channel.autojoin = bookmark.autojoin;
-    channel.user_autojoin = Some(bookmark.autojoin);
+    channel.user_bookmark = Some(UserBookmark::from_item(bookmark));
     channel.bookmark_name = bookmark.name.clone();
 }
 
@@ -184,7 +184,7 @@ pub(super) fn bookmark_only_channel(
         position,
         space_id: standalone_space_id.clone(),
         autojoin: bookmark.autojoin,
-        user_autojoin: Some(bookmark.autojoin),
+        user_bookmark: Some(UserBookmark::from_item(bookmark)),
         bookmark_name: bookmark.name.clone(),
         is_group_dm,
         members_only,

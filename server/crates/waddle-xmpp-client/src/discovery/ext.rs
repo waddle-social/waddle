@@ -492,7 +492,7 @@ impl DiscoveryExt for ClientHandle {
                             // autojoin (web parity); the user's XEP-0402
                             // bookmark below can override this.
                             autojoin: true,
-                            user_autojoin: None,
+                            user_bookmark: None,
                             bookmark_name: None,
                             is_group_dm,
                             members_only,

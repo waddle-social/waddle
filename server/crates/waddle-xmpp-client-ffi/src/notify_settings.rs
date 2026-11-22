@@ -385,7 +385,8 @@ impl WaddleClient {
     /// Set the per-chat XEP-0492 notification mode for one room by
     /// merging into the user's XEP-0402 bookmark for that room
     /// (creating one with `autojoin=true` when absent: an own bookmark
-    /// with `autojoin` off means the user left the room). Foreign `<advanced/>` children
+    /// with `autojoin` off and notifications off means the user left
+    /// the room). Foreign `<advanced/>` children
     /// and identity-scoped siblings written by other clients are
     /// preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
     /// toggles the Waddle rich XEP-0357 push-summary opt-in (#719).

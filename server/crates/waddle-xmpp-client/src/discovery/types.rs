@@ -4,6 +4,8 @@ use jid::BareJid;
 use waddle_xmpp_core::roster::RosterItem;
 
 use crate::messaging::MucAffiliation;
+use crate::xep::xep0402::BookmarkItem;
+use crate::xep::xep0492::{surface_bookmark_notify, NotifyMode};
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
@@ -211,6 +213,36 @@ impl DiscoveredChannelType {
     }
 }
 
+/// What discovery reads from the user's own XEP-0402 bookmark of a room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserBookmark {
+    /// `<conference autojoin='…'>`; absent means `false`.
+    pub autojoin: bool,
+    /// XEP-0492 fallback notification mode stored in the bookmark.
+    pub notify_mode: Option<NotifyMode>,
+}
+
+impl UserBookmark {
+    /// Read the fields discovery keeps from a bookmark item.
+    #[must_use]
+    pub fn from_item(item: &BookmarkItem) -> Self {
+        Self {
+            autojoin: item.autojoin,
+            notify_mode: surface_bookmark_notify(&item.extensions).fallback_mode,
+        }
+    }
+
+    /// Whether the user left the room: `autojoin` off (XEP-0402 §4)
+    /// together with notifications off, which is what
+    /// [`crate::notification_settings::set_room_membership`] publishes.
+    /// `autojoin` off alone is not enough: a bookmark written only to
+    /// store a notification mode used to have it off as well.
+    #[must_use]
+    pub fn has_left(&self) -> bool {
+        !self.autojoin && self.notify_mode == Some(NotifyMode::Never)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 /// Room address, metadata, and autojoin policy for a discovered channel.
 pub struct DiscoveredChannel {
@@ -235,12 +267,12 @@ pub struct DiscoveredChannel {
     /// every publicly listed room is joined so its live traffic
     /// flows).
     pub autojoin: bool,
-    /// `autojoin` of the user's own XEP-0402 bookmark for the room, or
-    /// `None` when they have none (or it could not be read, see
-    /// [`DiscoveredTopology::bookmarks_loaded`]). `Some(false)` means
-    /// the user left the room (XEP-0402 §4), which [`Self::autojoin`]
-    /// alone cannot say: a space's own bookmark can be off too.
-    pub user_autojoin: Option<bool>,
+    /// The user's own XEP-0402 bookmark for the room, or `None` when
+    /// they have none (or it could not be read, see
+    /// [`DiscoveredTopology::bookmarks_loaded`]). It says whether the
+    /// user left the room, which [`Self::autojoin`] cannot: a space's
+    /// own bookmark can have `autojoin` off too.
+    pub user_bookmark: Option<UserBookmark>,
     /// `<conference name='…'>` from the user's XEP-0402 bookmark,
     /// when the room is bookmarked and the bookmark carries a name.
     pub bookmark_name: Option<String>,
@@ -262,7 +294,7 @@ pub struct DiscoveredTopology {
     /// Channels returned by this discovery or listing operation.
     pub channels: Vec<DiscoveredChannel>,
     /// Whether the user's own XEP-0402 bookmarks were read. When
-    /// `false` every [`DiscoveredChannel::user_autojoin`] is `None`
+    /// `false` every [`DiscoveredChannel::user_bookmark`] is `None`
     /// and says nothing about which rooms the user left.
     pub bookmarks_loaded: bool,
 }

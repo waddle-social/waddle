@@ -1641,7 +1641,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_membership() != 58882) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 22204) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 9598) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server() != 33996) {
@@ -2954,7 +2954,8 @@ public interface WaddleClientInterface {
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
      * (creating one with `autojoin=true` when absent: an own bookmark
-     * with `autojoin` off means the user left the room). Foreign `<advanced/>` children
+     * with `autojoin` off and notifications off means the user left
+     * the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -5655,7 +5656,8 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room
      * (creating one with `autojoin=true` when absent: an own bookmark
-     * with `autojoin` off means the user left the room). Foreign `<advanced/>` children
+     * with `autojoin` off and notifications off means the user left
+     * the room). Foreign `<advanced/>` children
      * and identity-scoped siblings written by other clients are
      * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
@@ -8983,12 +8985,12 @@ data class WaddleChannel (
     var `autojoin`: kotlin.Boolean
     ,
     /**
-     * `autojoin` of the user's own XEP-0402 bookmark for the room, or
-     * `None` when they have none or it could not be read (see
-     * [`WaddleTopology::bookmarks_loaded`]). `Some(false)` means the
-     * user left the room.
+     * The user left the room: their own XEP-0402 bookmark for it has
+     * `autojoin` off and notifications off, as `set_room_membership`
+     * publishes. `false` when they have no bookmark, or when it could
+     * not be read (see [`WaddleTopology::bookmarks_loaded`]).
      */
-    var `userAutojoin`: kotlin.Boolean? = null
+    var `hasLeft`: kotlin.Boolean = false
     ,
     /**
      * `<conference name='…'>` from the user's XEP-0402 bookmark,
@@ -9032,7 +9034,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterInt.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
-            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
@@ -9048,7 +9050,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterInt.allocationSize(value.`position`) +
             FfiConverterString.allocationSize(value.`spaceId`) +
             FfiConverterBoolean.allocationSize(value.`autojoin`) +
-            FfiConverterOptionalBoolean.allocationSize(value.`userAutojoin`) +
+            FfiConverterBoolean.allocationSize(value.`hasLeft`) +
             FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
             FfiConverterBoolean.allocationSize(value.`isGroupDm`) +
             FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
@@ -9063,7 +9065,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterInt.write(value.`position`, buf)
             FfiConverterString.write(value.`spaceId`, buf)
             FfiConverterBoolean.write(value.`autojoin`, buf)
-            FfiConverterOptionalBoolean.write(value.`userAutojoin`, buf)
+            FfiConverterBoolean.write(value.`hasLeft`, buf)
             FfiConverterOptionalString.write(value.`bookmarkName`, buf)
             FfiConverterBoolean.write(value.`isGroupDm`, buf)
             FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
@@ -13754,8 +13756,7 @@ data class WaddleTopology (
     ,
     /**
      * Whether the user's own XEP-0402 bookmarks were read. When
-     * `false`, no channel's `user_autojoin` says which rooms the user
-     * left.
+     * `false`, no channel's `has_left` says which rooms the user left.
      */
     var `bookmarksLoaded`: kotlin.Boolean = true
 

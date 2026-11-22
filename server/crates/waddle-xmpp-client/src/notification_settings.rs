@@ -97,8 +97,8 @@ pub enum SetDmNotificationModeOutcome {
 /// Set the room notification mode and return the updated value.
 ///
 /// A room with no bookmark yet gets one with `autojoin` on: the user is
-/// using the room, and an own bookmark with `autojoin` off means they
-/// left it (see [`set_room_membership`]).
+/// using the room, and an own bookmark with `autojoin` off and
+/// notifications off means they left it (see [`set_room_membership`]).
 ///
 /// # Errors
 ///
@@ -114,12 +114,10 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
         options.room_jid,
         options.name,
         "set_room_notification_mode.publish",
-        |existing| {
-            (
-                existing.is_none_or(|item| item.autojoin),
-                mode,
-                rich_payload,
-            )
+        |existing| BookmarkChange {
+            autojoin: existing.is_none_or(|item| item.autojoin),
+            mode,
+            rich_payload,
         },
     )
     .await?;
@@ -197,7 +195,11 @@ pub async fn set_room_membership<D: CommandDriver>(
         |existing| {
             let opted_in = existing
                 .is_some_and(|item| surface_bookmark_notify(&item.extensions).rich_payload_opt_in);
-            (autojoin, mode, rich_push_summary(opted_in))
+            BookmarkChange {
+                autojoin,
+                mode,
+                rich_payload: rich_push_summary(opted_in),
+            }
         },
     )
     .await?;
@@ -206,6 +208,13 @@ pub async fn set_room_membership<D: CommandDriver>(
         PublishedRoomBookmark::NodeConfigMismatch => SetRoomMembershipOutcome::NodeConfigMismatch,
         PublishedRoomBookmark::Error => SetRoomMembershipOutcome::Error,
     })
+}
+
+/// What one write sets on a room bookmark; the rest is kept.
+struct BookmarkChange {
+    autojoin: bool,
+    mode: NotifyMode,
+    rich_payload: RichPushSummary,
 }
 
 enum PublishedRoomBookmark {
@@ -223,7 +232,7 @@ async fn publish_merged_room_bookmark<D: CommandDriver>(
     room_jid: BareJid,
     name: Option<String>,
     operation: &'static str,
-    decide: impl FnOnce(Option<&BookmarkItem>) -> (bool, NotifyMode, RichPushSummary),
+    decide: impl FnOnce(Option<&BookmarkItem>) -> BookmarkChange,
 ) -> ClientResult<PublishedRoomBookmark> {
     let fetch_iq = build_fetch_bookmarks_iq(&Uuid::new_v4().to_string());
     let items = match driver.send_iq(fetch_iq).await {
@@ -233,7 +242,11 @@ async fn publish_merged_room_bookmark<D: CommandDriver>(
     };
 
     let existing = items.iter().find(|item| item.jid == room_jid);
-    let (autojoin, mode, rich_payload) = decide(existing);
+    let BookmarkChange {
+        autojoin,
+        mode,
+        rich_payload,
+    } = decide(existing);
     let existing_extensions = existing.map(|item| build_extensions_wrapper(&item.extensions));
     let merged_extensions =
         merge_notify_into_extensions(existing_extensions.as_ref(), mode, rich_payload);
@@ -544,7 +557,7 @@ mod tests {
         assert!(!item.autojoin);
         let sent = driver.sent.borrow();
         let conference = published_conference(&sent[1]);
-        // XEP-0402 §2.2: an absent attribute is the false value.
+        // XEP-0402 schema: `autojoin` defaults to false, written by omission.
         assert_eq!(conference.attr("autojoin"), None);
         assert_eq!(conference.attr("name"), Some("Existing"));
         assert_eq!(
@@ -692,8 +705,8 @@ mod tests {
 
     #[test]
     fn a_notification_mode_on_a_room_with_no_bookmark_keeps_it_joined() {
-        // An own bookmark with autojoin off means the user left the room
-        // (XEP-0402 §4), so choosing a mode must not publish that.
+        // An own bookmark with autojoin off and notifications off means the
+        // user left the room, so muting must not publish autojoin off.
         let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
         let driver = MockDriver::new(vec![Ok(bookmarks_response(Vec::new())), Ok(ok_iq())]);
 

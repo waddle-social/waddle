@@ -1013,7 +1013,7 @@ mod tests {
             position,
             space_id: "default".into(),
             autojoin: true,
-            user_autojoin: None,
+            has_left: false,
             bookmark_name: None,
             is_group_dm: group_dm,
             members_only: None,
