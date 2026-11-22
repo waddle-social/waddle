@@ -12,10 +12,10 @@ struct SettingsAppearanceSection: View {
         Section {
             SettingsTilePicker(
                 selection: $preferences.appearance,
-                // Web `settings` order.
-                options: [.system, .dark, .light],
-                label: "Appearance",
-                title: \.title
+                options: Preferences.Appearance.settingsOrder.map {
+                    .init(value: $0, title: $0.title, systemImage: $0.symbol)
+                },
+                label: "Appearance"
             ) { appearance in
                 AppearancePreview(appearance: appearance)
             }
@@ -113,5 +113,37 @@ struct SettingsNotificationsSection: View {
         #else
         URL(string: "x-apple.systempreferences:com.apple.preference.notifications")
         #endif
+    }
+}
+
+/// A miniature of the app in one appearance (web `settings` Appearance
+/// swatch): the ground, a muted bar and the accent.
+private struct AppearancePreview: View {
+    let appearance: Preferences.Appearance
+
+    var body: some View {
+        switch appearance.colorScheme {
+        case let .some(scheme):
+            swatch.environment(\.colorScheme, scheme)
+        case .none:
+            // System: Daylight on the left, Night on the right.
+            HStack(spacing: 0) {
+                swatch.environment(\.colorScheme, .light)
+                swatch.environment(\.colorScheme, .dark)
+            }
+        }
+    }
+
+    private var swatch: some View {
+        ZStack(alignment: .bottom) {
+            Theme.Colors.bg
+            HStack(spacing: Theme.Spacing.xs) {
+                Capsule().fill(Theme.Colors.surface2)
+                Capsule().fill(Theme.Colors.action)
+            }
+            .frame(height: Theme.Size.previewBar)
+            .padding(Theme.Spacing.s)
+        }
+        .accessibilityHidden(true)
     }
 }

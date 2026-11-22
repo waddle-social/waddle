@@ -25,6 +25,7 @@ struct ProfileMoodEditor: View {
             }
             Section {
                 TextField("Note", text: $note, prompt: Text("Add a note (optional)"))
+                    .huddleText(Theme.Typography.body)
                     .submitLabel(.done)
                     .onSubmit(publish)
             } footer: {
@@ -32,10 +33,7 @@ struct ProfileMoodEditor: View {
             }
             ProfileSaveError(save: save)
             if current != nil {
-                Section {
-                    FormActionButton(title: "Clear mood", symbol: "xmark.circle", isDestructive: true, action: clear)
-                        .disabled(save.isSaving)
-                }
+                ProfileClearButton(title: "Clear mood", save: save, action: clear)
             }
         }
         .huddleForm()

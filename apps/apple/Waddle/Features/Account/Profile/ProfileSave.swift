@@ -40,6 +40,20 @@ struct ProfileSaveError: View {
     }
 }
 
+/// Clears what an editor shares (mood, activity, tune), in danger text.
+struct ProfileClearButton: View {
+    let title: String
+    let save: ProfileSave
+    let action: () -> Void
+
+    var body: some View {
+        Section {
+            FormActionButton(title: title, symbol: "xmark.circle", isDestructive: true, action: action)
+                .disabled(save.isSaving)
+        }
+    }
+}
+
 /// The editor's Save button, a spinner while saving.
 struct ProfileSaveButton: ToolbarContent {
     let save: ProfileSave

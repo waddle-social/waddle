@@ -14,17 +14,17 @@ struct ProfileAvatarControls: View {
             // Android `profile`: a pill under the header.
             HStack(spacing: Theme.Spacing.s) {
                 PhotosPicker(selection: $pickedItem, matching: .images) {
-                    Label(hasAvatar ? "Change photo" : "Add photo", systemImage: "camera")
+                    Label(hasAvatar ? "Change avatar" : "Add avatar", systemImage: "camera")
                 }
                 .buttonStyle(.huddle(size: .small))
                 if hasAvatar {
-                    Button("Remove photo", role: .destructive, action: remove)
+                    Button("Remove avatar", role: .destructive, action: remove)
                         .buttonStyle(.huddle(.danger, size: .small))
                 }
                 if isWorking {
                     ProgressView()
                         .controlSize(.small)
-                        .accessibilityLabel(Text("Updating photo"))
+                        .accessibilityLabel(Text("Updating avatar"))
                 }
             }
             .frame(maxWidth: .infinity)
@@ -33,6 +33,7 @@ struct ProfileAvatarControls: View {
                 Text(errorMessage)
                     .huddleText(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.dangerText)
+                    .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
             }
         }

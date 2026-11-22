@@ -4,6 +4,8 @@ import SwiftUI
 /// an inline editor to change it.
 struct SignInServerRow: View {
     let server: URL
+    /// The server answered with a way to sign in.
+    let isReachable: Bool
     @State private var isEditing = false
 
     var body: some View {
@@ -22,7 +24,7 @@ struct SignInServerRow: View {
                 FormSectionHeader("Homeserver")
                 HStack(spacing: Theme.Spacing.s) {
                     Circle()
-                        .fill(Theme.Colors.live)
+                        .fill(isReachable ? Theme.Colors.live : Theme.Colors.fgSoft)
                         .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
                         .accessibilityHidden(true)
                     Text(SignInServerLabel.text(for: server))
@@ -41,7 +43,7 @@ struct SignInServerRow: View {
                     .labelStyle(.trailingIcon)
             }
             .buttonStyle(.huddle(size: .small))
-            .accessibilityLabel(Text("Change server"))
+            .accessibilityLabel(Text("Edit homeserver"))
             .accessibilityHint(Text("Sign in to a different Waddle server"))
         }
     }

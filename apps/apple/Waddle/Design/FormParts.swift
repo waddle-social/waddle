@@ -41,21 +41,28 @@ struct FormSectionFooter: View {
     }
 }
 
-/// A switch row in a form: a glyph-less label and the Huddle switch.
+/// A switch row in a form: its label, with a glyph when the form's rows
+/// have them, and the Huddle switch.
 struct FormToggle: View {
     let title: String
+    var symbol: String?
     @Binding var isOn: Bool
 
-    init(_ title: String, isOn: Binding<Bool>) {
+    init(_ title: String, symbol: String? = nil, isOn: Binding<Bool>) {
         self.title = title
+        self.symbol = symbol
         _isOn = isOn
     }
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            Text(title)
-                .huddleText(Theme.Typography.body)
-                .foregroundStyle(Theme.Colors.fg)
+            if let symbol {
+                FormRowLabel(title: title, symbol: symbol)
+            } else {
+                Text(title)
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fg)
+            }
         }
         .toggleStyle(.huddle)
         .frame(minHeight: Theme.Size.formRow)

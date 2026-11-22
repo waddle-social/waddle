@@ -1,16 +1,17 @@
 import SwiftUI
 
-/// Chat or social timeline, picked from two drawn previews the way
-/// Appearance is picked.
+/// Chat or social timeline (Android "Timeline"), picked the way
+/// Appearance is.
 struct SettingsMessageOrderPicker: View {
     @Binding var selection: Preferences.MessageOrder
 
     var body: some View {
         SettingsTilePicker(
             selection: $selection,
-            options: Preferences.MessageOrder.allCases,
-            label: "Message order",
-            title: { "\($0.title) · \($0.subtitle)" }
+            options: Preferences.MessageOrder.allCases.map {
+                .init(value: $0, title: $0.title, subtitle: $0.subtitle, systemImage: $0.isNewestFirst ? "arrow.up.to.line" : "arrow.down.to.line")
+            },
+            label: "Message order"
         ) { order in
             MessageOrderPreview(order: order)
         }
@@ -47,7 +48,7 @@ private struct MessageOrderPreview: View {
         Capsule()
             .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
             .background(Capsule().fill(Theme.Colors.surface))
-            .frame(height: Theme.Spacing.m)
+            .frame(height: Theme.Size.previewBar * 2)
     }
 
     @ViewBuilder
@@ -59,13 +60,13 @@ private struct MessageOrderPreview: View {
                 HStack(spacing: Theme.Spacing.xxs) {
                     Circle()
                         .fill(isNewest ? Theme.Colors.action : Theme.Colors.surface2)
-                        .frame(width: Theme.Spacing.s, height: Theme.Spacing.s)
+                        .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
                     Capsule()
                         .fill(isNewest ? Theme.Colors.action : Theme.Colors.surface2)
-                        .frame(width: proxy.size.width * widths[age], height: Theme.Spacing.xs)
+                        .frame(width: proxy.size.width * widths[age], height: Theme.Size.previewBar)
                 }
             }
-            .frame(height: Theme.Spacing.s)
+            .frame(height: Theme.Size.liveDot)
         }
     }
 }

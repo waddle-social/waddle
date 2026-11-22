@@ -1,15 +1,47 @@
 import SwiftUI
 
-/// One choice drawn as a preview tile with a radio and a title under it
-/// (web `settings` Appearance): appearance and message order use it.
+/// One choice of a few, drawn as preview tiles with a radio, a title and
+/// an optional second line (web `settings` Appearance) on iPad and Mac,
+/// and as a segmented control on iPhone (Android `settings`).
 struct SettingsTilePicker<Value: Hashable & Identifiable, Preview: View>: View {
+    struct Option: Identifiable {
+        let value: Value
+        let title: String
+        var subtitle: String?
+        var systemImage: String?
+
+        var id: Value.ID { value.id }
+    }
+
     @Binding var selection: Value
-    let options: [Value]
+    let options: [Option]
     let label: String
-    let title: (Value) -> String
     @ViewBuilder let preview: (Value) -> Preview
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
 
     var body: some View {
+        if isCompact {
+            HuddleSegmentedControl(selection: $selection, segments: options.map {
+                .init(value: $0.value, title: $0.title, systemImage: $0.systemImage)
+            })
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel(Text(label))
+        } else {
+            tiles
+        }
+    }
+
+    private var isCompact: Bool {
+        #if os(iOS)
+        return sizeClass == .compact
+        #else
+        return false
+        #endif
+    }
+
+    private var tiles: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.s) {
             ForEach(options) { option in
                 tile(option)
@@ -21,78 +53,50 @@ struct SettingsTilePicker<Value: Hashable & Identifiable, Preview: View>: View {
         .accessibilityLabel(Text(label))
     }
 
-    private func tile(_ option: Value) -> some View {
-        let isSelected = option == selection
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+    private func tile(_ option: Option) -> some View {
+        let isSelected = option.value == selection
+        let card = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+        let well = RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
         return Button {
-            selection = option
+            selection = option.value
         } label: {
             VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-                preview(option)
+                preview(option.value)
                     .frame(height: Theme.Size.settingsPreview)
                     .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                            .strokeBorder(Theme.Colors.borderSoft, lineWidth: WaddleTokens.BorderWidth.hair)
-                    )
-                HStack(spacing: Theme.Spacing.xs) {
+                    .clipShape(well)
+                    .overlay(well.strokeBorder(Theme.Colors.borderSoft, lineWidth: WaddleTokens.BorderWidth.hair))
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs) {
                     Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
                         .foregroundStyle(isSelected ? Theme.Colors.action : Theme.Colors.fgSoft)
                         .contentTransition(.symbolEffect(.replace))
-                    Text(title(option))
-                        .foregroundStyle(Theme.Colors.fg)
-                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                        Text(option.title)
+                            .foregroundStyle(Theme.Colors.fg)
+                        if let subtitle = option.subtitle {
+                            Text(subtitle)
+                                .foregroundStyle(Theme.Colors.fgMuted)
+                        }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 .huddleText(Theme.Typography.caption)
             }
             .padding(Theme.Spacing.s)
-            .background(shape.fill(Theme.Colors.surface))
+            .background(card.fill(Theme.Colors.surface))
             .overlay(
-                shape.strokeBorder(
+                card.strokeBorder(
                     isSelected ? Theme.Colors.action : Theme.Colors.border,
                     lineWidth: isSelected ? WaddleTokens.BorderWidth.strong : WaddleTokens.BorderWidth.hair
                 )
             )
-            .contentShape(shape)
+            .contentShape(card)
         }
         // Plain, so each tile takes its own taps inside a form row.
         .buttonStyle(.plain)
         .huddleAnimation(.settle, value: isSelected)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(title(option)))
+        .accessibilityLabel(Text([option.title, option.subtitle].compactMap { $0 }.joined(separator: ", ")))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-    }
-}
-
-/// A miniature of the app in one appearance (web `settings` Appearance
-/// swatch): the ground, a muted bar and the accent.
-struct AppearancePreview: View {
-    let appearance: Preferences.Appearance
-
-    var body: some View {
-        switch appearance.colorScheme {
-        case let .some(scheme):
-            swatch.environment(\.colorScheme, scheme)
-        case .none:
-            // System: Daylight on the left, Night on the right.
-            HStack(spacing: 0) {
-                swatch.environment(\.colorScheme, .light)
-                swatch.environment(\.colorScheme, .dark)
-            }
-        }
-    }
-
-    private var swatch: some View {
-        ZStack(alignment: .bottom) {
-            Theme.Colors.bg
-            HStack(spacing: Theme.Spacing.xs) {
-                Capsule().fill(Theme.Colors.surface2)
-                Capsule().fill(Theme.Colors.action)
-            }
-            .frame(height: Theme.Spacing.s)
-            .padding(Theme.Spacing.s)
-        }
-        .accessibilityHidden(true)
     }
 }

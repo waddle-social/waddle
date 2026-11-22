@@ -12,14 +12,15 @@ struct ProfileStatusSection: View {
 
     var body: some View {
         Section {
-            Picker("Status", selection: choiceBinding) {
-                ForEach(ProfileStatusChoice.allCases) { choice in
-                    ProfileStatusChoiceLabel(choice: choice, automaticShows: automaticShows)
-                        .tag(choice)
+            ForEach(ProfileStatusChoice.allCases) { choice in
+                ProfileStatusChoiceRow(
+                    choice: choice,
+                    automaticShows: automaticShows,
+                    isSelected: ProfileStatusChoice(session.status.presenceMode) == choice
+                ) {
+                    Task { await session.setPresenceMode(choice.mode) }
                 }
             }
-            .pickerStyle(.inline)
-            .labelsHidden()
 
             TextField("Status message", text: $statusDraft, prompt: Text("What are you working on?"))
                 .huddleText(Theme.Typography.body)
@@ -39,15 +40,6 @@ struct ProfileStatusSection: View {
     /// what is shown only while the mode is automatic.
     private var automaticShows: Availability {
         session.status.presenceMode == .automatic ? session.status.availability : .available
-    }
-
-    private var choiceBinding: Binding<ProfileStatusChoice> {
-        Binding(
-            get: { ProfileStatusChoice(session.status.presenceMode) },
-            set: { choice in
-                Task { await session.setPresenceMode(choice.mode) }
-            }
-        )
     }
 
     private func loadDraft() {
@@ -71,18 +63,33 @@ struct ProfileStatusSection: View {
     }
 }
 
-/// A presence dot with the choice's name.
-private struct ProfileStatusChoiceLabel: View {
+/// A presence dot with the choice's name, and a check on the one in use.
+private struct ProfileStatusChoiceRow: View {
     let choice: ProfileStatusChoice
     let automaticShows: Availability
+    let isSelected: Bool
+    let select: () -> Void
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.s) {
-            PresenceDot(availability: choice.dot(automaticShows: automaticShows))
-                .accessibilityHidden(true)
-            Text(choice.title)
-                .huddleText(Theme.Typography.body)
-                .foregroundStyle(Theme.Colors.fg)
+        Button(action: select) {
+            HStack(spacing: Theme.Spacing.s) {
+                PresenceDot(availability: choice.dot(automaticShows: automaticShows))
+                    .accessibilityHidden(true)
+                Text(choice.title)
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fg)
+                Spacer(minLength: Theme.Spacing.s)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .huddleText(Theme.Typography.label)
+                        .foregroundStyle(Theme.Colors.action)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: Theme.Size.formRow, alignment: .leading)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

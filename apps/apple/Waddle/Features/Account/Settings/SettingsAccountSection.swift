@@ -11,11 +11,10 @@ struct SettingsAccountSection: View {
         Section {
             if let session = app.session {
                 SettingsAccountRow(account: session.coordinator.account)
-            }
-            FormValueRow(title: "Server", value: SignInServerLabel.text(for: app.server))
-            if app.session != nil {
+                server
                 AccountSignOutButton()
             } else {
+                server
                 Text("You're not signed in.")
                     .huddleText(Theme.Typography.body)
                     .foregroundStyle(Theme.Colors.fgMuted)
@@ -23,6 +22,10 @@ struct SettingsAccountSection: View {
         } header: {
             FormSectionHeader("Account")
         }
+    }
+
+    private var server: some View {
+        FormValueRow(title: "Server", value: SignInServerLabel.text(for: app.server))
     }
 }
 

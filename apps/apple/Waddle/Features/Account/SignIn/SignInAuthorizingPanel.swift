@@ -66,7 +66,7 @@ private struct SignInUserCode: View {
         VStack(spacing: Theme.Spacing.s) {
             FormSectionHeader("Your code")
             Text(code)
-                .huddleText(Theme.Typography.signInCode)
+                .huddleText(Theme.AppTypography.signInCode)
                 .foregroundStyle(Theme.Colors.fg)
                 .textSelection(.enabled)
                 .lineLimit(1)

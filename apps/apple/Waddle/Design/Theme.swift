@@ -19,6 +19,13 @@ enum Theme {
     /// Text styles, applied with `.huddleText(_:)`.
     typealias Typography = WaddleTokens.TextStyles
 
+    /// The app's own text styles, for things the preset has no style for.
+    enum AppTypography {
+        /// The device code on sign-in: large monospaced characters, spaced
+        /// so each reads on its own.
+        static let signInCode = HuddleTextStyle(font: .mono, size: 30, weight: 600, lineHeight: 1.2, letterSpacing: 0.08)
+    }
+
     enum Spacing {
         static let xxs = WaddleTokens.Spacing.s0Half
         static let xs = WaddleTokens.Spacing.s1
@@ -70,6 +77,8 @@ enum Theme {
         static let liveDot: CGFloat = 8
         /// The preview on a settings tile (Appearance, Message order).
         static let settingsPreview: CGFloat = 64
+        /// A bar in a settings tile's preview: a message, the composer.
+        static let previewBar: CGFloat = 6
         /// The narrowest emoji tile in a mood or activity picker.
         static let choiceTile: CGFloat = 76
         /// The person a profile or DM details is about.
@@ -98,12 +107,6 @@ enum Theme {
     static let groupingWindow: TimeInterval = 5 * 60
 
     static let quickReactions = ["👍", "❤️", "😂", "🎉", "👀", "🙏"]
-}
-
-extension WaddleTokens.TextStyles {
-    /// The device code on sign-in: large monospaced digits, spaced so each
-    /// character reads on its own.
-    static let signInCode = HuddleTextStyle(font: .mono, size: 30, weight: 600, lineHeight: 1.2, letterSpacing: 0.08)
 }
 
 extension Color {

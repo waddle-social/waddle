@@ -36,6 +36,7 @@ struct ProfileActivityEditor: View {
                     }
                 }
                 TextField("Note", text: $note, prompt: Text("Add a note (optional)"))
+                    .huddleText(Theme.Typography.body)
                     .submitLabel(.done)
                     .onSubmit(publish)
             } footer: {
@@ -43,10 +44,7 @@ struct ProfileActivityEditor: View {
             }
             ProfileSaveError(save: save)
             if current != nil {
-                Section {
-                    FormActionButton(title: "Clear activity", symbol: "xmark.circle", isDestructive: true, action: clear)
-                        .disabled(save.isSaving)
-                }
+                ProfileClearButton(title: "Clear activity", save: save, action: clear)
             }
         }
         .huddleForm()

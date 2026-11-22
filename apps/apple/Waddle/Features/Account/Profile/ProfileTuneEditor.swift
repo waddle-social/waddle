@@ -17,10 +17,13 @@ struct ProfileTuneEditor: View {
     var body: some View {
         Form {
             Section {
-                TextField("Title", text: $tune.title)
-                TextField("Artist", text: $tune.artist)
-                TextField("Album", text: $tune.album)
-                ProfileLinkField(text: $tune.link)
+                Group {
+                    TextField("Title", text: $tune.title)
+                    TextField("Artist", text: $tune.artist)
+                    TextField("Album", text: $tune.album)
+                    ProfileLinkField(text: $tune.link)
+                }
+                .huddleText(Theme.Typography.body)
             } header: {
                 FormSectionHeader("What are you listening to?")
             } footer: {
@@ -28,10 +31,7 @@ struct ProfileTuneEditor: View {
             }
             ProfileSaveError(save: save)
             if current != nil {
-                Section {
-                    FormActionButton(title: "Stop sharing", symbol: "xmark.circle", isDestructive: true, action: clear)
-                        .disabled(save.isSaving)
-                }
+                ProfileClearButton(title: "Stop sharing", save: save, action: clear)
             }
         }
         .huddleForm()

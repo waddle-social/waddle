@@ -5,7 +5,7 @@ struct ProfileLinkField: View {
     @Binding var text: String
 
     var body: some View {
-        TextField("Link", text: $text)
+        TextField("Website", text: $text)
             .autocorrectionDisabled()
             #if os(iOS)
             .textInputAutocapitalization(.never)

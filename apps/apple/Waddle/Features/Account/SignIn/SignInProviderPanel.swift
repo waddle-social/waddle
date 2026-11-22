@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// "Sign in with" and a button per provider, the first the primary one;
-/// or loading and failure states while they arrive.
+/// A button per provider, the first the primary one, under "Sign in
+/// with" (web) or "Sign in to your Waddle server" (Android); or loading
+/// and failure states while they arrive.
 struct SignInProviderPanel: View {
     @Environment(AppState.self) private var app
     @Environment(\.openURL) private var openURL
@@ -9,13 +10,25 @@ struct SignInProviderPanel: View {
     /// Nil while they load.
     let providers: [AuthProvider]?
     let errorMessage: String?
+    let layout: SignInLayout
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.m) {
             if let providers, !providers.isEmpty {
-                FormSectionHeader("Sign in with")
+                switch layout {
+                case .card where providers.count > 1:
+                    FormSectionHeader("Sign in with")
+                case .column:
+                    Text("Sign in to your Waddle server")
+                        .huddleText(Theme.Typography.label)
+                        .foregroundStyle(Theme.Colors.fgMuted)
+                        .frame(maxWidth: .infinity)
+                case .card:
+                    EmptyView()
+                }
                 ForEach(providers) { provider in
-                    providerButton(provider, isPrimary: provider.id == providers.first?.id)
+                    providerButton(provider, title: layout.buttonTitle(for: provider, isOnly: providers.count == 1),
+                                   isPrimary: provider.id == providers.first?.id)
                 }
                 SignInErrorText(message: errorMessage)
             } else if providers == nil {
@@ -35,7 +48,7 @@ struct SignInProviderPanel: View {
         }
     }
 
-    private func providerButton(_ provider: AuthProvider, isPrimary: Bool) -> some View {
+    private func providerButton(_ provider: AuthProvider, title: String, isPrimary: Bool) -> some View {
         Button {
             begin(with: provider)
         } label: {
@@ -43,13 +56,12 @@ struct SignInProviderPanel: View {
                 if pendingProvider == provider.id {
                     ProgressView().controlSize(.small)
                 }
-                Text(provider.title)
+                Text(title)
             }
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.huddle(isPrimary ? .primary : .secondary, size: .large))
         .disabled(pendingProvider != nil)
-        .accessibilityLabel(Text("Sign in with \(provider.title)"))
     }
 
     private func begin(with provider: AuthProvider) {

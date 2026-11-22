@@ -60,6 +60,11 @@ use (`design/src/preset.ts`).
 - **Surfaces, motion, controls.** `Surfaces.swift` (`huddleSurface`,
   `HuddleCard`), `Motion.swift` (`huddleAnimation`; under Reduce Motion a
   view swaps movement for a fade) and `Controls.swift` (button, chip, tag, toggle, segmented control).
+- **Forms.** `FormParts.swift`: `huddleForm()` puts a grouped form on the
+  Huddle ground; `FormSectionHeader`, `FormSectionFooter`, `FormRowLabel`,
+  `FormActionButton`, `FormToggle` and `FormValueRow` draw its rows, and
+  `huddleField()` a free-standing text field. Details, Settings and the
+  profile use them.
 
 ## Prerequisites
 
