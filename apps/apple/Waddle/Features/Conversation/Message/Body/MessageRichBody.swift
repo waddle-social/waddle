@@ -4,7 +4,10 @@ import WaddleKit
 /// The message text: paragraphs with XEP-0394 styling, XEP-0372 mention
 /// highlights and detected links; quotes with a leading bar; code blocks
 /// in monospace. A XEP-0245 `/me` body renders as an action line,
-/// "* Author action". Selectable.
+/// "* Author action". Selectable on iOS. Not on a Mac: there selectable
+/// text takes the secondary click for its own Cut/Copy/Paste menu, so a
+/// right-click on the words never reached the row's menu (react, reply,
+/// reply in thread); "Copy text" in that menu copies the message.
 struct MessageRichBody: View {
     let item: TimelineItem
     let account: AccountIdentity
@@ -25,7 +28,9 @@ struct MessageRichBody: View {
                 blockView(block, isLast: index == blocks.count - 1)
             }
         }
+        #if os(iOS)
         .textSelection(.enabled)
+        #endif
     }
 
     @ViewBuilder
