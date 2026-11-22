@@ -15,9 +15,10 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as KubeCondition;
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::{Client, ResourceExt};
 use waddle_operator_crd::{
-    ContentDigest, EsoApiVersion, PostgresSourceMode, ResourceName, RestrictedRuntimeSpec,
-    SecretProviderMode, SecretStoreKind, SpiceDbSourceMode, UpdateStrategyKind, ValidatedSpec,
-    WaddleServer, WaddleServerSpec,
+    CloudNativePgSource, ContentDigest, EsoApiVersion, ExternalPostgresSource, ExternalSecretsSpec,
+    ExternalSpiceDbSource, PostgresSourceMode, ResourceName, RestrictedRuntimeSpec,
+    SecretProviderMode, SecretStoreKind, SpiceDbOperatorSource, SpiceDbSourceMode,
+    UpdateStrategyKind, ValidatedSpec, WaddleServer, WaddleServerSpec,
 };
 use waddle_operator_fsm::{
     ConditionKind, ConditionRecord, ConditionStatus, DependencyHealth, ObservedWorld,
@@ -227,273 +228,297 @@ pub async fn observe_world(
     })
 }
 
+type PostgresObservation = (
+    DependencyHealth,
+    Option<PostgresBinding>,
+    Option<ContentDigest>,
+);
+
 async fn observe_postgres(
     client: &Client,
     ns: &str,
     ws: &WaddleServer,
     known_has_cnpg: bool,
-) -> Result<
-    (
-        DependencyHealth,
-        Option<PostgresBinding>,
-        Option<ContentDigest>,
-    ),
-    OperatorError,
-> {
+) -> Result<PostgresObservation, OperatorError> {
     let pg = &ws.spec.postgres;
     let restricted = pg.restricted_runtime.as_ref().filter(|r| r.enabled);
 
     match pg.mode {
         PostgresSourceMode::CloudNativePg => {
-            let Some(cnpg) = &pg.cnpg else {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "CnpgSpecMissing".to_owned(),
-                        detail: "postgres.mode is CloudNativePg without spec.postgres.cnpg"
-                            .to_owned(),
-                    },
-                    None,
-                    None,
-                ));
-            };
-
-            let ar = external_crds::api_resource_cnpg();
-            let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
-            let cluster_obj = match api.get(&cnpg.cluster_name).await {
-                Ok(obj) => obj,
-                Err(kube::Error::Api(status)) if status.code == 404 => {
-                    if is_missing_crd_status(&status.message)
-                        || (!known_has_cnpg
-                            && !has_group_version_live(client, "postgresql.cnpg.io", "v1").await)
-                    {
-                        return Ok((
-                            DependencyHealth::CrdNotInstalled {
-                                api_group: "postgresql.cnpg.io".to_owned(),
-                            },
-                            None,
-                            None,
-                        ));
-                    }
-                    return Ok((
-                        DependencyHealth::Missing {
-                            reason: "CnpgClusterNotFound".to_owned(),
-                            detail: format!(
-                                "CloudNativePG Cluster {} not found in namespace {ns}",
-                                cnpg.cluster_name
-                            ),
-                        },
-                        None,
-                        None,
-                    ));
-                }
-                Err(source) => {
-                    return Err(OperatorError::Kube {
-                        context: "get CloudNativePG Cluster",
-                        source,
-                    });
-                }
-            };
-
-            let cluster_view: CnpgClusterView = serde_json::from_value(cluster_obj.data)
-                .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
-            let health = external_crds::evaluate_cnpg_health(
-                &cluster_view,
-                &cnpg.cluster_name,
-                cnpg.require_healthy,
-            );
-            if !health.is_ready() {
-                return Ok((health, None, None));
-            }
-
-            if let Some(rr) = restricted {
-                let (blocker, rr_digest) = observe_restricted_runtime(client, ns, rr).await?;
-                if let Some(b) = blocker {
-                    return Ok((b, None, None));
-                }
-                return Ok((
-                    health,
-                    Some(PostgresBinding::RestrictedRuntime {
-                        spec: Box::new(rr.clone()),
-                    }),
-                    rr_digest,
-                ));
-            }
-
-            let secret_name = cnpg
-                .secret_name
-                .clone()
-                .unwrap_or_else(|| cluster_view.resolved_secret_name(&cnpg.cluster_name));
-            if !is_safe_resource_name(&secret_name) {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "InvalidPostgresSecretName".to_owned(),
-                        detail: format!(
-                            "Resolved CNPG credential Secret name '{secret_name}' is not a valid Kubernetes resource name"
-                        ),
-                    },
-                    None,
-                    None,
-                ));
-            }
-            let Some(secret) = Api::<Secret>::namespaced(client.clone(), ns)
-                .get_opt(&secret_name)
-                .await
-                .map_err(|source| OperatorError::Kube {
-                    context: "get CNPG credentials Secret",
-                    source,
-                })?
-            else {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "PostgresSecretMissing".to_owned(),
-                        detail: format!("PostgreSQL credential Secret {secret_name} not found"),
-                    },
-                    None,
-                    None,
-                ));
-            };
-
-            let data = secret.data.unwrap_or_default();
-            let raw = to_raw_byte_map(Some(&data));
-            let pg_digest = yolo::compute_consumed_secret_digest(
-                &raw,
-                &[&cnpg.uri_key, &cnpg.username_key, &cnpg.password_key],
-            );
-            if has_nonempty_key(&data, &cnpg.uri_key) {
-                return Ok((
-                    health,
-                    Some(PostgresBinding::UriSecret {
-                        secret_name,
-                        uri_key: cnpg.uri_key.clone(),
-                    }),
-                    pg_digest,
-                ));
-            }
-            if has_nonempty_key(&data, &cnpg.username_key)
-                && has_nonempty_key(&data, &cnpg.password_key)
-            {
-                return Ok((
-                    health,
-                    Some(PostgresBinding::BasicAuthSecret {
-                        secret_name,
-                        username_key: cnpg.username_key.clone(),
-                        password_key: cnpg.password_key.clone(),
-                        host: format!("{}-rw", cnpg.cluster_name),
-                        port: 5432,
-                        database: cluster_view.resolved_database_name().to_owned(),
-                    }),
-                    pg_digest,
-                ));
-            }
-
-            Ok((
-                DependencyHealth::NotReady {
-                    reason: "PostgresSecretKeysMissing".to_owned(),
-                    detail: format!(
-                        "Secret {secret_name} lacks non-empty '{}' or '{}'/'{}'",
-                        cnpg.uri_key, cnpg.username_key, cnpg.password_key
-                    ),
-                },
-                None,
-                None,
-            ))
+            observe_cnpg_postgres(client, ns, pg.cnpg.as_ref(), restricted, known_has_cnpg).await
         }
         PostgresSourceMode::External => {
-            let Some(ext) = &pg.external else {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "ExternalPostgresSpecMissing".to_owned(),
-                        detail: "postgres.mode is External without spec.postgres.external"
-                            .to_owned(),
-                    },
-                    None,
-                    None,
-                ));
-            };
-
-            if let Some(svc_name) = &ext.service_name {
-                if let Some(blocker) =
-                    check_service_endpoints(client, ns, svc_name, "Postgres").await?
-                {
-                    return Ok((blocker, None, None));
-                }
-            }
-
-            if let Some(rr) = restricted {
-                let (blocker, rr_digest) = observe_restricted_runtime(client, ns, rr).await?;
-                if let Some(b) = blocker {
-                    return Ok((b, None, None));
-                }
-                return Ok((
-                    DependencyHealth::Ready {
-                        endpoint_hint: format!(
-                            "{}:{}/{}",
-                            rr.database_host, rr.database_port, rr.database_name
-                        ),
-                    },
-                    Some(PostgresBinding::RestrictedRuntime {
-                        spec: Box::new(rr.clone()),
-                    }),
-                    rr_digest,
-                ));
-            }
-
-            let Some(secret) = Api::<Secret>::namespaced(client.clone(), ns)
-                .get_opt(&ext.secret_name)
-                .await
-                .map_err(|source| OperatorError::Kube {
-                    context: "get external Postgres Secret",
-                    source,
-                })?
-            else {
-                return Ok((
-                    DependencyHealth::Missing {
-                        reason: "PostgresSecretMissing".to_owned(),
-                        detail: format!(
-                            "PostgreSQL Secret {} not found in namespace {ns}",
-                            ext.secret_name
-                        ),
-                    },
-                    None,
-                    None,
-                ));
-            };
-
-            let data = secret.data.unwrap_or_default();
-            if !has_nonempty_key(&data, &ext.uri_key) {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "PostgresUriKeyMissing".to_owned(),
-                        detail: format!(
-                            "PostgreSQL Secret {} is missing non-empty key '{}'",
-                            ext.secret_name, ext.uri_key
-                        ),
-                    },
-                    None,
-                    None,
-                ));
-            }
-
-            let pg_digest = yolo::compute_consumed_secret_digest(
-                &to_raw_byte_map(Some(&data)),
-                &[&ext.uri_key],
-            );
-            let hint = ext.service_name.as_ref().map_or_else(
-                || format!("secret/{}", ext.secret_name),
-                |svc| format!("svc/{svc}"),
-            );
-            Ok((
-                DependencyHealth::Ready {
-                    endpoint_hint: hint,
-                },
-                Some(PostgresBinding::UriSecret {
-                    secret_name: ext.secret_name.clone(),
-                    uri_key: ext.uri_key.clone(),
-                }),
-                pg_digest,
-            ))
+            observe_external_postgres(client, ns, pg.external.as_ref(), restricted).await
         }
     }
+}
+
+async fn observe_cnpg_postgres(
+    client: &Client,
+    ns: &str,
+    cnpg: Option<&CloudNativePgSource>,
+    restricted: Option<&RestrictedRuntimeSpec>,
+    known_has_cnpg: bool,
+) -> Result<PostgresObservation, OperatorError> {
+    let Some(cnpg) = cnpg else {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "CnpgSpecMissing".to_owned(),
+                detail: "postgres.mode is CloudNativePg without spec.postgres.cnpg".to_owned(),
+            },
+            None,
+            None,
+        ));
+    };
+
+    let cluster_view =
+        match fetch_cnpg_cluster(client, ns, &cnpg.cluster_name, known_has_cnpg).await? {
+            Ok(view) => view,
+            Err(health) => return Ok((health, None, None)),
+        };
+
+    let health = external_crds::evaluate_cnpg_health(
+        &cluster_view,
+        &cnpg.cluster_name,
+        cnpg.require_healthy,
+    );
+    if !health.is_ready() {
+        return Ok((health, None, None));
+    }
+
+    if let Some(rr) = restricted {
+        let (blocker, rr_digest) = observe_restricted_runtime(client, ns, rr).await?;
+        if let Some(b) = blocker {
+            return Ok((b, None, None));
+        }
+        return Ok((
+            health,
+            Some(PostgresBinding::RestrictedRuntime {
+                spec: Box::new(rr.clone()),
+            }),
+            rr_digest,
+        ));
+    }
+
+    resolve_cnpg_secret_binding(client, ns, cnpg, &cluster_view, health).await
+}
+
+async fn fetch_cnpg_cluster(
+    client: &Client,
+    ns: &str,
+    cluster_name: &str,
+    known_has_cnpg: bool,
+) -> Result<Result<CnpgClusterView, DependencyHealth>, OperatorError> {
+    let ar = external_crds::api_resource_cnpg();
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    let cluster_obj = match api.get(cluster_name).await {
+        Ok(obj) => obj,
+        Err(kube::Error::Api(status)) if status.code == 404 => {
+            if is_missing_crd_status(&status.message)
+                || (!known_has_cnpg
+                    && !has_group_version_live(client, "postgresql.cnpg.io", "v1").await)
+            {
+                return Ok(Err(DependencyHealth::CrdNotInstalled {
+                    api_group: "postgresql.cnpg.io".to_owned(),
+                }));
+            }
+            return Ok(Err(DependencyHealth::Missing {
+                reason: "CnpgClusterNotFound".to_owned(),
+                detail: format!("CloudNativePG Cluster {cluster_name} not found in namespace {ns}"),
+            }));
+        }
+        Err(source) => {
+            return Err(OperatorError::Kube {
+                context: "get CloudNativePG Cluster",
+                source,
+            });
+        }
+    };
+
+    let view: CnpgClusterView = serde_json::from_value(cluster_obj.data)
+        .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
+    Ok(Ok(view))
+}
+
+async fn resolve_cnpg_secret_binding(
+    client: &Client,
+    ns: &str,
+    cnpg: &CloudNativePgSource,
+    cluster_view: &CnpgClusterView,
+    health: DependencyHealth,
+) -> Result<PostgresObservation, OperatorError> {
+    let secret_name = cnpg
+        .secret_name
+        .clone()
+        .unwrap_or_else(|| cluster_view.resolved_secret_name(&cnpg.cluster_name));
+    if !is_safe_resource_name(&secret_name) {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "InvalidPostgresSecretName".to_owned(),
+                detail: format!(
+                    "Resolved CNPG credential Secret name '{secret_name}' is not a valid Kubernetes resource name"
+                ),
+            },
+            None,
+            None,
+        ));
+    }
+    let Some(secret) = Api::<Secret>::namespaced(client.clone(), ns)
+        .get_opt(&secret_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get CNPG credentials Secret",
+            source,
+        })?
+    else {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "PostgresSecretMissing".to_owned(),
+                detail: format!("PostgreSQL credential Secret {secret_name} not found"),
+            },
+            None,
+            None,
+        ));
+    };
+
+    let data = secret.data.unwrap_or_default();
+    let raw = to_raw_byte_map(Some(&data));
+    let pg_digest = yolo::compute_consumed_secret_digest(
+        &raw,
+        &[&cnpg.uri_key, &cnpg.username_key, &cnpg.password_key],
+    );
+    if has_nonempty_key(&data, &cnpg.uri_key) {
+        return Ok((
+            health,
+            Some(PostgresBinding::UriSecret {
+                secret_name,
+                uri_key: cnpg.uri_key.clone(),
+            }),
+            pg_digest,
+        ));
+    }
+    if has_nonempty_key(&data, &cnpg.username_key) && has_nonempty_key(&data, &cnpg.password_key) {
+        return Ok((
+            health,
+            Some(PostgresBinding::BasicAuthSecret {
+                secret_name,
+                username_key: cnpg.username_key.clone(),
+                password_key: cnpg.password_key.clone(),
+                host: format!("{}-rw", cnpg.cluster_name),
+                port: 5432,
+                database: cluster_view.resolved_database_name().to_owned(),
+            }),
+            pg_digest,
+        ));
+    }
+
+    Ok((
+        DependencyHealth::NotReady {
+            reason: "PostgresSecretKeysMissing".to_owned(),
+            detail: format!(
+                "Secret {secret_name} lacks non-empty '{}' or '{}'/'{}'",
+                cnpg.uri_key, cnpg.username_key, cnpg.password_key
+            ),
+        },
+        None,
+        None,
+    ))
+}
+
+async fn observe_external_postgres(
+    client: &Client,
+    ns: &str,
+    ext: Option<&ExternalPostgresSource>,
+    restricted: Option<&RestrictedRuntimeSpec>,
+) -> Result<PostgresObservation, OperatorError> {
+    let Some(ext) = ext else {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "ExternalPostgresSpecMissing".to_owned(),
+                detail: "postgres.mode is External without spec.postgres.external".to_owned(),
+            },
+            None,
+            None,
+        ));
+    };
+
+    if let Some(svc_name) = &ext.service_name {
+        if let Some(blocker) = check_service_endpoints(client, ns, svc_name, "Postgres").await? {
+            return Ok((blocker, None, None));
+        }
+    }
+
+    if let Some(rr) = restricted {
+        let (blocker, rr_digest) = observe_restricted_runtime(client, ns, rr).await?;
+        if let Some(b) = blocker {
+            return Ok((b, None, None));
+        }
+        return Ok((
+            DependencyHealth::Ready {
+                endpoint_hint: format!(
+                    "{}:{}/{}",
+                    rr.database_host, rr.database_port, rr.database_name
+                ),
+            },
+            Some(PostgresBinding::RestrictedRuntime {
+                spec: Box::new(rr.clone()),
+            }),
+            rr_digest,
+        ));
+    }
+
+    let Some(secret) = Api::<Secret>::namespaced(client.clone(), ns)
+        .get_opt(&ext.secret_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get external Postgres Secret",
+            source,
+        })?
+    else {
+        return Ok((
+            DependencyHealth::Missing {
+                reason: "PostgresSecretMissing".to_owned(),
+                detail: format!(
+                    "PostgreSQL Secret {} not found in namespace {ns}",
+                    ext.secret_name
+                ),
+            },
+            None,
+            None,
+        ));
+    };
+
+    let data = secret.data.unwrap_or_default();
+    if !has_nonempty_key(&data, &ext.uri_key) {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "PostgresUriKeyMissing".to_owned(),
+                detail: format!(
+                    "PostgreSQL Secret {} is missing non-empty key '{}'",
+                    ext.secret_name, ext.uri_key
+                ),
+            },
+            None,
+            None,
+        ));
+    }
+
+    let pg_digest =
+        yolo::compute_consumed_secret_digest(&to_raw_byte_map(Some(&data)), &[&ext.uri_key]);
+    let hint = ext.service_name.as_ref().map_or_else(
+        || format!("secret/{}", ext.secret_name),
+        |svc| format!("svc/{svc}"),
+    );
+    Ok((
+        DependencyHealth::Ready {
+            endpoint_hint: hint,
+        },
+        Some(PostgresBinding::UriSecret {
+            secret_name: ext.secret_name.clone(),
+            uri_key: ext.uri_key.clone(),
+        }),
+        pg_digest,
+    ))
 }
 
 async fn observe_restricted_runtime(
@@ -625,224 +650,244 @@ async fn observe_restricted_runtime(
     Ok((None, yolo::combine_digests(&parts)))
 }
 
+type SpiceDbObservation = (
+    DependencyHealth,
+    Option<SpiceDbBinding>,
+    Option<ContentDigest>,
+);
+
 async fn observe_spicedb(
     client: &Client,
     ws: &WaddleServer,
     ns: &str,
     known_has_spicedb: bool,
     runtime_secret_name: &str,
-) -> Result<
-    (
-        DependencyHealth,
-        Option<SpiceDbBinding>,
-        Option<ContentDigest>,
-    ),
-    OperatorError,
-> {
+) -> Result<SpiceDbObservation, OperatorError> {
     let sp = &ws.spec.spicedb;
     match sp.mode {
         SpiceDbSourceMode::SpiceDbOperator => {
-            let Some(op) = &sp.operator else {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "SpiceDbSpecMissing".to_owned(),
-                        detail: "spicedb.mode is SpiceDbOperator without spec.spicedb.operator"
-                            .to_owned(),
-                    },
-                    None,
-                    None,
-                ));
-            };
-
-            let ar = external_crds::api_resource_spicedb();
-            let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
-            let cluster_obj = match api.get(&op.cluster_name).await {
-                Ok(obj) => obj,
-                Err(kube::Error::Api(status)) if status.code == 404 => {
-                    if is_missing_crd_status(&status.message)
-                        || (!known_has_spicedb
-                            && !has_group_version_live(client, "authzed.com", "v1alpha1").await)
-                    {
-                        return Ok((
-                            DependencyHealth::CrdNotInstalled {
-                                api_group: "authzed.com".to_owned(),
-                            },
-                            None,
-                            None,
-                        ));
-                    }
-                    return Ok((
-                        DependencyHealth::Missing {
-                            reason: "SpiceDbClusterNotFound".to_owned(),
-                            detail: format!(
-                                "SpiceDBCluster {} not found in namespace {ns}",
-                                op.cluster_name
-                            ),
-                        },
-                        None,
-                        None,
-                    ));
-                }
-                Err(source) => {
-                    return Err(OperatorError::Kube {
-                        context: "get SpiceDBCluster",
-                        source,
-                    });
-                }
-            };
-
-            let mut view: SpiceDbClusterView = serde_json::from_value(cluster_obj.data)
-                .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
-            // DynamicObject stores object metadata in `cluster_obj.metadata` rather than `data`.
-            if view.metadata.generation.is_none() {
-                view.metadata.generation = cluster_obj.metadata.generation;
-            }
-
-            let svc_name = op.service_name.as_deref().unwrap_or(&op.cluster_name);
-            let ready_endpoints = count_ready_endpoints(client, ns, svc_name).await?;
-            let insecure = op.insecure.unwrap_or_else(|| !view.has_tls());
-            let scheme = if insecure { "http" } else { "https" };
-            let endpoint = format!("{scheme}://{svc_name}:{}", op.port);
-
-            let health = external_crds::evaluate_spicedb_health(
-                &view,
-                &endpoint,
-                ready_endpoints,
-                op.require_ready,
-            );
-            if !health.is_ready() {
-                return Ok((health, None, None));
-            }
-
-            let (pk_secret_name, pk_secret_key, sp_digest) = if let Some(explicit) =
-                &op.preshared_key_secret_ref
-            {
-                let (blocker, digest) =
-                    verify_secret_key_present(client, ns, &explicit.name, &explicit.key, "SpiceDB")
-                        .await?;
-                if let Some(b) = blocker {
-                    return Ok((b, None, None));
-                }
-                (explicit.name.clone(), explicit.key.clone(), digest)
-            } else if ws.spec.secrets.mode == SecretProviderMode::Yolo {
-                let Some(cluster_secret) = view
-                    .spec
-                    .secret_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                else {
-                    return Ok((
-                            DependencyHealth::NotReady {
-                                reason: "SpiceDbSecretNameMissing".to_owned(),
-                                detail: format!(
-                                    "SpiceDBCluster {} has no spec.secretName; set presharedKeySecretRef",
-                                    op.cluster_name
-                                ),
-                            },
-                            None,
-                            None,
-                        ));
-                };
-                if !is_safe_resource_name(cluster_secret) {
-                    return Ok((
-                        DependencyHealth::NotReady {
-                            reason: "InvalidSpiceDbSecretName".to_owned(),
-                            detail: format!(
-                                "SpiceDBCluster.spec.secretName '{cluster_secret}' is not a valid Kubernetes resource name"
-                            ),
-                        },
-                        None,
-                        None,
-                    ));
-                }
-                let (blocker, digest) = verify_secret_key_present(
-                    client,
-                    ns,
-                    cluster_secret,
-                    "preshared_key",
-                    "SpiceDB",
-                )
-                .await?;
-                if let Some(b) = blocker {
-                    return Ok((b, None, None));
-                }
-                (
-                    cluster_secret.to_owned(),
-                    "preshared_key".to_owned(),
-                    digest,
-                )
-            } else {
-                (
-                    runtime_secret_name.to_owned(),
-                    KEY_SPICEDB_PRESHARED_KEY.to_owned(),
-                    None,
-                )
-            };
-
-            Ok((
-                health,
-                Some(SpiceDbBinding {
-                    endpoint,
-                    insecure,
-                    preshared_key_secret_name: pk_secret_name,
-                    preshared_key_secret_key: pk_secret_key,
-                }),
-                sp_digest,
-            ))
+            observe_spicedb_operator(
+                client,
+                ws,
+                ns,
+                sp.operator.as_ref(),
+                known_has_spicedb,
+                runtime_secret_name,
+            )
+            .await
         }
         SpiceDbSourceMode::External => {
-            let Some(ext) = &sp.external else {
-                return Ok((
-                    DependencyHealth::NotReady {
-                        reason: "ExternalSpiceDbSpecMissing".to_owned(),
-                        detail: "spicedb.mode is External without spec.spicedb.external".to_owned(),
-                    },
-                    None,
-                    None,
-                ));
-            };
-
-            if let Some(svc_name) = &ext.service_name {
-                if let Some(blocker) =
-                    check_service_endpoints(client, ns, svc_name, "SpiceDB").await?
-                {
-                    return Ok((blocker, None, None));
-                }
-            }
-
-            let (pk_secret_name, pk_secret_key, sp_digest) = if let Some(explicit) =
-                &ext.preshared_key_secret_ref
-            {
-                let (blocker, digest) =
-                    verify_secret_key_present(client, ns, &explicit.name, &explicit.key, "SpiceDB")
-                        .await?;
-                if let Some(b) = blocker {
-                    return Ok((b, None, None));
-                }
-                (explicit.name.clone(), explicit.key.clone(), digest)
-            } else {
-                (
-                    runtime_secret_name.to_owned(),
-                    KEY_SPICEDB_PRESHARED_KEY.to_owned(),
-                    None,
-                )
-            };
-
-            Ok((
-                DependencyHealth::Ready {
-                    endpoint_hint: ext.endpoint.clone(),
-                },
-                Some(SpiceDbBinding {
-                    endpoint: ext.endpoint.clone(),
-                    insecure: ext.insecure,
-                    preshared_key_secret_name: pk_secret_name,
-                    preshared_key_secret_key: pk_secret_key,
-                }),
-                sp_digest,
-            ))
+            observe_external_spicedb(client, ns, sp.external.as_ref(), runtime_secret_name).await
         }
     }
+}
+
+async fn observe_spicedb_operator(
+    client: &Client,
+    ws: &WaddleServer,
+    ns: &str,
+    op: Option<&SpiceDbOperatorSource>,
+    known_has_spicedb: bool,
+    runtime_secret_name: &str,
+) -> Result<SpiceDbObservation, OperatorError> {
+    let Some(op) = op else {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "SpiceDbSpecMissing".to_owned(),
+                detail: "spicedb.mode is SpiceDbOperator without spec.spicedb.operator".to_owned(),
+            },
+            None,
+            None,
+        ));
+    };
+
+    let view = match fetch_spicedb_cluster(client, ns, &op.cluster_name, known_has_spicedb).await? {
+        Ok(view) => view,
+        Err(health) => return Ok((health, None, None)),
+    };
+
+    let svc_name = op.service_name.as_deref().unwrap_or(&op.cluster_name);
+    let ready_endpoints = count_ready_endpoints(client, ns, svc_name).await?;
+    let insecure = op.insecure.unwrap_or_else(|| !view.has_tls());
+    let scheme = if insecure { "http" } else { "https" };
+    let endpoint = format!("{scheme}://{svc_name}:{}", op.port);
+
+    let health =
+        external_crds::evaluate_spicedb_health(&view, &endpoint, ready_endpoints, op.require_ready);
+    if !health.is_ready() {
+        return Ok((health, None, None));
+    }
+
+    let (pk_secret_name, pk_secret_key, sp_digest) =
+        match resolve_spicedb_operator_key(client, ws, ns, op, &view, runtime_secret_name).await? {
+            Ok(resolved) => resolved,
+            Err(blocker) => return Ok((blocker, None, None)),
+        };
+
+    Ok((
+        health,
+        Some(SpiceDbBinding {
+            endpoint,
+            insecure,
+            preshared_key_secret_name: pk_secret_name,
+            preshared_key_secret_key: pk_secret_key,
+        }),
+        sp_digest,
+    ))
+}
+
+async fn fetch_spicedb_cluster(
+    client: &Client,
+    ns: &str,
+    cluster_name: &str,
+    known_has_spicedb: bool,
+) -> Result<Result<SpiceDbClusterView, DependencyHealth>, OperatorError> {
+    let ar = external_crds::api_resource_spicedb();
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    let cluster_obj = match api.get(cluster_name).await {
+        Ok(obj) => obj,
+        Err(kube::Error::Api(status)) if status.code == 404 => {
+            if is_missing_crd_status(&status.message)
+                || (!known_has_spicedb
+                    && !has_group_version_live(client, "authzed.com", "v1alpha1").await)
+            {
+                return Ok(Err(DependencyHealth::CrdNotInstalled {
+                    api_group: "authzed.com".to_owned(),
+                }));
+            }
+            return Ok(Err(DependencyHealth::Missing {
+                reason: "SpiceDbClusterNotFound".to_owned(),
+                detail: format!("SpiceDBCluster {cluster_name} not found in namespace {ns}"),
+            }));
+        }
+        Err(source) => {
+            return Err(OperatorError::Kube {
+                context: "get SpiceDBCluster",
+                source,
+            });
+        }
+    };
+
+    let mut view: SpiceDbClusterView = serde_json::from_value(cluster_obj.data)
+        .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
+    // DynamicObject stores object metadata in `cluster_obj.metadata` rather than `data`.
+    if view.metadata.generation.is_none() {
+        view.metadata.generation = cluster_obj.metadata.generation;
+    }
+    Ok(Ok(view))
+}
+
+async fn resolve_spicedb_operator_key(
+    client: &Client,
+    ws: &WaddleServer,
+    ns: &str,
+    op: &SpiceDbOperatorSource,
+    view: &SpiceDbClusterView,
+    runtime_secret_name: &str,
+) -> Result<Result<(String, String, Option<ContentDigest>), DependencyHealth>, OperatorError> {
+    if let Some(explicit) = &op.preshared_key_secret_ref {
+        let (blocker, digest) =
+            verify_secret_key_present(client, ns, &explicit.name, &explicit.key, "SpiceDB").await?;
+        if let Some(b) = blocker {
+            return Ok(Err(b));
+        }
+        return Ok(Ok((explicit.name.clone(), explicit.key.clone(), digest)));
+    }
+    if ws.spec.secrets.mode != SecretProviderMode::Yolo {
+        return Ok(Ok((
+            runtime_secret_name.to_owned(),
+            KEY_SPICEDB_PRESHARED_KEY.to_owned(),
+            None,
+        )));
+    }
+
+    let Some(cluster_secret) = view
+        .spec
+        .secret_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(Err(DependencyHealth::NotReady {
+            reason: "SpiceDbSecretNameMissing".to_owned(),
+            detail: format!(
+                "SpiceDBCluster {} has no spec.secretName; set presharedKeySecretRef",
+                op.cluster_name
+            ),
+        }));
+    };
+    if !is_safe_resource_name(cluster_secret) {
+        return Ok(Err(DependencyHealth::NotReady {
+            reason: "InvalidSpiceDbSecretName".to_owned(),
+            detail: format!(
+                "SpiceDBCluster.spec.secretName '{cluster_secret}' is not a valid Kubernetes resource name"
+            ),
+        }));
+    }
+    let (blocker, digest) =
+        verify_secret_key_present(client, ns, cluster_secret, "preshared_key", "SpiceDB").await?;
+    if let Some(b) = blocker {
+        return Ok(Err(b));
+    }
+    Ok(Ok((
+        cluster_secret.to_owned(),
+        "preshared_key".to_owned(),
+        digest,
+    )))
+}
+
+async fn observe_external_spicedb(
+    client: &Client,
+    ns: &str,
+    ext: Option<&ExternalSpiceDbSource>,
+    runtime_secret_name: &str,
+) -> Result<SpiceDbObservation, OperatorError> {
+    let Some(ext) = ext else {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "ExternalSpiceDbSpecMissing".to_owned(),
+                detail: "spicedb.mode is External without spec.spicedb.external".to_owned(),
+            },
+            None,
+            None,
+        ));
+    };
+
+    if let Some(svc_name) = &ext.service_name {
+        if let Some(blocker) = check_service_endpoints(client, ns, svc_name, "SpiceDB").await? {
+            return Ok((blocker, None, None));
+        }
+    }
+
+    let (pk_secret_name, pk_secret_key, sp_digest) = if let Some(explicit) =
+        &ext.preshared_key_secret_ref
+    {
+        let (blocker, digest) =
+            verify_secret_key_present(client, ns, &explicit.name, &explicit.key, "SpiceDB").await?;
+        if let Some(b) = blocker {
+            return Ok((b, None, None));
+        }
+        (explicit.name.clone(), explicit.key.clone(), digest)
+    } else {
+        (
+            runtime_secret_name.to_owned(),
+            KEY_SPICEDB_PRESHARED_KEY.to_owned(),
+            None,
+        )
+    };
+
+    Ok((
+        DependencyHealth::Ready {
+            endpoint_hint: ext.endpoint.clone(),
+        },
+        Some(SpiceDbBinding {
+            endpoint: ext.endpoint.clone(),
+            insecure: ext.insecure,
+            preshared_key_secret_name: pk_secret_name,
+            preshared_key_secret_key: pk_secret_key,
+        }),
+        sp_digest,
+    ))
 }
 
 struct SecretObservationBundle {
@@ -1008,6 +1053,22 @@ async fn observe_yolo_secrets(
     })
 }
 
+struct EsoObjectObservation {
+    target_secret_name: String,
+    synced: Option<bool>,
+    error: Option<String>,
+    managed_drifted: bool,
+}
+
+struct TargetSecretInspection {
+    exists: bool,
+    missing_keys: Vec<String>,
+    invalid_keys: Vec<String>,
+    checksum: Option<ContentDigest>,
+    session_fp: Option<ContentDigest>,
+    occupant_fp: Option<ContentDigest>,
+}
+
 async fn observe_eso_secrets(
     client: &Client,
     ws: &WaddleServer,
@@ -1017,31 +1078,7 @@ async fn observe_eso_secrets(
     spicedb_key_in_runtime_secret: bool,
 ) -> Result<SecretObservationBundle, OperatorError> {
     let Some(eso) = &ws.spec.secrets.external_secrets else {
-        let fallback_target = resources::managed_target_secret_name(ws)?;
-        return Ok(SecretObservationBundle {
-            observation: SecretsObservation {
-                source: SecretSourceKind::ExternalSecretsUnmanaged,
-                yolo_allowed_by_operator: policy.enable_yolo_mode,
-                cluster_store_allowed: true,
-                external_secret_synced: Some(false),
-                external_secret_error: Some(
-                    "secrets.mode is ExternalSecrets without spec.secrets.externalSecrets"
-                        .to_owned(),
-                ),
-                managed_external_secret_drifted: false,
-                target_secret_exists: false,
-                missing_keys: vec![],
-                invalid_keys: vec![],
-                checksum: None,
-                sensitive_key_rotated: None,
-            },
-            target_secret_name: fallback_target,
-            component_digests: BTreeMap::new(),
-            session_key_fingerprint: None,
-            occupant_id_fingerprint: None,
-            eso_api_version: None,
-            resolved_deployment_uuid: ws.spec.deployment.uuid.clone(),
-        });
+        return missing_eso_spec_bundle(ws, policy);
     };
 
     let is_managed = eso.managed.is_some();
@@ -1050,8 +1087,102 @@ async fn observe_eso_secrets(
     } else {
         SecretSourceKind::ExternalSecretsUnmanaged
     };
+    let cluster_store_allowed = is_eso_cluster_store_allowed(eso, policy);
+    let eso_version =
+        resolve_eso_version(client, eso.api_version, policy.capabilities.eso_version).await;
 
-    let cluster_store_allowed = match &eso.managed {
+    let mut es_obs =
+        observe_external_secret_object(client, ws, ns, eso, eso_version, is_managed).await?;
+
+    let secret = if is_safe_resource_name(&es_obs.target_secret_name) {
+        Api::<Secret>::namespaced(client.clone(), ns)
+            .get_opt(&es_obs.target_secret_name)
+            .await
+            .map_err(|source| OperatorError::Kube {
+                context: "get ESO target runtime Secret",
+                source,
+            })?
+    } else {
+        es_obs.synced = Some(false);
+        es_obs.error = Some(format!(
+            "ExternalSecret spec.target.name '{}' is not a valid Kubernetes resource name",
+            es_obs.target_secret_name
+        ));
+        None
+    };
+
+    let mut inspection = inspect_eso_target_secret(
+        client,
+        ws,
+        ns,
+        eso,
+        secret.as_ref(),
+        spicedb_key_in_runtime_secret,
+    )
+    .await?;
+    check_eso_apns_secret(client, ns, eso, &mut inspection.missing_keys).await?;
+
+    let sensitive_key_rotated = detect_sensitive_key_rotation(
+        live_deployment,
+        inspection.session_fp.as_ref(),
+        inspection.occupant_fp.as_ref(),
+    );
+
+    Ok(SecretObservationBundle {
+        observation: SecretsObservation {
+            source: source_kind,
+            yolo_allowed_by_operator: policy.enable_yolo_mode,
+            cluster_store_allowed,
+            external_secret_synced: es_obs.synced,
+            external_secret_error: es_obs.error,
+            managed_external_secret_drifted: es_obs.managed_drifted,
+            target_secret_exists: inspection.exists,
+            missing_keys: inspection.missing_keys,
+            invalid_keys: inspection.invalid_keys,
+            checksum: inspection.checksum,
+            sensitive_key_rotated,
+        },
+        target_secret_name: es_obs.target_secret_name,
+        component_digests: BTreeMap::new(),
+        session_key_fingerprint: inspection.session_fp,
+        occupant_id_fingerprint: inspection.occupant_fp,
+        eso_api_version: eso_version,
+        resolved_deployment_uuid: ws.spec.deployment.uuid.clone(),
+    })
+}
+
+fn missing_eso_spec_bundle(
+    ws: &WaddleServer,
+    policy: &OperatorPolicy,
+) -> Result<SecretObservationBundle, OperatorError> {
+    let fallback_target = resources::managed_target_secret_name(ws)?;
+    Ok(SecretObservationBundle {
+        observation: SecretsObservation {
+            source: SecretSourceKind::ExternalSecretsUnmanaged,
+            yolo_allowed_by_operator: policy.enable_yolo_mode,
+            cluster_store_allowed: true,
+            external_secret_synced: Some(false),
+            external_secret_error: Some(
+                "secrets.mode is ExternalSecrets without spec.secrets.externalSecrets".to_owned(),
+            ),
+            managed_external_secret_drifted: false,
+            target_secret_exists: false,
+            missing_keys: vec![],
+            invalid_keys: vec![],
+            checksum: None,
+            sensitive_key_rotated: None,
+        },
+        target_secret_name: fallback_target,
+        component_digests: BTreeMap::new(),
+        session_key_fingerprint: None,
+        occupant_id_fingerprint: None,
+        eso_api_version: None,
+        resolved_deployment_uuid: ws.spec.deployment.uuid.clone(),
+    })
+}
+
+fn is_eso_cluster_store_allowed(eso: &ExternalSecretsSpec, policy: &OperatorPolicy) -> bool {
+    match &eso.managed {
         Some(managed) if managed.secret_store_ref.kind == SecretStoreKind::ClusterSecretStore => {
             policy
                 .allowed_cluster_secret_stores
@@ -1059,246 +1190,256 @@ async fn observe_eso_secrets(
                 .any(|allowed| allowed == &managed.secret_store_ref.name)
         }
         _ => true,
+    }
+}
+
+async fn observe_external_secret_object(
+    client: &Client,
+    ws: &WaddleServer,
+    ns: &str,
+    eso: &ExternalSecretsSpec,
+    eso_version: Option<DiscoveredEsoVersion>,
+    is_managed: bool,
+) -> Result<EsoObjectObservation, OperatorError> {
+    let mut target_secret_name = expected_runtime_secret_name(ws)?;
+    let Some(version) = eso_version else {
+        return Ok(EsoObjectObservation {
+            target_secret_name,
+            synced: Some(false),
+            error: Some(
+                "External Secrets Operator CRD (external-secrets.io) is not installed".to_owned(),
+            ),
+            managed_drifted: is_managed,
+        });
     };
 
-    let eso_version =
-        resolve_eso_version(client, eso.api_version, policy.capabilities.eso_version).await;
-    let mut target_secret_name = expected_runtime_secret_name(ws)?;
+    let es_name = if is_managed {
+        resources::managed_external_secret_name(ws)?
+    } else {
+        eso.external_secret_name
+            .clone()
+            .unwrap_or_else(|| target_secret_name.clone())
+    };
+    let ar = external_crds::api_resource_eso(version);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
 
-    let mut external_secret_synced = Some(false);
-    let mut external_secret_error;
-    let mut managed_drifted = false;
-
-    match eso_version {
-        None => {
-            external_secret_error = Some(
-                "External Secrets Operator CRD (external-secrets.io) is not installed".to_owned(),
-            );
-            managed_drifted = is_managed;
-        }
-        Some(version) => {
-            let es_name = if is_managed {
-                resources::managed_external_secret_name(ws)?
-            } else {
-                eso.external_secret_name
-                    .clone()
-                    .unwrap_or_else(|| target_secret_name.clone())
-            };
-            let ar = external_crds::api_resource_eso(version);
-            let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
-            match api.get(&es_name).await {
-                Ok(live_es) => {
-                    let view: ExternalSecretView = serde_json::from_value(live_es.data.clone())
-                        .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
-                    if !is_managed {
-                        if let Some(target_name) = view
-                            .spec
-                            .target
-                            .as_ref()
-                            .and_then(|t| t.name.as_deref())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                        {
-                            target_secret_name = target_name.to_owned();
-                        }
-                    }
-                    let (synced, err_msg) = external_crds::evaluate_eso_status(&view);
-                    external_secret_synced = synced;
-                    external_secret_error = err_msg;
-
-                    if is_managed {
-                        let desired_es = resources::build_managed_external_secret(ws, version)?;
-                        managed_drifted =
-                            resources::managed_external_secret_drifted(&live_es, &desired_es);
-                    }
-                }
-                Err(kube::Error::Api(status)) if status.code == 404 => {
-                    if is_missing_crd_status(&status.message)
-                        || !has_group_version_live(
-                            client,
-                            "external-secrets.io",
-                            version.version_str(),
-                        )
-                        .await
-                    {
-                        external_secret_error = Some(format!(
-                            "ExternalSecret CRD {} is not installed",
-                            version.api_version()
-                        ));
-                    } else {
-                        external_secret_error = Some(format!(
-                            "ExternalSecret {es_name} not found in namespace {ns}"
-                        ));
-                    }
-                    managed_drifted = is_managed;
-                }
-                Err(source) => {
-                    return Err(OperatorError::Kube {
-                        context: "get ExternalSecret",
-                        source,
-                    });
+    match api.get(&es_name).await {
+        Ok(live_es) => {
+            let view: ExternalSecretView = serde_json::from_value(live_es.data.clone())
+                .map_err(|err| OperatorError::InvalidClusterState(err.to_string()))?;
+            if !is_managed {
+                if let Some(target_name) = view
+                    .spec
+                    .target
+                    .as_ref()
+                    .and_then(|t| t.name.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    target_secret_name = target_name.to_owned();
                 }
             }
+            let (synced, error) = external_crds::evaluate_eso_status(&view);
+            let managed_drifted = if is_managed {
+                let desired_es = resources::build_managed_external_secret(ws, version)?;
+                resources::managed_external_secret_drifted(&live_es, &desired_es)
+            } else {
+                false
+            };
+            Ok(EsoObjectObservation {
+                target_secret_name,
+                synced,
+                error,
+                managed_drifted,
+            })
         }
+        Err(kube::Error::Api(status)) if status.code == 404 => {
+            let error = if is_missing_crd_status(&status.message)
+                || !has_group_version_live(client, "external-secrets.io", version.version_str())
+                    .await
+            {
+                format!(
+                    "ExternalSecret CRD {} is not installed",
+                    version.api_version()
+                )
+            } else {
+                format!("ExternalSecret {es_name} not found in namespace {ns}")
+            };
+            Ok(EsoObjectObservation {
+                target_secret_name,
+                synced: Some(false),
+                error: Some(error),
+                managed_drifted: is_managed,
+            })
+        }
+        Err(source) => Err(OperatorError::Kube {
+            context: "get ExternalSecret",
+            source,
+        }),
     }
+}
 
-    let secret = if is_safe_resource_name(&target_secret_name) {
-        Api::<Secret>::namespaced(client.clone(), ns)
-            .get_opt(&target_secret_name)
-            .await
-            .map_err(|source| OperatorError::Kube {
-                context: "get ESO target runtime Secret",
-                source,
-            })?
-    } else {
-        external_secret_synced = Some(false);
-        external_secret_error = Some(format!(
-            "ExternalSecret spec.target.name '{target_secret_name}' is not a valid Kubernetes resource name"
-        ));
-        None
+async fn inspect_eso_target_secret(
+    client: &Client,
+    ws: &WaddleServer,
+    ns: &str,
+    eso: &ExternalSecretsSpec,
+    secret: Option<&Secret>,
+    spicedb_key_in_runtime_secret: bool,
+) -> Result<TargetSecretInspection, OperatorError> {
+    let Some(sec) = secret else {
+        return Ok(TargetSecretInspection {
+            exists: false,
+            missing_keys: Vec::new(),
+            invalid_keys: Vec::new(),
+            checksum: None,
+            session_fp: None,
+            occupant_fp: None,
+        });
     };
 
     let mut missing_keys = Vec::new();
     let mut invalid_keys = Vec::new();
-    let mut checksum = None;
-    let mut session_fp = None;
-    let mut occupant_fp = None;
-
-    let target_secret_exists = if let Some(sec) = secret {
-        let raw_entries = to_raw_byte_map(sec.data.as_ref());
-        check_min_length_key(
+    let raw_entries = to_raw_byte_map(sec.data.as_ref());
+    check_min_length_key(
+        &raw_entries,
+        KEY_SESSION_KEY,
+        32,
+        &mut missing_keys,
+        &mut invalid_keys,
+    );
+    check_min_length_key(
+        &raw_entries,
+        KEY_OCCUPANT_ID_SECRET,
+        32,
+        &mut missing_keys,
+        &mut invalid_keys,
+    );
+    if spicedb_key_in_runtime_secret {
+        check_nonempty_key(&raw_entries, KEY_SPICEDB_PRESHARED_KEY, &mut missing_keys);
+    }
+    if ws.spec.s3.is_some() {
+        check_nonempty_key(&raw_entries, "WADDLE_S3_ACCESS_KEY_ID", &mut missing_keys);
+        check_nonempty_key(
             &raw_entries,
-            KEY_SESSION_KEY,
-            32,
+            "WADDLE_S3_SECRET_ACCESS_KEY",
             &mut missing_keys,
-            &mut invalid_keys,
         );
-        check_min_length_key(
-            &raw_entries,
-            KEY_OCCUPANT_ID_SECRET,
-            32,
-            &mut missing_keys,
-            &mut invalid_keys,
-        );
-        if spicedb_key_in_runtime_secret {
-            check_nonempty_key(&raw_entries, KEY_SPICEDB_PRESHARED_KEY, &mut missing_keys);
-        }
-        if ws.spec.s3.is_some() {
-            check_nonempty_key(&raw_entries, "WADDLE_S3_ACCESS_KEY_ID", &mut missing_keys);
-            check_nonempty_key(
-                &raw_entries,
-                "WADDLE_S3_SECRET_ACCESS_KEY",
-                &mut missing_keys,
-            );
-        }
-
-        let mut digest_keys: Vec<String> = vec![
-            KEY_SESSION_KEY.to_owned(),
-            KEY_OCCUPANT_ID_SECRET.to_owned(),
-            KEY_SPICEDB_PRESHARED_KEY.to_owned(),
-            "WADDLE_S3_ACCESS_KEY_ID".to_owned(),
-            "WADDLE_S3_SECRET_ACCESS_KEY".to_owned(),
-            "WADDLE_AUTH_PROVIDERS_JSON".to_owned(),
-        ];
-        if eso.clustering_keypool_secret_name.is_none() {
-            digest_keys.push("WADDLE_CLUSTERING_KEYPAIR_POOL".to_owned());
-        }
-        if let Some(managed) = &eso.managed {
-            for extra in &managed.remote_refs.extra_data {
-                digest_keys.push(extra.secret_key.clone());
-            }
-        }
-        let key_refs: Vec<&str> = digest_keys.iter().map(String::as_str).collect();
-        checksum = yolo::compute_consumed_secret_digest(&raw_entries, &key_refs);
-        session_fp = raw_entries
-            .get(KEY_SESSION_KEY)
-            .and_then(|b| yolo::compute_single_key_digest(b));
-        occupant_fp = raw_entries
-            .get(KEY_OCCUPANT_ID_SECRET)
-            .and_then(|b| yolo::compute_single_key_digest(b));
-
-        if ws.spec.clustering.enabled {
-            let max_surge = match ws.spec.update_strategy {
-                UpdateStrategyKind::RollingUpdate => 1,
-                UpdateStrategyKind::Recreate => 0,
-            };
-            let min_required = ws
-                .spec
-                .effective_replicas()
-                .saturating_add(max_surge)
-                .saturating_add(ws.spec.clustering.keypair_headroom);
-            let required_count = usize::try_from(min_required.max(1)).unwrap_or(1);
-
-            if let Some(pool_secret_name) = &eso.clustering_keypool_secret_name {
-                let pool_secret = Api::<Secret>::namespaced(client.clone(), ns)
-                    .get_opt(pool_secret_name)
-                    .await
-                    .map_err(|source| OperatorError::Kube {
-                        context: "get clustering keypool Secret",
-                        source,
-                    })?;
-                match pool_secret.and_then(|s| s.data) {
-                    Some(pool_data) => validate_keypool_in_map(
-                        &to_raw_byte_map(Some(&pool_data)),
-                        required_count,
-                        &mut missing_keys,
-                        &mut invalid_keys,
-                    ),
-                    None => missing_keys
-                        .push(format!("{pool_secret_name}/WADDLE_CLUSTERING_KEYPAIR_POOL")),
-                }
-            } else {
-                validate_keypool_in_map(
-                    &raw_entries,
-                    required_count,
-                    &mut missing_keys,
-                    &mut invalid_keys,
-                );
-            }
-        }
-        true
-    } else {
-        false
-    };
-
-    if let Some(apns) = &eso.apns_secret_ref {
-        let apns_sec = Api::<Secret>::namespaced(client.clone(), ns)
-            .get_opt(&apns.secret_name)
-            .await
-            .map_err(|source| OperatorError::Kube {
-                context: "get APNs Secret",
-                source,
-            })?;
-        match apns_sec.and_then(|s| s.data) {
-            Some(data) if has_nonempty_key(&data, &apns.secret_key) => {}
-            _ => missing_keys.push(format!("{}/{}", apns.secret_name, apns.secret_key)),
-        }
     }
 
-    let sensitive_key_rotated =
-        detect_sensitive_key_rotation(live_deployment, session_fp.as_ref(), occupant_fp.as_ref());
+    let mut digest_keys: Vec<String> = vec![
+        KEY_SESSION_KEY.to_owned(),
+        KEY_OCCUPANT_ID_SECRET.to_owned(),
+        KEY_SPICEDB_PRESHARED_KEY.to_owned(),
+        "WADDLE_S3_ACCESS_KEY_ID".to_owned(),
+        "WADDLE_S3_SECRET_ACCESS_KEY".to_owned(),
+        "WADDLE_AUTH_PROVIDERS_JSON".to_owned(),
+    ];
+    if eso.clustering_keypool_secret_name.is_none() {
+        digest_keys.push("WADDLE_CLUSTERING_KEYPAIR_POOL".to_owned());
+    }
+    if let Some(managed) = &eso.managed {
+        for extra in &managed.remote_refs.extra_data {
+            digest_keys.push(extra.secret_key.clone());
+        }
+    }
+    let key_refs: Vec<&str> = digest_keys.iter().map(String::as_str).collect();
+    let checksum = yolo::compute_consumed_secret_digest(&raw_entries, &key_refs);
+    let session_fp = raw_entries
+        .get(KEY_SESSION_KEY)
+        .and_then(|b| yolo::compute_single_key_digest(b));
+    let occupant_fp = raw_entries
+        .get(KEY_OCCUPANT_ID_SECRET)
+        .and_then(|b| yolo::compute_single_key_digest(b));
 
-    Ok(SecretObservationBundle {
-        observation: SecretsObservation {
-            source: source_kind,
-            yolo_allowed_by_operator: policy.enable_yolo_mode,
-            cluster_store_allowed,
-            external_secret_synced,
-            external_secret_error,
-            managed_external_secret_drifted: managed_drifted,
-            target_secret_exists,
+    if ws.spec.clustering.enabled {
+        validate_eso_clustering_keypool(
+            client,
+            ws,
+            ns,
+            eso,
+            &raw_entries,
+            &mut missing_keys,
+            &mut invalid_keys,
+        )
+        .await?;
+    }
+
+    Ok(TargetSecretInspection {
+        exists: true,
+        missing_keys,
+        invalid_keys,
+        checksum,
+        session_fp,
+        occupant_fp,
+    })
+}
+
+async fn validate_eso_clustering_keypool(
+    client: &Client,
+    ws: &WaddleServer,
+    ns: &str,
+    eso: &ExternalSecretsSpec,
+    raw_entries: &BTreeMap<String, Vec<u8>>,
+    missing_keys: &mut Vec<String>,
+    invalid_keys: &mut Vec<String>,
+) -> Result<(), OperatorError> {
+    let max_surge = match ws.spec.update_strategy {
+        UpdateStrategyKind::RollingUpdate => 1,
+        UpdateStrategyKind::Recreate => 0,
+    };
+    let min_required = ws
+        .spec
+        .effective_replicas()
+        .saturating_add(max_surge)
+        .saturating_add(ws.spec.clustering.keypair_headroom);
+    let required_count = usize::try_from(min_required.max(1)).unwrap_or(1);
+
+    let Some(pool_secret_name) = &eso.clustering_keypool_secret_name else {
+        validate_keypool_in_map(raw_entries, required_count, missing_keys, invalid_keys);
+        return Ok(());
+    };
+
+    let pool_secret = Api::<Secret>::namespaced(client.clone(), ns)
+        .get_opt(pool_secret_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get clustering keypool Secret",
+            source,
+        })?;
+    match pool_secret.and_then(|s| s.data) {
+        Some(pool_data) => validate_keypool_in_map(
+            &to_raw_byte_map(Some(&pool_data)),
+            required_count,
             missing_keys,
             invalid_keys,
-            checksum,
-            sensitive_key_rotated,
-        },
-        target_secret_name,
-        component_digests: BTreeMap::new(),
-        session_key_fingerprint: session_fp,
-        occupant_id_fingerprint: occupant_fp,
-        eso_api_version: eso_version,
-        resolved_deployment_uuid: ws.spec.deployment.uuid.clone(),
-    })
+        ),
+        None => missing_keys.push(format!("{pool_secret_name}/WADDLE_CLUSTERING_KEYPAIR_POOL")),
+    }
+    Ok(())
+}
+
+async fn check_eso_apns_secret(
+    client: &Client,
+    ns: &str,
+    eso: &ExternalSecretsSpec,
+    missing_keys: &mut Vec<String>,
+) -> Result<(), OperatorError> {
+    let Some(apns) = &eso.apns_secret_ref else {
+        return Ok(());
+    };
+    let apns_sec = Api::<Secret>::namespaced(client.clone(), ns)
+        .get_opt(&apns.secret_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get APNs Secret",
+            source,
+        })?;
+    match apns_sec.and_then(|s| s.data) {
+        Some(data) if has_nonempty_key(&data, &apns.secret_key) => {}
+        _ => missing_keys.push(format!("{}/{}", apns.secret_name, apns.secret_key)),
+    }
+    Ok(())
 }
 
 async fn observe_workload(
@@ -1545,83 +1686,104 @@ async fn collect_companion_secret_digests(
     parts: &mut BTreeMap<String, ContentDigest>,
 ) -> Result<(), OperatorError> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
-
-    if ws.spec.xmpp.enabled {
-        if let Some(tls_secret) = ws
-            .spec
-            .xmpp
-            .tls_secret_name
-            .as_deref()
-            .filter(|name| is_safe_resource_name(name))
-        {
-            if let Some(sec) =
-                secrets
-                    .get_opt(tls_secret)
-                    .await
-                    .map_err(|source| OperatorError::Kube {
-                        context: "get XMPP TLS Secret for checksum",
-                        source,
-                    })?
-            {
-                let raw = to_raw_byte_map(sec.data.as_ref());
-                if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &["tls.crt", "tls.key"])
-                {
-                    parts.insert("xmpp_tls".to_owned(), d);
-                }
-            }
-        }
-    }
-
+    collect_xmpp_tls_digest(&secrets, ws, parts).await?;
     if let Some(eso) = &ws.spec.secrets.external_secrets {
-        if let Some(apns) = &eso.apns_secret_ref {
-            if is_safe_resource_name(&apns.secret_name) {
-                if let Some(sec) = secrets.get_opt(&apns.secret_name).await.map_err(|source| {
-                    OperatorError::Kube {
-                        context: "get APNs Secret for checksum",
-                        source,
-                    }
-                })? {
-                    let raw = to_raw_byte_map(sec.data.as_ref());
-                    if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &[&apns.secret_key])
-                    {
-                        parts.insert("apns".to_owned(), d);
-                    }
-                }
-            }
-        }
+        collect_eso_companion_digests(&secrets, ws, eso, parts).await?;
+    }
+    collect_extra_secret_digests(&secrets, ws, parts).await?;
+    Ok(())
+}
 
-        if ws.spec.clustering.enabled {
-            if let Some(pool_name) = eso
-                .clustering_keypool_secret_name
-                .as_deref()
-                .filter(|name| is_safe_resource_name(name))
-            {
-                if let Some(sec) =
-                    secrets
-                        .get_opt(pool_name)
-                        .await
-                        .map_err(|source| OperatorError::Kube {
-                            context: "get keypool Secret for checksum",
-                            source,
-                        })?
-                {
-                    let raw = to_raw_byte_map(sec.data.as_ref());
-                    if let Some(d) = yolo::compute_consumed_secret_digest(
-                        &raw,
-                        &["WADDLE_CLUSTERING_KEYPAIR_POOL"],
-                    ) {
-                        parts.insert("keypool".to_owned(), d);
-                    }
-                }
-            }
+async fn insert_secret_keys_digest(
+    secrets: &Api<Secret>,
+    secret_name: &str,
+    context: &'static str,
+    keys: &[&str],
+    part_key: &str,
+    parts: &mut BTreeMap<String, ContentDigest>,
+) -> Result<(), OperatorError> {
+    if !is_safe_resource_name(secret_name) {
+        return Ok(());
+    }
+    let Some(sec) = secrets
+        .get_opt(secret_name)
+        .await
+        .map_err(|source| OperatorError::Kube { context, source })?
+    else {
+        return Ok(());
+    };
+    let raw = to_raw_byte_map(sec.data.as_ref());
+    if let Some(digest) = yolo::compute_consumed_secret_digest(&raw, keys) {
+        parts.insert(part_key.to_owned(), digest);
+    }
+    Ok(())
+}
+
+async fn collect_xmpp_tls_digest(
+    secrets: &Api<Secret>,
+    ws: &WaddleServer,
+    parts: &mut BTreeMap<String, ContentDigest>,
+) -> Result<(), OperatorError> {
+    if !ws.spec.xmpp.enabled {
+        return Ok(());
+    }
+    let Some(tls_secret) = ws.spec.xmpp.tls_secret_name.as_deref() else {
+        return Ok(());
+    };
+    insert_secret_keys_digest(
+        secrets,
+        tls_secret,
+        "get XMPP TLS Secret for checksum",
+        &["tls.crt", "tls.key"],
+        "xmpp_tls",
+        parts,
+    )
+    .await
+}
+
+async fn collect_eso_companion_digests(
+    secrets: &Api<Secret>,
+    ws: &WaddleServer,
+    eso: &ExternalSecretsSpec,
+    parts: &mut BTreeMap<String, ContentDigest>,
+) -> Result<(), OperatorError> {
+    if let Some(apns) = &eso.apns_secret_ref {
+        insert_secret_keys_digest(
+            secrets,
+            &apns.secret_name,
+            "get APNs Secret for checksum",
+            &[&apns.secret_key],
+            "apns",
+            parts,
+        )
+        .await?;
+    }
+    if ws.spec.clustering.enabled {
+        if let Some(pool_name) = eso.clustering_keypool_secret_name.as_deref() {
+            insert_secret_keys_digest(
+                secrets,
+                pool_name,
+                "get keypool Secret for checksum",
+                &["WADDLE_CLUSTERING_KEYPAIR_POOL"],
+                "keypool",
+                parts,
+            )
+            .await?;
         }
     }
+    Ok(())
+}
 
+async fn collect_extra_secret_digests(
+    secrets: &Api<Secret>,
+    ws: &WaddleServer,
+    parts: &mut BTreeMap<String, ContentDigest>,
+) -> Result<(), OperatorError> {
     for extra_name in collect_extra_secret_refs(ws) {
         if !is_safe_resource_name(&extra_name) {
             continue;
         }
-        if let Some(sec) =
+        let Some(sec) =
             secrets
                 .get_opt(&extra_name)
                 .await
@@ -1629,15 +1791,15 @@ async fn collect_companion_secret_digests(
                     context: "get extra envFrom Secret for checksum",
                     source,
                 })?
-        {
-            let raw = to_raw_byte_map(sec.data.as_ref());
-            let key_refs: Vec<&str> = raw.keys().map(String::as_str).collect();
-            if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &key_refs) {
-                parts.insert(format!("extra:{extra_name}"), d);
-            }
+        else {
+            continue;
+        };
+        let raw = to_raw_byte_map(sec.data.as_ref());
+        let key_refs: Vec<&str> = raw.keys().map(String::as_str).collect();
+        if let Some(d) = yolo::compute_consumed_secret_digest(&raw, &key_refs) {
+            parts.insert(format!("extra:{extra_name}"), d);
         }
     }
-
     Ok(())
 }
 

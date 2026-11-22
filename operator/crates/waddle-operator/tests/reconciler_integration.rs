@@ -158,9 +158,35 @@ async fn handle_k8s_request(
 
     let mut g = state.lock().expect("lock");
 
-    // Discovery routes
-    if method == Method::GET && path == "/apis/postgresql.cnpg.io/v1" {
-        return if g.cnpg_installed {
+    if method == Method::GET {
+        if let Some(resp) = handle_discovery_get(&g, &path) {
+            return resp;
+        }
+        if path.ends_with("/endpointslices") {
+            return handle_endpointslice_list(&g, &path, query);
+        }
+        return handle_resource_get(&mut g, &path);
+    }
+
+    g.mutations.push((method.as_str().to_owned(), path.clone()));
+    let payload: Value = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap_or(Value::Null)
+    };
+
+    match method {
+        Method::POST => handle_resource_post(&mut g, &path, payload),
+        Method::PUT => handle_resource_put(&mut g, path, payload),
+        Method::PATCH => handle_resource_patch(&mut g, path, payload),
+        Method::DELETE => handle_resource_delete(&mut g, &path),
+        _ => json_response(StatusCode::METHOD_NOT_ALLOWED, json!({})),
+    }
+}
+
+fn handle_discovery_get(g: &MockClusterInner, path: &str) -> Option<Response> {
+    match path {
+        "/apis/postgresql.cnpg.io/v1" => Some(if g.cnpg_installed {
             json_response(
                 StatusCode::OK,
                 json!({
@@ -172,10 +198,8 @@ async fn handle_k8s_request(
             )
         } else {
             missing_crd_response()
-        };
-    }
-    if method == Method::GET && path == "/apis/authzed.com/v1alpha1" {
-        return if g.spicedb_installed {
+        }),
+        "/apis/authzed.com/v1alpha1" => Some(if g.spicedb_installed {
             json_response(
                 StatusCode::OK,
                 json!({
@@ -187,10 +211,8 @@ async fn handle_k8s_request(
             )
         } else {
             missing_crd_response()
-        };
-    }
-    if method == Method::GET && path == "/apis/external-secrets.io/v1" {
-        return if g.eso_installed {
+        }),
+        "/apis/external-secrets.io/v1" => Some(if g.eso_installed {
             json_response(
                 StatusCode::OK,
                 json!({
@@ -202,102 +224,79 @@ async fn handle_k8s_request(
             )
         } else {
             missing_crd_response()
-        };
+        }),
+        "/apis/external-secrets.io/v1beta1" => Some(missing_crd_response()),
+        _ => None,
     }
-    if method == Method::GET && path == "/apis/external-secrets.io/v1beta1" {
+}
+
+fn handle_endpointslice_list(g: &MockClusterInner, path: &str, query: &str) -> Response {
+    let expected_svc = query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        if k == "labelSelector" {
+            v.strip_prefix("kubernetes.io/service-name%3D")
+                .or_else(|| v.strip_prefix("kubernetes.io/service-name="))
+        } else {
+            None
+        }
+    });
+    let prefix = format!("{path}/");
+    let items: Vec<Value> = g
+        .resources
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(_, v)| v.clone())
+        .filter(|item| match expected_svc {
+            Some(svc) => {
+                item["metadata"]["labels"]["kubernetes.io/service-name"].as_str() == Some(svc)
+            }
+            None => true,
+        })
+        .collect();
+    json_response(
+        StatusCode::OK,
+        json!({
+            "apiVersion": "discovery.k8s.io/v1",
+            "kind": "EndpointSliceList",
+            "metadata": { "resourceVersion": "1" },
+            "items": items
+        }),
+    )
+}
+
+fn handle_resource_get(g: &mut MockClusterInner, path: &str) -> Response {
+    g.gets.push(path.to_owned());
+    if (path.starts_with("/apis/postgresql.cnpg.io/v1/") && !g.cnpg_installed)
+        || (path.starts_with("/apis/authzed.com/v1alpha1/") && !g.spicedb_installed)
+        || (path.starts_with("/apis/external-secrets.io/v1/") && !g.eso_installed)
+    {
         return missing_crd_response();
     }
-
-    // EndpointSlice list
-    if method == Method::GET && path.ends_with("/endpointslices") {
-        let expected_svc = query.split('&').find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k == "labelSelector" {
-                v.strip_prefix("kubernetes.io/service-name%3D")
-                    .or_else(|| v.strip_prefix("kubernetes.io/service-name="))
-            } else {
-                None
-            }
-        });
-        let prefix = format!("{path}/");
-        let items: Vec<Value> = g
-            .resources
-            .iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, v)| v.clone())
-            .filter(|item| match expected_svc {
-                Some(svc) => {
-                    item["metadata"]["labels"]["kubernetes.io/service-name"].as_str() == Some(svc)
-                }
-                None => true,
-            })
-            .collect();
-        return json_response(
-            StatusCode::OK,
-            json!({
-                "apiVersion": "discovery.k8s.io/v1",
-                "kind": "EndpointSliceList",
-                "metadata": { "resourceVersion": "1" },
-                "items": items
-            }),
-        );
+    match g.resources.get(path) {
+        Some(obj) => json_response(StatusCode::OK, obj.clone()),
+        None => not_found_response(path),
     }
+}
 
-    if method == Method::GET {
-        g.gets.push(path.clone());
-        if path.starts_with("/apis/postgresql.cnpg.io/v1/") && !g.cnpg_installed {
-            return missing_crd_response();
-        }
-        if path.starts_with("/apis/authzed.com/v1alpha1/") && !g.spicedb_installed {
-            return missing_crd_response();
-        }
-        if path.starts_with("/apis/external-secrets.io/v1/") && !g.eso_installed {
-            return missing_crd_response();
-        }
-        if let Some(obj) = g.resources.get(&path) {
-            return json_response(StatusCode::OK, obj.clone());
-        }
-        return not_found_response(&path);
+fn next_rv(g: &mut MockClusterInner) -> String {
+    g.rv_counter += 1;
+    g.rv_counter.to_string()
+}
+
+fn handle_resource_post(g: &mut MockClusterInner, path: &str, payload: Value) -> Response {
+    if path.ends_with("/events") {
+        g.events.push(payload.clone());
+        return json_response(StatusCode::CREATED, payload);
     }
+    let name = payload["metadata"]["name"]
+        .as_str()
+        .unwrap_or("unnamed")
+        .to_owned();
+    let item_path = format!("{path}/{name}");
 
-    g.mutations.push((method.as_str().to_owned(), path.clone()));
-
-    let payload: Value = if body.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&body).unwrap_or(Value::Null)
-    };
-
-    if method == Method::POST {
-        if path.ends_with("/events") {
-            g.events.push(payload.clone());
-            return json_response(StatusCode::CREATED, payload);
-        }
-        let name = payload["metadata"]["name"]
-            .as_str()
-            .unwrap_or("unnamed")
-            .to_owned();
-        let item_path = format!("{path}/{name}");
-
-        if let Some((conflict_path, concurrent_obj)) = g.conflict_secret_once.take() {
-            if item_path == conflict_path {
-                g.resources.insert(item_path, concurrent_obj);
-                return json_response(
-                    StatusCode::CONFLICT,
-                    json!({
-                        "kind": "Status",
-                        "apiVersion": "v1",
-                        "status": "Failure",
-                        "reason": "AlreadyExists",
-                        "message": "secrets already exists",
-                        "code": 409
-                    }),
-                );
-            }
-            g.conflict_secret_once = Some((conflict_path, concurrent_obj));
-        }
-
-        if g.resources.contains_key(&item_path) {
+    if let Some((conflict_path, concurrent_obj)) = g.conflict_secret_once.take() {
+        if item_path == conflict_path {
+            g.resources.insert(item_path, concurrent_obj);
             return json_response(
                 StatusCode::CONFLICT,
                 json!({
@@ -305,155 +304,179 @@ async fn handle_k8s_request(
                     "apiVersion": "v1",
                     "status": "Failure",
                     "reason": "AlreadyExists",
+                    "message": "secrets already exists",
                     "code": 409
                 }),
             );
         }
-
-        let mut stored = payload;
-        g.rv_counter += 1;
-        let rv = g.rv_counter.to_string();
-        if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
-            meta.insert("resourceVersion".to_owned(), Value::String(rv));
-        }
-        g.resources.insert(item_path, stored.clone());
-        return json_response(StatusCode::CREATED, stored);
+        g.conflict_secret_once = Some((conflict_path, concurrent_obj));
     }
 
-    if method == Method::PUT {
-        let mut stored = payload;
-        g.rv_counter += 1;
-        let rv = g.rv_counter.to_string();
-        if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
-            meta.insert("resourceVersion".to_owned(), Value::String(rv));
-        }
-        g.resources.insert(path, stored.clone());
-        return json_response(StatusCode::OK, stored);
-    }
-
-    if method == Method::PATCH {
-        if let Some(parent_path) = path.strip_suffix("/status") {
-            let Some(mut parent) = g.resources.get(parent_path).cloned() else {
-                return not_found_response(parent_path);
-            };
-            if let Some(obj) = parent.as_object_mut() {
-                obj.insert("status".to_owned(), payload["status"].clone());
-            }
-            g.rv_counter += 1;
-            let rv = g.rv_counter.to_string();
-            if let Some(meta) = parent.get_mut("metadata").and_then(Value::as_object_mut) {
-                meta.insert("resourceVersion".to_owned(), Value::String(rv));
-            }
-            g.resources.insert(parent_path.to_owned(), parent.clone());
-            return json_response(StatusCode::OK, parent);
-        }
-
-        let url_name = path.rsplit('/').next().unwrap_or("");
-        if let Some(body_name) = payload["metadata"]["name"].as_str() {
-            if body_name != url_name {
-                return json_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    json!({
-                        "kind": "Status",
-                        "apiVersion": "v1",
-                        "status": "Failure",
-                        "reason": "Invalid",
-                        "message": format!("the name of the object ({body_name}) must match the name on the URL ({url_name})"),
-                        "code": 422
-                    }),
-                );
-            }
-        }
-
-        let existing = g.resources.get(&path).cloned();
-        let mut stored = payload;
-        if path.contains("/configmaps/") {
-            if let Some(prev) = &existing {
-                for field in ["data", "binaryData"] {
-                    if let Some(prev_entries) = prev.get(field).and_then(Value::as_object) {
-                        let stored_obj = stored.as_object_mut().and_then(|root| {
-                            root.entry(field.to_owned())
-                                .or_insert_with(|| json!({}))
-                                .as_object_mut()
-                        });
-                        if let Some(dst) = stored_obj {
-                            for (k, v) in prev_entries {
-                                dst.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if path.contains("/externalsecrets/") {
-            if let Some(target) = stored
-                .get_mut("spec")
-                .and_then(|s| s.get_mut("target"))
-                .and_then(Value::as_object_mut)
-            {
-                target
-                    .entry("deletionPolicy".to_owned())
-                    .or_insert_with(|| json!("Retain"));
-            }
-            if let Some(entries) = stored
-                .get_mut("spec")
-                .and_then(|s| s.get_mut("data"))
-                .and_then(Value::as_array_mut)
-            {
-                for item in entries {
-                    if let Some(rr) = item.get_mut("remoteRef").and_then(Value::as_object_mut) {
-                        rr.entry("conversionStrategy".to_owned())
-                            .or_insert_with(|| json!("Default"));
-                        rr.entry("decodingStrategy".to_owned())
-                            .or_insert_with(|| json!("None"));
-                        rr.entry("metadataPolicy".to_owned())
-                            .or_insert_with(|| json!("None"));
-                    }
-                }
-            }
-        }
-        let prev_gen = existing
-            .as_ref()
-            .and_then(|e| e["metadata"]["generation"].as_i64())
-            .unwrap_or(0);
-        let spec_changed = existing
-            .as_ref()
-            .is_none_or(|e| e.get("spec") != stored.get("spec"));
-        let next_gen = if spec_changed {
-            prev_gen + 1
-        } else {
-            prev_gen.max(1)
-        };
-
-        if let Some(prev_status) = existing.as_ref().and_then(|e| e.get("status")).cloned() {
-            if stored.get("status").is_none() {
-                if let Some(obj) = stored.as_object_mut() {
-                    obj.insert("status".to_owned(), prev_status);
-                }
-            }
-        }
-
-        g.rv_counter += 1;
-        let rv = g.rv_counter.to_string();
-        if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
-            meta.insert("resourceVersion".to_owned(), Value::String(rv));
-            meta.insert("generation".to_owned(), json!(next_gen));
-        }
-        g.resources.insert(path, stored.clone());
-        return json_response(StatusCode::OK, stored);
-    }
-
-    if method == Method::DELETE {
-        if g.resources.remove(&path).is_none() {
-            return not_found_response(&path);
-        }
+    if g.resources.contains_key(&item_path) {
         return json_response(
-            StatusCode::OK,
-            json!({ "kind": "Status", "apiVersion": "v1", "status": "Success" }),
+            StatusCode::CONFLICT,
+            json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "reason": "AlreadyExists",
+                "code": 409
+            }),
         );
     }
 
-    json_response(StatusCode::METHOD_NOT_ALLOWED, json!({}))
+    let mut stored = payload;
+    let rv = next_rv(g);
+    if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
+        meta.insert("resourceVersion".to_owned(), Value::String(rv));
+    }
+    g.resources.insert(item_path, stored.clone());
+    json_response(StatusCode::CREATED, stored)
+}
+
+fn handle_resource_put(g: &mut MockClusterInner, path: String, payload: Value) -> Response {
+    let mut stored = payload;
+    let rv = next_rv(g);
+    if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
+        meta.insert("resourceVersion".to_owned(), Value::String(rv));
+    }
+    g.resources.insert(path, stored.clone());
+    json_response(StatusCode::OK, stored)
+}
+
+fn handle_resource_patch(g: &mut MockClusterInner, path: String, payload: Value) -> Response {
+    if let Some(parent_path) = path.strip_suffix("/status") {
+        return handle_status_patch(g, parent_path, &payload);
+    }
+
+    let url_name = path.rsplit('/').next().unwrap_or("");
+    if let Some(body_name) = payload["metadata"]["name"].as_str() {
+        if body_name != url_name {
+            return json_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "reason": "Invalid",
+                    "message": format!("the name of the object ({body_name}) must match the name on the URL ({url_name})"),
+                    "code": 422
+                }),
+            );
+        }
+    }
+
+    let existing = g.resources.get(&path).cloned();
+    let mut stored = payload;
+    if path.contains("/configmaps/") {
+        if let Some(prev) = &existing {
+            merge_configmap_entries(&mut stored, prev);
+        }
+    }
+    if path.contains("/externalsecrets/") {
+        apply_externalsecret_defaults(&mut stored);
+    }
+
+    let next_gen = compute_patched_generation(existing.as_ref(), &stored);
+    if stored.get("status").is_none() {
+        if let Some(prev_status) = existing.as_ref().and_then(|e| e.get("status")).cloned() {
+            if let Some(obj) = stored.as_object_mut() {
+                obj.insert("status".to_owned(), prev_status);
+            }
+        }
+    }
+
+    let rv = next_rv(g);
+    if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
+        meta.insert("resourceVersion".to_owned(), Value::String(rv));
+        meta.insert("generation".to_owned(), json!(next_gen));
+    }
+    g.resources.insert(path, stored.clone());
+    json_response(StatusCode::OK, stored)
+}
+
+fn handle_status_patch(g: &mut MockClusterInner, parent_path: &str, payload: &Value) -> Response {
+    let Some(mut parent) = g.resources.get(parent_path).cloned() else {
+        return not_found_response(parent_path);
+    };
+    if let Some(obj) = parent.as_object_mut() {
+        obj.insert("status".to_owned(), payload["status"].clone());
+    }
+    let rv = next_rv(g);
+    if let Some(meta) = parent.get_mut("metadata").and_then(Value::as_object_mut) {
+        meta.insert("resourceVersion".to_owned(), Value::String(rv));
+    }
+    g.resources.insert(parent_path.to_owned(), parent.clone());
+    json_response(StatusCode::OK, parent)
+}
+
+fn merge_configmap_entries(stored: &mut Value, prev: &Value) {
+    for field in ["data", "binaryData"] {
+        let Some(prev_entries) = prev.get(field).and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(dst) = stored.as_object_mut().and_then(|root| {
+            root.entry(field.to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        }) else {
+            continue;
+        };
+        for (k, v) in prev_entries {
+            dst.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+}
+
+fn apply_externalsecret_defaults(stored: &mut Value) {
+    if let Some(target) = stored
+        .get_mut("spec")
+        .and_then(|s| s.get_mut("target"))
+        .and_then(Value::as_object_mut)
+    {
+        target
+            .entry("deletionPolicy".to_owned())
+            .or_insert_with(|| json!("Retain"));
+    }
+    let Some(entries) = stored
+        .get_mut("spec")
+        .and_then(|s| s.get_mut("data"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for item in entries {
+        if let Some(rr) = item.get_mut("remoteRef").and_then(Value::as_object_mut) {
+            rr.entry("conversionStrategy".to_owned())
+                .or_insert_with(|| json!("Default"));
+            rr.entry("decodingStrategy".to_owned())
+                .or_insert_with(|| json!("None"));
+            rr.entry("metadataPolicy".to_owned())
+                .or_insert_with(|| json!("None"));
+        }
+    }
+}
+
+fn compute_patched_generation(existing: Option<&Value>, stored: &Value) -> i64 {
+    let prev_gen = existing
+        .and_then(|e| e["metadata"]["generation"].as_i64())
+        .unwrap_or(0);
+    let spec_changed = existing.is_none_or(|e| e.get("spec") != stored.get("spec"));
+    if spec_changed {
+        prev_gen + 1
+    } else {
+        prev_gen.max(1)
+    }
+}
+
+fn handle_resource_delete(g: &mut MockClusterInner, path: &str) -> Response {
+    if g.resources.remove(path).is_none() {
+        return not_found_response(path);
+    }
+    json_response(
+        StatusCode::OK,
+        json!({ "kind": "Status", "apiVersion": "v1", "status": "Success" }),
+    )
 }
 
 fn json_response(status: StatusCode, body: Value) -> Response {

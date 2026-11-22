@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: waddle-operator
-          image: ghcr.io/waddle-social/waddle-operator:latest
+          image: ghcr.io/waddle-social/waddle-operator:0.1.0
           imagePullPolicy: IfNotPresent
           args:
             - run
