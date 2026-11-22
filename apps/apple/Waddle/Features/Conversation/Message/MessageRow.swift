@@ -236,7 +236,9 @@ private struct MessageRowBody: View {
     private var item: TimelineItem { entry.item }
 
     var body: some View {
-        if let target = item.message.reply {
+        // Inside a thread the quote only repeats the thread's own messages,
+        // most often its first one, on every reply.
+        if !actions.isThread, let target = item.message.reply {
             MessageReplyPreview(target: target, parent: entry.replyParent, isRoom: item.conversation.isRoom) {
                 if let parent = entry.replyParent {
                     actions.showMessage(parent.presentationID)
