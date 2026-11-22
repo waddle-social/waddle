@@ -78,7 +78,11 @@ struct ProfileAboutSection: View {
     }
 
     private func publish(_ details: ProfileDetails) {
-        save.run({ try await session.saveDetails(details) }, then: { draft = details.cleaned })
+        save.run({ try await session.saveDetails(details) }, then: {
+            // Tidy the draft only if nothing was typed while saving;
+            // otherwise keep those edits, which then read "Not saved yet."
+            if draft == details { draft = details.cleaned }
+        })
     }
 }
 

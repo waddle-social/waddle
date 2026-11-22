@@ -10,7 +10,11 @@ struct SettingsAccountSection: View {
     var body: some View {
         Section {
             if let session = app.session {
+                // The Mac Settings window is its own scene, outside the
+                // main window's environment, so the avatar gets the
+                // session here.
                 SettingsAccountRow(account: session.coordinator.account)
+                    .environment(session.coordinator)
                 server
                 AccountSignOutButton()
             } else {

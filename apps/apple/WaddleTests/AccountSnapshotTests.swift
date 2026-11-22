@@ -18,7 +18,13 @@ final class AccountSnapshotTests: XCTestCase {
     private static let settings = CGSize(width: 520, height: 760)
     #endif
 
-    private static let server = URL(string: "https://waddle.test")!
+    /// The sample account's own server.
+    private static let server: URL = {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = SampleSession.ana.jid.domain
+        return components.url!
+    }()
 
     func testSignInWithThreeProviders() async throws {
         let providers = [
