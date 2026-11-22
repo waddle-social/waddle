@@ -44,7 +44,7 @@ enum MentionCandidates {
     }
 
     static let broadcastCandidates = [
-        MentionCandidate(id: "broadcast:everyone", name: "everyone", detail: "Notify everyone in this channel", target: .everyone, jid: nil),
+        MentionCandidate(id: "broadcast:everyone", name: "everyone", detail: "Notify everyone in this room", target: .everyone, jid: nil),
         MentionCandidate(id: "broadcast:here", name: "here", detail: "Notify everyone who is online", target: .here, jid: nil),
     ]
 

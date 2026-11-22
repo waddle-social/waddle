@@ -14,7 +14,7 @@ struct NavigationRowChrome<Label: View>: View {
             .frame(minHeight: Self.height)
             .background(
                 RoundedRectangle(cornerRadius: WaddleTokens.Radius.sm, style: .continuous)
-                    .fill(Theme.Colors.fg.opacity(tint))
+                    .fill(tint)
             )
             .overlay(alignment: .leading) {
                 if isSelected {
@@ -30,9 +30,9 @@ struct NavigationRowChrome<Label: View>: View {
     }
 
     /// Web `state.selected` and `state.hover`: one tint for any surface.
-    private var tint: Double {
-        if isSelected { return 0.1 }
-        return isHovered ? 0.06 : 0
+    private var tint: Color {
+        if isSelected { return Theme.State.selected }
+        return isHovered ? Theme.State.hover : .clear
     }
 
     /// Touch gets the 44pt target; a pointer gets the 36pt row.

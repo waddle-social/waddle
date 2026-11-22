@@ -79,13 +79,14 @@ struct ConversationTitleView: View {
             HStack(spacing: Theme.Spacing.xs) {
                 leadingMark(isChannel: header.isChannel)
                 Text(header.name)
-                    .font(.headline)
+                    .huddleText(Theme.Typography.channel)
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
             }
             if let subtitle = ConversationHeaderText.subtitle(for: conversation, session: session) {
                 Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption.sized(WaddleTokens.FontSize.xxs))
+                    .foregroundStyle(Theme.Colors.fgMuted)
                     .lineLimit(1)
             }
         }
@@ -99,13 +100,13 @@ struct ConversationTitleView: View {
             PresenceDot(availability: session.presence.availability(of: conversation.jid), size: 8)
         } else if isChannel {
             Image(systemName: "number")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.label)
+                .foregroundStyle(Theme.Colors.fgSoft)
                 .accessibilityHidden(true)
         } else {
             Image(systemName: "person.2.fill")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .accessibilityHidden(true)
         }
     }

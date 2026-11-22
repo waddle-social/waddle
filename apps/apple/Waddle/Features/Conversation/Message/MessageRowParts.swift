@@ -11,26 +11,43 @@ struct MessageReplyPreview: View {
 
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: Theme.Spacing.s - 2) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.secondary.opacity(0.45))
-                    .frame(width: 3)
+            HStack(spacing: WaddleTokens.Spacing.s1Half) {
                 Image(systemName: "arrowshape.turn.up.left.fill")
-                    .font(.caption2)
+                    .huddleText(Theme.Typography.badge)
+                    .foregroundStyle(Theme.Colors.actionText)
                     .accessibilityHidden(true)
                 Text(MessageReplySummary.author(parent: parent, target: target, isRoom: isRoom))
-                    .font(.caption.weight(.semibold))
+                    .huddleText(Theme.Typography.caption.weight(700))
+                    .foregroundStyle(Theme.Colors.actionText)
                     .lineLimit(1)
                 Text(MessageReplySummary.snippet(parent: parent))
-                    .font(.caption)
+                    .huddleText(Theme.Typography.caption)
+                    .italic()
+                    .foregroundStyle(Theme.Colors.fgMuted.opacity(0.8))
                     .lineLimit(1)
             }
-            .foregroundStyle(.secondary)
+            .padding(.horizontal, Theme.Spacing.s)
+            .frame(minHeight: WaddleTokens.ControlHeight.xs)
+            .background(MessageReplyChipSurface())
             .fixedSize(horizontal: false, vertical: true)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(parent == nil)
+    }
+}
+
+/// The reply chip's ground: surface 2 with a 3pt action rail on the leading
+/// edge (web `replyChip`).
+private struct MessageReplyChipSurface: View {
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: WaddleTokens.Radius.sm, style: .continuous)
+        shape
+            .fill(Theme.Colors.surface2)
+            .overlay(alignment: .leading) {
+                Theme.Colors.actionText.frame(width: Theme.Size.rail)
+            }
+            .clipShape(shape)
     }
 }
 
@@ -44,9 +61,10 @@ struct MessageTombstoneView: View {
                 .italic()
         } icon: {
             Image(systemName: symbol)
+                .opacity(0.7)
         }
-        .font(.callout)
-        .foregroundStyle(.secondary)
+        .huddleText(Theme.Typography.body.sized(WaddleTokens.FontSize.sm))
+        .foregroundStyle(Theme.Colors.fgMuted)
     }
 
     private var text: String {
@@ -93,12 +111,12 @@ struct MessageDeliveryView: View {
                 ProgressView().controlSize(.mini)
                 Text("Sending…")
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            .huddleText(Theme.Typography.timestamp)
+            .foregroundStyle(Theme.Colors.fgSoft)
         case .some(.queued):
-            Label("Waiting for connection", systemImage: "clock")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            Label("Sends when you're back online", systemImage: "clock")
+                .huddleText(Theme.Typography.timestamp)
+                .foregroundStyle(Theme.Colors.fgSoft)
         case .some(.failed):
             failed
         default:
@@ -109,7 +127,7 @@ struct MessageDeliveryView: View {
     private var failed: some View {
         HStack(spacing: Theme.Spacing.s) {
             Label("Not sent", systemImage: "exclamationmark.circle.fill")
-                .foregroundStyle(Color.red)
+                .foregroundStyle(Theme.Colors.dangerText)
             Button("Retry") {
                 Task { await session.retry(clientID: item.id) }
             }
@@ -117,17 +135,16 @@ struct MessageDeliveryView: View {
                 session.discard(clientID: item.id, in: item.conversation)
             }
         }
-        .font(.caption)
+        .huddleText(Theme.Typography.timestamp)
+        .tint(Theme.Colors.actionText)
         .buttonStyle(.borderless)
     }
 }
 
-/// The attached reply card under a thread root: reply faces, "N replies ·
-/// time", then the newest loaded reply as "author: snippet". The whole
-/// card is one button that opens the thread, as wide as the content
-/// column. It publishes its bounds so the row can draw the thread rail
-/// from the avatar gutter into it (`MessageThreadRail`). Re-rendered each
-/// minute so the relative time stays current.
+/// The reply summary under a thread root (web `threadCard`): reply
+/// faces, "N replies · time", then the newest loaded reply as "author:
+/// snippet". The whole summary is one button that opens the thread.
+/// Re-rendered each minute so the relative time stays current.
 struct MessageThreadCard: View {
     let summary: ThreadSummary
     let action: () -> Void
@@ -142,51 +159,42 @@ struct MessageThreadCard: View {
             .accessibilityLabel(Text(MessageThreadCardText.accessibilityLabel(summary)))
             .accessibilityAddTraits(.isButton)
         }
-        .anchorPreference(key: MessageThreadCardBoundsKey.self, value: .bounds) { $0 }
-        .padding(.top, Theme.Spacing.xxs)
+        .padding(.top, Theme.Spacing.xs)
     }
 
     private var label: some View {
-        HStack(spacing: Theme.Spacing.s) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                HStack(spacing: Theme.Spacing.s - 2) {
-                    if !summary.faces.isEmpty {
-                        MessageThreadFaces(faces: summary.faces, overflow: summary.otherParticipantCount)
-                            .environment(\.huddleGround, Theme.Colors.surface2)
-                    }
-                    Text(MessageThreadCardText.count(summary.replyCount))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .lineLimit(1)
-                    if let latest = summary.latestReply {
-                        Text("·")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(MessageThreadCardText.time(latest.sentAt))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(spacing: WaddleTokens.Spacing.s1Half) {
+                if !summary.faces.isEmpty {
+                    MessageThreadFaces(faces: summary.faces, overflow: summary.otherParticipantCount)
                 }
+                Text(MessageThreadCardText.count(summary.replyCount))
+                    .huddleText(Theme.Typography.caption.weight(700))
+                    .foregroundStyle(Theme.Colors.actionText)
+                    .lineLimit(1)
                 if let latest = summary.latestReply {
-                    latestLine(latest)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("· \(MessageThreadCardText.time(latest.sentAt))")
+                        .huddleText(Theme.Typography.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.Colors.fgMuted)
                         .lineLimit(1)
-                        .truncationMode(.tail)
                 }
             }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.right")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            if let latest = summary.latestReply {
+                latestLine(latest)
+                    .huddleText(Theme.Typography.body.sized(WaddleTokens.FontSize.sm))
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
     }
 
     private func latestLine(_ latest: ThreadSummary.LatestReply) -> Text {
-        let snippet = Text(MessageThreadCardText.snippet(latest.snippet))
-        guard MessageThreadCardText.showsAuthor(latest) else { return snippet }
-        return Text("\(MessageThreadCardText.author(latest)): ").fontWeight(.semibold) + snippet
+        let snippet = MessageThreadCardText.snippet(latest.snippet)
+        guard MessageThreadCardText.showsAuthor(latest) else { return Text(snippet) }
+        let author = Text("\(MessageThreadCardText.author(latest)):").fontWeight(.bold).foregroundStyle(Theme.Colors.fg)
+        return Text("\(author) \(snippet)")
     }
 }
 
@@ -209,8 +217,8 @@ struct MessageSubThreadLink: View {
     }
 }
 
-/// Raised card surface with a hairline border, and the design system's
-/// hover and press tints.
+/// No ground until hovered or pressed; the summary sits flush with the
+/// body text, its padding hanging into the gutter.
 private struct MessageThreadCardStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         MessageThreadCardSurface(configuration: configuration)
@@ -222,105 +230,50 @@ private struct MessageThreadCardSurface: View {
     @State private var isHovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: WaddleTokens.Radius.sm, style: .continuous)
         configuration.label
-            .padding(.horizontal, Theme.Spacing.m)
-            .padding(.vertical, Theme.Spacing.s - 2)
-            .frame(maxWidth: .infinity, minHeight: Theme.Size.minHitTarget, alignment: .leading)
-            .background(shape.fill(Color.secondaryBackground))
-            .overlay(shape.fill(Color.primary.opacity(highlight)))
-            .overlay(shape.strokeBorder(Color.cardBorder, lineWidth: 1))
+            .padding(.horizontal, Theme.Spacing.s)
+            .padding(.vertical, Theme.Spacing.xs)
+            .background(shape.fill(tint))
             .contentShape(shape)
+            .padding(.leading, -Theme.Spacing.s)
             .onHover { isHovering = $0 }
     }
 
-    private var highlight: Double {
-        if configuration.isPressed { return 0.08 }
-        return isHovering ? 0.04 : 0
+    private var tint: Color {
+        if configuration.isPressed { return Theme.State.press }
+        return isHovering ? Theme.State.hover : .clear
     }
 }
 
-/// The reply card's bounds, for the row's thread rail.
-struct MessageThreadCardBoundsKey: PreferenceKey {
-    static var defaultValue: Anchor<CGRect>? { nil }
-
-    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
-        value = value ?? nextValue()
-    }
-}
-
-/// The thread rail in the avatar gutter: down from under the avatar,
-/// then across into the reply card's leading edge. Overlaid on the row's
-/// content (gutter and column), so `gutterX` and `top` are in that space.
-struct MessageThreadRail: View {
-    let card: Anchor<CGRect>?
-    /// Horizontal center of the avatar gutter.
-    let gutterX: CGFloat
-    /// Where the rail starts, below whatever the gutter shows.
-    let top: CGFloat
-
-    /// Down to the middle of the card's first line.
-    private static let joinDepth: CGFloat = 20
-
-    var body: some View {
-        GeometryReader { proxy in
-            if let card {
-                let rect = proxy[card]
-                MessageThreadElbow(
-                    start: CGPoint(x: gutterX, y: top),
-                    end: CGPoint(x: rect.minX, y: rect.minY + min(Self.joinDepth, rect.height / 2))
-                )
-                .stroke(Color.cardBorder, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-            }
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
-/// Down from `start`, then a rounded corner across to `end`.
-private struct MessageThreadElbow: Shape {
-    let start: CGPoint
-    let end: CGPoint
-
-    func path(in _: CGRect) -> Path {
-        var path = Path()
-        guard end.x > start.x, end.y > start.y else { return path }
-        let radius = min(8, end.x - start.x, end.y - start.y)
-        path.move(to: start)
-        path.addLine(to: CGPoint(x: start.x, y: end.y - radius))
-        path.addQuadCurve(
-            to: CGPoint(x: start.x + radius, y: end.y),
-            control: CGPoint(x: start.x, y: end.y)
-        )
-        path.addLine(to: end)
-        return path
-    }
-}
-
-/// Overlapping thread participants, then "+N": on the reply card and in
-/// the thread header. Each face cuts into the ground it sits on.
+/// Overlapping thread participants, then "+N": on the reply summary and
+/// in the thread header. Each face cuts into the ground it sits on.
 struct MessageThreadFaces: View {
     @Environment(\.huddleGround) private var ground
     let faces: [ThreadSummary.Participant]
     let overflow: Int
-    var size: CGFloat = 18
+    var size: CGFloat = 20
 
     var body: some View {
-        HStack(spacing: -size * 0.3) {
+        HStack(spacing: -WaddleTokens.Spacing.s1Half) {
             ForEach(Array(faces.enumerated()), id: \.offset) { index, face in
                 avatar(face)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                            .strokeBorder(ground, lineWidth: 1.5)
-                    )
+                    .padding(2)
+                    .background(Circle().fill(ground))
+                    .padding(-2)
                     .zIndex(Double(faces.count - index))
             }
             if overflow > 0 {
                 Text("+\(overflow)")
                     .huddleText(Theme.Typography.tag)
+                    .monospacedDigit()
                     .foregroundStyle(Theme.Colors.fgMuted)
-                    .padding(.leading, size * 0.3 + 2)
+                    .padding(.horizontal, Theme.Spacing.xs)
+                    .frame(minWidth: size, minHeight: size)
+                    .background(Capsule().fill(Theme.Colors.surface2))
+                    .padding(2)
+                    .background(Capsule().fill(ground))
+                    .padding(-2)
             }
         }
         .accessibilityHidden(true)
@@ -374,38 +327,48 @@ struct MessageLinkPreviewCard: View {
         Button {
             openURL(preview.url)
         } label: {
-            HStack(alignment: .top, spacing: Theme.Spacing.s + 2) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.accentColor.opacity(0.6))
-                    .frame(width: 3)
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Label {
                     Text(preview.url.host ?? preview.url.absoluteString)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    if let title = preview.title, !title.isEmpty {
-                        Text(title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .lineLimit(2)
-                    }
-                    if let summary = preview.summary, !summary.isEmpty {
-                        Text(summary)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                    }
-                    if let imageURL = preview.imageURL {
-                        previewImage(imageURL)
-                    }
+                } icon: {
+                    Image(systemName: "arrow.up.forward.square")
+                }
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
+                .lineLimit(1)
+                if let title = preview.title, !title.isEmpty {
+                    Text(title)
+                        .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.md).weight(700))
+                        .foregroundStyle(Theme.Colors.fg)
+                        .lineLimit(2)
+                }
+                if let summary = preview.summary, !summary.isEmpty {
+                    Text(summary)
+                        .huddleText(Theme.Typography.caption.sized(WaddleTokens.FontSize.sm))
+                        .foregroundStyle(Theme.Colors.fgMuted)
+                        .lineLimit(3)
+                }
+                if let imageURL = preview.imageURL {
+                    previewImage(imageURL)
+                        .padding(.top, Theme.Spacing.xs)
                 }
             }
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
-            .contentShape(Rectangle())
+            .padding(Theme.Spacing.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .fill(Theme.Colors.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: Theme.Size.mediaMaxWidth + 40, alignment: .leading)
+        .frame(maxWidth: Theme.Size.mediaMaxWidth + Theme.Spacing.m * 2, alignment: .leading)
         .accessibilityLabel(Text(preview.title ?? preview.url.absoluteString))
         .accessibilityAddTraits(.isLink)
     }
@@ -416,10 +379,10 @@ struct MessageLinkPreviewCard: View {
                 .resizable()
                 .scaledToFill()
         } placeholder: {
-            Color.secondary.opacity(0.1)
+            Theme.Colors.surface2
         }
-        .frame(maxWidth: Theme.Size.mediaMaxWidth, minHeight: 120, maxHeight: 160)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
+        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 160)
+        .clipShape(RoundedRectangle(cornerRadius: WaddleTokens.Radius.sm, style: .continuous))
         .accessibilityLabel(Text(preview.imageAlt ?? ""))
     }
 }

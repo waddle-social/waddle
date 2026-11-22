@@ -52,7 +52,7 @@ struct ThreadHeaderView: View {
         .padding(.leading, Theme.Spacing.l)
         .padding(.trailing, Theme.Spacing.m)
         .padding(.vertical, Theme.Spacing.s)
-        .background(.bar)
+        .background(Theme.Colors.bg)
         .overlay(alignment: .bottom) { HuddleDivider() }
     }
 

@@ -732,6 +732,12 @@ public final class SessionCoordinator {
         ))
     }
 
+    /// Whether `item` mentions the account: by address, by our nickname in
+    /// the room, or as a room-wide broadcast. Our own messages never do.
+    public func mentionsMe(_ item: TimelineItem) -> Bool {
+        !item.isMine && mentions(item.message, in: item.conversation)
+    }
+
     /// XEP-0372 mention of the account (bare JID, or our occupant JID in
     /// the room), or a room-wide broadcast mention.
     func mentions(_ message: WireMessage, in conversation: ConversationID) -> Bool {

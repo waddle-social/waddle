@@ -33,9 +33,14 @@ struct ComposerTextView: UIViewRepresentable {
     func makeUIView(context: Context) -> ComposerUITextView {
         let view = ComposerUITextView()
         view.delegate = context.coordinator
-        view.font = UIFont.preferredFont(forTextStyle: .body)
+        // The message style, scaled with Dynamic Type from the body size.
+        let message = Theme.Typography.message
+        view.font = UIFontMetrics(forTextStyle: .body).scaledFont(
+            for: HuddleFonts.font(message.font, size: message.size, weight: message.weight) as UIFont
+        )
         view.adjustsFontForContentSizeCategory = true
-        view.textColor = .label
+        view.textColor = UIColor(Theme.Colors.fg)
+        view.tintColor = UIColor(Theme.Colors.actionText)
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
@@ -263,7 +268,10 @@ struct ComposerTextView: NSViewRepresentable {
     let onPasteAttachments: () -> Void
 
     static let maxLines: CGFloat = 8
-    static let font = NSFont.preferredFont(forTextStyle: .body)
+    static let font: NSFont = {
+        let message = Theme.Typography.message
+        return HuddleFonts.font(message.font, size: message.size, weight: message.weight) as NSFont
+    }()
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -273,7 +281,8 @@ struct ComposerTextView: NSViewRepresentable {
         let view = ComposerNSTextView()
         view.delegate = context.coordinator
         view.font = Self.font
-        view.textColor = .labelColor
+        view.textColor = NSColor(Theme.Colors.fg)
+        view.insertionPointColor = NSColor(Theme.Colors.actionText)
         view.drawsBackground = false
         view.isRichText = false
         view.importsGraphics = false

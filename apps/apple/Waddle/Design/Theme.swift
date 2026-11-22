@@ -8,6 +8,14 @@ enum Theme {
     /// Semantic colours; each follows the Night or Daylight appearance.
     typealias Colors = WaddleTokens.Colors
 
+    /// Interaction layers (web `state.*`): the foreground over whatever
+    /// ground the control sits on.
+    enum State {
+        static let hover = Colors.fg.opacity(0.06)
+        static let selected = Colors.fg.opacity(0.10)
+        static let press = Colors.fg.opacity(0.10)
+    }
+
     /// Text styles, applied with `.huddleText(_:)`.
     typealias Typography = WaddleTokens.TextStyles
 
@@ -48,6 +56,11 @@ enum Theme {
         static let mediaMaxWidth: CGFloat = 360
         /// Readable line length for the conversation column.
         static let readableWidth: CGFloat = 820
+        /// The accent rail on a row's or chip's leading edge (web's 3px
+        /// inset rails: a mention, a reply quote, a block quote).
+        static let rail: CGFloat = 3
+        /// The large mark of an empty conversation.
+        static let emptyMark: CGFloat = 64
         /// Smallest tap target (Human Interface Guidelines).
         static let minHitTarget = WaddleTokens.ControlHeight.touch
     }

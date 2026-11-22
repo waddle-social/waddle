@@ -13,13 +13,13 @@ struct GifPickerFooter: View {
                     .accessibilityLabel(Text("Searching"))
             }
             Text("Powered by GIPHY")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .huddleText(Theme.Typography.caption.weight(700))
+                .foregroundStyle(Theme.Colors.fgMuted)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, Theme.Spacing.s)
         .overlay(alignment: .top) {
-            Divider()
+            HuddleDivider()
         }
     }
 }

@@ -55,10 +55,10 @@ struct ExtensionCommandFieldRow: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
             if let label = field.label, !label.isEmpty {
                 Text(label)
-                    .font(.subheadline.weight(.semibold))
+                    .huddleText(Theme.Typography.label)
             }
             Text(field.values.joined(separator: "\n"))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .textSelection(.enabled)
         }
     }
@@ -66,7 +66,7 @@ struct ExtensionCommandFieldRow: View {
     private var multiSelect: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Text(title)
-                .font(.subheadline)
+                .huddleText(Theme.Typography.body.sized(WaddleTokens.FontSize.sm))
             ForEach(field.options, id: \.value) { option in
                 Toggle(option.label ?? option.value, isOn: optionValue(option.value))
             }
@@ -77,15 +77,15 @@ struct ExtensionCommandFieldRow: View {
     private var multiLine: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Text(title)
-                .font(.subheadline)
+                .huddleText(Theme.Typography.body.sized(WaddleTokens.FontSize.sm))
             TextEditor(text: linesValue)
-                .font(.body)
+                .huddleText(Theme.Typography.body)
                 .frame(minHeight: 80)
                 .autocorrectionDisabled(field.type == .jidMulti)
             if field.type == .jidMulti {
                 Text("One address per line")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
         }
         .disabled(!isEditable)

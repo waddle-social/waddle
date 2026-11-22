@@ -53,8 +53,8 @@ struct MessageSafetyScoresSheet: View {
                 }
                 Section {
                     Text(explanation(modelVersion: scores.modelVersion))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
             }
         } else {
@@ -85,8 +85,9 @@ struct MessageSafetyScoreRowView: View {
                 Text(row.title)
                 Spacer(minLength: Theme.Spacing.s)
                 Text(row.percentText)
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.body)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
             ProgressView(value: row.probability)
                 .tint(MessageSafetyScoreStyle.color(for: row.category, scheme: colorScheme))

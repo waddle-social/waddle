@@ -61,7 +61,7 @@ struct ConversationComposer: View {
         .padding(.horizontal, Theme.Spacing.m)
         .padding(.top, Theme.Spacing.s)
         .padding(.bottom, Theme.Spacing.s)
-        .background(.bar)
+        .background(Theme.Colors.bg)
         .modifier(ComposerAttachmentPickers(
             showsPhotoPicker: $showsPhotoPicker,
             showsFileImporter: $showsFileImporter,

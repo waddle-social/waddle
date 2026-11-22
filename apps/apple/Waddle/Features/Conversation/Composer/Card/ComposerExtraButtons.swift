@@ -1,18 +1,17 @@
 import SwiftUI
 
-/// The row under the text: `+`, formatting, emoji, mention and command
-/// buttons, then Send.
-struct ComposerActionRow: View {
+/// The buttons after the text on a Mac or iPad (web composer): formatting,
+/// emoji, mention and commands. A phone has the keyboard's emoji key and
+/// keeps the rest in the `+` menu.
+struct ComposerExtraButtons: View {
     let isEditing: Bool
-    let canSend: Bool
     /// Rooms only: 1:1 conversations have nobody else to mention.
     let showsMention: Bool
     @Binding var showsFormatting: Bool
     let actions: ComposerActions
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.xxs) {
-            ComposerPlusMenu(isEditing: isEditing, actions: actions)
+        HStack(spacing: WaddleTokens.Spacing.s0Half) {
             ComposerIconButton(
                 symbol: "textformat",
                 label: showsFormatting ? "Hide formatting" : "Show formatting",
@@ -27,8 +26,6 @@ struct ComposerActionRow: View {
             }
             ComposerIconButton(symbol: "slash.circle", label: "Run a command", action: actions.startCommand)
                 .disabled(isEditing)
-            Spacer(minLength: Theme.Spacing.s)
-            ComposerSendButton(isEditing: isEditing, isEnabled: canSend, action: actions.submit)
         }
     }
 }

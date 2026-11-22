@@ -21,7 +21,7 @@ struct ExtensionCommandActionBar: View {
             }
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.vertical, Theme.Spacing.m)
-            .background(.bar)
+            .background(Theme.Colors.surface)
             .disabled(isBusy)
         }
     }

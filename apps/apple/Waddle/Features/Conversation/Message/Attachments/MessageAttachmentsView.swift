@@ -11,7 +11,7 @@ struct MessageAttachmentsView: View {
     var openStickerPack: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.s - 2) {
+        VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s1Half) {
             ForEach(files, id: \.url) { file in
                 attachment(file)
             }
@@ -128,11 +128,11 @@ struct MessageImageAttachment: View {
 
     private func placeholder(symbol: String?) -> some View {
         ZStack {
-            Color.secondary.opacity(0.12)
+            Theme.Colors.surface2
             if let symbol {
                 Image(systemName: symbol)
                     .font(.title2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             } else {
                 ProgressView()
             }
@@ -245,38 +245,39 @@ struct MessageFileCardLabel: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
             Image(systemName: symbol)
-                .font(.title3)
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 36, height: 36)
+                .huddleText(Theme.Typography.subtitle)
+                .foregroundStyle(Theme.Colors.actionText)
+                .frame(width: WaddleTokens.ControlHeight.md, height: WaddleTokens.ControlHeight.md)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.12))
+                        .fill(Theme.Colors.actionSubtle)
                 )
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text(title)
-                    .font(.subheadline.weight(.medium))
+                    .huddleText(Theme.Typography.label.weight(700))
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
                     .lineLimit(1)
             }
             Spacer(minLength: Theme.Spacing.s)
             Image(systemName: trailingSymbol)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Colors.fgMuted)
                 .accessibilityHidden(true)
         }
-        .padding(Theme.Spacing.s + 2)
+        .padding(Theme.Spacing.m)
         .frame(maxWidth: Theme.Size.mediaMaxWidth, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .fill(Color.secondaryBackground)
+                .fill(Theme.Colors.surface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(0.15), lineWidth: 1)
+                .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
         )
         .contentShape(Rectangle())
     }
@@ -303,8 +304,8 @@ struct MessageImagePreviewView: View {
                     .labelStyle(.iconOnly)
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(.white)
-                    .padding(12)
-                    .background(.black.opacity(0.55), in: Circle())
+                    .padding(Theme.Spacing.m)
+                    .background(Theme.Colors.scrim, in: Circle())
                 }
                 Spacer()
             }

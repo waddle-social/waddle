@@ -1,9 +1,11 @@
 import SwiftUI
 import WaddleKit
 
-/// The Slack-style card: optional formatting bar, the text field, pending
-/// attachments, and the action row.
+/// The composer panel (web `wd-composer`): the formatting bar and
+/// pending attachments when there are any, then one row of `+`, the text,
+/// the other buttons (iPad, Mac) and Send.
 struct ComposerCard: View {
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let model: ComposerModel
     /// The draft text; the composer notes what the field writes.
     @Binding var text: String
@@ -16,60 +18,72 @@ struct ComposerCard: View {
     let actions: ComposerActions
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
         VStack(alignment: .leading, spacing: 0) {
             if showsFormatting {
                 ComposerFormattingBar(
                     onFormat: actions.format,
                     onLink: actions.requestLink
                 )
+                HuddleDivider()
                     .padding(.horizontal, Theme.Spacing.xs)
-                Divider()
-                    .padding(.horizontal, Theme.Spacing.s)
+                    .padding(.bottom, Theme.Spacing.xs)
             }
-            ComposerTextField(
-                text: $text,
-                selection: $selection,
-                placeholder: model.isEditing ? "Edit message" : placeholder,
-                isFocused: $isFocused,
-                onSubmit: actions.submit,
-                onAcceptSuggestion: actions.acceptSuggestion,
-                onCancel: actions.cancelContext,
-                onPaste: actions.paste
-            )
-            .padding(.horizontal, Theme.Spacing.m)
-            .padding(.top, Theme.Spacing.xs)
             if !model.attachments.isEmpty, !model.isEditing {
                 ComposerAttachmentStrip(model: model, uploader: uploader)
-                    .padding(.horizontal, Theme.Spacing.m)
+                    .padding(.horizontal, Theme.Spacing.xs)
             }
-            ComposerActionRow(
-                isEditing: model.isEditing,
-                canSend: model.canSend,
-                showsMention: showsMention,
-                showsFormatting: $showsFormatting,
-                actions: actions
-            )
-            .padding(.horizontal, Theme.Spacing.xs)
-            .padding(.bottom, Theme.Spacing.xxs)
+            HStack(alignment: .bottom, spacing: Theme.Spacing.xs) {
+                ComposerPlusMenu(
+                    isEditing: model.isEditing,
+                    showsMention: showsMention,
+                    showsFormatting: $showsFormatting,
+                    holdsExtraButtons: isCompact,
+                    actions: actions
+                )
+                ComposerTextField(
+                    text: $text,
+                    selection: $selection,
+                    placeholder: model.isEditing ? "Edit message" : placeholder,
+                    isFocused: $isFocused,
+                    onSubmit: actions.submit,
+                    onAcceptSuggestion: actions.acceptSuggestion,
+                    onCancel: actions.cancelContext,
+                    onPaste: actions.paste
+                )
+                .padding(.horizontal, Theme.Spacing.s)
+                .frame(minHeight: ComposerMetrics.button)
+                if !isCompact {
+                    ComposerExtraButtons(
+                        isEditing: model.isEditing,
+                        showsMention: showsMention,
+                        showsFormatting: $showsFormatting,
+                        actions: actions
+                    )
+                }
+                ComposerSendButton(isEditing: model.isEditing, isEnabled: model.canSend, action: actions.submit)
+            }
         }
-        .background(cardBackground)
+        .padding(ComposerMetrics.inset)
+        .huddleSurface(.card, in: shape)
+        // An input, so its edge meets 3:1 contrast; focus adds the ring.
+        .overlay(shape.strokeBorder(Theme.Colors.borderStrong, lineWidth: WaddleTokens.BorderWidth.hair))
         .overlay(
-            RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-                .strokeBorder(borderColor, lineWidth: 1)
+            shape
+                .inset(by: -WaddleTokens.BorderWidth.focus / 2 - 1)
+                .stroke(Theme.Colors.focus, lineWidth: WaddleTokens.BorderWidth.focus)
+                .opacity(isFocused ? 1 : 0)
         )
-        .animation(.easeInOut(duration: 0.18), value: isFocused)
+        .huddleAnimation(.settle, value: isFocused)
     }
 
-    private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-            .fill(Color.secondaryBackground)
-    }
-
-    private var borderColor: Color {
+    /// A phone, or an iPad in a narrow column: the extra buttons move into
+    /// the `+` menu.
+    private var isCompact: Bool {
         #if os(iOS)
-        isFocused ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.08)
+        sizeClass == .compact
         #else
-        isFocused ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.2)
+        false
         #endif
     }
 }

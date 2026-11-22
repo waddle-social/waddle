@@ -17,8 +17,8 @@ struct MessageEmojiPicker: View {
                 }
                 ForEach(EmojiCatalog.groups) { group in
                     Text(group.title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .huddleText(Theme.Typography.caption.weight(700))
+                        .foregroundStyle(Theme.Colors.fgMuted)
                         .accessibilityAddTraits(.isHeader)
                     LazyVGrid(columns: columns, spacing: Theme.Spacing.xs) {
                         ForEach(group.emoji, id: \.self) { emoji in

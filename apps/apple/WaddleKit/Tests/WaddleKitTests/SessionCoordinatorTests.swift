@@ -66,6 +66,25 @@ struct SessionCoordinatorTests {
         #expect(sent.options.markupSpans == [MarkupSpan(kind: .italic, start: 6, end: 8)])
     }
 
+    @Test func mentionsMeMarksOthersMentionsAndBroadcastsButNotOurOwn() {
+        let (coordinator, _) = online()
+        var ofUs = roomMessage("@alice look", from: "bob", stanzaID: "m1")
+        ofUs.references = [Reference(kind: .mention, uri: "xmpp:alice@waddle.test", begin: 0, end: 6)]
+        var everyone = roomMessage("@everyone release", from: "bob", stanzaID: "m2")
+        everyone.broadcastMention = "everyone"
+        var ourOwn = roomMessage("@alice note to self", from: "alice", stanzaID: "m3")
+        ourOwn.references = ofUs.references
+        let plain = roomMessage("hello", from: "bob", stanzaID: "m4")
+        for message in [ofUs, everyone, ourOwn, plain] {
+            coordinator.route(message)
+        }
+        let rows = Dictionary(uniqueKeysWithValues: coordinator.timelines.timeline(for: roomConversation).items.map { ($0.body, $0) })
+        #expect(coordinator.mentionsMe(rows["@alice look"]!))
+        #expect(coordinator.mentionsMe(rows["@everyone release"]!))
+        #expect(!coordinator.mentionsMe(rows["@alice note to self"]!))
+        #expect(!coordinator.mentionsMe(rows["hello"]!))
+    }
+
     @Test func incomingMessageCountsUnreadAndAlertsOnMention() async {
         let (coordinator, _) = online()
         var alerts: [IncomingAlert] = []

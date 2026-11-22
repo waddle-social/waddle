@@ -16,6 +16,8 @@ struct MessageRichBody: View {
     /// The name the row header shows, used for `/me` action lines.
     let authorName: String
     let isSelectable: Bool
+    /// Dynamic Type's factor, for the faces runs pick for themselves.
+    @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
     var body: some View {
         let hidden = MeAction.hiddenScalarCount(ofBody: item.body)
@@ -24,7 +26,7 @@ struct MessageRichBody: View {
             detectLinks: MessageLinkDetector.links(in:)
         )
         let blocks = hidden > 0 ? MeActionLine.blocks(rendered, actor: authorName) : rendered
-        VStack(alignment: .leading, spacing: Theme.Spacing.s - 2) {
+        VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s1Half) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 blockView(block, isLast: index == blocks.count - 1)
             }
@@ -36,74 +38,86 @@ struct MessageRichBody: View {
     private func blockView(_ block: RichBlock, isLast: Bool) -> some View {
         switch block {
         case let .paragraph(segments):
-            Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark))
-                .font(.body)
+            Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark, scale: scale))
+                .huddleText(Theme.Typography.message)
+                .foregroundStyle(Theme.Colors.fg)
                 .fixedSize(horizontal: false, vertical: true)
         case let .quote(segments):
             HStack(alignment: .top, spacing: Theme.Spacing.s) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.secondary.opacity(0.5))
-                    .frame(width: 3)
-                Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark))
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                Capsule()
+                    .fill(Theme.Colors.border)
+                    .frame(width: Theme.Size.rail)
+                Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark, scale: scale))
+                    .huddleText(Theme.Typography.message)
+                    .foregroundStyle(Theme.Colors.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .fixedSize(horizontal: false, vertical: true)
         case let .code(code):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(.system(.callout, design: .monospaced))
-                    .padding(Theme.Spacing.s)
+                    .huddleText(Theme.Typography.code)
+                    .foregroundStyle(Theme.Colors.fg)
+                    .padding(Theme.Spacing.m)
             }
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                    .fill(Color.secondary.opacity(0.12))
+                RoundedRectangle(cornerRadius: WaddleTokens.Radius.sm, style: .continuous)
+                    .fill(Theme.Colors.surfaceCode)
             )
         }
     }
 }
 
-/// Maps styled runs to SwiftUI text attributes.
+/// Maps styled runs to SwiftUI text attributes (web `MessageBody`). Bold,
+/// code and mentions pick their own face from the message style at
+/// `scale`; the rest inherits it.
 enum RichTextAttributes {
-    static func attributed(_ segments: [RichSegment], editedMark: Bool) -> AttributedString {
+    static func attributed(_ segments: [RichSegment], editedMark: Bool, scale: CGFloat = 1) -> AttributedString {
         var result = AttributedString()
         for segment in segments {
-            result.append(styled(segment))
+            result.append(styled(segment, scale: scale))
         }
         if editedMark {
             var mark = AttributedString(" (edited)")
-            mark.foregroundColor = Color.secondary
-            mark.font = Font.caption
+            mark.foregroundColor = Theme.Colors.fgMuted
+            mark.font = Theme.Typography.timestamp.resolved(scale: scale).font
             result.append(mark)
         }
         return result
     }
 
-    private static func styled(_ segment: RichSegment) -> AttributedString {
+    private static func styled(_ segment: RichSegment, scale: CGFloat) -> AttributedString {
         var piece = AttributedString(segment.text)
         var intent: InlinePresentationIntent = []
+        var isBold = false
+        var isCode = false
         for style in segment.styles {
             switch style {
             case .bold:
-                intent.insert(.stronglyEmphasized)
+                isBold = true
             case .italic:
                 intent.insert(.emphasized)
             case .strikethrough:
                 intent.insert(.strikethrough)
             case .code:
-                intent.insert(.code)
-                piece.backgroundColor = Color.secondary.opacity(0.15)
+                isCode = true
+                piece.backgroundColor = Theme.Colors.surfaceCode
             case let .link(url):
                 piece.link = url
-            case .mention(.someone):
-                intent.insert(.stronglyEmphasized)
-                piece.foregroundColor = Color.accentColor
-            case .mention(.me):
-                intent.insert(.stronglyEmphasized)
-                piece.foregroundColor = Color.accentColor
-                piece.backgroundColor = Color.accentColor.opacity(0.2)
+                piece.foregroundColor = Theme.Colors.actionText
+            case .mention:
+                // Every mention alike, as on web; the row marks ours. The
+                // text takes the action colour, as in the Penpot frames.
+                isBold = true
+                piece.foregroundColor = Theme.Colors.action
+                piece.backgroundColor = Theme.Colors.goldSubtle
             }
+        }
+        // One face for the run, whatever order its styles came in.
+        if isCode {
+            piece.font = Theme.Typography.code.weight(isBold ? 700 : 400).resolved(scale: scale).font
+        } else if isBold {
+            piece.font = Theme.Typography.message.weight(700).resolved(scale: scale).font
         }
         if !intent.isEmpty {
             piece.inlinePresentationIntent = intent

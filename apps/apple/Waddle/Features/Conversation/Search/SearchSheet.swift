@@ -120,16 +120,16 @@ struct ConversationSearchResultRow: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack(alignment: .firstTextBaseline) {
                 Text(item.authorName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.consistent(for: item.conversation.isRoom ? item.authorName : item.authorKey))
+                    .huddleText(Theme.Typography.label)
+                    .foregroundStyle(Theme.Colors.fg)
                     .lineLimit(1)
                 Spacer(minLength: Theme.Spacing.s)
                 Text(item.sentAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
             }
             Text(highlighted)
-                .font(.callout)
+                .huddleText(Theme.Typography.body)
                 .lineLimit(4)
         }
         .padding(.vertical, Theme.Spacing.xs)
@@ -141,7 +141,8 @@ struct ConversationSearchResultRow: View {
         var text = AttributedString(MessageAccessibilityText.content(of: item))
         if !query.isEmpty, let range = text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) {
             text[range].inlinePresentationIntent = .stronglyEmphasized
-            text[range].backgroundColor = Color.yellow.opacity(0.35)
+            text[range].backgroundColor = Theme.Colors.goldSubtle
+            text[range].foregroundColor = Theme.Colors.goldText
         }
         return text
     }
