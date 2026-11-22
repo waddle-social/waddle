@@ -20,9 +20,16 @@ extension SessionCoordinator {
         from pack: StickerPack,
         in conversation: ConversationID,
         reply: ReplyContext? = nil,
-        thread: String? = nil
+        thread: String? = nil,
+        parentThread: String? = nil
     ) async -> String? {
-        guard let composed = MessageComposer.compose(sticker, from: pack, reply: reply, thread: thread) else { return nil }
+        guard let composed = MessageComposer.compose(
+            sticker,
+            from: pack,
+            reply: reply,
+            thread: thread,
+            parentThread: parentThread
+        ) else { return nil }
         return await send(composed, preview: sticker.text, in: conversation)
     }
 
@@ -290,6 +297,7 @@ extension SessionCoordinator {
             identity: MessageIdentity(messageID: message.clientID, originID: message.clientID),
             body: message.body,
             thread: message.options.thread,
+            parentThread: message.options.parentThread,
             reply: message.options.reply.map {
                 WireMessage.ReplyTarget(id: $0.targetID, author: $0.author, fallback: $0.fallback)
             },
@@ -338,9 +346,9 @@ extension SessionCoordinator {
     /// XEP-0308 correction of one of our own messages. The correction
     /// re-sends the whole message, as the XEP requires: the draft's text
     /// and mentions (markup and references are recomputed against the new
-    /// body) with the original's reply, thread and attachments. The draft's
-    /// own reply, thread and attachments are ignored. A sticker is not
-    /// text and cannot be corrected.
+    /// body) with the original's reply, thread, thread parent and
+    /// attachments. The draft's own reply, thread and attachments are
+    /// ignored. A sticker is not text and cannot be corrected.
     public func edit(_ item: TimelineItem, draft: Draft) async -> Bool {
         guard item.isMine,
               item.tombstone == nil,
@@ -394,6 +402,7 @@ extension SessionCoordinator {
             mentions: draft.mentions,
             reply: reply,
             thread: item.message.thread,
+            parentThread: item.message.parentThread,
             attachments: item.message.sharedFiles
         )
     }

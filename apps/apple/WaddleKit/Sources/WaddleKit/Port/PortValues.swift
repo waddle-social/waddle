@@ -4,6 +4,8 @@ import Foundation
 public struct OutboundOptions: Hashable, Sendable, Codable {
     public var reply: Reply?
     public var thread: String?
+    /// XEP-0201 `parent`: the thread `thread` hangs off, for a sub-thread.
+    public var parentThread: String?
     public var markupSpans: [MarkupSpan]
     public var references: [Reference]
     public var sharedFiles: [SharedFile]
@@ -30,6 +32,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
     public init(
         reply: Reply? = nil,
         thread: String? = nil,
+        parentThread: String? = nil,
         markupSpans: [MarkupSpan] = [],
         references: [Reference] = [],
         sharedFiles: [SharedFile] = [],
@@ -39,6 +42,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
     ) {
         self.reply = reply
         self.thread = thread
+        self.parentThread = parentThread
         self.markupSpans = markupSpans
         self.references = references
         self.sharedFiles = sharedFiles

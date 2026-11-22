@@ -162,7 +162,7 @@ final class ComposerModel {
 
     /// Takes what the composer holds as a send or an edit and clears it at
     /// once, so a second Return before the round trip cannot resend.
-    func takeSubmission(thread: String?) -> ComposerSubmission? {
+    func takeSubmission(thread: String?, parentThread: String?) -> ComposerSubmission? {
         if let editing {
             let newText = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !newText.isEmpty else { return nil }
@@ -178,6 +178,7 @@ final class ComposerModel {
             mentions: MentionTokens.locate(mentions, in: text),
             reply: reply,
             thread: thread,
+            parentThread: parentThread,
             attachments: attachments.compactMap(\.sharedFile)
         )
         clearDraft()
@@ -185,27 +186,33 @@ final class ComposerModel {
     }
 
     /// A message whose body is just `url` (a picked GIF), in reply to the
-    /// current reply target and in `thread`. The draft text and pending
-    /// attachments stay in the composer.
-    func takeLinkSubmission(_ url: URL, thread: String?) -> ComposerSubmission {
-        let draft = Draft(text: url.absoluteString, reply: reply, thread: thread)
+    /// current reply target and in `thread` (under `parentThread` for a
+    /// sub-thread). The draft text and pending attachments stay in the
+    /// composer.
+    func takeLinkSubmission(_ url: URL, thread: String?, parentThread: String?) -> ComposerSubmission {
+        let draft = Draft(text: url.absoluteString, reply: reply, thread: thread, parentThread: parentThread)
         reply = nil
         return .send(draft)
     }
 
     /// A sticker, in reply to the current reply target and in `thread`.
     /// The draft text and pending attachments stay in the composer.
-    func takeStickerSubmission(_ sticker: Sticker, from pack: StickerPack, thread: String?) -> ComposerSubmission {
+    func takeStickerSubmission(
+        _ sticker: Sticker,
+        from pack: StickerPack,
+        thread: String?,
+        parentThread: String?
+    ) -> ComposerSubmission {
         defer { reply = nil }
-        return .sticker(sticker, pack, reply: reply, thread: thread)
+        return .sticker(sticker, pack, reply: reply, thread: thread, parentThread: parentThread)
     }
 
     func perform(_ submission: ComposerSubmission, session: SessionCoordinator, in conversation: ConversationID) async {
         switch submission {
         case let .send(draft):
             await session.send(draft, in: conversation)
-        case let .sticker(sticker, pack, reply, thread):
-            await session.send(sticker, from: pack, in: conversation, reply: reply, thread: thread)
+        case let .sticker(sticker, pack, reply, thread, parentThread):
+            await session.send(sticker, from: pack, in: conversation, reply: reply, thread: thread, parentThread: parentThread)
         case let .edit(item, draft):
             let succeeded = await session.edit(item, draft: draft)
             if !succeeded {
@@ -227,7 +234,7 @@ final class ComposerModel {
 /// What one press of Send does.
 enum ComposerSubmission {
     case send(Draft)
-    case sticker(Sticker, StickerPack, reply: ReplyContext?, thread: String?)
+    case sticker(Sticker, StickerPack, reply: ReplyContext?, thread: String?, parentThread: String?)
     /// XEP-0308 correction of `item` to the draft's text and mentions.
     case edit(TimelineItem, Draft)
 }
