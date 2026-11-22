@@ -101,10 +101,12 @@ pub enum SetDmNotificationModeOutcome {
 /// using the room, and an own bookmark with `autojoin` off and
 /// notifications off means they left it (see [`set_room_membership`]).
 /// For the same reason muting turns `autojoin` on in a bookmark that has
-/// it off and is not a left one. A left room stays left: its mode stays
-/// `never` whatever is asked for, only the rich push opt-in is stored,
-/// and the returned item carries what the bookmark now holds. Rejoin
-/// with [`set_room_membership`] to change its mode.
+/// it off and is not a left one. Muting a left room again leaves it
+/// left. Choosing `always` or `on-mention` for a left room rejoins it
+/// (`autojoin` on): a room muted by an older client is stored exactly
+/// like a left one, and this is the only control some clients have. A
+/// client that shows left rooms apart should offer
+/// [`set_room_membership`] for them and not this.
 ///
 /// # Errors
 ///
@@ -123,15 +125,20 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
         |existing| {
             let has_left = existing.is_some_and(|item| UserBookmark::from_item(item).has_left());
             BookmarkChange {
-                // Choosing a mode neither leaves a room nor rejoins it.
-                // A bookmark that is not a left one can still have
-                // autojoin off (they used to be created that way);
-                // muting it as it is would give the left shape.
-                autojoin: existing
-                    .is_none_or(|item| item.autojoin || (mode == NotifyMode::Never && !has_left)),
-                // A left room keeps its notifications off, or it would
-                // stop being one. The returned item says so.
-                mode: if has_left { NotifyMode::Never } else { mode },
+                // The bookmark stays one or the other: left (autojoin
+                // off, notifications off) or joined. Muting a joined
+                // room whose bookmark has autojoin off (they used to be
+                // created that way) turns autojoin on, or it would read
+                // as left. Asking to be notified in a left room rejoins
+                // it, or it would be notified and never joined.
+                autojoin: existing.is_none_or(|item| {
+                    if has_left {
+                        mode != NotifyMode::Never
+                    } else {
+                        item.autojoin || mode == NotifyMode::Never
+                    }
+                }),
+                mode,
                 rich_payload,
             }
         },
@@ -797,7 +804,10 @@ mod tests {
     }
 
     #[test]
-    fn a_notification_mode_does_not_undo_a_leave() {
+    fn choosing_to_be_notified_in_a_left_room_rejoins_it_whole() {
+        // Clients without a rejoin flow have only this control, and a room
+        // muted by an older client is stored exactly like a left one. The
+        // bookmark must not end up half of each: notified but never joined.
         // The bookmark is the one leaving publishes, not a hand-built one.
         let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
         let driver = MockDriver::new(vec![Ok(bookmarks_response(Vec::new())), Ok(ok_iq())]);
@@ -815,31 +825,14 @@ mod tests {
         assert!(UserBookmark::from_item(&left).has_left());
 
         for mode in [NotifyMode::Always, NotifyMode::OnMention] {
-            let driver = MockDriver::new(vec![
-                Ok(bookmarks_response(vec![left.clone()])),
-                Ok(ok_iq()),
-            ]);
-            let outcome = block_on(set_room_notification_mode(
-                &driver,
-                SetRoomNotificationMode {
-                    room_jid: room_jid.clone(),
-                    name: None,
-                    mode,
-                    rich_payload_opt_in: true,
-                },
-            ))
-            .unwrap();
+            let conference = publish_mode(left.clone(), mode);
 
-            // The caller is told what was stored, which is still a leave.
-            let SetRoomNotificationModeOutcome::Ok { item } = outcome else {
-                panic!("expected ok outcome");
-            };
-            assert!(UserBookmark::from_item(&item).has_left());
-            let surfaced = surface_bookmark_notify(&item.extensions);
-            assert_eq!(surfaced.fallback_mode, Some(NotifyMode::Never));
-            assert!(surfaced.rich_payload_opt_in);
-            let sent = driver.sent.borrow();
-            assert_eq!(published_conference(&sent[1]).attr("autojoin"), None);
+            assert_eq!(conference.attr("autojoin"), Some("true"));
+            let notify = conference
+                .get_child("extensions", NS_BOOKMARKS)
+                .and_then(|extensions| extensions.get_child("notify", NS_NOTIFICATION_SETTINGS))
+                .expect("notify extension");
+            assert_eq!(read_fallback_mode(notify), Some(mode));
         }
     }
 
