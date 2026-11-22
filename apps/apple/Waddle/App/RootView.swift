@@ -82,6 +82,10 @@ private struct SignedInRoot: View {
         .onChange(of: session.coordinator.unread.total, initial: true) { _, total in
             app.notifications.setBadge(total)
         }
+        .onChange(of: session.coordinator.directory.leftRooms.map(\.roomJID), initial: true) { _, left in
+            // Also a room left on another device while it is open here.
+            session.navigation.closeLeftRooms(left)
+        }
         .onChange(of: app.preferences.sendsReadReceipts) { _, sends in
             session.coordinator.sendsReadReceipts = sends
         }

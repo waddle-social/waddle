@@ -7,6 +7,20 @@ final class NavigationModelTests: XCTestCase {
     private let lobby = ConversationID.room(BareJID(parsing: "lobby@muc.waddle.test")!)
     private let design = ConversationID.room(BareJID(parsing: "design@muc.waddle.test")!)
 
+    func testARoomLeftOnAnotherDeviceIsMovedOffWhileOthersStay() {
+        let navigation = NavigationModel()
+        navigation.open(design)
+        navigation.openThread("root", in: design, usesInspector: false)
+
+        navigation.closeLeftRooms([lobby.jid])
+        XCTAssertEqual(navigation.selection, design)
+        XCTAssertEqual(navigation.homePath.count, 2)
+
+        navigation.closeLeftRooms([design.jid])
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.homePath, [])
+    }
+
     func testThreadOpenedWithItsRoomSurvivesTheSelectionChange() {
         let navigation = NavigationModel()
         navigation.show(.inbox)

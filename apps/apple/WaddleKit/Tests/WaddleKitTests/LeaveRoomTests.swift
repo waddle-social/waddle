@@ -458,6 +458,17 @@ struct LeaveRoomTests {
         #expect(coordinator.directory.notifyMode(for: roomConversation) == .never)
     }
 
+    @Test func nothingIsSentToALeftRoom() async throws {
+        // The room would refuse it: this session is not in it.
+        let (coordinator, port) = online([general.with(hasLeft: true)])
+
+        let sent = await coordinator.send(Draft(text: "hello"), in: roomConversation)
+
+        #expect(sent == nil)
+        #expect(port.sent.isEmpty)
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.isEmpty)
+    }
+
     @Test func groupChatsAreNeverListedAsLeft() {
         let (coordinator, _) = online([Channel(roomJID: room, name: "group", isGroupDM: true, hasLeft: true)])
         #expect(coordinator.directory.leftRooms.isEmpty)
