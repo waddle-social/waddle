@@ -31,14 +31,12 @@ struct RoomMembersView: View {
             LazyVStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 RoomMembersHeader(
                     title: session.directory.title(for: .room(room)),
-                    total: cards.count,
+                    total: model.members == nil ? nil : MemberRoster.memberCount(cards),
                     here: here.count,
                     filter: $filter
                 )
                 .padding(.bottom, Theme.Spacing.s)
-                if filter == .everyone {
-                    RoomMembersLoadNotice(room: room, model: model)
-                }
+                RoomMembersLoadNotice(room: room, model: model)
                 if shown.isEmpty && !(filter == .everyone && model.members == nil) {
                     RoomMembersEmpty(isFiltered: filter == .here && !cards.isEmpty)
                 }
@@ -46,9 +44,7 @@ struct RoomMembersView: View {
                     MemberCardRow(room: room, card: card, model: model)
                 }
                 if !bots.isEmpty {
-                    Text("Bots")
-                        .huddleText(Theme.Typography.eyebrow)
-                        .foregroundStyle(Theme.Colors.fgMuted)
+                    DetailsSectionHeader("Bots")
                         .padding(.top, Theme.Spacing.l)
                         .padding(.bottom, Theme.Spacing.xxs)
                         .accessibilityAddTraits(.isHeader)
@@ -72,10 +68,13 @@ struct RoomMembersView: View {
     }
 }
 
-/// "In #design", the count, how many are here, and the switch.
+/// "In #design", the count, how many are here, and the switch. Until the
+/// member list has loaded only the people here are known, so the count
+/// is of them.
 private struct RoomMembersHeader: View {
     let title: String
-    let total: Int
+    /// Members, once the list has loaded.
+    let total: Int?
     let here: Int
     @Binding var filter: RoomMembersView.Filter
 
@@ -84,11 +83,11 @@ private struct RoomMembersHeader: View {
             Text("In \(title)")
                 .huddleText(Theme.Typography.eyebrow)
                 .foregroundStyle(Theme.Colors.fgMuted)
-            Text(total == 1 ? "1 member" : "\(total) members")
+            Text(headline)
                 .huddleText(Theme.Typography.title)
                 .foregroundStyle(Theme.Colors.fg)
                 .accessibilityAddTraits(.isHeader)
-            Text("\(here) here now. Pick someone to see their profile.")
+            Text(total == nil ? "Pick someone to see their profile." : "\(here) here now. Pick someone to see their profile.")
                 .huddleText(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.fgMuted)
             HuddleSegmentedControl(selection: $filter, segments: [
@@ -97,6 +96,11 @@ private struct RoomMembersHeader: View {
             ])
             .padding(.top, Theme.Spacing.s)
         }
+    }
+
+    private var headline: String {
+        guard let total else { return "\(here) here now" }
+        return total == 1 ? "1 member" : "\(total) members"
     }
 }
 

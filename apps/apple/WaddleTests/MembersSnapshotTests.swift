@@ -23,6 +23,23 @@ final class MembersSnapshotTests: XCTestCase {
         try await assertMembers(.everyone)
     }
 
+    #if os(iOS)
+    private static let sheet = CGSize.phone
+    #else
+    private static let sheet = CGSize(width: 420, height: 640)
+    #endif
+
+    /// Priya's profile opened from her card in #design (Android
+    /// `conversation_author_profile`): her role there, then Message.
+    func testProfileOfAMember() async throws {
+        let sample = SampleSession()
+        let room = SampleSession.design
+        sample.occupy(room, nick: "Priya", jid: SampleSession.priya, affiliation: .admin, role: .moderator,
+                      hats: [Hat(uri: "urn:waddle:hats:maintainer", title: "Maintainer")])
+        let route = PeerProfileRoute(name: "Priya", jid: SampleSession.priya, room: room, nick: "Priya")
+        try await assertScreenSnapshot(of: sample.host(PeerProfileSheet(profile: route)), size: Self.sheet, asSheet: true)
+    }
+
     /// #design: four people here (us, Priya away with a hat, Jo, Theo on
     /// do not disturb), Mika online elsewhere, Sam offline, Mallory banned,
     /// and the Herald bot. The lists load before the screen draws.

@@ -61,6 +61,8 @@ enum Theme {
         static let rail: CGFloat = 3
         /// The large mark of an empty conversation.
         static let emptyMark: CGFloat = 64
+        /// The person a profile or DM details is about.
+        static let profileAvatar: CGFloat = 88
         /// A person on a room's member list (Android `AvatarSize.LG`).
         static let memberAvatar: CGFloat = 44
         /// The glyph column of a details or settings row.

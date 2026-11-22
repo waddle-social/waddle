@@ -16,14 +16,11 @@ struct MemberCardRow: View {
                 name: card.name,
                 jid: card.jid,
                 room: card.isHere ? room : nil,
-                nick: card.isHere ? card.nick : nil
+                nick: card.isHere ? card.nick : nil,
+                affiliation: card.isHere ? nil : card.affiliation
             ))
         } label: {
-            MemberCardLabel(
-                name: card.name,
-                avatarJID: card.jid,
-                availability: card.isHere || card.place == .elsewhere ? card.availability : nil
-            ) {
+            MemberCardLabel(name: card.name, avatarJID: card.jid, availability: card.shownAvailability) {
                 MemberRoleLine(affiliation: card.affiliation, hats: card.hats)
                 Text(MemberLabels.place(card.place))
                     .huddleText(Theme.Typography.caption)
@@ -66,7 +63,7 @@ private struct MemberCardLabel<Lines: View>: View {
 
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
-            avatar
+            PeerPresenceAvatar(jid: avatarJID, name: name, availability: availability, size: Theme.Size.memberAvatar)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text(name)
                     .huddleText(Theme.Typography.author)
@@ -79,55 +76,59 @@ private struct MemberCardLabel<Lines: View>: View {
         .accessibilityElement(children: .combine)
     }
 
-    @ViewBuilder
-    private var avatar: some View {
-        let size = Theme.Size.memberAvatar
-        if let avatarJID, let availability {
-            PeerPresenceAvatar(jid: avatarJID, name: name, availability: availability, size: size)
-        } else if let avatarJID {
-            JIDAvatar(jid: avatarJID, name: name, size: size)
-        } else {
-            AvatarView(name: name, size: size)
-                .overlay(alignment: .bottomTrailing) {
-                    if let availability {
-                        PresenceDot(availability: availability, size: size * 0.3)
-                            .offset(x: size * 0.075, y: size * 0.075)
-                    }
-                }
-        }
-    }
 }
 
-/// Affiliation and hats in their colours (Android `RoleLine`): owner in
-/// gold, admin in action, banned in danger, member muted.
+/// Affiliation and up to two hats in their colours (Android `RoleLine`):
+/// owner in gold, admin and hats in action, banned in danger, the rest
+/// muted.
 struct MemberRoleLine: View {
     let affiliation: RoomAffiliation
     let hats: [Hat]
 
     var body: some View {
-        let label = MemberLabels.badge(affiliation)
-        let titles = hats.filter { $0.uri != Hat.botURI }.map(\.title)
-        if label != nil || !titles.isEmpty {
-            HStack(spacing: Theme.Spacing.xs) {
-                if let label {
-                    Text(label)
-                        .foregroundStyle(MemberLabels.tone(affiliation))
-                }
-                ForEach(titles, id: \.self) { title in
-                    Text(title)
-                        .foregroundStyle(Theme.Colors.actionText)
-                }
+        let titles = hats.filter { $0.uri != Hat.botURI }.prefix(2).map(\.title)
+        HStack(spacing: Theme.Spacing.xs) {
+            Text(MemberLabels.role(affiliation))
+                .foregroundStyle(tone)
+            ForEach(titles, id: \.self) { title in
+                Text(title)
+                    .foregroundStyle(Theme.Colors.actionText)
             }
-            .huddleText(Theme.Typography.eyebrow)
-            .lineLimit(1)
+        }
+        .huddleText(Theme.Typography.eyebrow)
+        .lineLimit(1)
+    }
+
+    private var tone: Color {
+        switch affiliation {
+        case .owner: return Theme.Colors.goldText
+        case .admin: return Theme.Colors.actionText
+        case .outcast: return Theme.Colors.dangerText
+        case .member, .none: return Theme.Colors.fgMuted
         }
     }
 }
 
 private struct MemberCardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
+        MemberCardButtonBody(configuration: configuration)
+    }
+}
+
+/// The card with the press tint, and the hover tint under a pointer.
+private struct MemberCardButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    @State private var isHovered = false
+
+    var body: some View {
         configuration.label
-            .memberCardSurface(tint: configuration.isPressed ? Theme.State.press : .clear)
+            .memberCardSurface(tint: tint)
+            .onHover { isHovered = $0 }
+    }
+
+    private var tint: Color {
+        if configuration.isPressed { return Theme.State.press }
+        return isHovered ? Theme.State.hover : .clear
     }
 }
 

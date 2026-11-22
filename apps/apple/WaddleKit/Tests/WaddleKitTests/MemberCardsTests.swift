@@ -20,29 +20,33 @@ private func occupant(
 
 @Suite("Room member cards")
 struct MemberCardsTests {
-    @Test func peopleInTheRoomAreHereByNameWithTheirShowAndNoBots() {
+    /// Android `MembersViewModel` order: available, then away, then do not
+    /// disturb; within each, owners, admins, members, others; then name.
+    @Test func peopleInTheRoomAreHereByPresenceThenRoleThenName() {
         let cards = MemberRoster.cards(
             present: [
                 occupant("theo", .doNotDisturb, jid: theo),
                 occupant("Priya", .away, affiliation: .admin, jid: priya),
                 occupant("helper", hats: [Hat(uri: Hat.botURI, title: "Bot")]),
+                occupant("zed", affiliation: .owner),
                 occupant("ana", .chat),
+                occupant("bo", .extendedAway),
             ],
             members: nil,
             contacts: [:]
         )
-        #expect(cards.map(\.name) == ["ana", "Priya", "theo"])
-        #expect(cards.map(\.place) == [.here, .hereAway, .hereBusy])
+        #expect(cards.map(\.name) == ["zed", "ana", "Priya", "bo", "theo"])
+        #expect(cards.map(\.place) == [.here, .here, .hereAway, .hereAway, .hereBusy])
         #expect(cards.allSatisfy { $0.isHere })
-        #expect(cards[1].affiliation == .admin)
-        #expect(cards[1].jid == priya)
-        #expect(cards[1].nick == "Priya")
+        #expect(cards[2].affiliation == .admin)
+        #expect(cards[2].jid == priya)
+        #expect(cards[2].nick == "Priya")
     }
 
-    /// Everyone: affiliated people not in the room follow those here, by
-    /// affiliation then name. A member counts as here by real JID or by
-    /// reserved nick. Online contacts are around; the rest, and the banned,
-    /// are not here.
+    /// Everyone: affiliated people not in the room follow those here,
+    /// those around first, then by affiliation and name. A member counts as
+    /// here by real JID or by reserved nick. Online contacts are around;
+    /// the rest, and the banned, are not here.
     @Test func membersNotInTheRoomFollowAndSayWhetherTheyAreAround() {
         let cards = MemberRoster.cards(
             present: [occupant("Priya", jid: priya), occupant("jo")],
@@ -58,11 +62,15 @@ struct MemberCardsTests {
                 mika: .init(availability: .offline, status: nil, idleSince: nil),
             ]
         )
-        #expect(cards.map(\.name) == ["jo", "Priya", "mika", "theo", "Mallory"])
-        #expect(cards.map(\.place) == [.here, .here, .notHere, .elsewhere, .notHere])
-        #expect(cards[3].availability == .away)
-        #expect(cards[2].availability == .offline)
+        #expect(cards.map(\.name) == ["jo", "Priya", "theo", "mika", "Mallory"])
+        #expect(cards.map(\.place) == [.here, .here, .elsewhere, .notHere, .notHere])
+        #expect(cards[2].availability == .away)
+        #expect(cards[3].availability == .offline)
         #expect(cards[4].affiliation == .outcast)
-        #expect(cards[2].nick == "mika")
+        #expect(cards[3].nick == "mika")
+        // A dot for those here or around; none for the rest.
+        #expect(cards.map(\.shownAvailability) == [.available, .available, .away, nil, nil])
+        // The banned are listed but are not members.
+        #expect(MemberRoster.memberCount(cards) == 4)
     }
 }

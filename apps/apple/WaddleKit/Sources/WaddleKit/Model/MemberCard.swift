@@ -4,7 +4,7 @@ import Foundation
 /// where they are now.
 public struct MemberCard: Identifiable, Hashable, Sendable {
     /// Where someone is, as the member list says it in words.
-    public enum Place: Hashable, Sendable {
+    public enum Place: Hashable, Sendable, Comparable {
         /// In the room and available.
         case here
         /// In the room, away or extended away.
@@ -27,9 +27,17 @@ public struct MemberCard: Identifiable, Hashable, Sendable {
     public let availability: Availability
     public let place: Place
 
+    /// The occupant's nick while they are here (one person can be in a
+    /// room twice under two nicks), else their address.
     public var id: String {
+        if isHere, let nick { return "nick:\(nick)" }
         if let jid { return "jid:\(jid)" }
         return "nick:\(nick ?? name)"
+    }
+
+    /// What the avatar's dot shows: nothing for someone who is not around.
+    public var shownAvailability: Availability? {
+        place == .notHere ? nil : availability
     }
 
     public var isHere: Bool {
@@ -41,9 +49,9 @@ public struct MemberCard: Identifiable, Hashable, Sendable {
 }
 
 extension MemberRoster {
-    /// The room's member list: the people here now by name, then, once
-    /// the affiliation lists are loaded, everyone else by affiliation and
-    /// name. Bots are left out; they list apart, from `RoomBotStore`.
+    /// The room's member list: the people here now and, once the
+    /// affiliation lists are loaded, everyone else, in `cardOrder`. Bots
+    /// are left out; they list apart, from `RoomBotStore`.
     public static func cards(
         present occupants: [Occupant],
         members: [RoomMember]?,
@@ -52,7 +60,6 @@ extension MemberRoster {
         let here = presentCards(occupants)
         let away = (members ?? [])
             .filter { !isPresent($0, among: occupants) }
-            .sorted(by: memberOrder)
             .map { member in
                 let availability = contacts[member.jid]?.availability ?? .offline
                 return MemberCard(
@@ -65,13 +72,27 @@ extension MemberRoster {
                     place: member.affiliation != .outcast && availability.isOnline ? .elsewhere : .notHere
                 )
             }
-        return here + away
+        return (here + away).sorted(by: cardOrder)
+    }
+
+    /// How many members the list holds: the banned are listed, after a ban
+    /// made here, but are not members.
+    public static func memberCount(_ cards: [MemberCard]) -> Int {
+        cards.filter { $0.affiliation != .outcast }.count
+    }
+
+    /// Android `MembersViewModel` order: where they are (here, here away,
+    /// here busy, around, not here), then owners, admins, members, others,
+    /// the banned, then name.
+    private static func cardOrder(_ lhs: MemberCard, _ rhs: MemberCard) -> Bool {
+        if lhs.place != rhs.place { return lhs.place < rhs.place }
+        if lhs.affiliation != rhs.affiliation { return lhs.affiliation < rhs.affiliation }
+        return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 
     private static func presentCards(_ occupants: [Occupant]) -> [MemberCard] {
         occupants
             .filter { !$0.isBot }
-            .sorted { $0.nick.localizedCaseInsensitiveCompare($1.nick) == .orderedAscending }
             .map { occupant in
                 MemberCard(
                     name: occupant.nick,

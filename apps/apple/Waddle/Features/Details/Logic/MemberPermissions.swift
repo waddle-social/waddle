@@ -1,4 +1,4 @@
-import SwiftUI
+import Foundation
 import WaddleKit
 
 /// A moderation action on a room member.
@@ -120,23 +120,14 @@ enum MemberPermissions {
 
 /// Role and affiliation copy.
 enum MemberLabels {
-    /// The role word; nil for users without an affiliation.
-    static func badge(_ affiliation: RoomAffiliation) -> String? {
+    /// The role word (Android `affiliationLabel`).
+    static func role(_ affiliation: RoomAffiliation) -> String {
         switch affiliation {
         case .owner: return "Owner"
         case .admin: return "Admin"
         case .member: return "Member"
         case .outcast: return "Banned"
-        case .none: return nil
-        }
-    }
-
-    static func tone(_ affiliation: RoomAffiliation) -> Color {
-        switch affiliation {
-        case .owner: return Theme.Colors.goldText
-        case .admin: return Theme.Colors.actionText
-        case .outcast: return Theme.Colors.dangerText
-        case .member, .none: return Theme.Colors.fgMuted
+        case .none: return "Guest"
         }
     }
 

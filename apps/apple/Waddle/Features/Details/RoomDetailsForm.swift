@@ -52,9 +52,10 @@ struct RoomDetailsForm: View {
         .roomManagementDialogs(management, name: session.directory.title(for: .room(room)), groupMembers: groupMembers)
     }
 
-    /// People in the room now, bots aside.
+    /// People in the room now, as Members counts them.
     private var hereCount: Int {
-        (session.presence.occupants[room] ?? [:]).values.filter { !$0.isBot }.count
+        let present = Array((session.presence.occupants[room] ?? [:]).values)
+        return MemberRoster.cards(present: present, members: nil, contacts: [:]).count
     }
 
     /// Us, the people here and, once loaded, every member.

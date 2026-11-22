@@ -63,8 +63,9 @@ struct DetailsRowLabel<Trailing: View>: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
             Image(systemName: symbol)
+                .huddleText(Theme.Typography.body)
                 .foregroundStyle(isDestructive ? Theme.Colors.dangerText : Theme.Colors.fgMuted)
-                .frame(width: Theme.Size.rowGlyph)
+                .frame(minWidth: Theme.Size.rowGlyph)
                 .accessibilityHidden(true)
             Text(title)
                 .huddleText(Theme.Typography.label)
@@ -73,6 +74,7 @@ struct DetailsRowLabel<Trailing: View>: View {
             trailing
                 .huddleText(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.fgMuted)
+                .monospacedDigit()
         }
         .frame(maxWidth: .infinity, minHeight: Theme.Size.detailsRow, alignment: .leading)
         .contentShape(Rectangle())

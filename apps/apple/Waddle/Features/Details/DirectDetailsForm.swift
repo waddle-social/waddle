@@ -67,8 +67,6 @@ struct PeerHeader: View {
     /// Their role in the room the profile was opened from.
     var role: MemberRoleLine?
 
-    private static let avatarSize: CGFloat = 88
-
     var body: some View {
         VStack(spacing: Theme.Spacing.s) {
             avatar
@@ -105,17 +103,8 @@ struct PeerHeader: View {
         .accessibilityElement(children: .combine)
     }
 
-    @ViewBuilder
     private var avatar: some View {
-        if let jid {
-            PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Self.avatarSize)
-        } else {
-            AvatarView(name: name, size: Self.avatarSize)
-                .overlay(alignment: .bottomTrailing) {
-                    PresenceDot(availability: availability, size: Self.avatarSize * 0.3)
-                        .offset(x: Self.avatarSize * 0.075, y: Self.avatarSize * 0.075)
-                }
-        }
+        PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Theme.Size.profileAvatar)
     }
 
     private var statusText: String? {
@@ -149,18 +138,22 @@ struct PeerProfileSheet: View {
                         idleSince: presence.idleSince,
                         role: roomRole
                     )
+                    if let peer = messageablePeer {
+                        // Android `conversation_author_profile`: the one
+                        // action, a pill under the header.
+                        Button {
+                            message(peer)
+                        } label: {
+                            Label("Message", systemImage: "bubble.left")
+                        }
+                        .buttonStyle(.huddle(.primary))
+                        .frame(maxWidth: .infinity)
+                        .accessibilityHint(Text("Opens your direct conversation"))
+                    }
                 }
                 PeerSharingSection(status: shared, isOnline: presence.availability.isOnline)
                 if let details {
                     PeerDetailsSection(details: details)
-                }
-                if let peer = messageablePeer {
-                    Section {
-                        DetailsActionButton(title: "Message", symbol: "bubble.left") {
-                            message(peer)
-                        }
-                        .accessibilityHint(Text("Opens your direct conversation"))
-                    }
                 }
             }
             .detailsForm()
@@ -183,12 +176,14 @@ struct PeerProfileSheet: View {
         #endif
     }
 
-    /// Their role in the room the profile was opened from, while they
-    /// are in it.
+    /// Their role in the room the profile was opened from: their
+    /// occupant's while they are in it, else the member list's.
     private var roomRole: MemberRoleLine? {
-        guard let room = profile.room, let nick = profile.nick,
-              let occupant = session.presence.occupant(named: nick, in: room) else { return nil }
-        return MemberRoleLine(affiliation: occupant.affiliation, hats: occupant.hats)
+        if let room = profile.room, let nick = profile.nick,
+           let occupant = session.presence.occupant(named: nick, in: room) {
+            return MemberRoleLine(affiliation: occupant.affiliation, hats: occupant.hats)
+        }
+        return profile.affiliation.map { MemberRoleLine(affiliation: $0, hats: []) }
     }
 
     /// A real JID that is not our own account; anonymous room occupants
