@@ -80,4 +80,13 @@ struct PeerSharedStatusTests {
         #expect(shown.lookedUpAgain(SharedStatus(mood: happy)) == SharedStatus(mood: happy))
         #expect(shown.lookedUpAgain(SharedStatus(activity: coding)) == SharedStatus(activity: coding))
     }
+
+    /// Looking again for the end of a call nothing will notify: the
+    /// activity found replaces the one shown, even when it is none.
+    @Test func lookingAgainForACallsEndTakesTheActivityFound() {
+        let shown = SharedStatus(mood: happy, activity: call, tune: song)
+
+        #expect(shown.callCheckedAgain(SharedStatus()) == SharedStatus(mood: happy, tune: song))
+        #expect(shown.callCheckedAgain(SharedStatus(mood: happy, activity: call)) == SharedStatus(mood: happy, activity: call))
+    }
 }

@@ -82,6 +82,16 @@ public struct SharedStatus: Hashable, Sendable {
     public func lookedUpAgain(_ later: SharedStatus) -> SharedStatus {
         later.isEmpty ? self : later
     }
+
+    /// What to show after looking again for the end of a call nothing will
+    /// notify (`SessionCoordinator.hearsActivity(of:)`): mood and tune as
+    /// `lookedUpAgain`, and the activity found, even none. A request that
+    /// failed then hides the call until the next look.
+    public func callCheckedAgain(_ later: SharedStatus) -> SharedStatus {
+        var next = lookedUpAgain(later)
+        next.activity = later.activity
+        return next
+    }
 }
 
 /// The XEP-0292 details of an account. An empty field is one that is not

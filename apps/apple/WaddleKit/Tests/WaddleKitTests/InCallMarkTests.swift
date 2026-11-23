@@ -287,6 +287,66 @@ struct InCallMarkTests {
         await coordinator.stop()
     }
 
+    // MARK: Someone whose activity is not heard
+
+    /// Their notifications come with their presence: someone seen only as
+    /// a room occupant sends none.
+    @Test func activityIsHeardOnlyFromSomeoneWhosePresenceIsSeen() async {
+        let (coordinator, _) = await connected()
+        #expect(!coordinator.hearsActivity(of: bob))
+
+        online(coordinator)
+        #expect(coordinator.hearsActivity(of: bob))
+        #expect(!coordinator.hearsActivity(of: me.jid))
+
+        offline(coordinator)
+        #expect(!coordinator.hearsActivity(of: bob))
+        await coordinator.stop()
+    }
+
+    /// A profile opened from a room for someone seen only there: the lookup
+    /// is the only source, so it shows what was looked up (whether that is
+    /// shown depends on the availability the profile finds). The lists,
+    /// which need their presence, never mark them.
+    @Test func theProfileOfSomeoneNotHeardShowsTheCallLookedUp() async {
+        let (coordinator, port) = await connected()
+        let occupant = WirePresence.Occupant(
+            affiliation: .member, role: .participant, realJID: jid("bob@waddle.test/phone"), statusCodes: []
+        )
+        coordinator.handle(.presence(WirePresence(
+            from: room.with(resource: "bob")!, kind: .available, show: nil, status: nil,
+            hats: [], occupant: occupant, idleSince: nil
+        )))
+        port.sharedStatus = .success(SharedStatus(activity: call))
+
+        let lookedUp = await coordinator.sharedStatus(of: bob)
+
+        #expect(coordinator.liveSharedStatus(of: bob, lookedUp: lookedUp) == SharedStatus(activity: call))
+        #expect(!coordinator.presence.isInCall(bob))
+        #expect(coordinator.presence.activities[bob] == nil)
+
+        coordinator.handle(.presence(WirePresence(
+            from: room.with(resource: "bob")!, kind: .unavailable, show: nil, status: nil,
+            hats: [], occupant: occupant, idleSince: nil
+        )))
+        #expect(!coordinator.presence.isInCall(bob))
+        await coordinator.stop()
+    }
+
+    /// Someone whose notifications are heard: a call their notification
+    /// ended stays ended, whatever the lookup read before it.
+    @Test func theProfileOfSomeoneHeardFollowsTheirNotifications() async {
+        let (coordinator, port) = await connected()
+        online(coordinator)
+        port.sharedStatus = .success(SharedStatus(activity: call))
+        let lookedUp = await coordinator.sharedStatus(of: bob)
+
+        coordinator.handle(.activityChanged(jid: bob, activity: nil))
+
+        #expect(coordinator.liveSharedStatus(of: bob, lookedUp: lookedUp) == SharedStatus())
+        await coordinator.stop()
+    }
+
     /// No notification about the account itself reaches here (the core
     /// drops it), so its own profile shows the account's activity as this
     /// device knows it, taught by the lookup.

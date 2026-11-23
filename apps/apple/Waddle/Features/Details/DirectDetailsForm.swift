@@ -36,7 +36,9 @@ struct DirectDetailsForm: View {
         }
         .huddleForm()
         .peerDetails(of: peer, session: session, into: $details)
-        .peerSharedStatus(of: peer, session: session, into: $shared)
+        .peerSharedStatus(
+            of: peer, isOnline: presence?.availability.isOnline ?? false, session: session, into: $shared
+        )
     }
 }
 
@@ -162,7 +164,9 @@ struct PeerProfileSheet: View {
             }
             .huddleForm()
             .peerDetails(of: profile.jid, session: session, into: $details)
-            .peerSharedStatus(of: profile.jid, session: session, into: $shared)
+            .peerSharedStatus(
+                of: profile.jid, isOnline: presence.availability.isOnline, session: session, into: $shared
+            )
             .checkingOwnCallEnds(while: isOwnCallShown, session: session)
             .navigationTitle(profile.name)
             #if os(iOS)

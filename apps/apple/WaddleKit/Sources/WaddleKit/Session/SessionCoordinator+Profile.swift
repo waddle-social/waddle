@@ -178,17 +178,32 @@ extension SessionCoordinator {
     }
 
     /// What to show of someone's shared status: the mood and tune `lookedUp`
-    /// found, and the activity as this device keeps it (`sharedStatus`):
-    /// someone else's follows their notifications, the account's own is
-    /// what it last looked up (`refreshOwnActivity` while it shows a call).
-    /// Nil when nothing is known. See `SharedStatus.shown(isOnline:)` for
-    /// what to show of it.
+    /// found, and their activity. Someone whose activity is heard
+    /// (`hearsActivity(of:)`) shows it as their notifications keep it; the
+    /// account's own as this device last looked it up (`status.activity`,
+    /// with `refreshOwnActivity` while it shows a call); anyone else as
+    /// `lookedUp` found it, the only source there is. Nil when nothing is
+    /// known. See `SharedStatus.shown(isOnline:)` for what to show of it.
     public func liveSharedStatus(of jid: BareJID, lookedUp: SharedStatus?) -> SharedStatus? {
-        let activity = jid == account.jid ? status.activity : presence.activities[jid]
+        let activity = if jid == account.jid {
+            status.activity
+        } else if hearsActivity(of: jid) {
+            presence.activities[jid]
+        } else {
+            lookedUp?.activity ?? presence.activities[jid]
+        }
         guard lookedUp != nil || activity != nil else { return nil }
         var live = lookedUp ?? SharedStatus()
         live.activity = activity
         return live
+    }
+
+    /// Whether someone's activity notifications reach this device: they
+    /// come with their presence (XEP-0163 §4), so only from someone whose
+    /// presence is seen. Not the account itself, whose own the core drops.
+    /// A room occupant seen only in the room sends none.
+    public func hearsActivity(of jid: BareJID) -> Bool {
+        jid != account.jid && presence.contacts[jid] != nil
     }
 
     /// XEP-0363 slot for an attachment the platform layer then uploads.

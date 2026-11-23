@@ -65,7 +65,7 @@ extension View {
         task(id: isShown) {
             guard isShown else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: ownCallCheckInterval)
+                try? await Task.sleep(for: callEndCheckInterval)
                 guard !Task.isCancelled else { return }
                 await session.refreshOwnActivity()
             }
@@ -73,9 +73,11 @@ extension View {
     }
 }
 
-/// How often a call shown as in progress on another device is checked
-/// for having ended.
-private let ownCallCheckInterval: Duration = .seconds(10)
+/// How often a call shown as in progress, and that no notification will
+/// end, is checked for having ended: the account's own on another device
+/// (`checkingOwnCallEnds`), or someone's whose activity is not heard
+/// (`peerSharedStatus`).
+let callEndCheckInterval: Duration = .seconds(10)
 
 /// How a tune reads in one row: its title first, else whatever it has.
 enum ProfileTuneSummary {
