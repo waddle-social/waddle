@@ -51,6 +51,12 @@ enum AvailabilityTitle {
         case .offline: return "Offline"
         }
     }
+
+    /// How a row says it aloud: the availability, then that they are in a
+    /// call when they are.
+    static func spoken(_ availability: Availability, isInCall: Bool) -> [String] {
+        [title(availability)] + (isInCall ? ["In a call"] : [])
+    }
 }
 
 /// Messages-style timestamps for list rows: time today, "Yesterday",

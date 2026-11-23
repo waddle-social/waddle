@@ -68,4 +68,25 @@ struct PeerSharedStatusTests {
         #expect(SharedStatus(activity: call, tune: UserTune()).shown(isOnline: false).isEmpty)
         #expect(!SharedStatus(tune: song).shown(isOnline: false).isEmpty)
     }
+
+    // MARK: Looking again
+
+    /// A request that fails reads as nothing shared, so a later lookup that
+    /// finds nothing at all leaves what is shown.
+    @Test func aLaterLookupThatFindsNothingLeavesWhatIsShown() {
+        let shown = SharedStatus(mood: happy, tune: song)
+
+        #expect(shown.lookedUpAgain(SharedStatus()) == shown)
+        #expect(shown.lookedUpAgain(SharedStatus(mood: happy)) == SharedStatus(mood: happy))
+        #expect(shown.lookedUpAgain(SharedStatus(activity: coding)) == SharedStatus(activity: coding))
+    }
+
+    /// Looking again for the end of a call nothing will notify: the
+    /// activity found replaces the one shown, even when it is none.
+    @Test func lookingAgainForACallsEndTakesTheActivityFound() {
+        let shown = SharedStatus(mood: happy, activity: call, tune: song)
+
+        #expect(shown.callCheckedAgain(SharedStatus()) == SharedStatus(mood: happy, tune: song))
+        #expect(shown.callCheckedAgain(SharedStatus(mood: happy, activity: call)) == SharedStatus(mood: happy, activity: call))
+    }
 }

@@ -27,14 +27,17 @@ public struct Person: Hashable, Sendable, Identifiable {
     public let name: String
     public let availability: Availability
     public let status: String?
+    /// In a call, as `PresenceStore.isInCall` says.
+    public let isInCall: Bool
 
     public var id: BareJID { jid }
 
-    public init(jid: BareJID, name: String, availability: Availability, status: String?) {
+    public init(jid: BareJID, name: String, availability: Availability, status: String?, isInCall: Bool) {
         self.jid = jid
         self.name = name
         self.availability = availability
         self.status = status
+        self.isInCall = isInCall
     }
 }
 
@@ -51,13 +54,15 @@ public struct PeopleList: Equatable, Sendable {
 
     /// `own` is left out: the account's other devices send presence too.
     /// A contact's saved name is used when there is one, else `name`.
-    /// `query` keeps people whose name or address contains it.
+    /// `isInCall` marks people in a call. `query` keeps people whose name
+    /// or address contains it.
     public static func build(
         contacts: [Contact],
         presence: [BareJID: PresenceStore.ContactPresence],
         directPeers: [BareJID],
         own: BareJID,
         name: (BareJID) -> String,
+        isInCall: (BareJID) -> Bool,
         query: String = ""
     ) -> PeopleList {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -66,7 +71,8 @@ public struct PeopleList: Equatable, Sendable {
             .map { jid in
                 Person(
                     jid: jid, name: savedNames[jid].flatMap { $0 } ?? name(jid),
-                    availability: presence[jid]?.availability ?? .offline, status: presence[jid]?.status
+                    availability: presence[jid]?.availability ?? .offline, status: presence[jid]?.status,
+                    isInCall: isInCall(jid)
                 )
             }
             .filter { person in

@@ -157,9 +157,53 @@ extension SessionCoordinator {
     }
 
     /// What someone shares about the moment, or nil when it could not be
-    /// looked up. See `SharedStatus.shown(isOnline:)` for what to show.
+    /// looked up. The activity it finds is also kept: a call that began
+    /// before this stream sent no notification on it, so this is how it is
+    /// first learned. Someone else's is kept with their presence
+    /// (`PresenceStore.activityLookedUp`); the account's own as
+    /// `status.activity`, since no notification about it reaches here.
+    /// Either way a lookup teaches an activity but never clears one: the
+    /// core answers an activity request that failed as no activity. Show
+    /// it with `liveSharedStatus`.
     public func sharedStatus(of jid: BareJID) async -> SharedStatus? {
-        try? await port.fetchSharedStatus(of: jid)
+        let stamp = presence.activityStamp(of: jid)
+        let edits = profileEdits
+        guard let status = try? await port.fetchSharedStatus(of: jid) else { return nil }
+        if jid != account.jid {
+            presence.activityLookedUp(status.activity, of: jid, since: stamp)
+        } else if let activity = status.activity, profileEdits.activity == edits.activity {
+            self.status.activity = activity
+        }
+        return status
+    }
+
+    /// What to show of someone's shared status: the mood and tune `lookedUp`
+    /// found, and their activity. Someone whose activity is heard
+    /// (`hearsActivity(of:)`) shows it as their notifications keep it; the
+    /// account's own as this device last looked it up (`status.activity`,
+    /// with `refreshOwnActivity` while it shows a call); anyone else as
+    /// `lookedUp` found it, the only source there is. Nil when nothing is
+    /// known. See `SharedStatus.shown(isOnline:)` for what to show of it.
+    public func liveSharedStatus(of jid: BareJID, lookedUp: SharedStatus?) -> SharedStatus? {
+        let activity = if jid == account.jid {
+            status.activity
+        } else if hearsActivity(of: jid) {
+            presence.activities[jid]
+        } else {
+            lookedUp?.activity ?? presence.activities[jid]
+        }
+        guard lookedUp != nil || activity != nil else { return nil }
+        var live = lookedUp ?? SharedStatus()
+        live.activity = activity
+        return live
+    }
+
+    /// Whether someone's activity notifications reach this device: they
+    /// come with their presence (XEP-0163 §4), so only from someone whose
+    /// presence is seen. Not the account itself, whose own the core drops.
+    /// A room occupant seen only in the room sends none.
+    public func hearsActivity(of jid: BareJID) -> Bool {
+        jid != account.jid && presence.contacts[jid] != nil
     }
 
     /// XEP-0363 slot for an attachment the platform layer then uploads.

@@ -125,9 +125,9 @@ private struct PeopleSection: View {
     }
 }
 
-/// Avatar with presence, name, and the status message or, without one,
-/// the availability in words.
-private struct PersonRow: View {
+/// Avatar with presence and, while they are in a call, the call badge;
+/// name, and the status message or, without one, the availability in words.
+struct PersonRow: View {
     @Environment(NavigationModel.self) private var navigation
     let person: Person
 
@@ -137,7 +137,10 @@ private struct PersonRow: View {
         } label: {
             NavigationRowChrome {
                 HStack(spacing: Theme.Spacing.m) {
-                    PeerPresenceAvatar(jid: person.jid, name: person.name, availability: person.availability, size: 40)
+                    PeerPresenceAvatar(
+                        jid: person.jid, name: person.name, availability: person.availability, size: 40,
+                        isInCall: person.isInCall
+                    )
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                         NavigationRowTitle(title: person.name, isEmphasised: person.availability.isOnline)
                         Text(statusLine)
@@ -151,8 +154,12 @@ private struct PersonRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(person.name), \(statusLine)"))
+        .accessibilityLabel(Text(accessibilityText))
         .accessibilityHint(Text("Opens their profile"))
+    }
+
+    private var accessibilityText: String {
+        ([person.name, statusLine] + (person.isInCall ? ["In a call"] : [])).joined(separator: ", ")
     }
 
     private var statusLine: String {

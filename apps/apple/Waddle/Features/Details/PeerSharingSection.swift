@@ -48,47 +48,78 @@ private extension String {
 }
 
 extension View {
-    /// Keeps `status` set to what `jid` shares, nil until it is known.
+    /// Keeps `status` set to what `jid` shares, nil until it is looked up.
     ///
-    /// Nothing tells this device when someone's mood, activity or tune
-    /// changes, so it is looked up when the person is shown. DM details can
-    /// stay open through a whole call, so for as long as "In a call" is
-    /// shown it is looked up again every few seconds. A repeat lookup that
-    /// fails leaves what is shown. When the person goes offline a call's
-    /// mark is forgotten, not just hidden: it may be one their device left
-    /// behind, and must not come back when they return (ADR-010).
+    /// Looked up when the person is shown and again on each new stream:
+    /// mood and tune have no notification, and a stream starts knowing no
+    /// one's activity (a call that began before it sent none). Not when
+    /// they come online: a call of theirs arrives as a notification, and a
+    /// lookup then would read back a call a crashed device left behind. In
+    /// between, the activity of someone whose notifications are heard
+    /// follows them, so show it with
+    /// `SessionCoordinator.liveSharedStatus(of:lookedUp:)`. A request that
+    /// fails reads as nothing shared, so a later lookup that finds nothing
+    /// at all leaves what is shown (`SharedStatus.lookedUpAgain`).
+    ///
+    /// Someone whose notifications are not heard (seen only in a room)
+    /// has only the lookup: while it shows them in a call, it is looked up
+    /// again every few seconds until the call ends (`UnheardCallCheck`).
     func peerSharedStatus(
         of jid: BareJID?, isOnline: Bool, session: SessionCoordinator, into status: Binding<SharedStatus?>
     ) -> some View {
-        let showsACall = status.wrappedValue?.shown(isOnline: isOnline).activity?.showsACall == true
-        return task(id: jid) {
-            status.wrappedValue = nil
-            guard let jid else { return }
-            // A lookup for the person shown before can still answer after
-            // this one; cancelling does not stop it.
-            let loaded = await session.sharedStatus(of: jid)
-            guard !Task.isCancelled else { return }
-            status.wrappedValue = loaded
-        }
-        .onChange(of: isOnline) { _, isOnline in
-            guard !isOnline, let held = status.wrappedValue else { return }
-            status.wrappedValue = held.shown(isOnline: false)
-        }
-        .task(id: PeerCallWatch(jid: jid, showsACall: showsACall)) {
-            guard showsACall, let jid else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: ProfileSharingSection.callCheckInterval)
-                guard !Task.isCancelled else { return }
+        let lookup = SharedStatusLookup(jid: jid, session: session)
+        let callCheck = UnheardCallCheck(jid: jid, shown: status.wrappedValue, isOnline: isOnline, session: session)
+        return onChange(of: jid) { status.wrappedValue = nil }
+            .task(id: lookup) {
+                guard let jid, lookup.isConnected else { return }
+                // A lookup for the person shown before can still answer
+                // after this one; cancelling does not stop it.
                 let loaded = await session.sharedStatus(of: jid)
-                guard !Task.isCancelled else { return }
-                if let loaded { status.wrappedValue = loaded }
+                guard !Task.isCancelled, let loaded else { return }
+                status.wrappedValue = status.wrappedValue?.lookedUpAgain(loaded) ?? loaded
             }
-        }
+            .task(id: callCheck) {
+                guard callCheck.isChecking, let jid else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: callEndCheckInterval)
+                    guard !Task.isCancelled else { return }
+                    let loaded = await session.sharedStatus(of: jid)
+                    guard !Task.isCancelled else { return }
+                    guard let loaded else { continue }
+                    status.wrappedValue = status.wrappedValue?.callCheckedAgain(loaded) ?? loaded
+                }
+            }
     }
 }
 
-/// Whose call is being watched, and whether one is shown at all.
-private struct PeerCallWatch: Hashable {
+/// When to look someone's shared status up: for each person shown, and
+/// again whenever a stream comes up.
+struct SharedStatusLookup: Hashable {
     let jid: BareJID?
-    let showsACall: Bool
+    let isConnected: Bool
+
+    @MainActor
+    init(jid: BareJID?, session: SessionCoordinator) {
+        self.jid = jid
+        isConnected = session.connection == .online
+    }
+}
+
+/// Whether to keep looking for the end of someone's call: only while a
+/// call shown comes from a lookup alone. Someone whose notifications are
+/// heard is told when it ends, and the account's own is checked by
+/// `checkingOwnCallEnds`.
+struct UnheardCallCheck: Hashable {
+    let jid: BareJID?
+    let isChecking: Bool
+
+    /// `shown` is what was looked up; `isOnline` the availability the
+    /// screen found for them, from any source.
+    @MainActor
+    init(jid: BareJID?, shown: SharedStatus?, isOnline: Bool, session: SessionCoordinator) {
+        self.jid = jid
+        let showsACall = shown?.shown(isOnline: isOnline).activity?.showsACall == true
+        isChecking = jid.map { $0 != session.account.jid && !session.hearsActivity(of: $0) } == true
+            && showsACall && session.connection == .online
+    }
 }

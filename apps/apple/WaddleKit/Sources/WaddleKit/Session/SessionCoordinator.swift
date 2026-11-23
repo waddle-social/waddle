@@ -593,6 +593,8 @@ public final class SessionCoordinator {
             avatars.avatarChanged(jid, id: id)
         case let .presenceModeChanged(mode):
             presenceModePicked(elsewhere: mode)
+        case let .activityChanged(jid, activity):
+            presence.activityChanged(activity, of: jid)
         case let .inboxPush(entry):
             applyInbox(entry)
         case let .roomConfigurationChanged(room):

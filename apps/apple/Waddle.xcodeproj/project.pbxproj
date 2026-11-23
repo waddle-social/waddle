@@ -306,6 +306,7 @@
 		6AD73F16367A94060654F740 /* FormParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB5E145B042E12941EC9EE6 /* FormParts.swift */; };
 		6BCEFD523B63E8EE4535F701 /* ComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17423AC98C25904805D06B23 /* ComposerModel.swift */; };
 		6C05CDEEC2CC3CD7341BEC21 /* EventEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9EC4DD4A44AFCE3C7C39AD3 /* EventEditorSheet.swift */; };
+		6C6BE163BA5F7A1CE679F09B /* InCallMarkSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B2CA8E975141324E9ABB11 /* InCallMarkSnapshotTests.swift */; };
 		6D6B5FAA197C4D4F5721D640 /* FFIXmppPort+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C23BB845ABC3CBB05A9314 /* FFIXmppPort+Push.swift */; };
 		6D7FA77C3C6D0FCD91C0A013 /* FFIInbound+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */; };
 		6E28C165381D38973ED24039 /* FFIOutbound.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC140B908325AEC014CE3D7E /* FFIOutbound.swift */; };
@@ -692,6 +693,7 @@
 		F1DF87FDD51F3048D6878FE8 /* ComposerTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB21941A20189E780D173236 /* ComposerTextSelection.swift */; };
 		F25354ABC94D24BE37A6FD4F /* AdminSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51ED97ED724C87F39F1DAD8E /* AdminSnapshotTests.swift */; };
 		F285A3B0C90E08845DB991B6 /* LiveKitCallMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75B3F089683BB9DAC0A793CE /* LiveKitCallMediaController.swift */; };
+		F2B2620C93224891875FCB17 /* InCallMarkSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B2CA8E975141324E9ABB11 /* InCallMarkSnapshotTests.swift */; };
 		F32EE16E21BD119003F8CF60 /* ProfileStatusSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CC7DD4CF9D585CB0C74C09 /* ProfileStatusSnapshotTests.swift */; };
 		F360FF646064644F875C77AE /* ConversationNameFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE81F851C3F1438978561562 /* ConversationNameFilter.swift */; };
 		F4A7FB6D5EB66394DEBB4018 /* ComposerActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */; };
@@ -1039,6 +1041,7 @@
 		D66FCE4A2E446F8397C801AC /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		D68BF996F6153724EA370719 /* GroupCallDockSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupCallDockSnapshotTests.swift; sourceTree = "<group>"; };
 		D7A3A86F1E3EAD9B4C5A4D0A /* FFIXmppPort+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Calls.swift"; sourceTree = "<group>"; };
+		D7B2CA8E975141324E9ABB11 /* InCallMarkSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InCallMarkSnapshotTests.swift; sourceTree = "<group>"; };
 		D98A14703F39AB98C5E790EF /* ComposerPlusMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerPlusMenu.swift; sourceTree = "<group>"; };
 		DA7DB82B1A228C6DF0FC1AD4 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		DCE28B7F154186590B772FC3 /* MessageLinkDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageLinkDetector.swift; sourceTree = "<group>"; };
@@ -1422,6 +1425,7 @@
 				EB8B71374D7CA95724584335 /* EventsSnapshotTests.swift */,
 				D68BF996F6153724EA370719 /* GroupCallDockSnapshotTests.swift */,
 				9415CA987DFA81F6A4438BE0 /* InboundBridgeTests.swift */,
+				D7B2CA8E975141324E9ABB11 /* InCallMarkSnapshotTests.swift */,
 				0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */,
 				CA83F0AA7B26489823FBA69F /* MembersSnapshotTests.swift */,
 				8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */,
@@ -2567,6 +2571,7 @@
 				C05ED8BD121D90686CA6D6A8 /* Fixtures.swift in Sources */,
 				B7A7653778DCBAFE6E77A901 /* GroupCallDockSnapshotTests.swift in Sources */,
 				61E55FA367FF60432DFA19A7 /* HuddleSnapshot.swift in Sources */,
+				6C6BE163BA5F7A1CE679F09B /* InCallMarkSnapshotTests.swift in Sources */,
 				773DE6E45A2795DF3D756BB1 /* InboundBridgeTests.swift in Sources */,
 				A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */,
 				8B07563CA0B531D2A8A1D72D /* MembersSnapshotTests.swift in Sources */,
@@ -2925,6 +2930,7 @@
 				66E38053AACC4ABA2CC45EB4 /* Fixtures.swift in Sources */,
 				A527F88168503310C28FC065 /* GroupCallDockSnapshotTests.swift in Sources */,
 				0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */,
+				F2B2620C93224891875FCB17 /* InCallMarkSnapshotTests.swift in Sources */,
 				32A192D90AC0AF6641C80F0C /* InboundBridgeTests.swift in Sources */,
 				D3B865E7071ED2E7DAB727A5 /* LiveKitCallMediaTests.swift in Sources */,
 				255461F1B0BDD7A7E2CADA52 /* MembersSnapshotTests.swift in Sources */,

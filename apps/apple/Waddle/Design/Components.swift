@@ -145,6 +145,27 @@ struct PresenceDot: View {
     }
 }
 
+/// The web avatar's "in a call" badge: a phone on the live colour, ringed
+/// in the ground like `PresenceDot`. It sits beside the presence dot,
+/// never in place of it: being in a call is not an availability (ADR-010).
+struct CallBadge: View {
+    var size: CGFloat = 14
+    @Environment(\.huddleGround) private var ground
+
+    var body: some View {
+        Image(systemName: "phone.fill")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size * 0.5, height: size * 0.5)
+            .foregroundStyle(Theme.Colors.liveFg)
+            .frame(width: size, height: size)
+            .background(Circle().fill(Theme.Colors.live))
+            .overlay(Circle().strokeBorder(ground, lineWidth: size * 0.14))
+            .accessibilityElement()
+            .accessibilityLabel(Text("In a call"))
+    }
+}
+
 /// Unread count pill. Gold means "this is for you", so only the mention
 /// variant is gold; plain unread is quiet.
 struct UnreadBadge: View {

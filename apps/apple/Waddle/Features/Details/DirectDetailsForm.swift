@@ -20,7 +20,10 @@ struct DirectDetailsForm: View {
                     presence: presence
                 )
             }
-            PeerSharingSection(status: shared, isOnline: presence?.availability.isOnline ?? false)
+            PeerSharingSection(
+                status: session.liveSharedStatus(of: peer, lookedUp: shared),
+                isOnline: presence?.availability.isOnline ?? false
+            )
             if let details {
                 PeerDetailsSection(details: details)
             }
@@ -151,7 +154,10 @@ struct PeerProfileSheet: View {
                         .accessibilityHint(Text("Opens your direct conversation"))
                     }
                 }
-                PeerSharingSection(status: shared, isOnline: presence.availability.isOnline)
+                PeerSharingSection(
+                    status: profile.jid.flatMap { session.liveSharedStatus(of: $0, lookedUp: shared) },
+                    isOnline: presence.availability.isOnline
+                )
                 if let details {
                     PeerDetailsSection(details: details)
                 }
@@ -161,6 +167,7 @@ struct PeerProfileSheet: View {
             .peerSharedStatus(
                 of: profile.jid, isOnline: presence.availability.isOnline, session: session, into: $shared
             )
+            .checkingOwnCallEnds(while: isOwnCallShown, session: session)
             .navigationTitle(profile.name)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -183,6 +190,12 @@ struct PeerProfileSheet: View {
             return MemberRoleLine(affiliation: occupant.affiliation, hats: occupant.hats)
         }
         return profile.affiliation.map { MemberRoleLine(affiliation: $0, hats: []) }
+    }
+
+    /// Our own profile showing a call on another device. No notification
+    /// about our own activity reaches here, so its end is looked for.
+    private var isOwnCallShown: Bool {
+        profile.jid == session.account.jid && session.status.activity?.showsACall == true
     }
 
     /// A real JID that is not our own account; anonymous room occupants
