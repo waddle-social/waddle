@@ -41,8 +41,10 @@ use xmpp_parsers::message::Message;
 use super::super::WebSocketState;
 
 mod caps;
+mod last_item;
 
 use caps::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
+pub(crate) use last_item::replay_last_published_items;
 
 mod implementation;
 pub use implementation::fan_out_pep_retract;

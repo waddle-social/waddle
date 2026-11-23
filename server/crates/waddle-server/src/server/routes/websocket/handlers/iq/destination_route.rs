@@ -90,7 +90,7 @@ pub(super) async fn route_iq_response(
         .await
         .into(),
         Destination::Missing | Destination::Server => {
-            handle_caps_disco_info_result(&iq, sender, state);
+            handle_caps_disco_info_result(&iq, sender, state).await;
             ResponseBatch::default()
         }
         Destination::Remote(remote) => {

@@ -120,6 +120,14 @@ impl CapsResolver {
         self.pending.retain(|_, v| v.full_jid != *full_jid);
     }
 
+    /// Forget the (hash, ver) recorded for `full_jid` without touching
+    /// pending resolutions. Called when a resource becomes available
+    /// again, so the caps it advertises in the new availability period
+    /// are treated as new interest (XEP-0163 last-item replay).
+    pub fn forget_resource_key(&self, full_jid: &FullJid) {
+        self.resource_to_ver.remove(full_jid);
+    }
+
     /// Return the (hash, ver) advertised by `full_jid`, if any.
     pub fn key_for_resource(&self, full_jid: &FullJid) -> Option<CapsCacheKey> {
         self.resource_to_ver

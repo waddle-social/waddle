@@ -80,7 +80,27 @@ pub(super) async fn handle_regular_presence_update(
                 .protocol
                 .connection_registry
                 .clear_last_activity(&sender_jid.to_bare());
+            if !was_available {
+                // A new availability period: the caps advertised now are
+                // fresh interest, not a continuation of an earlier session.
+                state
+                    .deps
+                    .protocol
+                    .caps_resolver
+                    .forget_resource_key(sender_jid);
+            }
             resolve_caps_for_presence(state, sender_jid, &presence).await;
+            if !was_available {
+                // XEP-0163 "Sending the Last Published Item": initial
+                // presence with caps already known. When the caps are
+                // still being resolved, the disco#info result replays.
+                crate::server::routes::websocket::handlers::pubsub_fanout::replay_last_published_items(
+                    state,
+                    sender_jid,
+                    &std::collections::HashSet::new(),
+                )
+                .await;
+            }
             // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
             // priority presence of a fresh session, drain pending_delivery
             // for the recipient. `claim_offline_flush` (a once-per-session
