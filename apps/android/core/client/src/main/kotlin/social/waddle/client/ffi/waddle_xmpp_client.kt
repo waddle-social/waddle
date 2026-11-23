@@ -12143,6 +12143,13 @@ data class WaddlePresence (
     var `mucStatusCodes`: List<kotlin.UShort>
     ,
     /**
+     * XEP-0045 §10.9: the `muc#user` payload carries `<destroy/>`, so
+     * the room's owner deleted it and this unavailable presence removes
+     * the recipient. Joining the room again would create it anew.
+     */
+    var `mucDestroyed`: kotlin.Boolean = false
+    ,
+    /**
      * XEP-0153 vCard avatar hash from `<x xmlns='vcard-temp:x:update'>`.
      */
     var `vcardAvatar`: kotlin.String?
@@ -12216,6 +12223,7 @@ public object FfiConverterTypeWaddlePresence: FfiConverterRustBuffer<WaddlePrese
             FfiConverterOptionalTypeWaddleMucRole.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceUShort.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -12238,6 +12246,7 @@ public object FfiConverterTypeWaddlePresence: FfiConverterRustBuffer<WaddlePrese
             FfiConverterOptionalTypeWaddleMucRole.allocationSize(value.`mucRole`) +
             FfiConverterOptionalString.allocationSize(value.`mucJid`) +
             FfiConverterSequenceUShort.allocationSize(value.`mucStatusCodes`) +
+            FfiConverterBoolean.allocationSize(value.`mucDestroyed`) +
             FfiConverterOptionalString.allocationSize(value.`vcardAvatar`) +
             FfiConverterOptionalString.allocationSize(value.`idleSince`) +
             FfiConverterOptionalString.allocationSize(value.`errorCondition`) +
@@ -12259,6 +12268,7 @@ public object FfiConverterTypeWaddlePresence: FfiConverterRustBuffer<WaddlePrese
             FfiConverterOptionalTypeWaddleMucRole.write(value.`mucRole`, buf)
             FfiConverterOptionalString.write(value.`mucJid`, buf)
             FfiConverterSequenceUShort.write(value.`mucStatusCodes`, buf)
+            FfiConverterBoolean.write(value.`mucDestroyed`, buf)
             FfiConverterOptionalString.write(value.`vcardAvatar`, buf)
             FfiConverterOptionalString.write(value.`idleSince`, buf)
             FfiConverterOptionalString.write(value.`errorCondition`, buf)

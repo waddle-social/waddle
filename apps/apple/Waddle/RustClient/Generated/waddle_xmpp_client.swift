@@ -11394,6 +11394,12 @@ public struct WaddlePresence: Equatable, Hashable {
      */
     public var mucStatusCodes: [UInt16]
     /**
+     * XEP-0045 §10.9: the `muc#user` payload carries `<destroy/>`, so
+     * the room's owner deleted it and this unavailable presence removes
+     * the recipient. Joining the room again would create it anew.
+     */
+    public var mucDestroyed: Bool
+    /**
      * XEP-0153 vCard avatar hash from `<x xmlns='vcard-temp:x:update'>`.
      */
     public var vcardAvatar: String?
@@ -11447,6 +11453,11 @@ public struct WaddlePresence: Equatable, Hashable {
          * payload. `110` identifies the recipient's own presence.
          */mucStatusCodes: [UInt16],
         /**
+         * XEP-0045 §10.9: the `muc#user` payload carries `<destroy/>`, so
+         * the room's owner deleted it and this unavailable presence removes
+         * the recipient. Joining the room again would create it anew.
+         */mucDestroyed: Bool = false,
+        /**
          * XEP-0153 vCard avatar hash from `<x xmlns='vcard-temp:x:update'>`.
          */vcardAvatar: String?,
         /**
@@ -11489,6 +11500,7 @@ public struct WaddlePresence: Equatable, Hashable {
         self.mucRole = mucRole
         self.mucJid = mucJid
         self.mucStatusCodes = mucStatusCodes
+        self.mucDestroyed = mucDestroyed
         self.vcardAvatar = vcardAvatar
         self.idleSince = idleSince
         self.errorCondition = errorCondition
@@ -11525,6 +11537,7 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
                 mucRole: FfiConverterOptionTypeWaddleMucRole.read(from: &buf),
                 mucJid: FfiConverterOptionString.read(from: &buf),
                 mucStatusCodes: FfiConverterSequenceUInt16.read(from: &buf),
+                mucDestroyed: FfiConverterBool.read(from: &buf),
                 vcardAvatar: FfiConverterOptionString.read(from: &buf),
                 idleSince: FfiConverterOptionString.read(from: &buf),
                 errorCondition: FfiConverterOptionString.read(from: &buf),
@@ -11547,6 +11560,7 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleMucRole.write(value.mucRole, into: &buf)
         FfiConverterOptionString.write(value.mucJid, into: &buf)
         FfiConverterSequenceUInt16.write(value.mucStatusCodes, into: &buf)
+        FfiConverterBool.write(value.mucDestroyed, into: &buf)
         FfiConverterOptionString.write(value.vcardAvatar, into: &buf)
         FfiConverterOptionString.write(value.idleSince, into: &buf)
         FfiConverterOptionString.write(value.errorCondition, into: &buf)
