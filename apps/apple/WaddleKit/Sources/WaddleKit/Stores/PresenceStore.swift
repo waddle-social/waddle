@@ -83,6 +83,8 @@ public final class PresenceStore {
         case joined(room: BareJID)
         /// We left or were removed.
         case left(room: BareJID)
+        /// The room's owner deleted it, which removed us (XEP-0045 §10.9).
+        case destroyed(room: BareJID)
         /// The room rejected the join.
         case joinFailed(room: BareJID, condition: String?)
         case ignored
@@ -150,6 +152,12 @@ public final class PresenceStore {
         case .unavailable:
             if occupants[room]?[nick] != nil {
                 occupants[room]?[nick] = nil
+            }
+            // A destruction is sent only to the occupant it removes, so it
+            // is our own departure even without status 110.
+            if presence.occupant?.roomDestroyed == true {
+                markLeft(room)
+                return .destroyed(room: room)
             }
             if isSelf {
                 markLeft(room)

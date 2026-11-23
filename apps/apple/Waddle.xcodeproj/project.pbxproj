@@ -139,6 +139,7 @@
 		31830ECEC79E1E5EA8E38BE4 /* StickerPackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE1700792B12197DDDE03183 /* StickerPackSheet.swift */; };
 		319AA3C028501007F86B83FF /* RowCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40DC87856F38A9D735B54E04 /* RowCopy.swift */; };
 		31FB4CFC1731BC45F731F40B /* FFIXmppPort+Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDE7DDBFAF9910770EE38879 /* FFIXmppPort+Profile.swift */; };
+		32A192D90AC0AF6641C80F0C /* InboundBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9415CA987DFA81F6A4438BE0 /* InboundBridgeTests.swift */; };
 		32B12224AFAD90BD4E9D47E8 /* AttachmentLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */; };
 		32C7E1A23AAC797A745AC8BE /* EventsSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB8B71374D7CA95724584335 /* EventsSnapshotTests.swift */; };
 		32E1AE53B5B835EF28107EB6 /* FFIInbound.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9295908F61E540E4185F41C3 /* FFIInbound.swift */; };
@@ -337,6 +338,7 @@
 		762970595BC850F288E57CB8 /* ProfileSharingSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A129DFC8B4BB5DA59EDF44AA /* ProfileSharingSnapshotTests.swift */; };
 		76E5B1FE49F45E1E387B5851 /* CallMediaControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0544D7793B1FDC868FA24526 /* CallMediaControls.swift */; };
 		7724D0E8A3AF5ECDFEE4EFCA /* FakePort+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA01E0DDEBD8CF352E5ABC19 /* FakePort+Events.swift */; };
+		773DE6E45A2795DF3D756BB1 /* InboundBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9415CA987DFA81F6A4438BE0 /* InboundBridgeTests.swift */; };
 		77F4EC8C93A38E79370BB95D /* ComposerNoticeLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB6F36130E53C59998BEE582 /* ComposerNoticeLine.swift */; };
 		786084370B7C716874FD6620 /* CallMediaControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0544D7793B1FDC868FA24526 /* CallMediaControls.swift */; };
 		7869CA33877C16E2041AA076 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0F38B78980F7FA0414198A /* Theme.swift */; };
@@ -927,6 +929,7 @@
 		929AAE533B849B08D33B3654 /* ProfileLinkField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileLinkField.swift; sourceTree = "<group>"; };
 		931B91F62774BEC1541CC962 /* CallDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDock.swift; sourceTree = "<group>"; };
 		93EB94A6DDD9F6A80D3D74C7 /* NotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationController.swift; sourceTree = "<group>"; };
+		9415CA987DFA81F6A4438BE0 /* InboundBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboundBridgeTests.swift; sourceTree = "<group>"; };
 		9472731557D616B2F74FF441 /* MessageReplySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageReplySummary.swift; sourceTree = "<group>"; };
 		96F23CCB3265FE12326F400F /* SignInServerLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInServerLabel.swift; sourceTree = "<group>"; };
 		97D13CF6890362A3E5A3EE80 /* FFIXmppPort+ReadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+ReadState.swift"; sourceTree = "<group>"; };
@@ -1410,6 +1413,7 @@
 				2866C6388D15ECCB5298DB01 /* EventsBridgeTests.swift */,
 				EB8B71374D7CA95724584335 /* EventsSnapshotTests.swift */,
 				D68BF996F6153724EA370719 /* GroupCallDockSnapshotTests.swift */,
+				9415CA987DFA81F6A4438BE0 /* InboundBridgeTests.swift */,
 				0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */,
 				CA83F0AA7B26489823FBA69F /* MembersSnapshotTests.swift */,
 				8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */,
@@ -2554,6 +2558,7 @@
 				C05ED8BD121D90686CA6D6A8 /* Fixtures.swift in Sources */,
 				B7A7653778DCBAFE6E77A901 /* GroupCallDockSnapshotTests.swift in Sources */,
 				61E55FA367FF60432DFA19A7 /* HuddleSnapshot.swift in Sources */,
+				773DE6E45A2795DF3D756BB1 /* InboundBridgeTests.swift in Sources */,
 				A6B72C13667338B5059C495C /* LiveKitCallMediaTests.swift in Sources */,
 				8B07563CA0B531D2A8A1D72D /* MembersSnapshotTests.swift in Sources */,
 				633AC5E6CFF14426B0E62B58 /* MessageActionModelTests.swift in Sources */,
@@ -2909,6 +2914,7 @@
 				66E38053AACC4ABA2CC45EB4 /* Fixtures.swift in Sources */,
 				A527F88168503310C28FC065 /* GroupCallDockSnapshotTests.swift in Sources */,
 				0B8714E64404EBEAB812D813 /* HuddleSnapshot.swift in Sources */,
+				32A192D90AC0AF6641C80F0C /* InboundBridgeTests.swift in Sources */,
 				D3B865E7071ED2E7DAB727A5 /* LiveKitCallMediaTests.swift in Sources */,
 				255461F1B0BDD7A7E2CADA52 /* MembersSnapshotTests.swift in Sources */,
 				E05876F9DDB418B292F5A62C /* MessageActionModelTests.swift in Sources */,

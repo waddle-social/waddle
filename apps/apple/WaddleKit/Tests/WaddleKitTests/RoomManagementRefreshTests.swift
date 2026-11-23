@@ -165,6 +165,56 @@ struct RoomManagementRefreshTests {
         await coordinator.stop()
     }
 
+    /// XEP-0045 §10.9: the presence the room sends each occupant it removes
+    /// when its owner deletes it.
+    private let destruction = WirePresence(
+        from: room.with(resource: "alice")!, kind: .unavailable,
+        occupant: .init(affiliation: RoomAffiliation.none, role: RoomRole.none, realJID: nil, statusCodes: [110], roomDestroyed: true))
+
+    /// A room deleted on another device is gone, and joining it would
+    /// create it again (#2538): it is forgotten as if deleted here, even
+    /// while a stale directory still lists it.
+    @Test func aRoomDeletedElsewhereIsForgottenAndNeverJoinedAgain() async throws {
+        let (coordinator, port) = await connected()
+        await coordinator.open(roomConversation)
+        coordinator.unread.set(2, for: roomConversation)
+        port.joined = []
+        port.emit(.presence(destruction))
+        await eventually { coordinator.directory.channel(for: room) == nil }
+        #expect(!coordinator.directory.isRoom(room))
+        #expect(!coordinator.presence.joinedRooms.contains(room))
+        #expect(coordinator.unread.count(for: roomConversation) == 0)
+        await coordinator.ensureJoined(room)
+        await coordinator.open(roomConversation)
+        await reconnect(coordinator, port)
+        await coordinator.ensureJoined(room)
+        #expect(port.joined.isEmpty)
+        #expect(coordinator.directory.channel(for: room) == nil)
+        #expect(!coordinator.canJoinGroupCall(in: room))
+        await coordinator.stop()
+    }
+
+    /// A delete that got no answer here is settled by the room's own word.
+    @Test func theRoomsDestructionSettlesAnUnansweredDelete() async throws {
+        let (coordinator, port) = await connected()
+        port.roomDestructionResult = .failure(.timeout)
+        await #expect(throws: PortError.timeout) { try await coordinator.deleteRoom(room) }
+        #expect(coordinator.directory.isRoom(room))
+        port.emit(.presence(destruction))
+        await eventually { !coordinator.directory.isRoom(room) }
+        #expect(coordinator.directory.channel(for: room) == nil)
+        await coordinator.stop()
+    }
+
+    @Test func aRoomDeletedElsewhereGetsNoHuddlePresenceAfterwards() async throws {
+        let (coordinator, port) = await connected()
+        port.emit(.presence(destruction))
+        await eventually { !coordinator.directory.isRoom(room) }
+        await coordinator.calls.leaveGroupPresence(in: room, nick: "alice", identity: nil, epoch: coordinator.calls.generation)
+        #expect(port.callSends.isEmpty)
+        await coordinator.stop()
+    }
+
     @Test func aRetryThatSucceedsAfterAnUnansweredDeleteForgetsTheRoom() async throws {
         let (coordinator, port) = await connected()
         port.roomDestructionResult = .failure(.timeout)

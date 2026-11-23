@@ -181,7 +181,7 @@ extension SessionCoordinator {
                     // refuses to delete a room that no longer exists.
                     unconfirmedDeletions.insert(room)
                     onDemandRooms.remove(room)
-                } else {
+                } else if !destroyedRooms.contains(room) {
                     calls.sealedGroupRooms.remove(room)
                 }
                 throw error
@@ -203,6 +203,21 @@ extension SessionCoordinator {
             presence.markLeft(room)
             unread.clearRoom(room)
         }
+    }
+
+    /// Forgets a room its owner deleted, here or on another device, as a
+    /// delete made here would: the server creates a room when someone joins
+    /// one that does not exist, so it is never joined again this session.
+    /// A huddle there ends, and no huddle presence goes to the room.
+    func forgetDestroyedRoom(_ room: BareJID) {
+        destroyedRooms.insert(room)
+        unconfirmedDeletions.remove(room)
+        onDemandRooms.remove(room)
+        calls.sealedGroupRooms.insert(room)
+        directory.remove(room)
+        directoryMutations.append(.remove(room))
+        unread.clearRoom(room)
+        if calls.groupSlotHolds(room) { Task { await calls.hangUp() } }
     }
 
     /// False once the session that started an action has stopped.

@@ -31,12 +31,14 @@ extension FFIInbound {
             || presence.mucRole != nil
             || presence.mucJid != nil
             || !presence.mucStatusCodes.isEmpty
+            || presence.mucDestroyed
         guard hasPayload else { return nil }
         return WirePresence.Occupant(
             affiliation: presence.mucAffiliation.map(roomAffiliation),
             role: presence.mucRole.map(roomRole),
             realJID: jid(presence.mucJid),
-            statusCodes: Set(presence.mucStatusCodes.map(Int.init))
+            statusCodes: Set(presence.mucStatusCodes.map(Int.init)),
+            roomDestroyed: presence.mucDestroyed
         )
     }
 

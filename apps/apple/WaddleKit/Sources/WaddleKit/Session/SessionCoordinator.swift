@@ -514,9 +514,10 @@ public final class SessionCoordinator {
                 // device, and answered only now.
                 Task { await self.departIfLeft(room) }
             }
+            if case let .destroyed(room) = update { forgetDestroyedRoom(room) }
             if handlesCalls, !isStopped {
                 switch update {
-                case .left(let room), .joinFailed(let room, _):
+                case .left(let room), .destroyed(let room), .joinFailed(let room, _):
                     // Out of the room, so out of earshot of its call.
                     calls.groupPresence.clearRoom(room)
                 case .contact, .occupant, .joined, .ignored:
