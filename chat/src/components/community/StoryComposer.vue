@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Clock, Image as ImageIcon, Paperclip, RefreshCw, Trash2, Upload, Video } from "lucide-vue-next";
 import { css, cx } from "styled-system/css";
 import { btn, floe, input, seg } from "styled-system/recipes";
+import { pickStoryVideoMimeType } from "@/lib/story-video-mime";
 
 type Mode = "attach" | "photo" | "record";
 type MediaKind = "image" | "video";
@@ -27,13 +28,6 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-// MediaRecorder MIME preference order: VP9 > VP8. iOS Safari rejects
-// `video/mp4` as a `mimeType` argument and the only working path is to
-// omit it entirely, letting Safari pick (it produces fragmented MP4).
-const VIDEO_MIME_CANDIDATES = [
-  "video/webm;codecs=vp9,opus",
-  "video/webm;codecs=vp8,opus",
-] as const;
 const VIDEO_BITS_PER_SECOND = 2_000_000;
 const RECORDING_MAX_MS = 20_000;
 const RECORDING_TICK_MS = 100;
@@ -321,14 +315,6 @@ async function takePhoto() {
   setPreview(blob, "image");
 }
 
-function pickSupportedMimeType(): string | undefined {
-  if (typeof MediaRecorder === "undefined") return undefined;
-  for (const mime of VIDEO_MIME_CANDIDATES) {
-    if (MediaRecorder.isTypeSupported(mime)) return mime;
-  }
-  return undefined;
-}
-
 function startRecording() {
   if (!stream.value) {
     setError("Camera not ready.");
@@ -338,7 +324,7 @@ function startRecording() {
     setError("Recording isn't supported on this browser.");
     return;
   }
-  const mimeType = pickSupportedMimeType();
+  const mimeType = pickStoryVideoMimeType((mime) => MediaRecorder.isTypeSupported(mime));
   let mr: MediaRecorder;
   try {
     mr = mimeType
@@ -353,7 +339,7 @@ function startRecording() {
     if (event.data && event.data.size > 0) recordChunks.push(event.data);
   };
   mr.onstop = () => {
-    const blob = new Blob(recordChunks, { type: mr.mimeType || "video/webm" });
+    const blob = new Blob(recordChunks, { type: mr.mimeType || mimeType || "video/webm" });
     recordChunks = [];
     recording.value = false;
     recordStartedAt.value = null;
