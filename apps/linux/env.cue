@@ -69,7 +69,7 @@ schema.#Project & {
 				pullRequest: true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write"}
-			"tasks": [tasks.checkCiDrift, tasks.fmt, tasks.clippy, tasks.test, tasks.validateData]
+			"tasks": [tasks.checkCiDrift, tasks.fmt, tasks.clippy, tasks.test, tasks.validateData, tasks.debugCache]
 		}
 	}
 
@@ -107,6 +107,24 @@ schema.#Project & {
 			cache: mode: "read-write"
 			hermetic: sandbox: "auto"
 			inputs: ["data/**"]
+		}
+
+		debugCache: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-c", """
+				set -x
+				cuenv cache stats || true
+				find "${CUENV_CACHE_DIR:-/tmp}" -maxdepth 4 -ls || true
+				for f in $(find "${CUENV_CACHE_DIR:-/tmp}" -path '*/ac/*' -type f 2>/dev/null); do
+				  h="$(basename "$f")"
+				  echo "=== INSPECT $h ==="
+				  cuenv cache inspect "$h" || true
+				done
+				echo "=== FRESH DEBUG RUN ==="
+				CUENV_CACHE_DIR="${RUNNER_TEMP:-/tmp}/cuenv-debug-fresh" cuenv -L debug task validateData || true
+				"""]
+			inputs: ["env.cue"]
 		}
 	}
 }
