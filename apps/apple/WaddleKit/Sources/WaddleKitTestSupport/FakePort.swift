@@ -100,6 +100,8 @@ final class FakePort: XmppPort {
     var groupDMInvitationResult: Result<Void, PortError> = .success(())
     var groupDMLeaves: [BareJID] = []
     var groupDMLeaveResult: Result<Void, PortError> = .success(())
+    var roomPinPermissionRequests: [BareJID] = []
+    var roomPinPermissionResult: Result<PinPermission?, PortError> = .success(nil)
     var roomSettingsRequests: [BareJID] = []
     var roomSettingsResult: Result<RoomSettings, PortError> = .success(RoomSettings(name: nil, summary: nil, pinPermission: nil))
     var holdsTopology = false
@@ -280,6 +282,11 @@ final class FakePort: XmppPort {
             throw PortError.rejected
         }
         inboxReads.append(partner)
+    }
+
+    func fetchRoomPinPermission(of room: BareJID) async throws -> PinPermission? {
+        roomPinPermissionRequests.append(room)
+        return try roomPinPermissionResult.get()
     }
 
     func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings {

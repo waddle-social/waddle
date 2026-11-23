@@ -314,6 +314,7 @@ enum DirectoryMutation {
     case remove(BareJID)
     /// The account left or rejoined the room here.
     case setLeft(BareJID, Bool)
-    /// The owner saved who may pin here.
-    case setPinPermission(BareJID, PinPermission)
+    /// The owner saved who may pin here, or the room was read again after
+    /// it said its configuration changed (nil: the room could not say).
+    case setPinPermission(BareJID, PinPermission?)
 }

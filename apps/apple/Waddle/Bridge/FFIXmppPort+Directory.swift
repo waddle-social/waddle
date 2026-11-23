@@ -32,6 +32,11 @@ extension FFIXmppPort {
         await client.leaveRoom(roomJid: room.description, nick: nick)
     }
 
+    func fetchRoomPinPermission(of room: BareJID) async throws -> PinPermission? {
+        try await mappingPortErrors { try await client.roomPinPermission(roomJid: room.description) }
+            .map(FFIInbound.pinPermission)
+    }
+
     func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings {
         let config = try await mappingPortErrors { try await client.fetchRoomConfig(roomJid: room.description) }
         return FFIInbound.roomSettings(config)

@@ -979,6 +979,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
     /**
+     * Who may pin in `room_jid`, read again from its disco#info (the room
+     * metadata form every occupant can read). For a room's XEP-0045
+     * §10.2.1 configuration-change notice. `Ok(None)`: the room did not
+     * say. `Err`: the lookup failed.
+     */
+    func roomPinPermission(roomJid: String) async throws  -> WaddlePinPermission?
+
+    /**
      * Full-text search of the account's personal archive, filtered to a
      * 1:1 peer via the standard `with` field. Returns the newest matching
      * page first; an empty page plus an `Error` event on failure,
@@ -2907,6 +2915,29 @@ open func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, 
             liftFunc: FfiConverterOptionTypeWaddleUploadSlot.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * Who may pin in `room_jid`, read again from its disco#info (the room
+     * metadata form every occupant can read). For a room's XEP-0045
+     * §10.2.1 configuration-change notice. `Ok(None)`: the room did not
+     * say. `Err`: the lookup failed.
+     */
+open func roomPinPermission(roomJid: String)async throws  -> WaddlePinPermission?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_room_pin_permission(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddlePinPermission.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -10192,6 +10223,12 @@ public struct WaddleMessage: Equatable, Hashable {
      * or `normal` and `from` is a room JID — route as room traffic.
      */
     public var mucUser: Bool
+    /**
+     * XEP-0045 `<status code='…'/>` markers of the message's `muc#user`
+     * payload: 104 is §10.2.1's notice that the room's configuration
+     * changed, so occupants read it again.
+     */
+    public var mucStatusCodes: [UInt16]
     public var thread: String?
     public var parentThreadId: String?
     /**
@@ -10338,7 +10375,12 @@ public struct WaddleMessage: Equatable, Hashable {
          * Carries XEP-0045 `muc#user`: a room private message or a room
          * invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
          * or `normal` and `from` is a room JID — route as room traffic.
-         */mucUser: Bool, thread: String?, parentThreadId: String?,
+         */mucUser: Bool,
+        /**
+         * XEP-0045 `<status code='…'/>` markers of the message's `muc#user`
+         * payload: 104 is §10.2.1's notice that the room's configuration
+         * changed, so occupants read it again.
+         */mucStatusCodes: [UInt16] = [], thread: String?, parentThreadId: String?,
         /**
          * XEP-0394 message markup spans over the body.
          */markupSpans: [WaddleMarkupSpan],
@@ -10440,6 +10482,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.displayedMarkerId = displayedMarkerId
         self.isMuc = isMuc
         self.mucUser = mucUser
+        self.mucStatusCodes = mucStatusCodes
         self.thread = thread
         self.parentThreadId = parentThreadId
         self.markupSpans = markupSpans
@@ -10505,6 +10548,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 displayedMarkerId: FfiConverterOptionString.read(from: &buf),
                 isMuc: FfiConverterBool.read(from: &buf),
                 mucUser: FfiConverterBool.read(from: &buf),
+                mucStatusCodes: FfiConverterSequenceUInt16.read(from: &buf),
                 thread: FfiConverterOptionString.read(from: &buf),
                 parentThreadId: FfiConverterOptionString.read(from: &buf),
                 markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
@@ -10556,6 +10600,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.displayedMarkerId, into: &buf)
         FfiConverterBool.write(value.isMuc, into: &buf)
         FfiConverterBool.write(value.mucUser, into: &buf)
+        FfiConverterSequenceUInt16.write(value.mucStatusCodes, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
         FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)
@@ -22418,6 +22463,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_room_pin_permission() != 20947) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history() != 34217) {

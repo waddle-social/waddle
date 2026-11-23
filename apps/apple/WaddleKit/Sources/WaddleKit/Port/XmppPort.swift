@@ -55,6 +55,9 @@ public enum XmppEvent: Sendable {
     case presenceModeChanged(PresenceMode)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)
+    /// The room's configuration changed in a way that is not
+    /// privacy-related (XEP-0045 §10.2.1, status 104).
+    case roomConfigurationChanged(BareJID)
     /// SASL failure: the presented credential is dead.
     case authenticationFailed
 }
@@ -118,6 +121,9 @@ public protocol DirectoryPort: AnyObject, Sendable {
     func setRoomMembership(_ membership: RoomMembership, of room: BareJID, name: String?) async throws
     /// Fetches the room settings offered by the server.
     func fetchRoomSettings(of room: BareJID) async throws -> RoomSettings
+    /// Who may pin in the room, read from its disco#info, which every
+    /// occupant can read. Nil when the room does not say.
+    func fetchRoomPinPermission(of room: BareJID) async throws -> PinPermission?
     /// Updates only the fields included in the patch.
     func updateRoomSettings(_ patch: RoomSettingsPatch, of room: BareJID) async throws
     /// Destroys the room for all occupants.

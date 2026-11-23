@@ -48,6 +48,15 @@ extension WaddleArchivedMessage: FFIMessageFields {}
 extension FFIInbound {
     /// A live stanza, with the live-only payloads (chat state, markers,
     /// pin broadcasts, XEP-0490 sibling cursors).
+    /// The room whose groupchat message says its configuration changed
+    /// (XEP-0045 §10.2.1, status 104). The notice comes from the room's
+    /// bare address and carries nothing else to show.
+    static func roomConfigurationChange(_ message: WaddleMessage) -> BareJID? {
+        guard message.isMuc, message.mucStatusCodes.contains(104), message.body == nil,
+              let from = JID(parsing: message.from ?? ""), from.resource == nil else { return nil }
+        return from.bare
+    }
+
     static func wireMessage(_ message: WaddleMessage) -> WireMessage? {
         guard var wire = wireMessage(fields: message, source: .live) else { return nil }
         wire.chatState = message.chatState.map(chatState)
