@@ -3,6 +3,9 @@ enum CallActivity {
     struct Publication: Equatable {
         let mark: UserActivity
         let previous: UserActivity?
+        /// Our own earlier mark this one was written over. Until the write
+        /// is confirmed, finding that one published still means it is ours.
+        var replaced: UserActivity?
         /// A lost reply leaves us needing to check whether the mark landed.
         var isConfirmed = true
     }
@@ -25,10 +28,10 @@ enum CallActivity {
     }
 
     static func change(desired: UserActivity?, published: UserActivity?, owned: Publication?) -> Change {
-        if let owned, published == owned.mark {
+        if let owned, let published, published == owned.mark || (!owned.isConfirmed && published == owned.replaced) {
             guard let desired else { return .write(owned.previous, keeping: nil) }
-            guard desired != owned.mark else { return .keep }
-            return .write(desired, keeping: Publication(mark: desired, previous: owned.previous))
+            guard desired != published else { return .keep }
+            return .write(desired, keeping: Publication(mark: desired, previous: owned.previous, replaced: published))
         }
         // Leave another device's edit alone if it replaced a confirmed mark.
         if owned?.isConfirmed == true { return .forget }

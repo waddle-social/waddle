@@ -44,7 +44,25 @@ import Testing
 
     @Test func aNewCallKindKeepsTheOriginalActivityForRestore() {
         let owned = CallActivity.Publication(mark: audio, previous: prior)
-        let updated = CallActivity.Publication(mark: video, previous: prior)
+        let updated = CallActivity.Publication(mark: video, previous: prior, replaced: audio)
         #expect(CallActivity.change(desired: video, published: audio, owned: owned) == .write(video, keeping: updated))
+    }
+
+    @Test func anUnconfirmedMarkStillOwnsTheMarkItWasWrittenOver() {
+        // The video mark never landed, so our audio mark is what the server holds.
+        let claim = CallActivity.Publication(mark: video, previous: prior, replaced: audio, isConfirmed: false)
+        #expect(CallActivity.change(desired: nil, published: audio, owned: claim) == .write(prior, keeping: nil))
+        #expect(CallActivity.change(desired: video, published: audio, owned: claim) == .write(video, keeping: claim.confirmed))
+        #expect(CallActivity.change(desired: audio, published: audio, owned: claim) == .keep)
+        // Once confirmed, the same audio mark can only be another device's.
+        #expect(CallActivity.change(desired: nil, published: audio, owned: claim.confirmed) == .forget)
+    }
+}
+
+private extension CallActivity.Publication {
+    var confirmed: Self {
+        var copy = self
+        copy.isConfirmed = true
+        return copy
     }
 }

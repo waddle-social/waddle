@@ -96,7 +96,10 @@ extension SessionCoordinator {
         case .forget:
             ownedCallActivity = nil
         case .keep:
-            break
+            // What is published is the mark this call wants: ours, settled.
+            if let owned = ownedCallActivity, let desired, published == desired {
+                ownedCallActivity = .init(mark: desired, previous: owned.previous)
+            }
         }
         recordOwnActivity(published)
     }
