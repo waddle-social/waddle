@@ -26,7 +26,7 @@ struct ProfileSharingSection: View {
                     title: "In a call",
                     detail: "Shown while you're in a call on another device."
                 )
-                .task { await watchForTheCallToEnd() }
+                .checkingOwnCallEnds(while: true, session: session)
             } else {
                 NavigationLink {
                     ProfileActivityEditor(current: session.status.activity)
@@ -55,23 +55,27 @@ struct ProfileSharingSection: View {
     }
 }
 
-private extension ProfileSharingSection {
-    /// How often a call shown as in progress is checked for having ended.
-    static let callCheckInterval: Duration = .seconds(10)
-
-    /// Nothing tells this device when another device of the account leaves
-    /// its call (the core drops the account's own notifications), so while
-    /// the row says "In a call" the activity is looked up again every few
-    /// seconds. The row, and this task with it, goes away once the activity
-    /// no longer shows a call.
-    func watchForTheCallToEnd() async {
-        while !Task.isCancelled {
-            try? await Task.sleep(for: Self.callCheckInterval)
-            guard !Task.isCancelled else { return }
-            await session.refreshOwnActivity()
+extension View {
+    /// While `isShown` (the account's own activity shows a call), looks it
+    /// up again every few seconds. Nothing tells this device when another
+    /// device of the account leaves its call (the core drops the account's
+    /// own notifications); once the activity no longer shows a call,
+    /// `isShown` turns false and the checking stops.
+    func checkingOwnCallEnds(while isShown: Bool, session: SessionCoordinator) -> some View {
+        task(id: isShown) {
+            guard isShown else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: ownCallCheckInterval)
+                guard !Task.isCancelled else { return }
+                await session.refreshOwnActivity()
+            }
         }
     }
 }
+
+/// How often a call shown as in progress on another device is checked
+/// for having ended.
+private let ownCallCheckInterval: Duration = .seconds(10)
 
 /// How a tune reads in one row: its title first, else whatever it has.
 enum ProfileTuneSummary {

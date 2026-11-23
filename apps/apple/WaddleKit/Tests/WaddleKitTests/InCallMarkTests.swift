@@ -232,6 +232,34 @@ struct InCallMarkTests {
         await coordinator.stop()
     }
 
+    /// The core answers a lookup whose activity request failed as one
+    /// with no activity; that must not end a call heard on this stream.
+    @Test func aLookupWithNoActivityLeavesTheCallHeard() async {
+        let (coordinator, port) = await connected()
+        online(coordinator)
+        coordinator.handle(.activityChanged(jid: bob, activity: call))
+        port.sharedStatus = .success(SharedStatus(mood: UserMood(value: "happy", text: nil)))
+
+        _ = await coordinator.sharedStatus(of: bob)
+
+        #expect(coordinator.presence.isInCall(bob))
+        #expect(coordinator.presence.activities[bob] == call)
+        await coordinator.stop()
+    }
+
+    @Test func aLookupForSomeoneOfflineLeavesTheActivityTheyPicked() async {
+        let (coordinator, port) = await connected()
+        online(coordinator)
+        coordinator.handle(.activityChanged(jid: bob, activity: coding))
+        offline(coordinator)
+        port.sharedStatus = .success(SharedStatus(activity: call))
+
+        _ = await coordinator.sharedStatus(of: bob)
+
+        #expect(coordinator.presence.activities[bob] == coding)
+        await coordinator.stop()
+    }
+
     // MARK: What a profile shows
 
     /// Mood and tune come from the lookup; the activity follows what is
@@ -260,14 +288,42 @@ struct InCallMarkTests {
     }
 
     /// No notification about the account itself reaches here (the core
-    /// drops it), so its own profile shows what was looked up.
+    /// drops it), so its own profile shows the account's activity as this
+    /// device knows it, taught by the lookup.
     @Test func theAccountsOwnProfileShowsWhatWasLookedUp() async {
         let (coordinator, port) = await connected()
         port.sharedStatus = .success(SharedStatus(activity: coding))
         let lookedUp = await coordinator.sharedStatus(of: me.jid)
 
         #expect(coordinator.liveSharedStatus(of: me.jid, lookedUp: lookedUp) == SharedStatus(activity: coding))
+        #expect(coordinator.status.activity == coding)
         #expect(coordinator.presence.activities[me.jid] == nil)
+        await coordinator.stop()
+    }
+
+    /// The own profile opened from one of our messages, while another
+    /// device is in a call: the call's end is learned by looking again.
+    @Test func theAccountsOwnProfileShowsTheCallEnding() async {
+        let (coordinator, port) = await connected()
+        port.sharedStatus = .success(SharedStatus(activity: call))
+        let lookedUp = await coordinator.sharedStatus(of: me.jid)
+        #expect(coordinator.liveSharedStatus(of: me.jid, lookedUp: lookedUp)?.activity == call)
+
+        port.ownActivity = .success(nil)
+        await coordinator.refreshOwnActivity()
+
+        #expect(coordinator.liveSharedStatus(of: me.jid, lookedUp: lookedUp) == SharedStatus())
+        await coordinator.stop()
+    }
+
+    @Test func aLookupWithNoActivityLeavesTheAccountsOwn() async {
+        let (coordinator, port) = await connected()
+        coordinator.status.activity = call
+        port.sharedStatus = .success(SharedStatus())
+
+        _ = await coordinator.sharedStatus(of: me.jid)
+
+        #expect(coordinator.status.activity == call)
         await coordinator.stop()
     }
 }

@@ -74,6 +74,14 @@ public struct SharedStatus: Hashable, Sendable {
         if tune?.isEmpty == true { shown.tune = nil }
         return shown
     }
+
+    /// What to show after looking again while this is shown. The core
+    /// answers a request that failed as nothing shared, so an answer with
+    /// nothing at all cannot be told from a lookup that failed and leaves
+    /// this; any other answer replaces it.
+    public func lookedUpAgain(_ later: SharedStatus) -> SharedStatus {
+        later.isEmpty ? self : later
+    }
 }
 
 /// The XEP-0292 details of an account. An empty field is one that is not

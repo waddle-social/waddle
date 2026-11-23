@@ -36,9 +36,7 @@ struct DirectDetailsForm: View {
         }
         .huddleForm()
         .peerDetails(of: peer, session: session, into: $details)
-        .peerSharedStatus(
-            of: peer, isOnline: presence?.availability.isOnline ?? false, session: session, into: $shared
-        )
+        .peerSharedStatus(of: peer, session: session, into: $shared)
     }
 }
 
@@ -164,9 +162,8 @@ struct PeerProfileSheet: View {
             }
             .huddleForm()
             .peerDetails(of: profile.jid, session: session, into: $details)
-            .peerSharedStatus(
-                of: profile.jid, isOnline: presence.availability.isOnline, session: session, into: $shared
-            )
+            .peerSharedStatus(of: profile.jid, session: session, into: $shared)
+            .checkingOwnCallEnds(while: isOwnCallShown, session: session)
             .navigationTitle(profile.name)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -189,6 +186,12 @@ struct PeerProfileSheet: View {
             return MemberRoleLine(affiliation: occupant.affiliation, hats: occupant.hats)
         }
         return profile.affiliation.map { MemberRoleLine(affiliation: $0, hats: []) }
+    }
+
+    /// Our own profile showing a call on another device. No notification
+    /// about our own activity reaches here, so its end is looked for.
+    private var isOwnCallShown: Bool {
+        profile.jid == session.account.jid && session.status.activity?.showsACall == true
     }
 
     /// A real JID that is not our own account; anonymous room occupants

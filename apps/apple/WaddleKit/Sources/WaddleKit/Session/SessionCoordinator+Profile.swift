@@ -157,26 +157,34 @@ extension SessionCoordinator {
     }
 
     /// What someone shares about the moment, or nil when it could not be
-    /// looked up. Their activity is also kept with their presence: a call
-    /// that began before this stream sent no notification on it, so this
-    /// is how it is first learned. Show it with `liveSharedStatus`.
+    /// looked up. The activity it finds is also kept: a call that began
+    /// before this stream sent no notification on it, so this is how it is
+    /// first learned. Someone else's is kept with their presence
+    /// (`PresenceStore.activityLookedUp`); the account's own as
+    /// `status.activity`, since no notification about it reaches here.
+    /// Either way a lookup teaches an activity but never clears one: the
+    /// core answers an activity request that failed as no activity. Show
+    /// it with `liveSharedStatus`.
     public func sharedStatus(of jid: BareJID) async -> SharedStatus? {
         let stamp = presence.activityStamp(of: jid)
+        let edits = profileEdits
         guard let status = try? await port.fetchSharedStatus(of: jid) else { return nil }
         if jid != account.jid {
             presence.activityLookedUp(status.activity, of: jid, since: stamp)
+        } else if let activity = status.activity, profileEdits.activity == edits.activity {
+            self.status.activity = activity
         }
         return status
     }
 
     /// What to show of someone's shared status: the mood and tune `lookedUp`
-    /// found, and the activity as their notifications keep it. Nil when
-    /// nothing is known. No notification about the account itself reaches
-    /// here, so its own is shown as looked up. See
-    /// `SharedStatus.shown(isOnline:)` for what to show of it.
+    /// found, and the activity as this device keeps it (`sharedStatus`):
+    /// someone else's follows their notifications, the account's own is
+    /// what it last looked up (`refreshOwnActivity` while it shows a call).
+    /// Nil when nothing is known. See `SharedStatus.shown(isOnline:)` for
+    /// what to show of it.
     public func liveSharedStatus(of jid: BareJID, lookedUp: SharedStatus?) -> SharedStatus? {
-        guard jid != account.jid else { return lookedUp }
-        let activity = presence.activities[jid]
+        let activity = jid == account.jid ? status.activity : presence.activities[jid]
         guard lookedUp != nil || activity != nil else { return nil }
         var live = lookedUp ?? SharedStatus()
         live.activity = activity

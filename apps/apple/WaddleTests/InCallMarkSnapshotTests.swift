@@ -83,4 +83,31 @@ final class InCallMarkSnapshotTests: XCTestCase {
         XCTAssertEqual(people.here.first { $0.jid == SampleSession.priya }?.isInCall, true)
         XCTAssertEqual(people.here.first { $0.jid == SampleSession.mika }?.isInCall, false)
     }
+
+    /// Someone's status is looked up again after our reconnect (the store
+    /// was cleared), not when they come online: that would read back a
+    /// call a crashed device left behind.
+    func testSharedStatusIsLookedUpAgainOnReconnectNotWhenTheyComeOnline() {
+        let sample = SampleSession()
+        let priya = SampleSession.priya
+        let shown = SharedStatusLookup(jid: priya, session: sample.coordinator)
+
+        _ = sample.coordinator.presence.apply(WirePresence(
+            from: priya.with(resource: "phone")!, kind: .unavailable, show: nil, status: nil,
+            hats: [], occupant: nil, idleSince: nil
+        ))
+        _ = sample.coordinator.presence.apply(WirePresence(
+            from: priya.with(resource: "laptop")!, kind: .available, show: nil, status: nil,
+            hats: [], occupant: nil, idleSince: nil
+        ))
+        XCTAssertEqual(SharedStatusLookup(jid: priya, session: sample.coordinator), shown)
+
+        sample.coordinator.status.connection = .offline(retryAt: nil)
+        let offline = SharedStatusLookup(jid: priya, session: sample.coordinator)
+        XCTAssertNotEqual(offline, shown)
+        XCTAssertFalse(offline.isConnected)
+
+        sample.coordinator.status.connection = .online
+        XCTAssertEqual(SharedStatusLookup(jid: priya, session: sample.coordinator), shown)
+    }
 }

@@ -129,13 +129,16 @@ public final class PresenceStore {
         max(activityChangedAt[jid] ?? 0, activitiesClearedAt)
     }
 
-    /// What a lookup that began at `stamp` read. Anything heard since is
-    /// newer and stands. A call read for someone offline is one their
-    /// device left behind, so it is not kept.
+    /// What a lookup that began at `stamp` read. A lookup can teach an
+    /// activity but never clears one: the core answers an activity request
+    /// that failed as no activity. Only their notification, their going
+    /// offline or a new stream clears one. Anything heard since the lookup
+    /// began is newer and stands, and a call read for someone offline is
+    /// one their device left behind, so it is not kept.
     func activityLookedUp(_ activity: UserActivity?, of jid: BareJID, since stamp: Int) {
-        guard activityStamp(of: jid) == stamp else { return }
-        let isLeftBehind = activity?.showsACall == true && !availability(of: jid).isOnline
-        activityChanged(isLeftBehind ? nil : activity, of: jid)
+        guard let activity, activityStamp(of: jid) == stamp else { return }
+        guard !activity.showsACall || availability(of: jid).isOnline else { return }
+        activityChanged(activity, of: jid)
     }
 
     /// What they are doing now, nil when they stopped saying: from their

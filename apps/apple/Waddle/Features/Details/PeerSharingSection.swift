@@ -50,17 +50,19 @@ private extension String {
 extension View {
     /// Keeps `status` set to what `jid` shares, nil until it is looked up.
     ///
-    /// Looked up when the person is shown, on each new stream and when they
-    /// come online: mood and tune have no notification, a stream starts
-    /// knowing no one's activity (a call that began before it sent none),
-    /// and a call read while they seemed offline was not kept. In between,
-    /// their activity follows their notifications, so show it with
-    /// `SessionCoordinator.liveSharedStatus(of:lookedUp:)`. A lookup that
-    /// fails leaves what is shown.
+    /// Looked up when the person is shown and again on each new stream:
+    /// mood and tune have no notification, and a stream starts knowing no
+    /// one's activity (a call that began before it sent none). Not when
+    /// they come online: a call of theirs arrives as a notification, and a
+    /// lookup then would read back a call a crashed device left behind. In
+    /// between, their activity follows their notifications, so show it
+    /// with `SessionCoordinator.liveSharedStatus(of:lookedUp:)`. A request
+    /// that fails reads as nothing shared, so a later lookup that finds
+    /// nothing at all leaves what is shown (`SharedStatus.lookedUpAgain`).
     func peerSharedStatus(
-        of jid: BareJID?, isOnline: Bool, session: SessionCoordinator, into status: Binding<SharedStatus?>
+        of jid: BareJID?, session: SessionCoordinator, into status: Binding<SharedStatus?>
     ) -> some View {
-        let lookup = SharedStatusLookup(jid: jid, isConnected: session.connection == .online, isOnline: isOnline)
+        let lookup = SharedStatusLookup(jid: jid, session: session)
         return onChange(of: jid) { status.wrappedValue = nil }
             .task(id: lookup) {
                 guard let jid, lookup.isConnected else { return }
@@ -68,15 +70,20 @@ extension View {
                 // after this one; cancelling does not stop it.
                 let loaded = await session.sharedStatus(of: jid)
                 guard !Task.isCancelled, let loaded else { return }
-                status.wrappedValue = loaded
+                status.wrappedValue = status.wrappedValue?.lookedUpAgain(loaded) ?? loaded
             }
     }
 }
 
-/// Whose status to look up, whether there is a stream to ask on, and
-/// whether they are online.
-private struct SharedStatusLookup: Hashable {
+/// When to look someone's shared status up: for each person shown, and
+/// again whenever a stream comes up.
+struct SharedStatusLookup: Hashable {
     let jid: BareJID?
     let isConnected: Bool
-    let isOnline: Bool
+
+    @MainActor
+    init(jid: BareJID?, session: SessionCoordinator) {
+        self.jid = jid
+        isConnected = session.connection == .online
+    }
 }
