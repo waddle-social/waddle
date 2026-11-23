@@ -49,6 +49,21 @@ struct RoomManagementCallTests {
         #expect(!coordinator.presence.joinedRooms.contains(groupRoom))
         coordinator.calls.clear()
     }
+    /// A room deleted on another device ends its huddle here, and nothing
+    /// goes to the room, which a presence would create again.
+    @Test func aRoomDeletedElsewhereEndsItsHuddleWithoutAWord() async throws {
+        let (coordinator, port) = try await inCall(group: false)
+        port.callSends = []
+        coordinator.handle(.presence(WirePresence(
+            from: groupRoom.with(resource: "alice")!, kind: .unavailable,
+            occupant: .init(affiliation: RoomAffiliation.none, role: RoomRole.none, realJID: nil, statusCodes: [110], roomDestroyed: true))))
+        await eventually { !coordinator.calls.groupSlotHolds(groupRoom) }
+        await coordinator.calls.settleGroupPresence()
+        #expect(!port.callSends.contains { if case .groupPresence = $0 { true } else { false } })
+        #expect(!coordinator.canJoinGroupCall(in: groupRoom))
+        coordinator.calls.clear()
+    }
+
     @Test(arguments: ["delete", "leave"])
     func aRefusedActionKeepsTheRoomButNotItsHuddle(action: String) async throws {
         let (coordinator, port) = try await inCall(group: action == "leave")

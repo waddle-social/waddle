@@ -98,6 +98,32 @@ struct StoreTests {
         #expect(presence.availability(of: bob) == .away)
     }
 
+    /// XEP-0045 §10.9: the room removes each occupant with one presence
+    /// carrying `<destroy/>`, sent only to the occupant it removes, so it
+    /// is our own departure even without status 110.
+    @Test func aDestroyedRoomIsLeftAndSaysSo() {
+        let presence = PresenceStore(isRoom: { $0 == room })
+        presence.apply(WirePresence(
+            from: jid("general@muc.waddle.test/alice"), kind: .available,
+            occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110])))
+        presence.apply(WirePresence(from: jid("general@muc.waddle.test/bob"), kind: .available))
+        let destroyed = WirePresence(
+            from: jid("general@muc.waddle.test/alice"), kind: .unavailable,
+            occupant: .init(affiliation: RoomAffiliation.none, role: RoomRole.none, realJID: nil, statusCodes: [], roomDestroyed: true))
+        #expect(presence.apply(destroyed) == .destroyed(room: room))
+        #expect(!presence.joinedRooms.contains(room))
+        #expect(presence.occupants[room] == nil)
+    }
+
+    @Test func anotherOccupantLeavingIsNotADestruction() {
+        let presence = PresenceStore(isRoom: { $0 == room })
+        presence.apply(WirePresence(from: jid("general@muc.waddle.test/bob"), kind: .available))
+        let left = WirePresence(
+            from: jid("general@muc.waddle.test/bob"), kind: .unavailable,
+            occupant: .init(affiliation: .member, role: RoomRole.none, realJID: nil, statusCodes: []))
+        #expect(presence.apply(left) == .occupant(room: room))
+    }
+
     @Test func presenceFlagsBotOccupantByHat() {
         let presence = PresenceStore(isRoom: { $0 == room })
         let vip = Hat(uri: "urn:waddle:hats:vip", title: "VIP")

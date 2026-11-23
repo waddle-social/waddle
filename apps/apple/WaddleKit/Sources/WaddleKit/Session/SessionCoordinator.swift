@@ -136,8 +136,15 @@ public final class SessionCoordinator {
     @ObservationIgnored var mdsPublishSupported: Bool?
     /// Rooms opened or created this session; rejoined after reconnects.
     @ObservationIgnored var onDemandRooms: Set<BareJID> = []
-    /// Destroyed rooms must not be recreated by a later join in this session.
-    @ObservationIgnored var destroyedRooms: Set<BareJID> = []
+    /// Rooms deleted this session, here or on another device. None is
+    /// joined (a join would make it again) until a lookup that began after
+    /// the deletion finds it made again. The app closes them.
+    public internal(set) var destroyedRooms: Set<BareJID> = []
+    /// For each of `destroyedRooms`, how many directory lookups had begun
+    /// when it was deleted.
+    @ObservationIgnored var lookupsBeforeDestruction: [BareJID: Int] = [:]
+    /// Directory lookups begun this session.
+    @ObservationIgnored var lookupsBegun = 0
     /// Rooms whose delete got no clear answer (timed out, cut off). They
     /// may be gone, so they are not joined again this session.
     @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
@@ -456,6 +463,7 @@ public final class SessionCoordinator {
         events.reset()
         onDemandRooms.removeAll()
         destroyedRooms.removeAll()
+        lookupsBeforeDestruction.removeAll()
         departingRooms.removeAll()
         roomsBeingManaged.removeAll()
         unconfirmedDeletions.removeAll()
@@ -533,9 +541,10 @@ public final class SessionCoordinator {
                 // device, and answered only now.
                 Task { await self.departIfLeft(room) }
             }
+            if case let .destroyed(room) = update { forgetDestroyedRoom(room) }
             if handlesCalls, !isStopped {
                 switch update {
-                case .left(let room), .joinFailed(let room, _):
+                case .left(let room), .destroyed(let room), .joinFailed(let room, _):
                     // Out of the room, so out of earshot of its call.
                     calls.groupPresence.clearRoom(room)
                 case .contact, .occupant, .joined, .ignored:
@@ -785,6 +794,8 @@ public final class SessionCoordinator {
 
     func applyInbox(_ entry: InboxEntry) {
         guard let applied = inbox.apply(entry) else { return }
+        // An answer from before the room was deleted counts nothing for it.
+        if applied.kind == .room, destroyedRooms.contains(applied.partner) { return }
         if let threadID = applied.threadID {
             // Only room threads have a badge; the server also keeps thread
             // rows for direct conversations (call threads), which must not

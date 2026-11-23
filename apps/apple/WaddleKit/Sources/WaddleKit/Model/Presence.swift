@@ -108,12 +108,19 @@ public struct WirePresence: Hashable, Sendable {
         public let realJID: JID?
         /// XEP-0045 status codes (110 = self-presence, 303 = nick change…).
         public let statusCodes: Set<Int>
+        /// XEP-0045 §10.9 `<destroy/>`: the room's owner deleted it, and
+        /// this presence removes us from it.
+        public let roomDestroyed: Bool
 
-        public init(affiliation: RoomAffiliation?, role: RoomRole?, realJID: JID?, statusCodes: Set<Int>) {
+        public init(
+            affiliation: RoomAffiliation?, role: RoomRole?, realJID: JID?, statusCodes: Set<Int>,
+            roomDestroyed: Bool = false
+        ) {
             self.affiliation = affiliation
             self.role = role
             self.realJID = realJID
             self.statusCodes = statusCodes
+            self.roomDestroyed = roomDestroyed
         }
 
         public var isSelf: Bool { statusCodes.contains(110) }

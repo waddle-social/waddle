@@ -12,11 +12,11 @@ final class NavigationModelTests: XCTestCase {
         navigation.open(design)
         navigation.openThread("root", in: design, usesInspector: false)
 
-        navigation.closeLeftRooms([lobby.jid])
+        navigation.closeRooms([lobby.jid])
         XCTAssertEqual(navigation.selection, design)
         XCTAssertEqual(navigation.homePath.count, 2)
 
-        navigation.closeLeftRooms([design.jid])
+        navigation.closeRooms([design.jid])
         XCTAssertNil(navigation.selection)
         XCTAssertEqual(navigation.homePath, [])
     }
@@ -245,7 +245,7 @@ final class NavigationModelTests: XCTestCase {
         navigation.show(.feed)
         navigation.open(theo)
 
-        navigation.closeLeftRooms([lobby.jid])
+        navigation.closeRooms([lobby.jid])
 
         XCTAssertEqual(navigation.selection, theo)
     }
