@@ -114,15 +114,21 @@ schema.#Project & {
 			command:  "bash"
 			args: ["-c", """
 				set -x
+				sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone 2>&1 || true
+				unshare -Urn true 2>&1 || true
+				sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 || true
+				unshare -Urn true 2>&1 || true
+				echo "=== STRICT DEBUG RUN ==="
+				export CUENV_CACHE_DIR="/tmp/cuenv-strict-test"
+				rm -rf "$CUENV_CACHE_DIR"
+				cuenv -L debug task validateData 2>&1 | tail -n 120 || true
+				echo "=== INSPECT STRICT ACTION ==="
 				cuenv cache stats || true
-				find "${CUENV_CACHE_DIR:-/tmp}" -maxdepth 4 -ls || true
-				for f in $(find "${CUENV_CACHE_DIR:-/tmp}" -path '*/ac/*' -type f 2>/dev/null); do
+				for f in $(find "$CUENV_CACHE_DIR" -path '*/ac/*' -type f 2>/dev/null); do
 				  h="$(basename "$f")"
 				  echo "=== INSPECT $h ==="
 				  cuenv cache inspect "$h" || true
 				done
-				echo "=== FRESH DEBUG RUN ==="
-				CUENV_CACHE_DIR="${RUNNER_TEMP:-/tmp}/cuenv-debug-fresh" cuenv -L debug task validateData || true
 				"""]
 			inputs: ["env.cue"]
 		}
