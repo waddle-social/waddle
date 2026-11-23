@@ -41,6 +41,8 @@ mod stories;
 mod types;
 
 #[cfg(test)]
+mod activity_tests;
+#[cfg(test)]
 mod call_lifecycle_tests;
 #[cfg(test)]
 mod calls_tests;

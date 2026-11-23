@@ -15153,6 +15153,20 @@ sealed class WaddleClientEvent {
         companion object
     }
 
+    /**
+     * XEP-0108 activity announced by another account's PEP service.
+     * `activity` is absent when the publisher clears or retracts it.
+     */
+    data class ActivityChanged(
+        val `jid`: social.waddle.client.ffi.BareJid,
+        val `activity`: social.waddle.client.ffi.WaddleActivity?) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
 
 
 
@@ -15209,6 +15223,10 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 )
             14 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
+                )
+            15 -> WaddleClientEvent.ActivityChanged(
+                FfiConverterTypeBareJid.read(buf),
+                FfiConverterOptionalTypeWaddleActivity.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -15314,6 +15332,14 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 + FfiConverterString.allocationSize(value.`description`)
             )
         }
+        is WaddleClientEvent.ActivityChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeBareJid.allocationSize(value.`jid`)
+                + FfiConverterOptionalTypeWaddleActivity.allocationSize(value.`activity`)
+            )
+        }
     }
 
     override fun write(value: WaddleClientEvent, buf: ByteBuffer) {
@@ -15387,6 +15413,12 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             is WaddleClientEvent.Error -> {
                 buf.putInt(14)
                 FfiConverterString.write(value.`description`, buf)
+                Unit
+            }
+            is WaddleClientEvent.ActivityChanged -> {
+                buf.putInt(15)
+                FfiConverterTypeBareJid.write(value.`jid`, buf)
+                FfiConverterOptionalTypeWaddleActivity.write(value.`activity`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -21213,6 +21245,16 @@ public object FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer<List
         }
     }
 }
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias BareJid = kotlin.String
+public typealias FfiConverterTypeBareJid = FfiConverterString
 
 
 

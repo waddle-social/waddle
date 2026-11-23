@@ -3,7 +3,9 @@
 //! Covers XEP-0163 (PEP), XEP-0107 (User Mood), XEP-0108 (User Activity),
 //! and XEP-0118 (User Tune).
 
+use jid::BareJid;
 use minidom::Element;
+use xmpp_parsers::pubsub::event::Item;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
@@ -16,6 +18,21 @@ use uuid::Uuid;
 pub const NS_MOOD: &str = "http://jabber.org/protocol/mood";
 /// Protocol token `http://jabber.org/protocol/activity`.
 pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
+/// General activity element names defined by XEP-0108.
+pub const GENERAL_ACTIVITIES: [&str; 12] = [
+    "doing_chores",
+    "drinking",
+    "eating",
+    "exercising",
+    "grooming",
+    "having_appointment",
+    "inactive",
+    "relaxing",
+    "talking",
+    "traveling",
+    "working",
+    "undefined",
+];
 /// XEP-0163 §3 notification filter for the activity node: a roster contact
 /// receives a peer's in-call overlay (ADR-010 Phase 3) only if it advertises
 /// this in its XEP-0115 caps.
@@ -129,6 +146,83 @@ fn parse_activity_event(items: &Element) -> Option<PepItem> {
         Some(payload) => Some(PepItem::Activity(payload)),
         None => Some(PepItem::ActivityCleared),
     }
+}
+
+/// Parse a peer activity update with the publisher identity intact.
+pub(crate) fn parse_activity_notification(
+    message: &Element,
+    account: &BareJid,
+) -> Option<(BareJid, Option<UserActivity>)> {
+    let items = message
+        .get_child("event", NS_PUBSUB_EVENT)?
+        .get_child("items", NS_PUBSUB_EVENT)
+        .filter(|items| items.attr("node") == Some(NS_ACTIVITY))?;
+    // XEP-0163 §4.3.1 requires the PEP service to send from the owner's bare JID.
+    let from = message.attr("from")?.parse::<BareJid>().ok()?;
+    if &from == account || message.attr("type") == Some("groupchat") {
+        return None;
+    }
+
+    // As in the web client, the last update wins for this singleton node.
+    let activity = items
+        .children()
+        .filter_map(|item| parse_activity_notification_item(item, &from))
+        .last()?;
+    Some((from, activity))
+}
+
+fn parse_activity_notification_item(
+    item: &Element,
+    from: &BareJid,
+) -> Option<Option<UserActivity>> {
+    if item.is("retract", NS_PUBSUB_EVENT) {
+        let id = item.attr("id")?;
+        return (!id.is_empty()
+            && item.children().next().is_none()
+            && item.texts().all(|text| text.trim().is_empty()))
+        .then_some(None);
+    }
+    let item = Item::try_from(item.clone()).ok()?;
+    if item
+        .publisher
+        .is_some_and(|publisher| publisher.to_bare() != *from)
+    {
+        return None;
+    }
+    let activity = item
+        .payload
+        .filter(|payload| payload.is("activity", NS_ACTIVITY))?;
+    if activity.texts().any(|text| !text.trim().is_empty()) {
+        return None;
+    }
+    let mut children = activity.children();
+    let Some(general) = children.next() else {
+        return Some(None);
+    };
+    let mut specifics = general.children();
+    let specific = specifics.next();
+    if general.ns() != NS_ACTIVITY
+        || !GENERAL_ACTIVITIES.contains(&general.name())
+        || general.texts().any(|text| !text.trim().is_empty())
+        || specifics.next().is_some()
+        || specific
+            .filter(|specific| specific.ns() == NS_ACTIVITY)
+            .is_some_and(|specific| {
+                let mut extensions = specific.children();
+                specific.texts().any(|text| !text.trim().is_empty())
+                    || extensions
+                        .next()
+                        .is_some_and(|child| child.ns() == NS_ACTIVITY)
+                    || extensions.next().is_some()
+            })
+        || children
+            .next()
+            .is_some_and(|text| !text.is("text", NS_ACTIVITY) || text.children().next().is_some())
+        || children.next().is_some()
+    {
+        return None;
+    }
+    parse_activity_payload(&activity).map(Some)
 }
 
 fn parse_tune_event(items: &Element) -> Option<PepItem> {

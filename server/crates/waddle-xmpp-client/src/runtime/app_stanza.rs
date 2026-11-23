@@ -52,6 +52,7 @@ impl XmppRuntime {
             ))];
         }
 
+        let mut events = Vec::new();
         if element.name() == "message" {
             if type_attr == "error" {
                 return self.message_rejection_events(element, true);
@@ -122,13 +123,18 @@ impl XmppRuntime {
                     .collect();
             }
 
+            if let Some((jid, activity)) =
+                pep::parse_activity_notification(element, self.account_bare_jid())
+            {
+                events.push(ClientEvent::ActivityChanged { jid, activity });
+            }
             if let Some(pep_item) = pep::parse(element) {
-                return vec![ClientEvent::PepEvent(pep_item)];
+                events.push(ClientEvent::PepEvent(pep_item));
+                return events;
             }
         }
 
         if let Some(call_event) = messaging::parse_call_event(element) {
-            let mut events = Vec::new();
             if let Some(ack) = jingle_iq_set_ack(element) {
                 events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                     TransportMessage::Element(ack),
@@ -140,12 +146,13 @@ impl XmppRuntime {
 
         if let Some(ev) = messaging::parse(element) {
             let pubsub_events = pubsub_notification_events(&ev, self.account_bare_jid());
-            let mut events = vec![ClientEvent::Messaging(ev)];
+            events.push(ClientEvent::Messaging(ev));
             events.extend(pubsub_events);
             return events;
         }
 
-        vec![ClientEvent::UnhandledStanza(element.clone())]
+        events.push(ClientEvent::UnhandledStanza(element.clone()));
+        events
     }
 }
 

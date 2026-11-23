@@ -51,6 +51,9 @@ final class FFIEventListener: WaddleEventListener {
             return .avatarChanged(jid: owner, id: avatarId)
         case let .statusPreferenceChanged(preference):
             return .presenceModeChanged(FFIInbound.presenceMode(preference))
+        case .activityChanged:
+            // handled in the Apple half of #2581
+            return nil
         case let .call(event):
             return FFIInbound.callEvent(event).map(XmppEvent.call)
         case let .inboxPush(entry):
