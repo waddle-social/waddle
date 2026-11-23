@@ -71,6 +71,60 @@ struct TimelineBatchIngestTests {
         #expect(batchedResults.map(Outcome.init) == singleResults.map(Outcome.init))
     }
 
+    /// An older page lands on a timeline that already has newer rows. A
+    /// row the page matches must be the one the one-by-one order would
+    /// match, even when two loaded rows claim the same id.
+    @Test func anOlderPageMergesIntoLoadedRowsAsOneByOne() {
+        let bobJID = bob.with(resource: "laptop")!
+        let meJID = jid("alice@waddle.test/phone")
+        // Loaded, live and timestampless: answers to stanza-id s2 and origin-id o.
+        let loaded = directMessage("live", from: bobJID, to: meJID, id: "o", archiveID: "s2")
+        // An older archived row that only reuses `@id` o.
+        var reused = directMessage("older", from: bobJID, to: meJID, id: "o", at: date(1), source: .archive(mamID: "m1"))
+        reused.identity.originID = nil
+        // A copy naming origin-id o: one by one, it meets the older row first.
+        let copy = directMessage("copy", from: bobJID, to: meJID, id: "o", at: date(3), source: .archive(mamID: "m3"))
+
+        let single = store()
+        single.ingest(loaded, receivedAt: receivedAt)
+        for message in [reused, copy] { single.ingest(message, receivedAt: receivedAt) }
+        let batched = store()
+        batched.ingest(loaded, receivedAt: receivedAt)
+        batched.ingest(contentsOf: [reused, copy], receivedAt: receivedAt)
+
+        #expect(rendered(single, bobConversation).map(\.timestamp) == [date(1), nil])
+        #expect(rendered(batched, bobConversation) == rendered(single, bobConversation))
+    }
+
+    /// A live row inside a batch still trims the oldest rows, and reports
+    /// the oldest archived row left, as on its own.
+    @Test func aLiveRowInABatchTrimsAsOnItsOwn() {
+        func trimmingStore() -> (TimelineStore, () -> [String?]) {
+            let store = TimelineStore(maxItemsPerConversation: 3)
+            store.account = me
+            var cursors: [String?] = []
+            store.onArchiveTrimmed = { _, cursor in cursors.append(cursor) }
+            return (store, { cursors })
+        }
+        let page = [
+            roomMessage("live", from: "bob", stanzaID: "s9"),
+            roomMessage("a4", from: "bob", stanzaID: "s4", at: date(4), source: .archive(mamID: "s4")),
+            roomMessage("a3", from: "bob", stanzaID: "s3", at: date(3), source: .archive(mamID: "s3")),
+            roomMessage("a2", from: "bob", stanzaID: "s2", at: date(2), source: .archive(mamID: "s2")),
+            roomMessage("a1", from: "bob", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")),
+            roomMessage("live 2", from: "bob", stanzaID: "s10"),
+        ]
+        let (single, singleCursors) = trimmingStore()
+        for message in page { single.ingest(message, receivedAt: receivedAt) }
+        let (batched, batchedCursors) = trimmingStore()
+        batched.ingest(contentsOf: page, receivedAt: receivedAt)
+
+        #expect(rendered(single, roomConversation).map(\.body) == ["a4", "live", "live 2"])
+        #expect(rendered(batched, roomConversation) == rendered(single, roomConversation))
+        #expect(batchedCursors() == singleCursors())
+        #expect(singleCursors() == ["s4"])
+    }
+
     @Test func aPageChangesTheRenderedRowsOnce() {
         let page = (1...50).reversed().map { seq in
             roomMessage("m\(seq)", from: "bob", stanzaID: "s\(seq)", at: date(TimeInterval(seq)), source: .archive(mamID: "s\(seq)"))
