@@ -38,6 +38,8 @@ extension SessionCoordinator {
             if directoryRefreshesInFlight == 0 { directoryMutations.removeAll() }
         }
         let epoch = connectionEpoch
+        lookupsBegun += 1
+        let lookupNumber = lookupsBegun
         let result = await port.discoverTopology()
         // A superseded ready pipeline (the stream dropped and reconnected
         // meanwhile) must not overwrite the directory with its answer.
@@ -52,6 +54,7 @@ extension SessionCoordinator {
             directory.apply(topology)
             // A room that outlived its space is listed again.
             roomsOfDeletedSpaces.subtract(topology.channels.map(\.roomJID))
+            unfenceRoomsMadeAgain(listedBy: topology, inLookup: lookupNumber)
             for mutation in directoryMutations.dropFirst(mutationStart) {
                 switch mutation {
                 case .upsert(let channel):
@@ -288,6 +291,7 @@ extension SessionCoordinator {
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
         // A room deleted earlier in the session exists again.
         destroyedRooms.remove(room)
+        lookupsBeforeDestruction[room] = nil
         unconfirmedDeletions.remove(room)
         roomsOfDeletedSpaces.remove(room)
         calls.sealedGroupRooms.remove(room)

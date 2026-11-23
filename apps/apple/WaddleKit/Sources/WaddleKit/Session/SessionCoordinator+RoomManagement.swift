@@ -192,7 +192,7 @@ extension SessionCoordinator {
             guard isCurrent(generation) else { return }
             unconfirmedDeletions.remove(room)
             if forGood {
-                destroyedRooms.insert(room)
+                fenceDestroyed(room)
             } else {
                 calls.sealedGroupRooms.remove(room)
             }
@@ -214,7 +214,7 @@ extension SessionCoordinator {
     /// A huddle there ends, and no huddle presence goes to the room.
     func forgetDestroyedRoom(_ room: BareJID) {
         guard !isStopped else { return }
-        destroyedRooms.insert(room)
+        fenceDestroyed(room)
         unconfirmedDeletions.remove(room)
         onDemandRooms.remove(room)
         calls.sealedGroupRooms.insert(room)
@@ -229,6 +229,26 @@ extension SessionCoordinator {
                 guard calls.groupSlotHolds(room), calls.state.sid == sid else { return }
                 await calls.hangUp()
             }
+        }
+    }
+
+    /// Keeps a deleted room from being joined, noting which lookups began
+    /// before the deletion: those cannot say the room was made again.
+    func fenceDestroyed(_ room: BareJID) {
+        destroyedRooms.insert(room)
+        lookupsBeforeDestruction[room] = lookupsBegun
+    }
+
+    /// A deleted room made again at the same address (addresses come from
+    /// room names) is joined like any other once a lookup that began after
+    /// the deletion lists it and the room answered that lookup itself.
+    func unfenceRoomsMadeAgain(listedBy topology: Topology, inLookup lookup: Int) {
+        for channel in topology.channels where channel.membersOnly != nil {
+            let room = channel.roomJID
+            guard let before = lookupsBeforeDestruction[room], before < lookup else { continue }
+            destroyedRooms.remove(room)
+            lookupsBeforeDestruction[room] = nil
+            calls.sealedGroupRooms.remove(room)
         }
     }
 

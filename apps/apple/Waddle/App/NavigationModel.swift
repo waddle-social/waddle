@@ -212,9 +212,10 @@ final class NavigationModel {
     /// Moves away from a conversation that no longer exists, after it was
     /// deleted or left: iPad and Mac select nothing and close the
     /// inspector; each phone stack returns to the screen it was opened from.
-    /// Moves off any room the account has left: its composer would send
-    /// to a room this device is no longer in.
-    func closeLeftRooms(_ rooms: [BareJID]) {
+    /// Moves off rooms the account has left or that were deleted: a
+    /// composer would send to a room this device is no longer in, and a
+    /// deleted room would be made again by the join that sending needs.
+    func closeRooms(_ rooms: some Sequence<BareJID>) {
         rooms.map(ConversationID.room).forEach(close)
     }
 

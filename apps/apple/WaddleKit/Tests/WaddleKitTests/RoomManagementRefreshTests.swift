@@ -1,3 +1,4 @@
+import Observation
 import Testing
 @testable import WaddleKit
 @testable import WaddleKitTestSupport
@@ -267,6 +268,56 @@ struct RoomManagementRefreshTests {
         await coordinator.stop()
     }
 
+    /// The app closes a deleted room it has open by watching the rooms
+    /// deleted this session; a deletion on another device must reach it.
+    @Test func aRoomDeletedElsewhereReachesThoseWatchingDeletedRooms() async throws {
+        let (coordinator, port) = await connected()
+        let watcher = DeletedRoomsWatcher(coordinator)
+        port.emit(.presence(destruction))
+        await eventually { watcher.changes > 0 }
+        #expect(watcher.changes > 0)
+        #expect(coordinator.destroyedRooms == [room])
+        await coordinator.stop()
+    }
+
+    /// Room addresses come from their names, so an owner can delete a room
+    /// and make it again at the same address. A lookup that began after
+    /// the deletion and found the room answering for itself lists it again.
+    @Test func aRoomMadeAgainAfterItsDeletionIsListedAndJoinedAgain() async throws {
+        let (coordinator, port) = await connected()
+        port.emit(.presence(destruction))
+        await eventually { !coordinator.directory.isRoom(room) }
+        port.joined = []
+        port.topology = Topology(spaces: [], channels: [Channel(roomJID: room, name: "Old name", membersOnly: false)])
+        await reconnect(coordinator, port)
+        #expect(coordinator.directory.isRoom(room))
+        #expect(port.joined == [room])
+        #expect(!coordinator.isFenced(room))
+        #expect(!coordinator.calls.sealedGroupRooms.contains(room))
+        await coordinator.stop()
+    }
+
+    /// A lookup already on its way when the room was deleted read a room
+    /// that no longer exists: it does not bring it back.
+    @Test func aLookupOnItsWayWhenTheRoomWasDeletedDoesNotBringItBack() async throws {
+        let (coordinator, port) = await connected()
+        port.topology = Topology(spaces: [], channels: [Channel(roomJID: room, name: "Old name", membersOnly: false)])
+        port.holdsTopology = true
+        port.emit(.disconnected)
+        port.emit(.connected)
+        await eventually { port.heldTopology.count == 1 }
+        try #require(port.heldTopology.count == 1)
+        coordinator.handle(.presence(destruction))
+        port.joined = []
+        port.holdsTopology = false
+        port.releaseTopology()
+        await coordinator.readyTask?.value
+        #expect(!coordinator.directory.isRoom(room))
+        #expect(port.joined.isEmpty)
+        #expect(coordinator.destroyedRooms.contains(room))
+        await coordinator.stop()
+    }
+
     @Test func aRetryThatSucceedsAfterAnUnansweredDeleteForgetsTheRoom() async throws {
         let (coordinator, port) = await connected()
         port.roomDestructionResult = .failure(.timeout)
@@ -275,5 +326,27 @@ struct RoomManagementRefreshTests {
         try await coordinator.deleteRoom(room)
         #expect(!coordinator.directory.isRoom(room))
         await coordinator.stop()
+    }
+}
+
+/// Counts changes to the rooms deleted this session, as a SwiftUI view
+/// watching them would see them.
+@MainActor
+private final class DeletedRoomsWatcher {
+    private let coordinator: SessionCoordinator
+    private(set) var changes = 0
+
+    init(_ coordinator: SessionCoordinator) {
+        self.coordinator = coordinator
+        track()
+    }
+
+    private func track() {
+        withObservationTracking { _ = coordinator.destroyedRooms } onChange: { [self] in
+            MainActor.assumeIsolated {
+                changes += 1
+                track()
+            }
+        }
     }
 }

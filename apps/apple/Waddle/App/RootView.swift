@@ -84,7 +84,11 @@ private struct SignedInRoot: View {
         }
         .onChange(of: session.coordinator.directory.leftRooms.map(\.roomJID), initial: true) { _, left in
             // Also a room left on another device while it is open here.
-            session.navigation.closeLeftRooms(left)
+            session.navigation.closeRooms(left)
+        }
+        .onChange(of: session.coordinator.destroyedRooms, initial: true) { _, deleted in
+            // Also a room deleted on another device while it is open here.
+            session.navigation.closeRooms(deleted)
         }
         .onChange(of: app.preferences.sendsReadReceipts) { _, sends in
             session.coordinator.sendsReadReceipts = sends
