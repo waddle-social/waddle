@@ -295,14 +295,13 @@ private struct HuddleSwitch: View {
     private static let thumb: CGFloat = 20
 
     var body: some View {
+        // The outline is a capsule filled behind the track, not a stroke: in
+        // a window, an animated view's stroked capsule is drawn as a layer
+        // of its own, which leaves a bar at each end (as the chips did).
         Capsule()
             .fill(isOn ? Theme.Colors.action : Theme.Colors.surface2)
-            .overlay(
-                Capsule().strokeBorder(
-                    isOn ? Theme.Colors.action : Theme.Colors.borderStrong,
-                    lineWidth: WaddleTokens.BorderWidth.hair
-                )
-            )
+            .padding(WaddleTokens.BorderWidth.hair)
+            .background(Capsule().fill(isOn ? Theme.Colors.action : Theme.Colors.borderStrong))
             .frame(width: Self.size.width, height: Self.size.height)
             .overlay { thumbs }
             .opacity(isEnabled ? 1 : 0.5)
@@ -397,12 +396,15 @@ struct HuddleSegmentedControl<Value: Hashable>: View {
 
     /// The raised pill behind the selected segment. It slides between
     /// segments; with Reduce Motion the old one fades out and the new one
-    /// fades in, so nothing moves.
+    /// fades in, so nothing moves. Its outline is a capsule filled behind
+    /// it, not a stroke, which would leave a bar at each end as it moves.
     @ViewBuilder
     private var selectionThumb: some View {
-        let pill = Color.clear
-            .huddleSurface(.card, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair))
+        let pill = Capsule()
+            .fill(Theme.Colors.surface)
+            .padding(WaddleTokens.BorderWidth.hair)
+            .background(Capsule().fill(Theme.Colors.border))
+            .huddleShadow(.card)
         if reduceMotion {
             pill.transition(.opacity)
         } else {
